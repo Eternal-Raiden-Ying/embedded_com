@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+.eggs/
+dist/
+
+# CMake build artifacts
+**/build/
+**/CMakeFiles/
+**/CMakeCache.txt
+**/cmake_install.cmake
+
+# Logs (rotated only, keep current *.out)
+**/logs/*.out.*
+
+# PID files
+**/pids/*.pid
+
+# Run data (runtime generated)
+**/runs/
+
+# TTS runtime output
+Voice/tts_out/
+
+# Large QNN model binaries (consider git LFS for these)
+*.amf
+*.ctx.bin
+
+# Third-party libraries
+Voice/thirdparty/
+VISTA/grasp_module/graspness_unofficial/
+
+# Environment
+.env
+*.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~

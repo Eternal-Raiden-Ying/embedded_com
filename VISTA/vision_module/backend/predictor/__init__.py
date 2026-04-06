@@ -1,0 +1,1 @@
+from .QNNPredictor import QNN_YOLO_Segment_Predictor

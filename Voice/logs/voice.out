@@ -1,0 +1,1 @@
+/home/aidlux/env/miniconda3/envs/asr/bin/python3: Error while finding module specification for 'voice_service.app.main' (ModuleNotFoundError: No module named 'voice_service')
