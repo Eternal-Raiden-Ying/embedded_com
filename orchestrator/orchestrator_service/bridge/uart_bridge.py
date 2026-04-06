@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import logging
+import os
 import queue
 import threading
 import time
@@ -29,7 +30,7 @@ class UartBridge:
         self.port = port
         self.baudrate = int(baudrate)
         self.timeout_s = float(timeout_s)
-        self.dry_run = bool(dry_run) or serial is None
+        self.dry_run = bool(dry_run) or serial is None or os.environ.get("ENV", "").lower() == "mock"
         self.readback_enabled = bool(readback_enabled)
         self.dry_run_echo_stdout = bool(dry_run_echo_stdout)
         self.tx_callback = tx_callback
