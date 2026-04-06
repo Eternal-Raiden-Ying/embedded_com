@@ -13,17 +13,27 @@ dist/
 **/CMakeCache.txt
 **/cmake_install.cmake
 
-# Logs (rotated only, keep current *.out)
-**/logs/*.out.*
+# Logs - strict patterns
+*.out
+*.log
+**/logs/
+**/logs/*
+
+# Audio outputs
+*.wav
+Voice/tts_out/
+Voice/tts_cache/
+
+# Architecture-specific binaries
+*.so
+**/*.aarch64*
+**/cxx/
 
 # PID files
 **/pids/*.pid
 
 # Run data (runtime generated)
 **/runs/
-
-# TTS runtime output
-Voice/tts_out/
 
 # Large QNN model binaries (consider git LFS for these)
 *.amf
