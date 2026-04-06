@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os
-import sys
 import time
 import queue
 import threading
@@ -10,14 +8,8 @@ import traceback
 from typing import Optional, Dict, Tuple, Any
 import cv2
 
-# HAL: 将项目根目录加入 sys.path，使 src.hal 可被 import
-_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
-if _PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, _PROJECT_ROOT)
-
-from src.hal.factory import is_mock as _is_mock
-_IS_MOCK = _is_mock()
-
+from .camera import HardwareCamera, RealSenseDepthCamera
+from .predictor import QNN_YOLO_Segment_Predictor
 from ..config.schema import VisionServiceConfig
 
 
@@ -119,43 +111,29 @@ class VisionEngine:
                             return cam_cfg[key]
 
                     if name == 'depth':
-                        if _IS_MOCK:
-                            from src.hal.mock.camera import MockCamera
-                            self.cams[name] = MockCamera(
-                                out_w=get_param('width'), out_h=get_param('height')
-                            )
-                        else:
-                            from .camera import RealSenseDepthCamera
-                            self.cams[name] = RealSenseDepthCamera(
-                                height=get_param('height'),
-                                width=get_param('width'),
-                                fps=get_param('fps')
-                            )
-                        log_target = "RealSense Depth (mock)" if _IS_MOCK else "RealSense Depth"
+                        self.cams[name] = RealSenseDepthCamera(
+                            height=get_param('height'),
+                            width=get_param('width'),
+                            fps=get_param('fps')
+                        )
+                        log_target = "RealSense Depth"
                     else:
                         source = get_param('source')
                         video_node = f"/dev/video{source}" if str(source).isdigit() else source
-                        if _IS_MOCK:
-                            from src.hal.mock.camera import MockCamera
-                            self.cams[name] = MockCamera(
-                                out_w=get_param('out_w'), out_h=get_param('out_h')
-                            )
-                        else:
-                            from .camera import HardwareCamera
-                            self.cams[name] = HardwareCamera(
-                                device=video_node,
-                                format=get_param('format'),
-                                fps=get_param('fps'),
-                                in_w=get_param('in_w'),
-                                in_h=get_param('in_h'),
-                                out_w=get_param('out_w'),
-                                out_h=get_param('out_h'),
-                                crop_x=get_param('crop_x'),
-                                crop_y=get_param('crop_y'),
-                                crop_w=get_param('crop_w'),
-                                crop_h=get_param('crop_h')
-                            )
-                        log_target = f"{video_node} (mock)" if _IS_MOCK else video_node
+                        self.cams[name] = HardwareCamera(
+                            device=video_node,
+                            format=get_param('format'),
+                            fps=get_param('fps'),
+                            in_w=get_param('in_w'),
+                            in_h=get_param('in_h'),
+                            out_w=get_param('out_w'),
+                            out_h=get_param('out_h'),
+                            crop_x=get_param('crop_x'),
+                            crop_y=get_param('crop_y'),
+                            crop_w=get_param('crop_w'),
+                            crop_h=get_param('crop_h')
+                        )
+                        log_target = video_node
 
                     self._clear_latest()
                     self.log.info(f"📸 挂载并启动相机 [{name.upper()}] -> {log_target}")
@@ -186,12 +164,7 @@ class VisionEngine:
                 self.log.error(f"❌ 找不到模型 [{name}] 的配置参数")
                 return
             self.log.info(f"🧠 加载 NPU 模型 [{name}] 中...")
-            if _IS_MOCK:
-                from src.hal.mock.predictor import MockPredictor
-                predictor = MockPredictor()
-            else:
-                from .predictor import QNN_YOLO_Segment_Predictor
-                predictor = QNN_YOLO_Segment_Predictor(model_profile)
+            predictor = QNN_YOLO_Segment_Predictor(model_profile)
             with self.lock:
                 self.predictor = predictor
                 self.active_model_name = name
