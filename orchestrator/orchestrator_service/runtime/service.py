@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import logging
 import queue
 import signal
 import time
@@ -12,18 +11,20 @@ from ..bridge.uart_bridge import UartBridge
 from ..config.schema import OrchestratorConfig, SocketEndpoint
 from ..ipc.protocol import HomeTagObs, TargetObs, TaskCmd, make_task_ack
 from ..ipc.transport import AsyncJsonlClientSender, JsonlClientSender, JsonlInboundServer
-from .common import RunLogger, configure_logging, ensure_dir, safe_dump
+from .common import RunLogger, ensure_dir, safe_dump
 from .state_machine import OrchestratorCore
+from common.base_module import BaseModule
 
 
-class OrchestratorService:
+class OrchestratorService(BaseModule):
     def __init__(self, cfg: OrchestratorConfig):
         self.cfg = cfg
-        configure_logging("full" if (cfg.runtime.debug or cfg.runtime.log_mode == "full") else "concise")
-        self.log = logging.getLogger("OrchestratorService")
+        super().__init__("orch", cfg.runtime.log_enabled, cfg.runtime.log_mode)
+        ensure_dir(cfg.runtime.log_dir)
         ensure_dir(cfg.runtime.runs_dir)
-        self.run_logger = RunLogger(cfg.runtime.runs_dir)
-        self.core = OrchestratorCore(cfg.control, cfg.car)
+        ensure_dir(cfg.runtime.pid_dir)
+        self.run_logger = RunLogger("orch", cfg.runtime.runs_dir, cfg.runtime.stack_run_id)
+        self.core = OrchestratorCore(cfg.control, cfg.car, logger=self.log)
         self.mapper = SimpleCarMapper(cfg.car)
         self._async_result_queue: "queue.Queue[Dict[str, Any]]" = queue.Queue()
         self._boot_ts = time.time()
@@ -47,6 +48,7 @@ class OrchestratorService:
         self._uart_lowfreq_last_emit_ts = 0.0
         self._uart_lowfreq_repeat_count = 0
         self._uart_lowfreq_last_payload: Optional[Dict[str, Any]] = None
+        self._stopped = False
         self.uart = UartBridge(
             cfg.serial.port,
             cfg.serial.baudrate,
@@ -55,6 +57,7 @@ class OrchestratorService:
             readback_enabled=cfg.serial.readback_enabled,
             dry_run_echo_stdout=cfg.serial.dry_run_echo_stdout,
             tx_callback=self._on_uart_tx,
+            logger=self.log,
         )
         self.task_server = self._build_server(cfg.task_cmd_in, "task_cmd_in")
         self.vision_server = self._build_server(cfg.vision_obs_in, "vision_obs_in")
@@ -68,9 +71,14 @@ class OrchestratorService:
         event = payload.get("event", "")
         name = payload.get("name", payload.get("src", "module"))
         extra = {k: v for k, v in payload.items() if k not in {"level", "msg"}}
-        getattr(self.log, level, self.log.info)("%s | %s | extra=%s", name, event or payload.get("msg", ""), extra)
+        message = event or payload.get("msg", "")
+        self.log(level, "ipc", f"{name} {message}".strip(), extra or None)
         if payload.get("src") == "ipc":
-            self.run_logger.write_ipc(name, event or "log", **{k: v for k, v in payload.items() if k not in {"level", "src", "name", "event"}})
+            ipc_fields = {k: v for k, v in payload.items() if k not in {"level", "src", "name", "event", "msg"}}
+            self.run_logger.write_ipc(name, event or "log", direction=self._ipc_direction_for(name), **ipc_fields)
+
+    def _ipc_direction_for(self, channel: str) -> str:
+        return "RX" if str(channel).endswith("_in") else "TX"
 
     def _build_server(self, ep: SocketEndpoint, name: str):
         return JsonlInboundServer(mode=ep.transport, tcp_host=ep.host, tcp_port=ep.port, uds_path=ep.uds_path, name=name, logger=self._log_json)
@@ -112,9 +120,14 @@ class OrchestratorService:
 
     def _config_dump(self) -> Dict[str, Any]:
         return {
+            "stack_run_id": self.run_logger.stack_run_id,
+            "log_dir": self.cfg.runtime.log_dir,
+            "log_file": self.cfg.runtime.log_file,
             "tick_hz": self.cfg.runtime.tick_hz,
             "heartbeat_period_s": self.cfg.runtime.heartbeat_period_s,
             "runs_dir": self.cfg.runtime.runs_dir,
+            "pid_dir": self.cfg.runtime.pid_dir,
+            "pid_file": self.cfg.runtime.pid_file,
             "serial": {
                 "port": self.cfg.serial.port,
                 "baudrate": self.cfg.serial.baudrate,
@@ -284,7 +297,7 @@ class OrchestratorService:
     def _emit_uart_console(self, payload: Dict[str, Any], emit_reason: str, repeat_count: int):
         if self._should_quiet_console(payload):
             return
-        self.log.info(self._console_message(payload, emit_reason, repeat_count))
+        self.log_info("uart", self._console_message(payload, emit_reason, repeat_count))
 
     def _update_uart_console(self, payload: Dict[str, Any]):
         if not (payload.get("dry_run") and self.cfg.serial.dry_run_echo_stdout):
@@ -335,19 +348,30 @@ class OrchestratorService:
 
     def start(self):
         cfg_dump = self._config_dump()
-        self.run_logger.write_event(f"run_dir={self.run_logger.run_dir}")
+        self.run_logger.write_meta({
+            "service": "orch",
+            "run_dir": str(self.run_logger.run_dir),
+            "project_root": self.cfg.runtime.project_root,
+            "log_file": self.cfg.runtime.log_file,
+            "pid_file": self.cfg.runtime.pid_file,
+        })
+        self.run_logger.write_service_event("SERVICE_STARTING", run_dir=str(self.run_logger.run_dir))
         self.run_logger.write_jsonl("config", cfg_dump)
         self.run_logger.write_timeline("BOOT", run_dir=str(self.run_logger.run_dir), config=cfg_dump)
         self.uart.start()
         self.task_server.start()
         self.vision_server.start()
         self._running = True
-        self.run_logger.write_event("orchestrator started")
-        self.log.info("orchestrator 已启动，日志目录: %s", self.run_logger.run_dir)
+        self.run_logger.write_service_event("SERVICE_READY", run_dir=str(self.run_logger.run_dir))
+        self.log_info("runtime", "SERVICE_READY", {"run_dir": str(self.run_logger.run_dir)})
         self._emit_heartbeat_if_needed(force=True)
 
     def stop(self):
+        if self._stopped:
+            return
+        self._stopped = True
         self._running = False
+        self.run_logger.write_service_event("SERVICE_STOPPING", state=self.core.ctx.state.value)
         try:
             self.uart.send_stop(tx_meta={
                 "mode": "STOP",
@@ -365,6 +389,7 @@ class OrchestratorService:
         self.task_ack_sender.close()
         self.vision_req_sender.close()
         self.tts_sender.close()
+        self.run_logger.write_service_event("SERVICE_STOPPED")
         self.run_logger.write_timeline("STOP")
         self.run_logger.close()
 
@@ -410,7 +435,18 @@ class OrchestratorService:
             if channel == "vision_req_out":
                 error = "" if ok else f"link_state={snap.get('link_state')} fail_count={snap.get('fail_count')}"
                 self.core.handle_vision_req_send_result(ok, payload, error=error)
-                self.run_logger.write_ipc(channel, "send_ok" if ok else "send_failed", req_id=payload.get("req_id"), mode=payload.get("mode"), error=error)
+                self.run_logger.write_ipc(
+                    channel,
+                    "send_ok" if ok else "send_failed",
+                    direction="TX",
+                    req_id=payload.get("req_id"),
+                    session_id=payload.get("session_id"),
+                    epoch=payload.get("epoch"),
+                    ok=ok,
+                    mode=payload.get("mode"),
+                    error=error,
+                    link_state=snap.get("link_state"),
+                )
                 self.run_logger.write_timeline(
                     "VISION_REQ_SEND",
                     req_id=payload.get("req_id"),
@@ -420,7 +456,15 @@ class OrchestratorService:
                     epoch=payload.get("epoch"),
                 )
             elif channel == "tts_event_out":
-                self.run_logger.write_ipc(channel, "send_ok" if ok else "send_failed", text=payload.get("text"), interrupt=payload.get("interrupt", False), link_state=snap.get("link_state"))
+                self.run_logger.write_ipc(
+                    channel,
+                    "send_ok" if ok else "send_failed",
+                    direction="TX",
+                    ok=ok,
+                    text=payload.get("text"),
+                    interrupt=payload.get("interrupt", False),
+                    link_state=snap.get("link_state"),
+                )
                 self.run_logger.write_timeline("TTS_EVENT_SEND", text=payload.get("text"), sent=ok, interrupt=payload.get("interrupt", False))
 
     def _drain_uart_feedback(self):
@@ -437,21 +481,52 @@ class OrchestratorService:
         sent = self.task_ack_sender.send(ack)
         self._last_tx_summary["task_ack_out"] = time.time()
         self.run_logger.write_jsonl("task_ack", ack)
-        self.run_logger.write_ipc("task_ack_out", "ack_sent" if sent else "ack_send_failed", cmd_id=cmd.cmd_id, accepted=accepted, reason=reason)
+        self.run_logger.write_ipc(
+            "task_ack_out",
+            "ack_sent" if sent else "ack_send_failed",
+            direction="TX",
+            cmd_id=cmd.cmd_id,
+            session_id=cmd.session_id,
+            epoch=cmd.epoch,
+            accepted=accepted,
+            ok=sent,
+            reason=reason,
+        )
+        self.log_ipc("TX", "task_ack", "sent" if sent else "failed", {"cmd_id": cmd.cmd_id, "accepted": accepted})
 
     def _drain_task_cmds(self):
         for item in self.task_server.drain():
             payload = item["payload"]
             self._last_task_cmd_recv_ts = float(item.get("recv_ts", time.time()))
+            self.log_ipc("RX", "task_cmd", "received", {"cmd_id": payload.get("cmd_id"), "intent": payload.get("intent")})
             try:
                 cmd = TaskCmd.from_dict(payload, set(self.cfg.frozen_targets.keys()))
             except Exception as exc:
-                self.log.warning("收到非法 task_cmd: %s (%s)", payload, exc)
+                self.log_warn("task_cmd", f"bad task_cmd: {payload} ({exc})")
                 self.run_logger.write_event(f"bad task_cmd: {payload} ({exc})")
+                self.run_logger.write_ipc(
+                    "task_cmd_in",
+                    "bad_payload",
+                    direction="RX",
+                    ok=False,
+                    error=str(exc),
+                    payload=safe_dump(payload),
+                )
                 self.run_logger.write_timeline("TASK_CMD_BAD", payload=safe_dump(payload), error=str(exc))
                 continue
             accepted, reason = self.core.handle_task_cmd(cmd)
             self.run_logger.write_jsonl("task_cmd", cmd.to_dict())
+            self.run_logger.write_ipc(
+                "task_cmd_in",
+                "received",
+                direction="RX",
+                cmd_id=cmd.cmd_id,
+                session_id=cmd.session_id,
+                epoch=cmd.epoch,
+                ok=True,
+                intent=cmd.intent,
+                target=cmd.target,
+            )
             self.run_logger.write_timeline("TASK_CMD_RECV", cmd_id=cmd.cmd_id, intent=cmd.intent, target=cmd.target, accepted=accepted, reason=reason, session_id=cmd.session_id, epoch=cmd.epoch)
             self._send_task_ack(cmd, accepted=accepted, reason=reason)
 
@@ -463,16 +538,48 @@ class OrchestratorService:
             payload = item["payload"]
             recv_ts = float(item.get("recv_ts", time.time()))
             msg_type = str(payload.get("type", "")).strip().lower()
+            self.log_ipc("RX", msg_type, "received", {"req_id": payload.get("req_id"), "found": payload.get("found")})
             try:
                 if msg_type == "home_tag_obs":
                     latest_home = HomeTagObs.from_dict(payload)
                     self._last_home_obs_recv_ts = recv_ts
+                    self.run_logger.write_ipc(
+                        "vision_obs_in",
+                        "received",
+                        direction="RX",
+                        req_id=latest_home.req_id,
+                        session_id=latest_home.session_id,
+                        epoch=latest_home.epoch,
+                        ok=True,
+                        found=latest_home.found,
+                        msg_type=msg_type,
+                    )
                 else:
                     latest_target = TargetObs.from_dict(payload)
                     self._last_vision_obs_recv_ts = recv_ts
+                    self.run_logger.write_ipc(
+                        "vision_obs_in",
+                        "received",
+                        direction="RX",
+                        req_id=latest_target.req_id,
+                        session_id=latest_target.session_id,
+                        epoch=latest_target.epoch,
+                        ok=True,
+                        found=latest_target.found,
+                        msg_type=msg_type,
+                    )
             except Exception as exc:
-                self.log.warning("收到非法视觉消息: %s (%s)", payload, exc)
+                self.log_warn("vision", f"bad vision msg: {payload} ({exc})")
                 self.run_logger.write_event(f"bad vision msg: {payload} ({exc})")
+                self.run_logger.write_ipc(
+                    "vision_obs_in",
+                    "bad_payload",
+                    direction="RX",
+                    ok=False,
+                    error=str(exc),
+                    payload=safe_dump(payload),
+                    msg_type=msg_type,
+                )
                 self.run_logger.write_timeline("VISION_BAD", payload=safe_dump(payload), error=str(exc))
         if latest_target is not None:
             self.core.handle_target_obs(latest_target)
@@ -484,9 +591,30 @@ class OrchestratorService:
     def _enqueue_async_or_fail(self, sender: Any, channel: str, msg: Dict[str, Any]) -> bool:
         ok = sender.send(msg)
         if ok:
+            self.run_logger.write_ipc(
+                channel,
+                "enqueue_ok",
+                direction="TX",
+                req_id=msg.get("req_id"),
+                session_id=msg.get("session_id"),
+                epoch=msg.get("epoch"),
+                ok=True,
+                mode=msg.get("mode"),
+                msg_type=msg.get("type"),
+            )
             return True
         error = f"enqueue_failed link_state={self._sender_snapshot(sender).get('link_state')}"
-        self.run_logger.write_ipc(channel, "enqueue_failed", req_id=msg.get("req_id"), mode=msg.get("mode"), error=error)
+        self.run_logger.write_ipc(
+            channel,
+            "enqueue_failed",
+            direction="TX",
+            req_id=msg.get("req_id"),
+            session_id=msg.get("session_id"),
+            epoch=msg.get("epoch"),
+            ok=False,
+            mode=msg.get("mode"),
+            error=error,
+        )
         self.run_logger.write_timeline(f"{channel.upper()}_ENQUEUE_FAIL", req_id=msg.get("req_id"), mode=msg.get("mode"), error=error)
         return False
 
@@ -502,19 +630,45 @@ class OrchestratorService:
             self._last_tx_summary["vision_req_out"] = time.time()
             error = "" if sent else f"link_state={self.vision_req_sender.snapshot().get('link_state')}"
             self.core.handle_vision_req_send_result(sent, msg, error=error)
-            self.run_logger.write_ipc("vision_req_out", "send_ok" if sent else "send_failed", req_id=msg.get("req_id"), mode=msg.get("mode"), error=error)
+            self.run_logger.write_ipc(
+                "vision_req_out",
+                "send_ok" if sent else "send_failed",
+                direction="TX",
+                req_id=msg.get("req_id"),
+                session_id=msg.get("session_id"),
+                epoch=msg.get("epoch"),
+                ok=sent,
+                mode=msg.get("mode"),
+                error=error,
+            )
             self.run_logger.write_timeline("VISION_REQ_SEND", req_id=msg.get("req_id"), mode=msg.get("mode"), sent=sent, session_id=msg.get("session_id"), epoch=msg.get("epoch"))
+            self.log_ipc("TX", "vision_req", "sent" if sent else "failed", {"req_id": msg.get("req_id"), "mode": msg.get("mode")})
         for msg in self.core.drain_tts_msgs():
             self.run_logger.write_jsonl("tts_event", msg)
             if self.cfg.tts_event_out.transport == "disabled":
-                self.run_logger.write_ipc("tts_event_out", "disabled", text=msg.get("text"), interrupt=msg.get("interrupt", False))
+                self.run_logger.write_ipc(
+                    "tts_event_out",
+                    "disabled",
+                    direction="TX",
+                    ok=False,
+                    text=msg.get("text"),
+                    interrupt=msg.get("interrupt", False),
+                )
                 continue
             if isinstance(self.tts_sender, AsyncJsonlClientSender):
                 self._enqueue_async_or_fail(self.tts_sender, "tts_event_out", msg)
                 continue
             sent = self.tts_sender.send(msg)
             self._last_tx_summary["tts_event_out"] = time.time()
-            self.run_logger.write_ipc("tts_event_out", "send_ok" if sent else "send_failed", text=msg.get("text"), interrupt=msg.get("interrupt", False))
+            self.run_logger.write_ipc(
+                "tts_event_out",
+                "send_ok" if sent else "send_failed",
+                direction="TX",
+                ok=sent,
+                text=msg.get("text"),
+                interrupt=msg.get("interrupt", False),
+            )
+            self.log_ipc("TX", "tts_event", "sent" if sent else "failed", {"text": msg.get("text"), "interrupt": msg.get("interrupt")})
 
     def _emit_motion(self, decision):
         cmd = decision.cmd
@@ -604,7 +758,7 @@ def run_orchestrator_service(cfg: OrchestratorConfig):
     service = OrchestratorService(cfg)
 
     def _handle_sig(signum, frame):
-        service.log.info("收到信号 %s，准备退出", signum)
+        service.log_info("runtime", f"signal {signum} received; shutting down")
         service._running = False
 
     signal.signal(signal.SIGINT, _handle_sig)

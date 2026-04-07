@@ -5,7 +5,8 @@ import time
 import queue
 import threading
 import traceback
-from typing import Optional, Dict, Tuple, Any
+import logging
+from typing import Optional, Dict, Tuple, Any, Callable
 import cv2
 
 from .camera import HardwareCamera, RealSenseDepthCamera
@@ -15,9 +16,15 @@ from ..config.schema import VisionServiceConfig
 
 class VisionEngine:
     """视觉引擎能力层。"""
-    def __init__(self, cfg: VisionServiceConfig, logger):
+    def __init__(
+        self,
+        cfg: VisionServiceConfig,
+        logger: Optional[logging.Logger] = None,
+        event_sink: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+    ):
         self.cfg = cfg
-        self.log = logger
+        self.log = logger or logging.getLogger("vision.engine")
+        self._event_sink = event_sink
         self.cams: Dict[str, Any] = {}
         self.predictor: Optional[Any] = None
         self.active_model_name: Optional[str] = None
@@ -30,8 +37,16 @@ class VisionEngine:
         self._infer_thread: Optional[threading.Thread] = None
         self.infer_enabled = True
 
+    def _emit_event(self, name: str, **fields: Any):
+        if self._event_sink is not None:
+            try:
+                self._event_sink(name, fields)
+            except Exception:
+                pass
+
     def init(self):
-        self.log.info("⚙️ 引擎初始化：系统准备就绪，等待 App 层分配硬件资源...")
+        self.log.info("engine init: system ready")
+        self._emit_event("engine_init")
 
     def start(self):
         if self.running:
@@ -41,7 +56,8 @@ class VisionEngine:
         self._infer_thread = threading.Thread(target=self._infer_worker, name="Engine_Infer", daemon=True)
         self._capture_thread.start()
         self._infer_thread.start()
-        self.log.info("🚀 视觉底层引擎流水线已运转")
+        self.log.info("vision engine pipeline started")
+        self._emit_event("engine_started")
 
     def _clear_latest(self):
         self._has_new_data = False
@@ -71,7 +87,8 @@ class VisionEngine:
             self._clear_latest()
         self._drain_infer_queue()
         if changed:
-            self.log.info(f"🧭 推理状态切换 -> {'ON' if enable else 'OFF'}")
+            self.log.info("inference %s", "enabled" if enable else "disabled")
+            self._emit_event("inference_changed", enabled=bool(enable))
 
     def stop(self):
         self.running = False
@@ -86,7 +103,8 @@ class VisionEngine:
             self._clear_latest()
         if predictor is not None:
             predictor.release()
-        self.log.info("✅ 底层流水线停止，硬件资源已全部安全释放")
+        self.log.info("pipeline stopped")
+        self._emit_event("engine_stopped")
 
     def set_camera(self, name: str, enable: bool, cfg: dict = None):
         with self.lock:
@@ -97,7 +115,7 @@ class VisionEngine:
                     
                     # 容错：如果既没有默认配置，也没有传入自定义配置，则报错
                     if not cam_cfg and not cfg:
-                        self.log.error(f"❌ 找不到相机 [{name}] 的配置参数")
+                        self.log.error("camera config not found: %s", name)
                         return
                     
                     # 初始化自定义配置为字典，方便后续统一处理
@@ -136,7 +154,8 @@ class VisionEngine:
                         log_target = video_node
 
                     self._clear_latest()
-                    self.log.info(f"📸 挂载并启动相机 [{name.upper()}] -> {log_target}")
+                    self.log.info("camera enabled: %s", log_target)
+                    self._emit_event("camera_enabled", camera=name, target=log_target)
                 return
             
             # --- 卸载相机的逻辑保持不变 ---
@@ -144,7 +163,8 @@ class VisionEngine:
                 del self.cams[name]
                 self._clear_latest()
                 self._drain_infer_queue()
-                self.log.info(f"🛑 卸载并释放相机 [{name.upper()}]")
+                self.log.info("camera disabled: %s", name)
+                self._emit_event("camera_disabled", camera=name)
 
     def set_model(self, name: str, enable: bool):
         old_predictor = None
@@ -161,15 +181,16 @@ class VisionEngine:
                 old_predictor.release()
             model_profile = self.cfg.model.profiles.get(name)
             if not model_profile:
-                self.log.error(f"❌ 找不到模型 [{name}] 的配置参数")
+                self.log.error("model config not found: %s", name)
                 return
-            self.log.info(f"🧠 加载 NPU 模型 [{name}] 中...")
+            self.log.info("loading model: %s", name)
             predictor = QNN_YOLO_Segment_Predictor(model_profile)
             with self.lock:
                 self.predictor = predictor
                 self.active_model_name = name
                 self._clear_latest()
-            self.log.info(f"🧠 加载 NPU 模型 [{name}] 完成")
+            self.log.info("model loaded: %s", name)
+            self._emit_event("model_loaded", model=name)
             return
 
         with self.lock:
@@ -180,7 +201,8 @@ class VisionEngine:
         self._drain_infer_queue()
         if old_predictor is not None:
             old_predictor.release()
-            self.log.info(f"🛑 卸载 NPU 模型 [{name}]，释放 DSP 内存")
+            self.log.info("model disabled: %s", name)
+            self._emit_event("model_disabled", model=name)
 
     def get_new_data(self) -> Tuple[Optional[Dict[str, cv2.Mat]], Optional[Dict[str, list]]]:
         with self.lock:
@@ -215,6 +237,7 @@ class VisionEngine:
                         del v
                 except queue.Empty:
                     pass
+                self._emit_event("capture_queue_drop", queue_size=self.infer_queue.maxsize)
             self.infer_queue.put(hw_frames)
 
     def _infer_worker(self):
@@ -244,7 +267,8 @@ class VisionEngine:
                     self._has_new_data = True
 
             except Exception:
-                self.log.error("流水线处理异常\n%s", traceback.format_exc())
+                self.log.error("pipeline exception: %s", traceback.format_exc())
+                self._emit_event("pipeline_exception", error=traceback.format_exc())
                 for v in hw_frames.values():
                     if v is not None:
                         del v

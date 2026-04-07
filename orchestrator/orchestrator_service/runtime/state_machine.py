@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import logging
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from ..config.schema import CarMotionConfig, ControlThresholds
 from ..ipc.protocol import CarState, HomeTagObs, TargetObs, TaskCmd, make_home_tag_req, make_tts_event, make_vision_idle, make_vision_req
@@ -13,13 +12,17 @@ from .controller import MotionController, MotionDecision
 
 
 class OrchestratorCore:
-    def __init__(self, cfg: ControlThresholds, car_cfg: CarMotionConfig):
+    def __init__(self, cfg: ControlThresholds, car_cfg: CarMotionConfig, logger: Optional[Callable] = None):
         self.cfg = cfg
         self.ctx = RuntimeContext()
-        self.log = logging.getLogger("OrchestratorCore")
+        self._logger = logger
         self.controller = MotionController(cfg, car_cfg)
         self._last_req_mono = 0.0
         self._last_stop_mono = 0.0
+
+    def _log(self, level: str, msg: str, *args):
+        if self._logger:
+            self._logger(level, "state_machine", msg, {"args": [str(a) for a in args]} if args else None)
 
     def handle_task_cmd(self, cmd: TaskCmd) -> Tuple[bool, str]:
         self.ctx.last_task_cmd = cmd
@@ -31,10 +34,10 @@ class OrchestratorCore:
             self._stop_current_task("收到 STOP 命令", tts_text="已停止", interrupt_tts=True, send_vision_idle=True)
             return True, "STOP accepted"
         if self._last_stop_mono > 0 and (monotonic_ts() - self._last_stop_mono) < float(self.cfg.post_stop_ignore_s):
-            self.log.info("忽略 STOP 后短窗口内的后续命令: %s", cmd.intent)
+            self._log("info", f"忽略 STOP 后短窗口内的后续命令: {cmd.intent}")
             return False, "ignored in post-stop guard"
         if cmd.confidence < self.cfg.cmd_confidence_th:
-            self.log.warning("忽略低置信度 task_cmd: %.3f", cmd.confidence)
+            self._log("warn", f"忽略低置信度 task_cmd: {cmd.confidence}")
             self._queue_tts("命令置信度过低")
             return False, "low confidence"
         if cmd.intent == "FIND":
@@ -139,7 +142,7 @@ class OrchestratorCore:
     def _start_find_task(self, cmd: TaskCmd):
         target = str(cmd.target or "").strip()
         if not target:
-            self.log.warning("FIND target 为空，忽略")
+            self._log("warn", "FIND target 为空，忽略")
             return
         self.ctx.clear_task_context()
         self.ctx.task_intent = "FIND"
@@ -303,7 +306,7 @@ class OrchestratorCore:
         return monotonic_ts() - self.ctx.state_enter_mono
 
     def _enter_state(self, new_state: State, reason: str):
-        self.log.info("状态切换: %s -> %s (%s)", self.ctx.state.value, new_state.value, reason)
+        self._log("info", f"状态切换: {self.ctx.state.value} -> {new_state.value} ({reason})")
         self.ctx.state = new_state
         self.ctx.state_enter_mono = monotonic_ts()
         self.ctx.state_enter_wall_ts = time.time()

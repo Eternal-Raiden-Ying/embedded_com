@@ -1,6 +1,10 @@
 import os
 import sys
 import subprocess
+import logging
+
+
+logger = logging.getLogger("vision.camera")
 
 # 1. 动态获取当前 __init__.py 所在的绝对路径
 _CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -75,9 +79,9 @@ class HardwareCamera:
             )
         except subprocess.CalledProcessError as e:
             # 针对不支持该控制的相机（如红外/深度相机）给出友好提示而非崩溃
-            print(f"⚠️ [硬件相机提示] 设备 {self.device} 不支持/或越界配置 '{ctrl_name}'。")
+            logger.warning("device %s does not support ctrl %s: %s", self.device, ctrl_name, e)
         except FileNotFoundError:
-            print(f"🚨 [系统错误] 未找到 v4l2-ctl 命令，请执行 'apt install v4l2-utils' 安装。")
+            logger.error("v4l2-ctl not found; install v4l2-utils")
 
     def set_auto_exposure(self, enable: bool):
         """动态开关自动曝光 (True: 自动, False: 手动)"""
@@ -114,7 +118,7 @@ class HardwareCamera:
             # 删除 C++ 对象的引用，触发 C++ 端的析构函数 (~HardwareCamera)
             del self._cam
             self._cam = None
-            print(f"✅ [硬件相机] {self.device} 资源已安全释放。")
+            logger.info("camera released: %s", self.device)
 
     def __del__(self):
         """Python 垃圾回收触发机制，防止用户忘记 release"""

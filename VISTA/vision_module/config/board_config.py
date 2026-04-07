@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import os
+
 from .schema import VisionServiceConfig, SingleModelConfig
 from .data import coco80, grasping_coco20
 
 CONFIG = VisionServiceConfig()
 
-CONFIG.runtime.project_root = "/home/aidlux/2026/VISTA"
-CONFIG.runtime.runs_dir = "/home/aidlux/2026/VISTA/runs"
+CONFIG.runtime.project_root = os.getenv("VISION_PROJECT_ROOT", "/home/aidlux/2026/VISTA")
+CONFIG.runtime.log_dir = os.getenv("VISION_LOG_DIR", f"{CONFIG.runtime.project_root}/logs")
+CONFIG.runtime.log_file = os.getenv("VISION_LOG_FILE", f"{CONFIG.runtime.log_dir}/vision.log")
+CONFIG.runtime.runs_dir = os.getenv("VISION_RUNS_DIR", f"{CONFIG.runtime.project_root}/runs")
+CONFIG.runtime.pid_dir = os.getenv("VISION_PID_DIR", f"{CONFIG.runtime.project_root}/pids")
+CONFIG.runtime.pid_file = os.getenv("VISION_PID_FILE", f"{CONFIG.runtime.pid_dir}/vision.pid")
+CONFIG.runtime.stack_run_id = os.getenv("STACK_RUN_ID", "")
 CONFIG.runtime.loop_hz = 8.0
 CONFIG.runtime.send_hz = 5.0
 CONFIG.runtime.stale_req_s = 3.0
@@ -15,8 +22,9 @@ CONFIG.runtime.hot_standby_s = 30.0
 CONFIG.runtime.keep_preview_after_stop = True
 CONFIG.runtime.keep_model_hot_in_standby = True
 CONFIG.runtime.enable_infer_during_hot_standby = False
-CONFIG.runtime.log_mode = "concise"
-CONFIG.runtime.debug = False
+CONFIG.runtime.log_mode = os.getenv("VISION_LOG_MODE", "concise")
+CONFIG.runtime.log_enabled = os.getenv("VISION_LOG_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
+CONFIG.runtime.debug = os.getenv("VISION_DEBUG", "0").strip().lower() in {"1", "true", "yes"}
 
 # camera config
 rgb = CONFIG.camera.streams["rgb"]

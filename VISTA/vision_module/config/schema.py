@@ -8,7 +8,12 @@ from typing import Dict, Optional, Union
 @dataclass
 class RuntimeConfig:
     project_root: str = "/home/aidlux/2026/VISTA"
+    log_dir: str = "/home/aidlux/2026/VISTA/logs"
+    log_file: str = "/home/aidlux/2026/VISTA/logs/vision.log"
     runs_dir: str = "/home/aidlux/2026/VISTA/runs"
+    pid_dir: str = "/home/aidlux/2026/VISTA/pids"
+    pid_file: str = "/home/aidlux/2026/VISTA/pids/vision.pid"
+    stack_run_id: str = ""
     loop_hz: float = 8.0
     send_hz: float = 5.0
     stale_req_s: float = 3.0
@@ -17,6 +22,7 @@ class RuntimeConfig:
     keep_model_hot_in_standby: bool = True
     enable_infer_during_hot_standby: bool = False
     log_mode: str = "concise"
+    log_enabled: bool = True
     debug: bool = False
 
 

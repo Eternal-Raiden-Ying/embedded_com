@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import logging
 import os
 import queue
 import threading
@@ -26,6 +25,7 @@ class UartBridge:
         readback_enabled: bool = True,
         dry_run_echo_stdout: bool = True,
         tx_callback: Optional[Callable[[str, bool, Optional[Dict[str, Any]]], None]] = None,
+        logger: Optional[Callable] = None,
     ):
         self.port = port
         self.baudrate = int(baudrate)
@@ -34,7 +34,7 @@ class UartBridge:
         self.readback_enabled = bool(readback_enabled)
         self.dry_run_echo_stdout = bool(dry_run_echo_stdout)
         self.tx_callback = tx_callback
-        self.log = logging.getLogger("UartBridge")
+        self._logger = logger
         self._ser = None
         self._last_line: Optional[str] = None
         self._stop = threading.Event()
@@ -43,17 +43,21 @@ class UartBridge:
         self.last_tx_ts = 0.0
         self.last_rx_ts = 0.0
 
+    def _log(self, level: str, msg: str, *args):
+        if self._logger:
+            self._logger(level, "uart", msg, {"args": [str(a) for a in args]} if args else None)
+
     def start(self):
         if self.dry_run:
-            self.log.warning("UART 运行在 dry-run 模式，不会真正打开串口")
+            self._log("warn", "UART 运行在 dry-run 模式，不会真正打开串口")
             return
         self._ser = serial.Serial(self.port, self.baudrate, timeout=self.timeout_s)
-        self.log.info("UART 已打开: %s @ %s", self.port, self.baudrate)
+        self._log("info", f"UART 已打开: {self.port} @ {self.baudrate}")
         if self.readback_enabled:
             self._stop.clear()
             self._rx_thread = threading.Thread(target=self._reader_loop, daemon=True, name="uart_reader")
             self._rx_thread.start()
-            self.log.info("UART 回传读取线程已启动")
+            self._log("info", "UART 回传读取线程已启动")
 
     def close(self):
         self._stop.set()
@@ -91,7 +95,7 @@ class UartBridge:
             try:
                 raw = self._ser.readline()
             except Exception as exc:
-                self.log.warning("UART 读取失败: %s", exc)
+                self._log("warn", f"UART 读取失败: {exc}")
                 continue
             if not raw:
                 continue

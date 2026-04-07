@@ -34,9 +34,15 @@ class SerialConfig:
 @dataclass
 class RuntimeConfig:
     project_root: str = "/home/aidlux/2026/orchestrator"
+    log_dir: str = "/home/aidlux/2026/orchestrator/logs"
+    log_file: str = "/home/aidlux/2026/orchestrator/logs/orchestrator.log"
     runs_dir: str = "/home/aidlux/2026/orchestrator/runs"
+    pid_dir: str = "/home/aidlux/2026/orchestrator/pids"
+    pid_file: str = "/home/aidlux/2026/orchestrator/pids/orchestrator.pid"
+    stack_run_id: str = ""
     tick_hz: float = 10.0
     log_mode: str = "concise"
+    log_enabled: bool = True
     debug: bool = False
     state_block_period_s: float = 1.0
     heartbeat_period_s: float = 1.0

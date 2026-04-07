@@ -53,16 +53,20 @@ FRAME_BYTES = FRAME_SAMPLES * 2
 MIN_UTT_MS = 200
 
 LOG_MODE = "concise"
+LOG_ENABLED = True
 QUIET_MIC_INFO = True
 
 
-def configure_logging(mode: str = "concise", quiet_mic_info: bool = True):
-    global LOG_MODE, QUIET_MIC_INFO
+def configure_logging(mode: str = "concise", quiet_mic_info: bool = True, log_enabled: bool = True):
+    global LOG_MODE, QUIET_MIC_INFO, LOG_ENABLED
     LOG_MODE = mode
     QUIET_MIC_INFO = quiet_mic_info
+    LOG_ENABLED = log_enabled
 
 
 def should_emit(payload: Dict[str, Any]) -> bool:
+    if not LOG_ENABLED:
+        return False
     level = str(payload.get("level", "info"))
     src = str(payload.get("src", ""))
     msg = str(payload.get("msg", ""))

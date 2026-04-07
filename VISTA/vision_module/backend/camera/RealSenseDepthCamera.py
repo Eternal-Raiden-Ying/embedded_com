@@ -1,5 +1,9 @@
 import pyrealsense2 as rs
 import numpy as np
+import logging
+
+
+logger = logging.getLogger("vision.camera")
 
 class RealSenseDepthCamera:
     """
@@ -53,7 +57,7 @@ class RealSenseDepthCamera:
         self.depth_sensor.open(target_profile)
         self.depth_sensor.start(self.frame_queue)
         self.is_running = True
-        print(f"✅ RealSense 深度流直连成功! ({width}x{height} @ {fps}fps)")
+        logger.info("realsense stream started: %sx%s @ %sfps", width, height, fps)
 
     def read_frame(self) -> np.ndarray:
         """
@@ -84,7 +88,7 @@ class RealSenseDepthCamera:
             try:
                 self.depth_sensor.stop()
                 self.depth_sensor.close()
-                print("✅ RealSense 深度流已安全关闭。")
+                logger.info("realsense stream closed")
             except:
                 pass
 
