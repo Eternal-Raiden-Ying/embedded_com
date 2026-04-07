@@ -25,8 +25,11 @@ VISTA_ROOT = os.path.dirname(VISION_ROOT)
 sys.path.insert(0, VISTA_ROOT)
 sys.path.insert(0, VISION_ROOT)
 
+from test_support import apply_backend_env, build_camera_instance, safe_release
+
+TEST_BACKEND = apply_backend_env()
+
 from vision_module.config.board_config import CONFIG
-from vision_module.backend.camera.mock import MockCamera
 
 
 def setup_logger():
@@ -61,39 +64,26 @@ def test_rgb_stream(logger) -> SensorTestResult:
         logger.error(result.error_msg)
         return result
 
-    result.mock_available = True
+    result.mock_available = TEST_BACKEND != "real"
+    cam = None
     try:
-        cam = MockCamera(
-            out_w=rgb_config.out_w,
-            out_h=rgb_config.out_h,
-            width=rgb_config.in_w,
-            height=rgb_config.in_h
-        )
-        cam.start()
-        time.sleep(0.2)
-        frames = cam.get_frames()
-        if frames and frames.get("rgb") is not None:
-            result.frame_captured = True
-            result.width = frames["rgb"].shape[1]
-            result.height = frames["rgb"].shape[0]
-            logger.info(f"Mock RGB frame: {result.width}x{result.height}")
-        else:
-            result.error_msg = "No RGB frame received"
-            logger.warning(result.error_msg)
-        cam.stop()
-    except AttributeError:
+        cam = build_camera_instance("rgb", rgb_config)
         frame = cam.read_frame()
-        if frame is not None:
+        if frame is not None and getattr(frame, "size", 0) > 0:
             result.frame_captured = True
             result.width = frame.shape[1]
             result.height = frame.shape[0]
-            logger.info(f"Mock RGB frame: {result.width}x{result.height}")
+            result.hw_available = "Mock" not in type(cam).__name__
+            result.mock_available = not result.hw_available
+            logger.info(f"RGB frame: {result.width}x{result.height} via {type(cam).__name__}")
         else:
             result.error_msg = "No RGB frame received"
             logger.warning(result.error_msg)
     except Exception as e:
-        result.error_msg = f"Mock RGB test failed: {e}"
+        result.error_msg = f"RGB test failed: {e}"
         logger.warning(result.error_msg)
+    finally:
+        safe_release(cam)
 
     return result
 
@@ -116,46 +106,26 @@ def test_depth_stream(logger) -> SensorTestResult:
         result.frame_captured = True
         return result
 
-    result.mock_available = True
+    result.mock_available = TEST_BACKEND != "real"
     cam = None
     try:
-        cam = MockCamera(
-            out_w=depth_config.out_w,
-            out_h=depth_config.out_h,
-            width=depth_config.width if hasattr(depth_config, 'width') else depth_config.in_w,
-            height=depth_config.height if hasattr(depth_config, 'height') else depth_config.in_h
-        )
-        cam.start()
-        time.sleep(0.2)
-        frames = cam.get_frames()
-        if frames and frames.get("depth") is not None:
+        cam = build_camera_instance("depth", depth_config)
+        frame = cam.read_frame()
+        if frame is not None and getattr(frame, "size", 0) > 0:
             result.frame_captured = True
-            result.width = frames["depth"].shape[1]
-            result.height = frames["depth"].shape[0]
-            logger.info(f"Mock Depth frame: {result.width}x{result.height}")
+            result.width = frame.shape[1]
+            result.height = frame.shape[0]
+            result.hw_available = "Mock" not in type(cam).__name__
+            result.mock_available = not result.hw_available
+            logger.info(f"Depth frame: {result.width}x{result.height} via {type(cam).__name__}")
         else:
             result.error_msg = "No Depth frame received"
             logger.warning(result.error_msg)
-    except AttributeError:
-        if cam:
-            frame = cam.read_frame()
-            if frame is not None:
-                result.frame_captured = True
-                result.width = frame.shape[1]
-                result.height = frame.shape[0]
-                logger.info(f"Mock Depth frame: {result.width}x{result.height}")
-            else:
-                result.error_msg = "No Depth frame received"
-                logger.warning(result.error_msg)
     except Exception as e:
-        result.error_msg = f"Mock Depth test failed: {e}"
+        result.error_msg = f"Depth test failed: {e}"
         logger.warning(result.error_msg)
     finally:
-        if cam and hasattr(cam, 'stop'):
-            try:
-                cam.stop()
-            except Exception:
-                pass
+        safe_release(cam)
 
     return result
 
@@ -174,39 +144,26 @@ def test_ir_stream(logger) -> SensorTestResult:
         logger.warning(result.error_msg)
         return result
 
-    result.mock_available = True
+    result.mock_available = TEST_BACKEND != "real"
+    cam = None
     try:
-        cam = MockCamera(
-            out_w=ir_config.out_w,
-            out_h=ir_config.out_h,
-            width=ir_config.in_w,
-            height=ir_config.in_h
-        )
-        cam.start()
-        time.sleep(0.2)
-        frames = cam.get_frames()
-        if frames and frames.get("ir") is not None:
-            result.frame_captured = True
-            result.width = frames["ir"].shape[1]
-            result.height = frames["ir"].shape[0]
-            logger.info(f"Mock IR frame: {result.width}x{result.height}")
-        else:
-            result.error_msg = "No IR frame received"
-            logger.warning(result.error_msg)
-        cam.stop()
-    except AttributeError:
+        cam = build_camera_instance("grey", ir_config)
         frame = cam.read_frame()
-        if frame is not None:
+        if frame is not None and getattr(frame, "size", 0) > 0:
             result.frame_captured = True
             result.width = frame.shape[1]
             result.height = frame.shape[0]
-            logger.info(f"Mock IR frame: {result.width}x{result.height}")
+            result.hw_available = "Mock" not in type(cam).__name__
+            result.mock_available = not result.hw_available
+            logger.info(f"IR frame: {result.width}x{result.height} via {type(cam).__name__}")
         else:
             result.error_msg = "No IR frame received"
             logger.warning(result.error_msg)
     except Exception as e:
-        result.error_msg = f"Mock IR test failed: {e}"
+        result.error_msg = f"IR test failed: {e}"
         logger.warning(result.error_msg)
+    finally:
+        safe_release(cam)
 
     return result
 
@@ -240,6 +197,7 @@ def run_all_tests(logger):
 if __name__ == "__main__":
     logger = setup_logger()
     logger.info("Starting VISTA Sensor Tests")
+    logger.info(f"Backend mode: {TEST_BACKEND}")
 
     try:
         success = run_all_tests(logger)

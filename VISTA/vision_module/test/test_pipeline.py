@@ -28,6 +28,10 @@ VISTA_ROOT = os.path.dirname(VISION_ROOT)
 sys.path.insert(0, VISTA_ROOT)
 sys.path.insert(0, VISION_ROOT)
 
+from test_support import apply_backend_env
+
+TEST_BACKEND = apply_backend_env()
+
 from vision_module.config.board_config import CONFIG
 from vision_module.backend.vision_engine import VisionEngine
 
@@ -81,48 +85,29 @@ def test_pipeline_camera_setup(logger, engine):
         return False
 
     try:
-        from vision_module.backend.camera.mock import MockCamera
-        logger.info("Using MockCamera for test")
+        logger.info(f"Requested backend: {TEST_BACKEND}")
 
         rgb_config = CONFIG.camera.streams.get("rgb")
         if rgb_config:
             try:
-                rgb_cam = MockCamera(
-                    out_w=rgb_config.out_w,
-                    out_h=rgb_config.out_h,
-                    width=rgb_config.in_w,
-                    height=rgb_config.in_h
-                )
-                engine.cams["rgb"] = rgb_cam
-                logger.info("RGB camera added to engine")
+                engine.set_camera("rgb", True)
+                logger.info(f"RGB camera added to engine via backend={TEST_BACKEND}")
             except Exception as e:
                 logger.warning(f"RGB camera setup error: {e}")
 
         depth_config = CONFIG.camera.streams.get("depth")
-        if depth_config and getattr(depth_config, 'enable', False):
+        if depth_config and getattr(depth_config, "enable", False):
             try:
-                depth_cam = MockCamera(
-                    out_w=depth_config.out_w if hasattr(depth_config, 'out_w') else 640,
-                    out_h=depth_config.out_h if hasattr(depth_config, 'out_h') else 640,
-                    width=depth_config.width if hasattr(depth_config, 'width') else depth_config.in_w,
-                    height=depth_config.height if hasattr(depth_config, 'height') else depth_config.in_h
-                )
-                engine.cams["depth"] = depth_cam
-                logger.info("Depth camera added to engine")
+                engine.set_camera("depth", True)
+                logger.info(f"Depth camera added to engine via backend={TEST_BACKEND}")
             except Exception as e:
                 logger.warning(f"Depth camera setup skipped: {e}")
 
         ir_config = CONFIG.camera.streams.get("ir") or CONFIG.camera.streams.get("grey")
-        if ir_config and getattr(ir_config, 'enable', False):
+        if ir_config and getattr(ir_config, "enable", False):
             try:
-                ir_cam = MockCamera(
-                    out_w=ir_config.out_w,
-                    out_h=ir_config.out_h,
-                    width=ir_config.in_w,
-                    height=ir_config.in_h
-                )
-                engine.cams["ir"] = ir_cam
-                logger.info("IR camera added to engine")
+                engine.set_camera("grey", True)
+                logger.info(f"IR/Grey camera added to engine via backend={TEST_BACKEND}")
             except Exception as e:
                 logger.warning(f"IR camera setup skipped: {e}")
 
@@ -230,6 +215,7 @@ def test_pipeline_end_to_end(logger):
 
 def run_all_tests(logger):
     logger.info("Starting VISTA Pipeline Integration Tests")
+    logger.info(f"Backend mode: {TEST_BACKEND}")
     logger.info(f"Active model: {CONFIG.model.active_model}")
     logger.info(f"RGB stream: {CONFIG.camera.streams.get('rgb')}")
 

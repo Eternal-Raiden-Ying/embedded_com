@@ -17,6 +17,10 @@ VISTA_ROOT = os.path.dirname(VISION_ROOT)
 sys.path.insert(0, VISTA_ROOT)
 sys.path.insert(0, VISION_ROOT)
 
+from test_support import apply_backend_env
+
+TEST_BACKEND = apply_backend_env()
+
 from vision_module.config.board_config import CONFIG
 
 
@@ -39,7 +43,7 @@ def test_predictor_init(logger):
 
     try:
         from vision_module.backend.predictor import QNN_YOLO_Segment_Predictor
-        predictor = QNN_YOLO_Segment_Predictor(CONFIG.model.active_model)
+        predictor = QNN_YOLO_Segment_Predictor(CONFIG.model.profiles[CONFIG.model.active_model])
         logger.info(f"Predictor initialized: {type(predictor).__name__}")
         is_mock = "Mock" in type(predictor).__name__
     except ImportError as e:
@@ -141,6 +145,7 @@ def run_all_tests(logger):
     logger.info("=" * 50)
     logger.info("Test Summary:")
     logger.info("=" * 50)
+    logger.info(f"Backend:     {TEST_BACKEND}")
     logger.info(f"Type:        {'MOCK' if is_mock else 'QNN (Hardware)'}")
     logger.info(f"Init:        {'PASS' if predictor else 'FAIL'}")
     if results:
