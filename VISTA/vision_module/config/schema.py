@@ -49,6 +49,7 @@ class IRCameraConfig:
     in_h: int = 720
     out_w: int = 640
     out_h: int = 640
+    in_format: str = "GREY"
     format: str = "GRAY8" 
     fps: int = 30
     crop_x: int = 280

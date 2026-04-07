@@ -179,10 +179,11 @@ def safe_release(obj: Any) -> None:
 def import_camera_classes(backend: str):
     if backend == "mock":
         module = importlib.import_module("vision_module.backend.camera.mock")
-        return module.MockCamera, module.MockCamera
-    hw = importlib.import_module("vision_module.backend.camera.HardwareCamera")
+        return module.MockCamera, module.MockCamera, module.MockCamera
+    color = importlib.import_module("vision_module.backend.camera.ColorCamera")
+    ir = importlib.import_module("vision_module.backend.camera.IRCamera")
     depth = importlib.import_module("vision_module.backend.camera.RealSenseDepthCamera")
-    return hw.HardwareCamera, depth.RealSenseDepthCamera
+    return color.ColorCamera, ir.IRCamera, depth.RealSenseDepthCamera
 
 
 def import_predictor_class(backend: str):
@@ -222,6 +223,7 @@ def make_ir_kwargs(args: argparse.Namespace) -> Dict[str, Any]:
         "out_w": args.ir_out_w,
         "out_h": args.ir_out_h,
         "fps": args.ir_fps,
+        "in_format": "GREY",
         "format": "GRAY8",
     }
 
@@ -271,6 +273,7 @@ def build_test_config(args: argparse.Namespace) -> VisionServiceConfig:
                 in_h=args.ir_in_h,
                 out_w=args.ir_out_w,
                 out_h=args.ir_out_h,
+                in_format="GREY",
                 fps=args.ir_fps,
                 enable=False,
             ),
@@ -304,8 +307,8 @@ def try_with_backends(
 
 
 def patch_engine_backends(engine_module: Any, camera_backend: str, predictor_backend: str) -> None:
-    hardware_cls, depth_cls = import_camera_classes(camera_backend)
+    color_cls, _, depth_cls = import_camera_classes(camera_backend)
     predictor_cls = import_predictor_class(predictor_backend)
-    engine_module.HardwareCamera = hardware_cls
+    engine_module.HardwareCamera = color_cls
     engine_module.RealSenseDepthCamera = depth_cls
     engine_module.QNN_YOLO_Segment_Predictor = predictor_cls

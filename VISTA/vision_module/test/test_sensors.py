@@ -34,12 +34,20 @@ def choose_camera_class(requested: str, stream_name: str):
     from test_support import try_with_backends
 
     def real_factory():
-        hardware_cls, depth_cls = import_camera_classes("real")
-        return depth_cls if stream_name == "depth" else hardware_cls
+        color_cls, ir_cls, depth_cls = import_camera_classes("real")
+        if stream_name == "depth":
+            return depth_cls
+        if stream_name == "ir":
+            return ir_cls
+        return color_cls
 
     def mock_factory():
-        hardware_cls, depth_cls = import_camera_classes("mock")
-        return depth_cls if stream_name == "depth" else hardware_cls
+        color_cls, ir_cls, depth_cls = import_camera_classes("mock")
+        if stream_name == "depth":
+            return depth_cls
+        if stream_name == "ir":
+            return ir_cls
+        return color_cls
 
     return try_with_backends(requested, real_factory, mock_factory)
 

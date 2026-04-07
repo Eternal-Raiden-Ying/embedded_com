@@ -71,10 +71,11 @@ def resolve_model_name(requested: str) -> str:
 def import_camera_classes(backend: str):
     if backend == "mock":
         module = importlib.import_module("vision_module.backend.camera.mock")
-        return module.MockCamera, module.MockCamera
-    hw = importlib.import_module("vision_module.backend.camera.HardwareCamera")
+        return module.MockCamera, module.MockCamera, module.MockCamera
+    color = importlib.import_module("vision_module.backend.camera.ColorCamera")
+    ir = importlib.import_module("vision_module.backend.camera.IRCamera")
     depth = importlib.import_module("vision_module.backend.camera.RealSenseDepthCamera")
-    return hw.HardwareCamera, depth.RealSenseDepthCamera
+    return color.ColorCamera, ir.IRCamera, depth.RealSenseDepthCamera
 
 
 def import_predictor_class(backend: str):
@@ -121,6 +122,7 @@ def build_camera_kwargs(stream: str) -> Dict[str, object]:
         "out_w": 640,
         "out_h": 480,
         "fps": 30,
+        "in_format": "GREY",
         "format": "GRAY8",
     }
 
@@ -130,8 +132,13 @@ def open_camera(stream: str, requested_backend: str):
     errors: List[str] = []
     for backend in try_backend_order(requested_backend):
         try:
-            hardware_cls, depth_cls = import_camera_classes(backend)
-            cls = depth_cls if stream == "depth" else hardware_cls
+            color_cls, ir_cls, depth_cls = import_camera_classes(backend)
+            if stream == "depth":
+                cls = depth_cls
+            elif stream == "ir":
+                cls = ir_cls
+            else:
+                cls = color_cls
             camera = cls(**kwargs)
             return camera, backend
         except Exception as exc:

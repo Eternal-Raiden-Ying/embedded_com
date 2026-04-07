@@ -72,24 +72,24 @@ def resolve_camera_backend(requested: str, args: argparse.Namespace):
     rgb_kwargs = build_direct_camera_kwargs(args)
 
     def real_factory():
-        hardware_cls, _ = import_camera_classes("real")
-        camera = hardware_cls(**rgb_kwargs)
+        color_cls, _, _ = import_camera_classes("real")
+        camera = color_cls(**rgb_kwargs)
         frame = camera.read_frame()
         if frame is None or getattr(frame, "size", 0) == 0:
             safe_release(camera)
             raise RuntimeError("camera opened but returned empty frame")
         safe_release(camera)
-        return hardware_cls
+        return color_cls
 
     def mock_factory():
-        hardware_cls, _ = import_camera_classes("mock")
-        camera = hardware_cls(**rgb_kwargs)
+        color_cls, _, _ = import_camera_classes("mock")
+        camera = color_cls(**rgb_kwargs)
         frame = camera.read_frame()
         if frame is None or getattr(frame, "size", 0) == 0:
             safe_release(camera)
             raise RuntimeError("mock camera returned empty frame")
         safe_release(camera)
-        return hardware_cls
+        return color_cls
 
     return try_with_backends(requested, real_factory, mock_factory)
 

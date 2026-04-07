@@ -35,21 +35,31 @@ def _prefer_mock_platform() -> bool:
 _BACKEND = _requested_backend()
 
 if _BACKEND == "mock":
+    from .mock import MockCamera as ColorCamera  # noqa: F401
+    from .mock import MockCamera as IRCamera  # noqa: F401
     from .mock import MockCamera as HardwareCamera  # noqa: F401
     from .mock import MockCamera as RealSenseDepthCamera  # noqa: F401
 elif _BACKEND == "real":
+    from .ColorCamera import ColorCamera  # noqa: F401
+    from .IRCamera import IRCamera  # noqa: F401
     from .HardwareCamera import HardwareCamera  # noqa: F401
     from .RealSenseDepthCamera import RealSenseDepthCamera  # noqa: F401
 else:
     if _prefer_mock_platform():
+        from .mock import MockCamera as ColorCamera  # noqa: F401
+        from .mock import MockCamera as IRCamera  # noqa: F401
         from .mock import MockCamera as HardwareCamera  # noqa: F401
         from .mock import MockCamera as RealSenseDepthCamera  # noqa: F401
     else:
         try:
+            from .ColorCamera import ColorCamera  # noqa: F401
+            from .IRCamera import IRCamera  # noqa: F401
             from .HardwareCamera import HardwareCamera  # noqa: F401
             from .RealSenseDepthCamera import RealSenseDepthCamera  # noqa: F401
         except Exception:
+            from .mock import MockCamera as ColorCamera  # noqa: F401
+            from .mock import MockCamera as IRCamera  # noqa: F401
             from .mock import MockCamera as HardwareCamera  # noqa: F401
             from .mock import MockCamera as RealSenseDepthCamera  # noqa: F401
 
-__all__ = ["ICamera", "HardwareCamera", "RealSenseDepthCamera"]
+__all__ = ["ICamera", "ColorCamera", "IRCamera", "HardwareCamera", "RealSenseDepthCamera"]
