@@ -9,7 +9,7 @@ import logging
 from typing import Optional, Dict, Tuple, Any, Callable
 import cv2
 
-from .camera import HardwareCamera, RealSenseDepthCamera
+from .camera import ColorCamera, HardwareCamera, IRCamera, RealSenseDepthCamera
 from .predictor import QNN_YOLO_Segment_Predictor
 from ..config.schema import VisionServiceConfig
 
@@ -125,8 +125,9 @@ class VisionEngine:
                     def get_param(key, default=None):
                         if key in cfg:
                             return cfg[key]
-                        else:
-                            return cam_cfg[key]
+                        if cam_cfg is None:
+                            return default
+                        return getattr(cam_cfg, key, default)
 
                     if name == 'depth':
                         self.cams[name] = RealSenseDepthCamera(
@@ -135,11 +136,30 @@ class VisionEngine:
                             fps=get_param('fps')
                         )
                         log_target = "RealSense Depth"
+                    elif name in {'ir', 'grey'}:
+                        source = get_param('source')
+                        video_node = f"/dev/video{source}" if str(source).isdigit() else source
+                        self.cams[name] = IRCamera(
+                            device=video_node,
+                            in_format=get_param('in_format', 'GREY'),
+                            format=get_param('format', 'GRAY8'),
+                            fps=get_param('fps'),
+                            in_w=get_param('in_w'),
+                            in_h=get_param('in_h'),
+                            out_w=get_param('out_w'),
+                            out_h=get_param('out_h'),
+                            crop_x=get_param('crop_x', 0),
+                            crop_y=get_param('crop_y', 0),
+                            crop_w=get_param('crop_w', 0),
+                            crop_h=get_param('crop_h', 0),
+                        )
+                        log_target = video_node
                     else:
                         source = get_param('source')
                         video_node = f"/dev/video{source}" if str(source).isdigit() else source
-                        self.cams[name] = HardwareCamera(
+                        self.cams[name] = ColorCamera(
                             device=video_node,
+                            in_format=get_param('in_format', 'YUY2'),
                             format=get_param('format'),
                             fps=get_param('fps'),
                             in_w=get_param('in_w'),
@@ -149,7 +169,10 @@ class VisionEngine:
                             crop_x=get_param('crop_x'),
                             crop_y=get_param('crop_y'),
                             crop_w=get_param('crop_w'),
-                            crop_h=get_param('crop_h')
+                            crop_h=get_param('crop_h'),
+                            auto_exposure=get_param('auto_exposure'),
+                            exposure=get_param('exposure'),
+                            brightness=get_param('brightness'),
                         )
                         log_target = video_node
 

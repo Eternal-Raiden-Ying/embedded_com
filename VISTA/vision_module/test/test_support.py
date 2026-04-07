@@ -307,8 +307,10 @@ def try_with_backends(
 
 
 def patch_engine_backends(engine_module: Any, camera_backend: str, predictor_backend: str) -> None:
-    color_cls, _, depth_cls = import_camera_classes(camera_backend)
+    color_cls, ir_cls, depth_cls = import_camera_classes(camera_backend)
     predictor_cls = import_predictor_class(predictor_backend)
+    engine_module.ColorCamera = color_cls
+    engine_module.IRCamera = ir_cls
     engine_module.HardwareCamera = color_cls
     engine_module.RealSenseDepthCamera = depth_cls
     engine_module.QNN_YOLO_Segment_Predictor = predictor_cls

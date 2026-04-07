@@ -38,7 +38,28 @@ rgb.crop_x = 280
 rgb.crop_y = 0
 rgb.crop_w = 720
 rgb.crop_h = 720
+rgb.in_format = "YUY2"
 CONFIG.camera.max_fps = 30
+
+depth = CONFIG.camera.streams["depth"]
+depth.source = "2"
+depth.width = 424
+depth.height = 240
+depth.fps = 15
+
+grey = CONFIG.camera.streams["grey"]
+grey.source = "4"
+grey.in_w = 1280
+grey.in_h = 720
+grey.out_w = 640
+grey.out_h = 640
+grey.in_format = "GREY"
+grey.format = "GRAY8"
+grey.fps = 30
+grey.crop_x = 280
+grey.crop_y = 0
+grey.crop_w = 720
+grey.crop_h = 720
 
 # model config
 CONFIG.model.active_model = "yolo26s_seg"

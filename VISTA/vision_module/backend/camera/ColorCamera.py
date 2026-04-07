@@ -26,12 +26,6 @@ class ColorCamera(FastGstCameraBase):
         exposure: int = None,
         brightness: int = None,
     ):
-        if auto_exposure is not None:
-            self.set_auto_exposure(auto_exposure)
-        if exposure is not None:
-            self.set_exposure(exposure)
-        if brightness is not None:
-            self.set_brightness(brightness)
         super().__init__(
             device=device,
             in_w=in_w,
@@ -49,6 +43,12 @@ class ColorCamera(FastGstCameraBase):
             crop_w=crop_w,
             crop_h=crop_h,
         )
+        if auto_exposure is not None:
+            self.set_auto_exposure(auto_exposure)
+        if exposure is not None:
+            self.set_exposure(exposure)
+        if brightness is not None:
+            self.set_brightness(brightness)
 
     def set_auto_exposure(self, enable: bool):
         self._v4l2_set_ctrl("exposure_auto", 3 if enable else 1)

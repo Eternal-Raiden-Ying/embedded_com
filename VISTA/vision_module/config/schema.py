@@ -37,9 +37,9 @@ class IPCConfig:
 @dataclass
 class DepthCameraConfig:
     source: str = "2"
-    height: int = 1280
-    width:  int = 720
-    fps:    int = 30
+    height: int = 240
+    width:  int = 424
+    fps:    int = 15
     enable: bool = False
 
 @dataclass
@@ -74,8 +74,8 @@ class ColorCameraConfig:
     crop_w: int = 720
     crop_h: int = 720
     enable: bool = True
-    auto_exposure: bool = True,    
-    exposure: int = None,          
+    auto_exposure: bool = True
+    exposure: int = None
     brightness: int = None
 
 @dataclass
