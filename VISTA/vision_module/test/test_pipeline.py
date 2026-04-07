@@ -1,255 +1,261 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os
+import argparse
+import importlib
 import sys
 import time
-import logging
-import threading
+from typing import Tuple
 
-try:
-    import numpy as np
-except ImportError:
-    np = None
-
-try:
-    import cv2
-except ImportError:
-    try:
-        import aidcv as cv2
-    except ImportError:
-        cv2 = None
-
-os.environ['PYTHONIOENCODING'] = 'utf-8'
-
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-VISION_ROOT = os.path.dirname(CURRENT_DIR)
-VISTA_ROOT = os.path.dirname(VISION_ROOT)
-sys.path.insert(0, VISTA_ROOT)
-sys.path.insert(0, VISION_ROOT)
-
-from test_support import apply_backend_env
-
-TEST_BACKEND = apply_backend_env()
-
-from vision_module.config.board_config import CONFIG
-from vision_module.backend.vision_engine import VisionEngine
+from test_support import (
+    EXIT_FAIL,
+    EXIT_INTERRUPT,
+    EXIT_OK,
+    EXIT_USAGE,
+    PrintLogger,
+    add_camera_args,
+    add_common_backend_args,
+    add_model_args,
+    build_test_config,
+    describe_frame,
+    import_camera_classes,
+    import_predictor_class,
+    make_model_profile,
+    patch_engine_backends,
+    print_header,
+    print_step,
+    print_summary,
+    safe_release,
+    try_with_backends,
+)
 
 
-def setup_logger():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)-5s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
-    )
-    return logging.getLogger("test_pipeline")
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="VISTA pipeline backend smoke test")
+    add_common_backend_args(parser)
+    add_camera_args(parser)
+    add_model_args(parser)
+    return parser
 
 
-class SimpleLogger:
-    def info(self, msg, *args):
-        print(f"INFO | {msg % args if args else msg}")
-
-    def warning(self, msg, *args):
-        print(f"WARN | {msg % args if args else msg}")
-
-    def error(self, msg, *args):
-        print(f"ERROR | {msg % args if args else msg}")
-
-    def debug(self, msg, *args):
-        print(f"DEBUG | {msg % args if args else msg}")
-
-
-def test_pipeline_init(logger):
-    logger.info("=" * 50)
-    logger.info("Testing Pipeline Initialization...")
-
-    engine = None
-    error_msg = ""
-
-    try:
-        engine = VisionEngine(CONFIG, SimpleLogger())
-        logger.info("VisionEngine created successfully")
-    except Exception as e:
-        error_msg = f"Init failed: {e}"
-        logger.error(error_msg)
-
-    return engine, error_msg
-
-
-def test_pipeline_camera_setup(logger, engine):
-    logger.info("=" * 50)
-    logger.info("Testing Camera Setup...")
-
-    if engine is None:
-        logger.error("No engine available")
-        return False
-
-    try:
-        logger.info(f"Requested backend: {TEST_BACKEND}")
-
-        rgb_config = CONFIG.camera.streams.get("rgb")
-        if rgb_config:
-            try:
-                engine.set_camera("rgb", True)
-                logger.info(f"RGB camera added to engine via backend={TEST_BACKEND}")
-            except Exception as e:
-                logger.warning(f"RGB camera setup error: {e}")
-
-        depth_config = CONFIG.camera.streams.get("depth")
-        if depth_config and getattr(depth_config, "enable", False):
-            try:
-                engine.set_camera("depth", True)
-                logger.info(f"Depth camera added to engine via backend={TEST_BACKEND}")
-            except Exception as e:
-                logger.warning(f"Depth camera setup skipped: {e}")
-
-        ir_config = CONFIG.camera.streams.get("ir") or CONFIG.camera.streams.get("grey")
-        if ir_config and getattr(ir_config, "enable", False):
-            try:
-                engine.set_camera("grey", True)
-                logger.info(f"IR/Grey camera added to engine via backend={TEST_BACKEND}")
-            except Exception as e:
-                logger.warning(f"IR camera setup skipped: {e}")
-
-        return len(engine.cams) > 0
-
-    except Exception as e:
-        logger.error(f"Camera setup failed: {e}")
-        return False
-
-
-def test_pipeline_model_setup(logger, engine):
-    logger.info("=" * 50)
-    logger.info("Testing Model Setup...")
-
-    if engine is None:
-        logger.error("No engine available")
-        return False
-
-    try:
-        model_name = CONFIG.model.active_model
-        logger.info(f"Loading model: {model_name}")
-        engine.set_model(model_name, enable=True)
-        logger.info(f"Model {model_name} loaded")
-        return True
-    except Exception as e:
-        logger.warning(f"Model setup failed (may be mock env): {e}")
-        return False
-
-
-def test_pipeline_inference_loop(logger, engine):
-    logger.info("=" * 50)
-    logger.info("Testing Inference Loop...")
-
-    if engine is None:
-        logger.error("No engine available")
-        return None
-
-    results = {
-        "iterations": 0,
-        "frames_received": 0,
-        "inference_done": 0,
-        "errors": 0,
+def build_engine_camera_cfg(args: argparse.Namespace) -> dict:
+    return {
+        "source": args.rgb_device,
+        "in_w": args.rgb_in_w,
+        "in_h": args.rgb_in_h,
+        "out_w": args.rgb_out_w,
+        "out_h": args.rgb_out_h,
+        "fps": args.rgb_fps,
+        "format": "RGB",
+        "in_format": "YUY2",
+        "crop_x": 0,
+        "crop_y": 0,
+        "crop_w": 0,
+        "crop_h": 0,
     }
 
+
+def build_direct_camera_kwargs(args: argparse.Namespace) -> dict:
+    return {
+        "device": args.rgb_device,
+        "in_w": args.rgb_in_w,
+        "in_h": args.rgb_in_h,
+        "out_w": args.rgb_out_w,
+        "out_h": args.rgb_out_h,
+        "fps": args.rgb_fps,
+        "format": "RGB",
+        "in_format": "YUY2",
+    }
+
+
+def resolve_camera_backend(requested: str, args: argparse.Namespace):
+    rgb_kwargs = build_direct_camera_kwargs(args)
+
+    def real_factory():
+        hardware_cls, _ = import_camera_classes("real")
+        camera = hardware_cls(**rgb_kwargs)
+        frame = camera.read_frame()
+        if frame is None or getattr(frame, "size", 0) == 0:
+            safe_release(camera)
+            raise RuntimeError("camera opened but returned empty frame")
+        safe_release(camera)
+        return hardware_cls
+
+    def mock_factory():
+        hardware_cls, _ = import_camera_classes("mock")
+        camera = hardware_cls(**rgb_kwargs)
+        frame = camera.read_frame()
+        if frame is None or getattr(frame, "size", 0) == 0:
+            safe_release(camera)
+            raise RuntimeError("mock camera returned empty frame")
+        safe_release(camera)
+        return hardware_cls
+
+    return try_with_backends(requested, real_factory, mock_factory)
+
+
+def resolve_predictor_backend(requested: str, args: argparse.Namespace):
+    profile = make_model_profile(args)
+
+    def real_factory():
+        if not args.model_path:
+            raise RuntimeError("--model-path is required for real predictor")
+        predictor_cls = import_predictor_class("real")
+        predictor = predictor_cls(profile)
+        if not predictor.is_ready():
+            safe_release(predictor)
+            raise RuntimeError("predictor not ready")
+        safe_release(predictor)
+        return predictor_cls
+
+    def mock_factory():
+        predictor_cls = import_predictor_class("mock")
+        predictor = predictor_cls(profile)
+        if not predictor.is_ready():
+            safe_release(predictor)
+            raise RuntimeError("mock predictor not ready")
+        safe_release(predictor)
+        return predictor_cls
+
+    return try_with_backends(requested, real_factory, mock_factory)
+
+
+def load_engine_module():
+    return importlib.import_module("vision_module.backend.vision_engine")
+
+
+def phase_camera_only(engine_module, cfg, camera_kwargs: dict) -> Tuple[bool, str]:
+    engine = engine_module.VisionEngine(cfg, logger=PrintLogger("pipeline"))
     try:
+        engine.set_camera("rgb", True, cfg=camera_kwargs)
+        if "rgb" not in engine.cams:
+            return False, "engine.cams missing rgb"
+        frame = engine.cams["rgb"].read_frame()
+        if frame is None or getattr(frame, "size", 0) == 0:
+            return False, "camera returned empty frame"
+        return True, describe_frame(frame)
+    finally:
+        engine.stop()
+        engine.stop()
+
+
+def phase_predictor_only(engine_module, cfg) -> Tuple[bool, str]:
+    engine = engine_module.VisionEngine(cfg, logger=PrintLogger("pipeline"))
+    try:
+        engine.set_model("test_model", True)
+        predictor = engine.predictor
+        if predictor is None:
+            return False, "engine.predictor is None"
+        if not predictor.is_ready():
+            return False, "predictor not ready"
+        return True, type(predictor).__name__
+    finally:
+        engine.stop()
+        engine.stop()
+
+
+def phase_combined(engine_module, cfg, camera_kwargs: dict, iterations: int) -> Tuple[bool, str]:
+    engine = engine_module.VisionEngine(cfg, logger=PrintLogger("pipeline"))
+    frames_seen = 0
+    infer_seen = 0
+    try:
+        engine.set_camera("rgb", True, cfg=camera_kwargs)
+        engine.set_model("test_model", True)
+        engine.set_inference_enabled(True)
         engine.init()
         engine.start()
-        logger.info("Engine started, running inference loop...")
-
-        num_iterations = 20
-        for i in range(num_iterations):
-            results["iterations"] += 1
-            try:
-                frames, infer_res = engine.get_new_data()
-                if frames:
-                    results["frames_received"] += 1
-                if infer_res is not None:
-                    results["inference_done"] += 1
-                time.sleep(0.05)
-            except Exception as e:
-                results["errors"] += 1
-                logger.debug(f"Iteration {i} error: {e}")
-
+        for _ in range(iterations):
+            frames, infer_res = engine.get_new_data()
+            if frames:
+                frames_seen += 1
+            if infer_res is not None:
+                infer_seen += 1
+            time.sleep(0.05)
+        if frames_seen <= 0:
+            return False, "no frames observed"
+        return True, f"frames_seen={frames_seen} infer_seen={infer_seen}"
+    finally:
         engine.stop()
-        logger.info(f"Loop completed: {results['iterations']} iterations")
-
-    except Exception as e:
-        logger.error(f"Inference loop failed: {e}")
-        return None
-
-    return results
+        engine.stop()
 
 
-def test_pipeline_end_to_end(logger):
-    logger.info("=" * 50)
-    logger.info("Testing End-to-End Pipeline...")
+def main() -> int:
+    args = build_parser().parse_args()
+    print_header("VISTA Pipeline Backend Test", args)
 
-    results = {
-        "init_ok": False,
-        "camera_ok": False,
-        "model_ok": False,
-        "inference_ok": False,
-    }
+    camera_backend_cls, camera_result = resolve_camera_backend(args.backend, args)
+    predictor_backend_cls, predictor_result = resolve_predictor_backend(args.backend, args)
 
-    engine, error_msg = test_pipeline_init(logger)
-    if engine is None:
-        logger.error(f"Init failed: {error_msg}")
-        return results
+    if camera_backend_cls is None and predictor_backend_cls is None:
+        print_step("camera_backend", "FAIL", camera_result.detail)
+        print_step("predictor_backend", "FAIL", predictor_result.detail)
+        print_summary(
+            args.backend,
+            "none",
+            "FAIL",
+            [("camera", camera_result.detail), ("predictor", predictor_result.detail)],
+        )
+        return EXIT_USAGE if "--model-path is required for real predictor" in predictor_result.detail else EXIT_FAIL
 
-    results["init_ok"] = True
+    print_step("camera_backend", "PASS" if camera_backend_cls else "FAIL", camera_result.detail)
+    print_step("predictor_backend", "PASS" if predictor_backend_cls else "FAIL", predictor_result.detail)
 
-    camera_ok = test_pipeline_camera_setup(logger, engine)
-    results["camera_ok"] = camera_ok
+    cfg = build_test_config(args)
+    camera_kwargs = build_engine_camera_cfg(args)
+    engine_module = load_engine_module()
+    camera_backend = camera_result.resolved if camera_backend_cls else "mock"
+    predictor_backend = predictor_result.resolved if predictor_backend_cls else "mock"
+    patch_engine_backends(engine_module, camera_backend, predictor_backend)
 
-    model_ok = test_pipeline_model_setup(logger, engine)
-    results["model_ok"] = model_ok
+    phase_results = []
 
-    inference_results = test_pipeline_inference_loop(logger, engine)
-    if inference_results and inference_results["frames_received"] > 0:
-        results["inference_ok"] = True
-        logger.info(f"Inference results: {inference_results}")
+    if camera_backend_cls is not None:
+        ok, detail = phase_camera_only(engine_module, cfg, camera_kwargs)
+        phase_results.append(("camera_only", ok, detail))
+        print_step("camera_only", "PASS" if ok else "FAIL", detail)
+    else:
+        phase_results.append(("camera_only", False, "camera backend unavailable"))
+        print_step("camera_only", "FAIL", "camera backend unavailable")
 
-    return results
+    if predictor_backend_cls is not None:
+        ok, detail = phase_predictor_only(engine_module, cfg)
+        phase_results.append(("predictor_only", ok, detail))
+        print_step("predictor_only", "PASS" if ok else "FAIL", detail)
+    else:
+        phase_results.append(("predictor_only", False, "predictor backend unavailable"))
+        print_step("predictor_only", "FAIL", "predictor backend unavailable")
 
+    if camera_backend_cls is not None and predictor_backend_cls is not None:
+        ok, detail = phase_combined(engine_module, cfg, camera_kwargs, args.iterations)
+        phase_results.append(("combined", ok, detail))
+        print_step("combined", "PASS" if ok else "FAIL", detail)
+    else:
+        phase_results.append(("combined", False, "combined phase skipped"))
+        print_step("combined", "FAIL", "combined phase skipped")
 
-def run_all_tests(logger):
-    logger.info("Starting VISTA Pipeline Integration Tests")
-    logger.info(f"Backend mode: {TEST_BACKEND}")
-    logger.info(f"Active model: {CONFIG.model.active_model}")
-    logger.info(f"RGB stream: {CONFIG.camera.streams.get('rgb')}")
+    pass_count = sum(1 for _, ok, _ in phase_results if ok)
+    if pass_count == len(phase_results):
+        overall = "PASS"
+        exit_code = EXIT_OK
+    elif pass_count > 0:
+        overall = "PARTIAL"
+        exit_code = EXIT_FAIL
+    else:
+        overall = "FAIL"
+        exit_code = EXIT_FAIL
 
-    results = test_pipeline_end_to_end(logger)
-
-    logger.info("=" * 50)
-    logger.info("Test Summary:")
-    logger.info("=" * 50)
-    logger.info(f"Init:        {'PASS' if results['init_ok'] else 'FAIL'}")
-    logger.info(f"Camera:      {'PASS' if results['camera_ok'] else 'FAIL'}")
-    logger.info(f"Model:       {'PASS' if results['model_ok'] else 'FAIL'}")
-    logger.info(f"Inference:   {'PASS' if results['inference_ok'] else 'FAIL'}")
-
-    all_passed = all(results.values())
-    return all_passed
+    print_summary(
+        args.backend,
+        f"camera={camera_backend} predictor={predictor_backend}",
+        overall,
+        [(name, detail) for name, _, detail in phase_results],
+    )
+    return exit_code
 
 
 if __name__ == "__main__":
-    logger = setup_logger()
-    logger.info("Starting VISTA Pipeline Integration Tests")
-
     try:
-        success = run_all_tests(logger)
-        if success:
-            logger.info("All pipeline tests PASSED")
-            sys.exit(0)
-        else:
-            logger.warning("Some pipeline tests FAILED")
-            sys.exit(1)
+        sys.exit(main())
     except KeyboardInterrupt:
-        logger.info("Test interrupted by user")
-        sys.exit(130)
-    except Exception as e:
-        logger.error(f"Test suite failed: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+        print("\nInterrupted")
+        sys.exit(EXIT_INTERRUPT)

@@ -1,179 +1,133 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os
+import argparse
 import sys
 import time
-import logging
+from typing import Tuple
 
-try:
-    import numpy as np
-except ImportError:
-    np = None
+import numpy as np
 
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-VISION_ROOT = os.path.dirname(CURRENT_DIR)
-VISTA_ROOT = os.path.dirname(VISION_ROOT)
-sys.path.insert(0, VISTA_ROOT)
-sys.path.insert(0, VISION_ROOT)
+from test_support import (
+    EXIT_FAIL,
+    EXIT_INTERRUPT,
+    EXIT_OK,
+    EXIT_USAGE,
+    add_common_backend_args,
+    add_model_args,
+    import_predictor_class,
+    make_model_profile,
+    print_header,
+    print_step,
+    print_summary,
+    safe_release,
+    try_with_backends,
+)
 
-from test_support import apply_backend_env
 
-TEST_BACKEND = apply_backend_env()
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="VISTA predictor backend smoke test")
+    add_common_backend_args(parser)
+    add_model_args(parser)
+    return parser
 
-from vision_module.config.board_config import CONFIG
+
+def build_dummy_frame(args: argparse.Namespace) -> np.ndarray:
+    return np.random.randint(0, 255, (args.model_height, args.model_width, 3), dtype=np.uint8)
 
 
-def setup_logger():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)-5s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
+def choose_predictor(requested_backend: str, args: argparse.Namespace):
+    profile = make_model_profile(args)
+
+    def real_factory():
+        if not args.model_path:
+            raise RuntimeError("--model-path is required for real predictor")
+        cls = import_predictor_class("real")
+        return cls(profile)
+
+    def mock_factory():
+        cls = import_predictor_class("mock")
+        return cls(profile)
+
+    return try_with_backends(requested_backend, real_factory, mock_factory)
+
+
+def verify_output(boxes, masks) -> Tuple[bool, str]:
+    if boxes is None or masks is None:
+        return False, "boxes or masks is None"
+    return True, f"boxes={len(boxes)} masks={len(masks)}"
+
+
+def run_inference(predictor, args: argparse.Namespace) -> Tuple[bool, str]:
+    frame = build_dummy_frame(args)
+    ok = predictor.is_ready()
+    if not ok:
+        return False, "predictor not ready"
+
+    boxes, masks = predictor.predict_frame(frame)
+    output_ok, detail = verify_output(boxes, masks)
+    if not output_ok:
+        return False, detail
+
+    times_ms = []
+    for _ in range(args.iterations):
+        start = time.perf_counter()
+        boxes, masks = predictor.predict_frame(frame)
+        times_ms.append((time.perf_counter() - start) * 1000.0)
+    output_ok, detail = verify_output(boxes, masks)
+    if not output_ok:
+        return False, detail
+
+    return True, (
+        f"{detail} avg_ms={sum(times_ms)/len(times_ms):.2f} "
+        f"min_ms={min(times_ms):.2f} max_ms={max(times_ms):.2f}"
     )
-    return logging.getLogger("test_predictor")
 
 
-def test_predictor_init(logger):
-    logger.info("=" * 50)
-    logger.info("Testing Predictor Initialization...")
+def main() -> int:
+    args = build_parser().parse_args()
+    print_header("VISTA Predictor Backend Test", args)
 
-    predictor = None
-    is_mock = False
-    error_msg = ""
-
-    try:
-        from vision_module.backend.predictor import QNN_YOLO_Segment_Predictor
-        predictor = QNN_YOLO_Segment_Predictor(CONFIG.model.profiles[CONFIG.model.active_model])
-        logger.info(f"Predictor initialized: {type(predictor).__name__}")
-        is_mock = "Mock" in type(predictor).__name__
-    except ImportError as e:
-        error_msg = f"Import failed: {e}"
-        logger.error(error_msg)
-    except Exception as e:
-        error_msg = f"Init failed: {e}"
-        logger.error(error_msg)
-
-    return predictor, is_mock, error_msg
-
-
-def test_predictor_inference(logger, predictor):
-    logger.info("=" * 50)
-    logger.info("Testing Predictor Inference...")
-
+    predictor, backend_result = choose_predictor(args.backend, args)
     if predictor is None:
-        logger.error("No predictor available for inference test")
-        return None
+        print_step("predictor_init", "FAIL", backend_result.detail)
+        print_summary(args.backend, backend_result.resolved, "FAIL", [("init", backend_result.detail)])
+        return EXIT_USAGE if "required for real predictor" in backend_result.detail else EXIT_FAIL
 
-    test_results = {
-        "warmup": {"time_ms": 0, "boxes": 0, "masks": 0},
-        "single_frame": {"time_ms": 0, "boxes": 0, "masks": 0},
-        "avg_time_ms": 0.0,
-        "min_time_ms": 0.0,
-        "max_time_ms": 0.0,
-    }
-
-    if not predictor.is_ready():
-        logger.warning("Predictor not ready after init")
-        return test_results
-
+    resolved = backend_result.resolved
+    print_step("predictor_init", "PASS", f"resolved={resolved} type={type(predictor).__name__}")
     try:
-        h, w = CONFIG.camera.streams["rgb"].out_h, CONFIG.camera.streams["rgb"].out_w
-        dummy_frame = np.random.randint(0, 255, (h, w, 3), dtype=np.uint8)
+        ok, detail = run_inference(predictor, args)
+        print_step("predictor_inference", "PASS" if ok else "FAIL", detail)
+        release_ok = True
+        release_detail = "release ok"
+        try:
+            predictor.release()
+            predictor.release()
+        except Exception as exc:
+            release_ok = False
+            release_detail = str(exc)
+        print_step("predictor_release", "PASS" if release_ok else "FAIL", release_detail)
 
-        logger.info("Running warmup inference...")
-        boxes, masks = predictor.predict_frame(dummy_frame)
-        test_results["warmup"]["boxes"] = len(boxes)
-        test_results["warmup"]["masks"] = len(masks)
-        logger.info(f"Warmup: {len(boxes)} boxes, {len(masks)} masks")
-
-        num_runs = 10
-        times = []
-
-        logger.info(f"Running {num_runs} inference iterations...")
-        for i in range(num_runs):
-            start = time.perf_counter()
-            boxes, masks = predictor.predict_frame(dummy_frame)
-            elapsed = (time.perf_counter() - start) * 1000
-            times.append(elapsed)
-
-        test_results["single_frame"]["boxes"] = len(boxes)
-        test_results["single_frame"]["masks"] = len(masks)
-
-        test_results["avg_time_ms"] = sum(times) / len(times)
-        test_results["min_time_ms"] = min(times)
-        test_results["max_time_ms"] = max(times)
-
-        logger.info(f"Avg inference time: {test_results['avg_time_ms']:.2f}ms")
-        logger.info(f"Min/Max: {test_results['min_time_ms']:.2f}ms / {test_results['max_time_ms']:.2f}ms")
-        logger.info(f"Last run: {len(boxes)} boxes, {len(masks)} masks")
-
-    except Exception as e:
-        logger.error(f"Inference failed: {e}")
-        return None
-
-    return test_results
-
-
-def test_predictor_release(logger, predictor):
-    logger.info("=" * 50)
-    logger.info("Testing Predictor Release...")
-
-    if predictor is None:
-        logger.warning("No predictor to release")
-        return True
-
-    try:
-        predictor.release()
-        logger.info("Predictor released successfully")
-        return True
-    except Exception as e:
-        logger.error(f"Release failed: {e}")
-        return False
-
-
-def run_all_tests(logger):
-    predictor, is_mock, error_msg = test_predictor_init(logger)
-
-    if predictor is None:
-        logger.error(f"Predictor init failed: {error_msg}")
-        return False
-
-    results = test_predictor_inference(logger, predictor)
-
-    release_ok = test_predictor_release(logger, predictor)
-
-    logger.info("=" * 50)
-    logger.info("Test Summary:")
-    logger.info("=" * 50)
-    logger.info(f"Backend:     {TEST_BACKEND}")
-    logger.info(f"Type:        {'MOCK' if is_mock else 'QNN (Hardware)'}")
-    logger.info(f"Init:        {'PASS' if predictor else 'FAIL'}")
-    if results:
-        logger.info(f"Inference:   PASS")
-        logger.info(f"Avg Time:    {results['avg_time_ms']:.2f}ms")
-        logger.info(f"Min/Max:     {results['min_time_ms']:.2f}ms / {results['max_time_ms']:.2f}ms")
-    else:
-        logger.info(f"Inference:   FAIL")
-    logger.info(f"Release:     {'PASS' if release_ok else 'FAIL'}")
-
-    return predictor is not None and results is not None and release_ok
+        overall = "PASS" if ok and release_ok else "FAIL"
+        print_summary(
+            args.backend,
+            resolved,
+            overall,
+            [
+                ("init", f"type={type(predictor).__name__}"),
+                ("inference", detail),
+                ("release", release_detail),
+            ],
+        )
+        return EXIT_OK if overall == "PASS" else EXIT_FAIL
+    finally:
+        safe_release(predictor)
 
 
 if __name__ == "__main__":
-    logger = setup_logger()
-    logger.info("Starting VISTA Predictor Tests")
-
     try:
-        success = run_all_tests(logger)
-        if success:
-            logger.info("All predictor tests PASSED")
-            sys.exit(0)
-        else:
-            logger.warning("Some predictor tests FAILED")
-            sys.exit(1)
+        sys.exit(main())
     except KeyboardInterrupt:
-        logger.info("Test interrupted by user")
-        sys.exit(130)
-    except Exception as e:
-        logger.error(f"Test suite failed: {e}")
-        sys.exit(1)
+        print("\nInterrupted")
+        sys.exit(EXIT_INTERRUPT)
