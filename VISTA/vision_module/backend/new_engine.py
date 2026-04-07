@@ -8,7 +8,7 @@ from typing import Optional, Dict, List, Tuple
 import cv2
 import numpy as np
 
-from .camera import ColorCamera, HardwareCamera, IRCamera, RealSenseDepthCamera
+from .camera import ColorCamera, IRCamera, RealSenseDepthCamera
 from .predictor import QNN_YOLO_Segment_Predictor  # 不同模型的predcitor框架不同
 from ..config.schema import VisionServiceConfig
 
@@ -51,12 +51,45 @@ class VisionEngine:
             if not cam_cfg.enable: continue
             video_node = f"/dev/video{cam_cfg.source}" if str(cam_cfg.source).isdigit() else cam_cfg.source
             
-            self.cams[name] = HardwareCamera(
-                device=video_node, in_w=cam_cfg.in_w, in_h=cam_cfg.in_h, 
-                out_w=cam_cfg.out_w, out_h=cam_cfg.out_h, format=cam_cfg.format, 
-                crop_x=cam_cfg.crop_x, crop_y=cam_cfg.crop_y, 
-                crop_w=cam_cfg.crop_w, crop_h=cam_cfg.crop_h
-            )
+            if name == "depth":
+                self.cams[name] = RealSenseDepthCamera(
+                    width=cam_cfg.width,
+                    height=cam_cfg.height,
+                    fps=cam_cfg.fps,
+                )
+            elif name in {"ir", "grey"}:
+                self.cams[name] = IRCamera(
+                    device=video_node,
+                    in_w=cam_cfg.in_w,
+                    in_h=cam_cfg.in_h,
+                    out_w=cam_cfg.out_w,
+                    out_h=cam_cfg.out_h,
+                    in_format=cam_cfg.in_format,
+                    format=cam_cfg.format,
+                    fps=cam_cfg.fps,
+                    crop_x=cam_cfg.crop_x,
+                    crop_y=cam_cfg.crop_y,
+                    crop_w=cam_cfg.crop_w,
+                    crop_h=cam_cfg.crop_h,
+                )
+            else:
+                self.cams[name] = ColorCamera(
+                    device=video_node,
+                    in_w=cam_cfg.in_w,
+                    in_h=cam_cfg.in_h,
+                    out_w=cam_cfg.out_w,
+                    out_h=cam_cfg.out_h,
+                    in_format=cam_cfg.in_format,
+                    format=cam_cfg.format,
+                    fps=cam_cfg.fps,
+                    crop_x=cam_cfg.crop_x,
+                    crop_y=cam_cfg.crop_y,
+                    crop_w=cam_cfg.crop_w,
+                    crop_h=cam_cfg.crop_h,
+                    auto_exposure=getattr(cam_cfg, "auto_exposure", None),
+                    exposure=getattr(cam_cfg, "exposure", None),
+                    brightness=getattr(cam_cfg, "brightness", None),
+                )
             self.log.info(f"📸 挂载相机 [{name.upper()}] -> {video_node} (Format: {cam_cfg.format})")
 
         active_model_name = self.cfg.model.active_model

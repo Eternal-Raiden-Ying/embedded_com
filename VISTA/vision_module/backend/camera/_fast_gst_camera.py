@@ -45,6 +45,7 @@ class FastGstCameraBase:
         self.device = device
         self.in_format = in_format
         self.format = format
+        self._cam = None
         self._cam = fast_cam.Camera(
             device,
             in_w,
@@ -83,13 +84,17 @@ class FastGstCameraBase:
         return self._cam.read_frame()
 
     def release(self):
-        if self._cam is not None:
+        cam = getattr(self, "_cam", None)
+        if cam is not None:
             del self._cam
             self._cam = None
             logger.info("camera released: %s", self.device)
 
     def __del__(self):
-        self.release()
+        try:
+            self.release()
+        except Exception:
+            pass
 
     def __enter__(self):
         return self

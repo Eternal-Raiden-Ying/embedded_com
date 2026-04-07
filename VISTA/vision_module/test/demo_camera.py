@@ -31,7 +31,7 @@ from vision_module.config.board_config import CONFIG
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Interactive VISTA camera/model demo")
     parser.add_argument("--stream", choices=["rgb", "depth", "ir"], default="")
-    parser.add_argument("--backend", choices=["auto", "mock", "real"], default="auto")
+    parser.add_argument("--backend", choices=["auto", "mock", "real"], default="real")
     parser.add_argument("--model", default="none", help="none | active | model profile name")
     parser.add_argument("--headless", action="store_true", help="run without opening a window")
     parser.add_argument("--max-frames", type=int, default=0, help="stop after N frames; 0 means unlimited")
@@ -87,11 +87,7 @@ def import_predictor_class(backend: str):
 
 
 def try_backend_order(requested: str) -> List[str]:
-    if requested == "real":
-        return ["real"]
-    if requested == "mock":
-        return ["mock"]
-    return ["real", "mock"]
+    return ["real"]
 
 
 def build_camera_kwargs(stream: str) -> Dict[str, object]:
@@ -100,30 +96,28 @@ def build_camera_kwargs(stream: str) -> Dict[str, object]:
             "device": "/dev/video6",
             "in_w": 1280,
             "in_h": 720,
-            "out_w": 640,
-            "out_h": 640,
+            "out_w": 1280,
+            "out_h": 720,
             "fps": 30,
             "in_format": "YUY2",
             "format": "RGB",
-            "crop_x": 280,
+            "crop_x": 0,
             "crop_y": 0,
-            "crop_w": 720,
-            "crop_h": 720,
-            "auto_exposure": False,
-            "exposure": 166,
-            "brightness": 0,
+            "crop_w": 0,
+            "crop_h": 0,
+            "auto_exposure": True,
         }
     if stream == "depth":
-        return {"width": 424, "height": 240, "fps": 15}
+        return {"width": 640, "height": 480, "fps": 30}
     return {
         "device": "/dev/video4",
-        "in_w": 640,
-        "in_h": 480,
-        "out_w": 640,
-        "out_h": 480,
+        "in_w": 1280,
+        "in_h": 720,
+        "out_w": 1280,
+        "out_h": 720,
         "fps": 30,
-        "in_format": "GREY",
-        "format": "GRAY8",
+        "in_format": "GRAY8",
+        "format": "BGR",
     }
 
 
@@ -143,9 +137,7 @@ def open_camera(stream: str, requested_backend: str):
             return camera, backend
         except Exception as exc:
             errors.append(f"{backend}: {exc}")
-            if requested_backend != "auto":
-                break
-            print(f"[WARN] camera backend {backend} unavailable: {exc}")
+            break
     raise RuntimeError("camera init failed | " + " | ".join(errors))
 
 
@@ -161,9 +153,7 @@ def open_predictor(model_name: str, requested_backend: str):
             return predictor, backend
         except Exception as exc:
             errors.append(f"{backend}: {exc}")
-            if requested_backend != "auto":
-                break
-            print(f"[WARN] predictor backend {backend} unavailable: {exc}")
+            break
     raise RuntimeError("predictor init failed | " + " | ".join(errors))
 
 
@@ -179,12 +169,13 @@ def safe_release(obj) -> None:
 def depth_to_bgr(frame: np.ndarray) -> np.ndarray:
     if frame.ndim == 3 and frame.shape[2] == 3:
         return frame.copy()
-    if frame.dtype != np.uint8:
-        norm = cv2.normalize(frame, None, 0, 255, cv2.NORM_MINMAX)
-        norm = norm.astype(np.uint8)
+    if frame.dtype == np.uint16:
+        vis = cv2.convertScaleAbs(frame, alpha=0.03)
+    elif frame.dtype != np.uint8:
+        vis = frame.astype(np.uint8)
     else:
-        norm = frame
-    return cv2.applyColorMap(norm, cv2.COLORMAP_JET)
+        vis = frame
+    return cv2.applyColorMap(vis, cv2.COLORMAP_JET)
 
 
 def ir_to_bgr(frame: np.ndarray) -> np.ndarray:
@@ -238,28 +229,10 @@ def draw_detections(image_bgr: np.ndarray, boxes, masks, class_names) -> np.ndar
 def overlay_status(
     image_bgr: np.ndarray,
     stream: str,
-    camera_backend: str,
-    model_name: str,
-    predictor_backend: str,
     fps: float,
-    exposure: int,
-    brightness: int,
 ) -> np.ndarray:
-    lines = [
-        f"stream={stream} camera_backend={camera_backend}",
-        f"model={model_name} predictor_backend={predictor_backend}",
-        f"fps={fps:.1f}",
-    ]
-    if stream == "rgb":
-        lines.append(f"exposure={exposure} brightness={brightness}")
-        lines.append("keys: A/D exposure W/S brightness N next-model M toggle-model")
-    else:
-        lines.append("keys: N next-model M toggle-model")
-    lines.append("keys: ESC/Q quit")
-    y = 25
-    for line in lines:
-        cv2.putText(image_bgr, line, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        y += 25
+    title = f"{stream.upper()} | {fps:.1f} FPS"
+    cv2.putText(image_bgr, title, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
     return image_bgr
 
 
@@ -286,6 +259,8 @@ def print_demo_info(stream: str, requested_backend: str, model_name: str) -> Non
 
 def main() -> int:
     args = parse_args()
+    if args.backend != "real":
+        raise SystemExit("demo_camera only supports --backend real")
     stream = choose_stream(args)
     model_name = resolve_model_name(args.model)
     print_demo_info(stream, args.backend, model_name)
@@ -304,12 +279,10 @@ def main() -> int:
 
         window_name = "VISTA Demo Camera"
         if not args.headless:
-            cv2.namedWindow(window_name)
+            cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
         prev_time = time.time()
         frame_count = 0
-        exposure = 166
-        brightness = 0
 
         while True:
             frame = camera.read_frame()
@@ -332,9 +305,10 @@ def main() -> int:
             current_time = time.time()
             fps = 1.0 / max(1e-6, current_time - prev_time)
             prev_time = current_time
-            vis_bgr = overlay_status(vis_bgr, stream, camera_backend, current_model, predictor_backend, fps, exposure, brightness)
+            vis_bgr = overlay_status(vis_bgr, stream, fps)
 
             if not args.headless:
+                cv2.resizeWindow(window_name, vis_bgr.shape[1], vis_bgr.shape[0])
                 cv2.imshow(window_name, vis_bgr)
 
             frame_count += 1
@@ -366,18 +340,6 @@ def main() -> int:
                     predictor_backend = "none"
                     current_model = "none"
                 print(f"[INFO] model toggle -> {current_model}")
-            elif stream == "rgb" and key == ord("a") and hasattr(camera, "set_exposure"):
-                exposure = max(1, exposure - 10)
-                camera.set_exposure(exposure)
-            elif stream == "rgb" and key == ord("d") and hasattr(camera, "set_exposure"):
-                exposure = min(10000, exposure + 10)
-                camera.set_exposure(exposure)
-            elif stream == "rgb" and key == ord("s") and hasattr(camera, "set_brightness"):
-                brightness = max(-64, brightness - 5)
-                camera.set_brightness(brightness)
-            elif stream == "rgb" and key == ord("w") and hasattr(camera, "set_brightness"):
-                brightness = min(64, brightness + 5)
-                camera.set_brightness(brightness)
 
         return 0
     finally:

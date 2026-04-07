@@ -45,17 +45,17 @@ class DepthCameraConfig:
 @dataclass
 class IRCameraConfig:
     source: str = "4"
-    in_w: int = 1280
-    in_h: int = 720
+    in_w: int = 640
+    in_h: int = 480
     out_w: int = 640
-    out_h: int = 640
-    in_format: str = "GREY"
-    format: str = "GRAY8" 
+    out_h: int = 480
+    in_format: str = "GRAY8"
+    format: str = "BGR"
     fps: int = 30
-    crop_x: int = 280
+    crop_x: int = 0
     crop_y: int = 0
-    crop_w: int = 720
-    crop_h: int = 720
+    crop_w: int = 0
+    crop_h: int = 0
     enable: bool = False
 
 

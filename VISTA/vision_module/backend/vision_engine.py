@@ -9,7 +9,7 @@ import logging
 from typing import Optional, Dict, Tuple, Any, Callable
 import cv2
 
-from .camera import ColorCamera, HardwareCamera, IRCamera, RealSenseDepthCamera
+from .camera import ColorCamera, IRCamera, RealSenseDepthCamera
 from .predictor import QNN_YOLO_Segment_Predictor
 from ..config.schema import VisionServiceConfig
 

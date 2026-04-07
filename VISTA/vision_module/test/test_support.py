@@ -223,8 +223,8 @@ def make_ir_kwargs(args: argparse.Namespace) -> Dict[str, Any]:
         "out_w": args.ir_out_w,
         "out_h": args.ir_out_h,
         "fps": args.ir_fps,
-        "in_format": "GREY",
-        "format": "GRAY8",
+        "in_format": "GRAY8",
+        "format": "BGR",
     }
 
 
@@ -273,7 +273,8 @@ def build_test_config(args: argparse.Namespace) -> VisionServiceConfig:
                 in_h=args.ir_in_h,
                 out_w=args.ir_out_w,
                 out_h=args.ir_out_h,
-                in_format="GREY",
+                in_format="GRAY8",
+                format="BGR",
                 fps=args.ir_fps,
                 enable=False,
             ),

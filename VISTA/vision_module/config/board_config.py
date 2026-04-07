@@ -49,17 +49,17 @@ depth.fps = 15
 
 grey = CONFIG.camera.streams["grey"]
 grey.source = "4"
-grey.in_w = 1280
-grey.in_h = 720
+grey.in_w = 640
+grey.in_h = 480
 grey.out_w = 640
-grey.out_h = 640
-grey.in_format = "GREY"
-grey.format = "GRAY8"
+grey.out_h = 480
+grey.in_format = "GRAY8"
+grey.format = "BGR"
 grey.fps = 30
-grey.crop_x = 280
+grey.crop_x = 0
 grey.crop_y = 0
-grey.crop_w = 720
-grey.crop_h = 720
+grey.crop_w = 0
+grey.crop_h = 0
 
 # model config
 CONFIG.model.active_model = "yolo26s_seg"
