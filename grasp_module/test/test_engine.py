@@ -38,6 +38,8 @@ def main():
     parser.add_argument('--collision_thresh', type=float, default=-1, help='Collision Threshold (set to -1 to disable)')
     parser.add_argument('--voxel_size_cd', type=float, default=0.01, help='Voxel Size for collision detection')
     parser.add_argument('--random_seed', type=int, default=0, help='Random seed for reproducible point sampling')
+    parser.add_argument('--scene_max_depth', type=float, default=3.0, help='Maximum depth in meters for debug scene cloud')
+    parser.add_argument('--debug_grasp_count', type=int, default=15, help='Number of top grasps to export in debug mesh')
     
     # 输入数据相关
     parser.add_argument('--rgb_path', type=str, default='./data/color/color_00000.png', help='Path to RGB image (jpg/png)')
@@ -105,8 +107,7 @@ def main():
             else:
                 seg_mask = normalize_seg_shape(cv2.imread(cfgs.seg_path, cv2.IMREAD_UNCHANGED))
         else:
-            print("-> No seg_mask provided, using full image mask.")
-            seg_mask = np.ones_like(depth_img, dtype=np.uint8)
+            raise ValueError("seg_mask is required for real inference. Provide --seg_path or enable --run_yolo.")
     else:
         print("-> No input paths provided, generating dummy data for testing...")
         H, W = 720, 1280

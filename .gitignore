@@ -20,3 +20,5 @@ grasp_module/test/debug_res/
 grasp_module/test/data/
 grasp_module/log/
 grasp_module/weights/
+grasp_module/backend/models/knn/build/
+grasp_module/backend/models/knn/*.egg-info/

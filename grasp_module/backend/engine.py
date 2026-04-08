@@ -1,6 +1,5 @@
 import os
 import sys
-import json
 import numpy as np
 import argparse
 import time
@@ -11,59 +10,14 @@ from graspnetAPI.graspnet_eval import GraspGroup
 from .models.graspnet import GraspNet, pred_decode
 from .utils.preprocess import minkowski_collate_fn
 from .utils.collision_detector import ModelFreeCollisionDetector
-from .utils.data_utils import CameraInfo, create_point_cloud_from_depth_image
-
-
-def load_camera_metadata(metadata_path):
-    """
-    从 JSON 文件加载相机内参
-    
-    Args:
-        metadata_path: 相机元数据 JSON 文件路径
-        
-    Returns:
-        CameraInfo: 相机信息对象
-    """
-    if not os.path.exists(metadata_path):
-        print(f"[Warning] Camera metadata file not found: {metadata_path}")
-        return None
-    
-    with open(metadata_path, 'r') as f:
-        metadata = json.load(f)
-    
-    depth_info = metadata.get('depth', {})
-    factor_depth = metadata.get('factor_depth')
-    depth_scale = metadata.get('depth_scale')
-
-    if factor_depth is not None:
-        scale = float(factor_depth)
-        scale_source = 'factor_depth'
-    elif depth_scale is not None:
-        depth_scale = float(depth_scale)
-        # 兼容历史 metadata: 若保存的是 RealSense depth_scale(米/单位)，
-        # 这里转换成 create_point_cloud_from_depth_image 需要的除数 factor_depth。
-        scale = 1.0 / depth_scale if depth_scale > 0 and depth_scale < 1 else depth_scale
-        scale_source = 'depth_scale(converted)' if depth_scale < 1 else 'depth_scale'
-    else:
-        scale = 1000.0
-        scale_source = 'default'
-    
-    camera_info = CameraInfo(
-        width=float(depth_info.get('width', 1280)),
-        height=float(depth_info.get('height', 720)),
-        fx=float(depth_info.get('fx', 631.5)),
-        fy=float(depth_info.get('fy', 631.2)),
-        cx=float(depth_info.get('cx', 639.5)),
-        cy=float(depth_info.get('cy', 359.5)),
-        scale=scale
-    )
-    
-    print(f"[Camera] Loaded intrinsics from {metadata_path}")
-    print(f"  fx={camera_info.fx}, fy={camera_info.fy}")
-    print(f"  cx={camera_info.cx}, cy={camera_info.cy}")
-    print(f"  scale={camera_info.scale} ({scale_source})")
-    
-    return camera_info
+from .utils.data_utils import (
+    CameraInfo,
+    build_ply_output_path,
+    create_colored_point_cloud_from_rgbd,
+    filter_point_cloud_by_z,
+    load_camera_info_from_metadata,
+    write_open3d_point_cloud,
+)
 
 
 class RealSenseGraspPredictor:
@@ -71,21 +25,23 @@ class RealSenseGraspPredictor:
         self.cfgs = cfgs
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         
-        camera_info = None
-        
-        if hasattr(cfgs, 'camera_metadata') and cfgs.camera_metadata:
-            camera_info = load_camera_metadata(cfgs.camera_metadata)
-        
+        default_camera_info = CameraInfo(
+            width=1280.0,
+            height=720.0,
+            fx=631.55,
+            fy=631.21,
+            cx=638.43,
+            cy=366.50,
+            scale=1000.0,
+        )
+
+        camera_info = load_camera_info_from_metadata(
+            getattr(cfgs, 'camera_metadata', None),
+            default_camera=default_camera_info,
+        )
+
         if camera_info is None:
-            camera_info = CameraInfo(
-                width=1280.0, 
-                height=720.0, 
-                fx=631.55,   
-                fy=631.21,   
-                cx=638.43,   
-                cy=366.50,   
-                scale=1000.0
-            )
+            camera_info = default_camera_info
             print("[Camera] Using default camera intrinsics (graspnet kinect defaults)")
         
         self.camera_info = camera_info
@@ -110,17 +66,12 @@ class RealSenseGraspPredictor:
         depth_img: np.ndarray (H, W) 
         seg_mask: np.ndarray (H, W) 背景通常为0，目标物体>0
         """
-        # 生成点云
-        cloud = create_point_cloud_from_depth_image(depth_img, self.camera_info, organized=True)
-
-        # 获取有效点掩码：有深度，且在分割掩码内
-        depth_mask = (depth_img > 0)
-        # 实际使用中可能还需要一个固定 Workspace Bounding Box 过滤掉桌子或背景
-        # workspace_mask = (cloud[:,:,2] < 1.0) & (cloud[:,:,2] > 0.1) # 简单的深度截断示例
-        mask = (depth_mask & (seg_mask > 0)) 
-        
-        cloud_masked = cloud[mask]
-        color_masked = color_img.reshape(-1, 3)[mask.flatten()]
+        cloud_masked, color_masked = create_colored_point_cloud_from_rgbd(
+            color_img,
+            depth_img,
+            self.camera_info,
+            mask=seg_mask,
+        )
 
         if len(cloud_masked) == 0:
             return None
@@ -140,9 +91,30 @@ class RealSenseGraspPredictor:
             'point_clouds': cloud_sampled.astype(np.float32),
             'coors': cloud_sampled.astype(np.float32) / self.cfgs.voxel_size,
             'feats': np.ones_like(cloud_sampled).astype(np.float32),
-            'colors': color_sampled.astype(np.float32) / 255.0,
+            'colors': color_sampled.astype(np.float32),
         }
         return ret_dict
+
+    def _score_to_color(self, score, min_score, max_score):
+        if max_score - min_score < 1e-6:
+            normalized = 1.0
+        else:
+            normalized = float((score - min_score) / (max_score - min_score))
+        return (normalized, 0.0, 1.0 - normalized)
+
+    def _build_grasp_mesh(self, grasp_group):
+        combined_grippers = o3d.geometry.TriangleMesh()
+        if grasp_group is None or len(grasp_group) == 0:
+            return combined_grippers
+
+        scores = grasp_group.scores
+        min_score = float(scores.min())
+        max_score = float(scores.max())
+        for i in range(len(grasp_group)):
+            grasp = grasp_group[i]
+            color = self._score_to_color(float(grasp.score), min_score, max_score)
+            combined_grippers += grasp.to_open3d_geometry(color=color)
+        return combined_grippers
 
     def post_process_grasps(self, grasp_group):
         """
@@ -207,38 +179,51 @@ class RealSenseGraspPredictor:
 
         # 5. Debug 模式可视化
         if self.cfgs.debug:
-            data_dict = self.preprocess(color_img, depth_img, np.ones_like(depth_img))
-            self.save_debug_visualizations(data_dict, gg)
+            self.save_debug_visualizations(color_img, depth_img, seg_mask, gg)
 
         return gg
 
-    def save_debug_visualizations(self, data_dict, gg):
+    def save_debug_visualizations(self, color_img, depth_img, seg_mask, gg):
         """
         在 Debug 模式下将结果存盘，方便用 MeshLab 或 CloudCompare 查看
         """
-        pc = data_dict['point_clouds']
-        colors = data_dict['colors']
-        
-        # 如果抓取位姿太多，只画前30个避免文件过大
-        vis_gg = gg[:30] if gg.__len__() > 30 else gg
-        grippers = vis_gg.to_open3d_geometry_list()
-        
-        cloud = o3d.geometry.PointCloud()
-        cloud.points = o3d.utility.Vector3dVector(pc.astype(np.float32))
-        cloud.colors = o3d.utility.Vector3dVector(colors)
-        
-        # 合并所有夹爪为一个 Mesh
-        combined_grippers = o3d.geometry.TriangleMesh()
-        for g in grippers:
-            combined_grippers += g
-            
-        cloud_path = os.path.join(self.cfgs.dump_dir, "debug_cloud.ply")
-        mesh_path = os.path.join(self.cfgs.dump_dir, "debug_grasps.ply")
-        
-        o3d.io.write_point_cloud(cloud_path, cloud)
-        o3d.io.write_triangle_mesh(mesh_path, combined_grippers)
-        
-        print(f"[DEBUG] Visualizations saved to:\n - {cloud_path}\n - {mesh_path}")
+        masked_points, masked_colors = create_colored_point_cloud_from_rgbd(
+            color_img,
+            depth_img,
+            self.camera_info,
+            mask=seg_mask,
+        )
+        scene_points, scene_colors = create_colored_point_cloud_from_rgbd(
+            color_img,
+            depth_img,
+            self.camera_info,
+            mask=None,
+        )
+        scene_points, scene_colors = filter_point_cloud_by_z(
+            scene_points,
+            scene_colors,
+            z_min=0.0,
+            z_max=getattr(self.cfgs, 'scene_max_depth', 3.0),
+        )
+
+        top_k = getattr(self.cfgs, 'debug_grasp_count', 15)
+        vis_gg = gg[:top_k] if gg.__len__() > top_k else gg
+        combined_grippers = self._build_grasp_mesh(vis_gg)
+
+        masked_cloud_path = build_ply_output_path(self.cfgs.dump_dir, 'masked_cloud.ply')
+        scene_cloud_path = build_ply_output_path(self.cfgs.dump_dir, 'scene_cloud.ply')
+        grasp_mesh_path = build_ply_output_path(self.cfgs.dump_dir, 'grasps_top15_heatmap.ply')
+
+        write_open3d_point_cloud(masked_cloud_path, masked_points, masked_colors)
+        write_open3d_point_cloud(scene_cloud_path, scene_points, scene_colors)
+        o3d.io.write_triangle_mesh(grasp_mesh_path, combined_grippers)
+
+        print(
+            f"[DEBUG] Visualizations saved to:\n"
+            f" - {masked_cloud_path}\n"
+            f" - {scene_cloud_path}\n"
+            f" - {grasp_mesh_path}"
+        )
 
 # ================= 测试运行逻辑 =================
 if __name__ == '__main__':
@@ -250,6 +235,8 @@ if __name__ == '__main__':
     parser.add_argument('--voxel_size', type=float, default=0.005, help='Voxel Size for sparse convolution')
     parser.add_argument('--collision_thresh', type=float, default=-1, help='Collision Threshold in collision detection [default: 0.01]')
     parser.add_argument('--voxel_size_cd', type=float, default=0.01, help='Voxel Size for collision detection')
+    parser.add_argument('--scene_max_depth', type=float, default=3.0, help='Maximum depth in meters for debug scene cloud')
+    parser.add_argument('--debug_grasp_count', type=int, default=15, help='Number of top grasps to export in debug mesh')
     
     # 增加的 Debug 开关
     parser.add_argument('--debug', action='store_true', default=False, help='Enable debug mode to save point cloud and grasp meshes')

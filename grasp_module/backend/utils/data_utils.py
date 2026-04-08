@@ -2,6 +2,9 @@
     Author: chenxi-wang
 """
 
+import json
+import os
+
 import numpy as np
 
 
@@ -16,6 +19,64 @@ class CameraInfo():
         self.cx = cx
         self.cy = cy
         self.scale = scale
+
+
+def ensure_dir(path):
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def get_ply_output_dir(base_dir):
+    return ensure_dir(os.path.join(base_dir, 'ply'))
+
+
+def build_ply_output_path(base_dir, filename):
+    return os.path.join(get_ply_output_dir(base_dir), filename)
+
+
+def load_camera_info_from_metadata(metadata_path, default_camera=None):
+    """Load CameraInfo from exported metadata json."""
+    if not metadata_path or not os.path.exists(metadata_path):
+        if metadata_path:
+            print(f"[Warning] Camera metadata file not found: {metadata_path}")
+        return default_camera
+
+    with open(metadata_path, 'r', encoding='utf-8') as f:
+        metadata = json.load(f)
+
+    depth_info = metadata.get('depth', {})
+    factor_depth = metadata.get('factor_depth')
+    depth_scale = metadata.get('depth_scale')
+
+    if factor_depth is not None:
+        scale = float(factor_depth)
+        scale_source = 'factor_depth'
+    elif depth_scale is not None:
+        depth_scale = float(depth_scale)
+        scale = 1.0 / depth_scale if 0 < depth_scale < 1 else depth_scale
+        scale_source = 'depth_scale(converted)' if 0 < depth_scale < 1 else 'depth_scale'
+    elif default_camera is not None:
+        scale = float(default_camera.scale)
+        scale_source = 'default_camera'
+    else:
+        scale = 1000.0
+        scale_source = 'default'
+
+    camera_info = CameraInfo(
+        width=float(depth_info.get('width', default_camera.width if default_camera else 1280)),
+        height=float(depth_info.get('height', default_camera.height if default_camera else 720)),
+        fx=float(depth_info.get('fx', default_camera.fx if default_camera else 631.55)),
+        fy=float(depth_info.get('fy', default_camera.fy if default_camera else 631.21)),
+        cx=float(depth_info.get('cx', default_camera.cx if default_camera else 638.43)),
+        cy=float(depth_info.get('cy', default_camera.cy if default_camera else 366.50)),
+        scale=scale,
+    )
+
+    print(f"[Camera] Loaded intrinsics from {metadata_path}")
+    print(f"  fx={camera_info.fx}, fy={camera_info.fy}")
+    print(f"  cx={camera_info.cx}, cy={camera_info.cy}")
+    print(f"  scale={camera_info.scale} ({scale_source})")
+    return camera_info
 
 
 def create_point_cloud_from_depth_image(depth, camera, organized=True):
@@ -44,6 +105,48 @@ def create_point_cloud_from_depth_image(depth, camera, organized=True):
     if not organized:
         cloud = cloud.reshape([-1, 3])
     return cloud
+
+
+def create_colored_point_cloud_from_rgbd(color, depth, camera, mask=None):
+    """Project RGB-D into camera coordinates with optional mask."""
+    cloud = create_point_cloud_from_depth_image(depth, camera, organized=True)
+    valid_mask = (depth > 0)
+    if mask is not None:
+        valid_mask &= (mask > 0)
+
+    points = cloud[valid_mask].astype(np.float32)
+    colors = None
+    if color is not None:
+        colors = color.reshape(-1, 3)[valid_mask.reshape(-1)].astype(np.float32) / 255.0
+    return points, colors
+
+
+def filter_point_cloud_by_z(points, colors=None, z_min=None, z_max=None):
+    if points.size == 0:
+        return points, colors
+
+    mask = np.ones(points.shape[0], dtype=bool)
+    if z_min is not None:
+        mask &= points[:, 2] >= z_min
+    if z_max is not None:
+        mask &= points[:, 2] <= z_max
+
+    points = points[mask]
+    if colors is not None:
+        colors = colors[mask]
+    return points, colors
+
+
+def write_open3d_point_cloud(ply_path, points, colors=None):
+    """Write point cloud using Open3D without changing axes."""
+    import open3d as o3d
+
+    ensure_dir(os.path.dirname(ply_path))
+    cloud = o3d.geometry.PointCloud()
+    cloud.points = o3d.utility.Vector3dVector(points.astype(np.float32))
+    if colors is not None:
+        cloud.colors = o3d.utility.Vector3dVector(colors.astype(np.float32))
+    o3d.io.write_point_cloud(ply_path, cloud)
 
 
 def transform_point_cloud(cloud, transform, format='4x4'):

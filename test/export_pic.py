@@ -2,15 +2,27 @@ import pyrealsense2 as rs
 import numpy as np
 import cv2
 import os
+import sys
+
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(CURRENT_DIR)
+sys.path.append(ROOT_DIR)
+
+from grasp_module.backend.utils.data_utils import (
+    CameraInfo,
+    build_ply_output_path,
+    create_colored_point_cloud_from_rgbd,
+    write_open3d_point_cloud,
+)
 
 # 配置路径
 bag_file = r"E:\Documents_E\embedded_competition\Fibocom\data\camera_behind.bag"  # 你的 .bag 文件路径
-output_base_path = "../output_dataset/camera_behind" # 存放照片的文件夹
+output_base_path = os.path.join(ROOT_DIR, "output_dataset", "camera_behind") # 存放照片的文件夹
 
 paths = {
     "color": os.path.join(output_base_path, "color"),
     "depth_raw": os.path.join(output_base_path, "depth_raw_16bit"), # 用于算法
-    "depth_vis_color": os.path.join(output_base_path, "depth_vis_colored") # 用于人工查看 (伪彩色)
+    "depth_vis_color": os.path.join(output_base_path, "depth_vis_colored"), # 用于人工查看 (伪彩色)
 }
 
 for p in paths.values():
@@ -50,29 +62,17 @@ try:
         if not aligned_depth_frame or not color_frame:
             continue
 
-        pc = rs.pointcloud()
-
-        # 2. 传入彩色帧以获取纹理 (颜色标签)
-        pc.map_to(color_frame)
-        
-        # 3. 计算点云数据
-        points = pc.calculate(aligned_depth_frame)
-        
-        # 4. 导出为 PLY 文件
-        # 这个文件可以直接用 MeshLab 打开查看
-        points.export_to_ply("reconstructed_model.ply", color_frame)
-        
-        print("点云已保存，请使用 MeshLab 打开 reconstructed_model.ply")
-        
         # --- 3. 颜色图片修复 ---
         # 获取彩色帧的原始数据
         color_data = np.asanyarray(color_frame.get_data())
-        
-        # 核心修复：检查帧格式。如果 SDK 提供的是 RGB8，则必须手动交换为 BGR 才能用 cv2.imwrite 正确保存。
+
+        # 统一得到 RGB 数据用于点云着色，再转换成 BGR 保存到磁盘。
         if color_frame.get_profile().as_video_stream_profile().format() == rs.format.rgb8:
-            color_image_correct = cv2.cvtColor(color_data, cv2.COLOR_RGB2BGR)
+            color_image_rgb = color_data
         else:
-            color_image_correct = color_data # 已经是 BGR 或其他兼容格式
+            color_image_rgb = cv2.cvtColor(color_data, cv2.COLOR_BGR2RGB)
+
+        color_image_correct = cv2.cvtColor(color_image_rgb, cv2.COLOR_RGB2BGR)
 
         # 保存修复后的彩色图
         color_filename = os.path.join(paths["color"], f"color_{frame_count:05d}.png")
@@ -84,6 +84,28 @@ try:
         depth_data = np.asanyarray(aligned_depth_frame.get_data())
         depth_raw_filename = os.path.join(paths["depth_raw"], f"depth_raw_{frame_count:05d}.png")
         cv2.imwrite(depth_raw_filename, depth_data) # OpenCV 会自动将其保存为单通道 16-bit PNG
+
+        # --- 5. 使用与 engine 完全一致的反投影逻辑导出点云 ---
+        depth_intrinsics = aligned_depth_frame.get_profile().as_video_stream_profile().get_intrinsics()
+        depth_scale = profile.get_device().first_depth_sensor().get_depth_scale()
+        camera_info = CameraInfo(
+            width=float(depth_intrinsics.width),
+            height=float(depth_intrinsics.height),
+            fx=float(depth_intrinsics.fx),
+            fy=float(depth_intrinsics.fy),
+            cx=float(depth_intrinsics.ppx),
+            cy=float(depth_intrinsics.ppy),
+            scale=float(1.0 / depth_scale),
+        )
+        full_points, full_colors = create_colored_point_cloud_from_rgbd(
+            color_image_rgb,
+            depth_data,
+            camera_info,
+            mask=None,
+        )
+        point_cloud_path = build_ply_output_path(output_base_path, f"cloud_{frame_count:05d}.ply")
+        write_open3d_point_cloud(point_cloud_path, full_points, full_colors)
+        print(f"点云已保存，请使用 MeshLab 打开 {point_cloud_path}")
 
         # C. 伪彩色渲染 (使用 RealSense 内置色彩器)
         # 这种方法最清晰，蓝色代表远，红色代表近（取决于模式）
