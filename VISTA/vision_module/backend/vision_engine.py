@@ -11,6 +11,7 @@ import cv2
 
 from .camera import ColorCamera, IRCamera, RealSenseDepthCamera
 from .predictor import QNNPredictor
+from .predictor.base import IPredictor
 from ..config.schema import VisionServiceConfig
 
 
@@ -26,7 +27,7 @@ class VisionEngine:
         self.log = logger or logging.getLogger("vision.engine")
         self._event_sink = event_sink
         self.cams: Dict[str, Any] = {}
-        self.predictor: Optional[Any] = None
+        self.predictor: Optional[IPredictor] = None
         self.active_model_name: Optional[str] = None
         self.running = False
         self.lock = threading.RLock()
@@ -95,12 +96,18 @@ class VisionEngine:
         time.sleep(0.2)
         self._drain_infer_queue()
         with self.lock:
+            cameras = list(self.cams.values())
             self.cams.clear()
             predictor = self.predictor
             self.predictor = None
             self.active_model_name = None
             self.infer_enabled = False
             self._clear_latest()
+        for camera in cameras:
+            try:
+                camera.release()
+            except Exception as exc:
+                self.log.warning("camera release failed: %s", exc)
         if predictor is not None:
             predictor.release()
         self.log.info("pipeline stopped")
@@ -183,9 +190,13 @@ class VisionEngine:
             
             # --- 卸载相机的逻辑保持不变 ---
             if name in self.cams:
-                del self.cams[name]
+                camera = self.cams.pop(name)
                 self._clear_latest()
                 self._drain_infer_queue()
+                try:
+                    camera.release()
+                except Exception as exc:
+                    self.log.warning("camera release failed: %s", exc)
                 self.log.info("camera disabled: %s", name)
                 self._emit_event("camera_disabled", camera=name)
 

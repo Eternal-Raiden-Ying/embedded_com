@@ -65,6 +65,7 @@ class FastGstCameraBase(ICamera):
             crop_w,
             crop_h,
         )
+        logger.info("camera %s started: %sx%s @ %sfps", device, out_w, out_h, fps)
 
     def _v4l2_set_ctrl(self, ctrl_name: str, value: int):
         try:

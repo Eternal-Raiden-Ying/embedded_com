@@ -59,7 +59,7 @@ class RealSenseDepthCamera(ICamera):
         self.depth_sensor.open(target_profile)
         self.depth_sensor.start(self.frame_queue)
         self.is_running = True
-        logger.info("realsense stream started: %sx%s @ %sfps", width, height, fps)
+        logger.info("camera /dev/video2 started: %sx%s @ %sfps", width, height, fps)
 
     def read_frame(self) -> np.ndarray:
         """
