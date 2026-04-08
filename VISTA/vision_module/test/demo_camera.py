@@ -35,6 +35,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default="none", help="none | active | model profile name")
     parser.add_argument("--headless", action="store_true", help="run without opening a window")
     parser.add_argument("--max-frames", type=int, default=0, help="stop after N frames; 0 means unlimited")
+    parser.add_argument("--preview-width", type=int, default=1280)
+    parser.add_argument("--preview-height", type=int, default=720)
     return parser.parse_args()
 
 
@@ -231,9 +233,23 @@ def overlay_status(
     stream: str,
     fps: float,
 ) -> np.ndarray:
-    title = f"{stream.upper()} | {fps:.1f} FPS"
+    title = f"{stream.upper()} CAMERA | {fps:.1f} FPS"
     cv2.putText(image_bgr, title, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
     return image_bgr
+
+
+def fit_preview(image_bgr: np.ndarray, max_width: int, max_height: int) -> np.ndarray:
+    h, w = image_bgr.shape[:2]
+    if h <= 0 or w <= 0:
+        return image_bgr
+    scale = min(float(max_width) / float(w), float(max_height) / float(h))
+    if scale <= 0:
+        return image_bgr
+    if abs(scale - 1.0) < 0.05:
+        return image_bgr
+    new_w = max(1, int(w * scale))
+    new_h = max(1, int(h * scale))
+    return cv2.resize(image_bgr, (new_w, new_h))
 
 
 def next_model_name(current: str) -> str:
@@ -279,7 +295,7 @@ def main() -> int:
 
         window_name = "VISTA Demo Camera"
         if not args.headless:
-            cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+            cv2.namedWindow(window_name)
 
         prev_time = time.time()
         frame_count = 0
@@ -306,9 +322,9 @@ def main() -> int:
             fps = 1.0 / max(1e-6, current_time - prev_time)
             prev_time = current_time
             vis_bgr = overlay_status(vis_bgr, stream, fps)
+            vis_bgr = fit_preview(vis_bgr, args.preview_width, args.preview_height)
 
             if not args.headless:
-                cv2.resizeWindow(window_name, vis_bgr.shape[1], vis_bgr.shape[0])
                 cv2.imshow(window_name, vis_bgr)
 
             frame_count += 1
