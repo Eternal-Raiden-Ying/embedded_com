@@ -1,0 +1,4 @@
+# ninja log v5
+12	3166	7967528884293830	E:/Documents_E/vscode/embedded_com/grasp_module/backend/models/knn/build/temp.win-amd64-cpython-310/Release/Documents_E/vscode/embedded_com/grasp_module/backend/models/knn/src/cuda/knn.obj	4b65ba8917826fb3
+3	24070	7967529093377534	E:/Documents_E/vscode/embedded_com/grasp_module/backend/models/knn/build/temp.win-amd64-cpython-310/Release/Documents_E/vscode/embedded_com/grasp_module/backend/models/knn/src/cpu/knn_cpu.obj	fbb04b29ca466c93
+21	24817	7967529100750955	E:/Documents_E/vscode/embedded_com/grasp_module/backend/models/knn/build/temp.win-amd64-cpython-310/Release/Documents_E/vscode/embedded_com/grasp_module/backend/models/knn/src/vision.obj	67579576e469c093
