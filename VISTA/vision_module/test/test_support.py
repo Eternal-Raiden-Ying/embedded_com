@@ -191,7 +191,7 @@ def import_predictor_class(backend: str):
         module = importlib.import_module("vision_module.backend.predictor.mock")
         return module.MockPredictor
     module = importlib.import_module("vision_module.backend.predictor.QNNPredictor")
-    return module.QNN_YOLO_Segment_Predictor
+    return module.QNNPredictor
 
 
 def make_rgb_kwargs(args: argparse.Namespace) -> Dict[str, Any]:
@@ -314,4 +314,5 @@ def patch_engine_backends(engine_module: Any, camera_backend: str, predictor_bac
     engine_module.IRCamera = ir_cls
     engine_module.HardwareCamera = color_cls
     engine_module.RealSenseDepthCamera = depth_cls
+    engine_module.QNNPredictor = predictor_cls
     engine_module.QNN_YOLO_Segment_Predictor = predictor_cls

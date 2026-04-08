@@ -1,13 +1,25 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import logging
 import threading
-import numpy as np
+
+import aidlite
 import cv2
-import aidlite 
-from .utils import xywh2xyxy, NMS_fast, process_mask_fast
+import numpy as np
+
+from .base import IPredictor
+from .utils import NMS_fast, process_mask_fast, xywh2xyxy
 
 
-class QNN_YOLO_Segment_Predictor(object):
+logger = logging.getLogger("vision.inference")
+
+
+class QNNPredictor(IPredictor):
     def __init__(self, args) -> None:
         self._lock = threading.RLock()
+        self.interpreter = None
+
         config = aidlite.Config.create_instance()
         config.implement_type = aidlite.ImplementType.TYPE_LOCAL
         config.framework_type = aidlite.FrameworkType.TYPE_QNN
@@ -25,40 +37,50 @@ class QNN_YOLO_Segment_Predictor(object):
         self.blocks = int(self.height * self.width * (1 / 64 + 1 / 256 + 1 / 1024))
         self.maskw = int(self.width / 4)
         self.maskh = int(self.height / 4)
-        self.output_shape = [[1, 32, self.blocks], [1, 4, self.blocks], [1, self.class_num, self.blocks], [1, self.maskh, self.maskw, 32]]
+        self.output_shape = [
+            [1, 32, self.blocks],
+            [1, 4, self.blocks],
+            [1, self.class_num, self.blocks],
+            [1, self.maskh, self.maskw, 32],
+        ]
 
-        model.set_model_properties(self.input_shape, aidlite.DataType.TYPE_FLOAT32, self.output_shape, aidlite.DataType.TYPE_FLOAT32)
+        model.set_model_properties(
+            self.input_shape,
+            aidlite.DataType.TYPE_FLOAT32,
+            self.output_shape,
+            aidlite.DataType.TYPE_FLOAT32,
+        )
         interpreter = aidlite.InterpreterBuilder.build_interpretper_from_model_and_config(model, config)
         interpreter.init()
         interpreter.load_model()
         self.interpreter = interpreter
+        logger.info("qnn predictor loaded: %s", getattr(args, "target_model", ""))
 
     def __del__(self):
-        self.release()
+        try:
+            self.release()
+        except Exception:
+            pass
 
     def is_ready(self) -> bool:
         with self._lock:
             return self.interpreter is not None
 
-    def release(self):
+    def release(self) -> None:
         with self._lock:
-            interpreter = getattr(self, 'interpreter', None)
+            interpreter = getattr(self, "interpreter", None)
             if interpreter is None:
                 return
-            print("🛑 正在显式卸载 QNN 模型与释放 DSP 内存...")
+            logger.info("releasing qnn predictor resources")
             try:
-                interpreter.destory()  # SDK 原始拼写
-            except Exception as e:
-                print(f"⚠️ 卸载模型时发生异常: {e}")
+                interpreter.destory()
+            except Exception as exc:
+                logger.warning("predictor release failed: %s", exc)
             finally:
                 self.interpreter = None
-            print("✅ QNN 资源释放完毕！")
+            logger.info("qnn predictor released")
 
-    def predict_frame(self, orig_img_rgb):
-        """
-        处理单帧图像。
-        注意：入参 orig_img_rgb 必须是硬件相机直接吐出的 640x640 RGB numpy数组！
-        """
+    def predict_frame(self, orig_img_rgb: np.ndarray):
         with self._lock:
             interpreter = self.interpreter
             if interpreter is None:
@@ -93,3 +115,6 @@ class QNN_YOLO_Segment_Predictor(object):
         out_boxes = x[index].astype(np.float16)
         masks = process_mask_fast(protos[0], out_boxes[:, -32:], out_boxes[:, :4], orig_img_rgb.shape)
         return out_boxes, masks
+
+
+QNN_YOLO_Segment_Predictor = QNNPredictor

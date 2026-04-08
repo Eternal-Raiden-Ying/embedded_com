@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 
 from .camera import ColorCamera, IRCamera, RealSenseDepthCamera
-from .predictor import QNN_YOLO_Segment_Predictor  # 不同模型的predcitor框架不同
+from .predictor import QNNPredictor  # 不同模型的predcitor框架不同
 from ..config.schema import VisionServiceConfig
 
 class VisionEngine:
@@ -24,7 +24,7 @@ class VisionEngine:
         
         # 资源句柄
         self.cams: Dict[str, object] = {}
-        self.predictor: Optional[QNN_YOLO_Segment_Predictor] = None
+        self.predictor: Optional[QNNPredictor] = None
         
         # 线程与并发控制
         self.running = False
@@ -95,7 +95,7 @@ class VisionEngine:
         active_model_name = self.cfg.model.active_model
         model_profile = self.cfg.model.profiles.get(active_model_name)
         if model_profile:
-            self.predictor = QNN_YOLO_Segment_Predictor(model_profile)
+            self.predictor = QNNPredictor(model_profile)
             self.log.info(f"🧠 加载 NPU 模型 [{active_model_name}]")
 
     def start(self):

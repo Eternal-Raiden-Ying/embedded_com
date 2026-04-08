@@ -10,7 +10,7 @@ from typing import Optional, Dict, Tuple, Any, Callable
 import cv2
 
 from .camera import ColorCamera, IRCamera, RealSenseDepthCamera
-from .predictor import QNN_YOLO_Segment_Predictor
+from .predictor import QNNPredictor
 from ..config.schema import VisionServiceConfig
 
 
@@ -207,7 +207,7 @@ class VisionEngine:
                 self.log.error("model config not found: %s", name)
                 return
             self.log.info("loading model: %s", name)
-            predictor = QNN_YOLO_Segment_Predictor(model_profile)
+            predictor = QNNPredictor(model_profile)
             with self.lock:
                 self.predictor = predictor
                 self.active_model_name = name

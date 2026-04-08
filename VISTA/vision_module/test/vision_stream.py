@@ -6,7 +6,7 @@ import aidcv as cv2  # AidLux 专用的推流与可视化库
 
 # 导入我们全新封装的底层加速模块
 from ..backend.camera import HardwareCamera
-from ..backend.predictor import QNN_YOLO_Segment_Predictor
+from ..backend.predictor import QNNPredictor
 
 # 导入工具与监控
 from ..utils.plot import draw_detect_res_fast
@@ -49,7 +49,7 @@ class AsyncStreamPipeline:
         )
 
         # 3. 初始化 AI 推理引擎
-        self.model = QNN_YOLO_Segment_Predictor(args)
+        self.model = QNNPredictor(args)
         
         # 4. 建立线程安全的流水线队列 (限制 maxsize 防止爆内存和累计延迟)
         self.frame_queue = queue.Queue(maxsize=2)
