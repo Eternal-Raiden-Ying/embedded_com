@@ -15,7 +15,7 @@ from .utils import NMS_fast, process_mask_fast, xywh2xyxy
 logger = logging.getLogger("vision.inference")
 
 
-class QNNPredictor(IPredictor):
+class QNN_YOLO_Segment_Predictor(IPredictor):
     def __init__(self, args) -> None:
         self._lock = threading.RLock()
         self.interpreter = None
@@ -117,4 +117,4 @@ class QNNPredictor(IPredictor):
         return out_boxes, masks
 
 
-QNN_YOLO_Segment_Predictor = QNNPredictor
+QNNPredictor = QNN_YOLO_Segment_Predictor

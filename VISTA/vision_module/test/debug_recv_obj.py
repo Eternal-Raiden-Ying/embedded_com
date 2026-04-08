@@ -1,49 +1,62 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-模拟业务端接收 Vision App 发送的识别结果
-"""
-import socket
 import json
+import socket
+
+try:
+    from .debug_protocol_tools import remember_interaction, summarize_obs
+except ImportError:
+    from debug_protocol_tools import remember_interaction, summarize_obs
 
 # 请修改为 App 尝试连接的端口 (obs_out 配置)
-HOST = "127.0.0.1" 
+HOST = "127.0.0.1"
 PORT = 9002
+
+
+def print_payload(data: dict):
+    msg_type = str(data.get("type", "unknown")).strip().upper()
+    print(f"[RX {msg_type}] {summarize_obs(data)}")
+    print(json.dumps(data, ensure_ascii=False, indent=2))
+    state = remember_interaction(data)
+    if state is not None:
+        print(
+            "[HINT] 已记录 interaction_id="
+            f"{state['last_interaction_id']}，可在 debug_send_req.py 里直接发送 ACCEPT/REJECT"
+        )
+
 
 def main():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server.bind((HOST, PORT))
         server.listen(1)
-        print(f"📡 [服务启动] 正在监听 {HOST}:{PORT} 等待 App 发送数据...")
+        print(f"[LISTEN] {HOST}:{PORT} 等待 VISTA 发送数据...")
 
         while True:
             try:
                 conn, addr = server.accept()
-                print(f"🔗 [客户端已连接] 来自 {addr}")
-                
+                print(f"[CONNECTED] 来自 {addr}")
+
                 with conn:
-                    # 将 socket 包装成 file object 方便按行读取
                     file_obj = conn.makefile("r", encoding="utf-8")
                     while True:
                         line = file_obj.readline()
                         if not line:
-                            print("❌ [连接断开] App 主动断开或崩溃。")
+                            print("[DISCONNECTED] VISTA 断开连接")
                             break
-                        
+
                         line = line.strip()
                         if line:
                             try:
                                 data = json.loads(line)
-                                msg_type = data.get('type', 'unknown')
-                                print(f"📥 [RX - {msg_type.upper()}] {json.dumps(data, ensure_ascii=False)}")
+                                print_payload(data)
                             except json.JSONDecodeError:
-                                print(f"⚠️ [脏数据] 无法解析: {line}")
+                                print(f"[WARN] 无法解析: {line}")
             except KeyboardInterrupt:
-                print("\n🛑 退出接收端。")
+                print("\n[STOP] 退出接收端")
                 break
-            except Exception as e:
-                print(f"⚠️ 发生错误: {e}")
+            except Exception as exc:
+                print(f"[WARN] 发生错误: {exc}")
 
 if __name__ == "__main__":
     main()

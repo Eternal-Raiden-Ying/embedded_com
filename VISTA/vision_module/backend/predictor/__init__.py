@@ -7,7 +7,7 @@ import platform
 from .base import IPredictor  # noqa: F401
 
 MockPredictor = None  # type: ignore
-QNNPredictor = None  # type: ignore
+QNN_YOLO_Segment_Predictor = None  # type: ignore
 
 
 def _requested_backend() -> str:
@@ -30,20 +30,20 @@ _BACKEND = _requested_backend()
 
 if _BACKEND == "mock":
     from .mock import MockPredictor  # noqa: F401
-    QNNPredictor = MockPredictor  # noqa: N816
+    QNN_YOLO_Segment_Predictor = MockPredictor  # noqa: N816
 elif _BACKEND == "real":
-    from .QNNPredictor import QNNPredictor  # noqa: F401
+    from .QNN_YOLO_Segment_Predictor import QNN_YOLO_Segment_Predictor  # noqa: F401
 else:
     if _prefer_mock_platform():
         from .mock import MockPredictor  # noqa: F401
-        QNNPredictor = MockPredictor  # noqa: N816
+        QNN_YOLO_Segment_Predictor = MockPredictor  # noqa: N816
     else:
         try:
-            from .QNNPredictor import QNNPredictor  # noqa: F401
+            from .QNN_YOLO_Segment_Predictor import QNN_YOLO_Segment_Predictor  # noqa: F401
         except Exception:
             from .mock import MockPredictor  # noqa: F401
-            QNNPredictor = MockPredictor  # noqa: N816
+            QNN_YOLO_Segment_Predictor = MockPredictor  # noqa: N816
 
-QNN_YOLO_Segment_Predictor = QNNPredictor
+QNNPredictor = QNN_YOLO_Segment_Predictor
 
 __all__ = ["IPredictor", "MockPredictor", "QNNPredictor", "QNN_YOLO_Segment_Predictor"]
