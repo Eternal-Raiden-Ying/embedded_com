@@ -2,39 +2,30 @@ import os
 import cv2
 import argparse
 import numpy as np
-from ultralytics import YOLO, settings
+import sys
+
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PARENT_DIR = os.path.dirname(CURRENT_DIR)
+sys.path.append(PARENT_DIR)
+
+from backend.utils.yolo_utils import load_yolo_model, predict_target_masks
 
 
 def generate_binary_mask(model, img_path, class_id):
-    results = model.predict(
-        source=img_path,
-        classes=[class_id],
-        retina_masks=True,
-        save=False,
-    )
-
-    result = results[0]
-    orig_img = result.orig_img
-    h, w = orig_img.shape[:2]
-    binary_mask = np.zeros((h, w), dtype=np.uint8)
-
-    if result.masks is not None:
-        for seg in result.masks.xy:
-            pts = np.array(seg, dtype=np.int32)
-            cv2.fillPoly(binary_mask, [pts], 1)
-
-    overlay_img = result.plot(boxes=False, labels=False)
-    return binary_mask, overlay_img, result
+    bgr_image = cv2.imread(img_path, cv2.IMREAD_COLOR)
+    if bgr_image is None:
+        raise ValueError(f"Failed to read image: {img_path}")
+    binary_mask, _, overlay_img, result_info = predict_target_masks(model, bgr_image, class_id)
+    return binary_mask, overlay_img, result_info
 
 def main(args):
     # 1. 设置 Ultralytics 全局设置 (如权重缓存路径)
     # 这会告诉 Ultralytics 去这个目录寻找或下载模型权重
-    settings.update({'weights_dir': args.weights_dir})
-    print(f"[*] 权重目录已设置为: {settings['weights_dir']}")
+    print(f"[*] 权重目录已设置为: {args.weights_dir}")
 
     # 2. 加载模型
     print(f"[*] 正在加载模型: {args.model}")
-    model = YOLO(args.model)
+    model = load_yolo_model(args.model, args.weights_dir)
 
     # 3. 进行推理
     print(f"[*] 正在对图片 {args.img_path} 进行推理...")
@@ -44,7 +35,7 @@ def main(args):
     binary_mask, overlay_img, result = generate_binary_mask(model, args.img_path, args.class_id)
 
     # 如果检测到目标，则将对应的多边形区域填充为 1
-    if result.masks is not None:
+    if result['found']:
         print(f"[*] 检测到目标！掩码矩阵包含的像素类别: {np.unique(binary_mask)}")
     else:
         print("[!] 未检测到指定类别的目标，输出全 0 掩码。")

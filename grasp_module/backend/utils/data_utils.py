@@ -3,9 +3,13 @@
 """
 
 import json
+import logging
 import os
 
 import numpy as np
+
+
+logger = logging.getLogger("vision.grasp")
 
 
 class CameraInfo():
@@ -38,7 +42,7 @@ def load_camera_info_from_metadata(metadata_path, default_camera=None):
     """Load CameraInfo from exported metadata json."""
     if not metadata_path or not os.path.exists(metadata_path):
         if metadata_path:
-            print(f"[Warning] Camera metadata file not found: {metadata_path}")
+            logger.warning("Camera metadata file not found: %s", metadata_path)
         return default_camera
 
     with open(metadata_path, 'r', encoding='utf-8') as f:
@@ -72,10 +76,16 @@ def load_camera_info_from_metadata(metadata_path, default_camera=None):
         scale=scale,
     )
 
-    print(f"[Camera] Loaded intrinsics from {metadata_path}")
-    print(f"  fx={camera_info.fx}, fy={camera_info.fy}")
-    print(f"  cx={camera_info.cx}, cy={camera_info.cy}")
-    print(f"  scale={camera_info.scale} ({scale_source})")
+    logger.info("Loaded camera metadata: %s", metadata_path)
+    logger.info(
+        "Camera intrinsics fx=%.4f fy=%.4f cx=%.4f cy=%.4f scale=%.6f (%s)",
+        camera_info.fx,
+        camera_info.fy,
+        camera_info.cx,
+        camera_info.cy,
+        camera_info.scale,
+        scale_source,
+    )
     return camera_info
 
 

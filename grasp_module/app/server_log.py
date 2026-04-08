@@ -8,6 +8,7 @@ from datetime import datetime
 from dataclasses import dataclass
 
 from ..config.global_config import cfgs
+from ..config.logging_config import configure_grasp_logger
 
 
 # ==========================================
@@ -50,6 +51,7 @@ def setup_logger(log_file: str):
 
 # 实例化全局 logger
 log = setup_logger(cfgs.log_path)
+configure_grasp_logger(level=log.level, handlers=log.handlers, propagate=False)
 
 
 # 提供便捷的封装函数，省去每次写 extra 的麻烦

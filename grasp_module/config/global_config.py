@@ -1,38 +1,24 @@
 import os
-import gc
-import json
-import time
-import logging
-import argparse
-from datetime import datetime
 from dataclasses import dataclass
 
+from .predictor_config import MODULE_DIR, PredictorConfig, build_predictor_arg_parser, create_predictor_config
 
-# ==========================================
-# 1. 配置管理 (Dataclass)
-# ==========================================
 @dataclass
-class AppConfig:
-    checkpoint_path: str = '/root/autodl-tmp/vista/grasp_module/weights/minkuresunet_kinect.tar'
-    dump_dir: str = '/root/autodl-tmp/vista/grasp_module/debug_res'
-    seed_feat_dim: int = 512
-    num_point: int = 15000
-    voxel_size: float = 0.005
-    collision_thresh: float = -1.0
-    voxel_size_cd: float = 0.01
-    debug: bool = False
-    log_path: str = '/root/autodl-tmp/vista/grasp_module/log/server.log'  # 新增的日志路径参数
+class AppConfig(PredictorConfig):
+    log_path: str = os.path.join(MODULE_DIR, 'log', 'server.log')
 
 def get_config() -> AppConfig:
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--seed_feat_dim', default=512, type=int)
-    parser.add_argument('--num_point', type=int, default=15000)
-    parser.add_argument('--voxel_size', type=float, default=0.005)
-    parser.add_argument('--collision_thresh', type=float, default=-1)
-    parser.add_argument('--voxel_size_cd', type=float, default=0.01)
-    parser.add_argument('--debug', action='store_true', default=False)
-    
-    args = parser.parse_args()
-    return AppConfig(**vars(args))
+    default_overrides = {
+        'dump_dir': os.path.join(MODULE_DIR, 'debug_res'),
+        'debug': False,
+    }
+    parser = build_predictor_arg_parser(default_overrides=default_overrides)
+    parser.add_argument('--log_path', type=str, default=os.path.join(MODULE_DIR, 'log', 'server.log'))
+
+    args, _ = parser.parse_known_args()
+    args_dict = vars(args).copy()
+    log_path = args_dict.pop('log_path')
+    predictor_cfg = create_predictor_config(default_overrides=default_overrides, **args_dict)
+    return AppConfig(**predictor_cfg.__dict__, log_path=log_path)
 
 cfgs = get_config()

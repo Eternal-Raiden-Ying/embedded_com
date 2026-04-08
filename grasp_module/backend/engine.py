@@ -1,8 +1,10 @@
 import os
 import sys
+import logging
 import numpy as np
 import argparse
 import time
+import cv2
 import torch
 import open3d as o3d
 from graspnetAPI.graspnet_eval import GraspGroup
@@ -18,14 +20,26 @@ from .utils.data_utils import (
     load_camera_info_from_metadata,
     write_open3d_point_cloud,
 )
+from .utils.yolo_utils import load_yolo_model, mask_to_bbox_mask, predict_target_masks
+
+
+logger = logging.getLogger("vision.grasp")
 
 
 class RealSenseGraspPredictor:
     def __init__(self, cfgs):
         self.cfgs = cfgs
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        
-        default_camera_info = CameraInfo(
+        self.seg_model = None
+
+        self.camera_info = self._load_camera_info()
+        self.net = self._load_grasp_model()
+
+        if cfgs.debug and not os.path.exists(cfgs.dump_dir):
+            os.makedirs(cfgs.dump_dir)
+
+    def _default_camera_info(self):
+        return CameraInfo(
             width=1280.0,
             height=720.0,
             fx=631.55,
@@ -35,29 +49,49 @@ class RealSenseGraspPredictor:
             scale=1000.0,
         )
 
+    def _load_camera_info(self):
+        default_camera_info = self._default_camera_info()
         camera_info = load_camera_info_from_metadata(
-            getattr(cfgs, 'camera_metadata', None),
+            getattr(self.cfgs, 'camera_metadata', None),
             default_camera=default_camera_info,
         )
-
         if camera_info is None:
-            camera_info = default_camera_info
-            print("[Camera] Using default camera intrinsics (graspnet kinect defaults)")
-        
-        self.camera_info = camera_info
-        
-        # 2. 初始化并加载模型
-        print("Loading GraspNet model...")
-        self.net = GraspNet(seed_feat_dim=cfgs.seed_feat_dim, is_training=False)
-        self.net.to(self.device)
-        
-        checkpoint = torch.load(cfgs.checkpoint_path, map_location=self.device)
-        self.net.load_state_dict(checkpoint['model_state_dict'])
-        self.net.eval()
-        print("-> Model loaded successfully.")
+            logger.info("Using default camera intrinsics (graspnet kinect defaults)")
+            return default_camera_info
+        return camera_info
 
-        if cfgs.debug and not os.path.exists(cfgs.dump_dir):
-            os.makedirs(cfgs.dump_dir)
+    def _load_grasp_model(self):
+        logger.info("Loading GraspNet model from %s", self.cfgs.checkpoint_path)
+        net = GraspNet(seed_feat_dim=self.cfgs.seed_feat_dim, is_training=False)
+        net.to(self.device)
+
+        checkpoint = torch.load(self.cfgs.checkpoint_path, map_location=self.device)
+        net.load_state_dict(checkpoint['model_state_dict'])
+        net.eval()
+        logger.info("GraspNet model loaded")
+        return net
+
+    def _sample_point_cloud(self, cloud_masked, color_masked):
+        if len(cloud_masked) == 0:
+            return None
+
+        # 采样到固定点数 (默认 15000)
+        if len(cloud_masked) >= self.cfgs.num_point:
+            idxs = np.random.choice(len(cloud_masked), self.cfgs.num_point, replace=False)
+        else:
+            idxs1 = np.arange(len(cloud_masked))
+            idxs2 = np.random.choice(len(cloud_masked), self.cfgs.num_point - len(cloud_masked), replace=True)
+            idxs = np.concatenate([idxs1, idxs2], axis=0)
+
+        cloud_sampled = cloud_masked[idxs]
+        color_sampled = color_masked[idxs]
+
+        return {
+            'point_clouds': cloud_sampled.astype(np.float32),
+            'coors': cloud_sampled.astype(np.float32) / self.cfgs.voxel_size,
+            'feats': np.ones_like(cloud_sampled).astype(np.float32),
+            'colors': color_sampled.astype(np.float32),
+        }
 
     def preprocess(self, color_img, depth_img, seg_mask):
         """
@@ -72,28 +106,84 @@ class RealSenseGraspPredictor:
             self.camera_info,
             mask=seg_mask,
         )
+        return self._sample_point_cloud(cloud_masked, color_masked)
 
-        if len(cloud_masked) == 0:
-            return None
+    def preprocess_points(self, points, colors):
+        return self._sample_point_cloud(points, colors)
 
-        # 采样到固定点数 (默认 15000)
-        if len(cloud_masked) >= self.cfgs.num_point:
-            idxs = np.random.choice(len(cloud_masked), self.cfgs.num_point, replace=False)
-        else:
-            idxs1 = np.arange(len(cloud_masked))
-            idxs2 = np.random.choice(len(cloud_masked), self.cfgs.num_point - len(cloud_masked), replace=True)
-            idxs = np.concatenate([idxs1, idxs2], axis=0)
-            
-        cloud_sampled = cloud_masked[idxs]
-        color_sampled = color_masked[idxs]
-        
-        ret_dict = {
-            'point_clouds': cloud_sampled.astype(np.float32),
-            'coors': cloud_sampled.astype(np.float32) / self.cfgs.voxel_size,
-            'feats': np.ones_like(cloud_sampled).astype(np.float32),
-            'colors': color_sampled.astype(np.float32),
-        }
-        return ret_dict
+    def _get_yolo_model(self):
+        if self.seg_model is None:
+            model_name = getattr(self.cfgs, 'yolo_model', 'yolo26m-seg.pt')
+            weights_dir = getattr(self.cfgs, 'yolo_weights_dir', None)
+            logger.info("Loading YOLO segmentation model: %s", model_name)
+            self.seg_model = load_yolo_model(model_name, weights_dir)
+        return self.seg_model
+
+    def _predict_target_masks(self, color_img, target_class_id):
+        bgr_image = cv2.cvtColor(color_img, cv2.COLOR_RGB2BGR)
+        seg_mask, bbox_mask, overlay_img, yolo_info = predict_target_masks(
+            self._get_yolo_model(),
+            bgr_image,
+            target_class_id,
+            conf=getattr(self.cfgs, 'yolo_conf', 0.25),
+            iou=getattr(self.cfgs, 'yolo_iou', 0.7),
+            bbox_scale=getattr(self.cfgs, 'bbox_expand_scale', 2.0),
+        )
+        return seg_mask, bbox_mask, overlay_img, yolo_info
+
+    def _build_scene_cloud(self, color_img, depth_img, seg_mask, bbox_mask):
+        grasp_points, grasp_colors = create_colored_point_cloud_from_rgbd(
+            color_img,
+            depth_img,
+            self.camera_info,
+            mask=seg_mask,
+        )
+        if len(grasp_points) == 0:
+            return grasp_points, grasp_colors
+
+        bbox_points, bbox_colors = create_colored_point_cloud_from_rgbd(
+            color_img,
+            depth_img,
+            self.camera_info,
+            mask=bbox_mask,
+        )
+        if len(bbox_points) == 0:
+            return grasp_points, grasp_colors
+
+        z_margin = getattr(self.cfgs, 'collision_depth_margin', 0.15)
+        z_min = max(0.0, float(grasp_points[:, 2].min()) - z_margin)
+        z_max = float(grasp_points[:, 2].max()) + z_margin
+        z_max = min(z_max, getattr(self.cfgs, 'scene_max_depth', 3.0))
+        bbox_points, bbox_colors = filter_point_cloud_by_z(
+            bbox_points,
+            bbox_colors,
+            z_min=z_min,
+            z_max=z_max,
+        )
+        if len(bbox_points) == 0:
+            return grasp_points, grasp_colors
+        return bbox_points, bbox_colors
+
+    def _build_input_clouds(self, color_img, depth_img, seg_mask, bbox_mask):
+        masked_points, masked_colors = create_colored_point_cloud_from_rgbd(
+            color_img,
+            depth_img,
+            self.camera_info,
+            mask=seg_mask,
+        )
+        scene_points, scene_colors = self._build_scene_cloud(color_img, depth_img, seg_mask, bbox_mask)
+        return masked_points, masked_colors, scene_points, scene_colors
+
+    def _resolve_masks(self, color_img, target):
+        if isinstance(target, np.ndarray):
+            seg_mask = (target > 0).astype(np.uint8)
+            bbox_mask, bbox = mask_to_bbox_mask(seg_mask, scale=getattr(self.cfgs, 'bbox_expand_scale', 2.0))
+            return seg_mask, bbox_mask, None, {'found': seg_mask.sum() > 0, 'bbox': bbox, 'source': 'input_mask'}
+
+        target_class_id = int(target)
+        seg_mask, bbox_mask, overlay_img, yolo_info = self._predict_target_masks(color_img, target_class_id)
+        yolo_info['source'] = 'yolo'
+        return seg_mask, bbox_mask, overlay_img, yolo_info
 
     def _score_to_color(self, score, min_score, max_score):
         if max_score - min_score < 1e-6:
@@ -116,6 +206,79 @@ class RealSenseGraspPredictor:
             combined_grippers += grasp.to_open3d_geometry(color=color)
         return combined_grippers
 
+    def _print_debug_timings(self, timings, extras=None):
+        if not getattr(self.cfgs, 'debug', False):
+            return
+
+        ordered_keys = [
+            'mask',
+            'clouds',
+            'preprocess',
+            'transfer',
+            'forward',
+            'collision',
+            'postprocess',
+            'debug_export',
+            'total',
+        ]
+        logger.info('[DEBUG] Timings (s):')
+        for key in ordered_keys:
+            if key in timings:
+                logger.info(" - %s: %.4f", key, timings[key])
+        if extras:
+            logger.info('[DEBUG] Stats:')
+            for key, value in extras.items():
+                logger.info(" - %s: %s", key, value)
+
+    def _prepare_batch_data(self, data_dict):
+        batch_data = minkowski_collate_fn([data_dict])
+        for key in batch_data:
+            if 'list' in key:
+                for i in range(len(batch_data[key])):
+                    for j in range(len(batch_data[key][i])):
+                        batch_data[key][i][j] = batch_data[key][i][j].to(self.device)
+            else:
+                batch_data[key] = batch_data[key].to(self.device)
+        return batch_data
+
+    def _forward_grasps(self, batch_data):
+        with torch.no_grad():
+            end_points = self.net(batch_data)
+            grasp_preds_list = pred_decode(end_points)
+        preds = grasp_preds_list[0].detach().cpu().numpy()
+        return GraspGroup(preds)
+
+    def _apply_collision_detection(self, grasp_group, scene_points, fallback_cloud):
+        if self.cfgs.collision_thresh <= 0:
+            if self.cfgs.debug:
+                logger.info("Collision detection skipped. collision_thresh=%s", self.cfgs.collision_thresh)
+            return grasp_group
+
+        collision_cloud = scene_points if scene_points is not None and len(scene_points) > 0 else fallback_cloud
+        mfcdetector = ModelFreeCollisionDetector(collision_cloud, voxel_size=self.cfgs.voxel_size_cd)
+        collision_mask = mfcdetector.detect(
+            grasp_group,
+            approach_dist=0.05,
+            collision_thresh=self.cfgs.collision_thresh,
+        )
+        if self.cfgs.debug:
+            logger.info(
+                "Collision detection enabled. threshold=%s, collision_cloud_points=%s",
+                self.cfgs.collision_thresh,
+                len(collision_cloud),
+            )
+        return grasp_group[~collision_mask]
+
+    def _log_target_info(self, yolo_info):
+        if yolo_info is None:
+            return
+        logger.info(
+            "Target mask source=%s bbox=%s conf=%s",
+            yolo_info.get('source'),
+            yolo_info.get('bbox'),
+            yolo_info.get('confidence'),
+        )
+
     def post_process_grasps(self, grasp_group):
         """
         【预留接口】：处理网络输出的抓取预测 (过滤、排序、NMS)
@@ -136,75 +299,102 @@ class RealSenseGraspPredictor:
             
         return grasp_group
 
-    def infer(self, color_img, depth_img, seg_mask):
+    def infer(self, color_img, depth_img, target):
         """
-        供外部调用的实际推理接口
+        供外部调用的实际推理接口。
+        target: 目标类别 id，或已有的二值 seg mask
         """
-        tic = time.time()
-        
-        # 1. 数据预处理
-        data_dict = self.preprocess(color_img, depth_img, seg_mask)
-        if data_dict is None:
-            print("No valid points found in the masked region.")
+        tic = time.perf_counter()
+        timings = {}
+
+        stage_tic = time.perf_counter()
+        seg_mask, bbox_mask, overlay_img, yolo_info = self._resolve_masks(color_img, target)
+        timings['mask'] = time.perf_counter() - stage_tic
+        if seg_mask.sum() == 0:
+            logger.warning("No valid target mask found")
             return None
 
-        batch_data = minkowski_collate_fn([data_dict])
-        for key in batch_data:
-            if 'list' in key:
-                for i in range(len(batch_data[key])):
-                    for j in range(len(batch_data[key][i])):
-                        batch_data[key][i][j] = batch_data[key][i][j].to(self.device)
-            else:
-                batch_data[key] = batch_data[key].to(self.device)
+        stage_tic = time.perf_counter()
+        masked_points, masked_colors, scene_points, scene_colors = self._build_input_clouds(
+            color_img,
+            depth_img,
+            seg_mask,
+            bbox_mask,
+        )
+        timings['clouds'] = time.perf_counter() - stage_tic
+        if getattr(self.cfgs, 'debug', False):
+            logger.info("Masked cloud points: %s", len(masked_points))
+            logger.info("Scene cloud points: %s", len(scene_points))
+        
+        stage_tic = time.perf_counter()
+        data_dict = self.preprocess_points(masked_points, masked_colors)
+        timings['preprocess'] = time.perf_counter() - stage_tic
+        if data_dict is None:
+            logger.warning("No valid points found in the masked region")
+            return None
 
-        # 2. 网络前向推理
-        with torch.no_grad():
-            end_points = self.net(batch_data)
-            grasp_preds_list = pred_decode(end_points)
-            
-        preds = grasp_preds_list[0].detach().cpu().numpy()
-        gg = GraspGroup(preds)
+        stage_tic = time.perf_counter()
+        batch_data = self._prepare_batch_data(data_dict)
+        timings['transfer'] = time.perf_counter() - stage_tic
 
-        # 3. 碰撞检测 (如果启用)
-        if self.cfgs.collision_thresh > 0:
-            cloud = data_dict['point_clouds']
-            mfcdetector = ModelFreeCollisionDetector(cloud, voxel_size=self.cfgs.voxel_size_cd)
-            collision_mask = mfcdetector.detect(gg, approach_dist=0.05, collision_thresh=self.cfgs.collision_thresh)
-            gg = gg[~collision_mask]
+        stage_tic = time.perf_counter()
+        gg = self._forward_grasps(batch_data)
+        timings['forward'] = time.perf_counter() - stage_tic
 
-        # 4. 后处理逻辑预留 (自定义过滤)
+        stage_tic = time.perf_counter()
+        gg = self._apply_collision_detection(gg, scene_points, data_dict['point_clouds'])
+        timings['collision'] = time.perf_counter() - stage_tic
+
+        stage_tic = time.perf_counter()
         gg = self.post_process_grasps(gg)
+        timings['postprocess'] = time.perf_counter() - stage_tic
 
-        print(f'-> Inference finished. Found {gg.__len__()} grasps. Time: {time.time() - tic:.4f}s')
+        timings['debug_export'] = 0.0
+        self._log_target_info(yolo_info)
 
-        # 5. Debug 模式可视化
         if self.cfgs.debug:
-            self.save_debug_visualizations(color_img, depth_img, seg_mask, gg)
+            stage_tic = time.perf_counter()
+            self.save_debug_visualizations(
+                color_img,
+                depth_img,
+                seg_mask,
+                bbox_mask,
+                gg,
+                scene_points,
+                scene_colors,
+                overlay_img,
+                masked_points,
+                masked_colors,
+            )
+            timings['debug_export'] = time.perf_counter() - stage_tic
+
+        timings['total'] = time.perf_counter() - tic
+        self._print_debug_timings(
+            timings,
+            extras={
+                'masked_cloud_points': len(masked_points),
+                'scene_cloud_points': len(scene_points),
+                'collision_thresh': self.cfgs.collision_thresh,
+            },
+        )
+
+        logger.info('Inference finished. Found %s grasps. Time: %.4fs', gg.__len__(), timings['total'])
 
         return gg
 
-    def save_debug_visualizations(self, color_img, depth_img, seg_mask, gg):
+    def save_debug_visualizations(self, color_img, depth_img, seg_mask, bbox_mask, gg, scene_points=None, scene_colors=None, overlay_img=None, masked_points=None, masked_colors=None):
         """
         在 Debug 模式下将结果存盘，方便用 MeshLab 或 CloudCompare 查看
         """
-        masked_points, masked_colors = create_colored_point_cloud_from_rgbd(
-            color_img,
-            depth_img,
-            self.camera_info,
-            mask=seg_mask,
-        )
-        scene_points, scene_colors = create_colored_point_cloud_from_rgbd(
-            color_img,
-            depth_img,
-            self.camera_info,
-            mask=None,
-        )
-        scene_points, scene_colors = filter_point_cloud_by_z(
-            scene_points,
-            scene_colors,
-            z_min=0.0,
-            z_max=getattr(self.cfgs, 'scene_max_depth', 3.0),
-        )
+        if masked_points is None or masked_colors is None:
+            masked_points, masked_colors = create_colored_point_cloud_from_rgbd(
+                color_img,
+                depth_img,
+                self.camera_info,
+                mask=seg_mask,
+            )
+        if scene_points is None or scene_colors is None:
+            scene_points, scene_colors = self._build_scene_cloud(color_img, depth_img, seg_mask, bbox_mask)
 
         top_k = getattr(self.cfgs, 'debug_grasp_count', 15)
         vis_gg = gg[:top_k] if gg.__len__() > top_k else gg
@@ -217,29 +407,24 @@ class RealSenseGraspPredictor:
         write_open3d_point_cloud(masked_cloud_path, masked_points, masked_colors)
         write_open3d_point_cloud(scene_cloud_path, scene_points, scene_colors)
         o3d.io.write_triangle_mesh(grasp_mesh_path, combined_grippers)
+        if overlay_img is not None:
+            overlay_path = os.path.join(self.cfgs.dump_dir, 'ply', 'yolo_overlay.jpg')
+            cv2.imwrite(overlay_path, overlay_img)
 
-        print(
-            f"[DEBUG] Visualizations saved to:\n"
-            f" - {masked_cloud_path}\n"
-            f" - {scene_cloud_path}\n"
-            f" - {grasp_mesh_path}"
+        logger.info(
+            "[DEBUG] Visualizations saved to:\n - %s\n - %s\n - %s",
+            masked_cloud_path,
+            scene_cloud_path,
+            grasp_mesh_path,
         )
 
 # ================= 测试运行逻辑 =================
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--checkpoint_path', default='./weights/minkuresunet_kinect.tar')
-    parser.add_argument('--dump_dir', help='Dump dir to save outputs', default='./debug_res')
-    parser.add_argument('--seed_feat_dim', default=512, type=int, help='Point wise feature dim')
-    parser.add_argument('--num_point', type=int, default=15000, help='Point Number [default: 15000]')
-    parser.add_argument('--voxel_size', type=float, default=0.005, help='Voxel Size for sparse convolution')
-    parser.add_argument('--collision_thresh', type=float, default=-1, help='Collision Threshold in collision detection [default: 0.01]')
-    parser.add_argument('--voxel_size_cd', type=float, default=0.01, help='Voxel Size for collision detection')
-    parser.add_argument('--scene_max_depth', type=float, default=3.0, help='Maximum depth in meters for debug scene cloud')
-    parser.add_argument('--debug_grasp_count', type=int, default=15, help='Number of top grasps to export in debug mesh')
-    
-    # 增加的 Debug 开关
-    parser.add_argument('--debug', action='store_true', default=False, help='Enable debug mode to save point cloud and grasp meshes')
+    from ..config.logging_config import configure_grasp_logger
+    from ..config.predictor_config import build_predictor_arg_parser
+
+    configure_grasp_logger()
+    parser = build_predictor_arg_parser(description='Standalone grasp predictor debug runner')
     cfgs = parser.parse_args()
 
     # 初始化推理引擎（只需执行一次）
