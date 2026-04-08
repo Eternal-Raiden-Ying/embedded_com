@@ -6,6 +6,8 @@ import os
 import subprocess
 import sys
 
+from .base import ICamera
+
 
 logger = logging.getLogger("vision.camera")
 
@@ -22,7 +24,7 @@ except ImportError as e:
     )
 
 
-class FastGstCameraBase:
+class FastGstCameraBase(ICamera):
     def __init__(
         self,
         *,

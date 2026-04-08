@@ -141,8 +141,8 @@ class VisionEngine:
                         video_node = f"/dev/video{source}" if str(source).isdigit() else source
                         self.cams[name] = IRCamera(
                             device=video_node,
-                            in_format=get_param('in_format', 'GREY'),
-                            format=get_param('format', 'GRAY8'),
+                            in_format=get_param('in_format', 'GRAY8'),
+                            format=get_param('format', 'BGR'),
                             fps=get_param('fps'),
                             in_w=get_param('in_w'),
                             in_h=get_param('in_h'),

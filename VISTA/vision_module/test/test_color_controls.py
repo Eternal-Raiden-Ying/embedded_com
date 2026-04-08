@@ -6,6 +6,7 @@ import importlib
 import sys
 import time
 from pathlib import Path
+from typing import Tuple
 
 try:
     import aidcv as cv2
@@ -65,7 +66,7 @@ def overlay_status(image_bgr, fps: float, exposure: int, brightness: int):
     return image_bgr
 
 
-def bounce(value: int, step: int, minimum: int, maximum: int) -> tuple[int, int]:
+def bounce(value: int, step: int, minimum: int, maximum: int) -> Tuple[int, int]:
     candidate = value + step
     if candidate > maximum or candidate < minimum:
         step = -step

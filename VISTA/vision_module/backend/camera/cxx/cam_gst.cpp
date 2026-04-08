@@ -66,7 +66,7 @@ public:
             "video/x-raw,format=" + out_format + ",width=" + std::to_string(out_w) + ",height=" + std::to_string(out_h) + " ! " +
             "appsink name=mysink drop=true max-buffers=2 sync=false";
 
-        std::cout << "🔗 [AidLux Cam] 启动硬件加速管道: " << pipe_str << std::endl;
+        // std::cout << "🔗 [AidLux Cam] 启动硬件加速管道: " << pipe_str << std::endl;
 
         GError *error = nullptr;
         pipeline = gst_parse_launch(pipe_str.c_str(), &error);

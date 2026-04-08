@@ -2,10 +2,12 @@ import pyrealsense2 as rs
 import numpy as np
 import logging
 
+from .base import ICamera
+
 
 logger = logging.getLogger("vision.camera")
 
-class RealSenseDepthCamera:
+class RealSenseDepthCamera(ICamera):
     """
     AidLux 专用的 RealSense 深度相机底层直读类
     绕过 V4L2 pipeline，直接使用 Sensor API 获取极低延迟的 16位 深度图

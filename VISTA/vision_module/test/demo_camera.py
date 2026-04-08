@@ -3,13 +3,10 @@
 
 import argparse
 import importlib
-import os
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-
-import numpy as np
+from typing import Dict, List
 
 try:
     import aidcv as cv2
@@ -25,23 +22,14 @@ if str(VISTA_ROOT) not in sys.path:
 if str(VISION_ROOT) not in sys.path:
     sys.path.insert(0, str(VISION_ROOT))
 
-from vision_module.config.board_config import CONFIG
-
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Interactive VISTA camera/model demo")
+    parser = argparse.ArgumentParser(description="Interactive VISTA camera demo")
     parser.add_argument("--stream", choices=["rgb", "depth", "ir"], default="")
     parser.add_argument("--backend", choices=["auto", "mock", "real"], default="real")
-    parser.add_argument("--model", default="none", help="none | active | model profile name")
     parser.add_argument("--headless", action="store_true", help="run without opening a window")
     parser.add_argument("--max-frames", type=int, default=0, help="stop after N frames; 0 means unlimited")
-    parser.add_argument("--preview-width", type=int, default=1280)
-    parser.add_argument("--preview-height", type=int, default=720)
     return parser.parse_args()
-
-
-def available_model_names() -> List[str]:
-    return sorted(CONFIG.model.profiles.keys())
 
 
 def choose_stream(args: argparse.Namespace) -> str:
@@ -58,38 +46,11 @@ def choose_stream(args: argparse.Namespace) -> str:
     return mapping.get(choice, "rgb")
 
 
-def resolve_model_name(requested: str) -> str:
-    requested = str(requested or "none").strip().lower()
-    if requested in {"", "none", "off"}:
-        return "none"
-    if requested == "active":
-        return str(CONFIG.model.active_model)
-    for name in available_model_names():
-        if requested == name.lower():
-            return name
-    raise SystemExit(f"Unknown model: {requested}. Available: none, active, {', '.join(available_model_names())}")
-
-
-def import_camera_classes(backend: str):
-    if backend == "mock":
-        module = importlib.import_module("vision_module.backend.camera.mock")
-        return module.MockCamera, module.MockCamera, module.MockCamera
+def import_camera_classes():
     color = importlib.import_module("vision_module.backend.camera.ColorCamera")
     ir = importlib.import_module("vision_module.backend.camera.IRCamera")
     depth = importlib.import_module("vision_module.backend.camera.RealSenseDepthCamera")
     return color.ColorCamera, ir.IRCamera, depth.RealSenseDepthCamera
-
-
-def import_predictor_class(backend: str):
-    if backend == "mock":
-        module = importlib.import_module("vision_module.backend.predictor.mock")
-        return module.MockPredictor
-    module = importlib.import_module("vision_module.backend.predictor.QNNPredictor")
-    return module.QNN_YOLO_Segment_Predictor
-
-
-def try_backend_order(requested: str) -> List[str]:
-    return ["real"]
 
 
 def build_camera_kwargs(stream: str) -> Dict[str, object]:
@@ -123,40 +84,14 @@ def build_camera_kwargs(stream: str) -> Dict[str, object]:
     }
 
 
-def open_camera(stream: str, requested_backend: str):
+def open_camera(stream: str):
     kwargs = build_camera_kwargs(stream)
-    errors: List[str] = []
-    for backend in try_backend_order(requested_backend):
-        try:
-            color_cls, ir_cls, depth_cls = import_camera_classes(backend)
-            if stream == "depth":
-                cls = depth_cls
-            elif stream == "ir":
-                cls = ir_cls
-            else:
-                cls = color_cls
-            camera = cls(**kwargs)
-            return camera, backend
-        except Exception as exc:
-            errors.append(f"{backend}: {exc}")
-            break
-    raise RuntimeError("camera init failed | " + " | ".join(errors))
-
-
-def open_predictor(model_name: str, requested_backend: str):
-    if model_name == "none":
-        return None, "none"
-    profile = CONFIG.model.profiles[model_name]
-    errors: List[str] = []
-    for backend in try_backend_order(requested_backend):
-        try:
-            predictor_cls = import_predictor_class(backend)
-            predictor = predictor_cls(profile)
-            return predictor, backend
-        except Exception as exc:
-            errors.append(f"{backend}: {exc}")
-            break
-    raise RuntimeError("predictor init failed | " + " | ".join(errors))
+    color_cls, ir_cls, depth_cls = import_camera_classes()
+    if stream == "depth":
+        return depth_cls(**kwargs)
+    if stream == "ir":
+        return ir_cls(**kwargs)
+    return color_cls(**kwargs)
 
 
 def safe_release(obj) -> None:
@@ -168,31 +103,31 @@ def safe_release(obj) -> None:
         pass
 
 
-def depth_to_bgr(frame: np.ndarray) -> np.ndarray:
+def depth_to_bgr(frame):
     if frame.ndim == 3 and frame.shape[2] == 3:
         return frame.copy()
-    if frame.dtype == np.uint16:
+    if str(frame.dtype) == "uint16":
         vis = cv2.convertScaleAbs(frame, alpha=0.03)
-    elif frame.dtype != np.uint8:
-        vis = frame.astype(np.uint8)
+    elif str(frame.dtype) != "uint8":
+        vis = frame.astype("uint8")
     else:
         vis = frame
     return cv2.applyColorMap(vis, cv2.COLORMAP_JET)
 
 
-def ir_to_bgr(frame: np.ndarray) -> np.ndarray:
+def ir_to_bgr(frame):
     if frame.ndim == 3 and frame.shape[2] == 3:
         return frame.copy()
     return cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
 
 
-def rgb_to_bgr(frame: np.ndarray) -> np.ndarray:
+def rgb_to_bgr(frame):
     if frame.ndim == 3 and frame.shape[2] == 3:
         return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
     return ir_to_bgr(frame)
 
 
-def frame_to_display(stream: str, frame: np.ndarray) -> np.ndarray:
+def frame_to_display(stream: str, frame):
     if stream == "rgb":
         return rgb_to_bgr(frame)
     if stream == "depth":
@@ -200,76 +135,18 @@ def frame_to_display(stream: str, frame: np.ndarray) -> np.ndarray:
     return ir_to_bgr(frame)
 
 
-def prepare_predictor_input(display_bgr: np.ndarray, model_name: str) -> Tuple[np.ndarray, np.ndarray]:
-    profile = CONFIG.model.profiles[model_name]
-    resized_bgr = cv2.resize(display_bgr, (profile.width, profile.height))
-    resized_rgb = cv2.cvtColor(resized_bgr, cv2.COLOR_BGR2RGB)
-    return resized_bgr, resized_rgb
-
-
-def draw_detections(image_bgr: np.ndarray, boxes, masks, class_names) -> np.ndarray:
-    if boxes is None or len(boxes) == 0:
-        return image_bgr
-    out = image_bgr.copy()
-    for idx in range(len(boxes)):
-        x1, y1, x2, y2 = [int(v) for v in boxes[idx][:4]]
-        score = float(boxes[idx][4]) if len(boxes[idx]) > 4 else 0.0
-        cls_id = int(boxes[idx][5]) if len(boxes[idx]) > 5 else -1
-        color = (0, 255, 0) if cls_id < 0 else (0, int((cls_id * 40) % 255), int((255 - cls_id * 30) % 255))
-        if masks is not None and idx < len(masks):
-            mask = np.asarray(masks[idx]).astype(bool)
-            if mask.shape[:2] == out.shape[:2]:
-                overlay = np.zeros_like(out)
-                overlay[:, :] = color
-                out[mask] = (out[mask] * 0.5 + overlay[mask] * 0.5).astype(np.uint8)
-        cv2.rectangle(out, (x1, y1), (x2, y2), color, 2)
-        label = class_names[cls_id] if class_names and 0 <= cls_id < len(class_names) else f"cls{cls_id}"
-        cv2.putText(out, f"{label} {score:.2f}", (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-    return out
-
-
-def overlay_status(
-    image_bgr: np.ndarray,
-    stream: str,
-    fps: float,
-) -> np.ndarray:
+def overlay_status(image_bgr, stream: str, fps: float):
     title = f"{stream.upper()} CAMERA | {fps:.1f} FPS"
     cv2.putText(image_bgr, title, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
     return image_bgr
 
 
-def fit_preview(image_bgr: np.ndarray, max_width: int, max_height: int) -> np.ndarray:
-    h, w = image_bgr.shape[:2]
-    if h <= 0 or w <= 0:
-        return image_bgr
-    scale = min(float(max_width) / float(w), float(max_height) / float(h))
-    if scale <= 0:
-        return image_bgr
-    if abs(scale - 1.0) < 0.05:
-        return image_bgr
-    new_w = max(1, int(w * scale))
-    new_h = max(1, int(h * scale))
-    return cv2.resize(image_bgr, (new_w, new_h))
-
-
-def next_model_name(current: str) -> str:
-    names = available_model_names()
-    if not names:
-        return "none"
-    if current == "none":
-        return names[0]
-    idx = names.index(current) if current in names else 0
-    return names[(idx + 1) % len(names)]
-
-
-def print_demo_info(stream: str, requested_backend: str, model_name: str) -> None:
+def print_demo_info(stream: str, requested_backend: str) -> None:
     print("=" * 72)
     print("VISTA demo_camera")
     print("=" * 72)
     print(f"stream={stream}")
     print(f"requested_backend={requested_backend}")
-    print(f"requested_model={model_name}")
-    print(f"available_models={', '.join(available_model_names()) or 'none'}")
     print("=" * 72)
 
 
@@ -278,21 +155,11 @@ def main() -> int:
     if args.backend != "real":
         raise SystemExit("demo_camera only supports --backend real")
     stream = choose_stream(args)
-    model_name = resolve_model_name(args.model)
-    print_demo_info(stream, args.backend, model_name)
+    print_demo_info(stream, args.backend)
 
-    predictor = None
     camera = None
-    predictor_backend = "none"
-    camera_backend = "none"
-    current_model = model_name
-
     try:
-        camera, camera_backend = open_camera(stream, args.backend)
-        if current_model != "none":
-            predictor, predictor_backend = open_predictor(current_model, args.backend)
-        print(f"[INFO] camera_backend={camera_backend} predictor_backend={predictor_backend}")
-
+        camera = open_camera(stream)
         window_name = "VISTA Demo Camera"
         if not args.headless:
             cv2.namedWindow(window_name)
@@ -309,20 +176,11 @@ def main() -> int:
                     cv2.waitKey(5)
                 continue
 
-            display_bgr = frame_to_display(stream, frame)
-            vis_bgr = display_bgr
-
-            if predictor is not None and predictor.is_ready() and current_model != "none":
-                predictor_bgr, predictor_rgb = prepare_predictor_input(display_bgr, current_model)
-                boxes, masks = predictor.predict_frame(predictor_rgb)
-                class_names = CONFIG.model.profiles[current_model].classes
-                vis_bgr = draw_detections(predictor_bgr, boxes, masks, class_names)
-
+            vis_bgr = frame_to_display(stream, frame)
             current_time = time.time()
             fps = 1.0 / max(1e-6, current_time - prev_time)
             prev_time = current_time
             vis_bgr = overlay_status(vis_bgr, stream, fps)
-            vis_bgr = fit_preview(vis_bgr, args.preview_width, args.preview_height)
 
             if not args.headless:
                 cv2.imshow(window_name, vis_bgr)
@@ -331,35 +189,13 @@ def main() -> int:
             if args.max_frames and frame_count >= args.max_frames:
                 break
 
-            key = -1
             if not args.headless:
                 key = cv2.waitKey(1) & 0xFF
-
-            if key in (27, ord("q")):
-                break
-            if key == ord("n"):
-                next_model = next_model_name(current_model)
-                safe_release(predictor)
-                predictor = None
-                predictor_backend = "none"
-                current_model = next_model
-                if current_model != "none":
-                    predictor, predictor_backend = open_predictor(current_model, args.backend)
-                print(f"[INFO] switched model -> {current_model} ({predictor_backend})")
-            elif key == ord("m"):
-                if current_model == "none":
-                    current_model = resolve_model_name(args.model if args.model != "none" else "active")
-                    predictor, predictor_backend = open_predictor(current_model, args.backend)
-                else:
-                    safe_release(predictor)
-                    predictor = None
-                    predictor_backend = "none"
-                    current_model = "none"
-                print(f"[INFO] model toggle -> {current_model}")
+                if key in (27, ord("q")):
+                    break
 
         return 0
     finally:
-        safe_release(predictor)
         safe_release(camera)
         if not args.headless:
             try:
