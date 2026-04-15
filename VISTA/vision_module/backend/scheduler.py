@@ -181,15 +181,6 @@ class Scheduler:
                 payload = (self.result_slots.get(route_name) or {}).get("payload")
                 if payload is not None:
                     stage_results[route_name] = payload
-            # Keep backward compatibility for unregistered routes.
-            for route_name in sorted((self.result_slots or {}).keys()):
-                if route_name in stage_results:
-                    continue
-                if route_name in (self.routes or {}):
-                    continue
-                payload = (self.result_slots.get(route_name) or {}).get("payload")
-                if payload is not None:
-                    stage_results[route_name] = payload
             snapshot = {
                 "runtime_running": bool(self.runtime_running),
                 "generation": int(self.active_generation),

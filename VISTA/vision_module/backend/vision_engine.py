@@ -33,13 +33,6 @@ class VisionEngine:
         self.lock = threading.RLock()
         self.current_mode = "IDLE"
         self._external_mode_control_enabled = True
-        self._preview_context: Dict[str, Any] = {
-            "stage": "IDLE",
-            "mode": "IDLE",
-            "session_id": None,
-            "req_id": None,
-            "epoch": 0,
-        }
         self._last_frame_seq_seen = 0
         self.infer_enabled = False
 
@@ -149,24 +142,6 @@ class VisionEngine:
     def set_external_mode_control(self, enabled: bool) -> None:
         self._external_mode_control_enabled = bool(enabled)
 
-    def set_preview_context(
-        self,
-        *,
-        stage: str,
-        mode: str,
-        session_id: Optional[str] = None,
-        req_id: Optional[str] = None,
-        epoch: int = 0,
-    ) -> None:
-        with self.lock:
-            self._preview_context = {
-                "stage": str(stage or "IDLE").strip().upper() or "IDLE",
-                "mode": str(mode or "IDLE").strip().upper() or "IDLE",
-                "session_id": session_id,
-                "req_id": req_id,
-                "epoch": int(epoch),
-            }
-
     def preview_exit_requested(self) -> bool:
         return bool(self.mode_controller.preview_exit_requested())
 
@@ -245,24 +220,9 @@ class VisionEngine:
         self.log.info("runtime stopped")
         self._emit_backend_lifecycle("stopped")
 
-    def _runtime_status_payload(self) -> Dict[str, Any]:
-        with self.lock:
-            ctx = dict(self._preview_context or {})
-        return {
-            "stage": str(ctx.get("stage") or "IDLE").strip().upper() or "IDLE",
-            "mode": str(ctx.get("mode") or self.current_mode).strip().upper() or "IDLE",
-            "session_id": ctx.get("session_id"),
-            "req_id": ctx.get("req_id"),
-            "epoch": int(ctx.get("epoch", 0) or 0),
-            "ts": time.time(),
-        }
-
     def poll_runtime_results(self) -> None:
         """Refresh low-frequency status slots owned by control-plane facade."""
         self.tick(now_ts=time.time())
-        generation = self.mode_controller.current_generation()
-        self.mode_controller.publish_result("runtime_status", self._runtime_status_payload(), generation=generation)
-        self.mode_controller.publish_result("remote_result", self.remote_manager.result_summary(), generation=generation)
 
     def get_new_data(self) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, list]]]:
         """Compatibility API kept for tests and low-level debug tooling."""
@@ -311,3 +271,59 @@ class VisionEngine:
                 "preview": self.preview_manager.snapshot(),
             },
         }
+
+
+class ModeControlPort:
+    """Narrow stage-facing mode control surface."""
+
+    def __init__(self, mode_controller):
+        self._mode_controller = mode_controller
+
+    def current_mode(self) -> str:
+        return self._mode_controller.current_mode()
+
+    def switch_mode(self, name: str, reason: str = "", force: bool = False):
+        return self._mode_controller.switch_mode(name=name, reason=reason, force=force)
+
+
+class VisionRuntimeService:
+    """App-facing runtime facade that hides engine internals."""
+
+    def __init__(
+        self,
+        cfg: VisionServiceConfig,
+        logger: Optional[logging.Logger] = None,
+        event_sink: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+    ):
+        self._engine = VisionEngine(cfg=cfg, logger=logger, event_sink=event_sink)
+        self._mode_port = ModeControlPort(self._engine.mode_controller)
+
+    def mode_control_port(self):
+        return self._mode_port
+
+    def set_external_mode_control(self, enabled: bool) -> None:
+        self._engine.set_external_mode_control(enabled)
+
+    def init(self) -> None:
+        self._engine.init()
+
+    def start(self) -> None:
+        self._engine.start()
+
+    def stop(self) -> None:
+        self._engine.stop()
+
+    def poll_runtime_results(self) -> None:
+        self._engine.poll_runtime_results()
+
+    def collect_tick_input(self, ts: float):
+        return self._engine.collect_tick_input(ts=ts)
+
+    def push_stage_signals(self, signals: Dict[str, object]) -> None:
+        self._engine.push_stage_signals(signals)
+
+    def preview_exit_requested(self) -> bool:
+        return self._engine.preview_exit_requested()
+
+    def snapshot(self) -> Dict[str, Any]:
+        return self._engine.snapshot()

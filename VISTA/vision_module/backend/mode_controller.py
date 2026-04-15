@@ -43,6 +43,7 @@ class ModeController:
         self._generation = 0
         self._runtime_running = False
         self._scheduler = Scheduler()
+        self._preview_exit_seen = False
         for mgr in (self.camera_manager, self.predictor_manager, self.remote_manager, self.preview_manager):
             binder = getattr(mgr, "bind_runtime", None)
             if callable(binder):
@@ -56,13 +57,6 @@ class ModeController:
             "requested_mode": "IDLE",
             "active_mode": "IDLE",
         }
-        for mgr in (self.camera_manager, self.predictor_manager, self.preview_manager):
-            binder = getattr(mgr, "bind_runtime", None)
-            if callable(binder):
-                try:
-                    binder(self._scheduler, self.current_generation)
-                except Exception:
-                    pass
 
     def register_profile(self, profile: ModeProfile) -> None:
         """Register one named mode profile."""
@@ -96,6 +90,7 @@ class ModeController:
 
     def start_runtime(self) -> None:
         self._runtime_running = True
+        self._preview_exit_seen = False
         self._scheduler.start_runtime()
         for mgr in (self.camera_manager, self.predictor_manager, self.remote_manager, self.preview_manager):
             starter = getattr(mgr, "start_runtime", None)
@@ -117,13 +112,21 @@ class ModeController:
         self._scheduler.stop_runtime()
 
     def preview_exit_requested(self) -> bool:
+        if self._preview_exit_seen:
+            return True
+        payload = self._scheduler.consume_event("preview_exit")
+        if isinstance(payload, dict) and bool(payload.get("requested", False)):
+            self._preview_exit_seen = True
+            return True
         checker = getattr(self.preview_manager, "exit_requested", None)
-        if not callable(checker):
-            return False
-        try:
-            return bool(checker())
-        except Exception:
-            return False
+        if callable(checker):
+            try:
+                if bool(checker()):
+                    self._preview_exit_seen = True
+                    return True
+            except Exception:
+                pass
+        return False
 
     def current_generation(self) -> int:
         return int(self._generation)
@@ -144,7 +147,11 @@ class ModeController:
         return self._scheduler.collect_tick_input(ts=ts)
 
     def push_stage_signals(self, signals: Dict[str, object]) -> None:
-        self._scheduler.push_stage_signals(dict(signals or {}))
+        payload = dict(signals or {})
+        runtime_status = payload.pop("runtime_status", None)
+        if isinstance(runtime_status, dict):
+            self.publish_result("runtime_status", dict(runtime_status))
+        self._scheduler.push_stage_signals(payload)
 
     def read_slot(self, route: str):
         return self._scheduler.read_slot(route)
@@ -314,6 +321,8 @@ class ModeController:
                 "remote_result": {"policy": "slot", "scope": "stage"},
                 "runtime_status": {"policy": "slot", "scope": "backend"},
                 "preview_exit": {"policy": "event", "scope": "backend"},
+                "remote_cmd": {"policy": "event", "scope": "backend"},
+                "remote_ack": {"policy": "event", "scope": "backend"},
             },
         }
 
@@ -496,7 +505,7 @@ class ModeController:
             "last_switch_ts": self._last_switch_ts,
             "generation": int(self._generation),
             "runtime_running": bool(self._runtime_running),
-            "preview_exit_requested": bool(getattr(self.preview_manager, "exit_requested", lambda: False)()),
+            "preview_exit_requested": bool(self._preview_exit_seen),
             "scheduler": self._scheduler.snapshot(),
             "last_switch_result": dict(self._last_switch_result),
             "pending_camera_release": dict(self._pending_camera_release),
