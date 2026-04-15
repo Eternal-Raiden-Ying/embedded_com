@@ -289,7 +289,7 @@ class VistaApp(BaseModule):
         self._last_heartbeat_ts = now
         req_snapshot = self.req_server.snapshot()
         obs_snapshot = self.obs_sender.snapshot()
-        engine_snapshot = self.runtime.snapshot()
+        runtime_snapshot = self.stage_controller.runtime_snapshot()
         last_req_age_s = (now - self.last_req_receive_ts) if self.last_req_receive_ts else None
         last_obs_send_age_s = (now - self.last_send_ts) if self.last_send_ts else None
         self.run_logger.write_heartbeat_record(
@@ -310,12 +310,10 @@ class VistaApp(BaseModule):
                 "req_in": req_snapshot,
                 "obs_out": obs_snapshot,
                 "engine": {
-                    "current_mode": engine_snapshot.get("current_mode"),
-                    "enabled_cameras": engine_snapshot.get("enabled_cameras"),
-                    "active_model_name": engine_snapshot.get("active_model_name"),
-                    "inference_enabled": engine_snapshot.get("inference_enabled"),
-                    "remote_enabled": engine_snapshot.get("remote_enabled"),
-                    "preview_enabled": engine_snapshot.get("preview_enabled"),
+                    "current_mode": runtime_snapshot.get("current_mode"),
+                    "target_mode": runtime_snapshot.get("target_mode"),
+                    "generation": runtime_snapshot.get("generation"),
+                    "runtime_running": runtime_snapshot.get("runtime_running"),
                 },
             },
         )
@@ -379,10 +377,8 @@ class VistaApp(BaseModule):
             "ts": time.time(),
         }
 
-    def _push_runtime_signals(self, extra_signals=None) -> None:
-        payload = dict(extra_signals or {})
-        payload["runtime_status"] = self._runtime_status_payload()
-        self.runtime.push_stage_signals(payload)
+    def _publish_runtime_status(self) -> None:
+        self.stage_controller.publish_runtime_status(self._runtime_status_payload())
 
     def _handle_stop_request(self, stage: str, stop_state=None):
         self._record_event("VISION_STOP", trigger="request:STOP", stage=stage)
@@ -462,9 +458,10 @@ class VistaApp(BaseModule):
                     },
                 )
                 self._apply_stage_output(stage_output, now=time.time(), force_send=True)
-                self._push_runtime_signals(stage_output.signals)
+                self._publish_runtime_status()
                 return
             self._handle_stop_request(request_stage, stop_state=stop_state)
+            self._publish_runtime_status()
             return
 
         self.hot_until_ts = 0.0
@@ -478,15 +475,12 @@ class VistaApp(BaseModule):
             data=req_event_data,
         )
         obs_sent = self._apply_stage_output(stage_output, now=time.time(), force_send=bool(stage_output and stage_output.vision_obs))
-        if stage_output is not None:
-            self._push_runtime_signals(stage_output.signals)
-        else:
-            self._push_runtime_signals()
+        self._publish_runtime_status()
         if not obs_sent:
             self.last_send_ts = 0.0
 
     def _tick_stage(self, now: float):
-        tick_input = self.runtime.collect_tick_input(ts=now)
+        tick_input = self.stage_controller.collect_tick_input(ts=now)
         tick_input.snapshot["app"] = {
             "stage": self.current_stage,
             "mode": self.current_mode,
@@ -498,10 +492,7 @@ class VistaApp(BaseModule):
         stage_output = self.stage_controller.tick(tick_input)
         self._sync_runtime_from_stage_context(reason="tick")
         self._apply_stage_output(stage_output, now=now)
-        if stage_output is not None:
-            self._push_runtime_signals(stage_output.signals)
-        else:
-            self._push_runtime_signals()
+        self._publish_runtime_status()
 
     def _expire_hot_standby(self, now: float):
         if self.current_mode != "IDLE_HOT" or self.hot_until_ts <= 0 or now < self.hot_until_ts:
@@ -587,11 +578,10 @@ class VistaApp(BaseModule):
                     )
                     self._handle_request_payload(payload)
 
-                self.runtime.poll_runtime_results()
                 now = time.time()
                 self._tick_stage(now)
                 self._expire_hot_standby(now)
-                if self.runtime.preview_exit_requested():
+                if self.stage_controller.preview_exit_requested():
                     self.log_info("runtime", "preview exit requested")
                     break
 

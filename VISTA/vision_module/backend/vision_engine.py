@@ -285,6 +285,21 @@ class ModeControlPort:
     def switch_mode(self, name: str, reason: str = "", force: bool = False):
         return self._mode_controller.switch_mode(name=name, reason=reason, force=force)
 
+    def tick_runtime(self, ts: Optional[float] = None) -> None:
+        self._mode_controller.tick(now_ts=ts)
+
+    def collect_tick_input(self, ts: float):
+        return self._mode_controller.collect_tick_input(ts=ts)
+
+    def push_stage_signals(self, signals: Dict[str, object]) -> None:
+        self._mode_controller.push_stage_signals(dict(signals or {}))
+
+    def preview_exit_requested(self) -> bool:
+        return bool(self._mode_controller.preview_exit_requested())
+
+    def snapshot(self) -> Dict[str, Any]:
+        return dict(self._mode_controller.snapshot() or {})
+
 
 class VisionRuntimeService:
     """App-facing runtime facade that hides engine internals."""
