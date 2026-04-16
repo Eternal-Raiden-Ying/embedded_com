@@ -1,277 +1,258 @@
-# VISTA 整体框架与层级设计
+# VISTA 当前架构
 
-## 1. 设计目标
+本文档描述当前代码中的实际结构，以 `vision_module/` 现状为准。
 
-VISTA 的整体架构目标是：
+## 目标
 
-- 将硬件能力、算法能力、网络能力与业务控制解耦
-- 支持按模式组合资源，而不是靠大量布尔开关拼接
-- 让调试能力成为旁路，而不是污染正式运行路径
-- 为后续抓取、避障、导航、微调等扩展预留稳定接口
+VISTA 当前已经收敛为一条明确主链路：
 
-## 2. 总体层级
+- `VistaApp` 负责服务生命周期、IPC、主循环、日志和心跳
+- `StageController` 负责业务阶段控制和 mode 触发
+- `ModeController` 负责 mode profile 和 mode 切换状态
+- `VisionEngine` 负责 backend runtime 装配与执行
+- `Scheduler` 负责 managers 与 stage 之间的摘要数据交换
+- 各 `Manager` 自己维护 worker loop，不把高频工作塞回主线程
 
-建议按以下层级组织：
+## 总体拓扑
 
-### 2.1 Hardware Backend Layer
+```text
+Orchestrator --vision_req--> VistaApp
+                              |
+                              v
+                        StageController
+                         |           \
+                         |            \
+                         v             v
+                    StagePlan      ModeController
+                         |             |
+                         |             | prepare_switch / commit_switch
+                         |             |
+                         +-------> VisionEngine.apply_mode_plan(...)
+                                        |
+                                        v
+                                RuntimeSupervisor
+                              /    |      |      \
+                             v     v      v       v
+                    CameraManager Predictor Remote Preview
+                             \      |      /        |
+                              +-----+-----+---------+
+                                            |
+                                            v
+                                       Scheduler
+                                            |
+                                            v
+                         StageController.collect_tick_input() / tick()
+                                            |
+                                            v
+                                VistaApp --vision_obs--> Orchestrator
+```
 
-职责：
+## 分层职责
 
-- 提供最底层的硬件访问封装
-- 管理真实设备初始化、读帧、释放资源
+### 1. App 层
 
-当前包含：
-
-- `ColorCamera`
-- `IRCamera`
-- `RealSenseDepthCamera`
-- `QNN_YOLO_Segment_Predictor`
-
-特点：
-
-- 面向能力，不感知上层业务模式
-- 提供统一接口，例如 `read_frame()`、`predict_frame()`、`release()`
-
-### 2.2 Capability Manager Layer
-
-职责：
-
-- 在 backend 之上做资源生命周期管理
-- 对外暴露“相机能力”“推理能力”“深度能力”“网络能力”
-
-建议拆分：
-
-- `CameraManager`
-- `PredictorManager`
-- `DepthCapability` 或 `DepthProcessor`
-- `NetworkGraspClient`
-- `PreviewSink`
-
-特点：
-
-- 管理资源创建、复用、释放
-- 避免上层直接操作底层 backend 类
-
-### 2.3 Mode Orchestration Layer
-
-职责：
-
-- 根据任务目标决定当前需要打开哪些能力
-- 负责模式切换与差量更新
-
-建议核心对象：
-
-- `ModeProfile`
-- `ModeController`
-
-`ModeProfile` 负责描述：
-
-- 哪些 camera 开启
-- 使用哪套相机 profile
-- predictor 是否开启
-- 使用哪个模型
-- network 是否开启
-- preview 是否开启
-- 运行频率配置
-
-`ModeController` 负责：
-
-- 当前 mode 的保存
-- 新 mode 的应用
-- 对比当前资源状态和目标状态
-- 只调整变化部分
-
-### 2.4 Application / Task Layer
+入口文件：`vision_module/app/app.py`
 
 职责：
 
-- 处理任务状态机与业务流程
-- 决定何时切 mode，何时请求抓取，何时做微调
+- 创建 `ModeController`、`VisionEngine`、`StageController`
+- 启动 `req_in` 和 `obs_out` IPC
+- 在主循环中接收请求、驱动 stage tick、发送 `vision_obs`
+- 记录 `event.jsonl`、`ipc.jsonl`、`heartbeat.jsonl`
+- 管理 stop 后的 `IDLE` / `IDLE_HOT` 过渡
 
-示例：
+不负责：
 
-- 搜索目标
-- 接近目标
-- 抓取拍照
-- 远程抓取预测
-- 微调位姿
-- 失败重试
+- 不直接读 raw frame
+- 不直接操作 camera/predictor/remote/preview manager
+- 不直接做业务 stage 判定
 
-特点：
+### 2. Stage 控制层
 
-- 这里处理“为什么切换”
-- 不直接决定底层相机如何初始化
+文件：
 
-## 3. 建议的资源管理结构
-
-### 3.1 CameraManager
-
-职责：
-
-- 保存当前已打开的 camera 实例
-- 支持 `ensure_camera(name, profile)`
-- 支持 `disable_camera(name)`
-- 支持 camera profile 比较
-- 在 profile 未变化时复用相机实例
-
-为什么要独立：
-
-- 相机初始化和重建代价高
-- 相机在多个模式中会被复用
-
-### 3.2 PredictorManager
+- `vision_module/app/stage_controller.py`
+- `vision_module/app/stages/base.py`
+- `vision_module/app/stages/search.py`
+- `vision_module/app/stages/grasp.py`
+- `vision_module/app/stages/return_home.py`
 
 职责：
 
-- 管理 `QNN_YOLO_Segment_Predictor`
-- 支持 `ensure_model(name)`
-- 支持 `disable_model()`
-- 避免同模型重复加载
+- 维护 `StageContext`
+- 处理 `START` / `UPDATE` / `RESPOND` / `STOP`
+- 进行 stage enter/restart/stop
+- 调用 `ModeController` + `VisionEngine` 完成 mode 变更
+- 从 `Scheduler` 采样 `StageTickInput`
+- 产出 `StageOutput`，并通过 `vision_obs` 对外输出结果
 
-为什么要独立：
+当前 stage：
 
-- NPU 模型加载有明显成本
-- 不是所有模式都需要 predictor
+- `SEARCH`：本地搜索与跟踪，消费 `local_perception`
+- `GRASP`：微调交互和远程抓取协作，消费 `remote_result`
+- `RETURN`：回航标记/回航目标观测，消费 `local_perception`
 
-### 3.3 PreviewSink
+核心 contract：
+
+- `StageContext`：跨请求、跨 tick 的可变业务状态
+- `StageTickInput`：当前控制周期对 `Scheduler` 的采样摘要
+- `StageOutput`：当前 stage 的输出 envelope，包含 `vision_obs`、`signals`、`effects`
+
+### 3. Mode 控制层
+
+文件：
+
+- `vision_module/backend/mode_controller.py`
+- `vision_module/backend/mode_profiles.py`
+- `vision_module/config/mode_defaults.py`
 
 职责：
 
-- 仅在 debug 时订阅最新帧并显示
-- 不参与 mode 核心逻辑
+- 注册并解析 `ModeProfile`
+- 把 mode 编译成 runtime plan
+- 维护当前 mode、target mode、generation、last switch result
+- 在 mode 成功生效后发出 `BACKEND_MODE_CHANGED`
 
-为什么要独立：
+当前默认 mode：
 
-- 预览只是调试能力
-- 关闭 preview 时应零侵入主流程
+- `IDLE`
+- `TRACK_LOCAL`
+- `MICRO_ADJUST`
+- `GRASP_REMOTE`
+- `IDLE_HOT`
 
-## 4. 模式设计
+当前实现中，`ModeController` 不直接管理各 manager 的启停；真正的 capability reconcile 在 `VisionEngine -> RuntimeSupervisor` 中完成。
 
-### 4.1 TRACK_LOCAL
+### 4. Runtime 层
 
-资源组合：
+文件：
 
-- `rgb`
-- local predictor
-- preview 可选
+- `vision_module/backend/vision_engine.py`
+- `vision_module/backend/runtime_supervisor.py`
 
-典型参数：
+职责划分：
 
-- RGB 640x640
-- 本地高频循环
-- 低延迟
+- `VisionEngine`
+  - runtime 根对象
+  - 持有 `Scheduler`、各 manager、`RuntimeSupervisor`
+  - 暴露 `start()`、`stop()`、`apply_mode_plan()`、`collect_tick_input()`、`publish_result()`、`publish_event()`
+- `RuntimeSupervisor`
+  - 根据 mode plan 配置 managers
+  - 把 capability plan 转成 camera/predictor/remote/preview 的启停与配置动作
+  - 发出 `BACKEND_RUNTIME_RECONCILED`
 
-适用场景：
+### 5. Scheduler / 数据总线层
 
-- 目标搜索
-- 目标跟踪
-- 循迹
+文件：`vision_module/backend/scheduler.py`
 
-### 4.2 GRASP_REMOTE
+职责：
 
-资源组合：
+- 保存当前 `routes`
+- 管理 `result_slots`
+- 管理 `event_latches`
+- 管理 `pending_signals`
+- 依据 `generation` 过滤旧数据
+- 为 stage 生成 `StageTickInput`
 
-- `rgb`
-- `depth`
-- network grasp client
-- local predictor 默认关闭
+当前重要 route：
 
-典型参数：
+- `camera_frames`：slot，backend scope
+- `frame_meta`：slot，stage scope
+- `local_perception`：slot，stage scope
+- `remote_result`：slot，stage scope
+- `runtime_status`：slot，backend scope
+- `remote_cmd`：event，backend scope
+- `remote_ack`：event，backend scope
 
-- RGB 1280x720
-- 同步 depth
-- 按需低频触发网络请求
+设计边界：
 
-适用场景：
+- `Scheduler` 只做共享数据总线
+- 不拥有业务 worker
+- 不直接做高频采集、推理或远程请求
 
-- 抓取前观测
-- 远程抓取姿态预测
+### 6. Manager 层
 
-### 4.3 待扩展模式
+文件：
 
-#### DEPTH_PERCEPTION
+- `vision_module/backend/camera_manager.py`
+- `vision_module/backend/predictor_manager.py`
+- `vision_module/backend/remote/manager.py`
+- `vision_module/backend/preview/manager.py`
 
-- 面向碰撞箱、点云、避障、导航
+职责：
 
-#### MICRO_ADJUST
+- `CameraManager`：相机实例生命周期和采集 worker，发布 `camera_frames`、`frame_meta`
+- `PredictorManager`：模型生命周期和推理 worker，读取 `camera_frames`，发布 `local_perception`
+- `RemoteManager`：远程抓取协作 worker，消费 `remote_cmd`，发布 `remote_result`、`remote_ack`
+- `PreviewManager`：预览 worker，读取 `camera_frames`、`runtime_status`、`local_perception`，渲染调试预览
 
-- 面向抓取后微调
-- 根据视觉反馈做位置纠正
+约束：
 
-## 5. 模式切换原则
+- 每个 manager 自己拥有 worker 线程
+- manager 之间只通过 `Scheduler` 交换数据
+- manager 不直接修改 `StageController` 或 `StageContext`
 
-模式切换必须遵循差量更新：
+### 7. Backend driver / sink 层
 
-- 不变化的相机不重建
-- 不变化的模型不重载
-- 只关闭当前 mode 不再需要的能力
-- 只开启目标 mode 新增的能力
+文件：
 
-错误示例：
+- `vision_module/backend/camera/*`
+- `vision_module/backend/predictor/*`
+- `vision_module/backend/remote/client.py`
+- `vision_module/backend/preview/*`
 
-- 每次切 mode 都全关全开
+职责：
 
-推荐示例：
+- 封装真实设备、真实模型、远程 HTTP 客户端和 preview sink
+- 提供 manager 可复用的最底层能力接口
 
-- `TRACK_LOCAL -> GRASP_REMOTE`
-  - 保留 `rgb`
-  - 补开 `depth`
-  - 关闭 local predictor
-  - 打开 network
+## 当前主调用链
 
-## 6. 当前代码落点建议
+### 请求处理链
 
-### 6.1 `vision_engine.py`
+```text
+VistaApp._handle_request_payload()
+  -> VisionReq.from_dict(...)
+  -> StageController.handle_request(...)
+  -> StagePlan.on_enter/on_update/on_respond/on_stop(...)
+  -> StageController._apply_context_mode(...)
+  -> ModeController.prepare_switch(...)
+  -> VisionEngine.apply_mode_plan(...)
+  -> RuntimeSupervisor.reconcile(...)
+  -> ModeController.commit_switch(...)
+  -> VistaApp 发送 vision_obs
+```
 
-建议定位：
+### 控制循环链
 
-- 主线正式 engine
-- 优先作为模式化引擎重构目标
+```text
+VistaApp._tick_stage()
+  -> StageController.collect_tick_input(...)
+  -> Scheduler.collect_tick_input(...)
+  -> StageController.tick(...)
+  -> StagePlan.tick(...)
+  -> VistaApp 发送 vision_obs
+```
 
-先做：
+### 数据面链路
 
-- `ModeProfile`
-- `ModeController`
-- `CameraManager`
-- `PredictorManager`
-- 两个模式：`TRACK_LOCAL`、`GRASP_REMOTE`
+```text
+CameraManager -> Scheduler(camera_frames, frame_meta)
+PredictorManager -> Scheduler(local_perception)
+RemoteManager -> Scheduler(remote_result, remote_ack)
+StageController effects -> Scheduler(remote_cmd)
+PreviewManager <- Scheduler(camera_frames, runtime_status, local_perception)
+```
 
-### 6.2 `new_engine.py`
+## 当前架构的关键约束
 
-建议定位：
+- `App` 不处理 raw frame
+- `StageTickInput` 只带摘要结果，不带原始图像
+- `StageOutput.signals` 只做短生命周期控制面反馈
+- 跨 tick 的业务状态放在 `StageContext.stage_state`
+- mode 以 `generation` 作为隔离边界，旧代结果不会进入当前 stage 采样
+- preview 是 backend/data-plane 的旁路能力，不再经过 `App` 处理图像
 
-- 试验性 / develop 路径
-- 可以继续做新模式和云抓取流程验证
-- 但长期不应和主线引擎分叉过大
+## 当前文档基线
 
-## 7. 建议的开发顺序
-
-1. 统一 backend 接口与命名
-2. 定义 `ModeProfile`
-3. 实现 `CameraManager`
-4. 实现 `PredictorManager`
-5. 在 `vision_engine.py` 中加入 `ModeController`
-6. 落地 `TRACK_LOCAL`
-7. 落地 `GRASP_REMOTE`
-8. 将预览改为旁路能力
-9. 再接上更高层 app / IPC / 任务状态机
-
-## 8. 扩展性建议
-
-未来新增模式时，不应继续增加大量：
-
-- `enable_xxx`
-- `use_depth`
-- `use_network`
-- `use_local_model`
-
-而应新增：
-
-- 一个新的 `ModeProfile`
-- 必要时新增一个新的 capability manager
-
-这样：
-
-- 产品需求变化时更容易适配
-- 代码结构更稳定
-- 端侧资源控制更清晰
+本目录下的旧计划文档已经不再作为主基线。后续如果代码继续调整，以当前 `app/`、`backend/`、`config/` 实现和本文件为准。
