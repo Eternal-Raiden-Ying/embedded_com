@@ -1,14 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-直接对 STM32 发送分行协议（归一化速度），脱离状态机验证底盘响应。
-
-示例：
-  python3 -m orchestrator_service.examples.uart_protocol_smoke_test --port /dev/ttyHS1 --baud 115200
-  python3 -m orchestrator_service.examples.uart_protocol_smoke_test --dry-run
-"""
-
 import argparse
 import sys
 import time
@@ -45,12 +37,12 @@ def maybe_read(ser, dry_run: bool, wait_s: float = 0.25):
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description="直接验证底盘 TXT 串口协议是否接受 MODE/VEL/STOP/BRAKE")
     ap.add_argument("--port", default="/dev/ttyHS1")
     ap.add_argument("--baud", type=int, default=115200)
     ap.add_argument("--timeout", type=float, default=0.1)
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--sleep", type=float, default=2.0, help="每段动作保持时间")
+    ap.add_argument("--sleep", type=float, default=1.2, help="每段动作保持时长")
     args = ap.parse_args()
 
     if not args.dry_run and serial is None:
@@ -59,20 +51,21 @@ def main():
 
     ser = None
     if not args.dry_run:
-        ser = serial.Serial(args.port, args.baud, timeout=args.timeout)
+        ser = serial.Serial(args.port, args.baud, timeout=args.timeout, write_timeout=args.timeout)
         print(f"[INFO] opened {args.port} @ {args.baud}")
 
     seq = [
-        ("MODE AUTOEXPLORE\n", args.sleep),
-        ("MODE AUTOSEARCH\n", args.sleep),
-        ("MODE SEARCH\n", 0.1),
-        ("V 0.350 0.000\n", args.sleep),
-        ("V 0.000 0.650\n", args.sleep),
-        ("MODE RETURN\n", 0.1),
-        ("V 0.280 0.000\n", args.sleep),
-        ("V 0.000 -0.550\n", args.sleep),
-        ("MODE STOP\n", 0.05),
-        ("STOP\n", 0.5),
+        ("PING\n", 0.2),
+        ("MODE SEARCH_TABLE\n", 0.05),
+        ("VEL 0.000 0.000 0.220 150\n", args.sleep),
+        ("MODE COARSE_ALIGN\n", 0.05),
+        ("VEL 0.000 0.000 -0.180 150\n", args.sleep),
+        ("MODE CONTROLLED_APPROACH\n", 0.05),
+        ("VEL 0.120 0.040 -0.080 150\n", args.sleep),
+        ("MODE EDGE_SLIDE_SEARCH\n", 0.05),
+        ("VEL 0.000 0.140 0.000 150\n", args.sleep),
+        ("STOP\n", 0.4),
+        ("BRAKE\n", 0.4),
     ]
 
     try:

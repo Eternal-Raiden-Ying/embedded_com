@@ -21,12 +21,48 @@ def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:10]}"
 
 
+def _payload_ts(payload: Dict[str, Any]) -> float:
+    if payload.get("ts") is not None:
+        return float(payload.get("ts"))
+    if payload.get("ts_ms") is not None:
+        return float(payload.get("ts_ms")) / 1000.0
+    return now_ts()
+
+
 def _pick_optional_float(payload: Dict[str, Any], *keys: str) -> Optional[float]:
     for key in keys:
         if payload.get(key) is None:
             continue
         try:
             return float(payload.get(key))
+        except Exception:
+            continue
+    return None
+
+
+def _pick_optional_bool(payload: Dict[str, Any], *keys: str) -> Optional[bool]:
+    for key in keys:
+        if key in payload and payload.get(key) is not None:
+            return bool(payload.get(key))
+    return None
+
+
+def _pick_optional_str(payload: Dict[str, Any], *keys: str) -> Optional[str]:
+    for key in keys:
+        if payload.get(key) is None:
+            continue
+        value = str(payload.get(key)).strip()
+        if value:
+            return value
+    return None
+
+
+def _pick_optional_int(payload: Dict[str, Any], *keys: str) -> Optional[int]:
+    for key in keys:
+        if payload.get(key) is None:
+            continue
+        try:
+            return int(payload.get(key))
         except Exception:
             continue
     return None
@@ -65,12 +101,12 @@ class TaskCmd:
         else:
             target = None
         return cls(
-            ts=float(payload.get("ts", now_ts())),
+            ts=_payload_ts(payload),
             intent=intent,
             confidence=confidence,
             target=target,
-            cmd_id=str(payload.get("cmd_id") or _new_id("cmd")),
-            session_id=str(payload.get("session_id") or _new_id("sess")),
+            cmd_id=str(payload.get("cmd_id") or payload.get("task_id") or _new_id("cmd")),
+            session_id=str(payload.get("session_id") or payload.get("task_id") or _new_id("sess")),
             epoch=int(payload.get("epoch", 0) or 0),
             source=str(payload.get("source", "voice") or "voice"),
             type=str(payload.get("type", "task_cmd") or "task_cmd"),
@@ -102,6 +138,65 @@ class TaskAck:
 
 
 @dataclass
+class TableEdgeObs:
+    ts: float
+    table_found: bool
+    edge_found: bool
+    confidence: float = 0.0
+    yaw_err_rad: Optional[float] = None
+    dist_err_m: Optional[float] = None
+    lateral_err_m: Optional[float] = None
+    edge_angle_rad: Optional[float] = None
+    edge_k: Optional[float] = None
+    edge_b: Optional[float] = None
+    depth_valid: Optional[bool] = None
+    table_cx_norm: Optional[float] = None
+    table_size_norm: Optional[float] = None
+    edge_ready: Optional[bool] = None
+    best_turn_dir: Optional[str] = None
+    obstacle_flag: bool = False
+    obstacle_distance_m: Optional[float] = None
+    req_id: Optional[str] = None
+    session_id: Optional[str] = None
+    epoch: int = 0
+    source: Optional[str] = None
+    type: str = "table_edge_obs"
+
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any]) -> "TableEdgeObs":
+        table_found = bool(payload.get("table_found", payload.get("found", False)))
+        edge_found = bool(payload.get("edge_found", payload.get("table_edge_found", table_found)))
+        confidence = _pick_optional_float(payload, "confidence", "score", "edge_confidence", "table_confidence") or 0.0
+        return cls(
+            ts=_payload_ts(payload),
+            table_found=table_found,
+            edge_found=edge_found,
+            confidence=float(confidence),
+            yaw_err_rad=_pick_optional_float(payload, "yaw_err_rad", "edge_yaw_err_rad", "yaw_error_rad"),
+            dist_err_m=_pick_optional_float(payload, "dist_err_m", "edge_dist_err_m", "distance_error_m", "table_edge_distance_m", "edge_distance_m"),
+            lateral_err_m=_pick_optional_float(payload, "lateral_err_m", "edge_lateral_err_m", "lateral_error_m"),
+            edge_angle_rad=_pick_optional_float(payload, "edge_angle_rad"),
+            edge_k=_pick_optional_float(payload, "edge_k"),
+            edge_b=_pick_optional_float(payload, "edge_b"),
+            depth_valid=_pick_optional_bool(payload, "depth_valid"),
+            table_cx_norm=_pick_optional_float(payload, "table_cx_norm", "table_cx"),
+            table_size_norm=_pick_optional_float(payload, "table_size_norm", "table_area_norm", "table_area", "size_norm"),
+            edge_ready=_pick_optional_bool(payload, "edge_ready", "table_edge_ready"),
+            best_turn_dir=_pick_optional_str(payload, "best_turn_dir", "avoid_dir"),
+            obstacle_flag=bool(payload.get("obstacle_flag", payload.get("obstacle", False))),
+            obstacle_distance_m=_pick_optional_float(payload, "obstacle_distance_m", "obstacle_distance", "front_obstacle_m"),
+            req_id=_pick_optional_str(payload, "req_id"),
+            session_id=_pick_optional_str(payload, "session_id", "task_id"),
+            epoch=int(payload.get("epoch", 0) or 0),
+            source=_pick_optional_str(payload, "source"),
+            type=str(payload.get("type", "table_edge_obs") or "table_edge_obs"),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {k: v for k, v in asdict(self).items() if v is not None}
+
+
+@dataclass
 class TargetObs:
     ts: float
     found: bool
@@ -111,29 +206,49 @@ class TargetObs:
     size_norm: float = 0.0
     track_id: Optional[int] = None
     bbox: Optional[list] = None
+    depth_m: Optional[float] = None
+    mask_ready: bool = False
+    mask_shape: Optional[list] = None
+    mask_area_ratio: Optional[float] = None
+    mask_bbox: Optional[list] = None
     req_id: Optional[str] = None
     session_id: Optional[str] = None
     epoch: int = 0
     vx_norm: Optional[float] = None
+    vy_norm: Optional[float] = None
     wz_norm: Optional[float] = None
+    obstacle_flag: bool = False
+    best_turn_dir: Optional[str] = None
+    obstacle_distance_m: Optional[float] = None
+    source: Optional[str] = None
     type: str = "target_obs"
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "TargetObs":
         return cls(
-            ts=float(payload.get("ts", now_ts())),
+            ts=_payload_ts(payload),
             found=bool(payload.get("found", False)),
             target=(str(payload.get("target")).strip() if payload.get("target") is not None else None),
-            confidence=(float(payload["confidence"]) if payload.get("confidence") is not None else None),
+            confidence=_pick_optional_float(payload, "confidence", "score"),
             cx_norm=float(payload.get("cx_norm", 0.0)),
-            size_norm=float(payload.get("size_norm", 0.0)),
-            track_id=(int(payload["track_id"]) if payload.get("track_id") is not None else None),
+            size_norm=float(payload.get("size_norm", payload.get("area_norm", 0.0))),
+            track_id=_pick_optional_int(payload, "track_id"),
             bbox=payload.get("bbox"),
-            req_id=(str(payload.get("req_id")).strip() if payload.get("req_id") is not None else None),
-            session_id=(str(payload.get("session_id")).strip() if payload.get("session_id") is not None else None),
+            depth_m=_pick_optional_float(payload, "depth_m"),
+            mask_ready=bool(payload.get("mask_ready", payload.get("mask_available", False))),
+            mask_shape=payload.get("mask_shape"),
+            mask_area_ratio=_pick_optional_float(payload, "mask_area_ratio"),
+            mask_bbox=payload.get("mask_bbox"),
+            req_id=_pick_optional_str(payload, "req_id"),
+            session_id=_pick_optional_str(payload, "session_id", "task_id"),
             epoch=int(payload.get("epoch", 0) or 0),
             vx_norm=_pick_optional_float(payload, "vx_norm", "vx", "v_norm", "linear_norm"),
+            vy_norm=_pick_optional_float(payload, "vy_norm", "vy", "lateral_norm"),
             wz_norm=_pick_optional_float(payload, "wz_norm", "wz", "omega_norm", "angular_norm"),
+            obstacle_flag=bool(payload.get("obstacle_flag", payload.get("obstacle", False))),
+            best_turn_dir=_pick_optional_str(payload, "best_turn_dir", "avoid_dir"),
+            obstacle_distance_m=_pick_optional_float(payload, "obstacle_distance_m", "obstacle_distance", "front_obstacle_m"),
+            source=_pick_optional_str(payload, "source"),
             type=str(payload.get("type", "target_obs") or "target_obs"),
         )
 
@@ -151,21 +266,31 @@ class HomeTagObs:
     session_id: Optional[str] = None
     epoch: int = 0
     vx_norm: Optional[float] = None
+    vy_norm: Optional[float] = None
     wz_norm: Optional[float] = None
+    obstacle_flag: bool = False
+    best_turn_dir: Optional[str] = None
+    obstacle_distance_m: Optional[float] = None
+    source: Optional[str] = None
     type: str = "home_tag_obs"
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "HomeTagObs":
         return cls(
-            ts=float(payload.get("ts", now_ts())),
+            ts=_payload_ts(payload),
             found=bool(payload.get("found", False)),
             yaw_err_rad=float(payload.get("yaw_err_rad", 0.0)),
-            distance_m=(float(payload["distance_m"]) if payload.get("distance_m") is not None else None),
-            req_id=(str(payload.get("req_id")).strip() if payload.get("req_id") is not None else None),
-            session_id=(str(payload.get("session_id")).strip() if payload.get("session_id") is not None else None),
+            distance_m=_pick_optional_float(payload, "distance_m"),
+            req_id=_pick_optional_str(payload, "req_id"),
+            session_id=_pick_optional_str(payload, "session_id", "task_id"),
             epoch=int(payload.get("epoch", 0) or 0),
             vx_norm=_pick_optional_float(payload, "vx_norm", "vx", "v_norm", "linear_norm"),
+            vy_norm=_pick_optional_float(payload, "vy_norm", "vy", "lateral_norm"),
             wz_norm=_pick_optional_float(payload, "wz_norm", "wz", "omega_norm", "angular_norm"),
+            obstacle_flag=bool(payload.get("obstacle_flag", payload.get("obstacle", False))),
+            best_turn_dir=_pick_optional_str(payload, "best_turn_dir", "avoid_dir"),
+            obstacle_distance_m=_pick_optional_float(payload, "obstacle_distance_m", "obstacle_distance", "front_obstacle_m"),
+            source=_pick_optional_str(payload, "source"),
             type=str(payload.get("type", "home_tag_obs") or "home_tag_obs"),
         )
 
@@ -184,6 +309,10 @@ class CarState:
     mode: Optional[str] = None
     message: Optional[str] = None
     raw: Optional[str] = None
+    vx: Optional[float] = None
+    vy: Optional[float] = None
+    wz: Optional[float] = None
+    fault_code: Optional[str] = None
     source: str = "uart"
     type: str = "car_state"
 
@@ -192,15 +321,19 @@ class CarState:
         state = str(payload.get("state", payload.get("status", "UNKNOWN"))).strip().upper() or "UNKNOWN"
         message = payload.get("message")
         return cls(
-            ts=float(payload.get("ts", now_ts())),
+            ts=_payload_ts(payload),
             state=state,
-            ok=bool(payload.get("ok", state == "OK")),
+            ok=bool(payload.get("ok", state in {"OK", "BUSY", "DONE"})),
             timeout=bool(payload.get("timeout", state == "TIMEOUT")),
             estop=bool(payload.get("estop", state in {"ESTOP", "E_STOP"})),
             fault=bool(payload.get("fault", state in {"FAULT", "ERROR"})),
             mode=(str(payload.get("mode")).strip().upper() if payload.get("mode") is not None else None),
             message=(str(message).strip() if message is not None else None),
             raw=(str(payload.get("raw")).rstrip("\n") if payload.get("raw") is not None else None),
+            vx=_pick_optional_float(payload, "vx"),
+            vy=_pick_optional_float(payload, "vy"),
+            wz=_pick_optional_float(payload, "wz"),
+            fault_code=_pick_optional_str(payload, "fault_code"),
             source=(str(payload.get("source", "uart")).strip() or "uart"),
             type=str(payload.get("type", "car_state")),
         )
@@ -214,16 +347,23 @@ class CmdVel:
     ts: float
     mode: str
     vx_norm: float = 0.0
+    vy_norm: float = 0.0
     wz_norm: float = 0.0
+    hold_ms: int = 150
+    brake: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "ts": float(self.ts),
             "mode": self.mode,
             "vx_norm": float(self.vx_norm),
+            "vy_norm": float(self.vy_norm),
             "wz_norm": float(self.wz_norm),
-            "vx_mps": float(self.vx_norm),
-            "wz_rps": float(self.wz_norm),
+            "vx": float(self.vx_norm),
+            "vy": float(self.vy_norm),
+            "wz": float(self.wz_norm),
+            "hold_ms": int(self.hold_ms),
+            "brake": bool(self.brake),
         }
 
 
@@ -239,27 +379,46 @@ def make_task_ack(cmd: TaskCmd, accepted: bool, state: str, reason: str = "") ->
     ).to_dict()
 
 
-def make_vision_req(target: str, session_id: str = "", epoch: int = 0, req_id: str = "") -> Dict[str, Any]:
-    return {
+def make_vision_req(
+    target: str,
+    session_id: str = "",
+    epoch: int = 0,
+    req_id: str = "",
+    *,
+    mode: str = "EDGE_TARGET_SEARCH",
+    stage: str = "",
+    current_edge_id: str = "",
+    need_depth: bool = True,
+) -> Dict[str, Any]:
+    payload = {
         "ts": now_ts(),
         "type": "vision_req",
-        "mode": "FIND",
+        "mode": str(mode or "EDGE_TARGET_SEARCH"),
         "target": target,
         "session_id": session_id,
         "epoch": int(epoch),
         "req_id": req_id or _new_id("req"),
+        "need_depth": bool(need_depth),
     }
+    if stage:
+        payload["stage"] = str(stage)
+    if current_edge_id:
+        payload["current_edge_id"] = str(current_edge_id)
+    return payload
 
 
-def make_home_tag_req(session_id: str = "", epoch: int = 0, req_id: str = "") -> Dict[str, Any]:
-    return {
+def make_home_tag_req(session_id: str = "", epoch: int = 0, req_id: str = "", *, stage: str = "") -> Dict[str, Any]:
+    payload = {
         "ts": now_ts(),
         "type": "home_tag_req",
-        "mode": "RETURN",
+        "mode": "HOME_TAG_SEARCH",
         "session_id": session_id,
         "epoch": int(epoch),
         "req_id": req_id or _new_id("req"),
     }
+    if stage:
+        payload["stage"] = str(stage)
+    return payload
 
 
 def make_vision_idle(session_id: str = "", epoch: int = 0, req_id: str = "") -> Dict[str, Any]:

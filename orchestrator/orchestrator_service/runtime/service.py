@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 from ..bridge.simple_car_protocol import SimpleCarMapper, parse_car_state_line
 from ..bridge.uart_bridge import UartBridge
 from ..config.schema import OrchestratorConfig, SocketEndpoint
-from ..ipc.protocol import HomeTagObs, TargetObs, TaskCmd, make_task_ack
+from ..ipc.protocol import HomeTagObs, TableEdgeObs, TargetObs, TaskCmd, make_task_ack
 from ..ipc.transport import AsyncJsonlClientSender, JsonlClientSender, JsonlInboundServer
 from .common import RunLogger, ensure_dir, safe_dump
 from .state_machine import OrchestratorCore
@@ -24,7 +24,7 @@ class OrchestratorService(BaseModule):
         ensure_dir(cfg.runtime.runs_dir)
         ensure_dir(cfg.runtime.pid_dir)
         self.run_logger = RunLogger("orch", cfg.runtime.runs_dir, cfg.runtime.stack_run_id)
-        self.core = OrchestratorCore(cfg.control, cfg.car, logger=self.log)
+        self.core = OrchestratorCore(cfg.control, cfg.car, cfg.docking, logger=self.log)
         self.mapper = SimpleCarMapper(cfg.car)
         self._async_result_queue: "queue.Queue[Dict[str, Any]]" = queue.Queue()
         self._boot_ts = time.time()
@@ -138,6 +138,20 @@ class OrchestratorService(BaseModule):
                 "dry_run_echo_summary_period_s": self.cfg.serial.dry_run_echo_summary_period_s,
                 "dry_run_quiet_idle_stop": self.cfg.serial.dry_run_quiet_idle_stop,
                 "uart_lowfreq_period_s": self.cfg.serial.uart_lowfreq_period_s,
+            },
+            "control": {
+                "search_table_timeout_s": self.cfg.control.search_table_timeout_s,
+                "approach_timeout_s": self.cfg.control.approach_timeout_s,
+                "target_search_timeout_s": self.cfg.control.target_search_timeout_s,
+                "edge_relocate_enabled": self.cfg.control.edge_relocate_enabled,
+                "max_edge_transitions_per_task": self.cfg.control.max_edge_transitions_per_task,
+            },
+            "docking": {
+                "min_confidence": self.cfg.docking.min_confidence,
+                "enable_lateral_control": self.cfg.docking.enable_lateral_control,
+                "approach_max_vx_norm": self.cfg.docking.approach_max_vx_norm,
+                "approach_max_vy_norm": self.cfg.docking.approach_max_vy_norm,
+                "approach_max_wz_norm": self.cfg.docking.approach_max_wz_norm,
             },
             "task_cmd_in": {
                 "transport": self.cfg.task_cmd_in.transport,
@@ -530,57 +544,100 @@ class OrchestratorService(BaseModule):
             self.run_logger.write_timeline("TASK_CMD_RECV", cmd_id=cmd.cmd_id, intent=cmd.intent, target=cmd.target, accepted=accepted, reason=reason, session_id=cmd.session_id, epoch=cmd.epoch)
             self._send_task_ack(cmd, accepted=accepted, reason=reason)
 
+    def _flatten_vision_payloads(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        msg_type = str(payload.get("type", "")).strip().lower()
+        if msg_type != "vision_obs":
+            return [payload]
+        perception = payload.get("perception") or {}
+        if not isinstance(perception, dict):
+            return []
+        base = {
+            "ts": payload.get("ts"),
+            "ts_ms": payload.get("ts_ms"),
+            "session_id": payload.get("session_id"),
+            "req_id": payload.get("req_id"),
+            "epoch": payload.get("epoch", 0),
+            "source": payload.get("source", "vision_obs"),
+        }
+        out: List[Dict[str, Any]] = []
+        for key in ("table_edge_obs", "target_obs", "home_tag_obs"):
+            item = perception.get(key)
+            if isinstance(item, dict):
+                merged = dict(base)
+                merged.update(item)
+                merged.setdefault("type", key)
+                out.append(merged)
+        return out
+
     def _drain_vision_msgs(self):
+        latest_table: Optional[TableEdgeObs] = None
         latest_target: Optional[TargetObs] = None
         latest_home: Optional[HomeTagObs] = None
         raw_items: List[dict] = self.vision_server.drain()
         for item in raw_items:
-            payload = item["payload"]
             recv_ts = float(item.get("recv_ts", time.time()))
-            msg_type = str(payload.get("type", "")).strip().lower()
-            self.log_ipc("RX", msg_type, "received", {"req_id": payload.get("req_id"), "found": payload.get("found")})
-            try:
-                if msg_type == "home_tag_obs":
-                    latest_home = HomeTagObs.from_dict(payload)
-                    self._last_home_obs_recv_ts = recv_ts
+            for payload in self._flatten_vision_payloads(item["payload"]):
+                msg_type = str(payload.get("type", "")).strip().lower()
+                self.log_ipc("RX", msg_type, "received", {"req_id": payload.get("req_id"), "found": payload.get("found", payload.get("table_found"))})
+                try:
+                    if msg_type == "table_edge_obs":
+                        latest_table = TableEdgeObs.from_dict(payload)
+                        self._last_vision_obs_recv_ts = recv_ts
+                        self.run_logger.write_ipc(
+                            "vision_obs_in",
+                            "received",
+                            direction="RX",
+                            req_id=latest_table.req_id,
+                            session_id=latest_table.session_id,
+                            epoch=latest_table.epoch,
+                            ok=True,
+                            found=latest_table.table_found,
+                            msg_type=msg_type,
+                        )
+                    elif msg_type == "home_tag_obs":
+                        latest_home = HomeTagObs.from_dict(payload)
+                        self._last_home_obs_recv_ts = recv_ts
+                        self.run_logger.write_ipc(
+                            "vision_obs_in",
+                            "received",
+                            direction="RX",
+                            req_id=latest_home.req_id,
+                            session_id=latest_home.session_id,
+                            epoch=latest_home.epoch,
+                            ok=True,
+                            found=latest_home.found,
+                            msg_type=msg_type,
+                        )
+                    else:
+                        latest_target = TargetObs.from_dict(payload)
+                        self._last_vision_obs_recv_ts = recv_ts
+                        self.run_logger.write_ipc(
+                            "vision_obs_in",
+                            "received",
+                            direction="RX",
+                            req_id=latest_target.req_id,
+                            session_id=latest_target.session_id,
+                            epoch=latest_target.epoch,
+                            ok=True,
+                            found=latest_target.found,
+                            msg_type=msg_type,
+                        )
+                except Exception as exc:
+                    self.log_warn("vision", f"bad vision msg: {payload} ({exc})")
+                    self.run_logger.write_event(f"bad vision msg: {payload} ({exc})")
                     self.run_logger.write_ipc(
                         "vision_obs_in",
-                        "received",
+                        "bad_payload",
                         direction="RX",
-                        req_id=latest_home.req_id,
-                        session_id=latest_home.session_id,
-                        epoch=latest_home.epoch,
-                        ok=True,
-                        found=latest_home.found,
+                        ok=False,
+                        error=str(exc),
+                        payload=safe_dump(payload),
                         msg_type=msg_type,
                     )
-                else:
-                    latest_target = TargetObs.from_dict(payload)
-                    self._last_vision_obs_recv_ts = recv_ts
-                    self.run_logger.write_ipc(
-                        "vision_obs_in",
-                        "received",
-                        direction="RX",
-                        req_id=latest_target.req_id,
-                        session_id=latest_target.session_id,
-                        epoch=latest_target.epoch,
-                        ok=True,
-                        found=latest_target.found,
-                        msg_type=msg_type,
-                    )
-            except Exception as exc:
-                self.log_warn("vision", f"bad vision msg: {payload} ({exc})")
-                self.run_logger.write_event(f"bad vision msg: {payload} ({exc})")
-                self.run_logger.write_ipc(
-                    "vision_obs_in",
-                    "bad_payload",
-                    direction="RX",
-                    ok=False,
-                    error=str(exc),
-                    payload=safe_dump(payload),
-                    msg_type=msg_type,
-                )
-                self.run_logger.write_timeline("VISION_BAD", payload=safe_dump(payload), error=str(exc))
+                    self.run_logger.write_timeline("VISION_BAD", payload=safe_dump(payload), error=str(exc))
+        if latest_table is not None:
+            self.core.handle_table_obs(latest_table)
+            self.run_logger.write_jsonl("table_edge_obs", latest_table.to_dict())
         if latest_target is not None:
             self.core.handle_target_obs(latest_target)
             self.run_logger.write_jsonl("target_obs", latest_target.to_dict())
@@ -680,7 +737,10 @@ class OrchestratorService(BaseModule):
             "mode": car_cmd.mode,
             "kind": car_cmd.kind,
             "vx_norm": car_cmd.vx_norm,
+            "vy_norm": car_cmd.vy_norm,
             "wz_norm": car_cmd.wz_norm,
+            "hold_ms": car_cmd.hold_ms,
+            "brake": car_cmd.brake,
             "raw": car_cmd.raw_line.rstrip("\n"),
         }
         car_record.update({k: v for k, v in tx_meta.items() if v not in (None, "")})
@@ -712,6 +772,7 @@ class OrchestratorService(BaseModule):
         ack_snap = self._sender_snapshot(self.task_ack_sender)
         vision_req_snap = self._sender_snapshot(self.vision_req_sender)
         tts_snap = self._sender_snapshot(self.tts_sender)
+        uart_snap = self.uart.snapshot()
         summary = {
             "ts": now,
             "uptime_s": max(0.0, now - self._boot_ts),
@@ -738,10 +799,11 @@ class OrchestratorService(BaseModule):
                 "vision_req_out": vision_req_snap,
                 "tts_event_out": tts_snap,
             },
+            "uart": uart_snap,
             "ready": {
                 "task_cmd_in_listening": bool(task_snap.get("listening")),
                 "vision_obs_in_listening": bool(vision_snap.get("listening")),
-                "uart_ready": bool(self.cfg.serial.dry_run or getattr(self.uart, "_ser", None) is not None),
+                "uart_ready": bool(self.cfg.serial.dry_run or uart_snap.get("serial_open")),
                 "vision_req_async": bool(vision_req_snap.get("async", False)),
                 "tts_async": bool(tts_snap.get("async", False)),
             },

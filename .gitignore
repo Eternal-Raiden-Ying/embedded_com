@@ -22,6 +22,7 @@ dist/
 
 # Audio outputs
 *.wav
+*.bag
 Voice/tts_out/
 Voice/tts_cache/
 
@@ -47,6 +48,15 @@ VISTA/grasp_module/graspness_unofficial/
 # Environment
 .env
 *.env
+
+# Test data and extracts for offline edge test
+VISTA/Offline_Edge_Test/test_data/
+VISTA/Offline_Edge_Test/bag_extract/
+
+# Snapshots, PIDs, and runs for online edge detect
+VISTA/Online_Edge_Detect/snapshots/
+VISTA/Online_Edge_Detect/pids/
+VISTA/Online_Edge_Detect/runs/
 
 # IDE
 .vscode/

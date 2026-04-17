@@ -2,21 +2,81 @@
 # -*- coding: utf-8 -*-
 
 import time
+from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
 from ..config.schema import CarMotionConfig, ControlThresholds
-from ..ipc.protocol import CarState, HomeTagObs, TargetObs, TaskCmd, make_home_tag_req, make_tts_event, make_vision_idle, make_vision_req
+from ..control.types import DockingControlConfig
+from ..ipc.protocol import (
+    CarState,
+    HomeTagObs,
+    TableEdgeObs,
+    TargetObs,
+    TaskCmd,
+    make_home_tag_req,
+    make_tts_event,
+    make_vision_idle,
+    make_vision_req,
+)
 from .common import monotonic_ts
 from .context import RuntimeContext, State
 from .controller import MotionController, MotionDecision
 
 
+MOVING_STATES = {
+    State.SEARCH_TABLE,
+    State.COARSE_ALIGN,
+    State.CONTROLLED_APPROACH,
+    State.FINAL_LOCK,
+    State.DOCK_RETRY,
+    State.EDGE_SLIDE_SEARCH,
+    State.LEAVE_EDGE,
+    State.RELOCATE_TO_EDGE,
+    State.REACQUIRE_EDGE,
+    State.NEXT_TABLE,
+    State.RETURN_HOME,
+    State.AVOID_OBSTACLE,
+}
+
+
+TABLE_VISION_STATES = {
+    State.SEARCH_TABLE,
+    State.COARSE_ALIGN,
+    State.CONTROLLED_APPROACH,
+    State.FINAL_LOCK,
+    State.REACQUIRE_EDGE,
+}
+
+
+TARGET_VISION_STATES = {
+    State.SEARCH_TARGET_INIT,
+    State.EDGE_SLIDE_SEARCH,
+    State.TARGET_CONFIRM,
+    State.TARGET_LOCKED,
+    State.FREEZE_BASE,
+}
+
+
+@dataclass
+class ObstacleSignal:
+    active: bool
+    best_turn_dir: str = ""
+    distance_m: Optional[float] = None
+    source: str = ""
+
+
 class OrchestratorCore:
-    def __init__(self, cfg: ControlThresholds, car_cfg: CarMotionConfig, logger: Optional[Callable] = None):
+    def __init__(
+        self,
+        cfg: ControlThresholds,
+        car_cfg: CarMotionConfig,
+        docking_cfg: Optional[DockingControlConfig] = None,
+        logger: Optional[Callable] = None,
+    ):
         self.cfg = cfg
         self.ctx = RuntimeContext()
         self._logger = logger
-        self.controller = MotionController(cfg, car_cfg)
+        self.controller = MotionController(cfg, car_cfg, docking_cfg)
         self._last_req_mono = 0.0
         self._last_stop_mono = 0.0
 
@@ -30,11 +90,10 @@ class OrchestratorCore:
             self._last_stop_mono = monotonic_ts()
             self.ctx.active_session_id = cmd.session_id
             self.ctx.active_epoch = cmd.epoch
-            # 只有显式语音 STOP 才让视觉进入 IDLE/HOT_STANDBY。
-            self._stop_current_task("收到 STOP 命令", tts_text="已停止", interrupt_tts=True, send_vision_idle=True)
+            self._interrupt_to_idle("收到 STOP 命令", tts_text="已停止", interrupt_tts=True, send_vision_idle=True)
             return True, "STOP accepted"
         if self._last_stop_mono > 0 and (monotonic_ts() - self._last_stop_mono) < float(self.cfg.post_stop_ignore_s):
-            self._log("info", f"忽略 STOP 后短窗口内的后续命令: {cmd.intent}")
+            self._log("info", f"忽略 STOP 短窗内的后续命令: {cmd.intent}")
             return False, "ignored in post-stop guard"
         if cmd.confidence < self.cfg.cmd_confidence_th:
             self._log("warn", f"忽略低置信度 task_cmd: {cmd.confidence}")
@@ -48,35 +107,30 @@ class OrchestratorCore:
             return True, "RETURN accepted"
         return False, "unsupported intent"
 
+    def handle_table_obs(self, obs: TableEdgeObs):
+        self.ctx.last_table_obs = obs
+
     def handle_target_obs(self, obs: TargetObs):
         self.ctx.last_target_obs = obs
-        try:
-            if bool(obs.found):
-                self.ctx.last_target_found_wall_ts = float(obs.ts)
-        except Exception:
-            pass
 
     def handle_home_obs(self, obs: HomeTagObs):
         self.ctx.last_home_obs = obs
-        try:
-            if bool(obs.found):
-                self.ctx.last_home_found_wall_ts = float(obs.ts)
-        except Exception:
-            pass
 
     def handle_car_state(self, state: CarState):
         self.ctx.last_car_state = state
         self.ctx.last_car_state_mono = monotonic_ts()
         if state.estop and self.cfg.car_estop_to_stop:
             reason = f"底盘急停: {state.message or state.state}"
-            self._stop_current_task(reason, tts_text="底盘急停，已停止", interrupt_tts=True)
+            self.ctx.last_safety_reason = reason
+            self._interrupt_to_idle(reason, tts_text="底盘急停，已停止", interrupt_tts=True)
         elif state.fault and self.cfg.car_fault_to_fail:
             reason = f"底盘故障: {state.message or state.state}"
-            self._stop_current_task(reason, tts_text="底盘故障，请检查小车", interrupt_tts=True)
             self.ctx.last_fail_reason = reason
-        elif state.timeout and self.cfg.car_timeout_to_stop and self.ctx.state != State.STOP:
+            self._enter_error_recovery(reason, tts_text="底盘故障，请检查小车", interrupt_tts=True)
+        elif state.timeout and self.cfg.car_timeout_to_stop and self.ctx.state != State.IDLE:
             reason = f"底盘超时: {state.message or state.state}"
-            self._stop_current_task(reason, tts_text="底盘通信超时，已停止", interrupt_tts=True)
+            self.ctx.last_fail_reason = reason
+            self._enter_error_recovery(reason, tts_text="底盘通信超时，已停止", interrupt_tts=True)
 
     def handle_vision_req_send_result(self, sent: bool, payload: Dict, error: str = ""):
         if sent:
@@ -86,14 +140,15 @@ class OrchestratorCore:
         self.ctx.vision_req_fail_streak += 1
         if not self.cfg.vision_req_fail_to_stop:
             return
-        if self.ctx.state == State.STOP:
+        if self.ctx.state in {State.IDLE, State.ERROR_RECOVERY}:
             return
         if self.ctx.vision_req_fail_streak < int(self.cfg.vision_req_fail_threshold):
             return
         reason = f"vision_req_out 发送失败 {self.ctx.vision_req_fail_streak} 次"
         if error:
             reason += f": {error}"
-        self._stop_current_task(reason, tts_text="视觉链路异常，已停车", interrupt_tts=True)
+        self.ctx.last_fail_reason = reason
+        self._enter_error_recovery(reason, tts_text="视觉链路异常，已停车", interrupt_tts=True)
 
     def drain_vision_msgs(self) -> List[Dict]:
         out = list(self.ctx.pending_vision_msgs)
@@ -106,219 +161,112 @@ class OrchestratorCore:
         return out
 
     def tick(self) -> MotionDecision:
-        st = self.ctx.state
-        if st == State.STOP:
-            return self.controller.stop_cmd("STOP")
-        if st == State.AUTOEXPLORE:
-            return self._tick_auto_explore()
-        if st == State.AUTOSEARCH:
-            return self._tick_auto_search()
-        if st == State.SEARCH:
-            return self._tick_search()
-        if st == State.RETURN:
-            return self._tick_return()
-        return self.controller.stop_cmd("STOP")
+        safety_override = self._check_safety_interlock()
+        if safety_override is not None:
+            return safety_override
+        dispatch = {
+            State.IDLE: self._tick_idle,
+            State.SEARCH_TABLE: self._tick_search_table,
+            State.COARSE_ALIGN: self._tick_coarse_align,
+            State.CONTROLLED_APPROACH: self._tick_controlled_approach,
+            State.FINAL_LOCK: self._tick_final_lock,
+            State.DOCK_RETRY: self._tick_dock_retry,
+            State.AT_TABLE_EDGE: self._tick_at_table_edge,
+            State.SEARCH_TARGET_INIT: self._tick_search_target_init,
+            State.EDGE_SLIDE_SEARCH: self._tick_edge_slide_search,
+            State.TARGET_CONFIRM: self._tick_target_confirm,
+            State.TARGET_LOCKED: self._tick_target_locked,
+            State.FREEZE_BASE: self._tick_freeze_base,
+            State.LEAVE_EDGE: self._tick_leave_edge,
+            State.RELOCATE_TO_EDGE: self._tick_relocate_to_edge,
+            State.REACQUIRE_EDGE: self._tick_reacquire_edge,
+            State.NEXT_TABLE: self._tick_next_table,
+            State.AVOID_OBSTACLE: self._tick_avoid_obstacle,
+            State.RETURN_HOME: self._tick_return_home,
+            State.ERROR_RECOVERY: self._tick_error_recovery,
+            State.DONE: self._tick_done,
+        }
+        return dispatch.get(self.ctx.state, self._tick_idle)()
 
     def export_state_block(self) -> Dict:
         return {
             "ts": time.time(),
             "state": self.ctx.state.value,
+            "prev_state": self.ctx.prev_state.value if self.ctx.prev_state else "",
+            "resume_state": self.ctx.resume_state.value if self.ctx.resume_state else "",
             "task_intent": self.ctx.task_intent,
             "active_target": self.ctx.active_target,
             "session_id": self.ctx.active_session_id,
             "epoch": self.ctx.active_epoch,
             "req_id": self.ctx.active_req_id,
+            "vision_mode": self.ctx.active_vision_mode,
+            "current_edge_id": self.ctx.current_edge_id,
+            "edge_visit_index": self.ctx.edge_visit_index,
+            "edge_transition_count": self.ctx.edge_transition_count,
+            "table_cycle_count": self.ctx.table_cycle_count,
             "last_enter_reason": self.ctx.last_enter_reason,
             "last_fail_reason": self.ctx.last_fail_reason,
+            "last_safety_reason": self.ctx.last_safety_reason,
             "vision_req_fail_streak": self.ctx.vision_req_fail_streak,
-            "found_frames": self.ctx.found_frames,
-            "lost_frames": self.ctx.lost_frames,
-            "arrived_frames": self.ctx.arrived_frames,
-            "tag_found_frames": self.ctx.tag_found_frames,
+            "table_found_frames": self.ctx.table_found_frames,
+            "table_lost_frames": self.ctx.table_lost_frames,
+            "table_lock_frames": self.ctx.table_lock_frames,
+            "approach_aligned_frames": self.ctx.approach_aligned_frames,
+            "target_found_frames": self.ctx.target_found_frames,
+            "target_lost_frames": self.ctx.target_lost_frames,
+            "target_lock_frames": self.ctx.target_lock_frames,
             "tag_lost_frames": self.ctx.tag_lost_frames,
             "tag_arrived_frames": self.ctx.tag_arrived_frames,
+            "dock_retry_count": self.ctx.dock_retry_count,
+            "avoid_retry_count": self.ctx.avoid_retry_count,
+            "table_loss_elapsed_s": self._loss_elapsed(self.ctx.table_loss_since_mono),
+            "target_loss_elapsed_s": self._loss_elapsed(self.ctx.target_loss_since_mono),
+            "tag_loss_elapsed_s": self._loss_elapsed(self.ctx.tag_loss_since_mono),
         }
 
-    def _start_find_task(self, cmd: TaskCmd):
-        target = str(cmd.target or "").strip()
-        if not target:
-            self._log("warn", "FIND target 为空，忽略")
+    def _transition(self, new_state: State, reason: str):
+        old_state = self.ctx.state
+        if old_state == new_state:
+            self.ctx.last_enter_reason = reason
             return
-        self.ctx.clear_task_context()
-        self.ctx.task_intent = "FIND"
-        self.ctx.active_target = target
-        self.ctx.active_session_id = cmd.session_id
-        self.ctx.active_epoch = cmd.epoch
-        self.ctx.task_start_wall_ts = time.time()
-        self._enter_state(State.AUTOEXPLORE, f"开始寻找 {target}")
-        self._queue_vision_req(make_vision_req(target, session_id=cmd.session_id, epoch=cmd.epoch), force=True)
-        self._queue_tts(f"开始寻找{target}")
-
-    def _start_return_task(self, cmd: TaskCmd):
-        self.ctx.clear_task_context()
-        self.ctx.task_intent = "RETURN"
-        self.ctx.active_session_id = cmd.session_id
-        self.ctx.active_epoch = cmd.epoch
-        self.ctx.task_start_wall_ts = time.time()
-        self._enter_state(State.AUTOEXPLORE, "开始返回")
-        self._queue_vision_req(make_home_tag_req(session_id=cmd.session_id, epoch=cmd.epoch), force=True)
-        self._queue_tts("开始返回")
-
-    def _tick_auto_explore(self) -> MotionDecision:
-        self._maybe_resend_req(self._active_req_payload())
-        if self.ctx.task_intent == "RETURN":
-            obs = self._fresh_home_obs()
-            if obs is not None and obs.found:
-                self.ctx.tag_found_frames += 1
-                if self.ctx.tag_found_frames >= self.cfg.tag_found_frames_to_track:
-                    self._enter_state(State.RETURN, "已发现回家标记")
-                    self._queue_tts("已发现回家标记")
-                    return self.controller.return_cmd(obs)
-            else:
-                self.ctx.tag_found_frames = 0
-        else:
-            obs = self._fresh_target_obs()
-            if obs is not None and obs.found:
-                self.ctx.found_frames += 1
-                if self.ctx.found_frames >= self.cfg.found_frames_to_approach:
-                    self._enter_state(State.SEARCH, "已发现目标")
-                    self._queue_tts("已发现目标")
-                    return self.controller.search_cmd(obs)
-            else:
-                self.ctx.found_frames = 0
-        if self._task_elapsed() >= self._task_timeout_s():
-            self.ctx.last_fail_reason = "搜索超时" if self.ctx.task_intent != "RETURN" else "返回搜索超时"
-            self._stop_current_task(self.ctx.last_fail_reason, tts_text="搜索超时，已停止", interrupt_tts=True)
-            return self.controller.stop_cmd("STOP")
-        return self.controller.auto_explore_cmd()
-
-    def _tick_auto_search(self) -> MotionDecision:
-        self._maybe_resend_req(self._active_req_payload())
-        if self.ctx.task_intent == "RETURN":
-            obs = self._fresh_home_obs()
-            if obs is not None and obs.found:
-                self.ctx.tag_found_frames += 1
-                if self.ctx.tag_found_frames >= self.cfg.tag_found_frames_to_track:
-                    self._enter_state(State.RETURN, "重新发现回家标记")
-                    self._queue_tts("已重新发现回家标记")
-                    return self.controller.return_cmd(obs)
-            else:
-                self.ctx.tag_found_frames = 0
-        else:
-            obs = self._fresh_target_obs()
-            if obs is not None and obs.found:
-                self.ctx.found_frames += 1
-                if self.ctx.found_frames >= self.cfg.found_frames_to_approach:
-                    self._enter_state(State.SEARCH, "重新发现目标")
-                    self._queue_tts("已重新发现目标")
-                    return self.controller.search_cmd(obs)
-            else:
-                self.ctx.found_frames = 0
-        # 自动搜索阶段的 timeout 应该从进入 AUTOSEARCH 那一刻重新计时，
-        # 而不是沿用整轮 FIND 的 task_start_wall_ts。
-        if self._state_elapsed() >= self._task_timeout_s():
-            self.ctx.last_fail_reason = "自动搜索超时"
-            self._stop_current_task(self.ctx.last_fail_reason, tts_text="搜索超时，已停止", interrupt_tts=True)
-            return self.controller.stop_cmd("STOP")
-        return self.controller.auto_search_cmd()
-
-    def _tick_search(self) -> MotionDecision:
-        self._maybe_resend_req(self._active_req_payload())
-        obs = self._fresh_target_obs()
-        now = time.time()
-        if obs is None or not obs.found:
-            self.ctx.lost_frames += 1
-            lost_hold_ok = True
-            if self.ctx.last_target_found_wall_ts > 0:
-                lost_hold_ok = (now - self.ctx.last_target_found_wall_ts) >= float(self.cfg.search_lost_hold_s)
-            dwell_ok = self._state_elapsed() >= float(self.cfg.search_min_dwell_s)
-            if self.ctx.lost_frames >= self.cfg.lost_frames_to_search and lost_hold_ok and dwell_ok:
-                self._enter_state(State.AUTOSEARCH, "目标丢失，自动搜索")
-                self._queue_tts("目标丢失，自动搜索")
-                self._queue_vision_req(self._active_req_payload(), force=True)
-                return self.controller.auto_search_cmd()
-            # 短时抖动/短时丢帧：保持 SEARCH，但先停住，不要立刻切到 AUTOSEARCH。
-            return self.controller.stop_cmd("SEARCH_HOLD")
-        self.ctx.lost_frames = 0
-        self.ctx.last_target_found_wall_ts = now
-        # 测试阶段：接近目标后不再自动 STOP，不再自动让视觉进入热待机。
-        self.ctx.arrived_frames = 0
-        return self.controller.search_cmd(obs)
-
-    def _tick_return(self) -> MotionDecision:
-        self._maybe_resend_req(self._active_req_payload())
-        obs = self._fresh_home_obs()
-        now = time.time()
-        if obs is None or not obs.found:
-            self.ctx.tag_lost_frames += 1
-            lost_hold_ok = True
-            if self.ctx.last_home_found_wall_ts > 0:
-                lost_hold_ok = (now - self.ctx.last_home_found_wall_ts) >= float(self.cfg.return_lost_hold_s)
-            dwell_ok = self._state_elapsed() >= float(self.cfg.search_min_dwell_s)
-            if self.ctx.tag_lost_frames >= self.cfg.tag_lost_frames_to_search and lost_hold_ok and dwell_ok:
-                self._enter_state(State.AUTOSEARCH, "回家目标丢失，自动搜索")
-                self._queue_tts("回家目标丢失，自动搜索")
-                self._queue_vision_req(self._active_req_payload(), force=True)
-                return self.controller.auto_search_cmd()
-            return self.controller.stop_cmd("RETURN_HOLD")
-        self.ctx.tag_lost_frames = 0
-        self.ctx.last_home_found_wall_ts = now
-        # 测试阶段：RETURN 接近目标后也不再自动 STOP，不再自动让视觉进入热待机。
-        self.ctx.tag_arrived_frames = 0
-        return self.controller.return_cmd(obs)
-
-    def _active_req_payload(self) -> Dict:
-        if self.ctx.task_intent == "RETURN":
-            return make_home_tag_req(session_id=self.ctx.active_session_id, epoch=self.ctx.active_epoch)
-        return make_vision_req(self.ctx.active_target or "", session_id=self.ctx.active_session_id, epoch=self.ctx.active_epoch)
-
-    def _fresh_target_obs(self) -> Optional[TargetObs]:
-        obs = self.ctx.last_target_obs
-        if obs is None or time.time() - obs.ts > self.cfg.target_obs_max_age_s:
-            return None
-        if self.ctx.task_start_wall_ts > 0 and obs.ts < self.ctx.task_start_wall_ts:
-            return None
-        if self.ctx.active_target and obs.target and obs.target != self.ctx.active_target:
-            return None
-        if obs.session_id and self.ctx.active_session_id and obs.session_id != self.ctx.active_session_id:
-            return None
-        return obs
-
-    def _fresh_home_obs(self) -> Optional[HomeTagObs]:
-        obs = self.ctx.last_home_obs
-        if obs is None or time.time() - obs.ts > self.cfg.home_obs_max_age_s:
-            return None
-        if self.ctx.task_start_wall_ts > 0 and obs.ts < self.ctx.task_start_wall_ts:
-            return None
-        if obs.session_id and self.ctx.active_session_id and obs.session_id != self.ctx.active_session_id:
-            return None
-        return obs
-
-    def _task_elapsed(self) -> float:
-        if self.ctx.task_start_wall_ts <= 0:
-            return 0.0
-        return time.time() - self.ctx.task_start_wall_ts
-
-    def _task_timeout_s(self) -> float:
-        return float(self.cfg.return_search_timeout_s if self.ctx.task_intent == "RETURN" else self.cfg.search_timeout_s)
-
-    def _state_elapsed(self) -> float:
-        return monotonic_ts() - self.ctx.state_enter_mono
-
-    def _enter_state(self, new_state: State, reason: str):
-        self._log("info", f"状态切换: {self.ctx.state.value} -> {new_state.value} ({reason})")
+        self._log("info", f"状态切换 {old_state.value} -> {new_state.value} ({reason})")
+        self.ctx.prev_state = old_state
         self.ctx.state = new_state
         self.ctx.state_enter_mono = monotonic_ts()
         self.ctx.state_enter_wall_ts = time.time()
         self.ctx.last_enter_reason = reason
         self.ctx.clear_motion_counters()
+        self._on_enter_state(new_state)
 
-    def _stop_current_task(self, reason: str, tts_text: Optional[str] = None, interrupt_tts: bool = False, send_vision_idle: bool = False):
-        # 只有显式语音 STOP 才允许把视觉打到 IDLE/HOT_STANDBY。
+    def _on_enter_state(self, state: State):
+        if state == State.IDLE:
+            self.ctx.clear_task_context()
+            self.ctx.active_vision_mode = ""
+            self.ctx.resume_state = None
+            return
+        if state in TABLE_VISION_STATES:
+            self.ctx.active_vision_mode = "TABLE_EDGE_SEARCH"
+            self._queue_vision_req(self._active_req_payload(), force=True)
+            return
+        if state in TARGET_VISION_STATES or state == State.AT_TABLE_EDGE:
+            self.ctx.active_vision_mode = "EDGE_TARGET_SEARCH"
+            self._queue_vision_req(self._active_req_payload(), force=True)
+            return
+        if state in {State.REACQUIRE_EDGE, State.RETURN_HOME}:
+            self.ctx.active_vision_mode = "TABLE_EDGE_SEARCH" if state == State.REACQUIRE_EDGE else "HOME_TAG_SEARCH"
+            self._queue_vision_req(self._active_req_payload(), force=True)
+
+    def _interrupt_to_idle(self, reason: str, tts_text: Optional[str] = None, interrupt_tts: bool = False, send_vision_idle: bool = False):
         if send_vision_idle:
             self._queue_vision_req(make_vision_idle(session_id=self.ctx.active_session_id, epoch=self.ctx.active_epoch), force=True)
         self.ctx.clear_task_context()
-        self._enter_state(State.STOP, reason)
+        self._transition(State.IDLE, reason)
+        if tts_text:
+            self._queue_tts(tts_text, interrupt=interrupt_tts)
+
+    def _enter_error_recovery(self, reason: str, tts_text: Optional[str] = None, interrupt_tts: bool = False):
+        self.ctx.resume_state = None
+        self._transition(State.ERROR_RECOVERY, reason)
         if tts_text:
             self._queue_tts(tts_text, interrupt=interrupt_tts)
 
@@ -342,3 +290,435 @@ class OrchestratorCore:
             self.ctx.pending_tts_msgs.append(make_tts_event(text, interrupt=interrupt))
         except Exception:
             pass
+
+    def _start_find_task(self, cmd: TaskCmd):
+        target = str(cmd.target or "").strip()
+        if not target:
+            self._log("warn", "FIND target 为空，忽略")
+            return
+        self.ctx.clear_task_context()
+        self.ctx.task_intent = "FIND"
+        self.ctx.active_target = target
+        self.ctx.active_session_id = cmd.session_id
+        self.ctx.active_epoch = cmd.epoch
+        self.ctx.task_start_wall_ts = time.time()
+        self._transition(State.SEARCH_TABLE, f"开始桌边任务，目标 {target}")
+        self._queue_tts(f"开始寻找 {target}")
+
+    def _start_return_task(self, cmd: TaskCmd):
+        self.ctx.clear_task_context()
+        self.ctx.task_intent = "RETURN"
+        self.ctx.active_session_id = cmd.session_id
+        self.ctx.active_epoch = cmd.epoch
+        self.ctx.task_start_wall_ts = time.time()
+        self._transition(State.RETURN_HOME, "开始返航")
+        self._queue_tts("开始返航")
+
+    def _tick_idle(self) -> MotionDecision:
+        return self.controller.stop_cmd("IDLE")
+
+    def _tick_search_table(self) -> MotionDecision:
+        self._maybe_resend_req(self._active_req_payload())
+        obs = self._fresh_table_obs()
+        if self._table_visible(obs):
+            self.ctx.table_found_frames += 1
+            if self.ctx.table_found_frames >= int(self.cfg.table_found_frames_to_approach):
+                self._transition(State.COARSE_ALIGN, "稳定发现桌边")
+                return self.controller.coarse_align_cmd(obs)
+        else:
+            self.ctx.table_found_frames = 0
+        if self._state_elapsed() >= float(self.cfg.search_table_timeout_s):
+            self.ctx.last_fail_reason = "搜索桌边超时"
+            self._transition(State.NEXT_TABLE, self.ctx.last_fail_reason)
+            return self.controller.next_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+        return self.controller.search_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+
+    def _tick_coarse_align(self) -> MotionDecision:
+        obs = self._fresh_table_obs()
+        if not self._table_visible(obs):
+            return self._handle_table_loss("桌边丢失，回到搜索", State.SEARCH_TABLE, "COARSE_ALIGN_HOLD")
+        self._reset_table_loss()
+        if self._coarse_aligned(obs):
+            self.ctx.approach_aligned_frames += 1
+            if self.ctx.approach_aligned_frames >= int(self.cfg.coarse_align_frames_to_advance):
+                self._transition(State.CONTROLLED_APPROACH, "完成粗对齐，开始受控接近")
+                return self.controller.controlled_approach_cmd(obs)
+        else:
+            self.ctx.approach_aligned_frames = 0
+        if self._state_elapsed() >= float(self.cfg.approach_timeout_s):
+            return self._enter_dock_retry_or_next("粗对齐超时")
+        self._maybe_resend_req(self._active_req_payload())
+        return self.controller.coarse_align_cmd(obs)
+
+    def _tick_controlled_approach(self) -> MotionDecision:
+        obs = self._fresh_table_obs()
+        if not self._table_visible(obs):
+            return self._handle_table_loss("接近时桌边丢失，回到搜索", State.SEARCH_TABLE, "CONTROLLED_APPROACH_HOLD")
+        self._reset_table_loss()
+        if self._edge_ready(obs):
+            self._transition(State.FINAL_LOCK, "进入最终锁边")
+            return self.controller.final_lock_cmd(obs)
+        if self._state_elapsed() >= float(self.cfg.approach_timeout_s):
+            return self._enter_dock_retry_or_next("受控接近超时")
+        self._maybe_resend_req(self._active_req_payload())
+        return self.controller.controlled_approach_cmd(obs)
+
+    def _tick_final_lock(self) -> MotionDecision:
+        obs = self._fresh_table_obs()
+        if not self._table_visible(obs):
+            return self._handle_table_loss("最终锁边时桌边丢失，回到搜索", State.SEARCH_TABLE, "FINAL_LOCK_HOLD")
+        self._reset_table_loss()
+        if self._final_lock_ready(obs):
+            self.ctx.table_lock_frames += 1
+            if self.ctx.table_lock_frames >= int(self.cfg.final_lock_frames_to_arrive):
+                self.ctx.dock_retry_count = 0
+                self._transition(State.AT_TABLE_EDGE, "已完成桌边停靠")
+                self._queue_tts("已完成桌边停靠")
+                return self.controller.stop_cmd("AT_TABLE_EDGE")
+        else:
+            self.ctx.table_lock_frames = 0
+        if self._state_elapsed() >= float(self.cfg.approach_timeout_s):
+            return self._enter_dock_retry_or_next("最终锁边超时")
+        self._maybe_resend_req(self._active_req_payload())
+        return self.controller.final_lock_cmd(obs)
+
+    def _tick_dock_retry(self) -> MotionDecision:
+        if self._state_elapsed() < float(self.cfg.dock_retry_backoff_s):
+            return self.controller.leave_edge_cmd()
+        self._transition(State.SEARCH_TABLE, "停靠重试完成，重新搜索桌边")
+        return self.controller.search_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+
+    def _tick_at_table_edge(self) -> MotionDecision:
+        if self._state_elapsed() < float(self.cfg.edge_settle_s):
+            return self.controller.stop_cmd("AT_TABLE_EDGE")
+        self._transition(State.SEARCH_TARGET_INIT, "桌边姿态稳定，初始化沿边搜索")
+        return self.controller.stop_cmd("AT_TABLE_EDGE")
+
+    def _tick_search_target_init(self) -> MotionDecision:
+        self._maybe_resend_req(self._active_req_payload())
+        if self._state_elapsed() < float(self.cfg.search_target_init_hold_s):
+            return self.controller.stop_cmd("SEARCH_TARGET_INIT")
+        self._transition(State.EDGE_SLIDE_SEARCH, "开始沿桌边搜索目标")
+        self._queue_tts("开始沿桌边搜索目标")
+        return self.controller.stop_cmd("SEARCH_TARGET_INIT")
+
+    def _tick_edge_slide_search(self) -> MotionDecision:
+        self._maybe_resend_req(self._active_req_payload())
+        obs = self._fresh_target_obs()
+        if obs is not None and obs.found and self._target_matches_active(obs):
+            self._transition(State.TARGET_CONFIRM, "检测到目标候选，开始确认")
+            return self.controller.stop_cmd("TARGET_CONFIRM")
+        if self._state_elapsed() >= float(self.cfg.target_search_timeout_s):
+            self.ctx.last_fail_reason = "当前桌边未找到目标"
+            if self._can_relocate_edge():
+                self.ctx.advance_edge()
+                self._transition(State.LEAVE_EDGE, f"{self.ctx.last_fail_reason}，切换到边 {self.ctx.current_edge_id}")
+                self._queue_tts("当前边未找到目标，准备换边")
+                return self.controller.leave_edge_cmd()
+            self._transition(State.NEXT_TABLE, f"{self.ctx.last_fail_reason}，准备切换下一张桌")
+            self._queue_tts("当前桌位未找到目标，尝试下一张桌")
+            return self.controller.next_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+        if self._obs_has_motion(obs):
+            return self.controller.target_track_cmd(obs)
+        direction = self._edge_slide_direction()
+        return self.controller.edge_slide_search_cmd(self._segment_elapsed(self.cfg.edge_slide_segment_s), direction_sign=direction)
+
+    def _tick_target_confirm(self) -> MotionDecision:
+        self._maybe_resend_req(self._active_req_payload())
+        obs = self._fresh_target_obs()
+        if obs is not None and obs.found and self._target_matches_active(obs):
+            self.ctx.target_found_frames += 1
+            self.ctx.target_lost_frames = 0
+            if self.ctx.target_found_frames >= int(self.cfg.target_found_frames_to_confirm):
+                self._transition(State.TARGET_LOCKED, "目标确认完成")
+                return self.controller.stop_cmd("TARGET_LOCKED")
+            return self.controller.stop_cmd("TARGET_CONFIRM")
+        self.ctx.target_lost_frames += 1
+        if self.ctx.target_lost_frames >= int(self.cfg.target_confirm_lost_frames):
+            self._transition(State.EDGE_SLIDE_SEARCH, "目标确认失败，恢复沿边搜索")
+        return self.controller.stop_cmd("TARGET_CONFIRM")
+
+    def _tick_target_locked(self) -> MotionDecision:
+        self._maybe_resend_req(self._active_req_payload())
+        obs = self._fresh_target_obs()
+        if obs is None or not obs.found or not self._target_matches_active(obs):
+            self._transition(State.EDGE_SLIDE_SEARCH, "目标锁定丢失，恢复沿边搜索")
+            return self.controller.stop_cmd("EDGE_SLIDE_SEARCH")
+        self.ctx.target_lock_frames += 1
+        if self._state_elapsed() >= float(self.cfg.target_lock_settle_s):
+            self._transition(State.FREEZE_BASE, "目标稳定，冻结底盘")
+            return self.controller.stop_cmd("FREEZE_BASE")
+        return self.controller.stop_cmd("TARGET_LOCKED")
+
+    def _tick_freeze_base(self) -> MotionDecision:
+        if self._state_elapsed() < float(self.cfg.freeze_settle_s):
+            return self.controller.stop_cmd("FREEZE_BASE")
+        self._transition(State.DONE, f"已在桌边锁定 {self.ctx.active_target}")
+        self._queue_tts(f"已在桌边锁定 {self.ctx.active_target}")
+        return self.controller.stop_cmd("DONE")
+
+    def _tick_leave_edge(self) -> MotionDecision:
+        if self._state_elapsed() < float(self.cfg.leave_edge_backoff_s):
+            return self.controller.leave_edge_cmd()
+        self._transition(State.RELOCATE_TO_EDGE, f"准备重定位到边 {self.ctx.current_edge_id}")
+        return self.controller.relocate_cmd(turn_sign=self.ctx.relocate_turn_sign)
+
+    def _tick_relocate_to_edge(self) -> MotionDecision:
+        if self._state_elapsed() < float(self.cfg.relocate_turn_s):
+            return self.controller.relocate_cmd(turn_sign=self.ctx.relocate_turn_sign)
+        self._transition(State.REACQUIRE_EDGE, f"开始重捕获边 {self.ctx.current_edge_id}")
+        return self.controller.search_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+
+    def _tick_reacquire_edge(self) -> MotionDecision:
+        self._maybe_resend_req(self._active_req_payload())
+        obs = self._fresh_table_obs()
+        if self._table_visible(obs):
+            self.ctx.table_found_frames += 1
+            if self.ctx.table_found_frames >= int(self.cfg.table_found_frames_to_approach):
+                self._transition(State.COARSE_ALIGN, f"已重捕获边 {self.ctx.current_edge_id}")
+                return self.controller.coarse_align_cmd(obs)
+        else:
+            self.ctx.table_found_frames = 0
+        if self._state_elapsed() >= float(self.cfg.reacquire_timeout_s):
+            self.ctx.last_fail_reason = f"重捕获边 {self.ctx.current_edge_id} 超时"
+            self._transition(State.NEXT_TABLE, self.ctx.last_fail_reason)
+            return self.controller.next_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+        return self.controller.search_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+
+    def _tick_next_table(self) -> MotionDecision:
+        if self._state_elapsed() >= float(self.cfg.next_table_dwell_s):
+            self.ctx.table_cycle_count += 1
+            self.ctx.reset_edge_plan()
+            self._transition(State.SEARCH_TABLE, "切换到下一张桌后重新搜索")
+            return self.controller.search_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+        return self.controller.next_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+
+    def _tick_avoid_obstacle(self) -> MotionDecision:
+        obstacle = self._extract_obstacle_signal()
+        if self._state_elapsed() >= float(self.cfg.avoid_timeout_s):
+            self.ctx.last_fail_reason = "避障超时"
+            self._enter_error_recovery(self.ctx.last_fail_reason, tts_text="避障失败，已停止", interrupt_tts=True)
+            return self.controller.stop_cmd("ERROR_RECOVERY", brake=True)
+        if self.ctx.avoid_retry_count > int(self.cfg.avoid_retry_limit):
+            self.ctx.last_fail_reason = "连续避障失败次数过多"
+            self._enter_error_recovery(self.ctx.last_fail_reason, tts_text="连续避障失败，已停止", interrupt_tts=True)
+            return self.controller.stop_cmd("ERROR_RECOVERY", brake=True)
+        if obstacle.active:
+            self.ctx.avoid_clear_frames = 0
+            return self.controller.avoid_cmd(obstacle.best_turn_dir)
+        self.ctx.avoid_clear_frames += 1
+        if self.ctx.avoid_clear_frames >= int(self.cfg.avoid_clear_frames_to_resume):
+            resume_state = self.ctx.resume_state or State.SEARCH_TABLE
+            self._transition(resume_state, "障碍清除，恢复主任务")
+        return self.controller.stop_cmd("AVOID_OBSTACLE")
+
+    def _tick_return_home(self) -> MotionDecision:
+        self._maybe_resend_req(self._active_req_payload())
+        obs = self._fresh_home_obs()
+        if obs is None or not obs.found:
+            self.ctx.tag_lost_frames += 1
+            self._start_loss_timer("tag_loss_since_mono")
+            lost_frames_ok = self.ctx.tag_lost_frames >= int(self.cfg.tag_lost_frames_to_search)
+            lost_hold_ok = self._loss_elapsed(self.ctx.tag_loss_since_mono) >= float(self.cfg.return_lost_hold_s)
+            min_dwell_ok = self._state_elapsed() >= float(self.cfg.return_min_dwell_s)
+            if lost_frames_ok and lost_hold_ok and min_dwell_ok:
+                return self.controller.search_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+            return self.controller.return_hold_cmd()
+        self.ctx.tag_lost_frames = 0
+        self.ctx.tag_loss_since_mono = 0.0
+        if obs.distance_m is not None and float(obs.distance_m) <= float(self.cfg.return_done_distance_m):
+            self.ctx.tag_arrived_frames += 1
+            if self.ctx.tag_arrived_frames >= int(self.cfg.tag_arrived_frames_to_stop):
+                self._transition(State.DONE, "已返回起点")
+                self._queue_tts("已返回起点")
+                return self.controller.stop_cmd("DONE")
+        else:
+            self.ctx.tag_arrived_frames = 0
+        return self.controller.return_cmd(obs)
+
+    def _tick_error_recovery(self) -> MotionDecision:
+        if self._state_elapsed() >= float(self.cfg.error_recovery_hold_s):
+            self._queue_vision_req(make_vision_idle(session_id=self.ctx.active_session_id, epoch=self.ctx.active_epoch), force=True)
+            self._transition(State.IDLE, "错误恢复完成，回到空闲")
+        return self.controller.stop_cmd("ERROR_RECOVERY", brake=True)
+
+    def _tick_done(self) -> MotionDecision:
+        if self._state_elapsed() >= float(self.cfg.done_hold_s):
+            self._queue_vision_req(make_vision_idle(session_id=self.ctx.active_session_id, epoch=self.ctx.active_epoch), force=True)
+            self._transition(State.IDLE, "任务完成，回到空闲")
+        return self.controller.stop_cmd("DONE")
+
+    def _active_req_payload(self) -> Dict:
+        if self.ctx.task_intent == "RETURN":
+            return make_home_tag_req(session_id=self.ctx.active_session_id, epoch=self.ctx.active_epoch, stage=self.ctx.state.value)
+        mode = "TABLE_EDGE_SEARCH" if self.ctx.state in TABLE_VISION_STATES else "EDGE_TARGET_SEARCH"
+        return make_vision_req(
+            self.ctx.active_target or "",
+            session_id=self.ctx.active_session_id,
+            epoch=self.ctx.active_epoch,
+            mode=mode,
+            stage=self.ctx.state.value,
+            current_edge_id=self.ctx.current_edge_id,
+            need_depth=True,
+        )
+
+    def _fresh_table_obs(self) -> Optional[TableEdgeObs]:
+        obs = self.ctx.last_table_obs
+        if obs is None or time.time() - obs.ts > self.cfg.table_obs_max_age_s:
+            return None
+        if self.ctx.task_start_wall_ts > 0 and obs.ts < self.ctx.task_start_wall_ts:
+            return None
+        if obs.session_id and self.ctx.active_session_id and obs.session_id != self.ctx.active_session_id:
+            return None
+        return obs
+
+    def _fresh_target_obs(self) -> Optional[TargetObs]:
+        obs = self.ctx.last_target_obs
+        if obs is None or time.time() - obs.ts > self.cfg.target_obs_max_age_s:
+            return None
+        if self.ctx.task_start_wall_ts > 0 and obs.ts < self.ctx.task_start_wall_ts:
+            return None
+        if obs.session_id and self.ctx.active_session_id and obs.session_id != self.ctx.active_session_id:
+            return None
+        return obs
+
+    def _fresh_home_obs(self) -> Optional[HomeTagObs]:
+        obs = self.ctx.last_home_obs
+        if obs is None or time.time() - obs.ts > self.cfg.home_obs_max_age_s:
+            return None
+        if self.ctx.task_start_wall_ts > 0 and obs.ts < self.ctx.task_start_wall_ts:
+            return None
+        if obs.session_id and self.ctx.active_session_id and obs.session_id != self.ctx.active_session_id:
+            return None
+        return obs
+
+    def _state_elapsed(self) -> float:
+        return monotonic_ts() - self.ctx.state_enter_mono
+
+    def _start_loss_timer(self, attr_name: str):
+        if getattr(self.ctx, attr_name, 0.0) <= 0.0:
+            setattr(self.ctx, attr_name, monotonic_ts())
+
+    def _loss_elapsed(self, started_mono: float) -> float:
+        if started_mono <= 0.0:
+            return 0.0
+        return max(0.0, monotonic_ts() - started_mono)
+
+    def _reset_table_loss(self):
+        self.ctx.table_lost_frames = 0
+        self.ctx.table_loss_since_mono = 0.0
+
+    def _table_visible(self, obs: Optional[TableEdgeObs]) -> bool:
+        return bool(obs is not None and obs.table_found)
+
+    def _coarse_aligned(self, obs: Optional[TableEdgeObs]) -> bool:
+        if obs is None:
+            return False
+        if obs.yaw_err_rad is not None:
+            return abs(float(obs.yaw_err_rad)) <= float(self.cfg.coarse_align_done_rad)
+        if obs.table_cx_norm is not None:
+            return abs(float(obs.table_cx_norm)) <= 0.12
+        return False
+
+    def _edge_ready(self, obs: Optional[TableEdgeObs]) -> bool:
+        if obs is None:
+            return False
+        if obs.edge_ready is not None:
+            return bool(obs.edge_ready)
+        if obs.dist_err_m is not None:
+            return abs(float(obs.dist_err_m)) <= float(self.cfg.final_lock_dist_tol_m) * 2.0
+        return bool(obs.edge_found)
+
+    def _final_lock_ready(self, obs: Optional[TableEdgeObs]) -> bool:
+        if obs is None or not obs.edge_found:
+            return False
+        yaw_ok = obs.yaw_err_rad is not None and abs(float(obs.yaw_err_rad)) <= float(self.cfg.final_lock_yaw_tol_rad)
+        dist_ok = obs.dist_err_m is not None and abs(float(obs.dist_err_m)) <= float(self.cfg.final_lock_dist_tol_m)
+        lat_ok = obs.lateral_err_m is None or abs(float(obs.lateral_err_m)) <= float(self.cfg.final_lock_lateral_tol_m)
+        return bool(yaw_ok and dist_ok and lat_ok)
+
+    def _target_matches_active(self, obs: TargetObs) -> bool:
+        if not self.ctx.active_target or not obs.target:
+            return True
+        return str(obs.target).strip() == str(self.ctx.active_target).strip()
+
+    def _obs_has_motion(self, obs: Optional[TargetObs]) -> bool:
+        if obs is None:
+            return False
+        return obs.vx_norm is not None or obs.vy_norm is not None or obs.wz_norm is not None
+
+    def _edge_slide_direction(self) -> int:
+        segment_s = max(0.2, float(self.cfg.edge_slide_segment_s))
+        segment_index = int(self._state_elapsed() / segment_s)
+        return self.ctx.slide_direction_sign if segment_index % 2 == 0 else -self.ctx.slide_direction_sign
+
+    def _segment_elapsed(self, segment_s: float) -> float:
+        segment_s = max(0.1, float(segment_s))
+        return self._state_elapsed() % segment_s
+
+    def _can_relocate_edge(self) -> bool:
+        if not bool(self.cfg.edge_relocate_enabled):
+            return False
+        if self.ctx.edge_transition_count >= int(self.cfg.max_edge_transitions_per_task):
+            return False
+        return self.ctx.edge_visit_index + 1 < len(self.ctx.edge_visit_order)
+
+    def _handle_table_loss(self, reason: str, fallback_state: State, hold_mode: str) -> MotionDecision:
+        self.ctx.table_lost_frames += 1
+        self._start_loss_timer("table_loss_since_mono")
+        lost_frames_ok = self.ctx.table_lost_frames >= int(self.cfg.table_lost_frames_to_reacquire)
+        lost_hold_ok = self._loss_elapsed(self.ctx.table_loss_since_mono) >= float(self.cfg.table_loss_hold_s)
+        min_dwell_ok = self._state_elapsed() >= float(self.cfg.approach_min_dwell_s)
+        if lost_frames_ok and lost_hold_ok and min_dwell_ok:
+            self._transition(fallback_state, reason)
+            return self.controller.search_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+        return self.controller.stop_cmd(hold_mode)
+
+    def _enter_dock_retry_or_next(self, reason: str) -> MotionDecision:
+        self.ctx.last_fail_reason = reason
+        if self.ctx.dock_retry_count < int(self.cfg.dock_retry_limit):
+            self.ctx.dock_retry_count += 1
+            self._transition(State.DOCK_RETRY, f"{reason}，准备重试第 {self.ctx.dock_retry_count} 次")
+            return self.controller.leave_edge_cmd()
+        self._transition(State.NEXT_TABLE, reason)
+        return self.controller.next_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+
+    def _extract_obstacle_signal(self) -> ObstacleSignal:
+        table_obs = self._fresh_table_obs()
+        if table_obs is not None and bool(table_obs.obstacle_flag):
+            return ObstacleSignal(
+                active=True,
+                best_turn_dir=str(table_obs.best_turn_dir or ""),
+                distance_m=table_obs.obstacle_distance_m,
+                source="table_edge_obs",
+            )
+        target_obs = self._fresh_target_obs()
+        if target_obs is not None and bool(target_obs.obstacle_flag):
+            return ObstacleSignal(
+                active=True,
+                best_turn_dir=str(target_obs.best_turn_dir or ""),
+                distance_m=target_obs.obstacle_distance_m,
+                source="target_obs",
+            )
+        home_obs = self._fresh_home_obs()
+        if home_obs is not None and bool(home_obs.obstacle_flag):
+            return ObstacleSignal(
+                active=True,
+                best_turn_dir=str(home_obs.best_turn_dir or ""),
+                distance_m=home_obs.obstacle_distance_m,
+                source="home_tag_obs",
+            )
+        return ObstacleSignal(active=False)
+
+    def _check_safety_interlock(self) -> Optional[MotionDecision]:
+        obstacle = self._extract_obstacle_signal()
+        if self.ctx.state == State.AVOID_OBSTACLE:
+            return None
+        if self.ctx.state in MOVING_STATES and obstacle.active:
+            self.ctx.last_safety_reason = f"检测到障碍({obstacle.source})"
+            self.ctx.resume_state = self.ctx.state
+            self.ctx.avoid_retry_count += 1
+            self._transition(State.AVOID_OBSTACLE, self.ctx.last_safety_reason)
+            self._queue_tts("前方有障碍，开始避障")
+            return self.controller.stop_cmd("AVOID_OBSTACLE", brake=True)
+        return None
