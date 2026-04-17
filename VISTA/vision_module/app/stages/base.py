@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+from abc import ABC
+from dataclasses import dataclass, field
+import time
+from typing import Any, Dict, Optional
+
+from ...ipc.protocol import VisionObs, VisionReq
+
+
+@dataclass
+class StageContext:
+    """Mutable session-scoped state shared across stage plans."""
+
+    current_stage: str = "IDLE"
+    current_mode: str = "IDLE"
+    session_id: Optional[str] = None
+    req_id: Optional[str] = None
+    epoch: int = 0
+    target_name: Optional[str] = None
+    interaction_id: Optional[str] = None
+    pending_result: Optional[Dict[str, Any]] = None
+    stage_state: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class StageTickInput:
+    """Read-only inputs available to a stage on each control loop tick."""
+
+    ts: float
+    generation: int = 0
+    results: Dict[str, Any] = field(default_factory=dict)
+    signals: Dict[str, Any] = field(default_factory=dict)
+    snapshot: Dict[str, Any] = field(default_factory=dict)
+
+    def result(self, key: str, default=None):
+        return (self.results or {}).get(key, default)
+
+    def has_result(self, key: str) -> bool:
+        return key in (self.results or {})
+
+    def signal(self, key: str, default=None):
+        if key in (self.signals or {}):
+            return self.signals.get(key, default)
+        return default
+
+
+@dataclass
+class StageOutput:
+    """Stage-level decision envelope returned from a stage tick."""
+
+    vision_obs: Optional[Dict[str, Any]] = None
+    signals: Dict[str, Any] = field(default_factory=dict)
+    snapshot: Dict[str, Any] = field(default_factory=dict)
+
+    def has_outbound(self) -> bool:
+        return self.vision_obs is not None
+
+    def signal(self, key: str, default=None):
+        if key in (self.signals or {}):
+            return self.signals.get(key, default)
+        return default
+
+
+def normalize_upper(value: Any, default: str = "") -> str:
+    text = str(value or default).strip().upper()
+    return text or str(default).strip().upper()
+
+
+def next_interaction_id() -> str:
+    return f"ia_{int(time.time() * 1000)}"
+
+
+def build_vision_obs(
+    ctx: StageContext,
+    status: str,
+    perception: Optional[Dict[str, Any]] = None,
+    proposal: Optional[Dict[str, Any]] = None,
+    result: Optional[Dict[str, Any]] = None,
+    interaction: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    return VisionObs(
+        ts=time.time(),
+        stage=ctx.current_stage,
+        mode=ctx.current_mode,
+        status=normalize_upper(status, "RUNNING"),
+        session_id=ctx.session_id,
+        req_id=ctx.req_id,
+        epoch=int(ctx.epoch),
+        interaction=interaction,
+        perception=perception,
+        proposal=proposal,
+        result=result,
+    ).to_dict()
+
+
+class BaseStagePlan(ABC):
+    """Base interface for business-stage orchestration logic."""
+
+    stage_name: str = "IDLE"
+    default_mode: str = "IDLE"
+
+    def on_enter(self, req: VisionReq, ctx: StageContext) -> None:
+        """Initialize stage-owned state when the stage becomes active."""
+        _ = req
+        ctx.current_stage = self.stage_name
+        ctx.current_mode = self.default_mode
+
+    def on_update(self, req: VisionReq, ctx: StageContext) -> Optional[StageOutput]:
+        """Handle START or UPDATE messages that keep execution in this stage."""
+        _ = (req, ctx)
+        return None
+
+    def on_respond(self, req: VisionReq, ctx: StageContext) -> Optional[StageOutput]:
+        """Handle RESPOND messages for multi-round interaction stages."""
+        _ = (req, ctx)
+        return None
+
+    def on_stop(self, req: VisionReq, ctx: StageContext) -> Optional[StageOutput]:
+        """Handle STOP semantics before the controller transitions to idle."""
+        _ = req
+        ctx.current_stage = "IDLE"
+        ctx.current_mode = "IDLE"
+        return None
+
+    def on_exit(self, ctx: StageContext) -> None:
+        """Release stage-local state before another stage takes control."""
+        ctx.stage_state.clear()
+
+    def build_obs(
+        self,
+        ctx: StageContext,
+        status: str,
+        perception: Optional[Dict[str, Any]] = None,
+        proposal: Optional[Dict[str, Any]] = None,
+        result: Optional[Dict[str, Any]] = None,
+        interaction: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Build one `vision_obs` envelope using the shared stage context."""
+        return build_vision_obs(
+            ctx,
+            status=status,
+            perception=perception,
+            proposal=proposal,
+            result=result,
+            interaction=interaction,
+        )
+
+    def tick(self, tick_input: StageTickInput, ctx: StageContext) -> Optional[StageOutput]:
+        """Run one stage iteration and optionally emit a stage output."""
+        _ = (tick_input, ctx)
+        return None
