@@ -4,7 +4,7 @@
 from abc import ABC
 from dataclasses import dataclass, field
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from ...ipc.protocol import VisionObs, VisionReq
 
@@ -20,7 +20,6 @@ class StageContext:
     epoch: int = 0
     target_name: Optional[str] = None
     interaction_id: Optional[str] = None
-    pending_result: Optional[Dict[str, Any]] = None
     stage_state: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -52,6 +51,7 @@ class StageOutput:
 
     vision_obs: Optional[Dict[str, Any]] = None
     signals: Dict[str, Any] = field(default_factory=dict)
+    effects: List[Dict[str, Any]] = field(default_factory=list)
     snapshot: Dict[str, Any] = field(default_factory=dict)
 
     def has_outbound(self) -> bool:
@@ -93,6 +93,24 @@ def build_vision_obs(
         proposal=proposal,
         result=result,
     ).to_dict()
+
+
+def resolve_stage_summary(
+    results: Dict[str, Any],
+    stage_state: Dict[str, Any],
+    state_key: str,
+    default_factory,
+    result_factory,
+    result_route: str = "local_perception",
+):
+    summary = result_factory(dict(results or {}))
+    source = "results" if summary is not None and result_route in (results or {}) else "stage_state"
+    if summary is None:
+        summary = dict(stage_state.get(state_key) or default_factory())
+    else:
+        summary = dict(summary)
+    stage_state[state_key] = dict(summary)
+    return summary, source
 
 
 class BaseStagePlan(ABC):

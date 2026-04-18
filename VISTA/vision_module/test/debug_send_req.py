@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""调试发送器：向 VISTA 发送新旧协议请求。"""
+"""调试发送器：向 VISTA 发送主线协议请求。"""
 
 import json
 import socket
@@ -52,6 +52,8 @@ def build_grasp_response(decision: str) -> dict:
     return build_req(
         "RESPOND",
         "GRASP",
+        session_id=state.get("last_session_id", "debug_sess"),
+        epoch=state.get("last_epoch", 1),
         interaction_id=interaction_id,
         response={"decision": decision},
         payload={
@@ -61,6 +63,35 @@ def build_grasp_response(decision: str) -> dict:
                 "dyaw_rad": 0.08,
             }
         },
+    )
+
+
+def build_search_found_req(target: str) -> dict:
+    """Test-only injection helper; not part of the normal external protocol flow."""
+    return build_req(
+        "START",
+        "SEARCH",
+        target=target,
+        payload={
+            "target_obs": {
+                "found": True,
+                "target": target,
+                "confidence": 0.91,
+                "cx_norm": 0.08,
+                "size_norm": 0.22,
+                "bbox": [160, 120, 360, 360],
+            }
+        },
+    )
+
+
+def build_grasp_start(mode_hint: str = "MICRO_ADJUST") -> dict:
+    return build_req(
+        "START",
+        "GRASP",
+        target="bottle",
+        mode_hint=mode_hint,
+        payload={"remote_grasp": True, "need_depth": True},
     )
 
 
@@ -82,56 +113,42 @@ def show_last_interaction():
 def show_menu():
     print("VISTA Vision 调试发送器")
     print("1: 新协议 SEARCH bottle")
-    print("2: 新协议 SEARCH mouse")
-    print("3: 新协议 RETURN")
-    print("4: 新协议 IDLE/STOP")
-    print("5: 新协议 GRASP START")
-    print("6: 新协议 GRASP RESPOND ACCEPT")
-    print("7: 新协议 GRASP RESPOND REJECT")
+    print("2: 新协议 RETURN")
+    print("3: 新协议 GRASP START")
+    print("4: 新协议 GRASP START(remote)")
+    print("5: 新协议 GRASP RESPOND ACCEPT")
+    print("6: 新协议 GRASP RESPOND REJECT")
+    print("7: 新协议 IDLE/STOP")
     print("8: 查看最近 interaction_id")
-    print("9: 旧协议 FIND bottle")
-    print("10: 旧协议 RETURN")
-    print("11: 旧协议 STOP")
+    print("")
+    print("[NOTE] SEARCH bottle(found) 仅用于内部测试注入，不再作为主菜单协议入口。")
 
 
 if __name__ == "__main__":
     show_menu()
     while True:
-        choice = input("\n请选择指令 (1-11, q 退出): ").strip().lower()
+        choice = input("\n请选择指令 (1-8, q 退出): ").strip().lower()
         if choice == "1":
             send_payload(build_req("START", "SEARCH", target="bottle"))
         elif choice == "2":
-            send_payload(build_req("START", "SEARCH", target="mouse"))
-        elif choice == "3":
             send_payload(build_req("START", "RETURN"))
+        elif choice == "3":
+            send_payload(build_grasp_start("MICRO_ADJUST"))
         elif choice == "4":
-            send_payload(build_req("STOP", "IDLE"))
+            send_payload(build_grasp_start("GRASP_REMOTE"))
         elif choice == "5":
-            send_payload(
-                build_req(
-                    "START",
-                    "GRASP",
-                    target="bottle",
-                    payload={"remote_grasp": True, "need_depth": True},
-                )
-            )
-        elif choice == "6":
             try:
                 send_payload(build_grasp_response("ACCEPT"))
             except RuntimeError as exc:
                 print(f"[ERR] {exc}")
-        elif choice == "7":
+        elif choice == "6":
             try:
                 send_payload(build_grasp_response("REJECT"))
             except RuntimeError as exc:
                 print(f"[ERR] {exc}")
+        elif choice == "7":
+            send_payload(build_req("STOP", "IDLE"))
         elif choice == "8":
             show_last_interaction()
-        elif choice == "9":
-            send_payload({"type": "vision_req", "ts": time.time(), "mode": "FIND", "target": "bottle"})
-        elif choice == "10":
-            send_payload({"type": "home_tag_req", "ts": time.time(), "mode": "RETURN"})
-        elif choice == "11":
-            send_payload({"type": "vision_req", "ts": time.time(), "mode": "STOP"})
         elif choice == "q":
             break

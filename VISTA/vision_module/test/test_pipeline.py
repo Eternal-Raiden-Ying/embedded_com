@@ -29,6 +29,10 @@ from test_support import (
     try_with_backends,
 )
 
+from vision_module.app.stage_controller import StageController
+from vision_module.backend.mode_controller import ModeController
+from vision_module.config.mode_defaults import build_default_mode_profiles
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="VISTA pipeline backend smoke test")
@@ -124,59 +128,78 @@ def load_engine_module():
     return importlib.import_module("vision_module.backend.vision_engine")
 
 
+def build_runtime_stack(engine_module, cfg):
+    runtime = engine_module.VisionEngine(cfg, logger=PrintLogger("pipeline"))
+    mode_controller = ModeController(
+        logger=PrintLogger("pipeline.mode"),
+        preview_allowed=bool(cfg.debug.preview),
+    )
+    mode_controller.register_profiles(build_default_mode_profiles(cfg.model.active_model).values())
+    stage_controller = StageController(
+        logger=PrintLogger("pipeline.stage"),
+        mode_controller=mode_controller,
+        runtime_service=runtime,
+    )
+    return runtime, mode_controller, stage_controller
+
+
 def phase_camera_only(engine_module, cfg, camera_kwargs: dict) -> Tuple[bool, str]:
-    engine = engine_module.VisionEngine(cfg, logger=PrintLogger("pipeline"))
+    runtime, _, _ = build_runtime_stack(engine_module, cfg)
     try:
-        engine.set_camera("rgb", True, cfg=camera_kwargs)
-        if "rgb" not in engine.cams:
+        runtime.camera_manager.ensure_camera("rgb", override=camera_kwargs)
+        if "rgb" not in runtime.camera_manager.cams:
             return False, "engine.cams missing rgb"
-        frame = engine.cams["rgb"].read_frame()
+        frame = runtime.camera_manager.cams["rgb"].read_frame()
         if frame is None or getattr(frame, "size", 0) == 0:
             return False, "camera returned empty frame"
         return True, describe_frame(frame)
     finally:
-        engine.stop()
-        engine.stop()
+        runtime.stop()
+        runtime.stop()
 
 
 def phase_predictor_only(engine_module, cfg) -> Tuple[bool, str]:
-    engine = engine_module.VisionEngine(cfg, logger=PrintLogger("pipeline"))
+    runtime, _, _ = build_runtime_stack(engine_module, cfg)
     try:
-        engine.set_model("test_model", True)
-        predictor = engine.predictor
+        runtime.predictor_manager.ensure_model("test_model")
+        predictor = runtime.predictor_manager.predictor
         if predictor is None:
             return False, "engine.predictor is None"
         if not predictor.is_ready():
             return False, "predictor not ready"
         return True, type(predictor).__name__
     finally:
-        engine.stop()
-        engine.stop()
+        runtime.stop()
+        runtime.stop()
 
 
 def phase_combined(engine_module, cfg, camera_kwargs: dict, iterations: int) -> Tuple[bool, str]:
-    engine = engine_module.VisionEngine(cfg, logger=PrintLogger("pipeline"))
+    runtime, _, stage_controller = build_runtime_stack(engine_module, cfg)
     frames_seen = 0
     infer_seen = 0
+    last_seq = 0
     try:
-        engine.set_camera("rgb", True, cfg=camera_kwargs)
-        engine.set_model("test_model", True)
-        engine.set_inference_enabled(True)
-        engine.init()
-        engine.start()
+        runtime.init()
+        runtime.start()
+        stage_controller.set_runtime_mode("TRACK_LOCAL", reason="test_pipeline_combined", force=True)
         for _ in range(iterations):
-            frames, infer_res = engine.get_new_data()
-            if frames:
-                frames_seen += 1
-            if infer_res is not None:
+            frame_slot = runtime.scheduler.read_slot("camera_frames")
+            if isinstance(frame_slot, dict):
+                seq = int(frame_slot.get("seq", 0) or 0)
+                frames = frame_slot.get("payload")
+                if seq > last_seq and isinstance(frames, dict):
+                    frames_seen += 1
+                    last_seq = seq
+            local = runtime.scheduler.read_result("local_perception", default={}) or {}
+            if isinstance(local, dict) and bool(local.get("has_infer")):
                 infer_seen += 1
             time.sleep(0.05)
         if frames_seen <= 0:
             return False, "no frames observed"
         return True, f"frames_seen={frames_seen} infer_seen={infer_seen}"
     finally:
-        engine.stop()
-        engine.stop()
+        runtime.stop()
+        runtime.stop()
 
 
 def main() -> int:

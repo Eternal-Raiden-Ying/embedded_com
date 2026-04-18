@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+import platform
 
 from .schema import VisionServiceConfig, SingleModelConfig
 from .data import coco80, grasping_coco20
@@ -25,6 +26,10 @@ CONFIG.runtime.enable_infer_during_hot_standby = False
 CONFIG.runtime.log_mode = os.getenv("VISION_LOG_MODE", "concise")
 CONFIG.runtime.log_enabled = os.getenv("VISION_LOG_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
 CONFIG.runtime.debug = os.getenv("VISION_DEBUG", "0").strip().lower() in {"1", "true", "yes"}
+_placeholder_default = "1" if platform.system().lower().startswith("win") else "0"
+CONFIG.runtime.capability_placeholder = os.getenv("VISION_CAPABILITY_PLACEHOLDER", _placeholder_default).strip().lower() in {"1", "true", "yes"}
+CONFIG.runtime.heartbeat_enabled = os.getenv("VISION_HEARTBEAT_ENABLED", "0").strip().lower() in {"1", "true", "yes"}
+CONFIG.runtime.heartbeat_interval_s = float(os.getenv("VISION_HEARTBEAT_INTERVAL_S", "5.0"))
 
 # camera config
 rgb = CONFIG.camera.streams["rgb"]
@@ -62,20 +67,55 @@ grey.crop_w = 0
 grey.crop_h = 0
 
 # model config
-CONFIG.model.active_model = "yolo26s_seg"
+CONFIG.model.active_model = os.getenv("VISION_ACTIVE_MODEL", "yolov7_detect")
+CONFIG.model.profiles["yolov7_detect"] = SingleModelConfig(
+    target_model=os.getenv(
+        "VISION_DETECT_MODEL_PATH",
+        "/home/aidlux/2026/VISTA/model/cutoff_yolov7_w8a8.qnn216.ctx.bin",
+    ),
+    width=640,
+    height=640,
+    conf_thres=0.25,
+    iou_thres=0.45,
+    class_num=80,
+    classes=coco80,
+    predictor_type="detect",
+    model_backend=os.getenv("VISION_DETECT_MODEL_BACKEND", "qnn"),
+    anchors=(
+        (12, 16, 19, 36, 40, 28),
+        (36, 75, 76, 55, 72, 146),
+        (142, 110, 192, 243, 459, 401),
+    ),
+    strides=(8, 16, 32),
+)
 CONFIG.model.profiles["yolov8s_seg"] = SingleModelConfig(
     target_model="/home/aidlux/2026/VISTA/model/cutoff_yolov8s-seg_qcs6490_w8a8.qnn236.ctx.bin",
-    width=640, height=640, conf_thres=0.45, iou_thres=0.45, class_num=80, classes=coco80,
+    width=640,
+    height=640,
+    conf_thres=0.45,
+    iou_thres=0.45,
+    class_num=80,
+    classes=coco80,
+    predictor_type="segment",
+    model_backend="qnn",
 )
 CONFIG.model.profiles["yolo26s_seg"] = SingleModelConfig(
     target_model="/home/aidlux/2026/VISTA/vision_module/model/yolo26s-seg-grasp/yolo26s-seg-grasp_split_qcs6490_w8a8.qnn236.ctx.bin.amf",
-    width=640, height=640, conf_thres=0.25, iou_thres=0.15, class_num=20, classes=grasping_coco20,
+    width=640,
+    height=640,
+    conf_thres=0.25,
+    iou_thres=0.15,
+    class_num=20,
+    classes=grasping_coco20,
+    predictor_type="segment",
+    model_backend="qnn",
 )
 
 # debug config
-CONFIG.debug.preview = True
-CONFIG.debug.draw_boxes = True
-CONFIG.debug.draw_masks = False
+_preview_default = "0" if platform.system().lower().startswith("win") else "1"
+CONFIG.debug.preview = os.getenv("VISION_PREVIEW", _preview_default).strip().lower() in {"1", "true", "yes"}
+CONFIG.debug.draw_boxes = os.getenv("VISION_DRAW_BOXES", "1").strip().lower() in {"1", "true", "yes"}
+CONFIG.debug.draw_masks = os.getenv("VISION_DRAW_MASKS", "0").strip().lower() in {"1", "true", "yes"}
 
 # orchestrator -> vision
 CONFIG.req_in.transport = "tcp"

@@ -27,7 +27,9 @@ class Scheduler:
         self._lock = threading.RLock()
 
     def _route_cfg(self, route_name: str) -> Dict[str, Any]:
-        raw = (self.routes or {}).get(route_name, {})
+        raw = (self.routes or {}).get(route_name)
+        if raw is None:
+            return {}
         if isinstance(raw, str):
             raw = {"source": raw}
         cfg = dict(raw or {})
@@ -39,6 +41,11 @@ class Scheduler:
         if generation is None:
             return True
         return int(generation) == int(self.active_generation)
+
+    def _slot_visible(self, slot: Optional[Dict[str, Any]]) -> bool:
+        if not isinstance(slot, dict):
+            return False
+        return self._should_accept_generation(slot.get("generation"))
 
     def start_runtime(self) -> None:
         with self._lock:
@@ -60,12 +67,16 @@ class Scheduler:
             self.active_plan = dict(plan or {})
             self.active_generation = int(generation)
             self.routes = dict((self.active_plan or {}).get("routes") or {})
+            self.result_slots.clear()
+            self.event_latches.clear()
             self.last_snapshot.update(
                 {
                     "last_config_ts": time.time(),
                     "active_mode": self.active_plan.get("mode"),
                     "generation": int(self.active_generation),
                     "route_count": len(self.routes),
+                    "slots_cleared_on_config": True,
+                    "events_cleared_on_config": True,
                 }
             )
 
@@ -74,6 +85,11 @@ class Scheduler:
         if not route_name:
             return False
         with self._lock:
+            cfg = self._route_cfg(route_name)
+            if not cfg or str(cfg.get("policy", "slot")).strip().lower() != "slot":
+                self.last_snapshot["rejected_result_route"] = route_name
+                self.last_snapshot["rejected_result_ts"] = time.time()
+                return False
             result_generation = int(self.active_generation if generation is None else generation)
             self._last_result_generation = result_generation
             self.last_snapshot["last_result_generation"] = result_generation
@@ -99,6 +115,11 @@ class Scheduler:
         if not route_name:
             return False
         with self._lock:
+            cfg = self._route_cfg(route_name)
+            if not cfg or str(cfg.get("policy", "slot")).strip().lower() != "event":
+                self.last_snapshot["rejected_event_route"] = route_name
+                self.last_snapshot["rejected_event_ts"] = time.time()
+                return False
             event_generation = int(self.active_generation if generation is None else generation)
             if not self._should_accept_generation(event_generation):
                 self.last_snapshot["dropped_event_generation"] = event_generation
@@ -132,8 +153,15 @@ class Scheduler:
         if not route_name:
             return None
         with self._lock:
+            cfg = self._route_cfg(route_name)
+            if not cfg or str(cfg.get("policy", "slot")).strip().lower() != "slot":
+                return None
             slot = self.result_slots.get(route_name)
-            if not isinstance(slot, dict):
+            if not self._slot_visible(slot):
+                if isinstance(slot, dict):
+                    self.last_snapshot["dropped_stale_slot_route"] = route_name
+                    self.last_snapshot["dropped_stale_slot_generation"] = int(slot.get("generation", 0) or 0)
+                    self.last_snapshot["dropped_stale_slot_ts"] = time.time()
                 return None
             return {
                 "generation": int(slot.get("generation", 0) or 0),
@@ -153,14 +181,23 @@ class Scheduler:
         if not route_name:
             return None
         with self._lock:
+            cfg = self._route_cfg(route_name)
+            if not cfg or str(cfg.get("policy", "slot")).strip().lower() != "event":
+                return None
             latch = self.event_latches.get(route_name)
             if not latch:
                 return None
-            try:
-                item = latch.popleft()
-            except Exception:
-                return None
-        return item.get("payload")
+            while latch:
+                try:
+                    item = latch.popleft()
+                except Exception:
+                    return None
+                if self._should_accept_generation((item or {}).get("generation")):
+                    return (item or {}).get("payload")
+                self.last_snapshot["dropped_stale_event_route"] = route_name
+                self.last_snapshot["dropped_stale_event_generation"] = int((item or {}).get("generation", 0) or 0)
+                self.last_snapshot["dropped_stale_event_ts"] = time.time()
+            return None
 
     def push_stage_signals(self, signals: Dict[str, Any]) -> None:
         if not signals:
@@ -178,7 +215,14 @@ class Scheduler:
                 cfg = self._route_cfg(route_name)
                 if str(cfg.get("scope", "stage")).strip().lower() != "stage":
                     continue
-                payload = (self.result_slots.get(route_name) or {}).get("payload")
+                slot = self.result_slots.get(route_name)
+                if not self._slot_visible(slot):
+                    if isinstance(slot, dict):
+                        self.last_snapshot["skipped_stage_route"] = route_name
+                        self.last_snapshot["skipped_stage_route_generation"] = int(slot.get("generation", 0) or 0)
+                        self.last_snapshot["skipped_stage_route_ts"] = time.time()
+                    continue
+                payload = (slot or {}).get("payload")
                 if payload is not None:
                     stage_results[route_name] = payload
             snapshot = {

@@ -24,6 +24,9 @@ class RuntimeConfig:
     log_mode: str = "concise"
     log_enabled: bool = True
     debug: bool = False
+    capability_placeholder: bool = False
+    heartbeat_enabled: bool = False
+    heartbeat_interval_s: float = 5.0
 
 
 @dataclass
@@ -97,11 +100,15 @@ class SingleModelConfig:
     iou_thres: float = 0.45
     class_num: int = 80
     classes: Optional[tuple] = None
+    predictor_type: str = "detect"
+    model_backend: str = "qnn"
+    anchors: Optional[tuple] = None
+    strides: Optional[tuple] = None
 
 
 @dataclass
 class ModelConfig:
-    active_model: str = "yolov8s_seg"
+    active_model: str = "yolov7_detect"
     profiles: Dict[str, SingleModelConfig] = field(default_factory=dict)
 
 

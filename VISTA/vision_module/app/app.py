@@ -13,7 +13,9 @@ if str(STACK_ROOT) not in sys.path:
 from common.base_module import BaseModule
 from common.runtime_logging import RunLogger, ensure_dir
 
-from ..backend.vision_engine import VisionRuntimeService
+from ..backend.mode_controller import ModeController
+from ..backend.vision_engine import VisionEngine
+from ..config.mode_defaults import build_default_mode_profiles
 from ..config.board_config import CONFIG
 from ..ipc.protocol import VisionReq
 from ..ipc.transport import JsonlClientSender, JsonlInboundServer
@@ -34,7 +36,13 @@ class VistaApp(BaseModule):
             enable_text_events=False,
         )
         self.log_paths = self.run_logger.structured_paths(heartbeat_enabled=CONFIG.runtime.heartbeat_enabled)
-        self.runtime = VisionRuntimeService(
+        mode_controller = ModeController(
+            logger=self.child_logger("mode"),
+            backend_event_sink=lambda event, **fields: self._record_backend_event(event, fields),
+            preview_allowed=bool(CONFIG.debug.preview),
+        )
+        mode_controller.register_profiles(build_default_mode_profiles(CONFIG.model.active_model).values())
+        self.runtime = VisionEngine(
             CONFIG,
             logger=self.child_logger("engine"),
             event_sink=self._record_backend_event,
@@ -58,9 +66,9 @@ class VistaApp(BaseModule):
         self.stage_controller = StageController(
             logger=self.child_logger("stage"),
             event_sink=self._record_stage_event,
-            mode_controller=self.runtime.mode_control_port(),
+            mode_controller=mode_controller,
+            runtime_service=self.runtime,
         )
-        self.runtime.set_external_mode_control(False)
         self.stage_controller.register_default_plans(
             {
                 "SEARCH": SearchStagePlan(),
@@ -75,7 +83,6 @@ class VistaApp(BaseModule):
         self.current_req_id = None
         self.current_epoch = 0
         self.active_interaction_id = None
-        self.pending_result = None
         self.last_send_ts = 0.0
         self.last_req_receive_ts = 0.0
         self.hot_until_ts = 0.0
@@ -289,7 +296,8 @@ class VistaApp(BaseModule):
         self._last_heartbeat_ts = now
         req_snapshot = self.req_server.snapshot()
         obs_snapshot = self.obs_sender.snapshot()
-        runtime_snapshot = self.stage_controller.runtime_snapshot()
+        runtime_snapshot = self.runtime.runtime_snapshot()
+        mode_snapshot = dict((self.stage_controller.snapshot().get("mode_controller") or {}))
         last_req_age_s = (now - self.last_req_receive_ts) if self.last_req_receive_ts else None
         last_obs_send_age_s = (now - self.last_send_ts) if self.last_send_ts else None
         self.run_logger.write_heartbeat_record(
@@ -310,9 +318,9 @@ class VistaApp(BaseModule):
                 "req_in": req_snapshot,
                 "obs_out": obs_snapshot,
                 "engine": {
-                    "current_mode": runtime_snapshot.get("current_mode"),
-                    "target_mode": runtime_snapshot.get("target_mode"),
-                    "generation": runtime_snapshot.get("generation"),
+                    "current_mode": mode_snapshot.get("current_mode"),
+                    "target_mode": mode_snapshot.get("target_mode"),
+                    "generation": mode_snapshot.get("generation"),
                     "runtime_running": runtime_snapshot.get("runtime_running"),
                 },
             },
@@ -333,14 +341,12 @@ class VistaApp(BaseModule):
         prev_stage = self.current_stage
         prev_mode = self.current_mode
         self.current_stage = self._safe_stage_text(ctx.current_stage)
-        if not (self.current_stage == "IDLE" and self.current_mode == "IDLE_HOT"):
-            self.current_mode = self._safe_mode_text(ctx.current_mode)
+        self.current_mode = self._safe_mode_text(ctx.current_mode)
         self.target_name = ctx.target_name
         self.current_session_id = ctx.session_id
         self.current_req_id = ctx.req_id
         self.current_epoch = int(ctx.epoch)
         self.active_interaction_id = ctx.interaction_id
-        self.pending_result = ctx.pending_result
         if prev_stage != self.current_stage or prev_mode != self.current_mode:
             payload = {
                 "reason": reason,
@@ -365,20 +371,6 @@ class VistaApp(BaseModule):
         if queued:
             self.last_send_ts = now
         return queued
-
-    def _runtime_status_payload(self) -> Dict[str, object]:
-        return {
-            "stage": self.current_stage,
-            "mode": self.current_mode,
-            "session_id": self.current_session_id,
-            "req_id": self.current_req_id,
-            "epoch": int(self.current_epoch),
-            "hot_until_ts": float(self.hot_until_ts),
-            "ts": time.time(),
-        }
-
-    def _publish_runtime_status(self) -> None:
-        self.stage_controller.publish_runtime_status(self._runtime_status_payload())
 
     def _handle_stop_request(self, stage: str, stop_state=None):
         self._record_event("VISION_STOP", trigger="request:STOP", stage=stage)
@@ -413,7 +405,6 @@ class VistaApp(BaseModule):
             ) = self._enter_cold_idle(stop_epoch)
         self.current_stage = "IDLE"
         self.active_interaction_id = None
-        self.pending_result = None
 
     def _handle_request_payload(self, payload):
         typ = str(payload.get("type", "vision_req")).strip()
@@ -458,10 +449,8 @@ class VistaApp(BaseModule):
                     },
                 )
                 self._apply_stage_output(stage_output, now=time.time(), force_send=True)
-                self._publish_runtime_status()
                 return
             self._handle_stop_request(request_stage, stop_state=stop_state)
-            self._publish_runtime_status()
             return
 
         self.hot_until_ts = 0.0
@@ -475,12 +464,11 @@ class VistaApp(BaseModule):
             data=req_event_data,
         )
         obs_sent = self._apply_stage_output(stage_output, now=time.time(), force_send=bool(stage_output and stage_output.vision_obs))
-        self._publish_runtime_status()
         if not obs_sent:
             self.last_send_ts = 0.0
 
     def _tick_stage(self, now: float):
-        tick_input = self.stage_controller.collect_tick_input(ts=now)
+        tick_input = self.runtime.collect_tick_input(ts=now)
         tick_input.snapshot["app"] = {
             "stage": self.current_stage,
             "mode": self.current_mode,
@@ -492,7 +480,6 @@ class VistaApp(BaseModule):
         stage_output = self.stage_controller.tick(tick_input)
         self._sync_runtime_from_stage_context(reason="tick")
         self._apply_stage_output(stage_output, now=now)
-        self._publish_runtime_status()
 
     def _expire_hot_standby(self, now: float):
         if self.current_mode != "IDLE_HOT" or self.hot_until_ts <= 0 or now < self.hot_until_ts:
@@ -526,6 +513,8 @@ class VistaApp(BaseModule):
         self.req_server.start()
         self.runtime.init()
         self.runtime.start()
+        self.stage_controller.set_runtime_mode("IDLE", reason="service_start", force=True)
+        self._sync_runtime_from_stage_context(reason="service_start")
         self._running = True
         self._record_event("SERVICE_READY", trigger="start")
         self.log_info(
@@ -581,9 +570,6 @@ class VistaApp(BaseModule):
                 now = time.time()
                 self._tick_stage(now)
                 self._expire_hot_standby(now)
-                if self.stage_controller.preview_exit_requested():
-                    self.log_info("runtime", "preview exit requested")
-                    break
 
                 self._emit_heartbeat_if_needed()
                 dt = time.time() - loop_start

@@ -3,22 +3,21 @@
 
 import logging
 import threading
-import time
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional
 
 from .camera_manager import CameraManager
-from .mode_controller import ModeController
 from .predictor_manager import PredictorManager
 from .preview import NullPreviewSink
 from .preview.manager import PreviewManager
 from .remote.client import RemoteGraspClient
 from .remote.manager import RemoteManager
-from ..config.mode_defaults import build_default_mode_profiles
+from .runtime_supervisor import RuntimeSupervisor
+from .scheduler import Scheduler
 from ..config.schema import VisionServiceConfig
 
 
 class VisionEngine:
-    """Runtime facade: assemble controllers/managers and expose control-plane APIs."""
+    """Runtime assembly and execution root for the VISTA backend."""
 
     def __init__(
         self,
@@ -29,13 +28,12 @@ class VisionEngine:
         self.cfg = cfg
         self.log = logger or logging.getLogger("vision.engine")
         self._event_sink = event_sink
-        self.running = False
         self.lock = threading.RLock()
-        self.current_mode = "IDLE"
-        self._external_mode_control_enabled = True
-        self._last_frame_seq_seen = 0
-        self.infer_enabled = False
+        self.running = False
+        self._active_runtime_plan: Optional[Dict[str, Any]] = None
+        self._active_runtime_generation = 0
 
+        self.scheduler = Scheduler()
         self.camera_manager = CameraManager(
             cfg=self.cfg,
             logger=self.log,
@@ -56,8 +54,8 @@ class VisionEngine:
             logger=self.log,
             capability_sink=self._on_simple_capability_change,
         )
-
-        self.mode_controller = ModeController(
+        self.runtime_supervisor = RuntimeSupervisor(
+            scheduler=self.scheduler,
             camera_manager=self.camera_manager,
             predictor_manager=self.predictor_manager,
             remote_manager=self.remote_manager,
@@ -65,18 +63,13 @@ class VisionEngine:
             logger=self.log,
             backend_event_sink=self._emit_event,
         )
-        self.mode_controller.bind_runtime_controls(
-            set_inference=self.set_inference_enabled,
-            preview_allowed=bool(self.cfg.debug.preview),
-        )
-        self.mode_controller.register_profiles(build_default_mode_profiles(self.cfg.model.active_model).values())
 
-        # Backward-compatible aliases used by test scripts.
         self.cams = self.camera_manager.cams
         self.predictor = self.predictor_manager.predictor
         self.active_model_name = self.predictor_manager.active_model_name
         self.remote_enabled = bool(self.remote_manager.enabled)
         self.preview_enabled = bool(self.preview_manager.enabled)
+        self.infer_enabled = bool(self.predictor_manager.inference_enabled)
 
     def _sync_aliases(self) -> None:
         self.predictor = self.predictor_manager.predictor
@@ -89,7 +82,7 @@ class VisionEngine:
         if self._event_sink is None:
             return
         try:
-            self._event_sink(event_name, fields)
+            self._event_sink(str(event_name or "").strip().upper(), fields)
         except Exception:
             pass
 
@@ -127,143 +120,95 @@ class VisionEngine:
         self._emit_capability_change(capability, action, **fields)
 
     def init(self) -> None:
-        self.log.info("engine init: system ready")
-        self.set_mode("IDLE", reason="engine_init", force=True, source="engine")
+        self.log.info("engine init: runtime service ready")
         self._emit_backend_lifecycle(
             "initialized",
-            registered_modes=sorted(self.mode_controller.snapshot().get("registered_modes", [])),
+            registered_modes=[],
         )
-
-    def tick(self, now_ts: Optional[float] = None) -> None:
-        self.mode_controller.tick(now_ts=now_ts)
-        self.current_mode = self.mode_controller.current_mode()
-        self._sync_aliases()
-
-    def set_external_mode_control(self, enabled: bool) -> None:
-        self._external_mode_control_enabled = bool(enabled)
-
-    def preview_exit_requested(self) -> bool:
-        return bool(self.mode_controller.preview_exit_requested())
-
-    def push_stage_signals(self, signals: Dict[str, object]) -> None:
-        self.mode_controller.push_stage_signals(dict(signals or {}))
-
-    def set_mode(self, name: str, reason: str = "", force: bool = False, source: str = "external") -> bool:
-        requested = str(name or "IDLE").strip().upper() or "IDLE"
-        source_text = str(source or "external").strip().lower() or "external"
-        if source_text == "external" and not self._external_mode_control_enabled:
-            self.log.warning("reject external set_mode: %s", requested)
-            self._emit_backend_failure(
-                "external_mode_set_blocked",
-                requested_mode=requested,
-                reason=str(reason or ""),
-            )
-            return False
-        if not force and requested == self.current_mode:
-            return True
-        profile = self.mode_controller.switch_mode(requested, reason=reason, force=force)
-        if profile is None:
-            return False
-        self.current_mode = str(profile.name or "IDLE").strip().upper() or "IDLE"
-        self.reset_runtime_state()
-        self._sync_aliases()
-        return True
 
     def start(self) -> None:
         if self.running:
             return
         self.running = True
-        self.mode_controller.start_runtime()
-        self.log.info("vision engine runtime started")
-        self._emit_backend_lifecycle("started")
-
-    def reset_runtime_state(self) -> None:
-        self._last_frame_seq_seen = 0
-
-    def set_inference_enabled(self, enable: bool) -> None:
-        before = bool(self.predictor_manager.inference_enabled)
-        self.predictor_manager.set_inference_enabled(bool(enable))
-        self.infer_enabled = bool(self.predictor_manager.inference_enabled)
-        if before != self.infer_enabled:
-            self.log.info("inference %s", "enabled" if self.infer_enabled else "disabled")
-            self._emit_capability_change(
-                "inference",
-                "enabled" if self.infer_enabled else "disabled",
-                enabled=bool(self.infer_enabled),
-            )
-
-    def set_camera(self, name: str, enable: bool, cfg: Optional[dict] = None) -> None:
-        if enable:
-            self.camera_manager.ensure_camera(name, override=cfg)
-        else:
-            self.camera_manager.disable_camera(name)
-
-    def set_model(self, name: str, enable: bool) -> None:
-        if enable:
-            self.predictor_manager.ensure_model(name)
-        else:
-            self.predictor_manager.disable_model()
+        self.scheduler.start_runtime()
+        if self._active_runtime_plan is not None:
+            self.scheduler.configure(plan=self._active_runtime_plan, generation=self._active_runtime_generation)
+        self.runtime_supervisor.start_runtime()
         self._sync_aliases()
+        self.log.info("vision runtime started")
+        self._emit_backend_lifecycle(
+            "started",
+            active_runtime_mode=str((self._active_runtime_plan or {}).get("mode") or "IDLE").strip().upper() or "IDLE",
+            generation=int(self._active_runtime_generation),
+        )
 
     def stop(self) -> None:
+        if not self.running and not self.runtime_supervisor.snapshot().get("runtime_running"):
+            return
         self.running = False
-        self.mode_controller.stop_runtime()
-        self.mode_controller.close()
-        self.camera_manager.release_all()
-        self.predictor_manager.release_all()
-        self.remote_manager.disable()
-        self.preview_manager.disable()
-        self.set_inference_enabled(False)
-        self.current_mode = "IDLE"
-        self.reset_runtime_state()
+        self.runtime_supervisor.stop_runtime()
+        self.scheduler.stop_runtime()
         self._sync_aliases()
         self.log.info("runtime stopped")
         self._emit_backend_lifecycle("stopped")
 
-    def poll_runtime_results(self) -> None:
-        """Refresh low-frequency status slots owned by control-plane facade."""
-        self.tick(now_ts=time.time())
+    def apply_mode_plan(self, plan: Dict[str, Any], generation: int) -> bool:
+        plan_payload = dict(plan or {})
+        target_generation = int(generation)
+        if not self.running:
+            self._active_runtime_plan = plan_payload
+            self._active_runtime_generation = target_generation
+            return bool(self.runtime_supervisor.reconcile(plan=plan_payload, generation=target_generation))
 
-    def get_new_data(self) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, list]]]:
-        """Compatibility API kept for tests and low-level debug tooling."""
-        self.poll_runtime_results()
-        frame_slot = self.mode_controller.read_slot("camera_frames")
-        if not isinstance(frame_slot, dict):
-            return None, None
-        seq = int(frame_slot.get("seq", 0) or 0)
-        if seq <= self._last_frame_seq_seen:
-            return None, None
-        self._last_frame_seq_seen = seq
-        frames = frame_slot.get("payload")
-        if not isinstance(frames, dict):
-            return None, None
-        local = dict(self.mode_controller.read_result("local_perception", default={}) or {})
-        boxes = list(local.get("infer_boxes", []) or [])
-        masks = list(local.get("infer_masks", []) or [])
-        infer_res = None
-        if boxes or masks or bool(local.get("has_infer")):
-            infer_res = {"boxes": boxes, "masks": masks}
-        return frames, infer_res
+        ok = bool(self.runtime_supervisor.reconcile(plan=plan_payload, generation=target_generation))
+        if not ok:
+            self._emit_backend_failure(
+                "mode_apply_incomplete",
+                requested_mode=str(plan_payload.get("mode") or "IDLE").strip().upper() or "IDLE",
+                previous_mode=str((self._active_runtime_plan or {}).get("mode") or "IDLE").strip().upper() or "IDLE",
+                capability_snapshot=self.runtime_supervisor.snapshot(),
+            )
+            return False
+
+        self.scheduler.configure(plan=plan_payload, generation=target_generation)
+        self._active_runtime_plan = plan_payload
+        self._active_runtime_generation = target_generation
+        self._sync_aliases()
+        return True
 
     def collect_tick_input(self, ts: float):
-        return self.mode_controller.collect_tick_input(ts=ts)
+        return self.scheduler.collect_tick_input(ts=ts)
 
-    def snapshot(self) -> Dict[str, Any]:
+    def push_stage_signals(self, signals: Dict[str, object]) -> None:
+        self.scheduler.push_stage_signals(dict(signals or {}))
+
+    def publish_result(self, route: str, payload) -> bool:
+        return self.scheduler.publish_result(route, payload, generation=self._active_runtime_generation)
+
+    def publish_event(self, route: str, payload) -> bool:
+        return self.scheduler.publish_event(route, payload, generation=self._active_runtime_generation)
+
+    def active_runtime_plan(self) -> Optional[Dict[str, Any]]:
+        if self._active_runtime_plan is None:
+            return None
+        return dict(self._active_runtime_plan)
+
+    def active_runtime_generation(self) -> int:
+        return int(self._active_runtime_generation)
+
+    def runtime_snapshot(self) -> Dict[str, Any]:
         self._sync_aliases()
-        frame_slot = self.mode_controller.read_slot("camera_frames") or {}
-        current_frame_seq = int(frame_slot.get("seq", 0) or 0)
-        has_new_data = current_frame_seq > int(self._last_frame_seq_seen)
         return {
-            "current_mode": self.current_mode,
-            "mode_controller": self.mode_controller.snapshot(),
-            "external_mode_control_enabled": bool(self._external_mode_control_enabled),
-            "enabled_cameras": sorted(self.cams.keys()),
+            "runtime_running": bool(self.running),
+            "active_runtime_generation": int(self._active_runtime_generation),
+            "active_runtime_plan": dict(self._active_runtime_plan or {}),
+            "active_runtime_mode": str((self._active_runtime_plan or {}).get("mode") or "IDLE").strip().upper() or "IDLE",
+            "scheduler": self.scheduler.snapshot(),
+            "runtime_supervisor": self.runtime_supervisor.snapshot(),
             "active_model_name": self.active_model_name,
             "inference_enabled": bool(self.infer_enabled),
             "remote_enabled": bool(self.remote_enabled),
             "preview_enabled": bool(self.preview_enabled),
-            "preview_exit_requested": bool(self.mode_controller.preview_exit_requested()),
-            "has_new_data": bool(has_new_data),
             "capabilities": {
                 "camera": self.camera_manager.snapshot(),
                 "predictor": self.predictor_manager.snapshot(),
@@ -272,73 +217,5 @@ class VisionEngine:
             },
         }
 
-
-class ModeControlPort:
-    """Narrow stage-facing mode control surface."""
-
-    def __init__(self, mode_controller):
-        self._mode_controller = mode_controller
-
-    def current_mode(self) -> str:
-        return self._mode_controller.current_mode()
-
-    def switch_mode(self, name: str, reason: str = "", force: bool = False):
-        return self._mode_controller.switch_mode(name=name, reason=reason, force=force)
-
-    def tick_runtime(self, ts: Optional[float] = None) -> None:
-        self._mode_controller.tick(now_ts=ts)
-
-    def collect_tick_input(self, ts: float):
-        return self._mode_controller.collect_tick_input(ts=ts)
-
-    def push_stage_signals(self, signals: Dict[str, object]) -> None:
-        self._mode_controller.push_stage_signals(dict(signals or {}))
-
-    def preview_exit_requested(self) -> bool:
-        return bool(self._mode_controller.preview_exit_requested())
-
     def snapshot(self) -> Dict[str, Any]:
-        return dict(self._mode_controller.snapshot() or {})
-
-
-class VisionRuntimeService:
-    """App-facing runtime facade that hides engine internals."""
-
-    def __init__(
-        self,
-        cfg: VisionServiceConfig,
-        logger: Optional[logging.Logger] = None,
-        event_sink: Optional[Callable[[str, Dict[str, Any]], None]] = None,
-    ):
-        self._engine = VisionEngine(cfg=cfg, logger=logger, event_sink=event_sink)
-        self._mode_port = ModeControlPort(self._engine.mode_controller)
-
-    def mode_control_port(self):
-        return self._mode_port
-
-    def set_external_mode_control(self, enabled: bool) -> None:
-        self._engine.set_external_mode_control(enabled)
-
-    def init(self) -> None:
-        self._engine.init()
-
-    def start(self) -> None:
-        self._engine.start()
-
-    def stop(self) -> None:
-        self._engine.stop()
-
-    def poll_runtime_results(self) -> None:
-        self._engine.poll_runtime_results()
-
-    def collect_tick_input(self, ts: float):
-        return self._engine.collect_tick_input(ts=ts)
-
-    def push_stage_signals(self, signals: Dict[str, object]) -> None:
-        self._engine.push_stage_signals(signals)
-
-    def preview_exit_requested(self) -> bool:
-        return self._engine.preview_exit_requested()
-
-    def snapshot(self) -> Dict[str, Any]:
-        return self._engine.snapshot()
+        return self.runtime_snapshot()

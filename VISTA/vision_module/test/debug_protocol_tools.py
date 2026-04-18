@@ -37,6 +37,7 @@ def remember_interaction(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "last_status": payload.get("status"),
         "last_session_id": payload.get("session_id"),
         "last_req_id": payload.get("req_id"),
+        "last_epoch": payload.get("epoch"),
         "updated_at": time.time(),
     }
     save_debug_state(state)
@@ -63,5 +64,15 @@ def summarize_obs(payload: Dict[str, Any]) -> str:
         if isinstance(item, dict) and "found" in item:
             parts.append(f"{key}.found={item.get('found')}")
             break
+
+    proposal = payload.get("proposal") or {}
+    if proposal.get("reason"):
+        parts.append(f"proposal={proposal['reason']}")
+
+    result = payload.get("result") or {}
+    if result.get("source"):
+        parts.append(f"result_source={result['source']}")
+    elif result.get("remote_state"):
+        parts.append(f"remote_state={result['remote_state']}")
 
     return " | ".join(parts)

@@ -2,11 +2,12 @@ import time
 import argparse
 import threading
 import queue
+import os
 import aidcv as cv2  # AidLux 专用的推流与可视化库
 
 # 导入我们全新封装的底层加速模块
 from ..backend.camera import HardwareCamera
-from ..backend.predictor import QNN_YOLO_Segment_Predictor
+from ..backend.predictor import QNNPredictor
 
 # 导入工具与监控
 from ..utils.plot import draw_detect_res_fast
@@ -16,7 +17,7 @@ def parser_args():
     parser = argparse.ArgumentParser(description="AidLux QNN 零拷贝极速流水线")
     parser.add_argument(
         '--target_model', type=str, 
-        default='/home/aidlux/2026/VISTA/vision_module/model/yolo26s-seg-grasp/yolo26s-seg-grasp_split_qcs6490_w8a8.qnn236.ctx.bin.amf',
+        default=os.getenv('VISION_DETECT_MODEL_PATH', '/home/aidlux/2026/VISTA/model/cutoff_yolov7_w8a8.qnn216.ctx.bin'),
         help="量化模型路径"
     )
     parser.add_argument('--source', type=str, default='6', help="视频源: 填入 0 调用摄像头，或传入具体节点名")
@@ -25,7 +26,7 @@ def parser_args():
     parser.add_argument('--height', type=int, default=640, help="模型输入高")
     parser.add_argument('--conf_thres', type=float, default=0.25, help="置信度阈值")
     parser.add_argument('--iou_thres', type=float, default=0.3, help="NMS IOU阈值")
-    parser.add_argument('--class_num', type=int, default=20, help="数据集类别数")
+    parser.add_argument('--class_num', type=int, default=80, help="数据集类别数")
     return parser.parse_args()
 
 
@@ -49,7 +50,7 @@ class AsyncStreamPipeline:
         )
 
         # 3. 初始化 AI 推理引擎
-        self.model = QNN_YOLO_Segment_Predictor(args)
+        self.model = QNNPredictor(args)
         
         # 4. 建立线程安全的流水线队列 (限制 maxsize 防止爆内存和累计延迟)
         self.frame_queue = queue.Queue(maxsize=2)

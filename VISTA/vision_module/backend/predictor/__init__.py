@@ -7,6 +7,8 @@ import platform
 from .base import IPredictor  # noqa: F401
 
 MockPredictor = None  # type: ignore
+QNN_YOLO_Dectec_Predictor = None  # type: ignore
+QNN_YOLO_Detect_Predictor = None  # type: ignore
 QNN_YOLO_Segment_Predictor = None  # type: ignore
 
 
@@ -30,20 +32,38 @@ _BACKEND = _requested_backend()
 
 if _BACKEND == "mock":
     from .mock import MockPredictor  # noqa: F401
+
+    QNN_YOLO_Dectec_Predictor = MockPredictor  # noqa: N816
+    QNN_YOLO_Detect_Predictor = MockPredictor  # noqa: N816
     QNN_YOLO_Segment_Predictor = MockPredictor  # noqa: N816
 elif _BACKEND == "real":
+    from .QNN_YOLO_Dectec_Predictor import QNN_YOLO_Dectec_Predictor, QNN_YOLO_Detect_Predictor  # noqa: F401
     from .QNN_YOLO_Segment_Predictor import QNN_YOLO_Segment_Predictor  # noqa: F401
 else:
     if _prefer_mock_platform():
         from .mock import MockPredictor  # noqa: F401
+
+        QNN_YOLO_Dectec_Predictor = MockPredictor  # noqa: N816
+        QNN_YOLO_Detect_Predictor = MockPredictor  # noqa: N816
         QNN_YOLO_Segment_Predictor = MockPredictor  # noqa: N816
     else:
         try:
+            from .QNN_YOLO_Dectec_Predictor import QNN_YOLO_Dectec_Predictor, QNN_YOLO_Detect_Predictor  # noqa: F401
             from .QNN_YOLO_Segment_Predictor import QNN_YOLO_Segment_Predictor  # noqa: F401
         except Exception:
             from .mock import MockPredictor  # noqa: F401
+
+            QNN_YOLO_Dectec_Predictor = MockPredictor  # noqa: N816
+            QNN_YOLO_Detect_Predictor = MockPredictor  # noqa: N816
             QNN_YOLO_Segment_Predictor = MockPredictor  # noqa: N816
 
-QNNPredictor = QNN_YOLO_Segment_Predictor
+QNNPredictor = QNN_YOLO_Dectec_Predictor
 
-__all__ = ["IPredictor", "MockPredictor", "QNNPredictor", "QNN_YOLO_Segment_Predictor"]
+__all__ = [
+    "IPredictor",
+    "MockPredictor",
+    "QNNPredictor",
+    "QNN_YOLO_Dectec_Predictor",
+    "QNN_YOLO_Detect_Predictor",
+    "QNN_YOLO_Segment_Predictor",
+]
