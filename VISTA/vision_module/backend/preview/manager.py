@@ -67,26 +67,6 @@ class PreviewManager:
             thread.join(timeout=1.0)
         self._worker_thread = None
 
-    def exit_requested(self) -> bool:
-        return bool(self._exit_requested)
-
-    def _publish_preview_exit(self) -> None:
-        scheduler = self._scheduler
-        if scheduler is None:
-            return
-        try:
-            generation = int(self._generation_getter())
-        except Exception:
-            generation = 0
-        try:
-            scheduler.publish_event(
-                "preview_exit",
-                {"requested": True, "ts": time.time()},
-                generation=generation,
-            )
-        except Exception:
-            pass
-
     def _worker_loop(self) -> None:
         while self._runtime_running and not self._worker_stop.is_set():
             if not self.enabled or self.sink is None:
@@ -141,7 +121,7 @@ class PreviewManager:
             )
             if not ok:
                 self._exit_requested = True
-                self._publish_preview_exit()
+                self.disable()
             self._worker_stop.wait(timeout=self._worker_interval_s)
 
     def set_sink(self, sink: PreviewSink) -> None:

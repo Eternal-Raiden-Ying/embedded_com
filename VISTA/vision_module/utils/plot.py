@@ -1,4 +1,7 @@
-import aidcv as cv2
+try:
+    import aidcv as cv2
+except ImportError:
+    import cv2
 import numpy as np
 
 from ..config.data import grasping_coco20 as CLASSES

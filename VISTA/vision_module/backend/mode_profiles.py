@@ -2,35 +2,49 @@
 # -*- coding: utf-8 -*-
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 
-@dataclass(frozen=True)
-class RemoteModeProfile:
+@dataclass
+class RemoteProfile:
+    """Capability requirements for remote inference or grasp cooperation."""
+
     enabled: bool = False
-    base_url: str = ""
+    base_url: Optional[str] = None
+    command: str = "predict"
+    require_depth: bool = False
+    require_segmentation: bool = False
+    timeout_s: float = 10.0
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass(frozen=True)
-class PreviewModeProfile:
+@dataclass
+class PreviewProfile:
+    """Preview sink settings associated with a mode profile."""
+
     enabled: bool = False
     sink_name: str = "null"
-    window_name: str = "VISTA Preview"
+    overlay_enabled: bool = True
+    window_name: str = "VISTA App Dashboard"
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass(frozen=True)
+@dataclass
 class ModeProfile:
+    """Resource-only definition for one runtime mode."""
+
     name: str
     enabled_cameras: Tuple[str, ...] = ()
     camera_overrides: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     predictor_enabled: bool = False
-    predictor_model: str = ""
-    remote: RemoteModeProfile = field(default_factory=RemoteModeProfile)
-    preview: PreviewModeProfile = field(default_factory=PreviewModeProfile)
-    loop_hz: float = 8.0
-    send_hz: float = 5.0
+    predictor_model: Optional[str] = None
+    remote: RemoteProfile = field(default_factory=RemoteProfile)
+    preview: PreviewProfile = field(default_factory=PreviewProfile)
+    loop_hz: Optional[float] = None
+    send_hz: Optional[float] = None
     release_cooldown_s: float = 0.0
     metadata: Dict[str, Any] = field(default_factory=dict)
 
-    def __post_init__(self):
-        object.__setattr__(self, "name", str(self.name or "IDLE").strip().upper() or "IDLE")
+    def camera_enabled(self, name: str) -> bool:
+        """Check whether a camera should be active in this mode."""
+        return str(name) in set(self.enabled_cameras)

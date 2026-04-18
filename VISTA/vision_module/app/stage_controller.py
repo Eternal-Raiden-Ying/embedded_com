@@ -16,12 +16,13 @@ class StageController:
     and handoff between stage logic and the mode/capability layer.
     """
 
-    def __init__(self, logger=None, event_sink=None, mode_controller=None):
+    def __init__(self, logger=None, event_sink=None, mode_controller=None, runtime_service=None):
         self._plans: Dict[str, BaseStagePlan] = {}
         self._ctx = StageContext()
         self.logger = logger
         self._event_sink = event_sink
         self._mode_controller = mode_controller
+        self._runtime_service = runtime_service
         self._last_applied_mode = "IDLE"
         self._last_interaction_state_key = None
         if self._mode_controller is not None:
@@ -112,15 +113,20 @@ class StageController:
             self._last_applied_mode = target_mode
             return True
         try:
-            profile = self._mode_controller.switch_mode(target_mode, reason=reason, force=force)
-            ok = profile is not None
+            profile = self._mode_controller.switch_mode(
+                target_mode,
+                reason=reason,
+                force=force,
+                apply_mode_plan=(self._runtime_service.apply_mode_plan if self._runtime_service is not None else None),
+            )
         except Exception:
-            ok = False
-        if ok:
-            applied_mode = normalize_upper(getattr(profile, "name", target_mode), target_mode)
-            self._ctx.current_mode = applied_mode
-            self._last_applied_mode = applied_mode
-        return ok
+            return False
+        if profile is None:
+            return False
+        applied_mode = normalize_upper(getattr(profile, "name", target_mode), target_mode)
+        self._ctx.current_mode = applied_mode
+        self._last_applied_mode = applied_mode
+        return True
 
     def set_runtime_mode(self, mode: str, reason: str = "", force: bool = False) -> bool:
         previous_mode = self._ctx.current_mode
@@ -128,6 +134,8 @@ class StageController:
         ok = self._apply_context_mode(reason=reason or "runtime_mode", force=force)
         if not ok:
             self._ctx.current_mode = previous_mode
+        else:
+            self._publish_runtime_status()
         return ok
 
     def _emit_transition(
@@ -186,19 +194,48 @@ class StageController:
 
     def _finalize_output(self, plan: Optional[BaseStagePlan], output: Optional[StageOutput]) -> Optional[StageOutput]:
         finalized = self._ensure_output(plan, output)
-        if finalized is not None and finalized.signals:
-            self._push_stage_signals(finalized.signals)
+        if finalized is not None and finalized.signals and self._runtime_service is not None:
+            try:
+                self._runtime_service.push_stage_signals(dict(finalized.signals or {}))
+            except Exception:
+                pass
+        if finalized is not None and finalized.effects:
+            self._publish_effects(finalized.effects)
+        self._publish_runtime_status()
         self._emit_output_events(finalized)
         return finalized
 
-    def _push_stage_signals(self, signals: Dict[str, Any]) -> None:
-        if self._mode_controller is None or not signals:
+    def _publish_effects(self, effects) -> None:
+        if self._runtime_service is None:
             return
-        pusher = getattr(self._mode_controller, "push_stage_signals", None)
-        if not callable(pusher):
+        for effect in list(effects or ()):
+            if not isinstance(effect, dict):
+                continue
+            effect_type = normalize_upper(effect.get("type"), "")
+            route = str(effect.get("route") or "").strip()
+            payload = dict(effect.get("payload") or {})
+            if effect_type != "PUBLISH_EVENT" or not route:
+                continue
+            try:
+                self._runtime_service.publish_event(route, payload)
+            except Exception:
+                pass
+
+    def _runtime_status_payload(self) -> Dict[str, Any]:
+        return {
+            "stage": normalize_upper(self._ctx.current_stage, "IDLE"),
+            "mode": normalize_upper(self._ctx.current_mode, "IDLE"),
+            "session_id": self._ctx.session_id,
+            "req_id": self._ctx.req_id,
+            "epoch": int(self._ctx.epoch),
+            "interaction_id": self._ctx.interaction_id,
+        }
+
+    def _publish_runtime_status(self) -> None:
+        if self._runtime_service is None:
             return
         try:
-            pusher(dict(signals or {}))
+            self._runtime_service.publish_result("runtime_status", self._runtime_status_payload())
         except Exception:
             pass
 
@@ -255,50 +292,6 @@ class StageController:
     def context(self) -> StageContext:
         """Expose the mutable runtime context owned by the controller."""
         return self._ctx
-
-    def collect_tick_input(self, ts: float) -> StageTickInput:
-        if self._mode_controller is None:
-            return StageTickInput(ts=float(ts))
-        ticker = getattr(self._mode_controller, "tick_runtime", None)
-        if callable(ticker):
-            try:
-                ticker(ts=ts)
-            except Exception:
-                pass
-        collector = getattr(self._mode_controller, "collect_tick_input", None)
-        if callable(collector):
-            try:
-                return collector(ts=ts)
-            except Exception:
-                pass
-        return StageTickInput(ts=float(ts))
-
-    def publish_runtime_status(self, status: Dict[str, Any]) -> None:
-        if not isinstance(status, dict):
-            return
-        self._push_stage_signals({"runtime_status": dict(status or {})})
-
-    def preview_exit_requested(self) -> bool:
-        if self._mode_controller is None:
-            return False
-        checker = getattr(self._mode_controller, "preview_exit_requested", None)
-        if not callable(checker):
-            return False
-        try:
-            return bool(checker())
-        except Exception:
-            return False
-
-    def runtime_snapshot(self) -> Dict[str, Any]:
-        if self._mode_controller is None:
-            return {}
-        getter = getattr(self._mode_controller, "snapshot", None)
-        if not callable(getter):
-            return {}
-        try:
-            return dict(getter() or {})
-        except Exception:
-            return {}
 
     def activate_stage(self, stage: str, req: Optional[VisionReq] = None) -> Optional[BaseStagePlan]:
         """Prepare a stage for execution and invoke its enter hook.
@@ -421,4 +414,11 @@ class StageController:
         data = asdict(self._ctx)
         data["registered_stages"] = sorted(self._plans.keys())
         data["last_applied_mode"] = self._last_applied_mode
+        if self._mode_controller is not None:
+            getter = getattr(self._mode_controller, "snapshot", None)
+            if callable(getter):
+                try:
+                    data["mode_controller"] = dict(getter() or {})
+                except Exception:
+                    data["mode_controller"] = {"error": "snapshot_failed"}
         return data

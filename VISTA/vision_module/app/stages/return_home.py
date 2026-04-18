@@ -1,60 +1,73 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from copy import deepcopy
 from typing import Dict, Optional
 
 from ...ipc.protocol import VisionReq
-from .base import BaseStagePlan, StageContext, StageOutput, StageTickInput, normalize_upper
+from .base import BaseStagePlan, StageContext, StageOutput, StageTickInput, normalize_upper, resolve_stage_summary
 
 
-def _default_home_obs() -> Dict[str, object]:
-    return {
-        "found": False,
-        "tag_id": None,
-        "confidence": 0.0,
-        "cx_norm": 0.0,
-        "area_norm": 0.0,
-        "bbox": None,
-    }
+def _home_tag_obs_from_payload(payload: Optional[Dict[str, object]]) -> Dict[str, object]:
+    base: Dict[str, object] = {"found": False}
+    source = None
+    if isinstance(payload, dict):
+        source = payload.get("home_tag_obs") or payload.get("mock_home_tag_obs")
+    if isinstance(source, dict):
+        base.update(source)
+    base["found"] = bool(base.get("found", False))
+    return base
+
+
+def _home_tag_obs_from_results(results: Dict[str, object]) -> Optional[Dict[str, object]]:
+    local = dict((results or {}).get("local_perception") or {})
+    home_tag_obs = local.get("home_tag_obs")
+    if not isinstance(home_tag_obs, dict):
+        return None
+    payload = {"found": bool(home_tag_obs.get("found", False))}
+    payload.update(home_tag_obs)
+    return payload
 
 
 class ReturnStagePlan(BaseStagePlan):
+    """Stage plan for home-tag or return-target perception."""
+
     stage_name = "RETURN"
     default_mode = "TRACK_LOCAL"
 
     def on_enter(self, req: VisionReq, ctx: StageContext) -> None:
+        """Initialize return-home state and choose the initial return mode."""
         super().on_enter(req, ctx)
         ctx.current_mode = normalize_upper(req.mode_hint, self.default_mode)
-        ctx.stage_state.clear()
-        payload = req.payload if isinstance(req.payload, dict) else {}
-        if isinstance(payload.get("home_tag_obs"), dict):
-            ctx.stage_state["home_tag_obs"] = dict(payload["home_tag_obs"])
+        ctx.interaction_id = None
+        ctx.stage_state["home_tag_obs"] = _home_tag_obs_from_payload(req.payload)
 
     def on_update(self, req: VisionReq, ctx: StageContext) -> Optional[StageOutput]:
+        """Refresh return parameters while staying in RETURN."""
         if req.mode_hint:
             ctx.current_mode = normalize_upper(req.mode_hint, self.default_mode)
-        payload = req.payload if isinstance(req.payload, dict) else {}
-        if isinstance(payload.get("home_tag_obs"), dict):
-            ctx.stage_state["home_tag_obs"] = dict(payload["home_tag_obs"])
+        if isinstance(req.payload, dict):
+            ctx.stage_state["home_tag_obs"] = _home_tag_obs_from_payload(req.payload)
         return StageOutput()
 
     def tick(self, tick_input: StageTickInput, ctx: StageContext) -> Optional[StageOutput]:
+        """Produce home-observation outputs used by the return workflow."""
         results = dict(tick_input.results or {})
-        local = dict(results.get("local_perception") or {})
-        home_obs = local.get("home_tag_obs")
-        if not isinstance(home_obs, dict):
-            home_obs = deepcopy(ctx.stage_state.get("home_tag_obs") or _default_home_obs())
-        else:
-            ctx.stage_state["home_tag_obs"] = dict(home_obs)
+        home_tag_obs, source = resolve_stage_summary(
+            results=results,
+            stage_state=ctx.stage_state,
+            state_key="home_tag_obs",
+            default_factory=lambda: _home_tag_obs_from_payload(None),
+            result_factory=_home_tag_obs_from_results,
+        )
         return StageOutput(
             vision_obs=self.build_obs(
                 ctx,
                 status="RUNNING",
-                perception={"home_tag_obs": home_obs},
+                perception={"home_tag_obs": home_tag_obs},
             ),
             snapshot={
                 "generation": int(tick_input.generation),
                 "result_keys": sorted(results.keys()),
+                "source": source,
             },
         )

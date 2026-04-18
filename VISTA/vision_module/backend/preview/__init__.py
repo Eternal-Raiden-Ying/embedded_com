@@ -1,12 +1,20 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+from .base import PreviewFrame, PreviewOverlay, PreviewSink
+from .null_sink import NullPreviewSink
 
-from .base import NullPreviewSink, OpenCVPreviewSink, PreviewFrame, PreviewOverlay, PreviewSink
+try:
+    from .opencv_sink import OpenCVPreviewSink
+except Exception:
+    class OpenCVPreviewSink(NullPreviewSink):  # type: ignore
+        sink_name = "opencv"
+
+        def __init__(self, window_name: str = "VISTA App Dashboard"):
+            super().__init__()
+            self.window_name = window_name
 
 __all__ = [
-    "NullPreviewSink",
-    "OpenCVPreviewSink",
     "PreviewFrame",
     "PreviewOverlay",
     "PreviewSink",
+    "NullPreviewSink",
+    "OpenCVPreviewSink",
 ]

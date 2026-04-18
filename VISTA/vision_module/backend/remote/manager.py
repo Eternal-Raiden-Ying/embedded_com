@@ -5,16 +5,21 @@ import threading
 import time
 from typing import Any, Callable, Dict, Optional
 
+try:
+    import aidcv as cv2
+except ImportError:
+    try:
+        import cv2
+    except ImportError:
+        cv2 = None  # type: ignore
+
+from ...config.data import ASR_VOCAB_MAP, TARGET_CLASSES
 from .client import RemoteGraspClient
-from .protocol import RemotePredictRequest, RemotePredictResponse
+from .protocol import RemoteMetadata, RemotePredictRequest, RemotePredictResponse
 
 
 class RemoteManager:
-    """Own remote client lifecycle and remote request orchestration.
-
-    This manager is the capability-facing wrapper used by mode control and
-    GRASP stage logic. It should hide HTTP details from the rest of VISTA.
-    """
+    """Own remote client lifecycle and remote request orchestration."""
 
     def __init__(
         self,
@@ -42,6 +47,7 @@ class RemoteManager:
             "status_code": None,
             "has_result": False,
             "result": None,
+            "request_id": None,
             "sequence": 0,
             "ts": 0.0,
         }
@@ -56,8 +62,16 @@ class RemoteManager:
         except Exception:
             pass
 
+    def _log(self, level: str, message: str, **fields: Any) -> None:
+        if self.logger is None:
+            return
+        extra = fields or None
+        text = message if not extra else f"{message} | {extra}"
+        fn = getattr(self.logger, level, None)
+        if callable(fn):
+            fn(text)
+
     def set_client(self, client: RemoteGraspClient) -> None:
-        """Replace the underlying remote client implementation."""
         self.client = client
 
     def bind_runtime(self, scheduler, generation_getter=None) -> None:
@@ -107,6 +121,176 @@ class RemoteManager:
         except Exception:
             pass
 
+    def _resolve_class_id(self, target: Optional[str], explicit_class_id: Any = None) -> Optional[int]:
+        if explicit_class_id is not None:
+            try:
+                return int(explicit_class_id)
+            except Exception:
+                return None
+        target_name = str(target or "").strip()
+        if not target_name:
+            return None
+        if target_name in TARGET_CLASSES:
+            return TARGET_CLASSES.index(target_name)
+        valid_names = ASR_VOCAB_MAP.get(target_name, set())
+        for class_name in sorted(valid_names):
+            if class_name in TARGET_CLASSES:
+                return TARGET_CLASSES.index(class_name)
+        return None
+
+    def _encode_frame(self, ext: str, frame, params=None) -> Optional[bytes]:
+        if frame is None:
+            return None
+        if cv2 is None:
+            return None
+        try:
+            ok, encoded = cv2.imencode(ext, frame, list(params or ()))
+        except Exception:
+            return None
+        if not ok:
+            return None
+        try:
+            return encoded.tobytes()
+        except Exception:
+            return None
+
+    def _build_predict_request(self, cmd: Dict[str, Any]) -> Optional[RemotePredictRequest]:
+        scheduler = self._scheduler
+        if scheduler is None:
+            return None
+        frame_slot = scheduler.read_slot("camera_frames")
+        frames = frame_slot.get("payload") if isinstance(frame_slot, dict) else None
+        if not isinstance(frames, dict):
+            self._update_result(
+                action="predict",
+                state="predict_failed",
+                ok=False,
+                error="missing_camera_frames",
+                request_id=cmd.get("request_id"),
+            )
+            return None
+
+        rgb = frames.get("rgb")
+        depth = frames.get("depth")
+        if rgb is None:
+            self._update_result(
+                action="predict",
+                state="predict_failed",
+                ok=False,
+                error="missing_rgb_frame",
+                request_id=cmd.get("request_id"),
+            )
+            return None
+        if bool(cmd.get("need_depth", False)) and depth is None:
+            self._update_result(
+                action="predict",
+                state="predict_failed",
+                ok=False,
+                error="missing_depth_frame",
+                request_id=cmd.get("request_id"),
+            )
+            return None
+
+        class_id = self._resolve_class_id(cmd.get("target"), cmd.get("class_id"))
+        if class_id is None:
+            self._update_result(
+                action="predict",
+                state="predict_failed",
+                ok=False,
+                error="missing_class_id",
+                request_id=cmd.get("request_id"),
+            )
+            return None
+        if cv2 is None:
+            self._update_result(
+                action="predict",
+                state="predict_failed",
+                ok=False,
+                error="opencv_unavailable",
+                request_id=cmd.get("request_id"),
+            )
+            return None
+        rgb_bytes = self._encode_frame(".jpg", rgb, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+        depth_bytes = self._encode_frame(".png", depth, [int(cv2.IMWRITE_PNG_COMPRESSION), 3]) if depth is not None else None
+        if rgb_bytes is None:
+            self._update_result(
+                action="predict",
+                state="predict_failed",
+                ok=False,
+                error="rgb_encode_failed",
+                request_id=cmd.get("request_id"),
+            )
+            return None
+
+        metadata = RemoteMetadata(
+            robot_id=str(cmd.get("robot_id") or "arm_001"),
+            command=str(cmd.get("command") or "predict"),
+            class_id=class_id,
+            extras=dict(cmd.get("metadata") or {}) if isinstance(cmd.get("metadata"), dict) else {},
+        )
+        metadata.extras.setdefault("target", cmd.get("target"))
+        metadata.extras.setdefault("request_id", cmd.get("request_id"))
+        return RemotePredictRequest(
+            rgb_bytes=rgb_bytes,
+            depth_bytes=depth_bytes,
+            seg_bytes=None,
+            class_id=class_id,
+            metadata=metadata,
+            timeout_s=float(cmd.get("timeout_s", 10.0) or 10.0),
+        )
+
+    def _handle_command(self, cmd: Dict[str, Any]) -> Dict[str, Any]:
+        op = str(cmd.get("op") or "").strip().upper()
+        timeout_s = float(cmd.get("timeout_s", 5.0) or 5.0)
+        request_id = cmd.get("request_id")
+        client = self.client
+        base_url = str(cmd.get("base_url") or "").strip()
+        if client is not None and base_url:
+            try:
+                client.configure(base_url)
+            except Exception:
+                pass
+        ack = {"op": op, "ok": False, "reason": "unsupported", "request_id": request_id}
+        try:
+            if op == "INIT":
+                resp = self.init_server(timeout_s=timeout_s, request_id=request_id)
+                ack = {
+                    "op": op,
+                    "ok": bool(resp is not None and resp.ok),
+                    "reason": str((resp.error if resp is not None else "") or ""),
+                    "status_code": getattr(resp, "status_code", None),
+                    "request_id": request_id,
+                }
+            elif op == "PREDICT":
+                request = self._build_predict_request(cmd)
+                resp = self.predict(request, request_id=request_id) if request is not None else None
+                ack = {
+                    "op": op,
+                    "ok": bool(resp is not None and resp.ok),
+                    "reason": str((resp.error if resp is not None else self._last_result.get("last_error")) or ""),
+                    "status_code": getattr(resp, "status_code", None),
+                    "request_id": request_id,
+                }
+            elif op == "RELEASE":
+                resp = self.release_server(timeout_s=timeout_s, request_id=request_id)
+                ack = {
+                    "op": op,
+                    "ok": bool(resp is not None and resp.ok),
+                    "reason": str((resp.error if resp is not None else "") or ""),
+                    "status_code": getattr(resp, "status_code", None),
+                    "request_id": request_id,
+                }
+        except Exception as exc:
+            ack = {"op": op, "ok": False, "reason": str(exc), "request_id": request_id}
+            self._update_result(
+                action=op.lower() or "remote",
+                state=f"{op.lower()}_failed" if op else "remote_failed",
+                ok=False,
+                error=str(exc),
+                request_id=request_id,
+            )
+        return ack
+
     def _worker_loop(self) -> None:
         while self._runtime_running and not self._worker_stop.is_set():
             self._publish_result("remote_result", self.result_summary())
@@ -114,18 +298,7 @@ class RemoteManager:
             if scheduler is not None:
                 cmd = scheduler.consume_event("remote_cmd")
                 if isinstance(cmd, dict):
-                    op = str(cmd.get("op") or "").strip().upper()
-                    timeout_s = float(cmd.get("timeout_s", 5.0) or 5.0)
-                    ack = {"op": op, "ok": False, "reason": "unsupported"}
-                    try:
-                        if op == "INIT":
-                            resp = self.init_server(timeout_s=timeout_s)
-                            ack = {"op": op, "ok": bool(resp is not None and resp.ok)}
-                        elif op == "RELEASE":
-                            resp = self.release_server(timeout_s=timeout_s)
-                            ack = {"op": op, "ok": bool(resp is not None and resp.ok)}
-                    except Exception as exc:
-                        ack = {"op": op, "ok": False, "reason": str(exc)}
+                    ack = self._handle_command(cmd)
                     self._publish_event("remote_ack", ack)
             self._worker_stop.wait(timeout=self._worker_interval_s)
 
@@ -138,6 +311,7 @@ class RemoteManager:
         error: str = "",
         status_code: Optional[int] = None,
         result: Optional[Dict[str, Any]] = None,
+        request_id: Optional[str] = None,
     ) -> None:
         self._sequence += 1
         self._last_result = {
@@ -149,12 +323,12 @@ class RemoteManager:
             "status_code": status_code,
             "has_result": result is not None,
             "result": dict(result or {}) if isinstance(result, dict) else result,
+            "request_id": request_id,
             "sequence": int(self._sequence),
             "ts": time.time(),
         }
 
     def enable(self) -> bool:
-        """Enable remote capability and prepare the client session."""
         if self.enabled:
             return False
         self.enabled = True
@@ -165,7 +339,6 @@ class RemoteManager:
         return True
 
     def disable(self) -> bool:
-        """Disable remote capability and close the client session."""
         if not self.enabled:
             return False
         self.enabled = False
@@ -175,9 +348,20 @@ class RemoteManager:
         self._emit("disabled", enabled=False)
         return True
 
-    def _record_response(self, action: str, response: Optional[RemotePredictResponse]) -> Optional[RemotePredictResponse]:
+    def _record_response(
+        self,
+        action: str,
+        response: Optional[RemotePredictResponse],
+        request_id: Optional[str] = None,
+    ) -> Optional[RemotePredictResponse]:
         if response is None:
-            self._update_result(action=action, state=f"{action}_skipped", ok=False, error="no_response")
+            self._update_result(
+                action=action,
+                state=f"{action}_skipped",
+                ok=False,
+                error="no_response",
+                request_id=request_id,
+            )
             return None
         payload = response.payload if isinstance(response.payload, dict) else {"value": response.payload}
         self._update_result(
@@ -187,26 +371,28 @@ class RemoteManager:
             error=str(response.error or ""),
             status_code=response.status_code,
             result=payload,
+            request_id=request_id,
         )
         return response
 
-    def init_server(self, timeout_s: float = 15.0) -> Optional[RemotePredictResponse]:
-        """Initialize the remote service before GRASP_REMOTE begins."""
+    def init_server(self, timeout_s: float = 15.0, request_id: Optional[str] = None) -> Optional[RemotePredictResponse]:
         if not self.enabled or self.client is None:
             return None
-        return self._record_response("init", self.client.init_server(timeout_s=timeout_s))
+        return self._record_response("init", self.client.init_server(timeout_s=timeout_s), request_id=request_id)
 
-    def predict(self, request: RemotePredictRequest) -> Optional[RemotePredictResponse]:
-        """Send one remote predict request assembled from synchronized inputs."""
-        if not self.enabled or self.client is None:
+    def predict(
+        self,
+        request: Optional[RemotePredictRequest],
+        request_id: Optional[str] = None,
+    ) -> Optional[RemotePredictResponse]:
+        if request is None or not self.enabled or self.client is None:
             return None
-        return self._record_response("predict", self.client.predict(request))
+        return self._record_response("predict", self.client.predict(request), request_id=request_id)
 
-    def release_server(self, timeout_s: float = 5.0) -> Optional[RemotePredictResponse]:
-        """Release remote service resources after remote work completes."""
+    def release_server(self, timeout_s: float = 5.0, request_id: Optional[str] = None) -> Optional[RemotePredictResponse]:
         if not self.enabled or self.client is None:
             return None
-        return self._record_response("release", self.client.release_server(timeout_s=timeout_s))
+        return self._record_response("release", self.client.release_server(timeout_s=timeout_s), request_id=request_id)
 
     def result_summary(self) -> Dict[str, Any]:
         payload = dict(self._last_result or {})
@@ -214,7 +400,6 @@ class RemoteManager:
         return payload
 
     def snapshot(self) -> Dict[str, Any]:
-        """Expose remote manager and client state for diagnostics."""
         return {
             "enabled": self.enabled,
             "client": self.client.snapshot() if self.client is not None else None,

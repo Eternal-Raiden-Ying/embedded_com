@@ -9,7 +9,7 @@ import time
 from threading import RLock
 from typing import Any, Callable, Dict, Optional, Tuple
 
-from .predictor import QNN_YOLO_Segment_Predictor
+from .predictor import QNN_YOLO_Dectec_Predictor, QNN_YOLO_Segment_Predictor
 from .predictor.base import IPredictor
 from .predictor.mock import MockPredictor
 from ..config.schema import VisionServiceConfig
@@ -61,6 +61,16 @@ class PredictorManager:
         self._scheduler = scheduler
         if callable(generation_getter):
             self._generation_getter = generation_getter
+
+    @staticmethod
+    def _predictor_type_for(profile) -> str:
+        return str(getattr(profile, "predictor_type", "detect") or "detect").strip().lower()
+
+    def _predictor_class_for_profile(self, profile):
+        predictor_type = self._predictor_type_for(profile)
+        if predictor_type == "segment":
+            return QNN_YOLO_Segment_Predictor
+        return QNN_YOLO_Dectec_Predictor
 
     def set_inference_enabled(self, enable: bool) -> None:
         self.inference_enabled = bool(enable)
@@ -139,6 +149,7 @@ class PredictorManager:
                 "local_perception",
                 {
                     "has_infer": bool(self.inference_enabled and rgb is not None and self.is_ready()),
+                    "predictor_type": str(type(self.predictor).__name__) if self.predictor is not None else None,
                     "box_count": int(len(boxes or [])),
                     "infer_boxes": list(boxes or []),
                     "infer_masks": list(masks or []),
@@ -182,7 +193,8 @@ class PredictorManager:
             return False
 
         try:
-            predictor = MockPredictor(profile) if self._use_placeholder() else QNN_YOLO_Segment_Predictor(profile)
+            predictor_cls = MockPredictor if self._use_placeholder() else self._predictor_class_for_profile(profile)
+            predictor = predictor_cls(profile)
         except Exception as exc:
             self.log.error("model load failed: %s | %s", target, exc)
             self._emit("load_failed", target, error=str(exc))
@@ -195,6 +207,7 @@ class PredictorManager:
         self._emit(
             "loaded",
             target,
+            predictor_type=self._predictor_type_for(profile),
             implementation="mock" if self._use_placeholder() else "real",
         )
         return True

@@ -190,8 +190,8 @@ def import_predictor_class(backend: str):
     if backend == "mock":
         module = importlib.import_module("vision_module.backend.predictor.mock")
         return module.MockPredictor
-    module = importlib.import_module("vision_module.backend.predictor.QNN_YOLO_Segment_Predictor")
-    return module.QNN_YOLO_Segment_Predictor
+    module = importlib.import_module("vision_module.backend.predictor.QNN_YOLO_Dectec_Predictor")
+    return module.QNN_YOLO_Dectec_Predictor
 
 
 def make_rgb_kwargs(args: argparse.Namespace) -> Dict[str, Any]:
@@ -237,6 +237,14 @@ def make_model_profile(args: argparse.Namespace) -> SingleModelConfig:
         iou_thres=args.iou_thres,
         class_num=args.class_num,
         classes=None,
+        predictor_type="detect",
+        model_backend="qnn",
+        anchors=(
+            (12, 16, 19, 36, 40, 28),
+            (36, 75, 76, 55, 72, 146),
+            (142, 110, 192, 243, 459, 401),
+        ),
+        strides=(8, 16, 32),
     )
 
 
@@ -314,4 +322,14 @@ def patch_engine_backends(engine_module: Any, camera_backend: str, predictor_bac
     engine_module.IRCamera = ir_cls
     engine_module.HardwareCamera = color_cls
     engine_module.RealSenseDepthCamera = depth_cls
+    engine_module.QNN_YOLO_Dectec_Predictor = predictor_cls
     engine_module.QNN_YOLO_Segment_Predictor = predictor_cls
+
+    # New engine architecture delegates capability creation to managers.
+    camera_manager_module = importlib.import_module("vision_module.backend.camera_manager")
+    predictor_manager_module = importlib.import_module("vision_module.backend.predictor_manager")
+    camera_manager_module.ColorCamera = color_cls
+    camera_manager_module.IRCamera = ir_cls
+    camera_manager_module.RealSenseDepthCamera = depth_cls
+    predictor_manager_module.QNN_YOLO_Dectec_Predictor = predictor_cls
+    predictor_manager_module.QNN_YOLO_Segment_Predictor = predictor_cls
