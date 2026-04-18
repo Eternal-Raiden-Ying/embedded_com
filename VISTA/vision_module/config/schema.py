@@ -21,6 +21,9 @@ class RuntimeConfig:
     keep_preview_after_stop: bool = True
     keep_model_hot_in_standby: bool = True
     enable_infer_during_hot_standby: bool = False
+    capability_placeholder: bool = False
+    heartbeat_enabled: bool = True
+    heartbeat_interval_s: float = 2.0
     log_mode: str = "concise"
     log_enabled: bool = True
     debug: bool = False

@@ -13,7 +13,6 @@ from ..ipc.protocol import (
     TableEdgeObs,
     TargetObs,
     TaskCmd,
-    make_home_tag_req,
     make_tts_event,
     make_vision_idle,
     make_vision_req,
@@ -63,6 +62,14 @@ class ObstacleSignal:
     best_turn_dir: str = ""
     distance_m: Optional[float] = None
     source: str = ""
+
+
+@dataclass(frozen=True)
+class VisionStageBinding:
+    stage: str
+    mode_hint: str
+    target: Optional[str] = None
+    payload: Optional[Dict[str, object]] = None
 
 
 class OrchestratorCore:
@@ -199,6 +206,7 @@ class OrchestratorCore:
             "session_id": self.ctx.active_session_id,
             "epoch": self.ctx.active_epoch,
             "req_id": self.ctx.active_req_id,
+            "vision_stage": self.ctx.active_vision_stage,
             "vision_mode": self.ctx.active_vision_mode,
             "current_edge_id": self.ctx.current_edge_id,
             "edge_visit_index": self.ctx.edge_visit_index,
@@ -241,20 +249,13 @@ class OrchestratorCore:
     def _on_enter_state(self, state: State):
         if state == State.IDLE:
             self.ctx.clear_task_context()
+            self.ctx.active_vision_stage = ""
             self.ctx.active_vision_mode = ""
             self.ctx.resume_state = None
             return
-        if state in TABLE_VISION_STATES:
-            self.ctx.active_vision_mode = "TABLE_EDGE_SEARCH"
-            self._queue_vision_req(self._active_req_payload(), force=True)
-            return
-        if state in TARGET_VISION_STATES or state == State.AT_TABLE_EDGE:
-            self.ctx.active_vision_mode = "EDGE_TARGET_SEARCH"
-            self._queue_vision_req(self._active_req_payload(), force=True)
-            return
-        if state in {State.REACQUIRE_EDGE, State.RETURN_HOME}:
-            self.ctx.active_vision_mode = "TABLE_EDGE_SEARCH" if state == State.REACQUIRE_EDGE else "HOME_TAG_SEARCH"
-            self._queue_vision_req(self._active_req_payload(), force=True)
+        req = self._active_req_payload()
+        if req is not None:
+            self._queue_vision_req(req, force=True)
 
     def _interrupt_to_idle(self, reason: str, tts_text: Optional[str] = None, interrupt_tts: bool = False, send_vision_idle: bool = False):
         if send_vision_idle:
@@ -270,10 +271,12 @@ class OrchestratorCore:
         if tts_text:
             self._queue_tts(tts_text, interrupt=interrupt_tts)
 
-    def _maybe_resend_req(self, req: Dict):
+    def _maybe_resend_req(self, req: Optional[Dict]):
         self._queue_vision_req(req, force=False)
 
     def _queue_vision_req(self, payload: Dict, force: bool = False):
+        if not isinstance(payload, dict) or not payload:
+            return
         now_m = monotonic_ts()
         if not force and now_m - self._last_req_mono < self.cfg.req_resend_period_s:
             return
@@ -548,19 +551,63 @@ class OrchestratorCore:
             self._transition(State.IDLE, "任务完成，回到空闲")
         return self.controller.stop_cmd("DONE")
 
-    def _active_req_payload(self) -> Dict:
-        if self.ctx.task_intent == "RETURN":
-            return make_home_tag_req(session_id=self.ctx.active_session_id, epoch=self.ctx.active_epoch, stage=self.ctx.state.value)
-        mode = "TABLE_EDGE_SEARCH" if self.ctx.state in TABLE_VISION_STATES else "EDGE_TARGET_SEARCH"
+    def _active_req_payload(self) -> Optional[Dict]:
+        binding = self._vision_binding_for_state(self.ctx.state)
+        if binding is None:
+            return None
+        same_stage = bool(self.ctx.active_vision_stage) and self.ctx.active_vision_stage == binding.stage
+        op = "UPDATE" if same_stage else "START"
+        self.ctx.active_vision_stage = binding.stage
+        self.ctx.active_vision_mode = binding.mode_hint
         return make_vision_req(
-            self.ctx.active_target or "",
+            target=binding.target,
             session_id=self.ctx.active_session_id,
             epoch=self.ctx.active_epoch,
-            mode=mode,
-            stage=self.ctx.state.value,
-            current_edge_id=self.ctx.current_edge_id,
-            need_depth=True,
+            op=op,
+            stage=binding.stage,
+            mode_hint=binding.mode_hint,
+            payload=dict(binding.payload or {}),
         )
+
+    def _vision_binding_for_state(self, state: State) -> Optional[VisionStageBinding]:
+        if state in TABLE_VISION_STATES:
+            return VisionStageBinding(
+                stage="SEARCH",
+                mode_hint="DEPTH_PERCEPTION",
+                target=None,
+                payload={
+                    "search_kind": "TABLE_EDGE",
+                    "need_depth": True,
+                    "current_edge_id": self.ctx.current_edge_id,
+                    "orchestrator_state": state.value,
+                    "table_cycle_count": int(self.ctx.table_cycle_count),
+                    "edge_visit_index": int(self.ctx.edge_visit_index),
+                },
+            )
+        if state in TARGET_VISION_STATES or state == State.AT_TABLE_EDGE:
+            return VisionStageBinding(
+                stage="SEARCH",
+                mode_hint="TRACK_LOCAL",
+                target=self.ctx.active_target,
+                payload={
+                    "search_kind": "TARGET",
+                    "need_depth": False,
+                    "current_edge_id": self.ctx.current_edge_id,
+                    "orchestrator_state": state.value,
+                    "edge_visit_index": int(self.ctx.edge_visit_index),
+                },
+            )
+        if state == State.RETURN_HOME:
+            return VisionStageBinding(
+                stage="RETURN",
+                mode_hint="TRACK_LOCAL",
+                target=None,
+                payload={
+                    "search_kind": "HOME_TAG",
+                    "orchestrator_state": state.value,
+                },
+            )
+        return None
 
     def _fresh_table_obs(self) -> Optional[TableEdgeObs]:
         obs = self.ctx.last_table_obs

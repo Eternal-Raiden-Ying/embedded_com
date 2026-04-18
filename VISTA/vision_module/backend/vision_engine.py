@@ -13,6 +13,7 @@ from .preview import NullPreviewSink
 from .preview.manager import PreviewManager
 from .remote.client import RemoteGraspClient
 from .remote.manager import RemoteManager
+from .table_edge_manager import TableEdgeManager
 from ..config.mode_defaults import build_default_mode_profiles
 from ..config.schema import VisionServiceConfig
 
@@ -51,6 +52,10 @@ class VisionEngine:
             logger=self.log,
             capability_sink=self._on_simple_capability_change,
         )
+        self.table_edge_manager = TableEdgeManager(
+            logger=self.log,
+            capability_sink=self._on_simple_capability_change,
+        )
         self.preview_manager = PreviewManager(
             sink=NullPreviewSink(),
             logger=self.log,
@@ -61,6 +66,7 @@ class VisionEngine:
             camera_manager=self.camera_manager,
             predictor_manager=self.predictor_manager,
             remote_manager=self.remote_manager,
+            table_edge_manager=self.table_edge_manager,
             preview_manager=self.preview_manager,
             logger=self.log,
             backend_event_sink=self._emit_event,
@@ -77,6 +83,7 @@ class VisionEngine:
         self.active_model_name = self.predictor_manager.active_model_name
         self.remote_enabled = bool(self.remote_manager.enabled)
         self.preview_enabled = bool(self.preview_manager.enabled)
+        self.table_edge_enabled = True
 
     def _sync_aliases(self) -> None:
         self.predictor = self.predictor_manager.predictor
@@ -84,6 +91,7 @@ class VisionEngine:
         self.remote_enabled = bool(self.remote_manager.enabled)
         self.preview_enabled = bool(self.preview_manager.enabled)
         self.infer_enabled = bool(self.predictor_manager.inference_enabled)
+        self.table_edge_enabled = True
 
     def _emit_event(self, event_name: str, **fields: Any) -> None:
         if self._event_sink is None:
@@ -212,6 +220,7 @@ class VisionEngine:
         self.camera_manager.release_all()
         self.predictor_manager.release_all()
         self.remote_manager.disable()
+        self.table_edge_manager.release_all()
         self.preview_manager.disable()
         self.set_inference_enabled(False)
         self.current_mode = "IDLE"
@@ -268,6 +277,7 @@ class VisionEngine:
                 "camera": self.camera_manager.snapshot(),
                 "predictor": self.predictor_manager.snapshot(),
                 "remote": self.remote_manager.snapshot(),
+                "table_edge": self.table_edge_manager.snapshot(),
                 "preview": self.preview_manager.snapshot(),
             },
         }

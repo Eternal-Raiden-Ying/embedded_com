@@ -44,6 +44,7 @@ class RuntimeContext:
     active_session_id: str = ""
     active_epoch: int = 0
     active_req_id: str = ""
+    active_vision_stage: str = ""
     active_vision_mode: str = ""
     current_edge_id: str = "front"
     edge_visit_order: List[str] = field(default_factory=lambda: ["front", "right", "back", "left"])
@@ -134,6 +135,7 @@ class RuntimeContext:
         self.active_session_id = ""
         self.active_epoch = 0
         self.active_req_id = ""
+        self.active_vision_stage = ""
         self.active_vision_mode = ""
         self.task_start_wall_ts = 0.0
         self.resume_state = None

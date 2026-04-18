@@ -22,6 +22,7 @@ class ModeController:
         camera_manager=None,
         predictor_manager=None,
         remote_manager=None,
+        table_edge_manager=None,
         preview_manager=None,
         logger=None,
         backend_event_sink=None,
@@ -29,6 +30,7 @@ class ModeController:
         self.camera_manager = camera_manager
         self.predictor_manager = predictor_manager
         self.remote_manager = remote_manager
+        self.table_edge_manager = table_edge_manager
         self.preview_manager = preview_manager
         self.logger = logger
         self._backend_event_sink = backend_event_sink
@@ -44,7 +46,7 @@ class ModeController:
         self._runtime_running = False
         self._scheduler = Scheduler()
         self._preview_exit_seen = False
-        for mgr in (self.camera_manager, self.predictor_manager, self.remote_manager, self.preview_manager):
+        for mgr in (self.camera_manager, self.predictor_manager, self.remote_manager, self.table_edge_manager, self.preview_manager):
             binder = getattr(mgr, "bind_runtime", None)
             if callable(binder):
                 try:
@@ -92,7 +94,7 @@ class ModeController:
         self._runtime_running = True
         self._preview_exit_seen = False
         self._scheduler.start_runtime()
-        for mgr in (self.camera_manager, self.predictor_manager, self.remote_manager, self.preview_manager):
+        for mgr in (self.camera_manager, self.predictor_manager, self.remote_manager, self.table_edge_manager, self.preview_manager):
             starter = getattr(mgr, "start_runtime", None)
             if callable(starter):
                 try:
@@ -102,7 +104,7 @@ class ModeController:
 
     def stop_runtime(self) -> None:
         self._runtime_running = False
-        for mgr in (self.preview_manager, self.remote_manager, self.predictor_manager, self.camera_manager):
+        for mgr in (self.preview_manager, self.table_edge_manager, self.remote_manager, self.predictor_manager, self.camera_manager):
             stopper = getattr(mgr, "stop_runtime", None)
             if callable(stopper):
                 try:
@@ -318,6 +320,7 @@ class ModeController:
                 "camera_frames": {"policy": "slot", "scope": "backend"},
                 "frame_meta": {"policy": "slot", "scope": "stage"},
                 "local_perception": {"policy": "slot", "scope": "stage"},
+                "table_edge_obs": {"policy": "slot", "scope": "stage"},
                 "remote_result": {"policy": "slot", "scope": "stage"},
                 "runtime_status": {"policy": "slot", "scope": "backend"},
                 "preview_exit": {"policy": "event", "scope": "backend"},
@@ -355,6 +358,11 @@ class ModeController:
                 payload["remote"] = self.remote_manager.snapshot()
             except Exception:
                 payload["remote"] = {"error": "snapshot_failed"}
+        if self.table_edge_manager is not None:
+            try:
+                payload["table_edge"] = self.table_edge_manager.snapshot()
+            except Exception:
+                payload["table_edge"] = {"error": "snapshot_failed"}
         if self.preview_manager is not None:
             try:
                 payload["preview"] = self.preview_manager.snapshot()

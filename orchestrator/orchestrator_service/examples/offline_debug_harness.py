@@ -25,6 +25,19 @@ def send_payload(host: str, port: int, payload: Dict) -> None:
     print(json.dumps(payload, ensure_ascii=False))
 
 
+def wrap_vision_obs(base: Dict, kind: str, perception: Dict, *, mode: str, status: str = "RUNNING") -> Dict:
+    stage = "RETURN" if kind == "home_tag_obs" else "SEARCH"
+    payload = {
+        **base,
+        "type": "vision_obs",
+        "stage": stage,
+        "mode": mode,
+        "status": status,
+        "perception": {kind: dict(perception or {})},
+    }
+    return payload
+
+
 def listen_tcp(host: str, port: int) -> None:
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -76,6 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--edge-ready", type=int, default=0)
     p.add_argument("--table-cx", type=float, default=0.05)
     p.add_argument("--table-size", type=float, default=0.35)
+    p.add_argument("--legacy", action="store_true", help="发送旧式裸 table_edge_obs，而不是新 vision_obs envelope")
 
     p = sub.add_parser("send-target", help="向 vision_obs_in 注入 target_obs")
     p.add_argument("--host", default="127.0.0.1")
@@ -87,6 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--vx", type=float)
     p.add_argument("--vy", type=float)
     p.add_argument("--wz", type=float)
+    p.add_argument("--legacy", action="store_true", help="发送旧式裸 target_obs，而不是新 vision_obs envelope")
 
     p = sub.add_parser("scenario", help="发送一段完整的找桌-停靠-找目标序列")
     p.add_argument("--task-host", default="127.0.0.1")
@@ -95,6 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--vision-port", type=int, default=DEFAULT_PORTS["vision_obs_in"])
     p.add_argument("--target", default="apple")
     p.add_argument("--period", type=float, default=0.35)
+    p.add_argument("--legacy", action="store_true", help="场景中使用旧式裸感知消息")
 
     return parser
 
@@ -122,9 +138,13 @@ def main() -> None:
         return
 
     if args.cmd == "send-table":
-        payload = {
+        base = {
             "ts": time.time(),
-            "type": "table_edge_obs",
+            "session_id": "sess_harness",
+            "epoch": 1,
+            "source": "offline_harness",
+        }
+        obs = {
             "table_found": bool(args.table_found),
             "edge_found": bool(args.edge_found),
             "confidence": 0.95,
@@ -134,32 +154,42 @@ def main() -> None:
             "edge_ready": bool(args.edge_ready),
             "table_cx_norm": args.table_cx,
             "table_size_norm": args.table_size,
-            "session_id": "sess_harness",
-            "epoch": 1,
-            "source": "offline_harness",
         }
+        payload = {**base, "type": "table_edge_obs", **obs} if args.legacy else wrap_vision_obs(
+            base,
+            "table_edge_obs",
+            obs,
+            mode="DEPTH_PERCEPTION",
+        )
         send_payload(args.host, args.port, payload)
         return
 
     if args.cmd == "send-target":
-        payload = {
+        base = {
             "ts": time.time(),
-            "type": "target_obs",
+            "session_id": "sess_harness",
+            "epoch": 1,
+            "source": "offline_harness",
+        }
+        obs = {
             "found": bool(args.found),
             "target": args.target if args.found else None,
             "confidence": 0.92 if args.found else None,
             "cx_norm": args.cx,
             "size_norm": args.size,
-            "session_id": "sess_harness",
-            "epoch": 1,
-            "source": "offline_harness",
         }
         if args.vx is not None:
-            payload["vx_norm"] = args.vx
+            obs["vx_norm"] = args.vx
         if args.vy is not None:
-            payload["vy_norm"] = args.vy
+            obs["vy_norm"] = args.vy
         if args.wz is not None:
-            payload["wz_norm"] = args.wz
+            obs["wz_norm"] = args.wz
+        payload = {**base, "type": "target_obs", **obs} if args.legacy else wrap_vision_obs(
+            base,
+            "target_obs",
+            obs,
+            mode="TRACK_LOCAL",
+        )
         send_payload(args.host, args.port, payload)
         return
 
@@ -176,9 +206,12 @@ def main() -> None:
         })
         time.sleep(args.period)
         for _ in range(2):
-            send_payload(args.vision_host, args.vision_port, {
+            base = {
                 "ts": time.time(),
-                "type": "table_edge_obs",
+                "session_id": "sess_harness",
+                "epoch": 1,
+            }
+            obs = {
                 "table_found": True,
                 "edge_found": True,
                 "confidence": 0.94,
@@ -186,14 +219,22 @@ def main() -> None:
                 "dist_err_m": 0.30,
                 "table_cx_norm": 0.18,
                 "table_size_norm": 0.22,
-                "session_id": "sess_harness",
-                "epoch": 1,
-            })
+            }
+            payload = {**base, "type": "table_edge_obs", **obs} if args.legacy else wrap_vision_obs(
+                base,
+                "table_edge_obs",
+                obs,
+                mode="DEPTH_PERCEPTION",
+            )
+            send_payload(args.vision_host, args.vision_port, payload)
             time.sleep(args.period)
         for _ in range(3):
-            send_payload(args.vision_host, args.vision_port, {
+            base = {
                 "ts": time.time(),
-                "type": "table_edge_obs",
+                "session_id": "sess_harness",
+                "epoch": 1,
+            }
+            obs = {
                 "table_found": True,
                 "edge_found": True,
                 "confidence": 0.96,
@@ -202,32 +243,53 @@ def main() -> None:
                 "edge_ready": True,
                 "table_cx_norm": 0.01,
                 "table_size_norm": 0.56,
-                "session_id": "sess_harness",
-                "epoch": 1,
-            })
+            }
+            payload = {**base, "type": "table_edge_obs", **obs} if args.legacy else wrap_vision_obs(
+                base,
+                "table_edge_obs",
+                obs,
+                mode="DEPTH_PERCEPTION",
+            )
+            send_payload(args.vision_host, args.vision_port, payload)
             time.sleep(args.period)
         for vy in (0.14, 0.14, -0.14, -0.14):
-            send_payload(args.vision_host, args.vision_port, {
+            base = {
                 "ts": time.time(),
-                "type": "target_obs",
-                "found": False,
-                "vy_norm": vy,
                 "session_id": "sess_harness",
                 "epoch": 1,
-            })
+            }
+            obs = {
+                "found": False,
+                "vy_norm": vy,
+            }
+            payload = {**base, "type": "target_obs", **obs} if args.legacy else wrap_vision_obs(
+                base,
+                "target_obs",
+                obs,
+                mode="TRACK_LOCAL",
+            )
+            send_payload(args.vision_host, args.vision_port, payload)
             time.sleep(args.period)
         for _ in range(3):
-            send_payload(args.vision_host, args.vision_port, {
+            base = {
                 "ts": time.time(),
-                "type": "target_obs",
+                "session_id": "sess_harness",
+                "epoch": 1,
+            }
+            obs = {
                 "found": True,
                 "target": args.target,
                 "confidence": 0.95,
                 "cx_norm": 0.01,
                 "size_norm": 0.16,
-                "session_id": "sess_harness",
-                "epoch": 1,
-            })
+            }
+            payload = {**base, "type": "target_obs", **obs} if args.legacy else wrap_vision_obs(
+                base,
+                "target_obs",
+                obs,
+                mode="TRACK_LOCAL",
+            )
+            send_payload(args.vision_host, args.vision_port, payload)
             time.sleep(args.period)
 
 

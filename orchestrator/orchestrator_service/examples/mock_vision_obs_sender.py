@@ -17,32 +17,43 @@ def send(payload):
     print("sent", payload)
 
 
+def wrap_vision_obs(kind: str, base: dict, perception: dict, *, mode: str = "TRACK_LOCAL", status: str = "RUNNING") -> dict:
+    stage = "RETURN" if kind == "home_tag_obs" else "SEARCH"
+    return {
+        **base,
+        "type": "vision_obs",
+        "stage": stage,
+        "mode": mode,
+        "status": status,
+        "perception": {kind: perception},
+    }
+
+
 if __name__ == "__main__":
     kind = sys.argv[1] if len(sys.argv) > 1 else "table"
+    extra_args = [str(arg).strip() for arg in sys.argv[2:]]
+    legacy = any(arg.lower() == "legacy" for arg in extra_args)
+    value_args = [arg for arg in extra_args if arg.lower() != "legacy"]
     base = {"ts": time.time(), "session_id": "sess_debug", "epoch": 1}
     if kind == "home":
-        payload = {
-            **base,
-            "type": "home_tag_obs",
+        obs = {
             "found": True,
             "yaw_err_rad": 0.05,
             "distance_m": 0.6,
         }
+        payload = {**base, "type": "home_tag_obs", **obs} if legacy else wrap_vision_obs("home_tag_obs", base, obs)
     elif kind == "target":
-        payload = {
-            **base,
-            "type": "target_obs",
+        obs = {
             "found": True,
-            "target": sys.argv[2] if len(sys.argv) > 2 else "cup",
+            "target": value_args[0] if value_args else "cup",
             "confidence": 0.88,
             "cx_norm": 0.03,
             "size_norm": 0.30,
             "bbox": [100, 80, 180, 200],
         }
+        payload = {**base, "type": "target_obs", **obs} if legacy else wrap_vision_obs("target_obs", base, obs)
     else:
-        payload = {
-            **base,
-            "type": "table_edge_obs",
+        obs = {
             "table_found": True,
             "edge_found": True,
             "confidence": 0.92,
@@ -53,4 +64,10 @@ if __name__ == "__main__":
             "table_size_norm": 0.42,
             "edge_ready": False,
         }
+        payload = {**base, "type": "table_edge_obs", **obs} if legacy else wrap_vision_obs(
+            "table_edge_obs",
+            base,
+            obs,
+            mode="DEPTH_PERCEPTION",
+        )
     send(payload)

@@ -9,7 +9,15 @@ from typing import Any, Dict, List, Optional
 from ..bridge.simple_car_protocol import SimpleCarMapper, parse_car_state_line
 from ..bridge.uart_bridge import UartBridge
 from ..config.schema import OrchestratorConfig, SocketEndpoint
-from ..ipc.protocol import HomeTagObs, TableEdgeObs, TargetObs, TaskCmd, make_task_ack
+from ..ipc.protocol import (
+    HomeTagObs,
+    TableEdgeObs,
+    TargetObs,
+    TaskCmd,
+    VisionObsEnvelope,
+    iter_vision_perception_payloads,
+    make_task_ack,
+)
 from ..ipc.transport import AsyncJsonlClientSender, JsonlClientSender, JsonlInboundServer
 from .common import RunLogger, ensure_dir, safe_dump
 from .state_machine import OrchestratorCore
@@ -457,14 +465,18 @@ class OrchestratorService(BaseModule):
                     session_id=payload.get("session_id"),
                     epoch=payload.get("epoch"),
                     ok=ok,
-                    mode=payload.get("mode"),
+                    op=payload.get("op"),
+                    stage=payload.get("stage"),
+                    mode_hint=payload.get("mode_hint"),
                     error=error,
                     link_state=snap.get("link_state"),
                 )
                 self.run_logger.write_timeline(
                     "VISION_REQ_SEND",
                     req_id=payload.get("req_id"),
-                    mode=payload.get("mode"),
+                    op=payload.get("op"),
+                    stage=payload.get("stage"),
+                    mode_hint=payload.get("mode_hint"),
                     sent=ok,
                     session_id=payload.get("session_id"),
                     epoch=payload.get("epoch"),
@@ -545,81 +557,92 @@ class OrchestratorService(BaseModule):
             self._send_task_ack(cmd, accepted=accepted, reason=reason)
 
     def _flatten_vision_payloads(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-        msg_type = str(payload.get("type", "")).strip().lower()
-        if msg_type != "vision_obs":
-            return [payload]
-        perception = payload.get("perception") or {}
-        if not isinstance(perception, dict):
-            return []
-        base = {
-            "ts": payload.get("ts"),
-            "ts_ms": payload.get("ts_ms"),
-            "session_id": payload.get("session_id"),
-            "req_id": payload.get("req_id"),
-            "epoch": payload.get("epoch", 0),
-            "source": payload.get("source", "vision_obs"),
-        }
-        out: List[Dict[str, Any]] = []
-        for key in ("table_edge_obs", "target_obs", "home_tag_obs"):
-            item = perception.get(key)
-            if isinstance(item, dict):
-                merged = dict(base)
-                merged.update(item)
-                merged.setdefault("type", key)
-                out.append(merged)
-        return out
+        msg_type = str(payload.get("type", "") or "").strip().lower()
+        if msg_type == "vision_obs":
+            env = VisionObsEnvelope.from_dict(payload)
+            self.run_logger.write_jsonl("vision_obs", env.to_dict())
+        return iter_vision_perception_payloads(payload)
 
     def _drain_vision_msgs(self):
         latest_table: Optional[TableEdgeObs] = None
         latest_target: Optional[TargetObs] = None
         latest_home: Optional[HomeTagObs] = None
+        latest_table_priority = -1
+        latest_target_priority = -1
+        latest_home_priority = -1
         raw_items: List[dict] = self.vision_server.drain()
         for item in raw_items:
             recv_ts = float(item.get("recv_ts", time.time()))
             for payload in self._flatten_vision_payloads(item["payload"]):
                 msg_type = str(payload.get("type", "")).strip().lower()
+                priority = int(payload.get("_perception_priority", 0) or 0)
+                from_envelope = bool(payload.get("_from_vision_obs_envelope", False))
                 self.log_ipc("RX", msg_type, "received", {"req_id": payload.get("req_id"), "found": payload.get("found", payload.get("table_found"))})
                 try:
                     if msg_type == "table_edge_obs":
-                        latest_table = TableEdgeObs.from_dict(payload)
+                        parsed = TableEdgeObs.from_dict(payload)
+                        if priority >= latest_table_priority:
+                            latest_table = parsed
+                            latest_table_priority = priority
                         self._last_vision_obs_recv_ts = recv_ts
                         self.run_logger.write_ipc(
                             "vision_obs_in",
                             "received",
                             direction="RX",
-                            req_id=latest_table.req_id,
-                            session_id=latest_table.session_id,
-                            epoch=latest_table.epoch,
+                            req_id=parsed.req_id,
+                            session_id=parsed.session_id,
+                            epoch=parsed.epoch,
                             ok=True,
-                            found=latest_table.table_found,
+                            found=parsed.table_found,
                             msg_type=msg_type,
+                            from_envelope=from_envelope,
+                            priority=priority,
                         )
                     elif msg_type == "home_tag_obs":
-                        latest_home = HomeTagObs.from_dict(payload)
+                        parsed = HomeTagObs.from_dict(payload)
+                        if priority >= latest_home_priority:
+                            latest_home = parsed
+                            latest_home_priority = priority
                         self._last_home_obs_recv_ts = recv_ts
                         self.run_logger.write_ipc(
                             "vision_obs_in",
                             "received",
                             direction="RX",
-                            req_id=latest_home.req_id,
-                            session_id=latest_home.session_id,
-                            epoch=latest_home.epoch,
+                            req_id=parsed.req_id,
+                            session_id=parsed.session_id,
+                            epoch=parsed.epoch,
                             ok=True,
-                            found=latest_home.found,
+                            found=parsed.found,
                             msg_type=msg_type,
+                            from_envelope=from_envelope,
+                            priority=priority,
                         )
-                    else:
-                        latest_target = TargetObs.from_dict(payload)
+                    elif msg_type == "target_obs":
+                        parsed = TargetObs.from_dict(payload)
+                        if priority >= latest_target_priority:
+                            latest_target = parsed
+                            latest_target_priority = priority
                         self._last_vision_obs_recv_ts = recv_ts
                         self.run_logger.write_ipc(
                             "vision_obs_in",
                             "received",
                             direction="RX",
-                            req_id=latest_target.req_id,
-                            session_id=latest_target.session_id,
-                            epoch=latest_target.epoch,
+                            req_id=parsed.req_id,
+                            session_id=parsed.session_id,
+                            epoch=parsed.epoch,
                             ok=True,
-                            found=latest_target.found,
+                            found=parsed.found,
+                            msg_type=msg_type,
+                            from_envelope=from_envelope,
+                            priority=priority,
+                        )
+                    else:
+                        self.run_logger.write_ipc(
+                            "vision_obs_in",
+                            "ignored_payload",
+                            direction="RX",
+                            ok=False,
+                            payload=safe_dump(payload),
                             msg_type=msg_type,
                         )
                 except Exception as exc:
@@ -656,7 +679,9 @@ class OrchestratorService(BaseModule):
                 session_id=msg.get("session_id"),
                 epoch=msg.get("epoch"),
                 ok=True,
-                mode=msg.get("mode"),
+                op=msg.get("op"),
+                stage=msg.get("stage"),
+                mode_hint=msg.get("mode_hint"),
                 msg_type=msg.get("type"),
             )
             return True
@@ -669,10 +694,19 @@ class OrchestratorService(BaseModule):
             session_id=msg.get("session_id"),
             epoch=msg.get("epoch"),
             ok=False,
-            mode=msg.get("mode"),
+            op=msg.get("op"),
+            stage=msg.get("stage"),
+            mode_hint=msg.get("mode_hint"),
             error=error,
         )
-        self.run_logger.write_timeline(f"{channel.upper()}_ENQUEUE_FAIL", req_id=msg.get("req_id"), mode=msg.get("mode"), error=error)
+        self.run_logger.write_timeline(
+            f"{channel.upper()}_ENQUEUE_FAIL",
+            req_id=msg.get("req_id"),
+            op=msg.get("op"),
+            stage=msg.get("stage"),
+            mode_hint=msg.get("mode_hint"),
+            error=error,
+        )
         return False
 
     def _flush_pending_msgs(self):
@@ -695,11 +729,32 @@ class OrchestratorService(BaseModule):
                 session_id=msg.get("session_id"),
                 epoch=msg.get("epoch"),
                 ok=sent,
-                mode=msg.get("mode"),
+                op=msg.get("op"),
+                stage=msg.get("stage"),
+                mode_hint=msg.get("mode_hint"),
                 error=error,
             )
-            self.run_logger.write_timeline("VISION_REQ_SEND", req_id=msg.get("req_id"), mode=msg.get("mode"), sent=sent, session_id=msg.get("session_id"), epoch=msg.get("epoch"))
-            self.log_ipc("TX", "vision_req", "sent" if sent else "failed", {"req_id": msg.get("req_id"), "mode": msg.get("mode")})
+            self.run_logger.write_timeline(
+                "VISION_REQ_SEND",
+                req_id=msg.get("req_id"),
+                op=msg.get("op"),
+                stage=msg.get("stage"),
+                mode_hint=msg.get("mode_hint"),
+                sent=sent,
+                session_id=msg.get("session_id"),
+                epoch=msg.get("epoch"),
+            )
+            self.log_ipc(
+                "TX",
+                "vision_req",
+                "sent" if sent else "failed",
+                {
+                    "req_id": msg.get("req_id"),
+                    "op": msg.get("op"),
+                    "stage": msg.get("stage"),
+                    "mode_hint": msg.get("mode_hint"),
+                },
+            )
         for msg in self.core.drain_tts_msgs():
             self.run_logger.write_jsonl("tts_event", msg)
             if self.cfg.tts_event_out.transport == "disabled":

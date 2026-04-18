@@ -4,9 +4,11 @@
 import time
 import uuid
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 ALLOWED_INTENTS: Set[str] = {"FIND", "RETURN", "STOP"}
+ALLOWED_VISTA_OPS: Set[str] = {"START", "UPDATE", "RESPOND", "STOP"}
+ALLOWED_VISTA_STAGES: Set[str] = {"SEARCH", "GRASP", "RETURN", "IDLE"}
 
 
 class ProtocolError(ValueError):
@@ -19,6 +21,11 @@ def now_ts() -> float:
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:10]}"
+
+
+def _upper_text(value: Any, default: str = "") -> str:
+    text = str(value or default).strip().upper()
+    return text or str(default).strip().upper()
 
 
 def _payload_ts(payload: Dict[str, Any]) -> float:
@@ -66,6 +73,148 @@ def _pick_optional_int(payload: Dict[str, Any], *keys: str) -> Optional[int]:
         except Exception:
             continue
     return None
+
+
+def _pick_optional_dict(payload: Dict[str, Any], *keys: str) -> Optional[Dict[str, Any]]:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def _compact(value: Any) -> Any:
+    if isinstance(value, dict):
+        out: Dict[str, Any] = {}
+        for key, item in value.items():
+            compacted = _compact(item)
+            if compacted is None or compacted == {}:
+                continue
+            out[key] = compacted
+        return out
+    if isinstance(value, list):
+        return [_compact(item) for item in value if _compact(item) is not None]
+    return value
+
+
+@dataclass
+class VisionReqMsg:
+    ts: float
+    op: str
+    stage: str
+    target: Optional[str] = None
+    mode_hint: Optional[str] = None
+    session_id: Optional[str] = None
+    req_id: Optional[str] = None
+    epoch: int = 0
+    interaction_id: Optional[str] = None
+    response: Optional[Dict[str, Any]] = None
+    payload: Optional[Dict[str, Any]] = None
+    type: str = "vision_req"
+
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any]) -> "VisionReqMsg":
+        stage = _upper_text(payload.get("stage"), "IDLE")
+        op = _upper_text(payload.get("op"), "START")
+        if stage not in ALLOWED_VISTA_STAGES:
+            raise ProtocolError(f"非法 VISTA stage: {stage!r}")
+        if op not in ALLOWED_VISTA_OPS:
+            raise ProtocolError(f"非法 VISTA op: {op!r}")
+        return cls(
+            ts=_payload_ts(payload),
+            op=op,
+            stage=stage,
+            target=_pick_optional_str(payload, "target"),
+            mode_hint=_pick_optional_str(payload, "mode_hint"),
+            session_id=_pick_optional_str(payload, "session_id"),
+            req_id=_pick_optional_str(payload, "req_id"),
+            epoch=int(payload.get("epoch", 0) or 0),
+            interaction_id=_pick_optional_str(payload, "interaction_id"),
+            response=_pick_optional_dict(payload, "response"),
+            payload=_pick_optional_dict(payload, "payload"),
+            type=str(payload.get("type", "vision_req") or "vision_req"),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return _compact(asdict(self))
+
+
+@dataclass
+class VisionObsEnvelope:
+    ts: float
+    stage: str
+    mode: str
+    status: str
+    session_id: Optional[str] = None
+    req_id: Optional[str] = None
+    epoch: int = 0
+    interaction: Optional[Dict[str, Any]] = None
+    perception: Optional[Dict[str, Any]] = None
+    proposal: Optional[Dict[str, Any]] = None
+    result: Optional[Dict[str, Any]] = None
+    source: Optional[str] = None
+    type: str = "vision_obs"
+
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any]) -> "VisionObsEnvelope":
+        msg_type = str(payload.get("type", "vision_obs") or "vision_obs").strip()
+        if msg_type != "vision_obs":
+            raise ProtocolError(f"非法 vision_obs.type: {msg_type!r}")
+        return cls(
+            ts=_payload_ts(payload),
+            stage=_upper_text(payload.get("stage"), "IDLE"),
+            mode=_upper_text(payload.get("mode"), "IDLE"),
+            status=_upper_text(payload.get("status"), "RUNNING"),
+            session_id=_pick_optional_str(payload, "session_id"),
+            req_id=_pick_optional_str(payload, "req_id"),
+            epoch=int(payload.get("epoch", 0) or 0),
+            interaction=_pick_optional_dict(payload, "interaction"),
+            perception=_pick_optional_dict(payload, "perception"),
+            proposal=_pick_optional_dict(payload, "proposal"),
+            result=_pick_optional_dict(payload, "result"),
+            source=_pick_optional_str(payload, "source"),
+            type=msg_type,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return _compact(asdict(self))
+
+
+def iter_vision_perception_payloads(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    msg_type = str(payload.get("type", "") or "").strip().lower()
+    if msg_type in {"table_edge_obs", "target_obs", "home_tag_obs"}:
+        legacy_payload = dict(payload)
+        legacy_payload["_from_vision_obs_envelope"] = False
+        legacy_payload["_perception_priority"] = 0
+        return [legacy_payload]
+    if msg_type != "vision_obs":
+        return []
+    env = VisionObsEnvelope.from_dict(payload)
+    perception = dict(env.perception or {})
+    if not perception:
+        return []
+    base = {
+        "ts": env.ts,
+        "session_id": env.session_id,
+        "req_id": env.req_id,
+        "epoch": int(env.epoch),
+        "source": env.source or "vision_obs",
+        "vision_stage": env.stage,
+        "vision_mode": env.mode,
+        "vision_status": env.status,
+    }
+    out: List[Dict[str, Any]] = []
+    for key in ("table_edge_obs", "target_obs", "home_tag_obs"):
+        item = perception.get(key)
+        if not isinstance(item, dict):
+            continue
+        merged = dict(base)
+        merged.update(item)
+        merged["type"] = key
+        merged["_from_vision_obs_envelope"] = True
+        merged["_perception_priority"] = 1
+        out.append(merged)
+    return out
 
 
 @dataclass
@@ -380,56 +529,63 @@ def make_task_ack(cmd: TaskCmd, accepted: bool, state: str, reason: str = "") ->
 
 
 def make_vision_req(
-    target: str,
+    target: Optional[str] = None,
     session_id: str = "",
     epoch: int = 0,
     req_id: str = "",
     *,
-    mode: str = "EDGE_TARGET_SEARCH",
-    stage: str = "",
-    current_edge_id: str = "",
-    need_depth: bool = True,
+    op: str = "START",
+    stage: str = "SEARCH",
+    mode_hint: str = "",
+    interaction_id: str = "",
+    response: Optional[Dict[str, Any]] = None,
+    payload: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    payload = {
-        "ts": now_ts(),
-        "type": "vision_req",
-        "mode": str(mode or "EDGE_TARGET_SEARCH"),
-        "target": target,
-        "session_id": session_id,
-        "epoch": int(epoch),
-        "req_id": req_id or _new_id("req"),
-        "need_depth": bool(need_depth),
-    }
-    if stage:
-        payload["stage"] = str(stage)
-    if current_edge_id:
-        payload["current_edge_id"] = str(current_edge_id)
-    return payload
+    return VisionReqMsg(
+        ts=now_ts(),
+        op=_upper_text(op, "START"),
+        stage=_upper_text(stage, "SEARCH"),
+        target=(str(target).strip() if target is not None and str(target).strip() else None),
+        mode_hint=(str(mode_hint).strip().upper() if mode_hint else None),
+        session_id=(str(session_id).strip() if session_id else None),
+        req_id=req_id or _new_id("req"),
+        epoch=int(epoch),
+        interaction_id=(str(interaction_id).strip() if interaction_id else None),
+        response=dict(response or {}) if isinstance(response, dict) else None,
+        payload=dict(payload or {}) if isinstance(payload, dict) else None,
+    ).to_dict()
 
 
-def make_home_tag_req(session_id: str = "", epoch: int = 0, req_id: str = "", *, stage: str = "") -> Dict[str, Any]:
-    payload = {
-        "ts": now_ts(),
-        "type": "home_tag_req",
-        "mode": "HOME_TAG_SEARCH",
-        "session_id": session_id,
-        "epoch": int(epoch),
-        "req_id": req_id or _new_id("req"),
-    }
-    if stage:
-        payload["stage"] = str(stage)
-    return payload
+def make_home_tag_req(
+    session_id: str = "",
+    epoch: int = 0,
+    req_id: str = "",
+    *,
+    op: str = "START",
+    mode_hint: str = "TRACK_LOCAL",
+    payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    return make_vision_req(
+        target=None,
+        session_id=session_id,
+        epoch=epoch,
+        req_id=req_id,
+        op=op,
+        stage="RETURN",
+        mode_hint=mode_hint,
+        payload=payload,
+    )
 
 
 def make_vision_idle(session_id: str = "", epoch: int = 0, req_id: str = "") -> Dict[str, Any]:
-    return {
-        "ts": now_ts(),
-        "type": "vision_req",
-        "mode": "IDLE",
-        "session_id": session_id,
-        "epoch": int(epoch),
-        "req_id": req_id or _new_id("req"),
-    }
+    return make_vision_req(
+        target=None,
+        session_id=session_id,
+        epoch=epoch,
+        req_id=req_id,
+        op="STOP",
+        stage="IDLE",
+    )
 
 
 def make_tts_event(text: str, source: str = "orchestrator", interrupt: bool = False) -> Dict[str, Any]:

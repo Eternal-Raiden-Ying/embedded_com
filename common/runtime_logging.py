@@ -111,12 +111,24 @@ def configure_stream_logger(name: str, mode: str = "concise", enabled: bool = Tr
 
 
 class RunLogger:
-    def __init__(self, module_name: str, runs_root: str, stack_run_id: str = ""):
+    def __init__(self, module_name: str, runs_root: str, stack_run_id: str = "", enable_text_events: bool = True):
         self.module_name = str(module_name).strip()
         self.stack_run_id = str(stack_run_id).strip() or make_stack_run_id()
         self.run_dir = Path(runs_root) / self.stack_run_id
         self.run_dir.mkdir(parents=True, exist_ok=True)
+        self._enable_text_events = bool(enable_text_events)
         self._event_fp = open(self.run_dir / "events.log", "a", encoding="utf-8")
+
+    def structured_paths(self, heartbeat_enabled: bool = True) -> Dict[str, str]:
+        paths = {
+            "run_dir": str(self.run_dir),
+            "meta": str(self.run_dir / "meta.json"),
+            "event": str(self.run_dir / "event.jsonl"),
+            "ipc": str(self.run_dir / "ipc.jsonl"),
+        }
+        if heartbeat_enabled:
+            paths["heartbeat"] = str(self.run_dir / "heartbeat.jsonl")
+        return paths
 
     def _with_common_fields(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         out = dict(payload)
@@ -138,8 +150,36 @@ class RunLogger:
             fp.write(line + "\n")
 
     def write_event(self, text: str) -> None:
+        if not self._enable_text_events:
+            return
         self._event_fp.write(f"[{time.strftime('%H:%M:%S')}] {text}\n")
         self._event_fp.flush()
+
+    def write_event_record(self, event: str, level: str = "info", trigger: str = "", data=None, **fields: Any) -> None:
+        payload = {
+            "event": str(event).strip().upper(),
+            "level": str(level or "info").strip().lower(),
+            "trigger": str(trigger or "").strip(),
+            "data": dict(data or {}),
+        }
+        payload.update(fields)
+        self.write_jsonl("event", payload)
+        details = ", ".join(f"{k}={v}" for k, v in fields.items() if v not in (None, "", [], {}))
+        self.write_event(f"{payload['event']}{' ' + details if details else ''}".rstrip())
+
+    def write_ipc_record(self, direction: str, channel: str, event: str, level: str = "info", data=None, **fields: Any) -> None:
+        payload = {
+            "direction": str(direction or "").strip().upper(),
+            "channel": str(channel or "").strip(),
+            "event": str(event or "").strip(),
+            "level": str(level or "info").strip().lower(),
+            "data": dict(data or {}),
+        }
+        payload.update(fields)
+        self.write_jsonl("ipc", payload)
+
+    def write_heartbeat_record(self, **payload: Any) -> None:
+        self.write_jsonl("heartbeat", payload)
 
     def write_timeline(self, event: str, **fields: Any) -> None:
         payload = {"event": str(event)}

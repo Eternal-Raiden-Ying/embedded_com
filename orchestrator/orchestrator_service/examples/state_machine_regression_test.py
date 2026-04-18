@@ -24,7 +24,12 @@ if PKG_NAME not in sys.modules:
         spec.loader.exec_module(module)
 
 from orchestrator_service.config.schema import CarMotionConfig, ControlThresholds
-from orchestrator_service.ipc.protocol import TableEdgeObs, TargetObs, TaskCmd
+from orchestrator_service.ipc.protocol import (
+    TableEdgeObs,
+    TargetObs,
+    TaskCmd,
+    iter_vision_perception_payloads,
+)
 from orchestrator_service.runtime.common import monotonic_ts
 from orchestrator_service.runtime.context import State
 from orchestrator_service.runtime.state_machine import OrchestratorCore
@@ -79,6 +84,30 @@ def assert_state(core: OrchestratorCore, expected: State, msg: str):
         raise AssertionError(f"{msg}: expected={expected.value}, actual={actual.value}")
 
 
+def drain_last_vision_req(core: OrchestratorCore) -> dict:
+    msgs = core.drain_vision_msgs()
+    if not msgs:
+        raise AssertionError("expected pending vision_req, got none")
+    return msgs[-1]
+
+
+def assert_vision_req(req: dict, *, op: str, stage: str, mode_hint: str, search_kind: str, target: str = ""):
+    if req.get("type") != "vision_req":
+        raise AssertionError(f"unexpected req type: {req}")
+    if req.get("op") != op:
+        raise AssertionError(f"unexpected req op: {req}")
+    if req.get("stage") != stage:
+        raise AssertionError(f"unexpected req stage: {req}")
+    if req.get("mode_hint") != mode_hint:
+        raise AssertionError(f"unexpected req mode_hint: {req}")
+    payload = req.get("payload") or {}
+    if payload.get("search_kind") != search_kind:
+        raise AssertionError(f"unexpected req payload.search_kind: {req}")
+    actual_target = str(req.get("target") or "")
+    if actual_target != target:
+        raise AssertionError(f"unexpected req target: {req}")
+
+
 def main():
     cfg = ControlThresholds()
     car_cfg = CarMotionConfig()
@@ -94,17 +123,34 @@ def main():
     cfg.target_lock_settle_s = 0.05
     cfg.freeze_settle_s = 0.05
     cfg.done_hold_s = 0.05
+    cfg.req_resend_period_s = 0.0
 
     core = OrchestratorCore(cfg, car_cfg)
     accepted, reason = core.handle_task_cmd(make_find_cmd())
     if not accepted:
         raise AssertionError(f"FIND should be accepted, got reason={reason}")
     assert_state(core, State.SEARCH_TABLE, "after FIND")
+    assert_vision_req(
+        drain_last_vision_req(core),
+        op="START",
+        stage="SEARCH",
+        mode_hint="DEPTH_PERCEPTION",
+        search_kind="TABLE_EDGE",
+        target="",
+    )
 
     for _ in range(2):
         core.handle_table_obs(make_table_obs(yaw=0.20, dist=0.30, edge_ready=False, table_cx=0.16))
         core.tick()
     assert_state(core, State.COARSE_ALIGN, "stable table should enter COARSE_ALIGN")
+    assert_vision_req(
+        drain_last_vision_req(core),
+        op="UPDATE",
+        stage="SEARCH",
+        mode_hint="DEPTH_PERCEPTION",
+        search_kind="TABLE_EDGE",
+        target="",
+    )
 
     for _ in range(2):
         core.handle_table_obs(make_table_obs(yaw=0.03, dist=0.22, edge_ready=False, table_cx=0.03))
@@ -123,6 +169,14 @@ def main():
     core.ctx.state_enter_mono = monotonic_ts() - 0.2
     core.tick()
     assert_state(core, State.SEARCH_TARGET_INIT, "after settle should enter SEARCH_TARGET_INIT")
+    assert_vision_req(
+        drain_last_vision_req(core),
+        op="UPDATE",
+        stage="SEARCH",
+        mode_hint="TRACK_LOCAL",
+        search_kind="TARGET",
+        target="apple",
+    )
 
     core.ctx.state_enter_mono = monotonic_ts() - 0.2
     core.tick()
@@ -146,13 +200,40 @@ def main():
     assert_state(core, State.IDLE, "done should return to idle")
 
     core.handle_task_cmd(make_find_cmd())
+    drain_last_vision_req(core)
     core.ctx.state = State.EDGE_SLIDE_SEARCH
     core.ctx.state_enter_mono = monotonic_ts() - (cfg.target_search_timeout_s + 0.2)
     core.tick()
     assert_state(core, State.LEAVE_EDGE, "search timeout should trigger edge relocation")
 
+    flattened = iter_vision_perception_payloads(
+        {
+            "type": "vision_obs",
+            "ts": time.time(),
+            "stage": "SEARCH",
+            "mode": "TRACK_LOCAL",
+            "status": "RUNNING",
+            "session_id": "sess_test_find",
+            "req_id": "req_test",
+            "epoch": 1,
+            "perception": {
+                "target_obs": {
+                    "found": True,
+                    "target": "apple",
+                    "confidence": 0.95,
+                    "cx_norm": 0.02,
+                    "size_norm": 0.14,
+                }
+            },
+        }
+    )
+    if len(flattened) != 1 or flattened[0].get("type") != "target_obs":
+        raise AssertionError(f"vision_obs flatten failed: {flattened}")
+
     print("PASS: state_machine_regression_test")
     print("  - search/dock/target happy path reaches DONE")
+    print("  - outbound vision_req uses START/UPDATE + SEARCH stage mapping")
+    print("  - vision_obs envelope can be flattened into target_obs payloads")
     print("  - edge search timeout triggers LEAVE_EDGE")
     print("  - state machine returns to IDLE after completion")
 
