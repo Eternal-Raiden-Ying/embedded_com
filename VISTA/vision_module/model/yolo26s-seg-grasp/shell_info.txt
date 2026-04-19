@@ -1,9 +1,9 @@
-2026-03-11 15:09:15,003 - INFO : Optimization started.
-2026-03-11 15:09:15,102 - INFO : [ONNX-SIM] Clean ONNX Model input node.
-2026-03-11 15:09:16,435 - INFO : [ONNX2QNN] Start converting to QNN.
-2026-03-11 15:15:14,278 - INFO : [CONVERT-QNN] Convert model is done. Begin to compile model.
-2026-03-11 15:15:48,350 - INFO : [COMPILE-QNN] Compile model is done. Begin to create serialization file.
-2026-03-11 15:15:52,574 - INFO : [CREATE-CONTEXT-BINARY] Create context binary is done.
-2026-03-11 15:15:52,669 - INFO : [ONNX2QNN] QNN conversion is done.
-2026-03-11 15:15:52,669 - INFO : [ONNX2QNN] QNN conversion is done.
-2026-03-11 15:15:52,669 - INFO : Model optimization done.
+2026-04-16 22:58:34,530 - INFO : Optimization started.
+2026-04-16 22:58:34,687 - INFO : [ONNX-SIM] Clean ONNX Model input node.
+2026-04-16 22:58:36,606 - WARNING : Onnxsimplify has failed and may cause errors.
+2026-04-16 22:58:43,903 - INFO : [ONNX2QNN] Start converting to QNN.
+2026-04-16 23:04:29,842 - INFO : [CONVERT-QNN] Convert model is done. Begin to compile model
+2026-04-16 23:05:21,069 - INFO : [COMPILE-QNN] Compile model is done. Begin to create serialization file
+2026-04-16 23:05:26,485 - INFO : [CREATE-CONTEXT-BINARY] Create context binary is done.
+2026-04-16 23:05:26,645 - INFO : [ONNX2QNN] QNN conversion is done.
+2026-04-16 23:05:26,645 - INFO : Model optimization done.

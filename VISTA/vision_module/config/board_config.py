@@ -105,7 +105,24 @@ CONFIG.model.profiles["yolov8s_seg"] = SingleModelConfig(
     model_backend="qnn",
 )
 CONFIG.model.profiles["yolo26s_seg"] = SingleModelConfig(
-    target_model=str(Path(_DEFAULT_MODEL_ROOT) / "yolo26s-seg-grasp" / "yolo26s-seg-grasp_split_qcs6490_w8a8.qnn236.ctx.bin.amf"),
+    target_model=os.getenv(
+        "VISION_SEG_MODEL_PATH",
+        str(Path(_DEFAULT_MODEL_ROOT) / "yolo26s-seg-grasp" / "yolo26s-seg-grasp_split_qcs6490_w8a8.qnn236.ctx.bin.amf"),
+    ),
+    width=640,
+    height=640,
+    conf_thres=0.25,
+    iou_thres=0.15,
+    class_num=20,
+    classes=grasping_coco20,
+    predictor_type="segment",
+    model_backend="qnn",
+)
+CONFIG.model.profiles["yolo26s_seg_qnn216"] = SingleModelConfig(
+    target_model=os.getenv(
+        "VISION_SEG_MODEL_QNN216_PATH",
+        str(Path(_DEFAULT_MODEL_ROOT) / "yolo26s-seg-grasp" / "yolo26s-seg-grasp_split_w8a8.qnn216.ctx.bin"),
+    ),
     width=640,
     height=640,
     conf_thres=0.25,

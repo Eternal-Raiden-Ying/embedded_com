@@ -20,7 +20,8 @@ ASR_ENV_NAME="asr"
 CONDA_SH=""
 
 # 运行模式：dryrun / full
-STACK_PROFILE="full"
+# STACK_PROFILE="full"
+STACK_PROFILE="dryrun"
 
 # 是否接扬声器：0=不接  1=接
 SPEAKER_ENABLED=0
