@@ -50,6 +50,7 @@ class QNN_YOLO_Segment_Predictor(IPredictor):
             self.output_shape,
             aidlite.DataType.TYPE_FLOAT32,
         )
+        print(f"initialize with model path {args.target_model}")
         interpreter = aidlite.InterpreterBuilder.build_interpretper_from_model_and_config(model, config)
         interpreter.init()
         interpreter.load_model()

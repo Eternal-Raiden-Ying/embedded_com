@@ -1,1 +1,1 @@
-{"backend_extensions": {"shared_library_path": "/home/opt/qcom/aistack/qairt/2.36.0.250627/lib/x86_64-linux-clang/libQnnHtpNetRunExtensions.so", "config_file_path": "/data0/ai-transform-data/data/2024e58f-6e6e-4ca7-8b18-b4cb51b319ae/yolo26s-seg-grasp_split_save_path/htp_config.json"}}
+{"backend_extensions": {"shared_library_path": "/home/qnn_sdk_2.16.4.231110/lib/x86_64-linux-clang/libQnnHtpNetRunExtensions.so", "config_file_path": "/data0/ai-transform-data/data/cd5d8264-2fca-46d2-8af4-93f122d34f39/yolo26s-seg-grasp_split_save_path/htp_config.json"}}

@@ -68,7 +68,7 @@ CONFIG.model.profiles["yolov8s_seg"] = SingleModelConfig(
     width=640, height=640, conf_thres=0.45, iou_thres=0.45, class_num=80, classes=coco80,
 )
 CONFIG.model.profiles["yolo26s_seg"] = SingleModelConfig(
-    target_model="/home/aidlux/2026/VISTA/vision_module/model/yolo26s-seg-grasp/yolo26s-seg-grasp_split_qcs6490_w8a8.qnn236.ctx.bin.amf",
+    target_model="/home/aidlux/2026/VISTA/vision_module/model/yolo26s-seg-grasp/yolo26s-seg-grasp_split_w8a8.qnn216.ctx.bin.amf",
     width=640, height=640, conf_thres=0.25, iou_thres=0.15, class_num=20, classes=grasping_coco20,
 )
 

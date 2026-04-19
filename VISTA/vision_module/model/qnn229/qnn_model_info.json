@@ -1,0 +1,1 @@
+{"model_name": "yolo26s-seg-grasp_split_qcs6490_w8a8.qnn229.ctx.bin", "data_type": "int8", "inputDimensions": {"images": [1, 640, 640, 3]}, "outputDimensions": {"mask_coefs": [1, 32, 8400], "bboxes": [1, 4, 8400], "scores": [1, 20, 8400], "mask_protos": [1, 160, 160, 32]}, "htp_socs_name": "QCS6490", "htp_socs_type": "sm7325", "qnn_sdk": "2.29.0.241129"}
