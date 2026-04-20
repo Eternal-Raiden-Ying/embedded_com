@@ -13,7 +13,7 @@ set -euo pipefail
 # =========================
 # 这里改你最常用的配置
 # =========================
-VOICE_ROOT="/home/aidlux/2026/Voice_service"
+VOICE_ROOT="/home/aidlux/2026/Voice"
 VISION_ROOT="/home/aidlux/2026/VISTA"
 ORCH_ROOT="/home/aidlux/2026/orchestrator"
 ASR_ENV_NAME="asr"

@@ -1,3 +1,6 @@
+# Codex scratch
+.codex
+
 # Python
 __pycache__/
 .venv/
@@ -25,6 +28,9 @@ dist/
 *.bag
 Voice/tts_out/
 Voice/tts_cache/
+Voice/logs/
+Voice/pids/
+Voice/runs/
 
 # Architecture-specific binaries
 *.so
@@ -41,8 +47,14 @@ Voice/tts_cache/
 *.amf
 *.ctx.bin
 
-# Third-party libraries
-Voice/thirdparty/
+# Voice third-party assets:
+# keep only the runtime-required model bundles under Git/LFS,
+# and continue ignoring the legacy/offline extras.
+Voice/thirdparty/*
+!Voice/thirdparty/fsmn_vad/
+!Voice/thirdparty/fsmn_vad/**
+!Voice/thirdparty/paraformer_asr_online/
+!Voice/thirdparty/paraformer_asr_online/**
 VISTA/grasp_module/graspness_unofficial/
 
 # Environment
@@ -63,3 +75,4 @@ VISTA/Online_Edge_Detect/runs/
 .idea/
 *.swp
 *~
+Voice_service/

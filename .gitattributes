@@ -1,0 +1,6 @@
+# Voice chain large assets managed by Git LFS
+Voice/kws/*.onnx filter=lfs diff=lfs merge=lfs -text
+Voice/tts/**/*.onnx filter=lfs diff=lfs merge=lfs -text
+Voice/scripts/*.tflite filter=lfs diff=lfs merge=lfs -text
+Voice/thirdparty/fsmn_vad/**/*.onnx filter=lfs diff=lfs merge=lfs -text
+Voice/thirdparty/paraformer_asr_online/*.onnx filter=lfs diff=lfs merge=lfs -text

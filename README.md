@@ -61,5 +61,5 @@ _2026/
 ├── start_robot_stack.sh     # 全栈启动脚本
 ├── orchestrator/            # 状态机核心
 ├── VISTA/                   # 视觉模块
-└── Voice/                   # 语音模块
+└── Voice/                   # 语音模块（主服务代码 + 模型资源）
 ```
