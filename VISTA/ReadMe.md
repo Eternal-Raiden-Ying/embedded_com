@@ -2,312 +2,246 @@
 
 **Vision Intelligent Search & Tracking Assistant**
 
-部署在 QCS6490 端侧设备上的视觉能力服务。VISTA 负责接收上层任务请求，按当前业务目标切换视觉运行模式，完成目标搜索、抓取前观测、回航标记识别等工作，并通过 `vision_obs` 对外持续输出观测结果、动作建议和交互回合状态。
+VISTA is the vision service in this robot stack. It runs on the edge device, accepts `vision_req`, produces `vision_obs`, and switches runtime resources according to the current business stage.
 
-## 架构
+This file is the current-state baseline for operators and developers.
 
-VISTA 的核心分层不是“单纯推理循环”，而是：
+For other viewpoints, use:
 
-- `stage`：业务目标层，例如 `SEARCH` / `GRASP` / `RETURN` / `IDLE`
-- `mode`：当前实际运行的资源模式，通常同一时刻只有一个 active mode
-- backend capability：camera / predictor / depth / network 等底层能力
+- `ARCHITECTURE.md`: current internal topology
+- `INTERFACES.md`: external IPC contract
+- `AUDIT_TODO.md`: coding handoff backlog
+- `MD_DRIFT_AUDIT.md`: markdown drift audit
 
-典型关系：
+## Current Scope
 
-- `SEARCH` stage 下可以先运行 `TRACK_LOCAL`，后续也可切到 `DEPTH_PERCEPTION`
-- `GRASP` stage 下可以在 `GRASP_REMOTE` 和 `MICRO_ADJUST` 间往返
-- `RETURN` stage 可复用 `TRACK_LOCAL`，但识别目标与输出语义不同
+VISTA currently focuses on three business stages:
 
-当前推荐的主线架构：
+- `SEARCH`: local target search and tracking
+- `GRASP`: micro-adjust interaction plus remote grasp cooperation
+- `RETURN`: return-target / home-tag observation
 
+Current runtime design is stage-driven, not a single monolithic inference loop.
+
+## Current Runtime Baseline
+
+```text
+Orchestrator --vision_req--> VistaApp
+                              |
+                              v
+                        StageController
+                         |           \
+                         |            \
+                         v             v
+                    StagePlan      ModeController
+                         |             |
+                         +-------> VisionEngine.apply_mode_plan(...)
+                                       |
+                                       v
+                               RuntimeSupervisor
+                             /    |      |      \
+                            v     v      v       v
+                   CameraManager Predictor Remote Preview
+                            \      |      /        |
+                             +-----+-----+---------+
+                                           |
+                                           v
+                                      Scheduler
+                                           |
+                                           v
+                                 VistaApp --vision_obs--> Orchestrator
 ```
-Orchestrator ──vision_req──▶ VistaApp / Stage Controller
-                                  │
-                                  ▼
-                           VisionEngine / Mode Controller
-                                  │
-                    ┌─────────────┼─────────────┐
-                    ▼             ▼             ▼
-              CameraManager  PredictorManager  Other Capabilities
-                    │             │             │
-                    └──── backend/camera / predictor / depth / network
 
-VistaApp ──vision_obs──▶ Orchestrator
-```
+Current responsibility split:
 
-## Stage 与 Mode
+- `VistaApp`: service lifecycle, IPC, main loop, logging, heartbeat
+- `StageController`: request handling, stage state, stage output, mode requests
+- `ModeController`: mode profile registration, switch state, runtime plan compilation
+- `VisionEngine`: runtime assembly root and backend facade
+- `RuntimeSupervisor`: capability reconcile for camera / predictor / remote / preview
+- `Scheduler`: route bus between managers and stage logic
+- managers: own worker loops and capability-specific state
 
-外部协议不直接命令底层 camera 或 model，而是围绕任务会话和交互回合工作。
+## Current Stage And Mode Baseline
 
-- `stage` 表达当前业务目标
-- `mode` 表达 VISTA 当前选择的运行模式
-- `mode` 也承担“当前执行步”的职责，因此当前设计不再单独拆 `phase`
-- 同一 `stage` 内允许多次 mode 切换
-- mode 切换后可进入短暂冷却期，延迟释放旧资源，避免反复加载带来的开销
+Current default stage-entry modes:
 
-当前规划中的 mode 示例：
+| Stage | Default Mode | Current role |
+| --- | --- | --- |
+| `IDLE` | `IDLE` | cold idle |
+| `SEARCH` | `TRACK_LOCAL` | local RGB tracking and target observation |
+| `GRASP` | `MICRO_ADJUST` | micro-adjust interaction before remote grasp |
+| `RETURN` | `TRACK_LOCAL` | local return-target observation |
 
-| Mode | 用途 |
-|------|------|
-| `TRACK_LOCAL` | 本地 RGB + 本地 NPU 检测/分割，低延迟追踪 |
-| `GRASP_REMOTE` | RGB + Depth + 远程抓取推理 |
-| `MICRO_ADJUST` | 根据视觉反馈给出位置/角度微调建议 |
-| `DEPTH_PERCEPTION` | 深度感知、避障、3D 辅助观测 |
+Current registered default modes:
 
-## 目录结构
+| Mode | Current role |
+| --- | --- |
+| `IDLE` | no active runtime capability |
+| `TRACK_LOCAL` | local RGB + local predictor |
+| `MICRO_ADJUST` | local RGB + local predictor, used by `GRASP` workflow |
+| `GRASP_REMOTE` | RGB + depth + remote grasp path |
+| `IDLE_HOT` | hot standby after stop |
 
-```
+Important distinction:
+
+- active baseline modes are the five above
+- future mode ideas such as `DEPTH_PERCEPTION` are not current runtime truth
+
+## Current Backend Baseline
+
+### Camera
+
+Current default board config:
+
+- `rgb`: input `1280x720`, cropped and output as `640x640`, format `RGB`
+- `depth`: `424x240 @ 15 fps`
+- `grey`: available as a separate stream
+
+These defaults currently live in `vision_module/config/board_config.py`.
+
+### Predictor
+
+Current default active model:
+
+- `yolov7_detect`
+
+Current built-in model profiles:
+
+- `yolov7_detect`: default local detect baseline, `coco80`
+- `yolov8s_seg`: optional segmentation profile
+- `yolo26s_seg`: optional segmentation profile using `grasping_coco20`
+
+Important note:
+
+- current local baseline is detect-first, not segmentation-first
+
+### Remote
+
+Current remote path is implemented through:
+
+- `vision_module/backend/remote/client.py`
+- `vision_module/backend/remote/manager.py`
+- `vision_module/app/stages/grasp.py`
+- `grasp_module/simulate_client_request.py` as the minimal reference script
+
+Current design intent is remote grasp by `class_id`.
+
+## Current IPC Baseline
+
+Default transport:
+
+- request inbound: `127.0.0.1:9003`
+- observation outbound: `127.0.0.1:9002`
+
+Current request contract:
+
+- inbound message: `vision_req`
+- supported `op`: `START`, `UPDATE`, `RESPOND`, `STOP`
+- supported `stage`: `SEARCH`, `GRASP`, `RETURN`, `IDLE`
+
+Current observation contract:
+
+- outbound message: `vision_obs`
+- stable current `status` values:
+  - `RUNNING`
+  - `WAITING_RESPONSE`
+  - `RESULT_READY`
+  - `FAILED`
+
+`DONE` is not a stable current output state and should not be used as the contract baseline.
+
+For full field definitions, use `INTERFACES.md`.
+
+## Current Repo Layout
+
+```text
 VISTA/
-├── vision_module/
-│   ├── app/app.py              # 服务入口 / stage 协调层
-│   ├── backend/
-│   │   ├── vision_engine.py    # 主线 mode 编排引擎
-│   │   ├── new_engine.py       # 实验性引擎 / 抓取流程验证
-│   │   ├── camera/
-│   │   │   ├── HardwareCamera.py
-│   │   │   ├── fast_cam.*.so   # GStreamer C++ 扩展（aarch64 预编译）
-│   │   │   └── cxx/            # C++ 源码（cam_gst.cpp）
-│   │   └── predictor/
-│   │       └── QNN_YOLO_Segment_Predictor.py # Qualcomm QNN 推理封装
-│   ├── config/board_config.py  # 主配置文件
-│   ├── ipc/                    # 协议与传输层
-│   ├── model/                  # YOLO 模型（QCS6490 编译版）
-│   └── test/                   # 调试工具 / 协议联调脚本
-├── grasp_module/               # 抓取模块（预留）
-├── tools/
-└── logs/ / runs/ / pids/
+├── ARCHITECTURE.md
+├── INTERFACES.md
+├── PRODUCT_REQUIREMENTS.md
+├── AUDIT_TODO.md
+├── MD_DRIFT_AUDIT.md
+├── grasp_module/
+│   └── simulate_client_request.py
+└── vision_module/
+    ├── app/
+    │   └── app.py
+    ├── backend/
+    │   ├── vision_engine.py
+    │   ├── runtime_supervisor.py
+    │   ├── scheduler.py
+    │   ├── camera_manager.py
+    │   ├── predictor_manager.py
+    │   ├── mode_controller.py
+    │   ├── remote/
+    │   └── preview/
+    ├── config/
+    │   ├── board_config.py
+    │   └── mode_defaults.py
+    ├── ipc/
+    ├── model/
+    └── test/
 ```
 
-## 模型
+## Current Debug And Validation Tools
 
-| 模型目录 | 用途 |
-|----------|------|
-| `model/yolo26s-seg/` | 本地检测与分割主模型 |
-| `model/yolo26s-seg-grasp/` | 抓取链路相关模型 |
-| `model/yolov8s-seg/` | 备用分割模型 |
+Current useful tools in `vision_module/test/` include:
 
-> 模型为 QCS6490 QNN 2.36 编译版（`.amf` / `.ctx.bin`），仅可在目标硬件上运行。
+- `debug_send_req.py`
+- `debug_recv_obj.py`
+- `debug_protocol_tools.py`
+- `demo_camera.py`
+- `test_sensors.py`
+- `test_predictor.py`
+- `test_pipeline.py`
+- `test_runtime_architecture.py`
+- `test_color_controls.py`
+- `vision_stream.py`
 
-## 运行
+The old references to `new_engine.py` and `test_grasp_only.py` are obsolete and should not be used.
+
+## Known Contract Gaps
+
+This section is intentionally explicit. The current structure is real, but some contracts are not settled yet.
+
+### Detect line
+
+- default local model is `coco80 detect`, but stage-side class resolution is not yet cleanly aligned with that baseline
+- real predictor output handling needs a safer contract at the predictor-manager boundary
+- current backend import path can still hide real-path problems by falling back to `mock` in some cases
+
+### Remote line
+
+- `GRASP_REMOTE` still needs a proven fresh-frame barrier before `PREDICT`
+- server-side `INIT` completion is not yet a clearly enforced gate before `PREDICT`
+- remote upload encoding should become configurable, not fixed
+- remote camera parameters should move into mode/profile ownership
+- segmentation-related remote surface is still present and should be deleted after parity is confirmed
+
+### Runtime policy
+
+- `release_cooldown_s` exists in mode profiles, but delayed release is not yet a meaningful runtime behavior
+
+## Run
+
+Target device runtime:
 
 ```bash
 cd /home/aidlux/2026/VISTA
 /usr/bin/python3 -m vision_module.app.app
 ```
 
-## IPC 协议
+## Local Development Note
 
-| 方向 | 消息类型 | 地址 |
-|------|----------|------|
-| 接收 | `vision_req` | `127.0.0.1:9003` |
-| 发送 | `vision_obs` | `127.0.0.1:9002` |
+This workspace may be opened on Windows, but the real runtime target is AidLux / QCS6490.
 
-### `vision_req`
+Important implications:
 
-`vision_req` 保留原消息名，但升级为统一请求协议。核心字段建议为：
+- real camera and QNN model execution are target-device concerns
+- missing model files on the Windows workspace is expected
+- local Windows work is mainly for protocol, architecture, and mock-path validation unless explicitly configured otherwise
 
-- `type`: 固定为 `vision_req`
-- `ts`
-- `session_id`
-- `req_id`
-- `epoch`
-- `op`: `START` / `UPDATE` / `RESPOND` / `STOP`
-- `stage`: `SEARCH` / `GRASP` / `RETURN` / `IDLE`
-- `target`: 可选，目标类名
-- `mode_hint`: 可选，建议优先模式
-- `interaction_id`: 可选，响应某个交互回合时使用
-- `response`: 可选，对上一个 `vision_obs` 中动作建议的确认/拒绝/反馈
-- `payload`: 可选，stage 专属请求体
+## Documentation Rule
 
-例 1：启动搜索
-
-```json
-{
-  "type": "vision_req",
-  "ts": 1710000000.0,
-  "session_id": "sess_001",
-  "req_id": "req_001",
-  "epoch": 1,
-  "op": "START",
-  "stage": "SEARCH",
-  "target": "bottle"
-}
-```
-
-例 2：启动抓取阶段
-
-```json
-{
-  "type": "vision_req",
-  "ts": 1710000010.0,
-  "session_id": "sess_001",
-  "req_id": "req_010",
-  "epoch": 1,
-  "op": "START",
-  "stage": "GRASP",
-  "target": "bottle",
-  "payload": {
-    "remote_grasp": true,
-    "need_depth": true
-  }
-}
-```
-
-例 3：对一次微调建议进行确认并反馈执行结果
-
-```json
-{
-  "type": "vision_req",
-  "ts": 1710000012.0,
-  "session_id": "sess_001",
-  "req_id": "req_011",
-  "epoch": 1,
-  "op": "RESPOND",
-  "stage": "GRASP",
-  "interaction_id": "ia_007",
-  "response": {
-    "decision": "ACCEPT"
-  },
-  "payload": {
-    "executed_motion": {
-      "dx_m": 0.03,
-      "dy_m": -0.01,
-      "dyaw_rad": 0.08
-    }
-  }
-}
-```
-
-### `vision_obs`
-
-`vision_obs` 保留原消息名，并统一作为 VISTA 的唯一对外输出 envelope。核心字段建议为：
-
-- `type`: 固定为 `vision_obs`
-- `ts`
-- `session_id`
-- `req_id`
-- `epoch`
-- `stage`
-- `mode`: 当前 active mode
-- `status`: `RUNNING` / `WAITING_RESPONSE` / `RESULT_READY` / `DONE` / `FAILED`
-- `interaction`: 可选，当前是否需要上层确认或执行动作
-- `perception`: 可选，当前感知结果
-- `proposal`: 可选，给外部的动作建议、微调量、移动方向、距离等
-- `result`: 可选，抓取姿态、空间坐标、阶段性结果等
-
-例 1：搜索观测
-
-```json
-{
-  "type": "vision_obs",
-  "ts": 1710000001.0,
-  "session_id": "sess_001",
-  "req_id": "req_001",
-  "epoch": 1,
-  "stage": "SEARCH",
-  "mode": "TRACK_LOCAL",
-  "status": "RUNNING",
-  "perception": {
-    "target_obs": {
-      "found": true,
-      "target": "bottle",
-      "confidence": 0.82,
-      "cx_norm": 0.47,
-      "size_norm": 0.19,
-      "bbox": [100, 120, 240, 300]
-    }
-  }
-}
-```
-
-例 2：抓取前输出微调建议，等待上层确认
-
-```json
-{
-  "type": "vision_obs",
-  "ts": 1710000011.0,
-  "session_id": "sess_001",
-  "req_id": "req_010",
-  "epoch": 1,
-  "stage": "GRASP",
-  "mode": "MICRO_ADJUST",
-  "status": "WAITING_RESPONSE",
-  "interaction": {
-    "required": true,
-    "interaction_id": "ia_007",
-    "kind": "MOVE_HINT"
-  },
-  "proposal": {
-    "motion_delta": {
-      "dx_m": 0.03,
-      "dy_m": -0.01,
-      "dyaw_rad": 0.08
-    },
-    "reason": "target_offset_before_remote_grasp"
-  }
-}
-```
-
-例 3：远程抓取结果返回
-
-```json
-{
-  "type": "vision_obs",
-  "ts": 1710000015.0,
-  "session_id": "sess_001",
-  "req_id": "req_012",
-  "epoch": 1,
-  "stage": "GRASP",
-  "mode": "GRASP_REMOTE",
-  "status": "RESULT_READY",
-  "result": {
-    "grasp_pose": {
-      "x_m": 0.41,
-      "y_m": -0.06,
-      "z_m": 0.18,
-      "yaw_rad": 1.57
-    },
-    "confidence": 0.87
-  }
-}
-```
-
-## 协议迁移说明
-
-当前仓库里的主服务和 Orchestrator 仍主要使用旧式字段：
-
-- `vision_req(mode=FIND/IDLE)`
-- `home_tag_req(mode=RETURN)`
-- `target_obs` / `home_tag_obs`
-
-后续主线将迁移到统一的 `vision_req` / `vision_obs` 协议。
-
-迁移策略建议：
-
-- VISTA 内部以新协议为主
-- `test/debug_send_req.py` 与 `test/debug_recv_obj.py` 优先支持新协议联调
-- legacy 输入适配仅作为过渡能力，不再限制新协议的表达能力
-
-## 硬件依赖
-
-- SoC：Qualcomm QCS6490（NPU 推理必须）
-- 摄像头：通过 GStreamer pipeline 采集，依赖 `fast_cam` C++ 扩展（aarch64 预编译 `.so`）
-- 深度相机：RealSense（可选，`RealSenseDepthCamera.py`）
-
-## 本地开发说明
-
-`fast_cam.cpython-38-aarch64-linux-gnu.so` 为 ARM 预编译产物，Windows 本地无法直接运行真实视觉模块。
-
-当前建议的本地开发方式：
-
-- mock backend smoke test
-- 新协议 sender/receiver 联调
-- 在 `new_engine.py` / `test_grasp_only.py` 上验证抓取实验流程
-
-如需重新编译相机扩展，在 AidLux 上执行：
-
-```bash
-cd VISTA/vision_module/backend/camera/cxx
-mkdir -p build && cd build
-cmake .. && make
-```
+When code and docs disagree, the current implementation plus `ARCHITECTURE.md` and `INTERFACES.md` should be treated as the nearer source of truth than historical planning notes.

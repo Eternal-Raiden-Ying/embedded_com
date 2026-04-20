@@ -1,16 +1,19 @@
 # VISTA 当前架构
 
-本文档描述当前代码中的实际结构，以 `vision_module/` 现状为准。
+本文档描述当前代码中的实际结构，以及当前仍未收口的架构缺口。
+
+它不是理想化蓝图，而是当前实现的近端基线。
 
 ## 目标
 
-VISTA 当前已经收敛为一条明确主链路：
+VISTA 当前的主线设计已经收敛为：
 
 - `VistaApp` 负责服务生命周期、IPC、主循环、日志和心跳
-- `StageController` 负责业务阶段控制和 mode 触发
-- `ModeController` 负责 mode profile 和 mode 切换状态
-- `VisionEngine` 负责 backend runtime 装配与执行
-- `Scheduler` 负责 managers 与 stage 之间的摘要数据交换
+- `StageController` 负责业务阶段控制和 stage state
+- `ModeController` 负责 mode profile、switch state 和 runtime plan 编译
+- `VisionEngine` 负责 backend runtime 装配与对外 facade
+- `RuntimeSupervisor` 负责 capability reconcile
+- `Scheduler` 负责 manager 与 stage 之间的摘要数据交换
 - 各 `Manager` 自己维护 worker loop，不把高频工作塞回主线程
 
 ## 总体拓扑
@@ -28,24 +31,46 @@ Orchestrator --vision_req--> VistaApp
                          |             | prepare_switch / commit_switch
                          |             |
                          +-------> VisionEngine.apply_mode_plan(...)
-                                        |
-                                        v
-                                RuntimeSupervisor
-                              /    |      |      \
-                             v     v      v       v
-                    CameraManager Predictor Remote Preview
-                             \      |      /        |
-                              +-----+-----+---------+
-                                            |
-                                            v
-                                       Scheduler
-                                            |
-                                            v
-                         StageController.collect_tick_input() / tick()
-                                            |
-                                            v
-                                VistaApp --vision_obs--> Orchestrator
+                                       |
+                                       v
+                               RuntimeSupervisor
+                             /    |      |      \
+                            v     v      v       v
+                   CameraManager Predictor Remote Preview
+                            \      |      /        |
+                             +-----+-----+---------+
+                                           |
+                                           v
+                                      Scheduler
+                                           |
+                                           v
+                      StageController.collect_tick_input() / tick()
+                                           |
+                                           v
+                                 VistaApp --vision_obs--> Orchestrator
 ```
+
+## 活跃基线
+
+### 当前 stage
+
+- `SEARCH`
+- `GRASP`
+- `RETURN`
+- `IDLE`
+
+### 当前默认 mode
+
+- `IDLE`
+- `TRACK_LOCAL`
+- `MICRO_ADJUST`
+- `GRASP_REMOTE`
+- `IDLE_HOT`
+
+说明：
+
+- `DEPTH_PERCEPTION` 等概念仍可作为未来扩展方向
+- 但它们不是当前已注册、已收口的默认 runtime 基线
 
 ## 分层职责
 
@@ -65,7 +90,7 @@ Orchestrator --vision_req--> VistaApp
 
 - 不直接读 raw frame
 - 不直接操作 camera/predictor/remote/preview manager
-- 不直接做业务 stage 判定
+- 不直接做细粒度 capability 时序控制
 
 ### 2. Stage 控制层
 
@@ -81,22 +106,16 @@ Orchestrator --vision_req--> VistaApp
 
 - 维护 `StageContext`
 - 处理 `START` / `UPDATE` / `RESPOND` / `STOP`
-- 进行 stage enter/restart/stop
+- 进行 stage enter / restart / stop
 - 调用 `ModeController` + `VisionEngine` 完成 mode 变更
 - 从 `Scheduler` 采样 `StageTickInput`
 - 产出 `StageOutput`，并通过 `vision_obs` 对外输出结果
 
-当前 stage：
+当前 stage 消费关系：
 
-- `SEARCH`：本地搜索与跟踪，消费 `local_perception`
-- `GRASP`：微调交互和远程抓取协作，消费 `remote_result`
-- `RETURN`：回航标记/回航目标观测，消费 `local_perception`
-
-核心 contract：
-
-- `StageContext`：跨请求、跨 tick 的可变业务状态
-- `StageTickInput`：当前控制周期对 `Scheduler` 的采样摘要
-- `StageOutput`：当前 stage 的输出 envelope，包含 `vision_obs`、`signals`、`effects`
+- `SEARCH`：主要消费 `local_perception`
+- `GRASP`：主要消费 `remote_result`，并在微调阶段消费 `local_perception`
+- `RETURN`：当前消费 `local_perception`，但真实适配路径仍弱于 `SEARCH`
 
 ### 3. Mode 控制层
 
@@ -113,15 +132,11 @@ Orchestrator --vision_req--> VistaApp
 - 维护当前 mode、target mode、generation、last switch result
 - 在 mode 成功生效后发出 `BACKEND_MODE_CHANGED`
 
-当前默认 mode：
+当前边界：
 
-- `IDLE`
-- `TRACK_LOCAL`
-- `MICRO_ADJUST`
-- `GRASP_REMOTE`
-- `IDLE_HOT`
-
-当前实现中，`ModeController` 不直接管理各 manager 的启停；真正的 capability reconcile 在 `VisionEngine -> RuntimeSupervisor` 中完成。
+- `ModeController` 负责资源需求描述
+- 不直接拥有 manager worker
+- capability reconcile 真正发生在 `VisionEngine -> RuntimeSupervisor`
 
 ### 4. Runtime 层
 
@@ -138,7 +153,7 @@ Orchestrator --vision_req--> VistaApp
   - 暴露 `start()`、`stop()`、`apply_mode_plan()`、`collect_tick_input()`、`publish_result()`、`publish_event()`
 - `RuntimeSupervisor`
   - 根据 mode plan 配置 managers
-  - 把 capability plan 转成 camera/predictor/remote/preview 的启停与配置动作
+  - 把 capability plan 转成 camera / predictor / remote / preview 的启停与配置动作
   - 发出 `BACKEND_RUNTIME_RECONCILED`
 
 ### 5. Scheduler / 数据总线层
@@ -162,7 +177,7 @@ Orchestrator --vision_req--> VistaApp
 - `remote_result`：slot，stage scope
 - `runtime_status`：slot，backend scope
 - `remote_cmd`：event，backend scope
-- `remote_ack`：event，backend scope
+- `remote_ack`：event，backend scope，当前更接近辅助诊断 route，不应被视为主业务 contract 真值
 
 设计边界：
 
@@ -214,7 +229,7 @@ Orchestrator --vision_req--> VistaApp
 VistaApp._handle_request_payload()
   -> VisionReq.from_dict(...)
   -> StageController.handle_request(...)
-  -> StagePlan.on_enter/on_update/on_respond/on_stop(...)
+  -> StagePlan.on_enter / on_update / on_respond / on_stop(...)
   -> StageController._apply_context_mode(...)
   -> ModeController.prepare_switch(...)
   -> VisionEngine.apply_mode_plan(...)
@@ -244,7 +259,7 @@ StageController effects -> Scheduler(remote_cmd)
 PreviewManager <- Scheduler(camera_frames, runtime_status, local_perception)
 ```
 
-## 当前架构的关键约束
+## 当前架构的关键边界
 
 - `App` 不处理 raw frame
 - `StageTickInput` 只带摘要结果，不带原始图像
@@ -253,6 +268,136 @@ PreviewManager <- Scheduler(camera_frames, runtime_status, local_perception)
 - mode 以 `generation` 作为隔离边界，旧代结果不会进入当前 stage 采样
 - preview 是 backend/data-plane 的旁路能力，不再经过 `App` 处理图像
 
+## 当前已知架构缺口
+
+这部分是当前文档必须明确写出的现实问题，而不是隐藏在代码里的实现债务。
+
+### 1. Detect 输出 contract 仍未完全收口
+
+现状：
+
+- real detect predictor 会返回 NumPy 结构
+- `PredictorManager` 与 stage 侧消费对真实输出的边界仍需收口
+
+影响：
+
+- `local_perception` 的稳定性依赖于 manager 边界是否把真实输出安全归一化
+
+### 2. Detect 类别语义所有权仍不清晰
+
+现状：
+
+- 默认本地主线是 `coco80 detect`
+- 但 stage 侧的 target 解析历史上依赖过 `grasping_coco20`
+
+影响：
+
+- 当前默认 detect 成功路径可能被错误类别映射削弱
+
+架构方向：
+
+- 类别 vocabulary 应跟随 active model/profile，而不是由单一全局 target 表硬编码主导
+
+### 3. Remote `INIT -> PREDICT` gate 不够严格
+
+现状：
+
+- `GRASP` stage 会触发 remote command
+- 但当前 integrated path 对“服务器 init 已完成”这一条件缺少清晰强制 gate
+
+影响：
+
+- 框架化之后，可能削弱 `simulate_client_request.py` 中的最小成功路径
+
+### 4. `GRASP_REMOTE` 缺 fresh-frame barrier
+
+现状：
+
+- mode 切换会带来 generation 变化和 scheduler state 清空
+- remote predict 当前仍可能在新 mode 的新 frame 就绪前被触发
+
+影响：
+
+- `missing_camera_frames`
+- `missing_depth_frame`
+- race-dependent false failures
+
+架构方向：
+
+- `mode applied` 不等于 `data ready`
+- 该 gate 应由 stage 驱动，而不是靠 worker timing 假设
+
+### 5. Camera 参数所有权仍偏向全局配置
+
+现状：
+
+- 关键相机参数仍主要在 `board_config.py`
+- `GRASP_REMOTE` 尚未完整拥有自己的 capture profile contract
+
+影响：
+
+- remote 路径可能沿用 local tracking 的默认捕获设置
+
+架构方向：
+
+- remote 相关分辨率、输出格式、上传前编码策略应进入 mode/profile 所有权
+
+### 6. `release_cooldown_s` 仍是声明多于行为
+
+现状：
+
+- mode profile 中存在 `release_cooldown_s`
+- runtime 当前仍以立即 stop/release 为主
+
+影响：
+
+- 文档和配置承诺了 cooldown 语义，但运行时并未真正兑现
+
+架构方向：
+
+- 要么真正实现 cooldown
+- 要么删去装饰性字段，不再制造虚假抽象
+
+### 7. Remote `class_id` 真值来源仍需收口
+
+现状：
+
+- 架构方向已经明确：`class_id` 来自外部输入
+- 当前实现仍保留从 `target` 推导 `class_id` 的回退逻辑
+
+影响：
+
+- remote contract 仍有双真值风险
+
+架构方向：
+
+- `class_id` 可以存于 stage state
+- 但来源应只来自外部请求，不应继续由 VISTA 内部猜测生成
+
+## 当前建议的所有权划分
+
+为减少重复定义和中间层膨胀，建议坚持以下边界：
+
+- `StagePlan`
+  - 负责业务流程
+  - 决定何时等待外部交互、何时请求 remote、何时结束阶段
+- `ModeProfile`
+  - 负责资源需求和默认 capture contract
+  - 不负责业务轮次逻辑
+- `Predictor` / model profile
+  - 负责输入输出与类别 vocabulary 的模型语义
+- `Scheduler`
+  - 负责数据交换，不负责业务含义
+- `RemoteManager`
+  - 负责请求执行，不负责推断业务真值来源
+
 ## 当前文档基线
 
-本目录下的旧计划文档已经不再作为主基线。后续如果代码继续调整，以当前 `app/`、`backend/`、`config/` 实现和本文件为准。
+当前目录中的文档应这样分工：
+
+- `ReadMe.md`：当前总览与操作基线
+- `INTERFACES.md`：外部协议基线
+- `ARCHITECTURE.md`：内部结构与已知缺口基线
+- `AUDIT_TODO.md`：编码交接 backlog
+
+如果代码继续调整，应优先同步这些文件，而不是继续依赖旧的迁移计划文档。
