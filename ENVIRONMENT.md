@@ -52,30 +52,33 @@ This is the most important non-upstream dependency in the environment. If anothe
 - the same modified source tree, or
 - a patch set / fork that contains the Windows build changes
 
-### 3. `anygrasp_sdk/pointnet2`
+### 3. Vendored `pointnet2`
 
-- Source location: `anygrasp_sdk/pointnet2/`
+- Source origin: `anygrasp_sdk/pointnet2/`
+- Tracked source location in this repo: `third_party/pointnet2/`
 - Purpose:
   - provides the `pointnet2` extension used by the grasp model
   - referenced by:
     - `grasp_module/backend/models/graspnet.py`
     - `grasp_module/backend/models/modules.py`
 - Current expectation:
+  - source is now vendored into the main repository
   - compiled and installed into `env/`
 
-The main project uses the installed `pointnet2` package, not the source directory directly at runtime.
+The main project still uses the installed `pointnet2` package at runtime, but the authoritative source snapshot for this project now lives under `third_party/pointnet2/`.
 
-### 4. `graspness_unofficial` KNN
+### 4. KNN in the main project
 
-- Reference source directory: `graspness_unofficial/`
 - Runtime KNN extension path in this project:
   - `grasp_module/backend/models/knn/`
 - Purpose:
   - supports KNN-related operations used in label / geometry processing
 - Important note:
   - the KNN implementation used here was adjusted to fix some bugs for the current environment
+  - it should now be treated as part of the main project implementation
+  - it does not need to stay coupled to `graspness_unofficial`
 
-In practice, this means the KNN code should also be treated as a locally maintained dependency variant rather than assumed upstream-clean.
+`graspness_unofficial/` can remain only as a local reference tree. It is not required as a separately preserved runtime dependency if the active KNN code lives under `grasp_module/backend/models/knn/`.
 
 ## Suggested Build / Install Order
 
@@ -124,7 +127,7 @@ For the modified dependencies in this project, especially:
 
 - `MinkowskiEngineCuda13`
 - `pointnet2`
-- KNN code derived from `graspness_unofficial`
+- the in-repo KNN extension
 
 the better options are:
 
@@ -137,7 +140,21 @@ Best when:
 - you want the full modified source history
 - the dependency will continue evolving
 
-### Option B: Keep the main repo clean and track patches only
+### Option B: Vendor the source into the main repo
+
+Keep the main repo focused on business code plus only the exact dependency sources you want to preserve.
+
+For this project, that now applies to:
+
+- `third_party/pointnet2/`
+
+Best when:
+
+- you want the repo itself to carry the exact source snapshot
+- the dependency is small enough to vendor
+- you want simpler rebuild instructions on another machine
+
+### Option C: Keep the main repo clean and track patches only
 
 Keep the third-party source trees ignored, but add tracked patch files and notes in the main repository, for example under a directory such as:
 
@@ -148,8 +165,6 @@ third_party_patches/
 Suggested contents:
 
 - `MinkowskiEngineCuda13_windows.patch`
-- `pointnet2_windows.patch`
-- `knn_bugfix.patch`
 - `README.md` describing patch order and target upstream commits
 
 Best when:
@@ -157,7 +172,7 @@ Best when:
 - the main repo should stay small
 - you only need reproducibility, not full vendor history
 
-### Option C: Use submodules
+### Option D: Use submodules
 
 If you want the remote project to reconstruct the environment more directly, convert the modified third-party dependencies into submodules pointing to your own forks.
 
@@ -168,16 +183,19 @@ Best when:
 
 ## Practical Recommendation For This Project
 
-For this repository, the most pragmatic setup is:
+For this repository, the current recommended setup is:
 
 1. Keep the root repo focused on `grasp_module` and project docs
-2. Keep the cloned third-party directories ignored
-3. Add environment documentation like this file
-4. For modified third-party code, choose one of:
-   - maintain forks, or
-   - track patch files separately
+2. Maintain `MinkowskiEngineCuda13` in its own remote repository
+3. Vendor `pointnet2` source into `third_party/pointnet2`
+4. Keep the cloned third-party mirror directories ignored
+5. Treat `grasp_module/backend/models/knn/` as the active KNN implementation owned by the main repo
 
-If you do nothing except ignore the third-party directories, the project may still run locally, but another machine will not be able to reproduce the exact Windows build state.
+This gives a cleaner split of responsibility:
+
+- `MinkowskiEngineCuda13`: separate dependency repo
+- `pointnet2`: vendored source in the main repo
+- `knn`: normal main-project code
 
 ## `.gitignore` Recommendation
 

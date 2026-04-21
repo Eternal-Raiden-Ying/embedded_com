@@ -7,10 +7,12 @@ grasp_module/test/data/
 grasp_module/test/debug_res/
 
 # Local mirrors / cloned third-party repositories
-# Keep these ignored in the main project repo.
-# If you need reproducibility for local modifications, prefer:
-# 1. a fork + submodule, or
-# 2. patch files / notes tracked separately in this repo.
+# Strategy for this project:
+# - MinkowskiEngineCuda13: maintain in its own remote repo
+# - pointnet2: vendor source into third_party/pointnet2
+# - anygrasp_sdk source tree: keep ignored here after vendoring the needed pointnet2 source
+# - graspness_unofficial: reference only, not part of the runtime repo
+# - graspnetAPI / yolo-source: local mirrors only unless you decide to vendor them later
 anygrasp_sdk/
 graspness_unofficial/
 graspnetAPI/
@@ -32,6 +34,9 @@ __pycache__/
 # Native extension build outputs
 grasp_module/backend/models/knn/build/
 grasp_module/backend/models/knn/*.egg-info/
+third_party/pointnet2/build/
+third_party/pointnet2/*.egg-info/
+third_party/pointnet2/pointnet2/__pycache__/
 
 # IDE / local workspace
 .vscode/
