@@ -6,7 +6,6 @@ import logging
 import cv2
 import numpy as np
 import torch
-import uvicorn
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 
 from .server_log import log_msg, log_recv, log_send
@@ -20,6 +19,124 @@ app = FastAPI()
 
 # 全局变量，用于保存模型实例
 global_predictor = None
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+MODULE_DIR = os.path.dirname(APP_DIR)
+
+
+def _normalize_depth(depth):
+    if depth is None:
+        return None
+    if depth.ndim == 3 and depth.shape[2] == 1:
+        return depth[:, :, 0]
+    return depth
+
+
+def _decode_rgb_image(image_bytes):
+    image = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        raise HTTPException(status_code=400, detail="Failed to decode rgb_file")
+    return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+
+def _decode_depth_image(image_bytes):
+    depth = _normalize_depth(cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_UNCHANGED))
+    if depth is None:
+        raise HTTPException(status_code=400, detail="Failed to decode depth_file")
+    if depth.ndim != 2:
+        raise HTTPException(status_code=400, detail=f"depth_file must decode to a 2D image, got shape {depth.shape}")
+    return depth
+
+
+def load_warmup_sample_inputs():
+    candidate_sets = [
+        {
+            'name': 'app_dummy_inputs',
+            'rgb': os.path.join(APP_DIR, 'dummy_inputs', 'color_00000.png'),
+            'depth': os.path.join(APP_DIR, 'dummy_inputs', 'depth_raw_00000.png'),
+        },
+        {
+            'name': 'test_data',
+            'rgb': os.path.join(MODULE_DIR, 'test', 'data', 'color', 'color_00000.png'),
+            'depth': os.path.join(MODULE_DIR, 'test', 'data', 'depth', 'depth_raw_00000.png'),
+        },
+    ]
+
+    for candidate in candidate_sets:
+        if not all(os.path.exists(candidate[key]) for key in ('rgb', 'depth')):
+            continue
+
+        rgb_bgr = cv2.imread(candidate['rgb'], cv2.IMREAD_COLOR)
+        depth = _normalize_depth(cv2.imread(candidate['depth'], cv2.IMREAD_UNCHANGED))
+        if rgb_bgr is None or depth is None:
+            continue
+        if depth.ndim != 2:
+            continue
+
+        rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
+        log_msg(f"Warm-up using sample inputs from {candidate['name']}")
+        return rgb, depth.astype(np.uint16)
+
+    return None
+
+
+def build_generated_warmup_inputs(height=720, width=1280, seed=0):
+    rng = np.random.default_rng(seed)
+    yy, xx = np.indices((height, width), dtype=np.float32)
+
+    # 生成带梯度和轻微噪声的 RGB，避免完全一致输入。
+    rgb = np.zeros((height, width, 3), dtype=np.uint8)
+    rgb[..., 0] = np.clip(40 + (xx / width) * 180 + rng.normal(0, 6, size=(height, width)), 0, 255).astype(np.uint8)
+    rgb[..., 1] = np.clip(60 + (yy / height) * 120 + rng.normal(0, 6, size=(height, width)), 0, 255).astype(np.uint8)
+    rgb[..., 2] = np.clip(90 + ((xx + yy) / (width + height)) * 100 + rng.normal(0, 6, size=(height, width)), 0, 255).astype(np.uint8)
+
+    depth = 470.0 + 45.0 * np.sin(xx / width * np.pi * 2.0) + 25.0 * np.cos(yy / height * np.pi)
+    depth += rng.normal(0, 4.0, size=(height, width))
+    depth = np.clip(depth, 360.0, 620.0).astype(np.uint16)
+
+    log_msg("Warm-up using generated structured dummy inputs")
+    return rgb, depth
+
+
+def build_warmup_inputs():
+    sample_inputs = load_warmup_sample_inputs()
+    if sample_inputs is not None:
+        return sample_inputs
+    return build_generated_warmup_inputs()
+
+
+def warmup_predictor(predictor):
+    log_msg("Performing predictor warm-up inference...")
+    tic = time.time()
+
+    original_debug = predictor.cfgs.debug
+    predictor.cfgs.debug = False
+    try:
+        warmup_rgb, warmup_depth = build_warmup_inputs()
+        warmup_class_id = int(getattr(predictor.cfgs, 'yolo_class_id', 46))
+        _ = predictor.infer(warmup_rgb, warmup_depth, warmup_class_id)
+    finally:
+        predictor.cfgs.debug = original_debug
+
+    log_msg(f"Warm-up complete in {time.time() - tic:.3f}s")
+
+
+def serialize_grasps(grasp_results, limit=10):
+    if grasp_results is None:
+        return []
+
+    serialized = []
+    count = min(len(grasp_results), limit)
+    for i in range(count):
+        grasp = grasp_results[i]
+        serialized.append({
+            "score": float(grasp.score),
+            "width": float(grasp.width),
+            "height": float(grasp.height),
+            "depth": float(grasp.depth),
+            "translation": grasp.translation.tolist(),
+            "rotation_matrix": grasp.rotation_matrix.tolist(),
+        })
+    return serialized
 
 @app.on_event("startup")
 async def startup_event():
@@ -39,34 +156,16 @@ async def init_model():
     try:
         # 1. 实例化模型并加载权重
         global_predictor = RealSenseGraspPredictor(cfgs)
-        
-        # # ==========================================
-        # # 2. 新增：模型 Warm-up (热身)，彻底消除首次推理延迟
-        # # ==========================================
-        # log_msg("Performing model warm-up (dummy inference) to pre-allocate activation memory...")
-        # tic_warmup = time.time()
-        
-        # # 生成与真实场景完全相同尺寸的假数据
-        # H, W = 720, 1280
-        # dummy_rgb = np.ones((H, W, 3), dtype=np.uint8)
-        # # 用 1000 填充深度图(模拟1米距离)，用 1 填充掩码，确保数据能通过预处理逻辑进入网络
-        # dummy_depth = np.ones((H, W), dtype=np.uint16) * 100 
-        # dummy_seg = np.ones((H, W), dtype=np.uint8)
-        
-        # # 强制跑一次完整推理
-        # _ = global_predictor.infer(dummy_rgb, dummy_depth, dummy_seg)
-        
-        # # 【注意】如果不清理这次推理的输出，它会占用少许显存，但通常可以忽略。
-        # # 如果追求极致干净，可以加一句 torch.cuda.empty_cache()，但别加，因为清了缓存下次又要重新分配显存。
-        
-        # log_msg(f"Warm-up complete in {time.time() - tic_warmup:.3f}s. Model is fully ready for zero-latency inference.")
-        # # ==========================================
+        warmup_predictor(global_predictor)
         
         response = {"status": "success", "message": "Predictor loaded and warmed up successfully."}
         log_send("Model initialization complete.")
         return response
         
     except Exception as e:
+        if global_predictor is not None:
+            del global_predictor
+            global_predictor = None
         log_msg(f"Failed to load model: {str(e)}", level=logging.ERROR)
         raise HTTPException(status_code=500, detail=f"Init failed: {str(e)}")
 
@@ -74,16 +173,25 @@ async def init_model():
 async def predict_grasp(
     rgb_file: UploadFile = File(...),
     depth_file: UploadFile = File(...),
-    seg_file: UploadFile = File(...),
+    class_id: int = Form(...),
     metadata: str = Form(...)
 ):
     global global_predictor
     
     # 记录收到请求
-    meta_info = json.loads(metadata)
+    try:
+        meta_info = json.loads(metadata)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="metadata must be valid JSON") from exc
+
+    if class_id < 0:
+        raise HTTPException(status_code=400, detail="class_id must be a non-negative integer")
     robot_id = meta_info.get('robot_id', 'unknown')
     cmd = meta_info.get('cmd', 'unknown')
-    log_recv(f"Data received from '{robot_id}'. Command: '{cmd}'. File sizes: RGB({rgb_file.size}B)")
+    log_recv(
+        f"Data received from '{robot_id}'. Command: '{cmd}'. "
+        f"File sizes: RGB({rgb_file.size}B) Depth({depth_file.size}B). class_id={class_id}"
+    )
 
     if global_predictor is None:
         log_msg("Prediction rejected: Predictor not initialized.", level=logging.ERROR)
@@ -93,22 +201,18 @@ async def predict_grasp(
     tic = time.time()
     
     # --- 您的解码和推理逻辑 ---
-    rgb_bytes = await rgb_file.read()
-    rgb = cv2.imdecode(np.frombuffer(rgb_bytes, np.uint8), cv2.IMREAD_COLOR)
-    rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
-    depth_bytes = await depth_file.read()
-    depth = cv2.imdecode(np.frombuffer(depth_bytes, np.uint8), cv2.IMREAD_UNCHANGED)
-    seg_bytes = await seg_file.read()
-    seg = cv2.imdecode(np.frombuffer(seg_bytes, np.uint8), cv2.IMREAD_UNCHANGED)
-    grasp_results = global_predictor.infer(rgb, depth, seg)
-    # ---------------------------
-    
-    time.sleep(0.5) # 模拟推理耗时
-    
+    rgb = _decode_rgb_image(await rgb_file.read())
+    depth = _decode_depth_image(await depth_file.read())
+    grasp_results = global_predictor.infer(rgb, depth, int(class_id))
+
     toc = time.time()
     log_msg(f"Inference finished in {toc - tic:.3f}s")
-    
-    response = {"status": "success", "grasps": "mock_data_array"}
+
+    response = {
+        "status": "success",
+        "grasp_count": 0 if grasp_results is None else len(grasp_results),
+        "grasps": serialize_grasps(grasp_results),
+    }
     log_send(f"Sending results back to '{robot_id}'")
     
     return response
@@ -140,6 +244,8 @@ async def release_model():
     return response
 
 if __name__ == "__main__":
+    import uvicorn
+
     # 使用 dataclass 中的参数控制
     # uvicorn_logger 设为 warning 防止其自带的格式打乱我们的清晰日志
     uvicorn.run(app, host="127.0.0.1", port=6006, log_level="warning")

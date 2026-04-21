@@ -20,7 +20,7 @@ from .utils.data_utils import (
     load_camera_info_from_metadata,
     write_open3d_point_cloud,
 )
-from .utils.yolo_utils import load_yolo_model, mask_to_bbox_mask, predict_target_masks
+from .utils.yolo_utils import load_yolo_model, predict_target_masks
 
 
 logger = logging.getLogger("vision.grasp")
@@ -174,13 +174,7 @@ class RealSenseGraspPredictor:
         scene_points, scene_colors = self._build_scene_cloud(color_img, depth_img, seg_mask, bbox_mask)
         return masked_points, masked_colors, scene_points, scene_colors
 
-    def _resolve_masks(self, color_img, target):
-        if isinstance(target, np.ndarray):
-            seg_mask = (target > 0).astype(np.uint8)
-            bbox_mask, bbox = mask_to_bbox_mask(seg_mask, scale=getattr(self.cfgs, 'bbox_expand_scale', 2.0))
-            return seg_mask, bbox_mask, None, {'found': seg_mask.sum() > 0, 'bbox': bbox, 'source': 'input_mask'}
-
-        target_class_id = int(target)
+    def _resolve_masks(self, color_img, target_class_id):
         seg_mask, bbox_mask, overlay_img, yolo_info = self._predict_target_masks(color_img, target_class_id)
         yolo_info['source'] = 'yolo'
         return seg_mask, bbox_mask, overlay_img, yolo_info
@@ -299,7 +293,7 @@ class RealSenseGraspPredictor:
             
         return grasp_group
 
-    def infer(self, color_img, depth_img, target):
+    def infer(self, color_img, depth_img, class_id):
         """
         供外部调用的实际推理接口。
         target: 目标类别 id，或已有的二值 seg mask
@@ -308,7 +302,7 @@ class RealSenseGraspPredictor:
         timings = {}
 
         stage_tic = time.perf_counter()
-        seg_mask, bbox_mask, overlay_img, yolo_info = self._resolve_masks(color_img, target)
+        seg_mask, bbox_mask, overlay_img, yolo_info = self._resolve_masks(color_img, int(class_id))
         timings['mask'] = time.perf_counter() - stage_tic
         if seg_mask.sum() == 0:
             logger.warning("No valid target mask found")
@@ -438,7 +432,7 @@ if __name__ == '__main__':
     dummy_seg = np.random.randint(0, 2, (H, W), dtype=np.uint8) # 0为背景，1为前景物体
 
     # 执行推理 (每次相机给到新帧时调用)
-    grasp_results = predictor.infer(dummy_rgb, dummy_depth, dummy_seg)
+    grasp_results = predictor.infer(dummy_rgb, dummy_depth, int(getattr(cfgs, 'yolo_class_id', 46)))
     
     # 实际机械臂执行逻辑示例:
     # if grasp_results is not None and len(grasp_results) > 0:

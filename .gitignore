@@ -1,24 +1,38 @@
+# Local runtime environment and large local-only assets
 env/
-anygrasp_sdk/
 output_dataset/
+grasp_module/weights/
+grasp_module/log/
+grasp_module/test/data/
+grasp_module/test/debug_res/
+
+# Local mirrors / cloned third-party repositories
+# Keep these ignored in the main project repo.
+# If you need reproducibility for local modifications, prefer:
+# 1. a fork + submodule, or
+# 2. patch files / notes tracked separately in this repo.
+anygrasp_sdk/
 graspness_unofficial/
 graspnetAPI/
 MinkowskiEngineCuda13/
 yolo-source/
 
+# Python cache
 __pycache__/
 .ipynb_checkpoints/
 *.pyc
 *.pyo
 *.pyd
 
+# Dataset and debug artifacts
 *.bag
 *.ply
 *.npy
 
-grasp_module/test/debug_res/
-grasp_module/test/data/
-grasp_module/log/
-grasp_module/weights/
+# Native extension build outputs
 grasp_module/backend/models/knn/build/
 grasp_module/backend/models/knn/*.egg-info/
+
+# IDE / local workspace
+.vscode/
+.vs/

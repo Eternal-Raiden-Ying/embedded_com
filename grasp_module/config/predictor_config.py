@@ -23,10 +23,8 @@ class PredictorConfig:
 
     rgb_path: str = os.path.join(MODULE_DIR, 'test', 'data', 'color', 'color_00000.png')
     depth_path: str = os.path.join(MODULE_DIR, 'test', 'data', 'depth', 'depth_raw_00000.png')
-    seg_path: str = os.path.join(MODULE_DIR, 'test', 'data', 'seg', 'seg_00000.npy')
     camera_metadata: str = os.path.join(CONFIG_DIR, 'realsense_metadata.json')
 
-    run_yolo: bool = False
     yolo_model: str = 'yolo26m-seg.pt'
     yolo_weights_dir: str = os.path.join(MODULE_DIR, 'weights')
     yolo_class_id: int = 46
@@ -61,10 +59,8 @@ def add_predictor_args(parser, default_overrides=None):
 
     parser.add_argument('--rgb_path', type=str, default=defaults['rgb_path'], help='Path to RGB image')
     parser.add_argument('--depth_path', type=str, default=defaults['depth_path'], help='Path to depth image')
-    parser.add_argument('--seg_path', type=str, default=defaults['seg_path'], help='Path to segmentation mask')
     parser.add_argument('--camera_metadata', type=str, default=defaults['camera_metadata'], help='Path to camera metadata JSON file')
 
-    parser.add_argument('--run_yolo', action='store_true', default=defaults['run_yolo'], help='Use engine internal YOLO segmentation with class id input')
     parser.add_argument('--yolo_model', type=str, default=defaults['yolo_model'], help='YOLO segmentation model name or path')
     parser.add_argument('--yolo_weights_dir', type=str, default=defaults['yolo_weights_dir'], help='Ultralytics weights cache directory')
     parser.add_argument('--yolo_class_id', type=int, default=defaults['yolo_class_id'], help='YOLO target class id')
