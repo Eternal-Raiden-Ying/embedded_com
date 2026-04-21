@@ -115,7 +115,7 @@ Orchestrator --vision_req--> VistaApp
 
 - `SEARCH`：主要消费 `local_perception`
 - `GRASP`：主要消费 `remote_result`，并在微调阶段消费 `local_perception`
-- `RETURN`：当前消费 `local_perception`，但真实适配路径仍弱于 `SEARCH`
+- `RETURN`：当前消费 `local_perception`，并已通过 detect 主线生成 outward-compatible 的 `home_tag_obs`
 
 ### 3. Mode 控制层
 
@@ -270,77 +270,81 @@ PreviewManager <- Scheduler(camera_frames, runtime_status, local_perception)
 
 ## 当前已知架构缺口
 
-这部分是当前文档必须明确写出的现实问题，而不是隐藏在代码里的实现债务。
+这部分是当前文档必须明确写出的 contract 基线与剩余问题，而不是隐藏在代码里的实现债务。
 
-### 1. Detect 输出 contract 仍未完全收口
+### 1. Detect 输出 contract 当前基线
 
 现状：
 
-- real detect predictor 会返回 NumPy 结构
-- `PredictorManager` 与 stage 侧消费对真实输出的边界仍需收口
+- detect predictor 当前允许保留 predictor-local 后处理语义
+- `PredictorManager` 已将 `local_perception` 收口为稳定摘要：
+  - `infer_boxes`: `[[x1, y1, x2, y2, score, class_id], ...]`
+  - `infer_box_format`: 当前 detect 基线为 `xyxy_score_class_id`
+  - `class_names`: 来自 active model/profile 的类别表
+  - NumPy 输出在 manager 边界被转换为纯 Python 结构
 
 影响：
 
-- `local_perception` 的稳定性依赖于 manager 边界是否把真实输出安全归一化
+- detect 输出已能稳定穿过 manager -> stage 边界
+- 后续若更换 predictor-specific postprocess，只能通过显式 contract 变更完成，不能再做未记录漂移
 
-### 2. Detect 类别语义所有权仍不清晰
+### 2. Detect 类别语义所有权当前基线
 
 现状：
 
 - 默认本地主线是 `coco80 detect`
-- 但 stage 侧的 target 解析历史上依赖过 `grasping_coco20`
+- stage 侧 detect 解析现在优先消费 `local_perception.class_names`
 
 影响：
 
-- 当前默认 detect 成功路径可能被错误类别映射削弱
+- 默认 detect 路径不再依赖 `grasping_coco20` 这一全局表
+- 旧的全局 `TARGET_CLASSES` 已从可执行代码中删除，主线真值由 active model/profile 提供
 
 架构方向：
 
 - 类别 vocabulary 应跟随 active model/profile，而不是由单一全局 target 表硬编码主导
 
-### 3. Remote `INIT -> PREDICT` gate 不够严格
+### 3. Remote request sequencing 当前基线
 
 现状：
 
-- `GRASP` stage 会触发 remote command
-- 但当前 integrated path 对“服务器 init 已完成”这一条件缺少清晰强制 gate
+- `RemoteManager` 在 service startup 时会对可用 `base_url` 做一次 best-effort `/init`
+- `GRASP` stage 在 `RESPOND ACCEPT` 后进入 `GRASP_REMOTE`
+- `StagePlan` 会等待 service-level init confirmed 和 fresh frame gate，同时最多触发 3 次 init retry
+- `RemoteManager` 也会在 manager 层拒绝 `init_not_confirmed` 的 `PREDICT`
 
 影响：
 
-- 框架化之后，可能削弱 `simulate_client_request.py` 中的最小成功路径
+- integrated path 现在与最小脚本的 session-style 主干顺序一致：
+  - service startup best-effort `/init`
+  - grasp-time wait init success / retry if needed
+  - `/predict`
+  - `/release` on shutdown / disable / explicit reset
 
-### 4. `GRASP_REMOTE` 缺 fresh-frame barrier
+### 4. `GRASP_REMOTE` fresh-frame barrier 当前基线
 
 现状：
 
-- mode 切换会带来 generation 变化和 scheduler state 清空
-- remote predict 当前仍可能在新 mode 的新 frame 就绪前被触发
+- mode 切换仍会带来 generation 变化和 scheduler state 清空
+- `GRASP_REMOTE` 当前通过 stage-visible `frame_meta` gate 等待新 generation 下的 fresh frame
 
 影响：
 
-- `missing_camera_frames`
-- `missing_depth_frame`
-- race-dependent false failures
+- `mode applied` 与 `data ready` 已被拆开，不再依赖 timing 碰运气
+- 远程抓取何时发起 `PREDICT` 现在由 stage 明确控制
 
-架构方向：
-
-- `mode applied` 不等于 `data ready`
-- 该 gate 应由 stage 驱动，而不是靠 worker timing 假设
-
-### 5. Camera 参数所有权仍偏向全局配置
+### 5. Camera 与上传参数所有权当前基线
 
 现状：
 
-- 关键相机参数仍主要在 `board_config.py`
-- `GRASP_REMOTE` 尚未完整拥有自己的 capture profile contract
+- `ModeProfile.camera_overrides` 现在承载每个 mode 的显式 capture contract
+- `GRASP_REMOTE` 默认 profile 会下发自己的 `rgb/depth` camera overrides
+- remote upload encoding 与压缩参数现在属于 `RemoteProfile`
 
 影响：
 
-- remote 路径可能沿用 local tracking 的默认捕获设置
-
-架构方向：
-
-- remote 相关分辨率、输出格式、上传前编码策略应进入 mode/profile 所有权
+- remote 的相机与上传设置不再只是 manager 内部硬编码
+- 后续要改 remote 抓拍质量时，应优先改 mode/profile，而不是改 worker 私有常量
 
 ### 6. `release_cooldown_s` 仍是声明多于行为
 
@@ -358,21 +362,17 @@ PreviewManager <- Scheduler(camera_frames, runtime_status, local_perception)
 - 要么真正实现 cooldown
 - 要么删去装饰性字段，不再制造虚假抽象
 
-### 7. Remote `class_id` 真值来源仍需收口
+### 7. Remote `class_id` 真值来源当前基线
 
 现状：
 
-- 架构方向已经明确：`class_id` 来自外部输入
-- 当前实现仍保留从 `target` 推导 `class_id` 的回退逻辑
+- `class_id` 现在只从外部请求读取，并可存入 `StageContext.stage_state`
+- remote manager 不再从 `target` 或 ASR vocabulary 推导 `class_id`
 
 影响：
 
-- remote contract 仍有双真值风险
-
-架构方向：
-
-- `class_id` 可以存于 stage state
-- 但来源应只来自外部请求，不应继续由 VISTA 内部猜测生成
+- remote contract 不再有双真值来源
+- 上游未提供 `class_id` 时，`GRASP` 会在进入 remote 路径前显式失败
 
 ## 当前建议的所有权划分
 
@@ -398,6 +398,16 @@ PreviewManager <- Scheduler(camera_frames, runtime_status, local_perception)
 - `ReadMe.md`：当前总览与操作基线
 - `INTERFACES.md`：外部协议基线
 - `ARCHITECTURE.md`：内部结构与已知缺口基线
-- `AUDIT_TODO.md`：编码交接 backlog
+- `IMPLEMENTATION_STATUS.md`：总计划与完成状态基线
+- `NEXT_TODO.md`：当前下一轮行动项
 
 如果代码继续调整，应优先同步这些文件，而不是继续依赖旧的迁移计划文档。
+## 2026-04 Audit Follow-Up Baseline
+
+- Camera and predictor runtime backend ownership now belongs to package-level backend selectors. `VISTA_BACKEND=mock|real|auto` is the control-plane truth. `capability_placeholder` is no longer allowed to choose the main runtime path.
+- `PredictorManager` now validates detect output at the manager boundary before publishing `local_perception`. Stable detect payload fields now include `contract_ok`, `contract_error`, `contract_warnings`, `class_names`, `class_names_source`, and `infer_box_format`.
+- Detect class-name fallback no longer returns to the legacy `grasping_coco20` table. Structural fallback is now normalized `coco80`, and weakened payloads are marked with `class_names_source=fallback_coco80`.
+- Frame-consuming managers are now generation-aware. `PredictorManager` and `PreviewManager` gate on `(generation, seq)` rather than raw `seq`, so `Scheduler.configure()` slot reset on mode switch does not stall local inference or freeze preview.
+- The default camera color baseline is now BGR. Detect follows BGR end-to-end to match the tmp benchmark path; the optional segment predictor converts BGR to RGB internally where needed.
+- Mode-profile camera ownership is now explicit rather than just structural. `TRACK_LOCAL`, `MICRO_ADJUST`, and `GRASP_REMOTE` each publish their own RGB capture contract through `ModeProfile.camera_overrides`.
+- Legacy alias cleanup is in progress: `vision_stream.py` is removed and `QNNPredictor` is no longer part of the supported predictor export surface.

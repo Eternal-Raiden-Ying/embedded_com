@@ -37,36 +37,21 @@ def build_metadata(cfgs):
     return metadata
 
 
-def open_optional_file(path):
-    if not path:
-        return None
-    return open(path, 'rb')
-
-
 def build_request_payload(cfgs):
+    if cfgs.class_id is None:
+        raise ValueError('class_id is required for the current remote contract')
     data = {
         'metadata': json.dumps(build_metadata(cfgs), ensure_ascii=False),
+        'class_id': str(cfgs.class_id),
     }
-    if not cfgs.use_seg_file:
-        if cfgs.class_id is None:
-            raise ValueError('class_id is required unless --use_seg_file is set')
-        data['class_id'] = str(cfgs.class_id)
     return data
 
 
 def build_request_files(cfgs):
-    files = {
+    return {
         'rgb_file': (os.path.basename(cfgs.rgb_path), open(cfgs.rgb_path, 'rb'), 'image/png'),
         'depth_file': (os.path.basename(cfgs.depth_path), open(cfgs.depth_path, 'rb'), 'image/png'),
     }
-    if cfgs.use_seg_file:
-        seg_handle = open_optional_file(cfgs.seg_path)
-        if seg_handle is None:
-            for _, handle, _ in files.values():
-                handle.close()
-            raise ValueError('seg_path is required when --use_seg_file is set')
-        files['seg_file'] = (os.path.basename(cfgs.seg_path), seg_handle, 'application/octet-stream')
-    return files
 
 
 def close_request_files(files):
@@ -104,17 +89,15 @@ def main():
     default_overrides = {
         'rgb_path': os.path.join(CURRENT_DIR, 'data', 'color', 'color_00000.png'),
         'depth_path': os.path.join(CURRENT_DIR, 'data', 'depth', 'depth_raw_00000.png'),
-        'seg_path': os.path.join(CURRENT_DIR, 'data', 'seg', 'seg_00000.npy'),
     }
     parser = build_predictor_arg_parser(description='Simulate edge-side requests to grasp server', default_overrides=default_overrides)
     parser.add_argument('--server_url', type=str, default='http://127.0.0.1:6006', help='Base server URL')
     parser.add_argument('--robot_id', type=str, default='edge-sim', help='Robot id for metadata')
-    parser.add_argument('--cmd', type=str, default='predict', help='Command field in metadata')
-    parser.add_argument('--class_id', type=int, default=46, help='Target class id for online YOLO mode; set to -1 to disable')
+    parser.add_argument('--cmd', type=str, default='predict', help='Debug metadata override for cmd field')
+    parser.add_argument('--class_id', type=int, default=46, help='Target class id for the current remote contract')
     parser.add_argument('--skip_init', action='store_true', help='Skip /init call')
     parser.add_argument('--skip_release', action='store_true', help='Skip /release call')
-    parser.add_argument('--use_seg_file', action='store_true', help='Send seg_file instead of class_id')
-    parser.add_argument('--timeout', type=float, default=120.0, help='HTTP timeout in seconds')
+    parser.add_argument('--timeout', type=float, default=120.0, help='Debug HTTP timeout in seconds')
     parser.add_argument('--predict_repeats', type=int, default=3, help='Number of predict requests to send')
     cfgs = parser.parse_args()
 
@@ -129,10 +112,7 @@ def main():
         init_resp = post_json(session, f'{base_url}/api/v1/init', timeout=cfgs.timeout)
         logger.info('Init response: %s', init_resp)
 
-    if cfgs.use_seg_file:
-        logger.info('Calling /api/v1/predict with seg_file: %s', cfgs.seg_path)
-    else:
-        logger.info('Calling /api/v1/predict with class_id: %s', cfgs.class_id)
+    logger.info('Calling /api/v1/predict with class_id: %s', cfgs.class_id)
 
     durations, responses = run_predict_requests(session, base_url, cfgs)
     if responses:

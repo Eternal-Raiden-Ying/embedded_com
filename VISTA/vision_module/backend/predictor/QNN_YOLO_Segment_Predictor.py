@@ -80,13 +80,13 @@ class QNN_YOLO_Segment_Predictor(IPredictor):
                 self.interpreter = None
             logger.info("qnn predictor released")
 
-    def predict_frame(self, orig_img_rgb: np.ndarray):
+    def predict_frame(self, orig_img_bgr: np.ndarray):
         with self._lock:
             interpreter = self.interpreter
             if interpreter is None:
                 return [], []
 
-            input_img = orig_img_rgb.astype(np.float32) * 0.003921568627
+            input_img = cv2.cvtColor(orig_img_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) * 0.003921568627
             input_img = np.expand_dims(input_img, 0)
             input_img = np.ascontiguousarray(input_img)
 
@@ -113,8 +113,5 @@ class QNN_YOLO_Segment_Predictor(IPredictor):
 
         index = NMS_fast(x[:, :4], x[:, 4], self.iou)
         out_boxes = x[index].astype(np.float16)
-        masks = process_mask_fast(protos[0], out_boxes[:, -32:], out_boxes[:, :4], orig_img_rgb.shape)
+        masks = process_mask_fast(protos[0], out_boxes[:, -32:], out_boxes[:, :4], orig_img_bgr.shape)
         return out_boxes, masks
-
-
-QNNPredictor = QNN_YOLO_Segment_Predictor

@@ -50,7 +50,7 @@ def build_engine_camera_cfg(args: argparse.Namespace) -> dict:
         "out_w": args.rgb_out_w,
         "out_h": args.rgb_out_h,
         "fps": args.rgb_fps,
-        "format": "RGB",
+        "format": "BGR",
         "in_format": "YUY2",
         "crop_x": 0,
         "crop_y": 0,
@@ -67,7 +67,7 @@ def build_direct_camera_kwargs(args: argparse.Namespace) -> dict:
         "out_w": args.rgb_out_w,
         "out_h": args.rgb_out_h,
         "fps": args.rgb_fps,
-        "format": "RGB",
+        "format": "BGR",
         "in_format": "YUY2",
     }
 
@@ -134,7 +134,7 @@ def build_runtime_stack(engine_module, cfg):
         logger=PrintLogger("pipeline.mode"),
         preview_allowed=bool(cfg.debug.preview),
     )
-    mode_controller.register_profiles(build_default_mode_profiles(cfg.model.active_model).values())
+    mode_controller.register_profiles(build_default_mode_profiles(cfg.model.active_model, cfg).values())
     stage_controller = StageController(
         logger=PrintLogger("pipeline.stage"),
         mode_controller=mode_controller,

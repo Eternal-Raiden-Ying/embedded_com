@@ -53,7 +53,9 @@ The old `aidlux_cam/csrc` path is obsolete for this repository.
 - Camera lifecycle is owned by `vision_module/backend/camera_manager.py`, not by the app layer.
 - Camera instances are selected and reconfigured according to runtime mode plans.
 - Current board defaults still live in `vision_module/config/board_config.py`.
-- Future cleanup should move more camera behavior into explicit mode/profile ownership for paths such as `GRASP_REMOTE`.
+- `GRASP_REMOTE` now consumes explicit `ModeProfile.camera_overrides` instead of implicitly reusing local tracking defaults.
+- Board config still provides the source defaults, but runtime ownership now belongs to mode/profile data.
+- The default color camera baseline is now `BGR`, and mode profiles own the final per-mode RGB-camera format / crop / fps contract.
 
 ## Current Limitations
 

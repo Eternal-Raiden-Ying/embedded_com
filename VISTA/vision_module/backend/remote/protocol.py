@@ -6,6 +6,27 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple
 
 
+_IMAGE_ENCODING_MAP = {
+    "jpg": (".jpg", "image/jpeg"),
+    "jpeg": (".jpg", "image/jpeg"),
+    "png": (".png", "image/png"),
+}
+
+
+def normalize_image_encoding(value: Any, default: str = "png") -> str:
+    text = str(value or default).strip().lower()
+    if text in _IMAGE_ENCODING_MAP:
+        return text
+    fallback = str(default or "png").strip().lower()
+    if fallback in _IMAGE_ENCODING_MAP:
+        return fallback
+    return "png"
+
+
+def image_encoding_info(value: Any, default: str = "png") -> Tuple[str, str]:
+    return _IMAGE_ENCODING_MAP[normalize_image_encoding(value, default=default)]
+
+
 @dataclass
 class RemoteMetadata:
     """Metadata shared with the remote grasp server."""
@@ -16,7 +37,6 @@ class RemoteMetadata:
     extras: Dict[str, Any] = field(default_factory=dict)
 
     def to_form_fields(self) -> Dict[str, Any]:
-        """Build request form fields for remote multipart requests."""
         payload: Dict[str, Any] = {"robot_id": self.robot_id, "cmd": self.command}
         if self.class_id is not None:
             payload["class_id"] = self.class_id
@@ -30,10 +50,11 @@ class RemotePredictRequest:
 
     rgb_bytes: Optional[bytes] = None
     depth_bytes: Optional[bytes] = None
-    seg_bytes: Optional[bytes] = None
     class_id: Optional[int] = None
     metadata: RemoteMetadata = field(default_factory=RemoteMetadata)
     timeout_s: float = 10.0
+    rgb_encoding: str = "jpeg"
+    depth_encoding: str = "png"
 
 
 @dataclass
@@ -47,20 +68,16 @@ class RemotePredictResponse:
 
 
 def build_predict_multipart(request: RemotePredictRequest) -> Tuple[Dict[str, Any], Dict[str, Tuple[str, bytes, str]]]:
-    """Build multipart form fields following the current remote grasp protocol.
-
-    The concrete endpoint behavior should stay aligned with the protocol used by
-    ``VISTA/grasp_module/simulate_client_request.py``.
-    """
+    """Build multipart form fields following the current remote grasp protocol."""
     data: Dict[str, Any] = {"metadata": json.dumps(request.metadata.to_form_fields(), ensure_ascii=False)}
     if request.class_id is not None:
         data["class_id"] = str(request.class_id)
 
     files: Dict[str, Tuple[str, bytes, str]] = {}
     if request.rgb_bytes is not None:
-        files["rgb_file"] = ("rgb.jpg", request.rgb_bytes, "image/jpeg")
+        rgb_ext, rgb_mime = image_encoding_info(request.rgb_encoding, default="jpeg")
+        files["rgb_file"] = (f"rgb{rgb_ext}", request.rgb_bytes, rgb_mime)
     if request.depth_bytes is not None:
-        files["depth_file"] = ("depth.png", request.depth_bytes, "image/png")
-    if request.seg_bytes is not None:
-        files["seg_file"] = ("seg.png", request.seg_bytes, "image/png")
+        depth_ext, depth_mime = image_encoding_info(request.depth_encoding, default="png")
+        files["depth_file"] = (f"depth{depth_ext}", request.depth_bytes, depth_mime)
     return data, files

@@ -140,8 +140,11 @@ class ModeController:
                     "base_url": remote_profile.base_url,
                     "command": remote_profile.command,
                     "require_depth": bool(remote_profile.require_depth),
-                    "require_segmentation": bool(remote_profile.require_segmentation),
                     "timeout_s": float(remote_profile.timeout_s),
+                    "rgb_encoding": str(remote_profile.rgb_encoding or "jpeg").strip().lower() or "jpeg",
+                    "depth_encoding": str(remote_profile.depth_encoding or "png").strip().lower() or "png",
+                    "rgb_quality": int(remote_profile.rgb_quality),
+                    "depth_compression": int(remote_profile.depth_compression),
                     "metadata": dict(remote_profile.metadata or {}),
                 },
                 "preview": {

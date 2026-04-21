@@ -202,7 +202,7 @@ def make_rgb_kwargs(args: argparse.Namespace) -> Dict[str, Any]:
         "out_w": args.rgb_out_w,
         "out_h": args.rgb_out_h,
         "fps": args.rgb_fps,
-        "format": "RGB",
+        "format": "BGR",
         "in_format": "YUY2",
     }
 
@@ -265,6 +265,7 @@ def build_test_config(args: argparse.Namespace) -> VisionServiceConfig:
                 in_h=args.rgb_in_h,
                 out_w=args.rgb_out_w,
                 out_h=args.rgb_out_h,
+                format="BGR",
                 fps=args.rgb_fps,
                 enable=True,
             ),

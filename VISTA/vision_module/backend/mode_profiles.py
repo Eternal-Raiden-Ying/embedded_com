@@ -13,8 +13,11 @@ class RemoteProfile:
     base_url: Optional[str] = None
     command: str = "predict"
     require_depth: bool = False
-    require_segmentation: bool = False
     timeout_s: float = 10.0
+    rgb_encoding: str = "jpeg"
+    depth_encoding: str = "png"
+    rgb_quality: int = 90
+    depth_compression: int = 3
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 

@@ -87,9 +87,10 @@
 
 当前稳定语义：
 
+- `vision_req.target` 是当前 detect-backed `RETURN` 的权威返回目标
 - `payload.home_tag_obs` / `payload.mock_home_tag_obs` 仍可用于调试或 mock 注入
 
-`RETURN` 当前对真实 local perception 的适配能力仍弱于 `SEARCH`，调用方不应假设它已经拥有和 `SEARCH` 同等成熟的 detect 驱动路径。
+`RETURN` 现在直接消费 `local_perception.infer_boxes`、`class_names`、`rgb_shape`、`contract_ok`、`contract_error`、`contract_warnings`，并对外继续发布 `perception.home_tag_obs`。detect 路径下不会猜测 target；缺少可用 `target` 时会返回 `found=false` 且附带 `reason=missing_return_target`。
 
 ### 3. `GRASP`
 
@@ -109,7 +110,8 @@
 - `class_id` 可以被 VISTA 保存到 stage state 中，作为请求上下文的一部分
 - `target` 只是业务目标名称，不应再被上游当作 remote `class_id` 的替代物
 
-当前代码中仍存在从 `target` 推导 `class_id` 的兼容/回退行为，但调用方不应依赖该行为；该回退路径是待收缩对象，不是目标 contract。
+当前基线下，remote grasp 不再从 `target` 推导 `class_id`。
+如果上游未显式提供 `payload.class_id`，remote 路径会被明确拒绝。
 
 #### 当前 `GRASP.payload` 中已被实现消费的字段
 
@@ -119,14 +121,13 @@
 | `need_depth` | `bool` | 当前支持 | 是否要求 depth，remote 路径通常应显式传入 |
 | `class_id` | `int` | 当前支持，推荐显式必传 | remote grasp 目标类别 |
 | `remote_timeout_s` | `float` | 当前支持 | request 级超时覆盖项 |
-| `remote_base_url` | `str` | 当前支持 | 临时 endpoint 覆盖项，更适合调试/测试 |
 | `remote_metadata` | `dict` | 当前支持 | 附加 remote metadata |
 
 #### 上游约束
 
 - 如果请求 remote grasp，上游应显式提供 `payload.class_id`
 - 不应依赖 VISTA 内部从 `target` 自动推导 `class_id`
-- `remote_base_url`、`remote_metadata`、`remote_timeout_s` 当前可用，但更接近高级覆盖项，而不是最小稳定生产 contract
+- `remote_metadata`、`remote_timeout_s` 当前可用，但更接近高级覆盖项，而不是最小稳定生产 contract
 
 #### `RESPOND` 语义
 
@@ -135,7 +136,12 @@
 1. VISTA 发出 `WAITING_RESPONSE`
 2. 上游执行或确认动作
 3. 上游发送 `RESPOND`
-4. VISTA 继续进入 `MICRO_ADJUST` 或 `GRASP_REMOTE` 的后续链路
+4. 如果进入 remote grasp，VISTA 会执行：
+   - `INIT`
+   - wait `INIT` success
+   - wait fresh `GRASP_REMOTE` frame
+   - `PREDICT`
+   - `RELEASE`
 
 典型字段：
 
@@ -308,8 +314,17 @@
 
 以下项目已经是架构方向，但当前实现仍在收口中：
 
-- VISTA 内部仍残留从 `target` 推导 `class_id` 的回退逻辑
 - remote request 的最小稳定字段集合仍在收缩中
-- `GRASP_REMOTE` 的 fresh-frame barrier 和 init-completion gate 仍需继续落实
+- segmentation 相关 remote surface 仍待删除
 
 这些属于当前实现债务，不应被上游拿来当正式 contract 依赖。
+## 2026-04 Contract Notes
+
+- `target` and remote `class_id` are different fields. Remote grasp requests must provide explicit `payload.class_id`; VISTA no longer infers `class_id` from `target`.
+- When detect contract weakens or fails, stage-side `perception.target_obs` may now include `contract_error` and `contract_warnings` instead of silently disappearing.
+- The stable detect manager contract is `infer_boxes = [[x1, y1, x2, y2, score, class_id], ...]` with `infer_box_format=xyxy_score_class_id`.
+- If detect `class_names` are missing from the active model profile, VISTA now weakens explicitly to normalized `coco80` rather than falling back to the legacy grasp-only class table.
+- External IPC still does not expose raw frame transport, but the internal service color baseline is now BGR. Debug and preview paths should assume BGR unless a specific predictor says otherwise.
+- Remote `/init` is now service-scoped. `GRASP` waits for service init confirmation plus fresh frames before `PREDICT`, and `/release` is no longer a default per-grasp action.
+- `remote_base_url` is no longer part of the supported request-level override surface. Endpoint ownership now belongs to mode/profile/runtime.
+- Segmentation-specific remote request surface has been removed from the integrated contract. Older references to `seg_file` or segmentation upload are historical only.

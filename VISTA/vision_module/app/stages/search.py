@@ -22,26 +22,44 @@ def _target_obs_from_payload(payload: Optional[Dict[str, object]], target: Optio
 
 def _target_obs_from_results(results: Dict[str, object], target: Optional[str]) -> Optional[Dict[str, object]]:
     local = dict((results or {}).get("local_perception") or {})
+    contract_ok = bool(local.get("contract_ok", True))
+    contract_error = str(local.get("contract_error") or "")
+    contract_warnings = list(local.get("contract_warnings") or [])
     target_obs = local.get("target_obs")
     if isinstance(target_obs, dict):
         merged = {"found": bool(target_obs.get("found", True)), "target": target}
         merged.update(target_obs)
         merged.setdefault("target", target)
+        if contract_error:
+            merged.setdefault("contract_error", contract_error)
+        if contract_warnings:
+            merged.setdefault("contract_warnings", contract_warnings)
         return merged
 
     boxes = local.get("infer_boxes")
+    class_names = local.get("class_names")
     rgb_shape = local.get("rgb_shape")
+    weak_payload = {"found": False, "target": target}
+    if contract_error:
+        weak_payload["contract_error"] = contract_error
+    if contract_warnings:
+        weak_payload["contract_warnings"] = contract_warnings
     if not isinstance(boxes, list) or not rgb_shape:
-        return None
+        return weak_payload if (not contract_ok or contract_error or contract_warnings) else None
     try:
-        obs = compute_target_obs(tuple(rgb_shape), target, boxes)
-    except Exception:
-        return None
+        obs = compute_target_obs(tuple(rgb_shape), target, boxes, class_names=class_names)
+    except Exception as exc:
+        weak_payload["contract_error"] = weak_payload.get("contract_error") or f"invalid_local_perception:{exc}"
+        return weak_payload
     if obs is None:
-        return None
+        return weak_payload if (not contract_ok or contract_error or contract_warnings) else None
     payload = {"found": True, "target": target}
     payload.update(obs)
     payload.setdefault("target", target)
+    if contract_error:
+        payload["contract_error"] = contract_error
+    if contract_warnings:
+        payload["contract_warnings"] = contract_warnings
     return payload
 
 

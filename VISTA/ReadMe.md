@@ -10,8 +10,8 @@ For other viewpoints, use:
 
 - `ARCHITECTURE.md`: current internal topology
 - `INTERFACES.md`: external IPC contract
-- `AUDIT_TODO.md`: coding handoff backlog
-- `MD_DRIFT_AUDIT.md`: markdown drift audit
+- `IMPLEMENTATION_STATUS.md`: master plan and completion state
+- `NEXT_TODO.md`: current next-round action list
 
 ## Current Scope
 
@@ -90,11 +90,16 @@ Important distinction:
 
 ## Current Backend Baseline
 
+Backend selection ownership:
+
+- `VISTA_BACKEND=mock|real|auto` is now the runtime source of truth for camera and predictor backend selection
+- `capability_placeholder` may still exist in config for test scaffolding, but it is no longer allowed to decide the main runtime real/mock path
+
 ### Camera
 
 Current default board config:
 
-- `rgb`: input `1280x720`, cropped and output as `640x640`, format `RGB`
+- `rgb`: input `1280x720`, cropped and output as `640x640`, format `BGR`
 - `depth`: `424x240 @ 15 fps`
 - `grey`: available as a separate stream
 
@@ -115,6 +120,12 @@ Current built-in model profiles:
 Important note:
 
 - current local baseline is detect-first, not segmentation-first
+- current camera color baseline is BGR; detect follows that baseline directly, while the optional segment predictor adapts internally
+- stage-side detect decoding now follows the active model profile `classes`, not one global hardcoded table
+- `PredictorManager` publishes detect boxes as flattened `infer_boxes = [[x1, y1, x2, y2, score, class_id], ...]`
+- `local_perception.class_names` is the current source of truth for stage-side detect class decoding
+- if a detect profile omits `classes`, `PredictorManager` now publishes fallback `coco80` class names explicitly and marks the payload as weakened via `class_names_source=fallback_coco80`
+- malformed detect rows are now surfaced at the manager boundary through `local_perception.contract_ok`, `contract_error`, and `contract_warnings`
 
 ### Remote
 
@@ -126,6 +137,15 @@ Current remote path is implemented through:
 - `grasp_module/simulate_client_request.py` as the minimal reference script
 
 Current design intent is remote grasp by `class_id`.
+
+Current remote execution baseline:
+
+- `RemoteManager` owns service-scoped `/init` and attempts one best-effort init when a usable `base_url` exists
+- `GRASP` gates `PREDICT` on service init confirmation plus fresh `GRASP_REMOTE` frames, and may retry init up to 3 times
+- `RemoteManager` rejects `PREDICT` if service init is not confirmed
+- `class_id` is now treated as explicit request truth and is no longer synthesized from `target`
+- `GRASP_REMOTE` camera parameters and upload encoding defaults now come from mode/profile data
+- `/release` is no longer a default per-grasp action; it is used on shutdown, remote disable, or explicit reset
 
 ## Current IPC Baseline
 
@@ -160,8 +180,8 @@ VISTA/
 ├── ARCHITECTURE.md
 ├── INTERFACES.md
 ├── PRODUCT_REQUIREMENTS.md
-├── AUDIT_TODO.md
-├── MD_DRIFT_AUDIT.md
+├── IMPLEMENTATION_STATUS.md
+├── NEXT_TODO.md
 ├── grasp_module/
 │   └── simulate_client_request.py
 └── vision_module/
@@ -197,9 +217,14 @@ Current useful tools in `vision_module/test/` include:
 - `test_pipeline.py`
 - `test_runtime_architecture.py`
 - `test_color_controls.py`
-- `vision_stream.py`
 
 The old references to `new_engine.py` and `test_grasp_only.py` are obsolete and should not be used.
+
+Current mode-level RGB capture baselines are no longer identical copies of board config:
+
+- `TRACK_LOCAL`: BGR, `1280x720 -> 640x640`, `24 fps`, wide center crop
+- `MICRO_ADJUST`: BGR, `1280x720 -> 640x640`, `30 fps`, tighter center crop
+- `GRASP_REMOTE`: BGR, `1280x720 -> 640x640`, `15 fps`, remote-oriented stable capture profile
 
 ## Known Contract Gaps
 
@@ -207,21 +232,20 @@ This section is intentionally explicit. The current structure is real, but some 
 
 ### Detect line
 
-- default local model is `coco80 detect`, but stage-side class resolution is not yet cleanly aligned with that baseline
-- real predictor output handling needs a safer contract at the predictor-manager boundary
-- current backend import path can still hide real-path problems by falling back to `mock` in some cases
+- `RETURN` is now backed by the default detect line; outward compatibility remains `perception.home_tag_obs`, but the payload may be detect-backed with `source=detect`
+- `auto` backend may still resolve to `mock`, but the resolution is now explicit and no longer hidden inside the runtime manager path
+- the default service color contract is already frozen to `BGR`; any later real-device validation is accuracy validation, not contract discovery
 
 ### Remote line
 
-- `GRASP_REMOTE` still needs a proven fresh-frame barrier before `PREDICT`
-- server-side `INIT` completion is not yet a clearly enforced gate before `PREDICT`
-- remote upload encoding should become configurable, not fixed
-- remote camera parameters should move into mode/profile ownership
-- segmentation-related remote surface is still present and should be deleted after parity is confirmed
+- segmentation-related remote surface has been deleted from the integrated path
+- request-level `base_url` override is no longer part of the remote request contract; endpoint ownership now stays with mode/profile/runtime
+- remote profile fields are intentionally trimmed to runtime capability defaults plus limited debug/test overrides
 
 ### Runtime policy
 
 - `release_cooldown_s` exists in mode profiles, but delayed release is not yet a meaningful runtime behavior
+- frame-consuming managers now gate on `(generation, seq)` rather than raw `seq` only, so mode switches no longer stall predictor or freeze preview after scheduler slot reset
 
 ## Run
 

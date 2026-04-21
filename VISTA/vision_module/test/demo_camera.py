@@ -63,7 +63,7 @@ def build_camera_kwargs(stream: str) -> Dict[str, object]:
             "out_h": 720,
             "fps": 30,
             "in_format": "YUY2",
-            "format": "RGB",
+            "format": "BGR",
             "crop_x": 0,
             "crop_y": 0,
             "crop_w": 0,
@@ -121,15 +121,15 @@ def ir_to_bgr(frame):
     return cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
 
 
-def rgb_to_bgr(frame):
+def color_to_bgr(frame):
     if frame.ndim == 3 and frame.shape[2] == 3:
-        return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        return frame.copy()
     return ir_to_bgr(frame)
 
 
 def frame_to_display(stream: str, frame):
     if stream == "rgb":
-        return rgb_to_bgr(frame)
+        return color_to_bgr(frame)
     if stream == "depth":
         return depth_to_bgr(frame)
     return ir_to_bgr(frame)

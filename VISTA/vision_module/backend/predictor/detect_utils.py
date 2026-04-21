@@ -119,6 +119,7 @@ def detect_postprocess(
     conf_thres: float,
     iou_thres: float,
 ) -> np.ndarray:
+    """Return flattened detections as [x1, y1, x2, y2, score, class_id]."""
     if prediction.ndim == 3:
         prediction = prediction[0]
     if prediction.size <= 0:

@@ -100,7 +100,7 @@ def main() -> int:
             out_h=args.out_h,
             fps=args.fps,
             in_format="YUY2",
-            format="RGB",
+            format="BGR",
             auto_exposure=False,
             exposure=exposure,
             brightness=brightness,
@@ -121,7 +121,7 @@ def main() -> int:
                 print("FAIL     | frame | empty frame")
                 return EXIT_FAIL
 
-            bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            bgr = frame.copy()
             now = time.time()
             fps = 1.0 / max(1e-6, now - prev_time)
             prev_time = now

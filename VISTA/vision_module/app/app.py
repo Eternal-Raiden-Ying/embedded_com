@@ -41,7 +41,7 @@ class VistaApp(BaseModule):
             backend_event_sink=lambda event, **fields: self._record_backend_event(event, fields),
             preview_allowed=bool(CONFIG.debug.preview),
         )
-        mode_controller.register_profiles(build_default_mode_profiles(CONFIG.model.active_model).values())
+        mode_controller.register_profiles(build_default_mode_profiles(CONFIG.model.active_model, CONFIG).values())
         self.runtime = VisionEngine(
             CONFIG,
             logger=self.child_logger("engine"),
