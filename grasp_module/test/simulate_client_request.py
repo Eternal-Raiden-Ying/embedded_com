@@ -72,7 +72,13 @@ def run_predict_requests(session, base_url, cfgs):
             duration = time.perf_counter() - tic
             durations.append(duration)
             responses.append(predict_resp)
-            logger.info('Predict #%s time: %.3fs, grasp_count=%s', idx + 1, duration, predict_resp.get('grasp_count'))
+            logger.info(
+                'Predict #%s time: %.3fs, grasp_count=%s, output_count=%s',
+                idx + 1,
+                duration,
+                predict_resp.get('grasp_count'),
+                predict_resp.get('output_count'),
+            )
         finally:
             close_request_files(files)
     return durations, responses
@@ -83,7 +89,9 @@ def main():
 
     default_overrides = {
         'rgb_path': os.path.join(CURRENT_DIR, 'data', 'color', 'color_00000.png'),
+        # 'rgb_path': r"E:\Documents_E\vscode\embedded_com\output_dataset\20260422\color\color_00000.png",
         'depth_path': os.path.join(CURRENT_DIR, 'data', 'depth', 'depth_raw_00000.png'),
+        # 'depth_path': r"E:\Documents_E\vscode\embedded_com\output_dataset\20260422\depth_raw_16bit\depth_raw_00000.png",
     }
     parser = build_predictor_arg_parser(description='Simulate edge-side requests to grasp server', default_overrides=default_overrides)
     parser.add_argument('--server_url', type=str, default='http://127.0.0.1:6006', help='Base server URL')

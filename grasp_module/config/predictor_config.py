@@ -27,11 +27,15 @@ class PredictorConfig:
 
     yolo_model: str = 'yolo26m-seg.pt'
     yolo_weights_dir: str = os.path.join(MODULE_DIR, 'weights')
-    yolo_class_id: int = 46
+    yolo_class_id: int = 47
     yolo_conf: float = 0.25
     yolo_iou: float = 0.7
     bbox_expand_scale: float = 2.0
     collision_depth_margin: float = 0.15
+    protocol_depth_base: float = -0.085  # 0.02
+    protocol_feasible_angle_deg: float = 5.0
+    protocol_min_score: float = 0.3
+    response_max_targets: int = 5
 
     debug: bool = False
 
@@ -68,6 +72,10 @@ def add_predictor_args(parser, default_overrides=None):
     parser.add_argument('--yolo_iou', type=float, default=defaults['yolo_iou'], help='YOLO NMS IoU threshold')
     parser.add_argument('--bbox_expand_scale', type=float, default=defaults['bbox_expand_scale'], help='Expand bbox width/height around center by this scale')
     parser.add_argument('--collision_depth_margin', type=float, default=defaults['collision_depth_margin'], help='Depth margin in meters for bbox collision cloud')
+    parser.add_argument('--protocol_depth_base', type=float, default=defaults['protocol_depth_base'], help='Rear-edge offset from grasp origin along negative approach axis, in meters')
+    parser.add_argument('--protocol_feasible_angle_deg', type=float, default=defaults['protocol_feasible_angle_deg'], help='Maximum allowed angle between raw and constrained approach direction')
+    parser.add_argument('--protocol_min_score', type=float, default=defaults['protocol_min_score'], help='Minimum score required for a grasp to be reported as executable; <=0 disables this filter')
+    parser.add_argument('--response_max_targets', type=int, default=defaults['response_max_targets'], help='Maximum number of protocol targets returned to downstream clients')
 
     parser.add_argument('--debug', action='store_true', default=defaults['debug'], help='Enable debug outputs')
     return parser

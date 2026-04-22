@@ -120,23 +120,52 @@ def warmup_predictor(predictor):
     log_msg(f"Warm-up complete in {time.time() - tic:.3f}s")
 
 
-def serialize_grasps(grasp_results, limit=10):
-    if grasp_results is None:
-        return []
+def build_downstream_response(grasp_results, protocol_targets, predictor_cfgs):
+    raw_grasp_count = 0 if grasp_results is None else len(grasp_results)
+    if raw_grasp_count == 0:
+        return {
+            "status": "reposition_required",
+            "grasp_count": 0,
+            "feasible_count": 0,
+            "output_count": 0,
+            "targets": [],
+            "reason": "no_grasp_detected",
+            "message": "placeholder",
+        }
 
-    serialized = []
-    count = min(len(grasp_results), limit)
-    for i in range(count):
-        grasp = grasp_results[i]
-        serialized.append({
-            "score": float(grasp.score),
-            "width": float(grasp.width),
-            "height": float(grasp.height),
-            "depth": float(grasp.depth),
-            "translation": grasp.translation.tolist(),
-            "rotation_matrix": grasp.rotation_matrix.tolist(),
-        })
-    return serialized
+    feasible_count = len(protocol_targets)
+    if feasible_count == 0:
+        return {
+            "status": "reposition_required",
+            "grasp_count": raw_grasp_count,
+            "feasible_count": 0,
+            "output_count": 0,
+            "targets": [],
+            "reason": "no_feasible_grasp",
+            "message": "placeholder",
+        }
+
+    min_score = float(getattr(predictor_cfgs, 'protocol_min_score', 0.0))
+    max_targets = max(1, int(getattr(predictor_cfgs, 'response_max_targets', 5)))
+    output_targets = [target for target in protocol_targets if target["confidence"] >= min_score][:max_targets]
+    if not output_targets:
+        return {
+            "status": "reposition_required",
+            "grasp_count": raw_grasp_count,
+            "feasible_count": feasible_count,
+            "output_count": 0,
+            "targets": [],
+            "reason": "score_below_threshold",
+            "message": "placeholder",
+        }
+
+    return {
+        "status": "success",
+        "grasp_count": raw_grasp_count,
+        "feasible_count": feasible_count,
+        "output_count": len(output_targets),
+        "targets": output_targets,
+    }
 
 @app.on_event("startup")
 async def startup_event():
@@ -208,11 +237,24 @@ async def predict_grasp(
     toc = time.time()
     log_msg(f"Inference finished in {toc - tic:.3f}s")
 
-    response = {
-        "status": "success",
-        "grasp_count": 0 if grasp_results is None else len(grasp_results),
-        "grasps": serialize_grasps(grasp_results),
-    }
+    protocol_targets = global_predictor.build_protocol_targets(grasp_results)
+    response = build_downstream_response(grasp_results, protocol_targets, global_predictor.cfgs)
+    if response["status"] == "success":
+        for idx, target in enumerate(response["targets"], start=1):
+            log_msg(
+                f"Protocol target #{idx}: "
+                f"x={target['x_cm']:.2f}cm y={target['y_cm']:.2f}cm z={target['z_cm']:.2f}cm "
+                f"pitch={target['pitch_deg']:.2f}deg roll={target['roll_deg']:.2f}deg "
+                f"width={target['gripper_width_cm']:.2f}cm depth={target['approach_depth_cm']:.2f}cm "
+                f"score={target['confidence']:.4f} feasible_angle={target['feasible_angle_deg']:.2f}deg"
+            )
+    else:
+        log_msg(
+            "Protocol output requires reposition. "
+            f"reason={response.get('reason')} grasp_count={response.get('grasp_count')} "
+            f"feasible_count={response.get('feasible_count')}",
+            level=logging.WARNING,
+        )
     log_send(f"Sending results back to '{robot_id}'")
     
     return response

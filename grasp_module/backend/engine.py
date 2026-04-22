@@ -24,6 +24,7 @@ from .utils.yolo_utils import load_yolo_model, predict_target_masks
 
 
 logger = logging.getLogger("vision.grasp")
+PROTOCOL_EPS = 1e-8
 
 
 class RealSenseGraspPredictor:
@@ -31,6 +32,11 @@ class RealSenseGraspPredictor:
         self.cfgs = cfgs
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.seg_model = None
+        self.rng = np.random.default_rng(getattr(self.cfgs, 'random_seed', 0))
+
+        torch.manual_seed(getattr(self.cfgs, 'random_seed', 0))
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(getattr(self.cfgs, 'random_seed', 0))
 
         self.camera_info = self._load_camera_info()
         self.net = self._load_grasp_model()
@@ -77,10 +83,10 @@ class RealSenseGraspPredictor:
 
         # 采样到固定点数 (默认 15000)
         if len(cloud_masked) >= self.cfgs.num_point:
-            idxs = np.random.choice(len(cloud_masked), self.cfgs.num_point, replace=False)
+            idxs = self.rng.choice(len(cloud_masked), self.cfgs.num_point, replace=False)
         else:
             idxs1 = np.arange(len(cloud_masked))
-            idxs2 = np.random.choice(len(cloud_masked), self.cfgs.num_point - len(cloud_masked), replace=True)
+            idxs2 = self.rng.choice(len(cloud_masked), self.cfgs.num_point - len(cloud_masked), replace=True)
             idxs = np.concatenate([idxs1, idxs2], axis=0)
 
         cloud_sampled = cloud_masked[idxs]
@@ -224,6 +230,107 @@ class RealSenseGraspPredictor:
             for key, value in extras.items():
                 logger.info(" - %s: %s", key, value)
 
+    def _normalize_vector(self, vec):
+        norm = float(np.linalg.norm(vec))
+        if norm < PROTOCOL_EPS:
+            return None
+        return vec / norm
+
+    def _clamp_unit_interval(self, value):
+        return max(-1.0, min(1.0, float(value)))
+
+    def _signed_angle_deg(self, reference, target, axis):
+        cross = np.cross(reference, target)
+        sin_term = float(np.dot(axis, cross))
+        cos_term = float(np.dot(reference, target))
+        return float(np.degrees(np.arctan2(sin_term, cos_term)))
+
+    def _angle_between_deg(self, vec_a, vec_b):
+        return float(np.degrees(np.arccos(self._clamp_unit_interval(np.dot(vec_a, vec_b)))))
+
+    def _camera_to_protocol_vector(self, vector):
+        vector = np.asarray(vector, dtype=np.float64)
+        return np.array([vector[2], vector[0], -vector[1]], dtype=np.float64)
+
+    def _camera_to_protocol_point_cm(self, point):
+        return 100.0 * self._camera_to_protocol_vector(point)
+
+    def _build_protocol_target(self, grasp):
+        raw_approach = self._normalize_vector(self._camera_to_protocol_vector(grasp.rotation_matrix[:, 0]))
+        if raw_approach is None:
+            return None
+
+        projected_approach = self._normalize_vector(
+            np.array([raw_approach[0], 0.0, raw_approach[2]], dtype=np.float64)
+        )
+        if projected_approach is None:
+            return None
+
+        feasible_angle_deg = self._angle_between_deg(raw_approach, projected_approach)
+
+        raw_width = self._camera_to_protocol_vector(grasp.rotation_matrix[:, 1])
+        width_axis = raw_width - float(np.dot(raw_width, projected_approach)) * projected_approach
+        width_axis = self._normalize_vector(width_axis)
+        if width_axis is None:
+            return None
+
+        horizontal_axis = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+        pitch_deg = float(np.degrees(np.arctan2(projected_approach[2], projected_approach[0])))
+        roll_deg = self._signed_angle_deg(horizontal_axis, width_axis, projected_approach)
+
+        depth_base_cm = 100.0 * float(getattr(self.cfgs, 'protocol_depth_base', 0.02))
+        grasp_origin_cm = self._camera_to_protocol_point_cm(grasp.translation)
+        rear_edge_center_cm = grasp_origin_cm - depth_base_cm * projected_approach
+
+        return {
+            "x_cm": float(rear_edge_center_cm[0]),
+            "y_cm": float(rear_edge_center_cm[1]),
+            "z_cm": float(rear_edge_center_cm[2]),
+            "pitch_deg": pitch_deg,
+            "roll_deg": roll_deg,
+            "gripper_width_cm": 100.0 * float(grasp.width),
+            "approach_depth_cm": 100.0 * float(grasp.depth),
+            "confidence": float(grasp.score),
+            "feasible_angle_deg": feasible_angle_deg,
+        }
+
+    def build_protocol_targets(self, grasp_group):
+        feasible_grasp_group = self.build_protocol_grasp_group(grasp_group)
+        if feasible_grasp_group is None or len(feasible_grasp_group) == 0:
+            return []
+
+        protocol_targets = []
+        for grasp in feasible_grasp_group:
+            target = self._build_protocol_target(grasp)
+            if target is None:
+                continue
+            protocol_targets.append(target)
+
+        protocol_targets.sort(key=lambda item: item['confidence'], reverse=True)
+        return protocol_targets
+
+    def build_protocol_grasp_group(self, grasp_group):
+        if grasp_group is None or len(grasp_group) == 0:
+            return GraspGroup()
+
+        angle_threshold = float(getattr(self.cfgs, 'protocol_feasible_angle_deg', 5.0))
+        feasible_grasp_arrays = []
+        for grasp in grasp_group:
+            target = self._build_protocol_target(grasp)
+            if target is None:
+                continue
+            if target['feasible_angle_deg'] > angle_threshold:
+                continue
+            feasible_grasp_arrays.append(grasp.grasp_array.copy())
+
+        if not feasible_grasp_arrays:
+            return GraspGroup()
+
+        feasible_grasp_group = GraspGroup(np.stack(feasible_grasp_arrays, axis=0))
+        feasible_grasp_group = feasible_grasp_group.nms()
+        feasible_grasp_group = feasible_grasp_group.sort_by_score()
+        return feasible_grasp_group
+
     def _prepare_batch_data(self, data_dict):
         batch_data = minkowski_collate_fn([data_dict])
         for key in batch_data:
@@ -282,7 +389,7 @@ class RealSenseGraspPredictor:
             return grasp_group
 
         # 1. NMS 过滤重叠抓取
-        grasp_group = grasp_group.nms()
+        grasp_group = grasp_group.sort_by_score()
         
         # 2. 按分数排序
         grasp_group = grasp_group.sort_by_score()
@@ -298,6 +405,7 @@ class RealSenseGraspPredictor:
         供外部调用的实际推理接口。
         target: 目标类别 id，或已有的二值 seg mask
         """
+        self.rng = np.random.default_rng(getattr(self.cfgs, 'random_seed', 0))
         tic = time.perf_counter()
         timings = {}
 
