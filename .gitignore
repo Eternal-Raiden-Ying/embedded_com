@@ -47,14 +47,8 @@ Voice/runs/
 *.amf
 *.ctx.bin
 
-# Voice third-party assets:
-# keep only the runtime-required model bundles under Git/LFS,
-# and continue ignoring the legacy/offline extras.
-Voice/thirdparty/*
-!Voice/thirdparty/fsmn_vad/
-!Voice/thirdparty/fsmn_vad/**
-!Voice/thirdparty/paraformer_asr_online/
-!Voice/thirdparty/paraformer_asr_online/**
+# Voice third-party assets stay local on board and are not tracked in Git.
+Voice/thirdparty/
 VISTA/grasp_module/graspness_unofficial/
 
 # Environment

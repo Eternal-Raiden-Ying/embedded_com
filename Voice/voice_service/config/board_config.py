@@ -14,7 +14,8 @@ from pathlib import Path
 from .schema import VoiceServiceConfig
 
 
-VOICE_ROOT = Path(os.getenv("VOICE_ROOT", "/home/aidlux/2026/Voice"))
+_DEFAULT_VOICE_ROOT = Path(__file__).resolve().parents[2]
+VOICE_ROOT = Path(os.getenv("VOICE_ROOT", str(_DEFAULT_VOICE_ROOT)))
 VOICE_SERVICE_ROOT = Path(os.getenv("VOICE_SERVICE_ROOT", str(VOICE_ROOT)))
 
 VOICE_TEST_PROFILE = os.getenv("VOICE_TEST_PROFILE", "").strip().lower()

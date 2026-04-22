@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+from pathlib import Path
 
 from .schema import OrchestratorConfig
 
@@ -41,11 +42,16 @@ def _env_str(name: str, default: str) -> str:
 
 CONFIG = OrchestratorConfig()
 
-CONFIG.runtime.project_root = _env_str("ORCH_PROJECT_ROOT", "/home/aidlux/2026/orchestrator")
-CONFIG.runtime.log_dir = _env_str("ORCH_LOG_DIR", "/home/aidlux/2026/orchestrator/logs")
+_DEFAULT_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_DEFAULT_LOG_DIR = _DEFAULT_PROJECT_ROOT / "logs"
+_DEFAULT_RUNS_DIR = _DEFAULT_PROJECT_ROOT / "runs"
+_DEFAULT_PID_DIR = _DEFAULT_PROJECT_ROOT / "pids"
+
+CONFIG.runtime.project_root = _env_str("ORCH_PROJECT_ROOT", str(_DEFAULT_PROJECT_ROOT))
+CONFIG.runtime.log_dir = _env_str("ORCH_LOG_DIR", str(_DEFAULT_LOG_DIR))
 CONFIG.runtime.log_file = _env_str("ORCH_LOG_FILE", f"{CONFIG.runtime.log_dir}/orchestrator.log")
-CONFIG.runtime.runs_dir = _env_str("ORCH_RUNS_DIR", "/home/aidlux/2026/orchestrator/runs")
-CONFIG.runtime.pid_dir = _env_str("ORCH_PID_DIR", "/home/aidlux/2026/orchestrator/pids")
+CONFIG.runtime.runs_dir = _env_str("ORCH_RUNS_DIR", str(_DEFAULT_RUNS_DIR))
+CONFIG.runtime.pid_dir = _env_str("ORCH_PID_DIR", str(_DEFAULT_PID_DIR))
 CONFIG.runtime.pid_file = _env_str("ORCH_PID_FILE", f"{CONFIG.runtime.pid_dir}/orchestrator.pid")
 CONFIG.runtime.stack_run_id = _env_str("STACK_RUN_ID", "")
 CONFIG.runtime.tick_hz = _env_float("ORCH_TICK_HZ", CONFIG.runtime.tick_hz)

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VOICE_ROOT="${VOICE_ROOT:-/home/aidlux/2026/Voice}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VOICE_ROOT="${VOICE_ROOT:-$SCRIPT_DIR}"
 LOG_DIR="$VOICE_ROOT/logs"
 PID_DIR="$VOICE_ROOT/pids"
 RUNS_DIR="$VOICE_ROOT/runs"

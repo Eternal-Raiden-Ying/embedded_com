@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
+
+
+_DEFAULT_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_DEFAULT_RUNS_DIR = _DEFAULT_PROJECT_ROOT / "runs"
+_DEFAULT_TTS_CACHE_DIR = _DEFAULT_PROJECT_ROOT / "tts_cache"
+_DEFAULT_TTS_OUT_DIR = _DEFAULT_PROJECT_ROOT / "tts_out"
 
 
 @dataclass
 class VoiceServiceConfig:
     # 项目路径 / runs
-    project_root: str = "/home/aidlux/2026/Voice"
-    runs_dir: str = "/home/aidlux/2026/Voice/runs"
+    project_root: str = field(default_factory=lambda: str(_DEFAULT_PROJECT_ROOT))
+    runs_dir: str = field(default_factory=lambda: str(_DEFAULT_RUNS_DIR))
 
     # 模型与资源路径
     asr_dir: str = ""
@@ -51,8 +58,8 @@ class VoiceServiceConfig:
 
     # TTS
     disable_tts: bool = False
-    tts_cache: str = "/home/aidlux/2026/Voice/tts_cache"
-    tts_out_dir: str = "/home/aidlux/2026/Voice/tts_out"
+    tts_cache: str = field(default_factory=lambda: str(_DEFAULT_TTS_CACHE_DIR))
+    tts_out_dir: str = field(default_factory=lambda: str(_DEFAULT_TTS_OUT_DIR))
     tts_mode: str = "play"  # save / play
     play_cmd: str = "aplay -q"
 

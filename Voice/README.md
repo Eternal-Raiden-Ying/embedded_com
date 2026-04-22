@@ -45,7 +45,7 @@ bash Voice/start_voice_asr.sh restart
 
 # 手动前台启动（需 conda env: asr）
 conda activate asr
-cd /home/aidlux/2026/Voice
+cd /home/aidlux/embedded_com/Voice
 python3 -m voice_service.app.main
 ```
 

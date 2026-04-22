@@ -2,9 +2,16 @@
 # -*- coding: utf-8 -*-
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List
 
 from ..control.types import DockingControlConfig
+
+
+_DEFAULT_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_DEFAULT_LOG_DIR = _DEFAULT_PROJECT_ROOT / "logs"
+_DEFAULT_RUNS_DIR = _DEFAULT_PROJECT_ROOT / "runs"
+_DEFAULT_PID_DIR = _DEFAULT_PROJECT_ROOT / "pids"
 
 
 @dataclass
@@ -35,12 +42,12 @@ class SerialConfig:
 
 @dataclass
 class RuntimeConfig:
-    project_root: str = "/home/aidlux/2026/orchestrator"
-    log_dir: str = "/home/aidlux/2026/orchestrator/logs"
-    log_file: str = "/home/aidlux/2026/orchestrator/logs/orchestrator.log"
-    runs_dir: str = "/home/aidlux/2026/orchestrator/runs"
-    pid_dir: str = "/home/aidlux/2026/orchestrator/pids"
-    pid_file: str = "/home/aidlux/2026/orchestrator/pids/orchestrator.pid"
+    project_root: str = field(default_factory=lambda: str(_DEFAULT_PROJECT_ROOT))
+    log_dir: str = field(default_factory=lambda: str(_DEFAULT_LOG_DIR))
+    log_file: str = field(default_factory=lambda: str(_DEFAULT_LOG_DIR / "orchestrator.log"))
+    runs_dir: str = field(default_factory=lambda: str(_DEFAULT_RUNS_DIR))
+    pid_dir: str = field(default_factory=lambda: str(_DEFAULT_PID_DIR))
+    pid_file: str = field(default_factory=lambda: str(_DEFAULT_PID_DIR / "orchestrator.pid"))
     stack_run_id: str = ""
     tick_hz: float = 10.0
     log_mode: str = "concise"
