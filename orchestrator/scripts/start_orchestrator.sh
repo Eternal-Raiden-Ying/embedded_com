@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ORCH_ROOT="${ORCH_ROOT:-/home/aidlux/2026/orchestrator}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_ORCH_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+ORCH_ROOT="${ORCH_ROOT:-$DEFAULT_ORCH_ROOT}"
 LOG_DIR="$ORCH_ROOT/logs"
 PID_DIR="$ORCH_ROOT/pids"
 RUNS_DIR="$ORCH_ROOT/runs"

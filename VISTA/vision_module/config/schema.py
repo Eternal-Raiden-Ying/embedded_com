@@ -2,17 +2,25 @@
 # -*- coding: utf-8 -*-
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, Optional, Union
+
+
+_HERE = Path(__file__).resolve()
+_DEFAULT_PROJECT_ROOT = _HERE.parents[2]
+_DEFAULT_LOG_DIR = _DEFAULT_PROJECT_ROOT / "logs"
+_DEFAULT_RUNS_DIR = _DEFAULT_PROJECT_ROOT / "runs"
+_DEFAULT_PID_DIR = _DEFAULT_PROJECT_ROOT / "pids"
 
 
 @dataclass
 class RuntimeConfig:
-    project_root: str = "/home/aidlux/2026/VISTA"
-    log_dir: str = "/home/aidlux/2026/VISTA/logs"
-    log_file: str = "/home/aidlux/2026/VISTA/logs/vision.log"
-    runs_dir: str = "/home/aidlux/2026/VISTA/runs"
-    pid_dir: str = "/home/aidlux/2026/VISTA/pids"
-    pid_file: str = "/home/aidlux/2026/VISTA/pids/vision.pid"
+    project_root: str = field(default_factory=lambda: str(_DEFAULT_PROJECT_ROOT))
+    log_dir: str = field(default_factory=lambda: str(_DEFAULT_LOG_DIR))
+    log_file: str = field(default_factory=lambda: str(_DEFAULT_LOG_DIR / "vision.log"))
+    runs_dir: str = field(default_factory=lambda: str(_DEFAULT_RUNS_DIR))
+    pid_dir: str = field(default_factory=lambda: str(_DEFAULT_PID_DIR))
+    pid_file: str = field(default_factory=lambda: str(_DEFAULT_PID_DIR / "vision.pid"))
     stack_run_id: str = ""
     loop_hz: float = 8.0
     send_hz: float = 5.0

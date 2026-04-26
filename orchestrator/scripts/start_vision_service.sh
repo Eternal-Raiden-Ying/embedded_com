@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VISION_ROOT="/home/aidlux/2026/VISTA"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+DEFAULT_VISION_ROOT="$REPO_ROOT/VISTA"
+
+VISION_ROOT="${VISION_ROOT:-$DEFAULT_VISION_ROOT}"
 LOG_DIR="$VISION_ROOT/logs"
 PID_DIR="$VISION_ROOT/pids"
 PID_FILE="$PID_DIR/vision.pid"
+MAIN_MODULE="${VISION_MAIN_MODULE:-vision_module.app.app}"
 mkdir -p "$LOG_DIR" "$PID_DIR"
 
 is_running() {
@@ -24,11 +29,11 @@ fi
 rm -f "$PID_FILE"
 
 if [[ "${1:-fg}" == "bg" ]]; then
-  nohup python3 -m vision_service.app.main > "$LOG_DIR/vision.out" 2>&1 &
+  nohup python3 -m "$MAIN_MODULE" > "$LOG_DIR/vision.out" 2>&1 &
   echo $! > "$PID_FILE"
   echo "[start_vision_service] 已后台启动 vision, pid=$(cat "$PID_FILE")"
   echo "[start_vision_service] 日志: $LOG_DIR/vision.out"
 else
   echo "[start_vision_service] 前台启动 vision"
-  python3 -m vision_service.app.main
+  python3 -m "$MAIN_MODULE"
 fi

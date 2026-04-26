@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STACK_ROOT="$SCRIPT_DIR"
+
 # ======================================================
 # robot stack launcher v5 (simple edition)
 # 使用方式只保留两种：
@@ -13,9 +16,9 @@ set -euo pipefail
 # =========================
 # 这里改你最常用的配置
 # =========================
-VOICE_ROOT="/home/aidlux/2026/Voice"
-VISION_ROOT="/home/aidlux/2026/VISTA"
-ORCH_ROOT="/home/aidlux/2026/orchestrator"
+VOICE_ROOT="${VOICE_ROOT:-$STACK_ROOT/Voice}"
+VISION_ROOT="${VISION_ROOT:-$STACK_ROOT/VISTA}"
+ORCH_ROOT="${ORCH_ROOT:-$STACK_ROOT/orchestrator}"
 ASR_ENV_NAME="asr"
 CONDA_SH=""
 

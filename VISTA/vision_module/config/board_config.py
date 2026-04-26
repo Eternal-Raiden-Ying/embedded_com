@@ -11,7 +11,7 @@ from .data import coco80, grasping_coco20
 CONFIG = VisionServiceConfig()
 
 _HERE = Path(__file__).resolve()
-_DEFAULT_PROJECT_ROOT = str(_HERE.parents[2]) if os.name == "nt" else "/home/aidlux/2026/VISTA"
+_DEFAULT_PROJECT_ROOT = str(_HERE.parents[2])
 _DEFAULT_MODEL_ROOT = str(Path(_DEFAULT_PROJECT_ROOT) / "vision_module" / "model")
 
 CONFIG.runtime.project_root = os.getenv("VISION_PROJECT_ROOT", _DEFAULT_PROJECT_ROOT)

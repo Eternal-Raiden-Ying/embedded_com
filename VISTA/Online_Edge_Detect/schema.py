@@ -2,21 +2,30 @@
 # -*- coding: utf-8 -*-
 
 from dataclasses import dataclass, field
+from pathlib import Path
+
+
+_DEFAULT_PROJECT_ROOT = Path(__file__).resolve().parent
+_DEFAULT_LOG_DIR = _DEFAULT_PROJECT_ROOT / "logs"
+_DEFAULT_RUNS_DIR = _DEFAULT_PROJECT_ROOT / "runs"
+_DEFAULT_PID_DIR = _DEFAULT_PROJECT_ROOT / "pids"
+_DEFAULT_SNAPSHOT_DIR = _DEFAULT_PROJECT_ROOT / "snapshots"
+_DEFAULT_CALIB_JSON = _DEFAULT_PROJECT_ROOT.parent / "Offline_Edge_Test" / "calib.json"
 
 
 @dataclass
 class RuntimeConfig:
-    project_root: str = "/home/aidlux/2026/VISTA/Online_Edge_Detect"
-    log_dir: str = "/home/aidlux/2026/VISTA/Online_Edge_Detect/logs"
-    log_file: str = "/home/aidlux/2026/VISTA/Online_Edge_Detect/logs/online_edge.log"
-    runs_dir: str = "/home/aidlux/2026/VISTA/Online_Edge_Detect/runs"
-    pid_dir: str = "/home/aidlux/2026/VISTA/Online_Edge_Detect/pids"
-    pid_file: str = "/home/aidlux/2026/VISTA/Online_Edge_Detect/pids/online_edge.pid"
+    project_root: str = field(default_factory=lambda: str(_DEFAULT_PROJECT_ROOT))
+    log_dir: str = field(default_factory=lambda: str(_DEFAULT_LOG_DIR))
+    log_file: str = field(default_factory=lambda: str(_DEFAULT_LOG_DIR / "online_edge.log"))
+    runs_dir: str = field(default_factory=lambda: str(_DEFAULT_RUNS_DIR))
+    pid_dir: str = field(default_factory=lambda: str(_DEFAULT_PID_DIR))
+    pid_file: str = field(default_factory=lambda: str(_DEFAULT_PID_DIR / "online_edge.pid"))
     stack_run_id: str = ""
     loop_hz: float = 10.0
     preview: bool = True
     save_snapshot_period_s: float = 0.0
-    snapshot_dir: str = "/home/aidlux/2026/VISTA/Online_Edge_Detect/snapshots"
+    snapshot_dir: str = field(default_factory=lambda: str(_DEFAULT_SNAPSHOT_DIR))
     log_mode: str = "concise"
     log_enabled: bool = True
 
@@ -46,7 +55,7 @@ class RealSenseConfig:
 
 @dataclass
 class DetectorConfig:
-    calib_json: str = "/home/aidlux/2026/VISTA/Offline_Edge_Test/calib.json"
+    calib_json: str = field(default_factory=lambda: str(_DEFAULT_CALIB_JSON))
     target_dist_m_override: float = -1.0
     roi_y0: int = 100
     roi_y1: int = 380

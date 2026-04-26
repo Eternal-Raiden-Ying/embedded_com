@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
 kill_pid_file() {
   local file="$1"
   if [[ -f "$file" ]]; then
@@ -14,8 +17,8 @@ kill_pid_file() {
   fi
 }
 
-kill_pid_file "/home/aidlux/2026/orchestrator/pids/orchestrator.pid"
-kill_pid_file "/home/aidlux/2026/VISTA/pids/vision.pid"
-kill_pid_file "/home/aidlux/2026/Voice/pids/voice.pid"
+kill_pid_file "$REPO_ROOT/orchestrator/pids/orchestrator.pid"
+kill_pid_file "$REPO_ROOT/VISTA/pids/vision.pid"
+kill_pid_file "$REPO_ROOT/Voice/pids/voice.pid"
 
 echo "[stop_stack_debug] 完成。"
