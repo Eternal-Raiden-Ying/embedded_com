@@ -11,12 +11,12 @@ That makes MQTT integration straightforward:
 
 1. keep the current command and status JSON unchanged
 2. replace or augment local TCP input with MQTT subscription on:
-   - `robot/v1/{robot_id}/mobile/cmd`
+   - `robot/v1/SC171/mobile/cmd`
 3. publish ACK and status to:
-   - `robot/v1/{robot_id}/mobile/ack`
-   - `robot/v1/{robot_id}/mobile/status`
+   - `robot/v1/SC171/mobile/ack`
+   - `robot/v1/SC171/mobile/status`
 4. keep session-scoped event streaming optional:
-   - `robot/v1/{robot_id}/session/{session_id}/event`
+   - `robot/v1/SC171/session/{session_id}/event`
 
 Recommended broker-side behaviors:
 

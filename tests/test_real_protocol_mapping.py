@@ -17,6 +17,7 @@ if str(ORCH_ROOT) not in sys.path:
 
 from orchestrator_service.ipc.protocol import TaskCmd  # noqa: E402
 from orchestrator_service.mobile_gateway.config.schema import MobileGatewayConfig  # noqa: E402
+from orchestrator_service.mobile_gateway.protocol import ROBOT_ID  # noqa: E402
 from orchestrator_service.mobile_gateway.runtime.service import MobileGatewayService  # noqa: E402
 
 
@@ -33,6 +34,22 @@ class _CaptureBackend:
     def submit(self, payload: Dict[str, Any]):
         self.payloads.append(dict(payload))
         return True, "captured"
+
+
+class _CaptureMqttAdapter:
+    def __init__(self) -> None:
+        self.acks: List[Dict[str, Any]] = []
+        self.statuses: List[Dict[str, Any]] = []
+        self.heartbeats: List[Dict[str, Any]] = []
+
+    def publish_ack(self, payload: Dict[str, Any]) -> None:
+        self.acks.append(dict(payload))
+
+    def publish_status(self, payload: Dict[str, Any]) -> None:
+        self.statuses.append(dict(payload))
+
+    def publish_heartbeat(self, payload: Dict[str, Any]) -> None:
+        self.heartbeats.append(dict(payload))
 
 
 class RealProtocolMappingTest(unittest.TestCase):
@@ -59,6 +76,16 @@ class RealProtocolMappingTest(unittest.TestCase):
         service._publish_status = lambda payload, force=False: published.append(dict(payload))
         return published
 
+    def _capture_gateway_ack(self, service: MobileGatewayService) -> List[Dict[str, Any]]:
+        published: List[Dict[str, Any]] = []
+        service._publish_gateway_ack = lambda payload, accepted, message, error_code=None: published.append({
+            "payload": dict(payload),
+            "accepted": accepted,
+            "message": message,
+            "error_code": error_code,
+        })
+        return published
+
     def _assert_task_cmd_valid(self, service: MobileGatewayService, payload: Dict[str, Any], expected_intent: str, expected_target: str = "") -> None:
         parsed = TaskCmd.from_dict(payload, set(service.cfg.backend.default_robot_id and {"apple", "banana", "bottle", "cup"}))
         self.assertEqual(parsed.intent, expected_intent)
@@ -69,32 +96,38 @@ class RealProtocolMappingTest(unittest.TestCase):
 
     def test_fetch_object_maps_to_find(self) -> None:
         service = self._make_service()
-        service._handle_command_payload({"cmd": "fetch_object", "target": "apple", "session_id": "sess_1", "ts": time.time()})
+        gateway_ack = self._capture_gateway_ack(service)
+        service._handle_command_payload({"cmd": "fetch_object", "target": "apple", "cmd_id": "cmd_fetch", "session_id": "sess_1", "ts": time.time()})
         self.assertEqual(len(service.backend.payloads), 1)
         payload = service.backend.payloads[-1]
         self._assert_task_cmd_valid(service, payload, "FIND", "apple")
+        self.assertEqual(payload["cmd_id"], "cmd_fetch")
+        self.assertEqual(gateway_ack[-1]["accepted"], True)
+        self.assertEqual(gateway_ack[-1]["payload"]["cmd_id"], "cmd_fetch")
 
     def test_stop_maps_to_stop(self) -> None:
         service = self._make_service()
         service._active_template = service._last_fetch_template = service._paused_template = None
         service._active_template = type("T", (), {"command": "fetch_object", "target": "apple", "session_id": "sess_2", "text": None})()
-        service._handle_command_payload({"cmd": "stop", "session_id": "sess_2", "ts": time.time()})
+        service._handle_command_payload({"cmd": "stop", "cmd_id": "cmd_stop", "session_id": "sess_2", "ts": time.time()})
         payload = service.backend.payloads[-1]
         self._assert_task_cmd_valid(service, payload, "STOP")
         self.assertTrue(payload.get("high_priority"))
 
     def test_go_home_maps_to_return(self) -> None:
         service = self._make_service()
-        service._handle_command_payload({"cmd": "go_home", "session_id": "sess_3", "ts": time.time()})
+        service._handle_command_payload({"cmd": "go_home", "cmd_id": "cmd_home", "session_id": "sess_3", "ts": time.time()})
         payload = service.backend.payloads[-1]
         self._assert_task_cmd_valid(service, payload, "RETURN")
 
     def test_invalid_target_rejected(self) -> None:
         service = self._make_service()
         published = self._capture_status(service)
+        gateway_ack = self._capture_gateway_ack(service)
         service._handle_command_payload({"cmd": "fetch_object", "target": "orange", "session_id": "sess_4", "ts": time.time()})
         self.assertEqual(service.backend.payloads, [])
         self.assertEqual(published[-1]["state"], "error")
+        self.assertEqual(gateway_ack[-1]["accepted"], False)
 
     def test_invalid_cmd_rejected(self) -> None:
         service = self._make_service()
@@ -117,6 +150,8 @@ class RealProtocolMappingTest(unittest.TestCase):
     def test_task_ack_maps_to_mobile_status(self) -> None:
         service = self._make_service()
         published = self._capture_status(service)
+        mqtt = _CaptureMqttAdapter()
+        service.mqtt_adapter = mqtt
         service._snapshot["command"] = "fetch_object"
         service._snapshot["target"] = "apple"
         service._handle_task_ack({
@@ -130,6 +165,9 @@ class RealProtocolMappingTest(unittest.TestCase):
         })
         self.assertEqual(published[-1]["state"], "accepted")
         self.assertEqual(published[-1]["backend_state"], "SEARCH_TABLE")
+        self.assertEqual(published[-1]["kind"], "status")
+        self.assertEqual(published[-1]["robot_id"], ROBOT_ID)
+        self.assertEqual(mqtt.acks[-1]["kind"], "task_ack")
 
     def test_state_block_maps_to_mobile_status(self) -> None:
         service = self._make_service()
@@ -152,6 +190,17 @@ class RealProtocolMappingTest(unittest.TestCase):
             "last_enter_reason": "任务完成",
         })
         self.assertEqual(published[-1]["state"], "completed")
+        self.assertEqual(published[-1]["kind"], "status")
+
+    def test_heartbeat_payload_uses_formal_kind(self) -> None:
+        service = self._make_service()
+        mqtt = _CaptureMqttAdapter()
+        service.mqtt_adapter = mqtt
+        service._last_heartbeat_emit_ts = 0.0
+        service._emit_heartbeat_if_needed()
+        self.assertTrue(mqtt.heartbeats)
+        self.assertEqual(mqtt.heartbeats[-1]["kind"], "heartbeat")
+        self.assertEqual(mqtt.heartbeats[-1]["robot_id"], ROBOT_ID)
 
 
 if __name__ == "__main__":

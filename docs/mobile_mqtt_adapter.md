@@ -1,100 +1,231 @@
 # Mobile MQTT Adapter
 
-## Purpose
+## Scope
 
-The MQTT adapter is a northbound transport layer for `mobile_gateway`.
+The MQTT adapter is the northbound transport for the formal mini-program protocol.
 
-It does not introduce a second command parser. Instead:
+It does not define a second command schema. It only transports:
 
-- MQTT `cmd` topic -> existing mobile command handler
-- existing `mobile_status` payload -> MQTT `status`
-- selected response states -> MQTT `ack`
+- inbound `mobile_cmd`
+- outbound `gateway_ack`
+- outbound `task_ack`
+- outbound `status`
+- outbound `heartbeat`
 
-## Topic Design
+The formal runtime implementation is the repository-local gateway under:
 
-Recommended versioned topics:
+- `orchestrator/orchestrator_service/mobile_gateway/`
 
-- `robot/v1/{robot_id}/mobile/cmd`
-- `robot/v1/{robot_id}/mobile/ack`
-- `robot/v1/{robot_id}/mobile/status`
-- `robot/v1/{robot_id}/heartbeat`
+The older validation helper at `~/mobile_gateway_cloud/cloud_mqtt_bridge.py` is no longer the primary workflow.
 
-Why versioned topics:
+## Fixed Robot And Topics
 
-- future schema evolution without breaking old clients
-- safer robot-by-robot routing
-- simpler broker-side ACL management
+The current MQTT northbound contract is fixed to:
 
-## QoS Recommendations
+- `robot_id = SC171`
+
+Topics:
+
+- `robot/v1/SC171/mobile/cmd`
+- `robot/v1/SC171/mobile/ack`
+- `robot/v1/SC171/mobile/status`
+- `robot/v1/SC171/heartbeat`
+
+## Inbound Topic
+
+### `robot/v1/SC171/mobile/cmd`
+
+Formal payload:
+
+```json
+{
+  "type": "mobile_cmd",
+  "robot_id": "SC171",
+  "cmd_id": "cmd_1234567890",
+  "session_id": "sess_1234567890",
+  "epoch": 1,
+  "cmd": "fetch_object",
+  "target": "apple",
+  "text": "拿苹果",
+  "source": "wechat_miniprogram",
+  "ts": 1713945600.0
+}
+```
+
+Compatibility-only payload:
+
+```json
+{
+  "type": "FIND_AND_PICK",
+  "target": "apple"
+}
+```
+
+This legacy format is accepted only for transition and testing. It is not the public production contract.
+
+## Outbound ACK Topic
+
+### `robot/v1/SC171/mobile/ack`
+
+Two different `kind` values are published on the same topic.
+
+#### `kind = gateway_ack`
+
+Published immediately after the gateway parses and validates a command.
+
+Typical fields:
+
+- `type = mobile_ack`
+- `kind = gateway_ack`
+- `robot_id = SC171`
+- `cmd_id`
+- `session_id`
+- `epoch`
+- `cmd`
+- `target`
+- `accepted`
+- `message`
+- `error_code`
+- `ts`
+
+#### `kind = task_ack`
+
+Published after Orchestrator returns a southbound `task_ack`.
+
+Typical fields:
+
+- `type = mobile_ack`
+- `kind = task_ack`
+- `robot_id = SC171`
+- `cmd_id`
+- `session_id`
+- `epoch`
+- `accepted`
+- `message`
+- `backend_state`
+- `error_code`
+- `ts`
+
+## Outbound Status Topic
+
+### `robot/v1/SC171/mobile/status`
+
+All progress/state messages use:
+
+- `type = mobile_status`
+- `kind = status`
+
+Typical fields:
+
+- `robot_id`
+- `session_id`
+- `epoch`
+- `state`
+- `target`
+- `message`
+- `progress`
+- `command`
+- `backend_state`
+- `ts`
+
+## Outbound Heartbeat Topic
+
+### `robot/v1/SC171/heartbeat`
+
+Heartbeat uses:
+
+- `type = mobile_gateway_heartbeat`
+- `kind = heartbeat`
+
+Typical fields:
+
+- `robot_id`
+- `backend_mode`
+- `state`
+- `session_id`
+- `epoch`
+- `status_age_s`
+- `recent_states`
+- `ts`
+
+## QoS Defaults
+
+The current formal gateway defaults are:
 
 - `cmd`: QoS 1
 - `ack`: QoS 1
-- `status`: QoS 0 or 1 depending on broker load and UI expectations
+- `status`: QoS 0
 - `heartbeat`: QoS 0
 
-Reasonable first production choice:
+## Retain Defaults
 
-- use QoS 1 for `cmd` and `ack`
-- use QoS 0 for frequent `status` and heartbeat updates
+The current formal gateway defaults are:
 
-## Retain Recommendations
-
-- retain `status`: usually yes for the latest snapshot
-- retain `ack`: no
-- retain `heartbeat`: no
-- retain `cmd`: no
-
-## Heartbeat Mechanism
-
-Heartbeat payload should include at least:
-
-- `robot_id`
-- gateway backend mode
-- current coarse state
-- latest session id
-- recent state ring
-- status age
-
-The current adapter design already reserves:
-
-- `robot/v1/{robot_id}/heartbeat`
+- `cmd`: no retain
+- `ack`: no retain
+- `status`: retain latest status
+- `heartbeat`: no retain
 
 ## Reconnect Strategy
 
-Recommended policy:
+- use client auto-reconnect
+- re-subscribe to `robot/v1/SC171/mobile/cmd` after reconnect
+- keep gateway task memory intact on transient MQTT disconnect
+- do not clear southbound task context just because MQTT reconnects
 
-- let the MQTT client auto-reconnect
-- re-subscribe to `cmd` on reconnect
-- avoid clearing gateway task memory on transient MQTT disconnect
-- continue southbound control if board-side orchestrator link remains healthy
-
-## Security Guidance
+## Security Recommendations
 
 For production:
 
-- use TLS
-- prefer WSS when the client is a mini-program
-- enable authentication
-- restrict per-robot topic ACLs
-- never expose unauthenticated public write access to `cmd`
-
-Do not use raw `ws://` or unsecured broker exposure as the final deployment pattern.
-
-## Mini-Program Access Notes
-
-For WeChat mini-program integration:
-
 - use WSS/TLS
+- require authentication
+- restrict topic ACLs to the `SC171` namespace
+- never expose an unauthenticated write path to `robot/v1/SC171/mobile/cmd`
+
+Formal production guidance:
+
+- do not use raw `ws://`
+- do not treat local IP direct-connect as the final mini-program architecture
+
+## Mini-Program Integration Notes
+
+For WeChat mini-program:
+
 - configure the broker domain as a legal socket domain
-- keep the mini-program payloads structured as `mobile_cmd`
-- do not put free-form robot control logic in the board-side gateway
+- use WSS/TLS
+- send only structured `mobile_cmd`
+- keep ASR text normalization outside the board-side gateway
 
-## Dependency Note
+## Dependency
 
-The adapter is implemented against `paho-mqtt` as an optional dependency.
-
-If MQTT is enabled without the package installed, the gateway will raise a clear startup error instead of failing silently:
+The adapter uses `paho-mqtt` as an optional runtime dependency:
 
 ```bash
 pip install paho-mqtt
+```
+
+If MQTT is enabled without the dependency, the gateway raises a clear startup error.
+
+## Startup Reference
+
+Orchestrator:
+
+```bash
+cd /home/aidlux/embedded_com/orchestrator
+export ORCH_TASK_CMD_IN_HOST=127.0.0.1
+export ORCH_TASK_CMD_IN_PORT=9001
+export ORCH_TASK_ACK_OUT_HOST=127.0.0.1
+export ORCH_TASK_ACK_OUT_PORT=9012
+export ORCH_SERIAL_DRY_RUN=1
+export ORCH_TTS_EVENT_OUT_TRANSPORT=disabled
+python3 -m orchestrator_service.app.main
+```
+
+Formal gateway:
+
+```bash
+cd /home/aidlux/embedded_com
+PYTHONPATH=/home/aidlux/embedded_com/orchestrator \
+python3 -m orchestrator_service.mobile_gateway.runtime.service \
+  --config configs/mobile_gateway.mqtt.yaml
 ```

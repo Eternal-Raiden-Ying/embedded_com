@@ -1,4 +1,4 @@
-robot_id: car_01
+robot_id: SC171
 backend: orchestrator_tcp
 
 mqtt:
@@ -10,12 +10,18 @@ mqtt:
   websocket_path: /mqtt
   username: ""
   password: ""
-  client_id: "sc171-car-01"
+  client_id: "sc171_car_01"
+  cmd_qos: 1
+  ack_qos: 1
+  status_qos: 0
+  heartbeat_qos: 0
+  retain_status: true
+  retain_heartbeat: false
   topics:
-    cmd: "robot/v1/car_01/mobile/cmd"
-    ack: "robot/v1/car_01/mobile/ack"
-    status: "robot/v1/car_01/mobile/status"
-    heartbeat: "robot/v1/car_01/heartbeat"
+    cmd: "robot/v1/SC171/mobile/cmd"
+    ack: "robot/v1/SC171/mobile/ack"
+    status: "robot/v1/SC171/mobile/status"
+    heartbeat: "robot/v1/SC171/heartbeat"
 
 orchestrator:
   task_cmd_host: "127.0.0.1"

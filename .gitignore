@@ -54,6 +54,7 @@ VISTA/grasp_module/graspness_unofficial/
 # Environment
 .env
 *.env
+configs/mobile_gateway.mqtt.yaml
 
 # Test data and extracts for offline edge test
 VISTA/Offline_Edge_Test/test_data/

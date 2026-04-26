@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from ..protocol import MQTT_TOPIC_ACK, MQTT_TOPIC_CMD, MQTT_TOPIC_HEARTBEAT, MQTT_TOPIC_STATUS, ROBOT_ID
 
 _ORCH_ROOT = Path(__file__).resolve().parents[3]
 _REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -43,7 +44,7 @@ class GatewayRuntimeConfig:
 @dataclass
 class GatewayBackendConfig:
     mode: str = "mock"  # mock / orchestrator_tcp / tcp_no_ack
-    default_robot_id: str = "sc171_v2"
+    default_robot_id: str = ROBOT_ID
     default_confidence: float = 0.99
     mock_step_interval_s: float = 0.20
     enforce_single_flight: bool = True
@@ -56,10 +57,10 @@ class GatewayBackendConfig:
 
 @dataclass
 class MqttTopicConfig:
-    cmd: str = "robot/v1/{robot_id}/mobile/cmd"
-    ack: str = "robot/v1/{robot_id}/mobile/ack"
-    status: str = "robot/v1/{robot_id}/mobile/status"
-    heartbeat: str = "robot/v1/{robot_id}/heartbeat"
+    cmd: str = MQTT_TOPIC_CMD
+    ack: str = MQTT_TOPIC_ACK
+    status: str = MQTT_TOPIC_STATUS
+    heartbeat: str = MQTT_TOPIC_HEARTBEAT
 
 
 @dataclass
@@ -72,10 +73,14 @@ class MqttAdapterConfig:
     websocket_path: str = "/mqtt"
     username: str = ""
     password: str = ""
-    client_id: str = "sc171-v2-mobile-gateway"
-    robot_id: str = "sc171_v2"
-    qos: int = 1
+    client_id: str = "sc171_car_01"
+    robot_id: str = ROBOT_ID
+    cmd_qos: int = 1
+    ack_qos: int = 1
+    status_qos: int = 0
+    heartbeat_qos: int = 0
     retain_status: bool = False
+    retain_heartbeat: bool = False
     keepalive_s: int = 60
     connect_timeout_s: float = 5.0
     topics: MqttTopicConfig = field(default_factory=MqttTopicConfig)

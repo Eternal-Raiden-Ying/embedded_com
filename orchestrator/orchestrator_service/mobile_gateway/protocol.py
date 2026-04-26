@@ -6,6 +6,11 @@ import uuid
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, Optional, Set
 
+ROBOT_ID = "SC171"
+MQTT_TOPIC_CMD = "robot/v1/SC171/mobile/cmd"
+MQTT_TOPIC_ACK = "robot/v1/SC171/mobile/ack"
+MQTT_TOPIC_STATUS = "robot/v1/SC171/mobile/status"
+MQTT_TOPIC_HEARTBEAT = "robot/v1/SC171/heartbeat"
 
 SUPPORTED_COMMANDS: Set[str] = {
     "fetch_object",
@@ -46,6 +51,7 @@ def new_id(prefix: str) -> str:
 
 @dataclass
 class MobileCommand:
+    cmd_id: str
     robot_id: str
     session_id: str
     cmd: str
@@ -63,7 +69,10 @@ class MobileCommand:
         supported_targets: Optional[Set[str]] = None,
     ) -> "MobileCommand":
         supported = set(supported_targets or SUPPORTED_TARGETS)
+        legacy_type = str(payload.get("type", "")).strip().upper()
         cmd = str(payload.get("cmd", "")).strip().lower()
+        if not cmd and legacy_type == "FIND_AND_PICK":
+            cmd = "fetch_object"
         if cmd not in SUPPORTED_COMMANDS:
             raise MobileProtocolError(f"unsupported cmd: {cmd!r}", ERROR_CODES["invalid_command"])
         target = payload.get("target")
@@ -77,14 +86,15 @@ class MobileCommand:
             target = str(target).strip().lower() if target is not None and str(target).strip() else None
         session_id = str(payload.get("session_id") or new_id("sess"))
         return cls(
-            robot_id=str(payload.get("robot_id") or default_robot_id),
+            cmd_id=str(payload.get("cmd_id") or new_id("cmd")),
+            robot_id=str(default_robot_id or ROBOT_ID),
             session_id=session_id,
             cmd=cmd,
             ts=float(payload.get("ts", now_ts())),
             target=target,
             text=(str(payload.get("text")).strip() if payload.get("text") is not None else None),
             epoch=int(payload.get("epoch", 0) or 0),
-            source=str(payload.get("source", "mobile") or "mobile"),
+            source=str(payload.get("source", "wechat_miniprogram") or "wechat_miniprogram"),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -98,6 +108,7 @@ class MobileStatus:
     state: str
     ts: float
     type: str = "mobile_status"
+    kind: str = "status"
     target: Optional[str] = None
     message: str = ""
     progress: Optional[int] = None

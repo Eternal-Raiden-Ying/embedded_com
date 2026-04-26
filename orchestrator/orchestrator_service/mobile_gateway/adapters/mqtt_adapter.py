@@ -107,25 +107,25 @@ class MqttAdapter:
         self._log("info", "mqtt_stopped")
 
     def publish_status(self, payload: Dict[str, Any]) -> None:
-        self._publish(self._status_topic, payload, retain=self.cfg.retain_status)
+        self._publish(self._status_topic, payload, qos=self.cfg.status_qos, retain=self.cfg.retain_status)
 
     def publish_ack(self, payload: Dict[str, Any]) -> None:
-        self._publish(self._ack_topic, payload, retain=False)
+        self._publish(self._ack_topic, payload, qos=self.cfg.ack_qos, retain=False)
 
     def publish_heartbeat(self, payload: Dict[str, Any]) -> None:
-        self._publish(self._heartbeat_topic, payload, retain=False)
+        self._publish(self._heartbeat_topic, payload, qos=self.cfg.heartbeat_qos, retain=self.cfg.retain_heartbeat)
 
-    def _publish(self, topic: str, payload: Dict[str, Any], retain: bool) -> None:
+    def _publish(self, topic: str, payload: Dict[str, Any], qos: int, retain: bool) -> None:
         client = self._client
         if not self._started or client is None:
             return
         line = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        info = client.publish(topic, line, qos=int(self.cfg.qos), retain=bool(retain))
-        self._log("info", "mqtt_publish", topic=topic, retain=retain, rc=getattr(info, "rc", None))
+        info = client.publish(topic, line, qos=int(qos), retain=bool(retain))
+        self._log("info", "mqtt_publish", topic=topic, qos=int(qos), retain=retain, rc=getattr(info, "rc", None))
 
     def _on_connect(self, client, userdata, flags, reason_code, properties=None) -> None:
-        client.subscribe(self._cmd_topic, qos=int(self.cfg.qos))
-        self._log("info", "mqtt_connected", topic=self._cmd_topic, reason_code=int(reason_code))
+        client.subscribe(self._cmd_topic, qos=int(self.cfg.cmd_qos))
+        self._log("info", "mqtt_connected", topic=self._cmd_topic, qos=int(self.cfg.cmd_qos), reason_code=int(reason_code))
 
     def _on_disconnect(self, client, userdata, disconnect_flags, reason_code, properties=None) -> None:
         self._log("warn", "mqtt_disconnected", reason_code=int(reason_code))

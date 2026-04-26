@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import argparse
 import json
 import queue
 import signal
@@ -17,12 +18,14 @@ from common.runtime_logging import RunLogger, ensure_dir, safe_dump
 from orchestrator_service.ipc.transport import JsonlClientSender, JsonlInboundServer
 
 from ..adapters.mqtt_adapter import MqttAdapter
+from ..config.board_config import build_config
 from ..config.schema import GatewayEndpoint, MobileGatewayConfig
 from ..protocol import (
     ERROR_CODES,
     MobileCommand,
     MobileProtocolError,
     MobileStatus,
+    ROBOT_ID,
     SUPPORTED_TARGETS,
     make_error_status,
     new_id,
@@ -322,7 +325,7 @@ class MobileGatewayService(BaseModule):
         self._last_fetch_template: Optional[TaskTemplate] = None
         self._last_stop_session_id = ""
         self._snapshot: Dict[str, Any] = MobileStatus(
-            robot_id=self.cfg.backend.default_robot_id,
+            robot_id=ROBOT_ID,
             session_id="",
             state="idle",
             ts=now_ts(),
@@ -496,13 +499,27 @@ class MobileGatewayService(BaseModule):
         try:
             command = MobileCommand.from_dict(
                 payload,
-                default_robot_id=self.cfg.backend.default_robot_id,
+                default_robot_id=ROBOT_ID,
                 supported_targets=SUPPORTED_TARGETS,
             )
         except MobileProtocolError as exc:
             fallback_session = str(payload.get("session_id") or "")
+            fallback_cmd_id = str(payload.get("cmd_id") or new_id("cmd"))
+            self._publish_gateway_ack(
+                {
+                    "cmd_id": fallback_cmd_id,
+                    "session_id": fallback_session,
+                    "epoch": int(payload.get("epoch", 0) or 0),
+                    "cmd": str(payload.get("cmd") or payload.get("type") or ""),
+                    "target": payload.get("target"),
+                    "source": str(payload.get("source") or "wechat_miniprogram"),
+                },
+                accepted=False,
+                message=str(exc),
+                error_code=exc.error_code,
+            )
             self._publish_status(make_error_status(
-                str(payload.get("robot_id") or self.cfg.backend.default_robot_id),
+                ROBOT_ID,
                 fallback_session,
                 str(exc),
                 exc.error_code,
@@ -511,9 +528,10 @@ class MobileGatewayService(BaseModule):
                 epoch=int(payload.get("epoch", 0) or 0),
             ))
             return
+        self._publish_gateway_ack(command.to_dict(), accepted=True, message="gateway command accepted")
         if command.cmd != "stop" and self._in_stop_cooldown():
             self._publish_status(make_error_status(
-                command.robot_id,
+                ROBOT_ID,
                 command.session_id,
                 "stop cooldown active; retry after a short delay",
                 ERROR_CODES["busy"],
@@ -524,10 +542,11 @@ class MobileGatewayService(BaseModule):
             return
         if command.cmd == "query_status":
             snapshot = dict(self._snapshot)
-            snapshot["robot_id"] = command.robot_id
+            snapshot["robot_id"] = ROBOT_ID
             snapshot["session_id"] = snapshot.get("session_id") or command.session_id
             snapshot["command"] = "query_status"
             snapshot["ts"] = now_ts()
+            snapshot["kind"] = "status"
             self._publish_status(snapshot, force=True)
             return
         if command.cmd == "resume":
@@ -541,7 +560,7 @@ class MobileGatewayService(BaseModule):
             return
         if self.cfg.backend.enforce_single_flight and self._is_busy():
             self._publish_status(make_error_status(
-                command.robot_id,
+                ROBOT_ID,
                 command.session_id,
                 "gateway busy; send stop before starting another task",
                 ERROR_CODES["busy"],
@@ -568,7 +587,7 @@ class MobileGatewayService(BaseModule):
     def _handle_resume(self, command: MobileCommand) -> None:
         if self._paused_template is None:
             self._publish_status(make_error_status(
-                command.robot_id,
+                ROBOT_ID,
                 command.session_id,
                 "no paused task to resume",
                 ERROR_CODES["resume_unavailable"],
@@ -587,7 +606,7 @@ class MobileGatewayService(BaseModule):
     def _handle_retry_search(self, command: MobileCommand) -> None:
         if self._last_fetch_template is None:
             self._publish_status(make_error_status(
-                command.robot_id,
+                ROBOT_ID,
                 command.session_id,
                 "no fetch_object task to retry",
                 ERROR_CODES["resume_unavailable"],
@@ -624,7 +643,7 @@ class MobileGatewayService(BaseModule):
             "type": "task_cmd",
             "intent": intent,
             "confidence": float(self.cfg.backend.default_confidence),
-            "cmd_id": new_id("cmd"),
+            "cmd_id": command.cmd_id,
             "session_id": session_id,
             "epoch": epoch,
             "source": "mobile_gateway",
@@ -649,7 +668,7 @@ class MobileGatewayService(BaseModule):
         )
         if not ok:
             self._publish_status(make_error_status(
-                command.robot_id,
+                ROBOT_ID,
                 session_id,
                 reason,
                 ERROR_CODES["backend_unavailable"],
@@ -666,7 +685,7 @@ class MobileGatewayService(BaseModule):
             "FIND": f"已提交取物命令，目标 {target}",
         }.get(intent, reason)
         self._publish_status(MobileStatus(
-            robot_id=command.robot_id,
+            robot_id=ROBOT_ID,
             session_id=session_id,
             state=state,
             target=target,
@@ -688,8 +707,9 @@ class MobileGatewayService(BaseModule):
         accepted = bool(payload.get("accepted", False))
         state = "accepted" if accepted else "error"
         message = str(payload.get("reason") or ("command accepted" if accepted else "command rejected"))
+        self._publish_task_ack(payload, accepted=accepted, message=message)
         status = MobileStatus(
-            robot_id=self.cfg.backend.default_robot_id,
+            robot_id=ROBOT_ID,
             session_id=session_id,
             state=state,
             target=self._snapshot.get("target"),
@@ -734,7 +754,7 @@ class MobileGatewayService(BaseModule):
             unified_state = "error"
             progress = 0
         status = MobileStatus(
-            robot_id=self.cfg.backend.default_robot_id,
+            robot_id=ROBOT_ID,
             session_id=session_id,
             state=unified_state,
             target=target,
@@ -752,7 +772,9 @@ class MobileGatewayService(BaseModule):
     def _publish_status(self, payload: Dict[str, Any], force: bool = False) -> None:
         payload = dict(payload)
         payload.setdefault("type", "mobile_status")
-        payload.setdefault("robot_id", self.cfg.backend.default_robot_id)
+        payload.setdefault("robot_id", ROBOT_ID)
+        payload["robot_id"] = ROBOT_ID
+        payload["kind"] = "status"
         payload.setdefault("ts", now_ts())
         dedup_payload = dict(payload)
         dedup_payload.pop("ts", None)
@@ -780,8 +802,6 @@ class MobileGatewayService(BaseModule):
             self.status_sender.send(payload)
         if self.mqtt_adapter is not None:
             self.mqtt_adapter.publish_status(payload)
-            if str(payload.get("state", "")).strip().lower() in {"submitted", "accepted", "error", "stopping", "stopped", "completed", "idle"}:
-                self.mqtt_adapter.publish_ack(payload)
 
     def _emit_heartbeat_if_needed(self) -> None:
         now = now_ts()
@@ -791,7 +811,8 @@ class MobileGatewayService(BaseModule):
         self._last_heartbeat_emit_ts = now
         heartbeat_payload = {
             "type": "mobile_gateway_heartbeat",
-            "robot_id": self.cfg.backend.default_robot_id,
+            "robot_id": ROBOT_ID,
+            "kind": "heartbeat",
             "ts": now,
             "backend_mode": self.backend_mode,
             "state": self._snapshot.get("state", "idle"),
@@ -851,6 +872,51 @@ class MobileGatewayService(BaseModule):
             return "stop"
         return command
 
+    def _publish_gateway_ack(self, payload: Dict[str, Any], *, accepted: bool, message: str, error_code: Optional[int] = None) -> None:
+        ack = {
+            "type": "mobile_ack",
+            "kind": "gateway_ack",
+            "robot_id": ROBOT_ID,
+            "cmd_id": str(payload.get("cmd_id") or new_id("cmd")),
+            "session_id": str(payload.get("session_id") or ""),
+            "epoch": int(payload.get("epoch", 0) or 0),
+            "cmd": str(payload.get("cmd") or ""),
+            "target": payload.get("target"),
+            "message": message,
+            "accepted": bool(accepted),
+            "error_code": error_code,
+            "source": "mobile_gateway",
+            "ts": now_ts(),
+        }
+        ack = {k: v for k, v in ack.items() if v not in (None, "", [], {})}
+        self.run_logger.write_jsonl("mobile_ack", ack)
+        if self.cfg.runtime.status_stdout:
+            print(json.dumps(ack, ensure_ascii=False))
+        if self.mqtt_adapter is not None:
+            self.mqtt_adapter.publish_ack(ack)
+
+    def _publish_task_ack(self, payload: Dict[str, Any], *, accepted: bool, message: str) -> None:
+        ack = {
+            "type": "mobile_ack",
+            "kind": "task_ack",
+            "robot_id": ROBOT_ID,
+            "cmd_id": str(payload.get("cmd_id") or ""),
+            "session_id": str(payload.get("session_id") or ""),
+            "epoch": int(payload.get("epoch", 0) or 0),
+            "message": message,
+            "accepted": bool(accepted),
+            "error_code": None if accepted else ERROR_CODES["task_rejected"],
+            "backend_state": str(payload.get("state") or ""),
+            "source": "mobile_gateway",
+            "ts": now_ts(),
+        }
+        ack = {k: v for k, v in ack.items() if v not in (None, "", [], {})}
+        self.run_logger.write_jsonl("mobile_ack", ack)
+        if self.cfg.runtime.status_stdout:
+            print(json.dumps(ack, ensure_ascii=False))
+        if self.mqtt_adapter is not None:
+            self.mqtt_adapter.publish_ack(ack)
+
     def _in_stop_cooldown(self) -> bool:
         if self._last_stop_ts <= 0:
             return False
@@ -867,3 +933,23 @@ def run_mobile_gateway_service(cfg: MobileGatewayConfig) -> None:
     signal.signal(signal.SIGINT, _handle_sig)
     signal.signal(signal.SIGTERM, _handle_sig)
     service.run_forever()
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run the SC171 mobile gateway.")
+    parser.add_argument(
+        "--config",
+        default="",
+        help="Optional YAML/JSON config file path, for example configs/mobile_gateway.mqtt.yaml",
+    )
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    args = _build_arg_parser().parse_args(argv)
+    cfg = build_config(config_file=args.config)
+    run_mobile_gateway_service(cfg)
+
+
+if __name__ == "__main__":
+    main()

@@ -5,6 +5,7 @@ import argparse
 import json
 import socket
 import time
+import uuid
 from typing import Any, Dict
 
 
@@ -19,7 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Send mock mobile commands to the board-side mobile gateway.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9101)
-    parser.add_argument("--robot-id", default="sc171_v2")
+    parser.add_argument("--robot-id", default="SC171")
     parser.add_argument("--session-id", default="")
     parser.add_argument("--epoch", type=int, default=0)
     parser.add_argument("--text", default="")
@@ -33,6 +34,7 @@ def main() -> None:
     payload: Dict[str, Any] = {
         "type": "mobile_cmd",
         "robot_id": args.robot_id,
+        "cmd_id": f"cmd_{uuid.uuid4().hex[:10]}",
         "session_id": args.session_id or None,
         "cmd": args.cmd,
         "text": args.text or None,
@@ -49,4 +51,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

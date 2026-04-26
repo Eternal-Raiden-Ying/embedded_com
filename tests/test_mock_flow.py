@@ -16,6 +16,7 @@ if str(ORCH_ROOT) not in sys.path:
     sys.path.insert(0, str(ORCH_ROOT))
 
 from orchestrator_service.mobile_gateway.config.schema import MobileGatewayConfig  # noqa: E402
+from orchestrator_service.mobile_gateway.protocol import ROBOT_ID  # noqa: E402
 from orchestrator_service.mobile_gateway.runtime.service import MobileGatewayService  # noqa: E402
 
 
@@ -51,17 +52,20 @@ class MockFlowTest(unittest.TestCase):
             service._handle_command_payload({
                 "cmd": "fetch_object",
                 "target": "apple",
+                "cmd_id": "cmd_demo_1",
                 "session_id": "sess_demo",
-                "robot_id": "robot_demo",
+                "robot_id": ROBOT_ID,
                 "ts": time.time(),
             })
             searching = wait_for_state(published, "searching")
             self.assertEqual(searching["target"], "apple")
+            self.assertEqual(searching["kind"], "status")
 
             service._handle_command_payload({
                 "cmd": "stop",
+                "cmd_id": "cmd_demo_2",
                 "session_id": "sess_demo",
-                "robot_id": "robot_demo",
+                "robot_id": ROBOT_ID,
                 "ts": time.time(),
             })
             stopped = wait_for_state(published, "stopped")

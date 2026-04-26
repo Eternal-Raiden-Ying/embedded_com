@@ -2,80 +2,213 @@
 
 ## Scope
 
-This document defines the northbound protocol between a mobile client and the board-side mobile gateway.
+This document defines the formal northbound mobile protocol used by `mobile_gateway`.
 
-The gateway keeps the existing southbound contract unchanged:
+The board-side southbound contract remains unchanged:
 
 - `fetch_object` -> `task_cmd(intent=FIND)`
 - `go_home` -> `task_cmd(intent=RETURN)`
 - `stop` -> `task_cmd(intent=STOP)`
 
-`resume`, `retry_search`, and `query_status` are handled by the gateway itself.
+`resume`, `retry_search`, and `query_status` remain gateway-level semantics.
 
-## Supported Commands
+## Fixed Robot Identity
 
-- `fetch_object`
-- `stop`
-- `resume`
-- `retry_search`
-- `go_home`
-- `query_status`
+The northbound mobile protocol is fixed to:
 
-Supported targets in this round:
+- `robot_id = "SC171"`
 
-- `apple`
-- `banana`
-- `bottle`
-- `cup`
+This value is normalized by the gateway and should be treated as the only formal robot identifier for the mini-program / MQTT interface in this phase.
 
-## Command JSON
+## Fixed MQTT Topics
+
+- `robot/v1/SC171/mobile/cmd`
+- `robot/v1/SC171/mobile/ack`
+- `robot/v1/SC171/mobile/status`
+- `robot/v1/SC171/heartbeat`
+
+These are now the canonical MQTT topics for the northbound protocol.
+
+## Formal Command Format
 
 ```json
 {
   "type": "mobile_cmd",
-  "robot_id": "sc171_v2",
-  "session_id": "sess_demo_001",
+  "robot_id": "SC171",
+  "cmd_id": "cmd_1234567890",
+  "session_id": "sess_1234567890",
+  "epoch": 1,
   "cmd": "fetch_object",
   "target": "apple",
   "text": "拿苹果",
-  "epoch": 1,
-  "ts": 1713945600.0,
-  "source": "mobile"
+  "source": "wechat_miniprogram",
+  "ts": 1713945600.0
 }
 ```
 
-### Required Fields
+### Command Fields
 
-- `cmd`
+- `type`
+  - must be `mobile_cmd`
 - `robot_id`
+  - must be `SC171`
+- `cmd_id`
+  - required unique command id
+- `session_id`
+  - required for stable multi-command task control
+- `epoch`
+  - task generation inside a session
+- `cmd`
+  - one of:
+    - `fetch_object`
+    - `stop`
+    - `resume`
+    - `retry_search`
+    - `go_home`
+    - `query_status`
+- `target`
+  - required for `fetch_object`
+  - allowed values:
+    - `apple`
+    - `banana`
+    - `bottle`
+    - `cup`
+- `text`
+  - optional natural-language mirror for UI/debug
+- `source`
+  - recommended value: `wechat_miniprogram`
 - `ts`
+  - unix timestamp in seconds
 
-### Conditional Fields
+## Compatibility Input
 
-- `target` is required for `fetch_object`
-- `session_id` is recommended for all commands after the first `fetch_object`
-
-## Status JSON
+The gateway still accepts this old test-only input:
 
 ```json
 {
-  "robot_id": "sc171_v2",
-  "session_id": "sess_demo_001",
+  "type": "FIND_AND_PICK",
+  "target": "apple"
+}
+```
+
+Compatibility behavior:
+
+- it is normalized to `cmd=fetch_object`
+- it is accepted only as a backward-compatible input form
+- it is not part of the formal mini-program contract
+- it must not be used as the documented production protocol
+
+## Outbound MQTT Message Kinds
+
+The gateway now uses explicit `kind` values.
+
+### 1. Gateway ACK
+
+Published immediately after the gateway accepts or rejects a northbound command.
+
+Topic:
+
+- `robot/v1/SC171/mobile/ack`
+
+Example:
+
+```json
+{
+  "type": "mobile_ack",
+  "kind": "gateway_ack",
+  "robot_id": "SC171",
+  "cmd_id": "cmd_1234567890",
+  "session_id": "sess_1234567890",
+  "epoch": 1,
+  "cmd": "fetch_object",
+  "target": "apple",
+  "accepted": true,
+  "message": "gateway command accepted",
+  "source": "mobile_gateway",
+  "ts": 1713945600.1
+}
+```
+
+### 2. Task ACK
+
+Published after a real Orchestrator `task_ack` arrives.
+
+Topic:
+
+- `robot/v1/SC171/mobile/ack`
+
+Example:
+
+```json
+{
+  "type": "mobile_ack",
+  "kind": "task_ack",
+  "robot_id": "SC171",
+  "cmd_id": "cmd_1234567890",
+  "session_id": "sess_1234567890",
+  "epoch": 1,
+  "accepted": true,
+  "message": "FIND accepted: apple",
+  "backend_state": "SEARCH_TABLE",
+  "source": "mobile_gateway",
+  "ts": 1713945600.3
+}
+```
+
+### 3. Status
+
+Published as the unified progress/status stream.
+
+Topic:
+
+- `robot/v1/SC171/mobile/status`
+
+Example:
+
+```json
+{
+  "type": "mobile_status",
+  "kind": "status",
+  "robot_id": "SC171",
+  "session_id": "sess_1234567890",
+  "epoch": 1,
   "state": "searching",
   "target": "apple",
   "message": "正在搜索 apple",
   "progress": 75,
   "command": "fetch_object",
   "backend_state": "SEARCH_TARGET_INIT",
-  "epoch": 1,
-  "ts": 1713945605.0,
-  "source": "mobile_gateway"
+  "source": "mobile_gateway",
+  "ts": 1713945605.0
 }
 ```
 
-## Stable Mobile State Enum
+### 4. Heartbeat
 
-The gateway exposes coarse, stable states to mobile:
+Topic:
+
+- `robot/v1/SC171/heartbeat`
+
+Example:
+
+```json
+{
+  "type": "mobile_gateway_heartbeat",
+  "kind": "heartbeat",
+  "robot_id": "SC171",
+  "backend_mode": "orchestrator_tcp",
+  "state": "idle",
+  "session_id": "",
+  "epoch": 0,
+  "status_age_s": 0.5,
+  "recent_states": ["idle"],
+  "ts": 1713945606.0
+}
+```
+
+## Stable Status States
+
+The mobile-facing `state` enum remains:
 
 - `idle`
 - `submitted`
@@ -89,62 +222,21 @@ The gateway exposes coarse, stable states to mobile:
 - `error`
 - `unknown`
 
-The original orchestrator internal state is preserved in `backend_state` when available.
+The fine-grained orchestrator state is exposed only via `backend_state`.
 
-## Error Codes
+## Privacy / Abstraction Rule
 
-| Code | Name | Meaning |
-| --- | --- | --- |
-| `1001` | `invalid_json` | malformed JSON or decode failure |
-| `1002` | `invalid_command` | unsupported `cmd` |
-| `1003` | `invalid_target` | target not in allowed whitelist |
-| `1004` | `missing_target` | `fetch_object` missing target |
-| `1005` | `busy` | gateway is already executing another high-level task |
-| `1006` | `resume_unavailable` | no paused or retriable task exists |
-| `1007` | `backend_unavailable` | southbound forward failed |
-| `1008` | `task_rejected` | southbound task was rejected |
+The formal mini-program protocol must not expose raw Orchestrator `raw` transport fields.
 
-## Session / Robot / Timestamp / Epoch Guidance
+Allowed upstream-facing debug fields:
 
-- `robot_id`: stable deployment identity of the robot
-- `session_id`: stable high-level task session; created on first `fetch_object`
-- `epoch`: gateway-managed generation inside one session; increment when replaying or changing execution plan
-- `ts`: Unix timestamp in seconds
+- `backend_state`
+- `message`
+- `progress`
 
-Recommended behavior:
+Disallowed as formal public fields:
 
-- first `fetch_object`: create session, `epoch=1`
-- `stop`: same session, next epoch
-- `resume`: same session, next epoch
-- `retry_search`: same session, next epoch
-- `go_home`: same session, next epoch
-- `query_status`: does not change epoch
-
-## Command Mapping To Board Internals
-
-| Mobile command | Gateway action | Southbound action |
-| --- | --- | --- |
-| `fetch_object(target)` | validate target, open or reuse session | `task_cmd(intent=FIND,target=target)` |
-| `stop` | freeze current resumable task, send highest-priority stop | `task_cmd(intent=STOP)` |
-| `resume` | replay last paused high-level task | `FIND` or `RETURN` |
-| `retry_search` | replay last `fetch_object` target from scratch | `task_cmd(intent=FIND,target=last_target)` |
-| `go_home` | switch task to return-home flow | `task_cmd(intent=RETURN)` |
-| `query_status` | return cached gateway status | none |
-
-## Stop / Resume Rules
-
-- `stop` has priority over normal commands
-- the gateway serializes commands per robot
-- `resume` is high-level replay, not restoration of internal orchestrator sub-state
-- `retry_search` always means restart search from the beginning for the last target
-
-## MQTT / WebSocket Topic Suggestions
-
-- `robot/v1/{robot_id}/mobile/cmd`
-- `robot/v1/{robot_id}/mobile/ack`
-- `robot/v1/{robot_id}/mobile/status`
-- `robot/v1/{robot_id}/mobile/event`
-- `robot/v1/{robot_id}/session/{session_id}/event`
-
-The northbound topic namespace is versioned and decoupled from the existing southbound `task_cmd` and `task_ack` channels.
+- serial raw lines
+- raw UART payloads
+- internal low-level transport dumps
 

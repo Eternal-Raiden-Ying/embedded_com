@@ -17,6 +17,7 @@ from orchestrator_service.mobile_gateway.protocol import (  # noqa: E402
     ERROR_CODES,
     MobileCommand,
     MobileProtocolError,
+    ROBOT_ID,
 )
 
 
@@ -25,28 +26,36 @@ class CommandProtocolTest(unittest.TestCase):
         with self.assertRaises(MobileProtocolError) as ctx:
             MobileCommand.from_dict(
                 {"cmd": "fetch_object", "target": "orange"},
-                default_robot_id="robot_01",
+                default_robot_id=ROBOT_ID,
             )
         self.assertEqual(ctx.exception.error_code, ERROR_CODES["invalid_target"])
 
     def test_fetch_object_defaults_robot_and_session(self) -> None:
         cmd = MobileCommand.from_dict(
             {"cmd": "fetch_object", "target": "apple"},
-            default_robot_id="robot_01",
+            default_robot_id=ROBOT_ID,
         )
-        self.assertEqual(cmd.robot_id, "robot_01")
+        self.assertEqual(cmd.robot_id, ROBOT_ID)
         self.assertEqual(cmd.target, "apple")
         self.assertTrue(cmd.session_id.startswith("sess_"))
+        self.assertTrue(cmd.cmd_id.startswith("cmd_"))
 
     def test_query_status_does_not_require_target(self) -> None:
         cmd = MobileCommand.from_dict(
             {"cmd": "query_status", "session_id": "sess_a"},
-            default_robot_id="robot_01",
+            default_robot_id=ROBOT_ID,
         )
         self.assertEqual(cmd.cmd, "query_status")
         self.assertIsNone(cmd.target)
 
+    def test_legacy_find_and_pick_is_accepted_for_compatibility(self) -> None:
+        cmd = MobileCommand.from_dict(
+            {"type": "FIND_AND_PICK", "target": "apple"},
+            default_robot_id=ROBOT_ID,
+        )
+        self.assertEqual(cmd.cmd, "fetch_object")
+        self.assertEqual(cmd.robot_id, ROBOT_ID)
+
 
 if __name__ == "__main__":
     unittest.main()
-

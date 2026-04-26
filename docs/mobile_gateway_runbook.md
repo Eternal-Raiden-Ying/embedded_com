@@ -16,7 +16,21 @@ This round supports three gateway modes:
   - listens for real `task_ack`
   - can also watch orchestrator `state_blocks.jsonl`
 
+The formal runtime path is now fully inside this repository:
+
+- `orchestrator/orchestrator_service/mobile_gateway/`
+
+`~/mobile_gateway_cloud/cloud_mqtt_bridge.py` should no longer be treated as the main workflow.
+
 ## Common Preparation
+
+Formal northbound identity and topics are now fixed:
+
+- `robot_id = SC171`
+- `robot/v1/SC171/mobile/cmd`
+- `robot/v1/SC171/mobile/ack`
+- `robot/v1/SC171/mobile/status`
+- `robot/v1/SC171/heartbeat`
 
 Start a status listener from repo root:
 
@@ -32,6 +46,32 @@ python3 tools/mock_mobile_sender.py --host 127.0.0.1 --port 9101 stop
 python3 tools/mock_mobile_sender.py --host 127.0.0.1 --port 9101 query_status
 ```
 
+Formal mini-program command shape:
+
+```json
+{
+  "type": "mobile_cmd",
+  "robot_id": "SC171",
+  "cmd_id": "cmd_1234567890",
+  "session_id": "sess_1234567890",
+  "epoch": 1,
+  "cmd": "fetch_object",
+  "target": "apple",
+  "text": "拿苹果",
+  "source": "wechat_miniprogram",
+  "ts": 1713945600.0
+}
+```
+
+Backward compatibility input still accepted for tests only:
+
+```json
+{
+  "type": "FIND_AND_PICK",
+  "target": "apple"
+}
+```
+
 ## Mode 1. Mock
 
 Run:
@@ -42,12 +82,11 @@ bash tools/run_mobile_gateway_mock.sh
 
 Expected flow:
 
-1. `submitted`
-2. `accepted`
-3. `searching`
-4. `approaching`
-5. `completed`
-6. `idle`
+1. MQTT-style or stdout `gateway_ack` with `kind=gateway_ack`
+2. status with `kind=status` and `state=submitted`
+3. Orchestrator-style `task_ack` or mock `task_ack` with `kind=task_ack`
+4. status with `kind=status` and `state=accepted`
+5. later progress states such as `searching`, `approaching`, `completed`, `idle`
 
 This is the default fallback mode for local regression testing.
 
@@ -80,32 +119,36 @@ Recommended usage:
 
 This is the intended real bridge mode.
 
-Gateway side:
+Start Orchestrator first:
 
 ```bash
-bash tools/run_mobile_gateway_real_tcp.sh
-```
-
-If orchestrator ACK should be routed back into the gateway, start orchestrator with:
-
-```bash
-ORCH_SERIAL_DRY_RUN=1 \
-ORCH_TASK_ACK_OUT_TRANSPORT=tcp \
-ORCH_TASK_ACK_OUT_HOST=127.0.0.1 \
-ORCH_TASK_ACK_OUT_PORT=9103 \
+cd /home/aidlux/embedded_com/orchestrator
+export ORCH_TASK_CMD_IN_HOST=127.0.0.1
+export ORCH_TASK_CMD_IN_PORT=9001
+export ORCH_TASK_ACK_OUT_HOST=127.0.0.1
+export ORCH_TASK_ACK_OUT_PORT=9012
+export ORCH_SERIAL_DRY_RUN=1
+export ORCH_TTS_EVENT_OUT_TRANSPORT=disabled
 python3 -m orchestrator_service.app.main
 ```
 
-And start the gateway with:
+Then start the formal gateway with either fixed command below.
+
+From repo root:
 
 ```bash
-MOBILE_GATEWAY_BACKEND=orchestrator_tcp \
-MOBILE_GATEWAY_ORCH_TASK_CMD_HOST=127.0.0.1 \
-MOBILE_GATEWAY_ORCH_TASK_CMD_PORT=9001 \
-MOBILE_GATEWAY_ORCH_TASK_ACK_TRANSPORT=tcp \
-MOBILE_GATEWAY_ORCH_TASK_ACK_HOST=127.0.0.1 \
-MOBILE_GATEWAY_ORCH_TASK_ACK_PORT=9103 \
-python3 -m orchestrator_service.mobile_gateway.app.main
+cd /home/aidlux/embedded_com
+PYTHONPATH=/home/aidlux/embedded_com/orchestrator \
+python3 -m orchestrator_service.mobile_gateway.runtime.service \
+  --config configs/mobile_gateway.mqtt.yaml
+```
+
+From `orchestrator/`:
+
+```bash
+cd /home/aidlux/embedded_com/orchestrator
+python3 -m orchestrator_service.mobile_gateway.runtime.service \
+  --config ../configs/mobile_gateway.mqtt.yaml
 ```
 
 Optional state snapshot bridge:
@@ -146,6 +189,21 @@ The sequence is:
 3. `stop`
 4. `go_home`
 
+The smoke sender already emits the formal command format:
+
+- `type=mobile_cmd`
+- `robot_id=SC171`
+- `cmd_id=cmd_xxx`
+- `source=wechat_miniprogram`
+
+When bridge mode is healthy, the expected outbound sequence is:
+
+1. `kind=gateway_ack`
+2. `kind=status`
+3. `kind=task_ack` when real Orchestrator responds
+4. more `kind=status`
+5. periodic `kind=heartbeat`
+
 ## MQTT Configuration Entry
 
 MQTT is optional and northbound only. If enabled, it reuses the same command handler and status payloads.
@@ -161,6 +219,52 @@ MOBILE_GATEWAY_MQTT_USE_TLS=1
 Config template:
 
 - `configs/mobile_gateway.mqtt.example.yaml`
+
+Real local runtime file:
+
+- `configs/mobile_gateway.mqtt.yaml`
+
+Create this file locally from the example. Do not commit it.
+
+MQTT message kinds:
+
+- `robot/v1/SC171/mobile/ack`
+  - `kind=gateway_ack`
+  - `kind=task_ack`
+- `robot/v1/SC171/mobile/status`
+  - `kind=status`
+- `robot/v1/SC171/heartbeat`
+  - `kind=heartbeat`
+
+## EMQX phone_test Example
+
+Publish to:
+
+- `robot/v1/SC171/mobile/cmd`
+
+Payload:
+
+```json
+{
+  "type": "mobile_cmd",
+  "robot_id": "SC171",
+  "cmd_id": "cmd_demo_001",
+  "session_id": "sess_demo_001",
+  "epoch": 1,
+  "cmd": "fetch_object",
+  "target": "apple",
+  "text": "拿苹果",
+  "source": "wechat_miniprogram",
+  "ts": 1713945600.0
+}
+```
+
+Expected outbound sequence:
+
+1. `robot/v1/SC171/mobile/ack` with `kind=gateway_ack`
+2. `robot/v1/SC171/mobile/ack` with `kind=task_ack`
+3. `robot/v1/SC171/mobile/status` with `kind=status`
+4. `robot/v1/SC171/heartbeat` with `kind=heartbeat`
 
 ## Tests
 
