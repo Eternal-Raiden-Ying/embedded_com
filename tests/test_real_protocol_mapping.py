@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import sys
+import time
+import unittest
+from pathlib import Path
+from typing import Any, Dict, List
+
+
+ROOT = Path(__file__).resolve().parents[1]
+ORCH_ROOT = ROOT / "orchestrator"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+if str(ORCH_ROOT) not in sys.path:
+    sys.path.insert(0, str(ORCH_ROOT))
+
+from orchestrator_service.ipc.protocol import TaskCmd  # noqa: E402
+from orchestrator_service.mobile_gateway.config.schema import MobileGatewayConfig  # noqa: E402
+from orchestrator_service.mobile_gateway.runtime.service import MobileGatewayService  # noqa: E402
+
+
+class _CaptureBackend:
+    def __init__(self) -> None:
+        self.payloads: List[Dict[str, Any]] = []
+
+    def start(self, *args, **kwargs) -> None:
+        return None
+
+    def stop(self) -> None:
+        return None
+
+    def submit(self, payload: Dict[str, Any]):
+        self.payloads.append(dict(payload))
+        return True, "captured"
+
+
+class RealProtocolMappingTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._services: List[MobileGatewayService] = []
+
+    def tearDown(self) -> None:
+        for service in self._services:
+            service.stop()
+
+    def _make_service(self) -> MobileGatewayService:
+        cfg = MobileGatewayConfig()
+        cfg.backend.mode = "orchestrator_tcp"
+        cfg.runtime.status_stdout = False
+        cfg.status_out.transport = "disabled"
+        cfg.orchestrator_task_ack_in.transport = "disabled"
+        service = MobileGatewayService(cfg)
+        service.backend = _CaptureBackend()
+        self._services.append(service)
+        return service
+
+    def _capture_status(self, service: MobileGatewayService) -> List[Dict[str, Any]]:
+        published: List[Dict[str, Any]] = []
+        service._publish_status = lambda payload, force=False: published.append(dict(payload))
+        return published
+
+    def _assert_task_cmd_valid(self, service: MobileGatewayService, payload: Dict[str, Any], expected_intent: str, expected_target: str = "") -> None:
+        parsed = TaskCmd.from_dict(payload, set(service.cfg.backend.default_robot_id and {"apple", "banana", "bottle", "cup"}))
+        self.assertEqual(parsed.intent, expected_intent)
+        if expected_target:
+            self.assertEqual(parsed.target, expected_target)
+        else:
+            self.assertIsNone(parsed.target)
+
+    def test_fetch_object_maps_to_find(self) -> None:
+        service = self._make_service()
+        service._handle_command_payload({"cmd": "fetch_object", "target": "apple", "session_id": "sess_1", "ts": time.time()})
+        self.assertEqual(len(service.backend.payloads), 1)
+        payload = service.backend.payloads[-1]
+        self._assert_task_cmd_valid(service, payload, "FIND", "apple")
+
+    def test_stop_maps_to_stop(self) -> None:
+        service = self._make_service()
+        service._active_template = service._last_fetch_template = service._paused_template = None
+        service._active_template = type("T", (), {"command": "fetch_object", "target": "apple", "session_id": "sess_2", "text": None})()
+        service._handle_command_payload({"cmd": "stop", "session_id": "sess_2", "ts": time.time()})
+        payload = service.backend.payloads[-1]
+        self._assert_task_cmd_valid(service, payload, "STOP")
+        self.assertTrue(payload.get("high_priority"))
+
+    def test_go_home_maps_to_return(self) -> None:
+        service = self._make_service()
+        service._handle_command_payload({"cmd": "go_home", "session_id": "sess_3", "ts": time.time()})
+        payload = service.backend.payloads[-1]
+        self._assert_task_cmd_valid(service, payload, "RETURN")
+
+    def test_invalid_target_rejected(self) -> None:
+        service = self._make_service()
+        published = self._capture_status(service)
+        service._handle_command_payload({"cmd": "fetch_object", "target": "orange", "session_id": "sess_4", "ts": time.time()})
+        self.assertEqual(service.backend.payloads, [])
+        self.assertEqual(published[-1]["state"], "error")
+
+    def test_invalid_cmd_rejected(self) -> None:
+        service = self._make_service()
+        published = self._capture_status(service)
+        service._handle_command_payload({"cmd": "dance", "session_id": "sess_5", "ts": time.time()})
+        self.assertEqual(service.backend.payloads, [])
+        self.assertEqual(published[-1]["state"], "error")
+
+    def test_stop_priority_bypasses_busy_guard(self) -> None:
+        service = self._make_service()
+        published = self._capture_status(service)
+        service._snapshot["state"] = "searching"
+        service._active_template = type("T", (), {"command": "fetch_object", "target": "apple", "session_id": "sess_busy", "text": None})()
+        service._handle_command_payload({"cmd": "go_home", "session_id": "sess_busy", "ts": time.time()})
+        self.assertEqual(service.backend.payloads, [])
+        self.assertEqual(published[-1]["state"], "error")
+        service._handle_command_payload({"cmd": "stop", "session_id": "sess_busy", "ts": time.time()})
+        self.assertEqual(service.backend.payloads[-1]["intent"], "STOP")
+
+    def test_task_ack_maps_to_mobile_status(self) -> None:
+        service = self._make_service()
+        published = self._capture_status(service)
+        service._snapshot["command"] = "fetch_object"
+        service._snapshot["target"] = "apple"
+        service._handle_task_ack({
+            "type": "task_ack",
+            "cmd_id": "cmd_1",
+            "session_id": "sess_ack",
+            "epoch": 2,
+            "accepted": True,
+            "state": "SEARCH_TABLE",
+            "reason": "FIND accepted",
+        })
+        self.assertEqual(published[-1]["state"], "accepted")
+        self.assertEqual(published[-1]["backend_state"], "SEARCH_TABLE")
+
+    def test_state_block_maps_to_mobile_status(self) -> None:
+        service = self._make_service()
+        published = self._capture_status(service)
+        service._snapshot["command"] = "fetch_object"
+        service._handle_state_block({
+            "state": "SEARCH_TARGET_INIT",
+            "session_id": "sess_state",
+            "epoch": 3,
+            "active_target": "apple",
+            "last_enter_reason": "正在搜索 apple",
+        })
+        self.assertEqual(published[-1]["state"], "searching")
+        self.assertEqual(published[-1]["target"], "apple")
+        service._handle_state_block({
+            "state": "DONE",
+            "session_id": "sess_state",
+            "epoch": 3,
+            "active_target": "apple",
+            "last_enter_reason": "任务完成",
+        })
+        self.assertEqual(published[-1]["state"], "completed")
+
+
+if __name__ == "__main__":
+    unittest.main()

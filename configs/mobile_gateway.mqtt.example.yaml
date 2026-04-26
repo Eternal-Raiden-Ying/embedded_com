@@ -1,0 +1,31 @@
+robot_id: car_01
+backend: orchestrator_tcp
+
+mqtt:
+  enabled: false
+  transport: websocket
+  use_tls: true
+  broker_host: your-broker-domain.com
+  broker_port: 443
+  websocket_path: /mqtt
+  username: ""
+  password: ""
+  client_id: "sc171-car-01"
+  topics:
+    cmd: "robot/v1/car_01/mobile/cmd"
+    ack: "robot/v1/car_01/mobile/ack"
+    status: "robot/v1/car_01/mobile/status"
+    heartbeat: "robot/v1/car_01/heartbeat"
+
+orchestrator:
+  task_cmd_host: "127.0.0.1"
+  task_cmd_port: 9001
+  task_ack_host: "127.0.0.1"
+  task_ack_port: 9012
+  state_blocks_path: ""
+
+mobile_gateway:
+  cmd_in_host: "127.0.0.1"
+  cmd_in_port: 9101
+  status_out_host: "127.0.0.1"
+  status_out_port: 9102
