@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import json
 import sys
 import time
 import unittest
 from pathlib import Path
 from typing import Any, Dict, List
+import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +18,7 @@ if str(ORCH_ROOT) not in sys.path:
     sys.path.insert(0, str(ORCH_ROOT))
 
 from orchestrator_service.ipc.protocol import TaskCmd  # noqa: E402
+from orchestrator_service.mobile_gateway.config.board_config import build_config  # noqa: E402
 from orchestrator_service.mobile_gateway.config.schema import MobileGatewayConfig  # noqa: E402
 from orchestrator_service.mobile_gateway.protocol import ROBOT_ID  # noqa: E402
 from orchestrator_service.mobile_gateway.runtime.service import MobileGatewayService  # noqa: E402
@@ -201,6 +204,25 @@ class RealProtocolMappingTest(unittest.TestCase):
         self.assertTrue(mqtt.heartbeats)
         self.assertEqual(mqtt.heartbeats[-1]["kind"], "heartbeat")
         self.assertEqual(mqtt.heartbeats[-1]["robot_id"], ROBOT_ID)
+
+    def test_orchestrator_tcp_config_enables_ack_listener(self) -> None:
+        config_obj = {
+            "robot_id": "SC171",
+            "backend": "orchestrator_tcp",
+            "orchestrator": {
+                "task_cmd_host": "127.0.0.1",
+                "task_cmd_port": 9001,
+                "task_ack_host": "127.0.0.1",
+                "task_ack_port": 9012,
+            },
+        }
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as fp:
+            json.dump(config_obj, fp)
+            path = fp.name
+        cfg = build_config(config_file=path)
+        self.assertEqual(cfg.orchestrator_task_ack_in.transport, "tcp")
+        self.assertEqual(cfg.orchestrator_task_ack_in.host, "127.0.0.1")
+        self.assertEqual(cfg.orchestrator_task_ack_in.port, 9012)
 
 
 if __name__ == "__main__":

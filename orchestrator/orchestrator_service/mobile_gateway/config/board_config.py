@@ -92,13 +92,69 @@ def _load_config_dict(path: str) -> Dict[str, Any]:
         try:
             import yaml  # type: ignore
         except ImportError as exc:
-            raise RuntimeError(
-                "YAML config requested but PyYAML is not installed. "
-                "Install with `pip install pyyaml` or use JSON config."
-            ) from exc
+            with open(file_path, "r", encoding="utf-8") as fp:
+                return _parse_simple_yaml(fp.read())
         with open(file_path, "r", encoding="utf-8") as fp:
             return dict(yaml.safe_load(fp) or {})
     raise RuntimeError(f"unsupported config file format: {file_path}")
+
+
+def _parse_simple_yaml(text: str) -> Dict[str, Any]:
+    """Parse a tiny YAML subset used by mobile_gateway configs.
+
+    Supported:
+    - nested mappings with spaces-only indentation
+    - string / int / float / bool / empty string values
+    - comments and blank lines
+    """
+
+    root: Dict[str, Any] = {}
+    stack = [(-1, root)]
+
+    def _scalar(raw: str) -> Any:
+        value = str(raw).strip()
+        if value == "":
+            return ""
+        if value in {'""', "''"}:
+            return ""
+        if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+            return value[1:-1]
+        lowered = value.lower()
+        if lowered == "true":
+            return True
+        if lowered == "false":
+            return False
+        try:
+            if "." in value:
+                return float(value)
+            return int(value)
+        except Exception:
+            return value
+
+    for raw_line in text.splitlines():
+        line = raw_line.split("#", 1)[0].rstrip()
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        stripped = line.strip()
+        if ":" not in stripped:
+            continue
+        key, value = stripped.split(":", 1)
+        key = key.strip()
+        value = value.strip()
+
+        while stack and indent <= stack[-1][0]:
+            stack.pop()
+        current = stack[-1][1]
+
+        if value == "":
+            new_dict: Dict[str, Any] = {}
+            current[key] = new_dict
+            stack.append((indent, new_dict))
+        else:
+            current[key] = _scalar(value)
+
+    return root
 
 
 def _apply_config_file(cfg: MobileGatewayConfig, data: Dict[str, Any]) -> None:
@@ -133,6 +189,11 @@ def _apply_config_file(cfg: MobileGatewayConfig, data: Dict[str, Any]) -> None:
     orch = dict(data.get("orchestrator") or {})
     cfg.orchestrator_task_cmd_out.host = str(orch.get("task_cmd_host") or cfg.orchestrator_task_cmd_out.host)
     cfg.orchestrator_task_cmd_out.port = int(orch.get("task_cmd_port", cfg.orchestrator_task_cmd_out.port) or cfg.orchestrator_task_cmd_out.port)
+    task_ack_transport = str(orch.get("task_ack_transport") or "").strip()
+    if task_ack_transport:
+        cfg.orchestrator_task_ack_in.transport = task_ack_transport
+    elif "task_ack_host" in orch or "task_ack_port" in orch:
+        cfg.orchestrator_task_ack_in.transport = "tcp"
     cfg.orchestrator_task_ack_in.host = str(orch.get("task_ack_host") or cfg.orchestrator_task_ack_in.host)
     cfg.orchestrator_task_ack_in.port = int(orch.get("task_ack_port", cfg.orchestrator_task_ack_in.port) or cfg.orchestrator_task_ack_in.port)
     cfg.backend.state_blocks_path = str(orch.get("state_blocks_path") or cfg.backend.state_blocks_path)
@@ -228,6 +289,9 @@ def build_config(config_file: str = "") -> MobileGatewayConfig:
         ["MOBILE_GATEWAY_ORCH_TASK_ACK_UDS", "MOBILE_GATEWAY_TASK_ACK_IN_UDS"],
         cfg.orchestrator_task_ack_in.uds_path,
     )
+
+    if str(cfg.backend.mode).strip().lower() == "orchestrator_tcp" and str(cfg.orchestrator_task_ack_in.transport).strip().lower() == "disabled":
+        cfg.orchestrator_task_ack_in.transport = "tcp"
 
     cfg.mqtt.enabled = _env_bool("MOBILE_GATEWAY_MQTT_ENABLED", cfg.mqtt.enabled)
     cfg.mqtt.transport = _env_str("MOBILE_GATEWAY_MQTT_TRANSPORT", cfg.mqtt.transport)
