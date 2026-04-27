@@ -25,9 +25,10 @@ class ModelFreeCollisionDetector():
             collision_mask, empty_mask, iou_list = mfcdetector.detect(grasp_group, approach_dist=0.03, collision_thresh=0.05,
                                             return_empty_grasp=True, empty_thresh=0.01, return_ious=True)
     """
-    def __init__(self, scene_points, voxel_size=0.005):
-        self.finger_width = 0.01
-        self.finger_length = 0.06
+    def __init__(self, scene_points, voxel_size=0.005, finger_width=0.01, finger_length=0.06, height_override=None):
+        self.finger_width = float(finger_width)
+        self.finger_length = float(finger_length)
+        self.height_override = None if height_override is None else float(height_override)
         self.voxel_size = voxel_size
         scene_cloud = o3d.geometry.PointCloud()
         scene_cloud.points = o3d.utility.Vector3dVector(scene_points)
@@ -70,6 +71,8 @@ class ModelFreeCollisionDetector():
         T = grasp_group.translations
         R = grasp_group.rotation_matrices
         heights = grasp_group.heights[:,np.newaxis]
+        if self.height_override is not None and self.height_override > 0:
+            heights = np.full_like(heights, self.height_override, dtype=np.float64)
         depths = grasp_group.depths[:,np.newaxis]
         widths = grasp_group.widths[:,np.newaxis]
         targets = self.scene_points[np.newaxis,:,:] - T[:,np.newaxis,:]

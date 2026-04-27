@@ -20,6 +20,7 @@ from .utils.data_utils import (
     load_camera_info_from_metadata,
     write_open3d_point_cloud,
 )
+from .utils.frames import FrameTransformer
 from .utils.yolo_utils import load_yolo_model, predict_target_masks
 
 
@@ -33,6 +34,7 @@ class RealSenseGraspPredictor:
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.seg_model = None
         self.rng = np.random.default_rng(getattr(self.cfgs, 'random_seed', 0))
+        self.frames = FrameTransformer.from_config(self.cfgs)
 
         torch.manual_seed(getattr(self.cfgs, 'random_seed', 0))
         if torch.cuda.is_available():
@@ -197,13 +199,25 @@ class RealSenseGraspPredictor:
         if grasp_group is None or len(grasp_group) == 0:
             return combined_grippers
 
+        gripper_params = {
+            "height": float(getattr(self.cfgs, 'gripper_height_m', 0.004)),
+            "finger_width": float(getattr(self.cfgs, 'gripper_finger_width_m', 0.004)),
+            "tail_length": float(getattr(self.cfgs, 'gripper_tail_length_m', 0.04)),
+            "depth_base": float(getattr(self.cfgs, 'gripper_depth_base_m', 0.02)),
+        }
         scores = grasp_group.scores
         min_score = float(scores.min())
         max_score = float(scores.max())
         for i in range(len(grasp_group)):
             grasp = grasp_group[i]
             color = self._score_to_color(float(grasp.score), min_score, max_score)
-            combined_grippers += grasp.to_open3d_geometry(color=color)
+            try:
+                combined_grippers += grasp.to_open3d_geometry(color=color, gripper_params=gripper_params)
+            except TypeError:
+                # Compatibility path: the runtime environment may import an older
+                # graspnetAPI package from site-packages whose Grasp.to_open3d_geometry
+                # only accepts `color`.
+                combined_grippers += grasp.to_open3d_geometry(color=color)
         return combined_grippers
 
     def _print_debug_timings(self, timings, extras=None):
@@ -248,15 +262,8 @@ class RealSenseGraspPredictor:
     def _angle_between_deg(self, vec_a, vec_b):
         return float(np.degrees(np.arccos(self._clamp_unit_interval(np.dot(vec_a, vec_b)))))
 
-    def _camera_to_protocol_vector(self, vector):
-        vector = np.asarray(vector, dtype=np.float64)
-        return np.array([vector[2], vector[0], -vector[1]], dtype=np.float64)
-
-    def _camera_to_protocol_point_cm(self, point):
-        return 100.0 * self._camera_to_protocol_vector(point)
-
     def _build_protocol_target(self, grasp):
-        raw_approach = self._normalize_vector(self._camera_to_protocol_vector(grasp.rotation_matrix[:, 0]))
+        raw_approach = self._normalize_vector(self.frames.camera_vector_to_robot(grasp.rotation_matrix[:, 0]))
         if raw_approach is None:
             return None
 
@@ -268,7 +275,7 @@ class RealSenseGraspPredictor:
 
         feasible_angle_deg = self._angle_between_deg(raw_approach, projected_approach)
 
-        raw_width = self._camera_to_protocol_vector(grasp.rotation_matrix[:, 1])
+        raw_width = self.frames.camera_vector_to_robot(grasp.rotation_matrix[:, 1])
         width_axis = raw_width - float(np.dot(raw_width, projected_approach)) * projected_approach
         width_axis = self._normalize_vector(width_axis)
         if width_axis is None:
@@ -279,19 +286,21 @@ class RealSenseGraspPredictor:
         roll_deg = self._signed_angle_deg(horizontal_axis, width_axis, projected_approach)
 
         depth_base_cm = 100.0 * float(getattr(self.cfgs, 'protocol_depth_base', 0.02))
-        grasp_origin_cm = self._camera_to_protocol_point_cm(grasp.translation)
-        rear_edge_center_cm = grasp_origin_cm - depth_base_cm * projected_approach
+        grasp_origin_robot_cm = self.frames.camera_point_to_robot_cm(grasp.translation)
+        rear_edge_center_robot_cm = grasp_origin_robot_cm - depth_base_cm * projected_approach
 
         return {
-            "x_cm": float(rear_edge_center_cm[0]),
-            "y_cm": float(rear_edge_center_cm[1]),
-            "z_cm": float(rear_edge_center_cm[2]),
+            "x_cm": float(rear_edge_center_robot_cm[0]),
+            "y_cm": float(rear_edge_center_robot_cm[1]),
+            "z_cm": float(rear_edge_center_robot_cm[2]),
             "pitch_deg": pitch_deg,
             "roll_deg": roll_deg,
             "gripper_width_cm": 100.0 * float(grasp.width),
             "approach_depth_cm": 100.0 * float(grasp.depth),
             "confidence": float(grasp.score),
             "feasible_angle_deg": feasible_angle_deg,
+            "position_frame": "robot",
+            "angle_frame": "robot",
         }
 
     def build_protocol_targets(self, grasp_group):
@@ -356,7 +365,16 @@ class RealSenseGraspPredictor:
             return grasp_group
 
         collision_cloud = scene_points if scene_points is not None and len(scene_points) > 0 else fallback_cloud
-        mfcdetector = ModelFreeCollisionDetector(collision_cloud, voxel_size=self.cfgs.voxel_size_cd)
+        height_override = float(getattr(self.cfgs, 'collision_height_override_m', -1.0))
+        if height_override <= 0:
+            height_override = None
+        mfcdetector = ModelFreeCollisionDetector(
+            collision_cloud,
+            voxel_size=self.cfgs.voxel_size_cd,
+            finger_width=getattr(self.cfgs, 'collision_finger_width_m', 0.01),
+            finger_length=getattr(self.cfgs, 'collision_finger_length_m', 0.06),
+            height_override=height_override,
+        )
         collision_mask = mfcdetector.detect(
             grasp_group,
             approach_dist=0.05,

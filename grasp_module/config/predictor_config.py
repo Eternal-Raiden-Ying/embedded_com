@@ -20,6 +20,13 @@ class PredictorConfig:
     random_seed: int = 0
     scene_max_depth: float = 3.0
     debug_grasp_count: int = 15
+    gripper_height_m: float = 0.028
+    gripper_finger_width_m: float = 0.018
+    gripper_depth_base_m: float = 0.0
+    gripper_tail_length_m: float = 0.04
+    collision_finger_width_m: float = 0.02
+    collision_finger_length_m: float = 0.07
+    collision_height_override_m: float = -1.0
 
     rgb_path: str = os.path.join(MODULE_DIR, 'test', 'data', 'color', 'color_00000.png')
     depth_path: str = os.path.join(MODULE_DIR, 'test', 'data', 'depth', 'depth_raw_00000.png')
@@ -32,10 +39,13 @@ class PredictorConfig:
     yolo_iou: float = 0.7
     bbox_expand_scale: float = 2.0
     collision_depth_margin: float = 0.15
-    protocol_depth_base: float = -0.085  # 0.02
+    protocol_depth_base: float = -0.03  # 0.02
     protocol_feasible_angle_deg: float = 5.0
     protocol_min_score: float = 0.3
     response_max_targets: int = 5
+    robot_cam_rotation_csv: str = '0.00428801,-0.63729195,0.77061053,-0.99996824,0.00244406,0.00758549,-0.00671759,-0.77061858,-0.63726123'
+    robot_cam_translation_cm_csv: str = '-10.30593831,0.93004589,35.4166982'
+    robot_calibration_translation_cm_csv: str = ''
 
     debug: bool = False
 
@@ -60,6 +70,13 @@ def add_predictor_args(parser, default_overrides=None):
     parser.add_argument('--random_seed', type=int, default=defaults['random_seed'], help='Random seed for reproducible point sampling')
     parser.add_argument('--scene_max_depth', type=float, default=defaults['scene_max_depth'], help='Maximum depth in meters for debug scene cloud')
     parser.add_argument('--debug_grasp_count', type=int, default=defaults['debug_grasp_count'], help='Number of top grasps to export in debug mesh')
+    parser.add_argument('--gripper_height_m', type=float, default=defaults['gripper_height_m'], help='Debug gripper mesh height in meters')
+    parser.add_argument('--gripper_finger_width_m', type=float, default=defaults['gripper_finger_width_m'], help='Debug gripper finger width in meters')
+    parser.add_argument('--gripper_depth_base_m', type=float, default=defaults['gripper_depth_base_m'], help='Debug gripper rear offset (depth base) in meters')
+    parser.add_argument('--gripper_tail_length_m', type=float, default=defaults['gripper_tail_length_m'], help='Debug gripper tail length in meters')
+    parser.add_argument('--collision_finger_width_m', type=float, default=defaults['collision_finger_width_m'], help='Collision gripper finger width in meters')
+    parser.add_argument('--collision_finger_length_m', type=float, default=defaults['collision_finger_length_m'], help='Collision gripper finger length in meters')
+    parser.add_argument('--collision_height_override_m', type=float, default=defaults['collision_height_override_m'], help='Override grasp height used in collision detection; <=0 keeps raw grasp height')
 
     parser.add_argument('--rgb_path', type=str, default=defaults['rgb_path'], help='Path to RGB image')
     parser.add_argument('--depth_path', type=str, default=defaults['depth_path'], help='Path to depth image')
@@ -76,6 +93,9 @@ def add_predictor_args(parser, default_overrides=None):
     parser.add_argument('--protocol_feasible_angle_deg', type=float, default=defaults['protocol_feasible_angle_deg'], help='Maximum allowed angle between raw and constrained approach direction')
     parser.add_argument('--protocol_min_score', type=float, default=defaults['protocol_min_score'], help='Minimum score required for a grasp to be reported as executable; <=0 disables this filter')
     parser.add_argument('--response_max_targets', type=int, default=defaults['response_max_targets'], help='Maximum number of protocol targets returned to downstream clients')
+    parser.add_argument('--robot_cam_rotation_csv', type=str, default=defaults['robot_cam_rotation_csv'], help='Rotation from native camera frame to robot frame, in row-major CSV format (9 values)')
+    parser.add_argument('--robot_cam_translation_cm_csv', type=str, default=defaults['robot_cam_translation_cm_csv'], help='Translation from native camera frame to robot frame, in centimeters CSV format (3 values)')
+    parser.add_argument('--robot_calibration_translation_cm_csv', type=str, default=defaults['robot_calibration_translation_cm_csv'], help='Deprecated compatibility alias for robot_cam_translation_cm_csv')
 
     parser.add_argument('--debug', action='store_true', default=defaults['debug'], help='Enable debug outputs')
     return parser

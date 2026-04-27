@@ -5,6 +5,10 @@ grasp_module/weights/
 grasp_module/log/
 grasp_module/test/data/
 grasp_module/test/debug_res/
+grasp_module/test/bag_debug/
+grasp_module/test/handeye_debug/
+grasp_module/test/yolo_debug/
+grasp_module/test/yolo26l.pt
 
 # Local mirrors / cloned third-party repositories
 # Strategy for this project:
