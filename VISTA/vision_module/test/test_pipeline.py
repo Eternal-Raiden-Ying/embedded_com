@@ -183,19 +183,40 @@ def phase_combined(engine_module, cfg, camera_kwargs: dict, iterations: int) -> 
         runtime.start()
         stage_controller.set_runtime_mode("TRACK_LOCAL", reason="test_pipeline_combined", force=True)
         for _ in range(iterations):
+            frame_meta = runtime.scheduler.read_result("frame_meta", default={}) or {}
+            if isinstance(frame_meta, dict):
+                frame_seq = int(frame_meta.get("frame_seq", 0) or 0)
+                if bool(frame_meta.get("has_frames")) and frame_seq > last_seq:
+                    frames_seen += 1
+                    last_seq = frame_seq
+
+            # Keep a backend-slot fallback for compatibility with older route contracts.
             frame_slot = runtime.scheduler.read_slot("camera_frames")
-            if isinstance(frame_slot, dict):
+            if frames_seen <= 0 and isinstance(frame_slot, dict):
                 seq = int(frame_slot.get("seq", 0) or 0)
                 frames = frame_slot.get("payload")
                 if seq > last_seq and isinstance(frames, dict):
                     frames_seen += 1
                     last_seq = seq
+
             local = runtime.scheduler.read_result("local_perception", default={}) or {}
             if isinstance(local, dict) and bool(local.get("has_infer")):
                 infer_seen += 1
             time.sleep(0.05)
         if frames_seen <= 0:
-            return False, "no frames observed"
+            snapshot = runtime.runtime_snapshot()
+            camera_state = dict(snapshot.get("capabilities", {}).get("camera", {}) or {})
+            scheduler_state = dict(snapshot.get("scheduler", {}) or {})
+            return False, (
+                "no frames observed "
+                f"(camera_enabled={camera_state.get('enabled_cameras')} "
+                f"camera_running={camera_state.get('runtime_running')} "
+                f"camera_last_seq={camera_state.get('last_frame_seq')} "
+                f"routes={scheduler_state.get('route_keys')} "
+                f"results={scheduler_state.get('result_keys')})"
+            )
+        if infer_seen <= 0:
+            return False, "no inference observed in combined phase"
         return True, f"frames_seen={frames_seen} infer_seen={infer_seen}"
     finally:
         runtime.stop()
@@ -206,8 +227,10 @@ def main() -> int:
     args = build_parser().parse_args()
     print_header("VISTA Pipeline Backend Test", args)
 
-    camera_backend_cls, camera_result = resolve_camera_backend(args.backend, args)
+    # Initialize predictor first to avoid static TLS conflicts on some boards when
+    # camera/CV libraries are loaded before the QNN runtime.
     predictor_backend_cls, predictor_result = resolve_predictor_backend(args.backend, args)
+    camera_backend_cls, camera_result = resolve_camera_backend(args.backend, args)
 
     if camera_backend_cls is None and predictor_backend_cls is None:
         print_step("camera_backend", "FAIL", camera_result.detail)

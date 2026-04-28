@@ -57,7 +57,7 @@ DEFAULT_MODEL_WIDTH = 640
 DEFAULT_MODEL_HEIGHT = 640
 DEFAULT_CONF_THRES = 0.25
 DEFAULT_IOU_THRES = 0.15
-DEFAULT_CLASS_NUM = 20
+DEFAULT_CLASS_NUM = 80
 DEFAULT_ITERATIONS = 10
 
 
@@ -265,7 +265,13 @@ def build_test_config(args: argparse.Namespace) -> VisionServiceConfig:
                 in_h=args.rgb_in_h,
                 out_w=args.rgb_out_w,
                 out_h=args.rgb_out_h,
+                in_format="YUY2",
+                format="RGB",
                 fps=args.rgb_fps,
+                crop_x=0,
+                crop_y=0,
+                crop_w=0,
+                crop_h=0,
                 enable=True,
             ),
             "depth": DepthCameraConfig(

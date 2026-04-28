@@ -13,6 +13,18 @@ CONFIG = VisionServiceConfig()
 _HERE = Path(__file__).resolve()
 _DEFAULT_PROJECT_ROOT = str(_HERE.parents[2])
 _DEFAULT_MODEL_ROOT = str(Path(_DEFAULT_PROJECT_ROOT) / "vision_module" / "model")
+_DEFAULT_DETECT_MODEL = (
+    Path(_DEFAULT_MODEL_ROOT)
+    / "qnn216"
+    / "model_farm_yolov7_qcs6490_qnn2.16_int8_aidlite"
+    / "models"
+    / "cutoff_yolov7_w8a8.qnn216.ctx.bin"
+)
+_DEFAULT_SEG_MODEL_QNN216 = (
+    Path(_DEFAULT_MODEL_ROOT)
+    / "yolo26s-seg-grasp"
+    / "yolo26s-seg-grasp_split_w8a8.qnn216.ctx.bin"
+)
 
 CONFIG.runtime.project_root = os.getenv("VISION_PROJECT_ROOT", _DEFAULT_PROJECT_ROOT)
 CONFIG.runtime.log_dir = os.getenv("VISION_LOG_DIR", f"{CONFIG.runtime.project_root}/logs")
@@ -76,7 +88,7 @@ CONFIG.model.active_model = os.getenv("VISION_ACTIVE_MODEL", "yolov7_detect")
 CONFIG.model.profiles["yolov7_detect"] = SingleModelConfig(
     target_model=os.getenv(
         "VISION_DETECT_MODEL_PATH",
-        str(Path(_DEFAULT_MODEL_ROOT) / "cutoff_yolov7_w8a8.qnn216.ctx.bin"),
+        str(_DEFAULT_DETECT_MODEL),
     ),
     width=640,
     height=640,
@@ -107,7 +119,7 @@ CONFIG.model.profiles["yolov8s_seg"] = SingleModelConfig(
 CONFIG.model.profiles["yolo26s_seg"] = SingleModelConfig(
     target_model=os.getenv(
         "VISION_SEG_MODEL_PATH",
-        str(Path(_DEFAULT_MODEL_ROOT) / "yolo26s-seg-grasp" / "yolo26s-seg-grasp_split_qcs6490_w8a8.qnn236.ctx.bin.amf"),
+        str(_DEFAULT_SEG_MODEL_QNN216),
     ),
     width=640,
     height=640,
@@ -121,7 +133,7 @@ CONFIG.model.profiles["yolo26s_seg"] = SingleModelConfig(
 CONFIG.model.profiles["yolo26s_seg_qnn216"] = SingleModelConfig(
     target_model=os.getenv(
         "VISION_SEG_MODEL_QNN216_PATH",
-        str(Path(_DEFAULT_MODEL_ROOT) / "yolo26s-seg-grasp" / "yolo26s-seg-grasp_split_w8a8.qnn216.ctx.bin"),
+        str(_DEFAULT_SEG_MODEL_QNN216),
     ),
     width=640,
     height=640,
