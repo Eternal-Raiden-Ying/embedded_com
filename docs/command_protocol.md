@@ -2,109 +2,56 @@
 
 ## Scope
 
-This document defines the formal northbound mobile protocol used by `mobile_gateway`.
+This document defines the fixed northbound protocol between the WeChat mini-program and the board-side `mobile_gateway`.
 
-The board-side southbound contract remains unchanged:
+The southbound Orchestrator TCP contract stays unchanged:
 
-- `fetch_object` -> `task_cmd(intent=FIND)`
-- `go_home` -> `task_cmd(intent=RETURN)`
-- `stop` -> `task_cmd(intent=STOP)`
+- `task_cmd` input port remains unchanged
+- `task_ack` output port remains unchanged
+- `fetch_object` still maps to `intent=FIND`
+- `stop` still maps to `intent=STOP`
 
-`resume`, `retry_search`, and `query_status` remain gateway-level semantics.
+## Fixed Identity And Topics
 
-## Fixed Robot Identity
-
-The northbound mobile protocol is fixed to:
-
-- `robot_id = "SC171"`
-
-This value is normalized by the gateway and should be treated as the only formal robot identifier for the mini-program / MQTT interface in this phase.
-
-## Fixed MQTT Topics
-
+- `robot_id = SC171`
 - `robot/v1/SC171/mobile/cmd`
 - `robot/v1/SC171/mobile/ack`
 - `robot/v1/SC171/mobile/status`
 - `robot/v1/SC171/heartbeat`
 
-These are now the canonical MQTT topics for the northbound protocol.
+These topics are fixed and must not be changed.
 
-## Formal Command Format
+## Formal Command Payload
 
 ```json
 {
   "type": "mobile_cmd",
   "robot_id": "SC171",
-  "cmd_id": "cmd_1234567890",
-  "session_id": "sess_1234567890",
+  "cmd_id": "wx_1777293209382",
+  "session_id": "wx_session_001",
   "epoch": 1,
   "cmd": "fetch_object",
   "target": "apple",
   "text": "拿苹果",
   "source": "wechat_miniprogram",
-  "ts": 1713945600.0
+  "ts": 1777293208.5
 }
 ```
 
-### Command Fields
+Formal mini-program commands:
 
-- `type`
-  - must be `mobile_cmd`
-- `robot_id`
-  - must be `SC171`
-- `cmd_id`
-  - required unique command id
-- `session_id`
-  - required for stable multi-command task control
-- `epoch`
-  - task generation inside a session
-- `cmd`
-  - one of:
-    - `fetch_object`
-    - `stop`
-    - `resume`
-    - `retry_search`
-    - `go_home`
-    - `query_status`
-- `target`
-  - required for `fetch_object`
-  - allowed values:
-    - `apple`
-    - `banana`
-    - `bottle`
-    - `cup`
-- `text`
-  - optional natural-language mirror for UI/debug
-- `source`
-  - recommended value: `wechat_miniprogram`
-- `ts`
-  - unix timestamp in seconds
+- `fetch_object`
+- `stop`
 
-## Compatibility Input
+Current compatibility behavior:
 
-The gateway still accepts this old test-only input:
+- `FIND_AND_PICK` can still be accepted when `runtime.enable_legacy_command_compat=true`
+- gateway-local diagnostics such as `query_status`, `resume`, `retry_search`, `go_home` remain available for engineering/debug flows
+- those compatibility inputs are not the formal mini-program contract
 
-```json
-{
-  "type": "FIND_AND_PICK",
-  "target": "apple"
-}
-```
+## Gateway ACK
 
-Compatibility behavior:
-
-- it is normalized to `cmd=fetch_object`
-- it is accepted only as a backward-compatible input form
-- it is not part of the formal mini-program contract
-- it must not be used as the documented production protocol
-
-## Outbound MQTT Message Kinds
-
-The gateway now uses explicit `kind` values.
-
-### 1. Gateway ACK
-
-Published immediately after the gateway accepts or rejects a northbound command.
+The gateway publishes `gateway_ack` immediately after it parses and accepts or rejects the incoming command.
 
 Topic:
 
@@ -117,21 +64,59 @@ Example:
   "type": "mobile_ack",
   "kind": "gateway_ack",
   "robot_id": "SC171",
-  "cmd_id": "cmd_1234567890",
-  "session_id": "sess_1234567890",
+  "cmd_id": "wx_1777293209382",
+  "session_id": "wx_session_001",
   "epoch": 1,
   "cmd": "fetch_object",
   "target": "apple",
-  "accepted": true,
   "message": "gateway command accepted",
+  "accepted": true,
   "source": "mobile_gateway",
-  "ts": 1713945600.1
+  "ts": 1777293208.6
 }
 ```
 
-### 2. Task ACK
+Meaning:
 
-Published after a real Orchestrator `task_ack` arrives.
+- `gateway_ack` means the board-side gateway has accepted the northbound command format
+- it does not mean Orchestrator has accepted the task yet
+
+## Southbound Mapping
+
+`fetch_object` maps to:
+
+```json
+{
+  "type": "task_cmd",
+  "intent": "FIND",
+  "confidence": 1.0,
+  "cmd_id": "wx_1777293209382",
+  "session_id": "wx_session_001",
+  "epoch": 1,
+  "source": "wechat_miniprogram",
+  "ts": 1777293208.6,
+  "target": "apple"
+}
+```
+
+`stop` maps to:
+
+```json
+{
+  "type": "task_cmd",
+  "intent": "STOP",
+  "confidence": 1.0,
+  "cmd_id": "wx_1777293209382",
+  "session_id": "wx_session_001",
+  "epoch": 1,
+  "source": "wechat_miniprogram",
+  "ts": 1777293208.7
+}
+```
+
+## Task ACK
+
+After Orchestrator returns `task_ack`, the gateway publishes a second ACK on the same MQTT ACK topic.
 
 Topic:
 
@@ -144,20 +129,23 @@ Example:
   "type": "mobile_ack",
   "kind": "task_ack",
   "robot_id": "SC171",
-  "cmd_id": "cmd_1234567890",
-  "session_id": "sess_1234567890",
+  "cmd_id": "wx_1777293209382",
+  "session_id": "wx_session_001",
   "epoch": 1,
   "accepted": true,
   "message": "FIND accepted: apple",
-  "backend_state": "SEARCH_TABLE",
   "source": "mobile_gateway",
-  "ts": 1713945600.3
+  "ts": 1777293208.8
 }
 ```
 
-### 3. Status
+Meaning:
 
-Published as the unified progress/status stream.
+- `task_ack` means Orchestrator has accepted or rejected the southbound task
+- in `debug` mode, diagnostic fields such as `backend_state` may be attached
+- in `production` mode, raw backend fields are not exposed to the mini-program protocol
+
+## Mobile Status
 
 Topic:
 
@@ -170,73 +158,120 @@ Example:
   "type": "mobile_status",
   "kind": "status",
   "robot_id": "SC171",
-  "session_id": "sess_1234567890",
+  "session_id": "wx_session_001",
   "epoch": 1,
   "state": "searching",
   "target": "apple",
-  "message": "正在搜索 apple",
-  "progress": 75,
+  "message": "开始桌边任务，目标 apple",
+  "progress": 20,
   "command": "fetch_object",
-  "backend_state": "SEARCH_TARGET_INIT",
   "source": "mobile_gateway",
-  "ts": 1713945605.0
+  "ts": 1777293210.0
 }
 ```
 
-### 4. Heartbeat
+Formal mobile-facing states:
+
+- `submitted`
+- `accepted`
+- `searching`
+- `running`
+- `idle`
+- `stopped`
+- `error`
+
+Back-end state mapping:
+
+- `IDLE -> idle`
+- `SEARCH_TABLE -> searching`
+- `SEARCH_OBJECT -> searching`
+- `SEARCH_TARGET_INIT -> searching`
+- `GRASPING -> running`
+- `ERROR_RECOVERY -> error`
+- `STOP -> stopped`
+- `STOPPED -> stopped`
+
+Display-oriented messages should be directly usable by the mini-program UI, for example:
+
+- `已提交取物命令，目标 apple`
+- `FIND accepted: apple`
+- `开始桌边任务，目标 apple`
+- `视觉模块未连接，任务暂时无法继续`
+- `任务已停止`
+
+Error mapping rule:
+
+If the gateway detects any of the following back-end failure signals:
+
+- `vision_req_out connect_failed`
+- `Connection refused`
+- `link_state=DEGRADED`
+
+then it publishes:
+
+```json
+{
+  "state": "error",
+  "error_code": 1007,
+  "message": "视觉模块未连接，任务暂时无法继续"
+}
+```
+
+Debug-only diagnostic extension fields:
+
+- `backend_state`
+- `raw_error`
+
+## Heartbeat
 
 Topic:
 
 - `robot/v1/SC171/heartbeat`
 
-Example:
+Production payload shape:
 
 ```json
 {
   "type": "mobile_gateway_heartbeat",
   "kind": "heartbeat",
   "robot_id": "SC171",
+  "online": true,
   "backend_mode": "orchestrator_tcp",
   "state": "idle",
   "session_id": "",
   "epoch": 0,
-  "status_age_s": 0.5,
-  "recent_states": ["idle"],
-  "ts": 1713945606.0
+  "ts": 1777293212.0
 }
 ```
 
-## Stable Status States
+Debug mode may append lightweight diagnostics such as:
 
-The mobile-facing `state` enum remains:
+- `status_age_s`
+- `recent_states`
 
-- `idle`
-- `submitted`
-- `accepted`
-- `searching`
-- `approaching`
-- `returning`
-- `stopping`
-- `stopped`
-- `completed`
-- `error`
-- `unknown`
+## Duplicate `cmd_id` Handling
 
-The fine-grained orchestrator state is exposed only via `backend_state`.
+The gateway keeps a recent `cmd_id` cache, default size `64`.
 
-## Privacy / Abstraction Rule
+When a duplicate `cmd_id` is received:
 
-The formal mini-program protocol must not expose raw Orchestrator `raw` transport fields.
+- `gateway_ack` may be re-published
+- the command is not forwarded again to Orchestrator
+- status is not re-published just because of the duplicate
+- duplicate STOP commands are also suppressed from repeat forwarding and log spam
 
-Allowed upstream-facing debug fields:
+## Production And Debug Modes
 
-- `backend_state`
-- `message`
-- `progress`
+`production` mode:
 
-Disallowed as formal public fields:
+- keeps the formal protocol stable
+- suppresses raw MQTT payload logs
+- suppresses per-heartbeat publish success logs
+- does not expose raw backend fields to the mini-program payload
 
-- serial raw lines
-- raw UART payloads
-- internal low-level transport dumps
+`debug` mode:
 
+- keeps the same formal topics and command schema
+- allows raw MQTT TX/RX diagnostics
+- may attach `backend_state` and `raw_error`
+- keeps compatibility hooks easier to observe during bring-up

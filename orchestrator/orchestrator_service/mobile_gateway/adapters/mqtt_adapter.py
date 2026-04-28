@@ -21,10 +21,15 @@ class MqttAdapter:
         cfg: MqttAdapterConfig,
         command_handler: Callable[[Dict[str, Any]], None],
         logger: Optional[Callable[[str, str, Dict[str, Any]], None]] = None,
+        *,
+        enable_raw_debug: bool = False,
+        suppress_heartbeat_success_log: bool = True,
     ):
         self.cfg = cfg
         self.command_handler = command_handler
         self.logger = logger
+        self.enable_raw_debug = bool(enable_raw_debug)
+        self.suppress_heartbeat_success_log = bool(suppress_heartbeat_success_log)
         self._client = None
         self._mqtt = None
         self._started = False
@@ -121,7 +126,17 @@ class MqttAdapter:
             return
         line = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         info = client.publish(topic, line, qos=int(qos), retain=bool(retain))
-        self._log("info", "mqtt_publish", topic=topic, qos=int(qos), retain=retain, rc=getattr(info, "rc", None))
+        if topic == self._heartbeat_topic and self.suppress_heartbeat_success_log and not self.enable_raw_debug:
+            return
+        event = {
+            "topic": topic,
+            "qos": int(qos),
+            "retain": retain,
+            "rc": getattr(info, "rc", None),
+        }
+        if self.enable_raw_debug:
+            event["payload"] = dict(payload)
+        self._log("info", "mqtt_publish", **event)
 
     def _on_connect(self, client, userdata, flags, reason_code, properties=None) -> None:
         client.subscribe(self._cmd_topic, qos=int(self.cfg.cmd_qos))
@@ -131,10 +146,15 @@ class MqttAdapter:
         self._log("warn", "mqtt_disconnected", reason_code=int(reason_code))
 
     def _on_message(self, client, userdata, msg) -> None:
+        raw_payload = msg.payload.decode("utf-8", errors="replace")
         try:
-            payload = json.loads(msg.payload.decode("utf-8"))
+            payload = json.loads(raw_payload)
         except Exception as exc:
-            self._log("warn", "mqtt_bad_json", topic=msg.topic, error=str(exc))
+            self._log("warn", "mqtt_bad_json", topic=msg.topic, error=str(exc), raw_payload=raw_payload if self.enable_raw_debug else None)
             return
-        self._log("info", "mqtt_message", topic=msg.topic)
+        event = {"topic": msg.topic}
+        if self.enable_raw_debug:
+            event["raw_payload"] = raw_payload
+            event["payload"] = dict(payload)
+        self._log("info", "mqtt_message", **event)
         self.command_handler(payload)

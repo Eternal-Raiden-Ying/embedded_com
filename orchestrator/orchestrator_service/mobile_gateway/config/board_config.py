@@ -164,6 +164,31 @@ def _apply_config_file(cfg: MobileGatewayConfig, data: Dict[str, Any]) -> None:
     cfg.mqtt.robot_id = ROBOT_ID
     cfg.backend.mode = str(data.get("backend") or cfg.backend.mode)
 
+    runtime = dict(data.get("runtime") or {})
+    cfg.runtime.mode = str(runtime.get("mode") or cfg.runtime.mode)
+    cfg.runtime.log_level = str(runtime.get("log_level") or cfg.runtime.log_level)
+    cfg.runtime.tick_hz = float(runtime.get("tick_hz", cfg.runtime.tick_hz) or cfg.runtime.tick_hz)
+    cfg.runtime.heartbeat_period_s = float(
+        runtime.get("heartbeat_period_s", cfg.runtime.heartbeat_period_s) or cfg.runtime.heartbeat_period_s
+    )
+    cfg.runtime.heartbeat_log_interval_s = float(
+        runtime.get("heartbeat_log_interval_s", cfg.runtime.heartbeat_log_interval_s) or cfg.runtime.heartbeat_log_interval_s
+    )
+    cfg.runtime.suppress_heartbeat_success_log = bool(
+        runtime.get("suppress_heartbeat_success_log", cfg.runtime.suppress_heartbeat_success_log)
+    )
+    cfg.runtime.enable_raw_mqtt_debug = bool(runtime.get("enable_raw_mqtt_debug", cfg.runtime.enable_raw_mqtt_debug))
+    cfg.runtime.enable_legacy_command_compat = bool(
+        runtime.get("enable_legacy_command_compat", cfg.runtime.enable_legacy_command_compat)
+    )
+    cfg.runtime.cmd_dedup_cache_size = int(
+        runtime.get("cmd_dedup_cache_size", cfg.runtime.cmd_dedup_cache_size) or cfg.runtime.cmd_dedup_cache_size
+    )
+    cfg.runtime.log_mode = str(runtime.get("log_mode") or cfg.runtime.log_mode)
+    cfg.runtime.log_enabled = bool(runtime.get("log_enabled", cfg.runtime.log_enabled))
+    cfg.runtime.status_stdout = bool(runtime.get("status_stdout", cfg.runtime.status_stdout))
+    cfg.runtime.stdin_enabled = bool(runtime.get("stdin_enabled", cfg.runtime.stdin_enabled))
+
     mqtt = dict(data.get("mqtt") or {})
     topics = dict(mqtt.get("topics") or {})
     cfg.mqtt.enabled = bool(mqtt.get("enabled", cfg.mqtt.enabled))
@@ -220,12 +245,50 @@ def build_config(config_file: str = "") -> MobileGatewayConfig:
     cfg.runtime.pid_dir = _env_str("MOBILE_GATEWAY_PID_DIR", cfg.runtime.pid_dir)
     cfg.runtime.pid_file = _env_str("MOBILE_GATEWAY_PID_FILE", cfg.runtime.pid_file)
     cfg.runtime.stack_run_id = _env_str("STACK_RUN_ID", cfg.runtime.stack_run_id)
+    cfg.runtime.mode = _env_str("MOBILE_GATEWAY_RUNTIME_MODE", cfg.runtime.mode)
+    cfg.runtime.log_level = _env_str("MOBILE_GATEWAY_LOG_LEVEL", cfg.runtime.log_level)
     cfg.runtime.tick_hz = _env_float("MOBILE_GATEWAY_TICK_HZ", cfg.runtime.tick_hz)
     cfg.runtime.heartbeat_period_s = _env_float("MOBILE_GATEWAY_HEARTBEAT_PERIOD_S", cfg.runtime.heartbeat_period_s)
+    cfg.runtime.heartbeat_log_interval_s = _env_float(
+        "MOBILE_GATEWAY_HEARTBEAT_LOG_INTERVAL_S",
+        cfg.runtime.heartbeat_log_interval_s,
+    )
+    cfg.runtime.suppress_heartbeat_success_log = _env_bool(
+        "MOBILE_GATEWAY_SUPPRESS_HEARTBEAT_SUCCESS_LOG",
+        cfg.runtime.suppress_heartbeat_success_log,
+    )
+    cfg.runtime.enable_raw_mqtt_debug = _env_bool(
+        "MOBILE_GATEWAY_ENABLE_RAW_MQTT_DEBUG",
+        cfg.runtime.enable_raw_mqtt_debug,
+    )
+    cfg.runtime.enable_legacy_command_compat = _env_bool(
+        "MOBILE_GATEWAY_ENABLE_LEGACY_COMMAND_COMPAT",
+        cfg.runtime.enable_legacy_command_compat,
+    )
+    cfg.runtime.cmd_dedup_cache_size = _env_int(
+        "MOBILE_GATEWAY_CMD_DEDUP_CACHE_SIZE",
+        cfg.runtime.cmd_dedup_cache_size,
+    )
     cfg.runtime.log_mode = _env_str("MOBILE_GATEWAY_LOG_MODE", cfg.runtime.log_mode)
     cfg.runtime.log_enabled = _env_bool("MOBILE_GATEWAY_LOG_ENABLED", cfg.runtime.log_enabled)
     cfg.runtime.status_stdout = _env_bool("MOBILE_GATEWAY_STATUS_STDOUT", cfg.runtime.status_stdout)
     cfg.runtime.stdin_enabled = _env_bool("MOBILE_GATEWAY_STDIN_ENABLED", cfg.runtime.stdin_enabled)
+
+    runtime_mode = str(cfg.runtime.mode or "production").strip().lower()
+    if runtime_mode == "debug":
+        if "MOBILE_GATEWAY_LOG_MODE" not in os.environ:
+            cfg.runtime.log_mode = "full"
+        if "MOBILE_GATEWAY_LOG_LEVEL" not in os.environ:
+            cfg.runtime.log_level = "DEBUG"
+        if "MOBILE_GATEWAY_SUPPRESS_HEARTBEAT_SUCCESS_LOG" not in os.environ:
+            cfg.runtime.suppress_heartbeat_success_log = False
+        if "MOBILE_GATEWAY_ENABLE_RAW_MQTT_DEBUG" not in os.environ:
+            cfg.runtime.enable_raw_mqtt_debug = True
+    else:
+        if "MOBILE_GATEWAY_LOG_MODE" not in os.environ:
+            cfg.runtime.log_mode = "concise"
+        if "MOBILE_GATEWAY_LOG_LEVEL" not in os.environ:
+            cfg.runtime.log_level = "INFO"
 
     cfg.backend.mode = _env_str("MOBILE_GATEWAY_BACKEND", cfg.backend.mode)
     cfg.backend.default_robot_id = _env_str("MOBILE_GATEWAY_ROBOT_ID", cfg.backend.default_robot_id)

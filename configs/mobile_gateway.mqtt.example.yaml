@@ -1,6 +1,16 @@
 robot_id: SC171
 backend: orchestrator_tcp
 
+runtime:
+  mode: production
+  log_level: INFO
+  heartbeat_period_s: 1.0
+  heartbeat_log_interval_s: 30
+  suppress_heartbeat_success_log: true
+  enable_raw_mqtt_debug: false
+  enable_legacy_command_compat: true
+  cmd_dedup_cache_size: 64
+
 mqtt:
   enabled: false
   transport: websocket

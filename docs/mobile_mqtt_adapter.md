@@ -1,10 +1,10 @@
 # Mobile MQTT Adapter
 
-## Scope
+## Role
 
-The MQTT adapter is the northbound transport for the formal mini-program protocol.
+`mobile_gateway` uses MQTT only as the northbound transport layer.
 
-It does not define a second command schema. It only transports:
+It carries:
 
 - inbound `mobile_cmd`
 - outbound `gateway_ack`
@@ -12,26 +12,19 @@ It does not define a second command schema. It only transports:
 - outbound `status`
 - outbound `heartbeat`
 
-The formal runtime implementation is the repository-local gateway under:
+It does not define a second protocol.
 
-- `orchestrator/orchestrator_service/mobile_gateway/`
-
-The older validation helper at `~/mobile_gateway_cloud/cloud_mqtt_bridge.py` is no longer the primary workflow.
-
-## Fixed Robot And Topics
-
-The current MQTT northbound contract is fixed to:
+## Fixed MQTT Contract
 
 - `robot_id = SC171`
+- `cmd: robot/v1/SC171/mobile/cmd`
+- `ack: robot/v1/SC171/mobile/ack`
+- `status: robot/v1/SC171/mobile/status`
+- `heartbeat: robot/v1/SC171/heartbeat`
 
-Topics:
+These topics are fixed.
 
-- `robot/v1/SC171/mobile/cmd`
-- `robot/v1/SC171/mobile/ack`
-- `robot/v1/SC171/mobile/status`
-- `robot/v1/SC171/heartbeat`
-
-## Inbound Topic
+## Inbound
 
 ### `robot/v1/SC171/mobile/cmd`
 
@@ -41,82 +34,68 @@ Formal payload:
 {
   "type": "mobile_cmd",
   "robot_id": "SC171",
-  "cmd_id": "cmd_1234567890",
-  "session_id": "sess_1234567890",
+  "cmd_id": "wx_1777293209382",
+  "session_id": "wx_session_001",
   "epoch": 1,
   "cmd": "fetch_object",
   "target": "apple",
   "text": "拿苹果",
   "source": "wechat_miniprogram",
-  "ts": 1713945600.0
+  "ts": 1777293208.5
 }
 ```
 
-Compatibility-only payload:
+Formal mini-program commands:
 
-```json
-{
-  "type": "FIND_AND_PICK",
-  "target": "apple"
-}
-```
+- `fetch_object`
+- `stop`
 
-This legacy format is accepted only for transition and testing. It is not the public production contract.
+Compatibility input:
 
-## Outbound ACK Topic
+- `type=FIND_AND_PICK` can still be enabled for transition/debug use
+
+## Outbound ACKs
 
 ### `robot/v1/SC171/mobile/ack`
 
-Two different `kind` values are published on the same topic.
+Two `kind` values share the same topic.
 
-#### `kind = gateway_ack`
+`kind=gateway_ack`
 
-Published immediately after the gateway parses and validates a command.
+- emitted immediately after gateway validation
+- means the gateway accepted or rejected the MQTT/mobile command itself
 
-Typical fields:
+`kind=task_ack`
 
-- `type = mobile_ack`
-- `kind = gateway_ack`
-- `robot_id = SC171`
+- emitted after Orchestrator returns a southbound `task_ack`
+- means the task has been accepted or rejected by the southbound service
+
+Production ACK fields:
+
+- `type`
+- `kind`
+- `robot_id`
 - `cmd_id`
 - `session_id`
 - `epoch`
-- `cmd`
-- `target`
 - `accepted`
 - `message`
 - `error_code`
+- `source`
 - `ts`
 
-#### `kind = task_ack`
+Debug ACK additions:
 
-Published after Orchestrator returns a southbound `task_ack`.
-
-Typical fields:
-
-- `type = mobile_ack`
-- `kind = task_ack`
-- `robot_id = SC171`
-- `cmd_id`
-- `session_id`
-- `epoch`
-- `accepted`
-- `message`
 - `backend_state`
-- `error_code`
-- `ts`
 
-## Outbound Status Topic
+## Outbound Status
 
 ### `robot/v1/SC171/mobile/status`
 
-All progress/state messages use:
+Production status fields:
 
-- `type = mobile_status`
-- `kind = status`
-
-Typical fields:
-
+- `type=mobile_status`
+- `kind=status`
 - `robot_id`
 - `session_id`
 - `epoch`
@@ -125,107 +104,81 @@ Typical fields:
 - `message`
 - `progress`
 - `command`
-- `backend_state`
+- `source`
 - `ts`
 
-## Outbound Heartbeat Topic
+Formal states:
+
+- `submitted`
+- `accepted`
+- `searching`
+- `running`
+- `idle`
+- `stopped`
+- `error`
+
+Debug status additions:
+
+- `backend_state`
+- `raw_error`
+
+## Outbound Heartbeat
 
 ### `robot/v1/SC171/heartbeat`
 
-Heartbeat uses:
+Production heartbeat fields:
 
-- `type = mobile_gateway_heartbeat`
-- `kind = heartbeat`
-
-Typical fields:
-
+- `type=mobile_gateway_heartbeat`
+- `kind=heartbeat`
 - `robot_id`
+- `online`
 - `backend_mode`
 - `state`
 - `session_id`
 - `epoch`
-- `status_age_s`
-- `recent_states`
 - `ts`
 
-## QoS Defaults
+Debug heartbeat additions:
 
-The current formal gateway defaults are:
+- `status_age_s`
+- `recent_states`
+
+## Log Behavior
+
+`production` mode:
+
+- logs connection and disconnection events
+- logs command receipt and status transitions
+- suppresses raw MQTT payload logs
+- suppresses per-heartbeat publish success logs
+
+`debug` mode:
+
+- logs MQTT TX/RX with raw payloads
+- keeps heartbeat publish traces
+- keeps compatibility/diagnostic data visible
+
+## QoS And Retain Defaults
 
 - `cmd`: QoS 1
 - `ack`: QoS 1
 - `status`: QoS 0
 - `heartbeat`: QoS 0
 
-## Retain Defaults
-
-The current formal gateway defaults are:
-
-- `cmd`: no retain
-- `ack`: no retain
 - `status`: retain latest status
 - `heartbeat`: no retain
 
-## Reconnect Strategy
-
-- use client auto-reconnect
-- re-subscribe to `robot/v1/SC171/mobile/cmd` after reconnect
-- keep gateway task memory intact on transient MQTT disconnect
-- do not clear southbound task context just because MQTT reconnects
-
-## Security Recommendations
-
-For production:
+## Security Notes
 
 - use WSS/TLS
-- require authentication
-- restrict topic ACLs to the `SC171` namespace
-- never expose an unauthenticated write path to `robot/v1/SC171/mobile/cmd`
-
-Formal production guidance:
-
-- do not use raw `ws://`
-- do not treat local IP direct-connect as the final mini-program architecture
-
-## Mini-Program Integration Notes
-
-For WeChat mini-program:
-
-- configure the broker domain as a legal socket domain
-- use WSS/TLS
-- send only structured `mobile_cmd`
-- keep ASR text normalization outside the board-side gateway
+- keep credentials outside committed files
+- restrict ACLs to the `SC171` topic namespace
+- do not expose an unauthenticated write path to `robot/v1/SC171/mobile/cmd`
 
 ## Dependency
 
-The adapter uses `paho-mqtt` as an optional runtime dependency:
+The adapter still uses optional `paho-mqtt`:
 
 ```bash
 pip install paho-mqtt
-```
-
-If MQTT is enabled without the dependency, the gateway raises a clear startup error.
-
-## Startup Reference
-
-Orchestrator:
-
-```bash
-cd /home/aidlux/embedded_com/orchestrator
-export ORCH_TASK_CMD_IN_HOST=127.0.0.1
-export ORCH_TASK_CMD_IN_PORT=9001
-export ORCH_TASK_ACK_OUT_HOST=127.0.0.1
-export ORCH_TASK_ACK_OUT_PORT=9012
-export ORCH_SERIAL_DRY_RUN=1
-export ORCH_TTS_EVENT_OUT_TRANSPORT=disabled
-python3 -m orchestrator_service.app.main
-```
-
-Formal gateway:
-
-```bash
-cd /home/aidlux/embedded_com
-PYTHONPATH=/home/aidlux/embedded_com/orchestrator \
-python3 -m orchestrator_service.mobile_gateway.runtime.service \
-  --config configs/mobile_gateway.mqtt.yaml
 ```

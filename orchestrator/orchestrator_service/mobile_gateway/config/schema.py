@@ -33,8 +33,15 @@ class GatewayRuntimeConfig:
     pid_dir: str = field(default_factory=lambda: str(_ORCH_ROOT / "pids"))
     pid_file: str = field(default_factory=lambda: str(_ORCH_ROOT / "pids" / "mobile_gateway.pid"))
     stack_run_id: str = ""
+    mode: str = "production"
+    log_level: str = "INFO"
     tick_hz: float = 10.0
     heartbeat_period_s: float = 1.0
+    heartbeat_log_interval_s: float = 30.0
+    suppress_heartbeat_success_log: bool = True
+    enable_raw_mqtt_debug: bool = False
+    enable_legacy_command_compat: bool = True
+    cmd_dedup_cache_size: int = 64
     log_mode: str = "concise"
     log_enabled: bool = True
     status_stdout: bool = True

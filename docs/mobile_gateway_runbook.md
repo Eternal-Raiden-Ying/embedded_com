@@ -1,125 +1,40 @@
 # Mobile Gateway Runbook
 
-## Supported Runtime Modes
+## Runtime Modes
 
-This round supports three gateway modes:
+`mobile_gateway` now has two runtime styles:
+
+- `production`
+  - formal service layout
+  - low-noise logs
+  - no raw MQTT payload dumps
+  - no raw backend fields in public MQTT payloads
+- `debug`
+  - keeps the same formal topics and command protocol
+  - enables raw MQTT diagnostics
+  - can expose `backend_state` and `raw_error`
+  - suitable for bring-up, smoke, and fault tracing
+
+The backend transport mode remains separate:
 
 - `mock`
-  - fully offline
-  - does not require real orchestrator, vision, UART, or hardware
 - `tcp_no_ack`
-  - sends real southbound `task_cmd` over TCP JSONL
-  - does not require `task_ack`
-  - useful when only command delivery needs to be verified
 - `orchestrator_tcp`
-  - sends real southbound `task_cmd`
-  - listens for real `task_ack`
-  - can also watch orchestrator `state_blocks.jsonl`
 
-The formal runtime path is now fully inside this repository:
+## Fixed Topics
 
-- `orchestrator/orchestrator_service/mobile_gateway/`
-
-`~/mobile_gateway_cloud/cloud_mqtt_bridge.py` should no longer be treated as the main workflow.
-
-## Common Preparation
-
-Formal northbound identity and topics are now fixed:
-
-- `robot_id = SC171`
 - `robot/v1/SC171/mobile/cmd`
 - `robot/v1/SC171/mobile/ack`
 - `robot/v1/SC171/mobile/status`
 - `robot/v1/SC171/heartbeat`
 
-Start a status listener from repo root:
+These topics are fixed and unchanged.
 
-```bash
-python3 tools/mock_status_listener.py --host 127.0.0.1 --port 9102
-```
+## Recommended Startup
 
-Send commands from repo root:
+### 1. Start Orchestrator
 
-```bash
-python3 tools/mock_mobile_sender.py --host 127.0.0.1 --port 9101 fetch_object apple
-python3 tools/mock_mobile_sender.py --host 127.0.0.1 --port 9101 stop
-python3 tools/mock_mobile_sender.py --host 127.0.0.1 --port 9101 query_status
-```
-
-Formal mini-program command shape:
-
-```json
-{
-  "type": "mobile_cmd",
-  "robot_id": "SC171",
-  "cmd_id": "cmd_1234567890",
-  "session_id": "sess_1234567890",
-  "epoch": 1,
-  "cmd": "fetch_object",
-  "target": "apple",
-  "text": "拿苹果",
-  "source": "wechat_miniprogram",
-  "ts": 1713945600.0
-}
-```
-
-Backward compatibility input still accepted for tests only:
-
-```json
-{
-  "type": "FIND_AND_PICK",
-  "target": "apple"
-}
-```
-
-## Mode 1. Mock
-
-Run:
-
-```bash
-bash tools/run_mobile_gateway_mock.sh
-```
-
-Expected flow:
-
-1. MQTT-style or stdout `gateway_ack` with `kind=gateway_ack`
-2. status with `kind=status` and `state=submitted`
-3. Orchestrator-style `task_ack` or mock `task_ack` with `kind=task_ack`
-4. status with `kind=status` and `state=accepted`
-5. later progress states such as `searching`, `approaching`, `completed`, `idle`
-
-This is the default fallback mode for local regression testing.
-
-## Mode 2. tcp_no_ack
-
-Use this when you want to validate that `mobile_gateway` emits a correctly shaped `task_cmd`, but real orchestrator ACK fan-in is not ready yet.
-
-Run:
-
-```bash
-bash tools/run_mobile_gateway_tcp_no_ack.sh
-```
-
-Important environment variables:
-
-```bash
-MOBILE_GATEWAY_BACKEND=tcp_no_ack
-MOBILE_GATEWAY_ORCH_TASK_CMD_HOST=127.0.0.1
-MOBILE_GATEWAY_ORCH_TASK_CMD_PORT=9001
-MOBILE_GATEWAY_ORCH_TASK_ACK_TRANSPORT=disabled
-MOBILE_GATEWAY_STATE_BLOCKS_PATH=/path/to/state_blocks.jsonl
-```
-
-Recommended usage:
-
-- pair this mode with a separate collector or orchestrator dry-run instance
-- use it when `task_ack_out` cannot yet be redirected to the gateway
-
-## Mode 3. orchestrator_tcp
-
-This is the intended real bridge mode.
-
-Start Orchestrator first:
+From repo root:
 
 ```bash
 cd /home/aidlux/embedded_com/orchestrator
@@ -132,111 +47,127 @@ export ORCH_TTS_EVENT_OUT_TRANSPORT=disabled
 python3 -m orchestrator_service.app.main
 ```
 
-Then start the formal gateway with either fixed command below.
+### 2. Start Mobile Gateway
 
-From repo root:
+Formal recommended command:
 
 ```bash
 cd /home/aidlux/embedded_com
 PYTHONPATH=/home/aidlux/embedded_com/orchestrator \
-python3 -m orchestrator_service.mobile_gateway.runtime.service \
+/usr/bin/python3 -m orchestrator_service.mobile_gateway.runtime.service \
   --config configs/mobile_gateway.mqtt.yaml
 ```
 
-From `orchestrator/`:
+`configs/mobile_gateway.mqtt.yaml` is a local board-side runtime file and should not contain secrets in git commits.
 
-```bash
-cd /home/aidlux/embedded_com/orchestrator
-python3 -m orchestrator_service.mobile_gateway.runtime.service \
-  --config ../configs/mobile_gateway.mqtt.yaml
+## Configuration Files
+
+- example config: `configs/mobile_gateway.mqtt.example.yaml`
+- local board config: `configs/mobile_gateway.mqtt.yaml`
+- example env: `configs/mqtt_cloud.env.example`
+
+Important runtime knobs:
+
+- `runtime.mode`
+- `runtime.log_level`
+- `runtime.heartbeat_log_interval_s`
+- `runtime.suppress_heartbeat_success_log`
+- `runtime.enable_raw_mqtt_debug`
+- `runtime.enable_legacy_command_compat`
+- `runtime.cmd_dedup_cache_size`
+
+## Formal Command Contract
+
+Formal mini-program commands:
+
+- `fetch_object`
+- `stop`
+
+Example:
+
+```json
+{
+  "type": "mobile_cmd",
+  "robot_id": "SC171",
+  "cmd_id": "wx_1777293209382",
+  "session_id": "wx_session_001",
+  "epoch": 1,
+  "cmd": "fetch_object",
+  "target": "apple",
+  "text": "拿苹果",
+  "source": "wechat_miniprogram",
+  "ts": 1777293208.5
+}
 ```
 
-Optional state snapshot bridge:
+## ACK, Status, Heartbeat Semantics
 
-```bash
-MOBILE_GATEWAY_STATE_BLOCKS_PATH=/abs/path/to/orchestrator/runs/run_xxx/state_blocks.jsonl
+`gateway_ack`
+
+- gateway has accepted or rejected the northbound command format
+
+`task_ack`
+
+- Orchestrator has accepted or rejected the southbound task
+
+`status`
+
+- unified mini-program progress stream
+- suitable for direct UI message display
+
+`heartbeat`
+
+- liveness and current mode/state summary
+
+## Production Log Strategy
+
+Production logs keep:
+
+- `gateway online`
+- `mqtt connected`
+- `mqtt disconnected`
+- `cmd received`
+- `gateway_ack sent`
+- `task_cmd forwarded`
+- `task_ack forwarded`
+- `status changed`
+- `heartbeat running`
+- `error summary`
+
+Production logs suppress:
+
+- per-heartbeat MQTT publish success lines
+- raw MQTT payload dumps
+- excessive success chatter for every low-level publish
+
+Heartbeat summary style:
+
+```text
+heartbeat running | count=30 | last_state=idle
 ```
 
-If `MOBILE_GATEWAY_STATE_BLOCKS_PATH` is empty, the gateway falls back to scanning the configured orchestrator runs directory for the latest `run_*/state_blocks.jsonl`.
+## Debug Log Strategy
 
-## Real Orchestrator Notes
+Debug mode additionally keeps:
 
-The repository already contains dry-run helpers:
+- raw inbound MQTT payload
+- raw outbound MQTT payload
+- backend diagnostic fields
+- compatibility behavior visibility
 
-- `start_robot_stack.sh` with `STACK_PROFILE="dryrun"`
-- `orchestrator/orchestrator_nohw_demo.py`
+## Duplicate `cmd_id` Behavior
 
-In dry-run mode, orchestrator can avoid real UART writes by setting:
+The gateway keeps a recent `cmd_id` cache, default `64`.
 
-```bash
-ORCH_SERIAL_DRY_RUN=1
-```
+When a duplicate command arrives:
 
-This still keeps the real `task_cmd` / `task_ack` JSONL control surface alive.
+- `gateway_ack` can be sent again
+- no second forward to Orchestrator
+- no duplicate status spam
 
-## Smoke Sender
+## Acceptance With Mini-Program
 
-To emit a small fixed command sequence to the gateway:
-
-```bash
-python3 tools/smoke_mobile_to_orchestrator.py --host 127.0.0.1 --port 9101
-```
-
-The sequence is:
-
-1. `query_status`
-2. `fetch_object apple`
-3. `stop`
-4. `go_home`
-
-The smoke sender already emits the formal command format:
-
-- `type=mobile_cmd`
-- `robot_id=SC171`
-- `cmd_id=cmd_xxx`
-- `source=wechat_miniprogram`
-
-When bridge mode is healthy, the expected outbound sequence is:
-
-1. `kind=gateway_ack`
-2. `kind=status`
-3. `kind=task_ack` when real Orchestrator responds
-4. more `kind=status`
-5. periodic `kind=heartbeat`
-
-## MQTT Configuration Entry
-
-MQTT is optional and northbound only. If enabled, it reuses the same command handler and status payloads.
-
-```bash
-MOBILE_GATEWAY_MQTT_ENABLED=1
-MOBILE_GATEWAY_MQTT_BROKER_HOST=broker.example.com
-MOBILE_GATEWAY_MQTT_BROKER_PORT=443
-MOBILE_GATEWAY_MQTT_TRANSPORT=websocket
-MOBILE_GATEWAY_MQTT_USE_TLS=1
-```
-
-Config template:
-
-- `configs/mobile_gateway.mqtt.example.yaml`
-
-Real local runtime file:
-
-- `configs/mobile_gateway.mqtt.yaml`
-
-Create this file locally from the example. Do not commit it.
-
-MQTT message kinds:
-
-- `robot/v1/SC171/mobile/ack`
-  - `kind=gateway_ack`
-  - `kind=task_ack`
-- `robot/v1/SC171/mobile/status`
-  - `kind=status`
-- `robot/v1/SC171/heartbeat`
-  - `kind=heartbeat`
-
-## EMQX phone_test Example
+### Fetch Apple
 
 Publish to:
 
@@ -248,35 +179,78 @@ Payload:
 {
   "type": "mobile_cmd",
   "robot_id": "SC171",
-  "cmd_id": "cmd_demo_001",
-  "session_id": "sess_demo_001",
+  "cmd_id": "wx_1777293209382",
+  "session_id": "wx_session_001",
   "epoch": 1,
   "cmd": "fetch_object",
   "target": "apple",
   "text": "拿苹果",
   "source": "wechat_miniprogram",
-  "ts": 1713945600.0
+  "ts": 1777293208.5
 }
 ```
 
-Expected outbound sequence:
+Expected northbound sequence:
 
-1. `robot/v1/SC171/mobile/ack` with `kind=gateway_ack`
-2. `robot/v1/SC171/mobile/ack` with `kind=task_ack`
-3. `robot/v1/SC171/mobile/status` with `kind=status`
-4. `robot/v1/SC171/heartbeat` with `kind=heartbeat`
+1. `mobile/ack` with `kind=gateway_ack`
+2. `mobile/ack` with `kind=task_ack`
+3. `mobile/status` with `state=submitted`
+4. `mobile/status` with `state=accepted`
+5. `mobile/status` with `state=searching`
+6. later `running`, `idle`, or `error` depending on backend progress
 
-## Tests
+### Stop
 
-Run the current regression set from repo root:
+Publish:
 
-```bash
-python3 -m unittest tests.test_command_protocol tests.test_gateway_mapping tests.test_mock_flow
-python3 -m unittest tests.test_real_protocol_mapping
+```json
+{
+  "type": "mobile_cmd",
+  "robot_id": "SC171",
+  "cmd_id": "wx_1777293209383",
+  "session_id": "wx_session_001",
+  "epoch": 1,
+  "cmd": "stop",
+  "source": "wechat_miniprogram",
+  "ts": 1777293215.0
+}
 ```
 
-## Current Limits
+Expected northbound sequence:
 
-- `resume` and `retry_search` are high-level task replays, not fine-grained orchestrator resume
-- `orchestrator_tcp` assumes the gateway can become the `task_ack_out` sink or observe state snapshots
-- MQTT support is a real adapter skeleton, but it still requires `paho-mqtt` to be installed before connecting
+1. `mobile/ack` with `kind=gateway_ack`
+2. `mobile/ack` with `kind=task_ack`
+3. `mobile/status` showing `任务已停止`
+4. `heartbeat` continues with `state=stopped` or later `idle`
+
+## Diagnostic Tools
+
+These scripts are still kept and are now documented as diagnostics, not production entrypoints.
+
+In `tools/`:
+
+- `mock_mobile_sender.py`
+- `mock_status_listener.py`
+- `smoke_mobile_to_orchestrator.py`
+- `run_mobile_gateway_mock.sh`
+- `run_mobile_gateway_tcp_no_ack.sh`
+- `run_mobile_gateway_real_tcp.sh`
+
+In `orchestrator/orchestrator_service/examples/`:
+
+- `mock_task_cmd_sender.py`
+- `mock_vision_obs_sender.py`
+- `control_module_smoke_test.py`
+- `uart_protocol_smoke_test.py`
+
+## Test Command
+
+Run from repo root:
+
+```bash
+python3 -m unittest \
+  tests.test_command_protocol \
+  tests.test_gateway_mapping \
+  tests.test_mock_flow \
+  tests.test_real_protocol_mapping
+```

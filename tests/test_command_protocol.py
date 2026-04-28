@@ -56,6 +56,15 @@ class CommandProtocolTest(unittest.TestCase):
         self.assertEqual(cmd.cmd, "fetch_object")
         self.assertEqual(cmd.robot_id, ROBOT_ID)
 
+    def test_legacy_find_and_pick_can_be_disabled(self) -> None:
+        with self.assertRaises(MobileProtocolError) as ctx:
+            MobileCommand.from_dict(
+                {"type": "FIND_AND_PICK", "target": "apple"},
+                default_robot_id=ROBOT_ID,
+                allow_legacy_command_compat=False,
+            )
+        self.assertEqual(ctx.exception.error_code, ERROR_CODES["invalid_command"])
+
 
 if __name__ == "__main__":
     unittest.main()

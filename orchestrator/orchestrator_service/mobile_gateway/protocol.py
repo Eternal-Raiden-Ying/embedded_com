@@ -67,11 +67,12 @@ class MobileCommand:
         payload: Dict[str, Any],
         default_robot_id: str,
         supported_targets: Optional[Set[str]] = None,
+        allow_legacy_command_compat: bool = True,
     ) -> "MobileCommand":
         supported = set(supported_targets or SUPPORTED_TARGETS)
         legacy_type = str(payload.get("type", "")).strip().upper()
         cmd = str(payload.get("cmd", "")).strip().lower()
-        if not cmd and legacy_type == "FIND_AND_PICK":
+        if not cmd and allow_legacy_command_compat and legacy_type == "FIND_AND_PICK":
             cmd = "fetch_object"
         if cmd not in SUPPORTED_COMMANDS:
             raise MobileProtocolError(f"unsupported cmd: {cmd!r}", ERROR_CODES["invalid_command"])
