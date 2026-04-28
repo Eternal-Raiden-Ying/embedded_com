@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 import numpy as np
+
+from ..utils.table_roi import build_table_roi, quadrant_to_roi
 
 
 CapabilitySink = Optional[Callable[[str, Dict[str, Any]], None]]
@@ -119,7 +122,15 @@ class TableEdgeManager:
         except Exception:
             pass
 
-    def _default_result(self, *, depth_valid: bool, reason: str, frame_seq: int) -> Dict[str, Any]:
+    def _default_result(
+        self,
+        *,
+        depth_valid: bool,
+        reason: str,
+        frame_seq: int,
+        roi_meta: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        roi = self._roi_payload(roi_meta=roi_meta)
         return {
             "table_found": False,
             "edge_found": False,
@@ -136,19 +147,109 @@ class TableEdgeManager:
             "source": "vision_table_edge_manager",
             "reason": str(reason or ""),
             "target_dist_m": float(self._target_dist_m),
+            **roi,
             "type": "table_edge_obs",
         }
 
-    def _process_depth(self, depth_frame: np.ndarray, frame_seq: int) -> Dict[str, Any]:
-        if self._detector is None:
-            return self._default_result(depth_valid=True, reason=self._detector_error or "detector_unavailable", frame_seq=frame_seq)
+    def _static_roi(self) -> Optional[list[int]]:
+        cfg = self._detector_cfg
+        if cfg is None:
+            return None
+        return [
+            int(getattr(cfg, "roi_x0", 0) or 0),
+            int(getattr(cfg, "roi_y0", 0) or 0),
+            int(getattr(cfg, "roi_x1", 0) or 0),
+            int(getattr(cfg, "roi_y1", 0) or 0),
+        ]
+
+    @staticmethod
+    def _manual_static_roi_enabled() -> bool:
+        raw = os.getenv("VISTA_TABLE_EDGE_STATIC_ROI", os.getenv("VISTA_FORCE_STATIC_EDGE_ROI", "0"))
+        return str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
+
+    def _local_perception(self) -> Dict[str, Any]:
+        scheduler = self._scheduler
+        if scheduler is None:
+            return {}
         try:
-            result, _debug = self._detector.process_depth(depth_frame)
+            value = scheduler.read_result("local_perception", default={}) or {}
+        except Exception:
+            return {}
+        return dict(value) if isinstance(value, dict) else {}
+
+    def _select_roi(self, depth_frame: Optional[np.ndarray]) -> Dict[str, Any]:
+        fallback = self._static_roi()
+        local = self._local_perception()
+        depth_shape = getattr(depth_frame, "shape", None)
+        roi_meta = build_table_roi(local, local.get("rgb_shape"), depth_shape, fallback)
+        manual_static = self._manual_static_roi_enabled()
+        quadrant = roi_meta.get("table_quadrant")
+        if manual_static:
+            roi_source = "manual_static"
+            depth_edge_roi = fallback
+        elif quadrant:
+            if depth_shape is not None and len(depth_shape) >= 2:
+                depth_edge_roi = quadrant_to_roi(quadrant, int(depth_shape[1]), int(depth_shape[0]))
+            else:
+                depth_edge_roi = roi_meta.get("depth_edge_roi")
+            roi_source = "yolo_table_quadrant"
+        else:
+            depth_edge_roi = fallback
+            roi_source = "static_fallback"
+        roi_meta["depth_edge_roi"] = depth_edge_roi
+        roi_meta["roi_source"] = roi_source
+        return roi_meta
+
+    def _roi_payload(self, roi_box=None, roi_meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        cfg = self._detector_cfg
+        if roi_box is None:
+            roi_box = (roi_meta or {}).get("depth_edge_roi") or self._static_roi()
+        roi = [int(v) for v in roi_box] if roi_box is not None else None
+        meta = dict(roi_meta or {})
+        payload: Dict[str, Any] = {
+            "table_bbox": meta.get("table_bbox"),
+            "table_quadrant": meta.get("table_quadrant"),
+            "rgb_search_roi": meta.get("rgb_search_roi"),
+            "depth_edge_roi": roi,
+            "table_edge_roi": roi,
+            "edge_roi": roi,
+            "roi_source": meta.get("roi_source") or "static_fallback",
+            "roi_format": "xyxy",
+        }
+        if cfg is not None:
+            payload.update(
+                {
+                    "depth_z_min_m": float(getattr(cfg, "z_min", 0.0) or 0.0),
+                    "depth_z_max_m": float(getattr(cfg, "z_max", 0.0) or 0.0),
+                    "table_y_min_m": float(getattr(cfg, "table_y_min", 0.0) or 0.0),
+                    "table_y_max_m": float(getattr(cfg, "table_y_max", 0.0) or 0.0),
+                }
+            )
+        return payload
+
+    def _process_depth(self, depth_frame: np.ndarray, frame_seq: int) -> Dict[str, Any]:
+        roi_meta = self._select_roi(depth_frame)
+        roi_override = roi_meta.get("depth_edge_roi") if roi_meta.get("roi_source") != "static_fallback" else None
+        if self._detector is None:
+            return self._default_result(
+                depth_valid=True,
+                reason=self._detector_error or "detector_unavailable",
+                frame_seq=frame_seq,
+                roi_meta=roi_meta,
+            )
+        try:
+            result, _debug = self._detector.process_depth(depth_frame, roi_override=roi_override)
         except Exception as exc:
             self.log.debug("table edge detect failed | error=%s", exc)
-            return self._default_result(depth_valid=True, reason=f"detect_failed:{exc}", frame_seq=frame_seq)
+            return self._default_result(depth_valid=True, reason=f"detect_failed:{exc}", frame_seq=frame_seq, roi_meta=roi_meta)
+        roi_box = None
+        if isinstance(_debug, dict):
+            roi_box = _debug.get("roi_box")
+        roi_payload = self._roi_payload(roi_box, roi_meta)
+        table_points = int(getattr(result, "table_point_count", 0) or 0)
+        all_points = int(getattr(result, "point_count", 0) or 0)
         return {
-            "table_found": bool(getattr(result, "table_point_count", 0) > 0),
+            "table_found": bool(table_points > 0),
             "edge_found": bool(getattr(result, "edge_found", False)),
             "confidence": float(getattr(result, "edge_confidence", 0.0) or 0.0),
             "yaw_err_rad": float(getattr(result, "yaw_err_rad", 0.0)) if bool(getattr(result, "edge_found", False)) else None,
@@ -156,12 +257,17 @@ class TableEdgeManager:
             "edge_k": getattr(result, "line_k", None),
             "edge_b": getattr(result, "line_b", None),
             "depth_valid": True,
-            "point_count": int(getattr(result, "point_count", 0) or 0),
-            "table_point_count": int(getattr(result, "table_point_count", 0) or 0),
+            "point_count": all_points,
+            "valid_edge_points": all_points,
+            "table_point_count": table_points,
+            "edge_inlier_count": table_points,
+            "selected_edge": bool(getattr(result, "edge_found", False)),
+            "near_edge": bool(getattr(result, "edge_found", False)),
             "frame_id": int(self._frame_id),
             "frame_seq": int(frame_seq),
             "source": "vision_table_edge_manager",
             "target_dist_m": float(self._target_dist_m),
+            **roi_payload,
             "type": "table_edge_obs",
         }
 
@@ -184,9 +290,19 @@ class TableEdgeManager:
             self._frame_id += 1
             depth = frames.get("depth")
             if not isinstance(depth, np.ndarray) or depth.size <= 0:
-                payload = self._default_result(depth_valid=False, reason="depth_frame_missing", frame_seq=seq)
+                payload = self._default_result(
+                    depth_valid=False,
+                    reason="depth_frame_missing",
+                    frame_seq=seq,
+                    roi_meta=self._select_roi(None),
+                )
             elif depth.ndim != 2:
-                payload = self._default_result(depth_valid=False, reason="depth_frame_not_2d", frame_seq=seq)
+                payload = self._default_result(
+                    depth_valid=False,
+                    reason="depth_frame_not_2d",
+                    frame_seq=seq,
+                    roi_meta=self._select_roi(depth),
+                )
             else:
                 payload = self._process_depth(depth, seq)
             self._publish_result("table_edge_obs", payload)

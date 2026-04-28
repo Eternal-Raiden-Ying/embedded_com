@@ -7,6 +7,13 @@ from typing import Dict
 from ..backend.mode_profiles import ModeProfile, PreviewProfile, RemoteProfile
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return bool(default)
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def build_default_stage_entry_modes() -> Dict[str, str]:
     """Return the recommended initial mode for each business stage."""
     return {
@@ -19,6 +26,9 @@ def build_default_stage_entry_modes() -> Dict[str, str]:
 
 def build_default_mode_profiles(active_model: str) -> Dict[str, ModeProfile]:
     """Build the initial mode profile set for VISTA."""
+    table_bbox_enabled = _env_bool("VISTA_TABLE_BBOX_ENABLE", False)
+    depth_cameras = ("rgb", "depth") if table_bbox_enabled else ("depth",)
+    table_model = str(os.getenv("VISTA_TABLE_MODEL", "yolov7_detect") or "yolov7_detect").strip()
     return {
         "IDLE": ModeProfile(
             name="IDLE",
@@ -47,15 +57,15 @@ def build_default_mode_profiles(active_model: str) -> Dict[str, ModeProfile]:
         ),
         "DEPTH_PERCEPTION": ModeProfile(
             name="DEPTH_PERCEPTION",
-            enabled_cameras=("depth",),
-            predictor_enabled=False,
-            predictor_model=None,
+            enabled_cameras=depth_cameras,
+            predictor_enabled=table_bbox_enabled,
+            predictor_model=table_model if table_bbox_enabled else None,
             preview=PreviewProfile(enabled=True, sink_name="opencv"),
             release_cooldown_s=2.0,
             metadata={
                 "contract": {
-                    "cameras": ["depth"],
-                    "predictor": "disabled",
+                    "cameras": list(depth_cameras),
+                    "predictor": "optional_table_bbox" if table_bbox_enabled else "disabled",
                     "remote": "disabled",
                     "perception": "table_edge_obs",
                 }

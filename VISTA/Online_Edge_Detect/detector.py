@@ -57,11 +57,18 @@ class OnlineTableEdgeDetector:
         self.target_dist_m = float(target_dist_m)
         self._rng = np.random.default_rng(int(cfg.random_seed))
 
-    def _preprocess_depth(self, depth_img: np.ndarray):
-        y0 = max(0, int(self.cfg.roi_y0))
-        y1 = min(depth_img.shape[0], int(self.cfg.roi_y1))
-        x0 = max(0, int(self.cfg.roi_x0))
-        x1 = min(depth_img.shape[1], int(self.cfg.roi_x1))
+    def _preprocess_depth(self, depth_img: np.ndarray, roi_override=None):
+        if roi_override is not None:
+            try:
+                ox0, oy0, ox1, oy1 = [int(round(float(v))) for v in roi_override[:4]]
+            except Exception:
+                ox0, oy0, ox1, oy1 = self.cfg.roi_x0, self.cfg.roi_y0, self.cfg.roi_x1, self.cfg.roi_y1
+        else:
+            ox0, oy0, ox1, oy1 = self.cfg.roi_x0, self.cfg.roi_y0, self.cfg.roi_x1, self.cfg.roi_y1
+        y0 = max(0, int(oy0))
+        y1 = min(depth_img.shape[0], int(oy1))
+        x0 = max(0, int(ox0))
+        x1 = min(depth_img.shape[1], int(ox1))
         if y1 <= y0 or x1 <= x0:
             raise ValueError("invalid ROI range")
 
@@ -131,8 +138,8 @@ class OnlineTableEdgeDetector:
         conf = float(best_count) / float(max(1, n))
         return True, float(yaw_err), float(dist_err), float(conf), (float(k), float(b))
 
-    def process_depth(self, depth_image_16bit: np.ndarray):
-        valid_mask, depth_meters, roi_box = self._preprocess_depth(depth_image_16bit)
+    def process_depth(self, depth_image_16bit: np.ndarray, roi_override=None):
+        valid_mask, depth_meters, roi_box = self._preprocess_depth(depth_image_16bit, roi_override=roi_override)
         pc_cam = self._depth_to_3d(depth_meters, valid_mask, roi_box)
         if len(pc_cam) < int(self.cfg.min_all_points):
             return EdgeDetectResult(False, 0.0, 0.0, 0.0, point_count=len(pc_cam), table_point_count=0), {

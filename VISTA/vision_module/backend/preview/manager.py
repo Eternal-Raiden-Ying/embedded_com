@@ -34,6 +34,8 @@ class PreviewManager:
         self._worker_interval_s = 0.02
         self._last_frame_seq = 0
         self._exit_requested = False
+        self._last_source_key = ""
+        self._last_table_summary_ts = 0.0
 
     def _emit(self, action: str, **fields: Any) -> None:
         if self._capability_sink is None:
@@ -93,7 +95,21 @@ class PreviewManager:
                 self._worker_stop.wait(timeout=self._worker_interval_s)
                 continue
             status = dict(scheduler.read_result("runtime_status", default={}) or {})
+            frame_meta = dict(scheduler.read_result("frame_meta", default={}) or {})
             local = dict(scheduler.read_result("local_perception", default={}) or {})
+            table_edge = dict(scheduler.read_result("table_edge_obs", default={}) or {})
+            target_obs = dict(scheduler.read_result("target_obs", default={}) or {})
+            now = time.time()
+            cameras = sorted(str(k) for k in frames.keys())
+            source_key = ",".join(cameras) or "none"
+            if source_key != self._last_source_key:
+                self._last_source_key = source_key
+                if self.logger is not None:
+                    self.logger.info(
+                        "preview source | cameras=%s layout=%s",
+                        source_key,
+                        getattr(self.sink, "layout", "default") if self.sink is not None else "none",
+                    )
             lines = [
                 f"stage={str(status.get('stage') or 'IDLE').upper()}",
                 f"mode={str(status.get('mode') or 'IDLE').upper()}",
@@ -106,16 +122,55 @@ class PreviewManager:
             req_id = status.get("req_id")
             if req_id:
                 lines.append(f"req={req_id}")
+            if table_edge:
+                found = bool(table_edge.get("table_found", table_edge.get("found", False)))
+                edge_found = bool(table_edge.get("edge_found", False))
+                conf = float(table_edge.get("confidence", 0.0) or 0.0)
+                yaw = table_edge.get("yaw_err_rad")
+                dist = table_edge.get("dist_err_m")
+                reason = str(table_edge.get("reason") or "").strip()
+                lines.append(f"table found={int(found)} edge={int(edge_found)} conf={conf:.2f}")
+                if yaw is not None or dist is not None:
+                    lines.append(f"yaw={float(yaw or 0.0):+.3f} dist={float(dist or 0.0):+.3f}m")
+                if reason:
+                    lines.append(f"reason={reason[:42]}")
+                if now - self._last_table_summary_ts >= 1.0:
+                    self._last_table_summary_ts = now
+                    if self.logger is not None:
+                        self.logger.info(
+                            "table_edge_obs summary | found=%s edge_found=%s confidence=%.3f yaw_err=%s dist_err=%s points=%s table_points=%s roi_source=%s table_quadrant=%s depth_edge_roi=%s reason=%s",
+                            found,
+                            edge_found,
+                            conf,
+                            table_edge.get("yaw_err_rad"),
+                            table_edge.get("dist_err_m"),
+                            table_edge.get("point_count"),
+                            table_edge.get("table_point_count"),
+                            table_edge.get("roi_source"),
+                            table_edge.get("table_quadrant"),
+                            table_edge.get("depth_edge_roi") or table_edge.get("edge_roi"),
+                            reason or "",
+                        )
+            if not target_obs:
+                lines.append("target_obs=unavailable")
             ok = self.render(
                 PreviewFrame(
-                    ts=time.time(),
-                    image=image,
+                    ts=now,
+                    image=dict(frames),
                     stage=str(status.get("stage") or "IDLE").upper(),
                     mode=str(status.get("mode") or "IDLE").upper(),
                     overlay=PreviewOverlay(
                         title="VISTA Preview",
                         lines=lines,
-                        metadata={"frame_seq": seq},
+                        metadata={
+                            "frame_seq": seq,
+                            "frame_meta": frame_meta,
+                            "runtime_status": status,
+                            "local_perception": local,
+                            "table_edge_obs": table_edge,
+                            "target_obs": target_obs,
+                            "source_cameras": cameras,
+                        },
                     ),
                 )
             )
@@ -147,6 +202,11 @@ class PreviewManager:
         self.enabled = True
         if self.sink is not None:
             self.sink.open()
+        if self.logger is not None:
+            self.logger.info(
+                "preview started | sink=%s",
+                getattr(self.sink, "sink_name", "unknown") if self.sink is not None else "none",
+            )
         self._emit("enabled", enabled=True, sink_name=getattr(self.sink, "sink_name", "unknown"))
         return True
 
@@ -157,6 +217,11 @@ class PreviewManager:
         self.enabled = False
         if self.sink is not None:
             self.sink.close()
+        if self.logger is not None:
+            self.logger.info(
+                "preview disabled | sink=%s",
+                getattr(self.sink, "sink_name", "unknown") if self.sink is not None else "none",
+            )
         self._emit("disabled", enabled=False, sink_name=getattr(self.sink, "sink_name", "unknown"))
         return True
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from threading import RLock
@@ -13,6 +14,7 @@ from .predictor import QNN_YOLO_Dectec_Predictor, QNN_YOLO_Segment_Predictor
 from .predictor.base import IPredictor
 from .predictor.mock import MockPredictor
 from ..config.schema import VisionServiceConfig
+from ..utils.table_roi import build_table_roi, find_table_bbox
 
 
 CapabilitySink = Optional[Callable[[str, str, Dict[str, Any]], None]]
@@ -45,6 +47,45 @@ class PredictorManager:
 
     def _use_placeholder(self) -> bool:
         return bool(getattr(self.cfg.runtime, "capability_placeholder", False))
+
+    @staticmethod
+    def _env_bool(name: str, default: bool = False) -> bool:
+        raw = os.getenv(name)
+        if raw is None:
+            return bool(default)
+        return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _plain_list(value: Any) -> list:
+        if value is None:
+            return []
+        try:
+            return value.tolist()
+        except Exception:
+            pass
+        try:
+            return list(value)
+        except Exception:
+            return []
+
+    @classmethod
+    def _mock_table_bbox(cls, rgb_shape: Any) -> Optional[list]:
+        raw = os.getenv("VISTA_MOCK_TABLE_BBOX")
+        parsed = find_table_bbox({"mock_table_bbox": raw}) if raw else None
+        if parsed is not None:
+            return parsed
+        if not cls._env_bool("VISTA_MOCK_TABLE_BBOX", False):
+            return None
+        if not isinstance(rgb_shape, (list, tuple)) or len(rgb_shape) < 2:
+            return None
+        try:
+            h = int(rgb_shape[0])
+            w = int(rgb_shape[1])
+        except Exception:
+            return None
+        if h <= 0 or w <= 0:
+            return None
+        return [w // 4, h // 2, (w * 3) // 4, (h * 9) // 10]
 
     def _emit(self, action: str, model_name: Optional[str], **fields: Any) -> None:
         if self._capability_sink is None:
@@ -121,6 +162,10 @@ class PredictorManager:
                         "infer_boxes": [],
                         "infer_masks": [],
                         "rgb_shape": None,
+                        "table_bbox": None,
+                        "table_quadrant": None,
+                        "rgb_search_roi": None,
+                        "table_roi_source": "yolo_unavailable",
                     },
                 )
                 self._worker_stop.wait(timeout=self._worker_interval_s)
@@ -145,15 +190,35 @@ class PredictorManager:
             if self.inference_enabled and rgb is not None and self.is_ready():
                 boxes, masks = self.predict_frame(rgb)
 
+            boxes_list = self._plain_list(boxes)
+            masks_list = self._plain_list(masks)
+            roi_input = {"infer_boxes": boxes_list, "rgb_shape": rgb_shape}
+            table_bbox = find_table_bbox(roi_input)
+            table_source = "yolo_table_bbox" if table_bbox is not None else "yolo_unavailable"
+            if table_bbox is not None:
+                roi_input["table_bbox"] = table_bbox
+            else:
+                mock_bbox = self._mock_table_bbox(rgb_shape)
+                if mock_bbox is not None:
+                    roi_input["mock_table_bbox"] = mock_bbox
+                    table_bbox = find_table_bbox(roi_input)
+                    table_source = "mock_table_bbox"
+            roi_meta = build_table_roi(roi_input, rgb_shape, None)
+            table_bbox_payload = roi_meta.get("table_bbox")
+
             self._publish_result(
                 "local_perception",
                 {
                     "has_infer": bool(self.inference_enabled and rgb is not None and self.is_ready()),
                     "predictor_type": str(type(self.predictor).__name__) if self.predictor is not None else None,
-                    "box_count": int(len(boxes or [])),
-                    "infer_boxes": list(boxes or []),
-                    "infer_masks": list(masks or []),
+                    "box_count": int(len(boxes_list)),
+                    "infer_boxes": boxes_list,
+                    "infer_masks": masks_list,
                     "rgb_shape": rgb_shape,
+                    "table_bbox": table_bbox_payload,
+                    "table_quadrant": roi_meta.get("table_quadrant"),
+                    "rgb_search_roi": roi_meta.get("rgb_search_roi"),
+                    "table_roi_source": table_source,
                 },
             )
             self._worker_stop.wait(timeout=self._worker_interval_s)
