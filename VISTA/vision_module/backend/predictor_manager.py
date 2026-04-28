@@ -44,6 +44,7 @@ class PredictorManager:
         self._worker_interval_s = 0.02
         self._last_camera_seq = 0
         self._last_publish_ts = 0.0
+        self._last_summary_ts = 0.0
 
     def _use_placeholder(self) -> bool:
         return bool(getattr(self.cfg.runtime, "capability_placeholder", False))
@@ -205,6 +206,15 @@ class PredictorManager:
                     table_source = "mock_table_bbox"
             roi_meta = build_table_roi(roi_input, rgb_shape, None)
             table_bbox_payload = roi_meta.get("table_bbox")
+            self._log_local_summary(
+                boxes_list=boxes_list,
+                has_infer=bool(self.inference_enabled and rgb is not None and self.is_ready()),
+                rgb_shape=rgb_shape,
+                table_bbox=table_bbox_payload,
+                table_quadrant=roi_meta.get("table_quadrant"),
+                rgb_search_roi=roi_meta.get("rgb_search_roi"),
+                table_source=table_source,
+            )
 
             self._publish_result(
                 "local_perception",
@@ -222,6 +232,45 @@ class PredictorManager:
                 },
             )
             self._worker_stop.wait(timeout=self._worker_interval_s)
+
+    def _log_local_summary(
+        self,
+        *,
+        boxes_list: list,
+        has_infer: bool,
+        rgb_shape: Any,
+        table_bbox: Any,
+        table_quadrant: Any,
+        rgb_search_roi: Any,
+        table_source: str,
+    ) -> None:
+        now = time.time()
+        if now - self._last_summary_ts < 1.0:
+            return
+        self._last_summary_ts = now
+        class_ids = []
+        for row in list(boxes_list or [])[:12]:
+            try:
+                if isinstance(row, dict):
+                    cid = row.get("class_id", row.get("cls", row.get("class")))
+                elif isinstance(row, (list, tuple)) and len(row) >= 6:
+                    cid = row[5]
+                else:
+                    continue
+                class_ids.append(int(float(cid)))
+            except Exception:
+                continue
+        self.log.info(
+            "local_perception summary | has_infer=%s boxes=%s class_ids=%s rgb_shape=%s table_bbox=%s table_quadrant=%s rgb_search_roi=%s table_roi_source=%s",
+            bool(has_infer),
+            int(len(boxes_list or [])),
+            class_ids,
+            rgb_shape,
+            table_bbox,
+            table_quadrant,
+            rgb_search_roi,
+            table_source,
+        )
 
     def is_ready(self) -> bool:
         with self._lock:
