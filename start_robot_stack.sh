@@ -5,82 +5,87 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STACK_ROOT="$SCRIPT_DIR"
 
 # ======================================================
-# robot stack launcher v5 (simple edition)
-# 使用方式只保留两种：
+# robot stack launcher v6 (mobile control edition)
+# 使用方式：
 #   1) ./start_robot_stack.sh          # 开启（默认）
 #   2) ./start_robot_stack.sh stop     # 结束
+#   3) ./start_robot_stack.sh status   # 查看状态
 #
-# 平时不要记命令行参数，直接修改下面这些配置即可。
+# 当前主链路：Mobile Gateway -> Orchestrator/Controller -> VISTA
+# voice 默认不再启动；手机小程序现在是任务入口。
 # ======================================================
 
 # =========================
 # 这里改你最常用的配置
 # =========================
-VOICE_ROOT="${VOICE_ROOT:-$STACK_ROOT/Voice}"
 VISION_ROOT="${VISION_ROOT:-$STACK_ROOT/VISTA}"
 ORCH_ROOT="${ORCH_ROOT:-$STACK_ROOT/orchestrator}"
-ASR_ENV_NAME="asr"
-CONDA_SH=""
+GATEWAY_CONFIG="${GATEWAY_CONFIG:-$STACK_ROOT/configs/mobile_gateway.mqtt.yaml}"
+VISION_LD_PRELOAD="${VISION_LD_PRELOAD:-/lib/aarch64-linux-gnu/libGLdispatch.so.0}"
+VISTA_TABLE_BBOX_ENABLE="${VISTA_TABLE_BBOX_ENABLE:-0}"
+VISTA_TABLE_MODEL="${VISTA_TABLE_MODEL:-yolov7_detect}"
+VISTA_PREVIEW_RGB="${VISTA_PREVIEW_RGB:-1}"
+VISTA_MOCK_TABLE_BBOX="${VISTA_MOCK_TABLE_BBOX:-}"
 
 # 运行模式：dryrun / full
+# dryrun：不连接小车，只打印将要发送到 UART 的实际控制信号。
+# full：连接小车串口，真实下发控制。
 # STACK_PROFILE="full"
-STACK_PROFILE="dryrun"
-
-# 是否接扬声器：0=不接  1=接
-SPEAKER_ENABLED=0
+STACK_PROFILE="${STACK_PROFILE:-dryrun}"
 
 # orchestrator 是否使用 sudo：auto / 0 / 1
-# 建议：保持 auto
-ORCH_USE_SUDO="auto"
+# full 模式通常需要 sudo 访问串口；dryrun 一般不需要。
+ORCH_USE_SUDO="${ORCH_USE_SUDO:-auto}"
 
 # 串口设备（正式接车时用）
-UART_DEV="/dev/ttyHS1"
+UART_DEV="${UART_DEV:-/dev/ttyHS1}"
+UART_BAUDRATE="${UART_BAUDRATE:-115200}"
 
 # ready-check 超时时间（秒）
-READY_TIMEOUT_S=35
+READY_TIMEOUT_S="${READY_TIMEOUT_S:-35}"
 
-# STOP 后按 Ctrl+C 只退出当前摘要显示，不停止服务
-FOLLOW_ORCH_SUMMARY_AFTER_START=1
+# STOP 后按 Ctrl+C 只退出当前日志显示，不停止服务
+FOLLOW_STACK_LOGS_AFTER_START="${FOLLOW_STACK_LOGS_AFTER_START:-1}"
 
-# 当前终端默认只看状态机摘要，不打印视觉/语音日志
-ORCH_SUMMARY_PATTERN='状态切换|MODE |stop_class=|搜索超时|已发现目标|目标丢失|开始寻找|AUTOEXPLORE|AUTOSEARCH|SEARCH|RETURN|收到 STOP 命令|热待机|重新发现目标|自动搜索超时'
-LOG_TAIL_N=80
+# 当前终端显示的状态摘要和手机链路关键字
+ORCH_SUMMARY_PATTERN='状态切换|MODE |DRY_RUN|UART|stop_class=|搜索超时|已发现目标|目标丢失|开始寻找|AUTOEXPLORE|AUTOSEARCH|SEARCH|RETURN|收到 STOP 命令|热待机|重新发现目标|自动搜索超时|TASK_CMD|task_cmd|vision_req'
+GATEWAY_SUMMARY_PATTERN='gateway online|mqtt connected|mqtt disconnected|cmd received|gateway_ack sent|task_cmd forwarded|task_ack forwarded|status changed|heartbeat running|fetch_object|mobile_cmd|stop'
+VISION_SUMMARY_PATTERN='SERVICE_READY|vision runtime started|mode switched|camera enabled|model loaded|vision_obs|vision_req|target_obs|table_edge_obs|FAILED|ERROR'
+LOG_TAIL_N="${LOG_TAIL_N:-80}"
 
-# voice ready 判断：不要只靠端口，优先看日志
-VOICE_READY_PATTERN='voice service ready'
-
-# 端口配置
-STACK_PORTS="9001 9002 9003 9011 9012"
-STACK_SOCK_DIR="/tmp/robot_stack"
-VISION_READY_PORTS="9003"
-ORCH_READY_PORTS="9001 9002"
+# TCP/UDS 端口配置
+STACK_PORTS="${STACK_PORTS:-9001 9002 9003 9011 9012 9101 9102}"
+STACK_SOCK_DIR="${STACK_SOCK_DIR:-/tmp/robot_stack}"
+VISION_READY_PORTS="${VISION_READY_PORTS:-9003}"
+ORCH_READY_PORTS="${ORCH_READY_PORTS:-9001 9002}"
+GATEWAY_READY_PATTERN="${GATEWAY_READY_PATTERN:-gateway online|SERVICE_READY|mqtt connected|mqtt disabled}"
 
 # 额外等待（秒）
-VISION_READY_EXTRA_S=2
-ORCH_READY_EXTRA_S=1
-VOICE_READY_EXTRA_S=1
-STOP_GRACE_S=3
+VISION_READY_EXTRA_S="${VISION_READY_EXTRA_S:-2}"
+ORCH_READY_EXTRA_S="${ORCH_READY_EXTRA_S:-1}"
+GATEWAY_READY_EXTRA_S="${GATEWAY_READY_EXTRA_S:-1}"
+STOP_GRACE_S="${STOP_GRACE_S:-3}"
 
 # =========================
 # 以下一般不用改
 # =========================
-VOICE_LOG_DIR="$VOICE_ROOT/logs"
 VISION_LOG_DIR="$VISION_ROOT/logs"
 ORCH_LOG_DIR="$ORCH_ROOT/logs"
-VOICE_PID_DIR="$VOICE_ROOT/pids"
+GATEWAY_LOG_DIR="$STACK_ROOT/logs"
 VISION_PID_DIR="$VISION_ROOT/pids"
 ORCH_PID_DIR="$ORCH_ROOT/pids"
+GATEWAY_PID_DIR="$STACK_ROOT/pids"
 
-VOICE_PID_FILE="$VOICE_PID_DIR/voice.pid"
 VISION_PID_FILE="$VISION_PID_DIR/vision.pid"
 ORCH_PID_FILE="$ORCH_PID_DIR/orchestrator.pid"
+GATEWAY_PID_FILE="$GATEWAY_PID_DIR/mobile_gateway.pid"
 
-VOICE_LOG_FILE="$VOICE_LOG_DIR/voice.out"
 VISION_LOG_FILE="$VISION_LOG_DIR/vision.out"
 ORCH_LOG_FILE="$ORCH_LOG_DIR/orchestrator.out"
+GATEWAY_LOG_FILE="$GATEWAY_LOG_DIR/mobile_gateway.out"
 
-mkdir -p "$VOICE_LOG_DIR" "$VISION_LOG_DIR" "$ORCH_LOG_DIR" \
-         "$VOICE_PID_DIR" "$VISION_PID_DIR" "$ORCH_PID_DIR" "$STACK_SOCK_DIR"
+mkdir -p "$VISION_LOG_DIR" "$ORCH_LOG_DIR" "$GATEWAY_LOG_DIR" \
+         "$VISION_PID_DIR" "$ORCH_PID_DIR" "$GATEWAY_PID_DIR" "$STACK_SOCK_DIR"
 
 # ---------- pretty output ----------
 if [[ -t 1 ]]; then
@@ -104,7 +109,17 @@ mark() {
   printf '%b[%s]%b %s\n' "$color" "$tag" "$C_RESET" "$*"
 }
 
-headline() { printf '\n%b== %s ==%b\n' "$C_BOLD$C_BLUE" "$*" "$C_RESET"; }
+divider() {
+  printf '%b%s%b\n' "$C_BLUE" "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" "$C_RESET"
+}
+
+headline() {
+  printf '\n'
+  divider
+  printf '%b== %s ==%b\n' "$C_BOLD$C_BLUE" "$*" "$C_RESET"
+  divider
+}
+
 log() { mark note "$*"; }
 warn() { mark warn "$*" >&2; }
 die() { mark err "$*" >&2; exit 1; }
@@ -115,43 +130,35 @@ apply_profile_defaults() {
       ORCH_SERIAL_DRY_RUN=1
       ORCH_TTS_EVENT_OUT_TRANSPORT="disabled"
       ORCH_DRY_RUN_ECHO_STDOUT=1
-      VOICE_TASK_SEND_MODE="oneshot"
       ;;
     full)
       ORCH_SERIAL_DRY_RUN=0
-      ORCH_TTS_EVENT_OUT_TRANSPORT="tcp"
+      ORCH_TTS_EVENT_OUT_TRANSPORT="disabled"
       ORCH_DRY_RUN_ECHO_STDOUT=0
-      VOICE_TASK_SEND_MODE="oneshot"
       ;;
     *)
       die "STACK_PROFILE 只支持 dryrun/full，当前=$STACK_PROFILE"
       ;;
   esac
 
-  if [[ "$SPEAKER_ENABLED" == "1" ]]; then
-    VOICE_TEST_PROFILE="normal"
-    VOICE_DISABLE_TTS=0
-    VOICE_TTS_EVENT_TRANSPORT="tcp"
-  else
-    VOICE_TEST_PROFILE="nospeaker"
-    VOICE_DISABLE_TTS=1
-    VOICE_TTS_EVENT_TRANSPORT="disabled"
-  fi
-
   PYTHONUNBUFFERED=1
 }
 
 show_banner() {
-  headline "robot stack controller v5"
-  printf '%bprofile%b      : %s\n' "$C_BOLD" "$C_RESET" "$STACK_PROFILE"
-  printf '%bspeaker%b      : %s\n' "$C_BOLD" "$C_RESET" "$SPEAKER_ENABLED"
-  printf '%bvoice root%b   : %s\n' "$C_BOLD" "$C_RESET" "$VOICE_ROOT"
-  printf '%bvision root%b  : %s\n' "$C_BOLD" "$C_RESET" "$VISION_ROOT"
-  printf '%borch root%b    : %s\n' "$C_BOLD" "$C_RESET" "$ORCH_ROOT"
-  printf '%bready timeout%b: %ss\n' "$C_BOLD" "$C_RESET" "$READY_TIMEOUT_S"
-  printf '%bsudo%b         : requested=%s effective=%s\n' "$C_BOLD" "$C_RESET" "$ORCH_USE_SUDO" "$([[ $(orch_use_sudo_effective; echo $?) -eq 0 ]] && echo 1 || echo 0)"
-  printf '%bvoice profile%b: %s\n' "$C_BOLD" "$C_RESET" "$VOICE_TEST_PROFILE"
-  printf '%bdry-run%b      : ORCH_SERIAL_DRY_RUN=%s  ORCH_TTS_EVENT_OUT_TRANSPORT=%s\n' "$C_BOLD" "$C_RESET" "$ORCH_SERIAL_DRY_RUN" "$ORCH_TTS_EVENT_OUT_TRANSPORT"
+  headline "robot stack controller v6"
+  printf '%bprofile%b        : %s\n' "$C_BOLD" "$C_RESET" "$STACK_PROFILE"
+  printf '%bmobile input%b   : mobile_gateway (voice disabled)\n' "$C_BOLD" "$C_RESET"
+  printf '%bvision root%b    : %s\n' "$C_BOLD" "$C_RESET" "$VISION_ROOT"
+  printf '%bvision preload%b : %s\n' "$C_BOLD" "$C_RESET" "${VISION_LD_PRELOAD:-<none>}"
+  printf '%btable bbox%b     : enable=%s model=%s mock=%s preview_rgb=%s\n' \
+    "$C_BOLD" "$C_RESET" "$VISTA_TABLE_BBOX_ENABLE" "$VISTA_TABLE_MODEL" "${VISTA_MOCK_TABLE_BBOX:-<none>}" "$VISTA_PREVIEW_RGB"
+  printf '%borch root%b      : %s\n' "$C_BOLD" "$C_RESET" "$ORCH_ROOT"
+  printf '%bgateway config%b : %s\n' "$C_BOLD" "$C_RESET" "$GATEWAY_CONFIG"
+  printf '%bready timeout%b  : %ss\n' "$C_BOLD" "$C_RESET" "$READY_TIMEOUT_S"
+  printf '%buart device%b    : %s @ %s\n' "$C_BOLD" "$C_RESET" "$UART_DEV" "$UART_BAUDRATE"
+  printf '%bsudo%b           : requested=%s effective=%s\n' "$C_BOLD" "$C_RESET" "$ORCH_USE_SUDO" "$([[ $(orch_use_sudo_effective; echo $?) -eq 0 ]] && echo 1 || echo 0)"
+  printf '%bdry-run%b        : ORCH_SERIAL_DRY_RUN=%s  ORCH_DRY_RUN_ECHO_STDOUT=%s\n' "$C_BOLD" "$C_RESET" "$ORCH_SERIAL_DRY_RUN" "$ORCH_DRY_RUN_ECHO_STDOUT"
+  printf '%bports%b          : %s\n' "$C_BOLD" "$C_RESET" "$STACK_PORTS"
 }
 
 path_user_writable_or_creatable() {
@@ -257,61 +264,25 @@ CMD
   mark ok "$name 已拉起: pid=$(cat "$pid_file")  log=$log_file"
 }
 
-start_voice_bg() {
-  if pid_alive "$VOICE_PID_FILE" 0; then
-    log "voice 已在运行, pid=$(cat "$VOICE_PID_FILE")"
-    return 0
-  fi
-  headline "启动 voice"
-  mark run "voice 使用 conda env=$ASR_ENV_NAME"
-  local cmd
-  cmd=$(cat <<CMD
-set -euo pipefail
-load_conda_inner() {
-  local candidates=(
-    "$CONDA_SH"
-    "/home/aidlux/env/miniconda3/etc/profile.d/conda.sh"
-    "\$HOME/miniconda3/etc/profile.d/conda.sh"
-    "\$HOME/anaconda3/etc/profile.d/conda.sh"
-    "/opt/conda/etc/profile.d/conda.sh"
-  )
-  local p
-  for p in "\${candidates[@]}"; do
-    [[ -n "\$p" ]] || continue
-    if [[ -f "\$p" ]]; then
-      source "\$p"
-      return 0
-    fi
-  done
-  echo "[voice-launch] 找不到 conda.sh" >&2
-  exit 1
-}
-load_conda_inner
-conda activate "$ASR_ENV_NAME"
-cd "$VOICE_ROOT"
-export PYTHONUNBUFFERED="$PYTHONUNBUFFERED"
-export VOICE_TASK_SEND_MODE="$VOICE_TASK_SEND_MODE"
-export VOICE_TEST_PROFILE="$VOICE_TEST_PROFILE"
-export VOICE_DISABLE_TTS="$VOICE_DISABLE_TTS"
-export VOICE_TTS_EVENT_TRANSPORT="$VOICE_TTS_EVENT_TRANSPORT"
-exec stdbuf -oL -eL python3 -m voice_service.app.main
-CMD
-)
-  launch_bg_user "voice" "$VOICE_PID_FILE" "$VOICE_LOG_FILE" "$cmd"
-}
-
 start_vision_bg() {
   if pid_alive "$VISION_PID_FILE" 0; then
     log "vision 已在运行, pid=$(cat "$VISION_PID_FILE")"
     return 0
   fi
-  headline "启动 vision"
+  headline "启动 vision / VISTA"
   mark run "vision 使用 /usr/bin/python3"
   local cmd
   cmd=$(cat <<CMD
 set -euo pipefail
 cd "$VISION_ROOT"
 export PYTHONUNBUFFERED="$PYTHONUNBUFFERED"
+export VISTA_TABLE_BBOX_ENABLE="$VISTA_TABLE_BBOX_ENABLE"
+export VISTA_TABLE_MODEL="$VISTA_TABLE_MODEL"
+export VISTA_PREVIEW_RGB="$VISTA_PREVIEW_RGB"
+export VISTA_MOCK_TABLE_BBOX="$VISTA_MOCK_TABLE_BBOX"
+if [[ -n "$VISION_LD_PRELOAD" && -e "$VISION_LD_PRELOAD" ]]; then
+  export LD_PRELOAD="$VISION_LD_PRELOAD\${LD_PRELOAD:+:\$LD_PRELOAD}"
+fi
 exec stdbuf -oL -eL /usr/bin/python3 -m vision_module.app.app
 CMD
 )
@@ -333,7 +304,7 @@ start_orch_bg() {
   else
     mark ok "orchestrator 将以普通用户方式启动"
   fi
-  headline "启动 orchestrator"
+  headline "启动 orchestrator / controller"
   mark run "orchestrator 模式=$([[ $(orch_use_sudo_effective; echo $?) -eq 0 ]] && echo sudo || echo user)  python=/usr/bin/python3"
   local cmd
   cmd=$(cat <<CMD
@@ -341,8 +312,18 @@ set -euo pipefail
 cd "$ORCH_ROOT"
 export PYTHONUNBUFFERED="$PYTHONUNBUFFERED"
 export ORCH_SERIAL_DRY_RUN="$ORCH_SERIAL_DRY_RUN"
+export ORCH_SERIAL_PORT="$UART_DEV"
+export ORCH_SERIAL_BAUDRATE="$UART_BAUDRATE"
 export ORCH_TTS_EVENT_OUT_TRANSPORT="$ORCH_TTS_EVENT_OUT_TRANSPORT"
 export ORCH_DRY_RUN_ECHO_STDOUT="$ORCH_DRY_RUN_ECHO_STDOUT"
+export ORCH_TASK_CMD_IN_HOST="127.0.0.1"
+export ORCH_TASK_CMD_IN_PORT="9001"
+export ORCH_TASK_ACK_OUT_HOST="127.0.0.1"
+export ORCH_TASK_ACK_OUT_PORT="9012"
+export ORCH_VISION_OBS_IN_HOST="127.0.0.1"
+export ORCH_VISION_OBS_IN_PORT="9002"
+export ORCH_VISION_REQ_OUT_HOST="127.0.0.1"
+export ORCH_VISION_REQ_OUT_PORT="9003"
 exec stdbuf -oL -eL /usr/bin/python3 -m orchestrator_service.app.main
 CMD
 )
@@ -351,6 +332,32 @@ CMD
   else
     launch_bg_user "orchestrator" "$ORCH_PID_FILE" "$ORCH_LOG_FILE" "$cmd"
   fi
+}
+
+start_gateway_bg() {
+  if pid_alive "$GATEWAY_PID_FILE" 0; then
+    log "mobile_gateway 已在运行, pid=$(cat "$GATEWAY_PID_FILE")"
+    return 0
+  fi
+  if [[ ! -f "$GATEWAY_CONFIG" ]]; then
+    die "找不到 mobile gateway 配置: $GATEWAY_CONFIG"
+  fi
+  headline "启动 mobile gateway"
+  mark run "gateway config=$GATEWAY_CONFIG"
+  local cmd
+  cmd=$(cat <<CMD
+set -euo pipefail
+cd "$STACK_ROOT"
+export PYTHONUNBUFFERED="$PYTHONUNBUFFERED"
+export PYTHONPATH="$ORCH_ROOT"
+export MOBILE_GATEWAY_ORCH_TASK_CMD_HOST="127.0.0.1"
+export MOBILE_GATEWAY_ORCH_TASK_CMD_PORT="9001"
+export MOBILE_GATEWAY_ORCH_TASK_ACK_HOST="127.0.0.1"
+export MOBILE_GATEWAY_ORCH_TASK_ACK_PORT="9012"
+exec stdbuf -oL -eL /usr/bin/python3 -m orchestrator_service.mobile_gateway.runtime.service --config "$GATEWAY_CONFIG"
+CMD
+)
+  launch_bg_user "mobile_gateway" "$GATEWAY_PID_FILE" "$GATEWAY_LOG_FILE" "$cmd"
 }
 
 is_port_listening() {
@@ -483,7 +490,7 @@ stop_all() {
     ensure_sudo_ready
   fi
   headline "停止与清理"
-  kill_pid_group "$VOICE_PID_FILE" 0 "voice"
+  kill_pid_group "$GATEWAY_PID_FILE" 0 "mobile_gateway"
   kill_pid_group "$VISION_PID_FILE" 0 "vision"
   kill_pid_group "$ORCH_PID_FILE" $([[ $(orch_use_sudo_effective; echo $?) -eq 0 ]] && echo 1 || echo 0) "orchestrator"
   kill_by_ports
@@ -502,17 +509,45 @@ status_one() {
 status_all() {
   headline "当前状态"
   status_one "vision" "$VISION_PID_FILE" 0 "$VISION_LOG_FILE"
-  status_one "orchestrator" "$ORCH_PID_FILE" $([[ $(orch_use_sudo_effective; echo $?) -eq 0 ]] && echo 1 || echo 0) "$ORCH_LOG_FILE"
-  status_one "voice" "$VOICE_PID_FILE" 0 "$VOICE_LOG_FILE"
+  status_one "orchestrator/controller" "$ORCH_PID_FILE" $([[ $(orch_use_sudo_effective; echo $?) -eq 0 ]] && echo 1 || echo 0) "$ORCH_LOG_FILE"
+  status_one "mobile_gateway" "$GATEWAY_PID_FILE" 0 "$GATEWAY_LOG_FILE"
 }
 
-tail_orch_summary() {
-  touch "$ORCH_LOG_FILE"
-  local pattern="$ORCH_SUMMARY_PATTERN"
-  headline "状态机摘要"
-  log "当前终端只显示状态机状态切换摘要。"
-  log "按 Ctrl+C 仅退出摘要显示，不会停止服务；需要结束时请执行：./start_robot_stack.sh stop"
-  tail -n "$LOG_TAIL_N" -F "$ORCH_LOG_FILE" | grep --line-buffered -E "$pattern" | sed -u 's/^/[orch] /'
+tail_stack_summary() {
+  touch "$ORCH_LOG_FILE" "$GATEWAY_LOG_FILE" "$VISION_LOG_FILE"
+  headline "单终端日志"
+  log "显示 mobile_gateway / orchestrator / VISTA 的关键日志。"
+  log "按 Ctrl+C 只退出日志显示，不会停止服务；需要结束时执行：./start_robot_stack.sh stop"
+  divider
+  tail -n "$LOG_TAIL_N" -F "$GATEWAY_LOG_FILE" "$ORCH_LOG_FILE" "$VISION_LOG_FILE" 2>/dev/null | \
+  awk -v orch_pat="$ORCH_SUMMARY_PATTERN" \
+      -v gw_pat="$GATEWAY_SUMMARY_PATTERN" \
+      -v vista_pat="$VISION_SUMMARY_PATTERN" '
+    /^==> .* <==$/ {
+      src=$0
+      next
+    }
+    {
+      tag="[stack]"
+      show=0
+      if (src ~ /mobile_gateway\.out/) {
+        tag="[phone-gateway]"
+        show=($0 ~ gw_pat)
+      } else if (src ~ /orchestrator\.out/) {
+        tag="[orchestrator]"
+        show=($0 ~ orch_pat)
+      } else if (src ~ /vision\.out/) {
+        tag="[vista]"
+        show=($0 ~ vista_pat)
+      }
+      if (show) {
+        if ($0 ~ /(mobile_cmd|cmd received|gateway_ack|task_ack|fetch_object|status changed|stop)/) {
+          print "-------------------- phone command path --------------------"
+        }
+        print tag " " $0
+      }
+    }
+  '
 }
 
 start_stack() {
@@ -533,20 +568,20 @@ start_stack() {
     exit 1
   fi
 
-  start_voice_bg
-  if ! wait_for_log_pattern "voice" "$VOICE_LOG_FILE" "$VOICE_READY_PATTERN" "$READY_TIMEOUT_S" "$VOICE_READY_EXTRA_S"; then
-    tail_last_logs_on_failure "voice" "$VOICE_LOG_FILE"
+  start_gateway_bg
+  if ! wait_for_log_pattern "mobile_gateway" "$GATEWAY_LOG_FILE" "$GATEWAY_READY_PATTERN" "$READY_TIMEOUT_S" "$GATEWAY_READY_EXTRA_S"; then
+    tail_last_logs_on_failure "mobile_gateway" "$GATEWAY_LOG_FILE"
     stop_all || true
     exit 1
   fi
 
   headline "启动完成"
-  mark ok "vision / orchestrator / voice 均已通过 ready-check，可以开始测试。"
+  mark ok "vision / orchestrator(controller) / mobile_gateway 均已通过 ready-check，可以用手机端发指令。"
   status_all
 
-  if [[ "$FOLLOW_ORCH_SUMMARY_AFTER_START" == "1" ]]; then
-    trap 'echo; mark note "退出状态机摘要显示，服务继续运行。"; exit 0' INT TERM
-    tail_orch_summary
+  if [[ "$FOLLOW_STACK_LOGS_AFTER_START" == "1" ]]; then
+    trap 'echo; mark note "退出日志显示，服务继续运行。"; exit 0' INT TERM
+    tail_stack_summary
   fi
 }
 
@@ -566,10 +601,14 @@ main() {
     stop|off|down|结束|关)
       stop_stack
       ;;
+    status|状态)
+      status_all
+      ;;
     *)
-      echo "用法只保留两种："
+      echo "用法："
       echo "  ./start_robot_stack.sh        # 开启（默认）"
       echo "  ./start_robot_stack.sh stop   # 结束"
+      echo "  ./start_robot_stack.sh status # 查看状态"
       exit 1
       ;;
   esac
