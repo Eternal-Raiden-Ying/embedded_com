@@ -217,9 +217,10 @@ class RealProtocolMappingTest(unittest.TestCase):
             "active_target": "apple",
             "last_enter_reason": "开始桌边任务",
         })
-        self.assertEqual(published[-1]["state"], "searching")
+        self.assertEqual(published[-1]["state"], "searching_table")
         self.assertEqual(published[-1]["target"], "apple")
-        self.assertEqual(published[-1]["message"], "开始桌边任务，目标 apple")
+        self.assertEqual(published[-1]["message"], "正在寻找桌边")
+        self.assertEqual(published[-1]["backend_state"], "SEARCH_TABLE")
         service._handle_state_block({
             "state": "DONE",
             "session_id": "sess_state",

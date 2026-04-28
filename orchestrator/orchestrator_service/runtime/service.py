@@ -561,6 +561,31 @@ class OrchestratorService(BaseModule):
         if msg_type == "vision_obs":
             env = VisionObsEnvelope.from_dict(payload)
             self.run_logger.write_jsonl("vision_obs", env.to_dict())
+            perception = dict(env.perception or {})
+            self.log_ipc("RX", "vision_obs", "received", {
+                "req_id": env.req_id,
+                "stage": env.stage,
+                "mode": env.mode,
+                "status": env.status,
+                "session_id": env.session_id,
+                "epoch": env.epoch,
+                "has_table_edge_obs": isinstance(perception.get("table_edge_obs"), dict),
+                "has_target_obs": isinstance(perception.get("target_obs"), dict),
+            })
+            self.run_logger.write_ipc(
+                "vision_obs_in",
+                "envelope_received",
+                direction="RX",
+                req_id=env.req_id,
+                session_id=env.session_id,
+                epoch=env.epoch,
+                ok=True,
+                stage=env.stage,
+                mode=env.mode,
+                status=env.status,
+                has_table_edge_obs=isinstance(perception.get("table_edge_obs"), dict),
+                has_target_obs=isinstance(perception.get("target_obs"), dict),
+            )
         return iter_vision_perception_payloads(payload)
 
     def _drain_vision_msgs(self):
@@ -585,15 +610,31 @@ class OrchestratorService(BaseModule):
                             latest_table = parsed
                             latest_table_priority = priority
                         self._last_vision_obs_recv_ts = recv_ts
+                        reason = str(payload.get("reason") or parsed.reason or "").strip()
+                        verdict = "table_edge_obs_accepted" if parsed.table_found else "table_edge_obs_rejected"
+                        self.log_ipc("RX", "table_edge_obs", verdict, {
+                            "req_id": parsed.req_id,
+                            "found": parsed.table_found,
+                            "edge_found": parsed.edge_found,
+                            "depth_valid": parsed.depth_valid,
+                            "point_count": parsed.point_count,
+                            "table_point_count": parsed.table_point_count,
+                            "reason": reason or None,
+                        })
                         self.run_logger.write_ipc(
                             "vision_obs_in",
-                            "received",
+                            verdict,
                             direction="RX",
                             req_id=parsed.req_id,
                             session_id=parsed.session_id,
                             epoch=parsed.epoch,
                             ok=True,
                             found=parsed.table_found,
+                            edge_found=parsed.edge_found,
+                            depth_valid=parsed.depth_valid,
+                            point_count=parsed.point_count,
+                            table_point_count=parsed.table_point_count,
+                            reason=reason,
                             msg_type=msg_type,
                             from_envelope=from_envelope,
                             priority=priority,

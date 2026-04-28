@@ -35,11 +35,14 @@ from ..protocol import (
 
 ORCHESTRATOR_STATE_MAP: Dict[str, Tuple[str, int]] = {
     "IDLE": ("idle", 0),
-    "SEARCH_TABLE": ("searching", 20),
+    "SEARCH_TABLE": ("searching_table", 20),
     "SEARCH_OBJECT": ("searching", 70),
-    "COARSE_ALIGN": ("searching", 35),
-    "CONTROLLED_APPROACH": ("running", 50),
-    "FINAL_LOCK": ("running", 65),
+    "COARSE_ALIGN": ("aligning_table", 35),
+    "CONTROLLED_APPROACH": ("approaching_table", 50),
+    "FINAL_LOCK": ("locking_table", 65),
+    "EDGE_FOLLOW_OBJECT_SEARCH": ("searching_object", 82),
+    "DETECTOR_UNAVAILABLE": ("detector_unavailable", 0),
+    "DOCK_RETRY": ("docking_retry", 45),
     "AT_TABLE_EDGE": ("running", 68),
     "SEARCH_TARGET_INIT": ("searching", 75),
     "EDGE_SLIDE_SEARCH": ("searching", 82),
@@ -826,8 +829,37 @@ class MobileGatewayService(BaseModule):
             error_info=error_info,
         )
         target = str(payload.get("active_target") or self._snapshot.get("target") or "").strip() or None
-        session_id = str(payload.get("session_id") or self._snapshot.get("session_id") or "")
+        payload_session_id = str(payload.get("session_id") or "")
+        session_id = str(payload_session_id or self._snapshot.get("session_id") or "")
         epoch = int(payload.get("epoch", 0) or 0)
+        current_epoch = int(self._snapshot.get("epoch", 0) or 0)
+        current_state = str(self._snapshot.get("state") or "").strip().lower()
+        if (
+            raw_state == "IDLE"
+            and epoch < current_epoch
+            and current_state in {"submitted", "accepted", "searching", "running"}
+        ):
+            self.run_logger.write_ipc_record(
+                "RX",
+                "orchestrator_state_block",
+                "ignored_stale_epoch",
+                msg_type="state_block",
+                session_id=payload_session_id,
+                epoch=epoch,
+                ok=False,
+                data={
+                    "payload": payload,
+                    "current_epoch": current_epoch,
+                    "current_state": current_state,
+                },
+            )
+            self.log_info("backend", "stale state_block ignored", {
+                "state": raw_state,
+                "epoch": epoch,
+                "current_epoch": current_epoch,
+                "current_state": current_state,
+            })
+            return
         if raw_state == "IDLE" and self._last_stop_session_id and session_id == self._last_stop_session_id:
             unified_state = "stopped"
             progress = 0
@@ -860,10 +892,16 @@ class MobileGatewayService(BaseModule):
             ),
             ts=now_ts(),
         ).to_dict()
-        if self._is_debug_mode():
-            status["backend_state"] = raw_state
-            if error_info is not None:
-                status["raw_error"] = error_info["raw_error"]
+        status["backend_state"] = raw_state
+        status["raw_backend_state"] = raw_state
+        status["stage"] = payload.get("vision_stage") or payload.get("stage") or ""
+        status["mode"] = payload.get("vision_mode") or payload.get("mode") or ""
+        status["has_table_edge_obs"] = bool(payload.get("has_table_edge_obs", False))
+        status["has_target_obs"] = bool(payload.get("has_target_obs", False))
+        status["lock_ready"] = bool(payload.get("lock_ready", False))
+        status["lock_reason"] = str(payload.get("lock_reason") or "")
+        if error_info is not None:
+            status["raw_error"] = error_info["raw_error"]
         self.run_logger.write_jsonl("orchestrator_state_block", payload)
         self._publish_status(status)
 
@@ -1098,9 +1136,19 @@ class MobileGatewayService(BaseModule):
         if error_info is not None:
             return str(error_info["message"])
         if raw_state == "SEARCH_TABLE":
-            return f"开始桌边任务，目标 {target}" if target else "开始桌边任务"
-        if raw_state in {"SEARCH_OBJECT", "SEARCH_TARGET_INIT", "EDGE_SLIDE_SEARCH", "TARGET_CONFIRM"}:
+            return "正在寻找桌边"
+        if raw_state == "COARSE_ALIGN":
+            return "已发现桌边，正在调整方向"
+        if raw_state == "CONTROLLED_APPROACH":
+            return "正在靠近桌边"
+        if raw_state == "FINAL_LOCK":
+            return "正在锁定桌边位置"
+        if raw_state in {"EDGE_FOLLOW_OBJECT_SEARCH", "SEARCH_OBJECT", "SEARCH_TARGET_INIT", "EDGE_SLIDE_SEARCH", "TARGET_CONFIRM"}:
             return f"正在搜索目标 {target}" if target else "正在搜索目标"
+        if raw_state == "DETECTOR_UNAVAILABLE":
+            return "目标检测暂不可用"
+        if raw_state == "DOCK_RETRY":
+            return "锁边未完成，正在重试"
         if raw_state in {"TARGET_LOCKED", "GRASPING", "CONTROLLED_APPROACH", "FINAL_LOCK", "AT_TABLE_EDGE"}:
             return f"正在执行取物任务，目标 {target}" if target else "正在执行取物任务"
         if raw_state in {"STOP", "STOPPED"}:

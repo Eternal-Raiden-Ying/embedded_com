@@ -196,6 +196,9 @@ class OrchestratorCore:
         return dispatch.get(self.ctx.state, self._tick_idle)()
 
     def export_state_block(self) -> Dict:
+        table_obs = self.ctx.last_table_obs
+        target_obs = self.ctx.last_target_obs
+        lock_status = self._final_lock_status(table_obs, stable_count=self.ctx.table_lock_frames)
         return {
             "ts": time.time(),
             "state": self.ctx.state.value,
@@ -230,6 +233,16 @@ class OrchestratorCore:
             "table_loss_elapsed_s": self._loss_elapsed(self.ctx.table_loss_since_mono),
             "target_loss_elapsed_s": self._loss_elapsed(self.ctx.target_loss_since_mono),
             "tag_loss_elapsed_s": self._loss_elapsed(self.ctx.tag_loss_since_mono),
+            "has_table_edge_obs": table_obs is not None,
+            "has_target_obs": target_obs is not None,
+            "lock_ready": bool(lock_status["lock_ready"]),
+            "lock_reason": str(lock_status["reason"]),
+            "table_found": bool(table_obs.table_found) if table_obs is not None else False,
+            "edge_found": bool(table_obs.edge_found) if table_obs is not None else False,
+            "confidence": table_obs.confidence if table_obs is not None else None,
+            "yaw_err_rad": table_obs.yaw_err_rad if table_obs is not None else None,
+            "dist_err_m": table_obs.dist_err_m if table_obs is not None else None,
+            "target_dist_m": table_obs.target_dist_m if table_obs is not None else None,
         }
 
     def _transition(self, new_state: State, reason: str):
@@ -369,19 +382,24 @@ class OrchestratorCore:
     def _tick_final_lock(self) -> MotionDecision:
         obs = self._fresh_table_obs()
         if not self._table_visible(obs):
+            self._log_final_lock_summary(obs, lock_ready=False, reason="table_lost", stable_count=self.ctx.table_lock_frames)
             return self._handle_table_loss("最终锁边时桌边丢失，回到搜索", State.SEARCH_TABLE, "FINAL_LOCK_HOLD")
         self._reset_table_loss()
-        if self._final_lock_ready(obs):
+        lock_status = self._final_lock_status(obs, stable_count=self.ctx.table_lock_frames)
+        if bool(lock_status["lock_ready"]):
             self.ctx.table_lock_frames += 1
             if self.ctx.table_lock_frames >= int(self.cfg.final_lock_frames_to_arrive):
                 self.ctx.dock_retry_count = 0
+                self._log_final_lock_summary(obs, lock_ready=True, reason="ok", stable_count=self.ctx.table_lock_frames)
                 self._transition(State.AT_TABLE_EDGE, "已完成桌边停靠")
                 self._queue_tts("已完成桌边停靠")
                 return self.controller.stop_cmd("AT_TABLE_EDGE")
         else:
             self.ctx.table_lock_frames = 0
         if self._state_elapsed() >= float(self.cfg.approach_timeout_s):
-            return self._enter_dock_retry_or_next("最终锁边超时")
+            reason = "stable_count_not_enough" if bool(lock_status["lock_ready"]) else str(lock_status["reason"])
+            self._log_final_lock_summary(obs, lock_ready=False, reason=reason, stable_count=self.ctx.table_lock_frames)
+            return self._enter_dock_retry_or_next(f"最终锁边超时:{reason}")
         self._maybe_resend_req(self._active_req_payload())
         return self.controller.final_lock_cmd(obs)
 
@@ -677,12 +695,79 @@ class OrchestratorCore:
         return bool(obs.edge_found)
 
     def _final_lock_ready(self, obs: Optional[TableEdgeObs]) -> bool:
+        return bool(self._final_lock_status(obs, stable_count=self.ctx.table_lock_frames)["lock_ready"])
+
+    def _final_lock_status(self, obs: Optional[TableEdgeObs], stable_count: int = 0) -> Dict[str, object]:
         if obs is None or not obs.edge_found:
-            return False
+            reason = "table_lost" if obs is None or not bool(getattr(obs, "table_found", False)) else "table_lost"
+            return {
+                "lock_ready": False,
+                "reason": reason,
+                "yaw_locked": False,
+                "dist_locked": False,
+                "lat_locked": False,
+                "stable_count": int(stable_count),
+            }
+        if obs.depth_valid is False:
+            return {
+                "lock_ready": False,
+                "reason": "depth_invalid",
+                "yaw_locked": False,
+                "dist_locked": False,
+                "lat_locked": False,
+                "stable_count": int(stable_count),
+            }
         yaw_ok = obs.yaw_err_rad is not None and abs(float(obs.yaw_err_rad)) <= float(self.cfg.final_lock_yaw_tol_rad)
         dist_ok = obs.dist_err_m is not None and abs(float(obs.dist_err_m)) <= float(self.cfg.final_lock_dist_tol_m)
         lat_ok = obs.lateral_err_m is None or abs(float(obs.lateral_err_m)) <= float(self.cfg.final_lock_lateral_tol_m)
-        return bool(yaw_ok and dist_ok and lat_ok)
+        reason = "ok"
+        if not yaw_ok:
+            reason = "yaw_not_aligned"
+        elif obs.dist_err_m is None:
+            reason = "depth_invalid"
+        elif not dist_ok:
+            reason = "distance_too_far" if float(obs.dist_err_m) > 0 else "distance_too_close"
+        elif not lat_ok:
+            reason = "yaw_not_aligned"
+        return {
+            "lock_ready": bool(yaw_ok and dist_ok and lat_ok),
+            "reason": reason,
+            "yaw_locked": bool(yaw_ok),
+            "dist_locked": bool(dist_ok),
+            "lat_locked": bool(lat_ok),
+            "stable_count": int(stable_count),
+        }
+
+    def _log_final_lock_summary(
+        self,
+        obs: Optional[TableEdgeObs],
+        *,
+        lock_ready: bool,
+        reason: str,
+        stable_count: int,
+    ) -> None:
+        status = self._final_lock_status(obs, stable_count=stable_count)
+        measured_distance = None
+        target_distance = None
+        if obs is not None:
+            target_distance = obs.target_dist_m
+            if obs.dist_err_m is not None and target_distance is not None:
+                measured_distance = float(target_distance) + float(obs.dist_err_m)
+        lines = [
+            "FINAL_LOCK summary:",
+            f"table_found={bool(obs.table_found) if obs is not None else False}",
+            f"conf={float(obs.confidence or 0.0):.3f}" if obs is not None else "conf=0.000",
+            f"yaw_err={obs.yaw_err_rad}" if obs is not None else "yaw_err=None",
+            f"measured_distance={measured_distance}",
+            f"target_distance={target_distance}",
+            f"dist_err={obs.dist_err_m if obs is not None else None}",
+            f"yaw_locked={bool(status['yaw_locked'])}",
+            f"dist_locked={bool(status['dist_locked'])}",
+            f"stable_count={int(stable_count)}",
+            f"lock_ready={bool(lock_ready)}",
+            f"reason={reason or status['reason']}",
+        ]
+        self._log("info" if lock_ready else "warn", "\n".join(lines))
 
     def _target_matches_active(self, obs: TargetObs) -> bool:
         if not self.ctx.active_target or not obs.target:
