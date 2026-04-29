@@ -99,6 +99,79 @@ class GraspStageRemoteFlowTest(unittest.TestCase):
         self.assertTrue(any(effect["payload"]["op"] == "RELEASE" for effect in final_tick.effects))
 
 
+class SearchStagePlanKindTest(unittest.TestCase):
+    def _enter(self, search_kind, target="cup"):
+        plan = SearchStagePlan()
+        ctx = StageContext()
+        req = VisionReq(
+            ts=time.time(),
+            op="START",
+            stage="SEARCH",
+            target=target,
+            payload={"search_kind": search_kind},
+        )
+        plan.on_enter(req, ctx)
+        return plan, ctx
+
+    def test_target_search_outputs_only_target_obs(self):
+        plan, ctx = self._enter("TARGET")
+        self.assertEqual(ctx.current_mode, "TRACK_LOCAL")
+        output = plan.tick(
+            StageTickInput(
+                ts=time.time(),
+                generation=1,
+                results={
+                    "local_perception": {"target_obs": {"found": True, "target": "cup"}},
+                    "table_edge_obs": {"edge_found": True},
+                },
+            ),
+            ctx,
+        )
+        perception = output.vision_obs["perception"]
+        self.assertEqual(sorted(perception.keys()), ["target_obs"])
+        self.assertTrue(perception["target_obs"]["found"])
+
+    def test_table_edge_search_outputs_only_table_edge_obs(self):
+        plan, ctx = self._enter("TABLE_EDGE")
+        self.assertEqual(ctx.current_mode, "TABLE_EDGE_PERCEPTION")
+        output = plan.tick(
+            StageTickInput(
+                ts=time.time(),
+                generation=1,
+                results={
+                    "local_perception": {"target_obs": {"found": True, "target": "cup"}},
+                    "table_edge_obs": {"edge_found": True, "confidence": 0.8},
+                },
+            ),
+            ctx,
+        )
+        perception = output.vision_obs["perception"]
+        self.assertEqual(sorted(perception.keys()), ["table_edge_obs"])
+        self.assertTrue(perception["table_edge_obs"]["edge_found"])
+
+    def test_edge_follow_target_outputs_both_and_keeps_partial_results(self):
+        plan, ctx = self._enter("EDGE_FOLLOW_TARGET")
+        self.assertEqual(ctx.current_mode, "TABLE_EDGE_PERCEPTION")
+        output = plan.tick(
+            StageTickInput(
+                ts=time.time(),
+                generation=1,
+                results={
+                    "local_perception": {"target_obs": {"found": True, "target": "cup"}},
+                },
+            ),
+            ctx,
+        )
+        perception = output.vision_obs["perception"]
+        self.assertEqual(sorted(perception.keys()), ["table_edge_obs", "target_obs"])
+        self.assertTrue(perception["target_obs"]["found"])
+        self.assertFalse(perception["table_edge_obs"]["edge_found"])
+
+        alias_plan, alias_ctx = self._enter("TARGET_ON_EDGE")
+        self.assertEqual(alias_ctx.current_mode, "TABLE_EDGE_PERCEPTION")
+        self.assertEqual(alias_ctx.stage_state["search_kind"], "TARGET_ON_EDGE")
+
+
 class RuntimeSupervisorModeApplyTest(unittest.TestCase):
     def test_runtime_supervisor_reconciles_managers_from_mode(self):
         args = SimpleNamespace(

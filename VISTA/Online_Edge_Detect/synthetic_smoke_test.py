@@ -35,7 +35,12 @@ def main():
         target_dist = float(CONFIG.detector.target_dist_m_override)
     detector = OnlineTableEdgeDetector(calib, CONFIG.detector, target_dist)
     depth = build_synthetic_depth()
-    result, _ = detector.process_depth(depth)
+    result, debug = detector.process_depth(depth)
+    override_roi = [120, 140, 420, 360]
+    override_depth = np.zeros_like(depth)
+    x0, y0, x1, y1 = override_roi
+    override_depth[y0:y1, x0:x1] = depth[y0:y1, x0:x1]
+    override_result, override_debug = detector.process_depth(override_depth, roi_override=override_roi)
     print("synthetic result:")
     print({
         "edge_found": result.edge_found,
@@ -44,9 +49,15 @@ def main():
         "edge_confidence": result.edge_confidence,
         "point_count": result.point_count,
         "table_point_count": result.table_point_count,
+        "roi_box": debug["roi_box"],
+        "override_roi_box": override_debug["roi_box"],
     })
     if result.point_count <= 0:
         raise RuntimeError("synthetic detector produced no points")
+    if tuple(override_debug["roi_box"]) != tuple(override_roi):
+        raise RuntimeError(f"override ROI not applied: {override_debug['roi_box']}")
+    if override_result.point_count <= 0:
+        raise RuntimeError("override ROI produced no points")
 
 
 if __name__ == "__main__":

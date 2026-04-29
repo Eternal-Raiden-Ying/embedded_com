@@ -5,7 +5,7 @@ import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -57,21 +57,53 @@ class OnlineTableEdgeDetector:
         self.target_dist_m = float(target_dist_m)
         self._rng = np.random.default_rng(int(cfg.random_seed))
 
-    def _preprocess_depth(self, depth_img: np.ndarray, roi_override=None):
-        if roi_override is not None:
-            try:
-                ox0, oy0, ox1, oy1 = [int(round(float(v))) for v in roi_override[:4]]
-            except Exception:
-                ox0, oy0, ox1, oy1 = self.cfg.roi_x0, self.cfg.roi_y0, self.cfg.roi_x1, self.cfg.roi_y1
-        else:
-            ox0, oy0, ox1, oy1 = self.cfg.roi_x0, self.cfg.roi_y0, self.cfg.roi_x1, self.cfg.roi_y1
-        y0 = max(0, int(oy0))
-        y1 = min(depth_img.shape[0], int(oy1))
-        x0 = max(0, int(ox0))
-        x1 = min(depth_img.shape[1], int(ox1))
-        if y1 <= y0 or x1 <= x0:
-            raise ValueError("invalid ROI range")
+    def _cfg_roi(self) -> Tuple[int, int, int, int]:
+        return (
+            int(self.cfg.roi_x0),
+            int(self.cfg.roi_y0),
+            int(self.cfg.roi_x1),
+            int(self.cfg.roi_y1),
+        )
 
+    @staticmethod
+    def _parse_roi_box(value: Any) -> Optional[Tuple[int, int, int, int]]:
+        if not isinstance(value, (list, tuple)) or len(value) < 4:
+            return None
+        try:
+            x0, y0, x1, y1 = [int(round(float(v))) for v in value[:4]]
+        except (TypeError, ValueError):
+            return None
+        return x0, y0, x1, y1
+
+    @staticmethod
+    def _clip_roi_box(roi_box: Tuple[int, int, int, int], width: int, height: int) -> Optional[Tuple[int, int, int, int]]:
+        x0, y0, x1, y1 = roi_box
+        x0 = max(0, min(int(width), int(x0)))
+        x1 = max(0, min(int(width), int(x1)))
+        y0 = max(0, min(int(height), int(y0)))
+        y1 = max(0, min(int(height), int(y1)))
+        if x1 <= x0 or y1 <= y0:
+            return None
+        return x0, y0, x1, y1
+
+    def _resolve_roi(self, depth_img: np.ndarray, roi_override=None) -> Tuple[int, int, int, int]:
+        if depth_img is None or len(getattr(depth_img, "shape", ())) < 2:
+            raise ValueError("depth image must be a 2D array")
+        height, width = int(depth_img.shape[0]), int(depth_img.shape[1])
+        override_box = self._parse_roi_box(roi_override)
+        if override_box is not None:
+            clipped = self._clip_roi_box(override_box, width, height)
+            if clipped is not None:
+                return clipped
+
+        cfg_box = self._parse_roi_box(self._cfg_roi())
+        clipped_cfg = self._clip_roi_box(cfg_box, width, height) if cfg_box is not None else None
+        if clipped_cfg is None:
+            raise ValueError(f"invalid depth ROI: override={roi_override!r} cfg={self._cfg_roi()!r} image_shape={depth_img.shape!r}")
+        return clipped_cfg
+
+    def _preprocess_depth(self, depth_img: np.ndarray, roi_override=None):
+        x0, y0, x1, y1 = self._resolve_roi(depth_img, roi_override=roi_override)
         depth_roi = depth_img[y0:y1, x0:x1]
         ksize = int(self.cfg.depth_median_ksize)
         if ksize > 1 and ksize % 2 == 1:

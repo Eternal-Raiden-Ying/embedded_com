@@ -11,12 +11,18 @@ from .base import BaseStagePlan, StageContext, StageOutput, StageTickInput, norm
 def _search_kind(req: VisionReq, default_mode: str) -> str:
     payload = req.payload if isinstance(req.payload, dict) else {}
     explicit = normalize_upper(payload.get("search_kind"), "")
-    if explicit in {"TABLE_EDGE", "TARGET"}:
+    if explicit in {"TABLE_EDGE", "TARGET", "EDGE_FOLLOW_TARGET", "TARGET_ON_EDGE"}:
         return explicit
     hinted_mode = normalize_upper(req.mode_hint, default_mode)
+    if hinted_mode == "TABLE_EDGE_PERCEPTION":
+        return "EDGE_FOLLOW_TARGET"
     if hinted_mode == "DEPTH_PERCEPTION":
         return "TABLE_EDGE"
     return "TARGET"
+
+
+def _is_edge_follow_target(search_kind: str) -> bool:
+    return normalize_upper(search_kind, "") in {"EDGE_FOLLOW_TARGET", "TARGET_ON_EDGE"}
 
 
 def _target_obs_from_payload(payload: Optional[Dict[str, object]], target: Optional[str]) -> Dict[str, object]:
@@ -100,9 +106,12 @@ class SearchStagePlan(BaseStagePlan):
     default_mode = "TRACK_LOCAL"
 
     def _resolve_mode(self, req: VisionReq) -> str:
+        search_kind = _search_kind(req, self.default_mode)
+        if search_kind == "TABLE_EDGE" or _is_edge_follow_target(search_kind):
+            return "TABLE_EDGE_PERCEPTION"
         if req.mode_hint:
             return normalize_upper(req.mode_hint, self.default_mode)
-        return "TABLE_EDGE_PERCEPTION" if _search_kind(req, self.default_mode) == "TABLE_EDGE" else self.default_mode
+        return self.default_mode
 
     def on_enter(self, req: VisionReq, ctx: StageContext) -> None:
         """Prepare target metadata and choose the initial local tracking mode."""
@@ -130,7 +139,7 @@ class SearchStagePlan(BaseStagePlan):
         results = dict(tick_input.results or {})
         search_kind = normalize_upper(ctx.stage_state.get("search_kind"), "TARGET")
 
-        if search_kind == "TABLE_EDGE":
+        if search_kind == "TABLE_EDGE" or _is_edge_follow_target(search_kind):
             table_edge_obs, source = resolve_stage_summary(
                 results=results,
                 stage_state=ctx.stage_state,
@@ -139,6 +148,30 @@ class SearchStagePlan(BaseStagePlan):
                 result_factory=_table_edge_obs_from_results,
                 result_route="table_edge_obs",
             )
+            if _is_edge_follow_target(search_kind):
+                target_obs, target_source = resolve_stage_summary(
+                    results=results,
+                    stage_state=ctx.stage_state,
+                    state_key="target_obs",
+                    default_factory=lambda: _target_obs_from_payload(None, ctx.target_name),
+                    result_factory=lambda payload: _target_obs_from_results(payload, ctx.target_name),
+                )
+                return StageOutput(
+                    vision_obs=self.build_obs(
+                        ctx,
+                        status="RUNNING",
+                        perception={
+                            "table_edge_obs": table_edge_obs,
+                            "target_obs": target_obs,
+                        },
+                    ),
+                    snapshot={
+                        "generation": int(tick_input.generation),
+                        "result_keys": sorted(results.keys()),
+                        "source": {"table_edge_obs": source, "target_obs": target_source},
+                        "search_kind": search_kind,
+                    },
+                )
             return StageOutput(
                 vision_obs=self.build_obs(
                     ctx,
