@@ -19,7 +19,7 @@ class _FakeCV2(types.SimpleNamespace):
     INTER_AREA = 6
 
 
-sys.modules.setdefault("cv2", _FakeCV2())
+_FAKE_CV2 = sys.modules.setdefault("cv2", _FakeCV2())
 
 try:
     from VISTA.vision_module.backend.preview.opencv_sink import CYAN, YELLOW, OpenCVPreviewSink
@@ -162,6 +162,64 @@ class PreviewTableBboxTest(unittest.TestCase):
         self.assertIn("bottle:0.62", labels)
         self.assertNotIn("table_bbox", labels)
         self.assertIn(("target=apple boxes=2", (0, 255, 80)), sink.notes)
+
+    def test_status_panel_uses_metadata_without_crashing(self):
+        calls = []
+        cv2_obj = OpenCVPreviewSink._draw_status_sections.__globals__["cv2"]
+        old_put_text = getattr(cv2_obj, "putText", None)
+        cv2_obj.putText = lambda _panel, text, *_args, **_kwargs: calls.append(str(text))
+        try:
+            sink = OpenCVPreviewSink(window_name="VISTA App Dashboard")
+            panel = np.zeros((420, 360, 3), dtype=np.uint8)
+            sink._draw_status_sections(
+                panel,
+                {"preview_layout": "target_rgb", "window_id": "VISTA App Dashboard#1"},
+                {"stage": "SEARCH", "mode": "TRACK_LOCAL", "req_id": "req-test"},
+                {"edge_found": True, "table_found": True, "confidence": 0.8},
+                {"target": "apple", "found": False, "boxes_count": 0},
+                {"has_infer": True, "box_count": 0},
+                ["rgb"],
+                "apple",
+                0.02,
+            )
+        finally:
+            if old_put_text is None:
+                delattr(cv2_obj, "putText")
+            else:
+                cv2_obj.putText = old_put_text
+        self.assertIn("preview_layout=target_rgb", calls)
+        self.assertIn("window_id=VISTA App Dashboard#1", calls)
+        self.assertIn("mode=TRACK_LOCAL", calls)
+
+    def test_close_cleans_preview_windows(self):
+        calls = []
+        cv2_obj = OpenCVPreviewSink.close.__globals__["cv2"]
+        old_destroy_window = getattr(cv2_obj, "destroyWindow", None)
+        old_destroy_all = getattr(cv2_obj, "destroyAllWindows", None)
+        old_wait_key = getattr(cv2_obj, "waitKey", None)
+        cv2_obj.destroyWindow = lambda name: calls.append(("destroyWindow", name))
+        cv2_obj.destroyAllWindows = lambda: calls.append(("destroyAllWindows", None))
+        cv2_obj.waitKey = lambda delay=0: calls.append(("waitKey", delay)) or 0
+        try:
+            sink = OpenCVPreviewSink(window_name="VISTA App Dashboard")
+            sink._opened = True
+            sink.close()
+        finally:
+            if old_destroy_window is None:
+                delattr(cv2_obj, "destroyWindow")
+            else:
+                cv2_obj.destroyWindow = old_destroy_window
+            if old_destroy_all is None:
+                delattr(cv2_obj, "destroyAllWindows")
+            else:
+                cv2_obj.destroyAllWindows = old_destroy_all
+            if old_wait_key is None:
+                delattr(cv2_obj, "waitKey")
+            else:
+                cv2_obj.waitKey = old_wait_key
+        self.assertIn(("destroyWindow", "VISTA App Dashboard"), calls)
+        self.assertIn(("destroyAllWindows", None), calls)
+        self.assertFalse(sink._opened)
 
 
 if __name__ == "__main__":

@@ -464,8 +464,29 @@ class VistaApp(BaseModule):
                     "mode",
                     f"[VISTA] MODE {prev_mode} -> {self.current_mode} reason={reason}",
                 )
+                if self.current_mode == "TRACK_LOCAL" and reason == "target_search":
+                    self.operator_console.emit_change(
+                        "target_view",
+                        f"[VISTA] TARGET_VIEW enter target={self.target_name or 'target'}",
+                    )
             if self._console_is_full():
                 self.log_info("runtime", "stage/mode changed", payload)
+
+    @staticmethod
+    def _request_kind(req: VisionReq, request_stage: str) -> str:
+        payload = req.payload if isinstance(req.payload, dict) else {}
+        kind = (
+            payload.get("search_kind")
+            or payload.get("kind")
+            or ("TABLE_EDGE" if request_stage == "SEARCH" else request_stage)
+        )
+        return str(kind or "").strip().upper()
+
+    def _request_sync_reason(self, req: VisionReq, request_stage: str, req_kind: str) -> str:
+        mode_hint = self._safe_mode_text(req.mode_hint)
+        if request_stage == "SEARCH" and req_kind == "TARGET" and mode_hint == "TRACK_LOCAL":
+            return "target_search"
+        return f"request:{req.op}"
 
     def _apply_stage_output(self, output, now: float, force_send: bool = False) -> bool:
         if output is None:
@@ -521,11 +542,7 @@ class VistaApp(BaseModule):
         req = VisionReq.from_dict(payload)
         request_stage = self._safe_stage_text(req.stage)
         self._sync_runtime_request_context(req)
-        req_kind = str(
-            payload.get("kind")
-            or (req.payload or {}).get("kind")
-            or ("TABLE_EDGE" if request_stage == "SEARCH" else request_stage)
-        ).strip().upper()
+        req_kind = self._request_kind(req, request_stage)
         self.operator_console.emit(
             f"[VISTA] REQ stage={request_stage} kind={req_kind} target={req.target or ''} "
             f"req={req.req_id or ''} epoch={int(req.epoch)}"
@@ -571,7 +588,13 @@ class VistaApp(BaseModule):
 
         self.hot_until_ts = 0.0
         stage_output = self.stage_controller.handle_request(req)
-        self._sync_runtime_from_stage_context(reason=f"request:{req.op}")
+        sync_reason = self._request_sync_reason(req, request_stage, req_kind)
+        self._sync_runtime_from_stage_context(reason=sync_reason)
+        if request_stage == "SEARCH" and req_kind == "TARGET" and self.current_mode == "TRACK_LOCAL":
+            self.operator_console.emit_change(
+                "target_view",
+                f"[VISTA] TARGET_VIEW enter target={self.target_name or req.target or 'target'}",
+            )
         self._record_event(
             "VISION_REQ",
             trigger="req_in",

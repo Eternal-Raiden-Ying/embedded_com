@@ -32,6 +32,7 @@ class OpenCVPreviewSink(PreviewSink):
 
     def __init__(self, window_name: str = "VISTA Preview"):
         self.window_name = window_name
+        self.window_id = f"{id(self):x}"
         self.layout = os.getenv("VISTA_PREVIEW_LAYOUT", os.getenv("VISION_PREVIEW_LAYOUT", "rgb_depth_edge"))
         self.scale = self._env_float("VISTA_PREVIEW_SCALE", self._env_float("VISION_PREVIEW_SCALE", 1.0))
         self.canvas_w = self._env_int("VISTA_PREVIEW_WIDTH", 1280)
@@ -86,18 +87,31 @@ class OpenCVPreviewSink(PreviewSink):
         table_edge = {} if mode == "TRACK_LOCAL" else (metadata.get("table_edge_obs") or {})
         target_obs = metadata.get("target_obs") or {}
 
-        panel_w = max(320, self.canvas_w // 2)
-        panel_h = max(220, self.canvas_h // 2)
-        panel_size = (panel_w, panel_h)
+        if mode == "TRACK_LOCAL":
+            rgb_w = max(480, int(self.canvas_w * 0.68))
+            info_w = max(280, self.canvas_w - rgb_w)
+            target_metadata = dict(metadata)
+            target_metadata["preview_layout"] = "target_rgb"
+            target_metadata["window_id"] = self.window_id
+            rgb_panel = self._make_rgb_panel(frames.get("rgb") if frames else frame.image, target_metadata, (rgb_w, self.canvas_h))
+            info_panel = self._make_info_panel(frame, target_metadata, {}, target_obs, (info_w, self.canvas_h))
+            canvas = np.hstack([rgb_panel, info_panel])
+        else:
+            panel_w = max(320, self.canvas_w // 2)
+            panel_h = max(220, self.canvas_h // 2)
+            panel_size = (panel_w, panel_h)
 
-        rgb_panel = self._make_rgb_panel(frames.get("rgb") if frames else frame.image, metadata, panel_size)
-        depth_panel = self._make_depth_panel(frames.get("depth") if frames else frame.image, table_edge, panel_size)
-        edge_panel = self._make_edge_panel(frames.get("depth") if frames else None, table_edge, panel_size)
-        info_panel = self._make_info_panel(frame, metadata, table_edge, target_obs, panel_size)
+            edge_metadata = dict(metadata)
+            edge_metadata["preview_layout"] = "rgb_depth_edge"
+            edge_metadata["window_id"] = self.window_id
+            rgb_panel = self._make_rgb_panel(frames.get("rgb") if frames else frame.image, edge_metadata, panel_size)
+            depth_panel = self._make_depth_panel(frames.get("depth") if frames else frame.image, table_edge, panel_size)
+            edge_panel = self._make_edge_panel(frames.get("depth") if frames else None, table_edge, panel_size)
+            info_panel = self._make_info_panel(frame, edge_metadata, table_edge, target_obs, panel_size)
 
-        top = np.hstack([rgb_panel, depth_panel])
-        bottom = np.hstack([edge_panel, info_panel])
-        canvas = np.vstack([top, bottom])
+            top = np.hstack([rgb_panel, depth_panel])
+            bottom = np.hstack([edge_panel, info_panel])
+            canvas = np.vstack([top, bottom])
 
         if self.canvas_w > 0 and self.canvas_h > 0 and canvas.shape[:2] != (self.canvas_h, self.canvas_w):
             canvas = cv2.resize(canvas, (self.canvas_w, self.canvas_h), interpolation=cv2.INTER_AREA)
@@ -245,7 +259,7 @@ class OpenCVPreviewSink(PreviewSink):
         status = dict(metadata.get("runtime_status") or {})
         local = dict(metadata.get("local_perception") or {})
         self._title(panel, "STATUS / TOP VIEW")
-        self._draw_status_sections(panel, status, table_edge, target_obs, local, source_cameras, target_name, frame_age)
+        self._draw_status_sections(panel, metadata, status, table_edge, target_obs, local, source_cameras, target_name, frame_age)
         if str(status.get("mode") or "").upper() != "TRACK_LOCAL":
             self._draw_top_view(panel, table_edge, graph=(w - 250, h - 170, w - 18, h - 18))
         return panel
@@ -536,6 +550,7 @@ class OpenCVPreviewSink(PreviewSink):
     def _draw_status_sections(
         self,
         panel: np.ndarray,
+        metadata: Dict[str, Any],
         status: Dict[str, Any],
         table_edge: Dict[str, Any],
         target_obs: Dict[str, Any],
@@ -551,6 +566,8 @@ class OpenCVPreviewSink(PreviewSink):
             ("TASK", [
                 f"stage={status.get('stage', 'IDLE')}",
                 f"mode={status.get('mode', 'IDLE')}",
+                f"preview_layout={metadata.get('preview_layout') or ('target_rgb' if str(status.get('mode') or '').upper() == 'TRACK_LOCAL' else 'rgb_depth_edge')}",
+                f"window_id={metadata.get('window_id') or self.window_id}",
                 f"session={status.get('session_id') or ''}",
                 f"epoch={status.get('epoch', 0)}",
                 f"req={status.get('req_id') or ''}",
@@ -740,6 +757,15 @@ class OpenCVPreviewSink(PreviewSink):
                 cv2.destroyWindow(self.window_name)
             except Exception:
                 pass
+            try:
+                if self._env_bool("VISTA_PREVIEW_DESTROY_ALL_ON_CLOSE", True):
+                    cv2.destroyAllWindows()
+            except Exception:
+                pass
+            try:
+                cv2.waitKey(1)
+            except Exception:
+                pass
         self._opened = False
 
     def snapshot(self) -> Dict[str, Any]:
@@ -748,6 +774,7 @@ class OpenCVPreviewSink(PreviewSink):
         snap.update(
             {
                 "window_name": self.window_name,
+                "window_id": self.window_id,
                 "layout": self.layout,
                 "scale": self.scale,
                 "canvas_size": [self.canvas_w, self.canvas_h],

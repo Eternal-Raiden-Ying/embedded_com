@@ -27,7 +27,14 @@ def _is_edge_follow_target(search_kind: str) -> bool:
 
 
 def _target_obs_from_payload(payload: Optional[Dict[str, object]], target: Optional[str]) -> Dict[str, object]:
-    base: Dict[str, object] = {"found": False, "target": target}
+    base: Dict[str, object] = {
+        "found": False,
+        "target": target,
+        "boxes_count": 0,
+        "best_cls": "n/a",
+        "best_conf": 0.0,
+        "reason": "waiting_local_perception",
+    }
     source = None
     if isinstance(payload, dict):
         source = payload.get("target_obs") or payload.get("mock_target_obs")
@@ -36,6 +43,18 @@ def _target_obs_from_payload(payload: Optional[Dict[str, object]], target: Optio
     base.setdefault("target", target)
     base["found"] = bool(base.get("found", False))
     return base
+
+
+def _payload_has_target_obs(payload: Optional[Dict[str, object]]) -> bool:
+    return isinstance(payload, dict) and (
+        isinstance(payload.get("target_obs"), dict) or isinstance(payload.get("mock_target_obs"), dict)
+    )
+
+
+def _payload_has_table_edge_obs(payload: Optional[Dict[str, object]]) -> bool:
+    return isinstance(payload, dict) and (
+        isinstance(payload.get("table_edge_obs"), dict) or isinstance(payload.get("mock_table_edge_obs"), dict)
+    )
 
 
 def _default_table_edge_obs() -> Dict[str, object]:
@@ -66,7 +85,19 @@ def _table_edge_obs_from_payload(payload: Optional[Dict[str, object]]) -> Dict[s
 
 
 def _target_obs_from_results(results: Dict[str, object], target: Optional[str]) -> Optional[Dict[str, object]]:
-    local = dict((results or {}).get("local_perception") or {})
+    if "local_perception" not in (results or {}):
+        return None
+    local_raw = (results or {}).get("local_perception")
+    if not isinstance(local_raw, dict):
+        return {
+            "found": False,
+            "target": target,
+            "boxes_count": 0,
+            "best_cls": "n/a",
+            "best_conf": 0.0,
+            "reason": "invalid_local_perception",
+        }
+    local = dict(local_raw or {})
     contract_ok = bool(local.get("contract_ok", True))
     contract_error = str(local.get("contract_error") or "")
     contract_warnings = list(local.get("contract_warnings") or [])
@@ -84,7 +115,19 @@ def _target_obs_from_results(results: Dict[str, object], target: Optional[str]) 
     boxes = local.get("infer_boxes")
     class_names = local.get("class_names")
     rgb_shape = local.get("rgb_shape")
-    weak_payload = {"found": False, "target": target}
+    weak_payload = {
+        "found": False,
+        "target": target,
+        "boxes_count": int(local.get("box_count", 0) or 0),
+        "best_cls": "n/a",
+        "best_conf": 0.0,
+    }
+    if not local:
+        weak_payload["reason"] = "no_local_perception"
+    elif not local.get("rgb_shape"):
+        weak_payload["reason"] = "rgb_unavailable"
+    elif not bool(local.get("has_infer", False)):
+        weak_payload["reason"] = "predictor_not_ready"
     normalized_target = normalize_class_name(target)
     valid_names = set(ASR_VOCAB_MAP.get(normalized_target, set()))
     available_names = [str(name) for name in class_names] if isinstance(class_names, (list, tuple)) else []
@@ -114,12 +157,14 @@ def _target_obs_from_results(results: Dict[str, object], target: Optional[str]) 
                 continue
         weak_payload["best_cls"] = best_cls
         weak_payload["best_conf"] = float(best_conf)
+        if not boxes:
+            weak_payload.setdefault("reason", "no_boxes")
     if contract_error:
         weak_payload["contract_error"] = contract_error
     if contract_warnings:
         weak_payload["contract_warnings"] = contract_warnings
     if not isinstance(boxes, list) or not rgb_shape:
-        return weak_payload if (not contract_ok or contract_error or contract_warnings) else None
+        return weak_payload
     try:
         obs = compute_target_obs(tuple(rgb_shape), target, boxes, class_names=class_names)
     except Exception as exc:
@@ -186,8 +231,14 @@ class SearchStagePlan(BaseStagePlan):
         ctx.current_mode = self._resolve_mode(req)
         if isinstance(req.payload, dict):
             ctx.stage_state["search_kind"] = _search_kind(req, self.default_mode)
-            ctx.stage_state["target_obs"] = _target_obs_from_payload(req.payload, ctx.target_name)
-            ctx.stage_state["table_edge_obs"] = _table_edge_obs_from_payload(req.payload)
+            if _payload_has_target_obs(req.payload):
+                ctx.stage_state["target_obs"] = _target_obs_from_payload(req.payload, ctx.target_name)
+            else:
+                ctx.stage_state.setdefault("target_obs", _target_obs_from_payload(None, ctx.target_name))
+            if _payload_has_table_edge_obs(req.payload):
+                ctx.stage_state["table_edge_obs"] = _table_edge_obs_from_payload(req.payload)
+            else:
+                ctx.stage_state.setdefault("table_edge_obs", _table_edge_obs_from_payload(None))
         return StageOutput()
 
     def tick(self, tick_input: StageTickInput, ctx: StageContext) -> Optional[StageOutput]:

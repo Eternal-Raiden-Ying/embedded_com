@@ -328,7 +328,11 @@ class RuntimeSupervisor:
         try:
             current_sink = getattr(self.preview_manager, "sink", None)
             current_name = getattr(current_sink, "sink_name", "null") if current_sink is not None else "null"
-            if getattr(sink, "sink_name", "null") != current_name:
+            current_window = getattr(current_sink, "window_name", "")
+            requested_window = getattr(sink, "window_name", "")
+            if getattr(sink, "sink_name", "null") != current_name or (
+                getattr(sink, "sink_name", "null") == "opencv" and requested_window and requested_window != current_window
+            ):
                 self.preview_manager.set_sink(sink)
         except Exception:
             ok = False

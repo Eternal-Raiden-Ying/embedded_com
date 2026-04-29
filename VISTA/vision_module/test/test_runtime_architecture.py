@@ -23,6 +23,7 @@ from vision_module.backend.camera_manager import CameraManager
 from vision_module.backend.mode_controller import ModeController
 from vision_module.backend.preview.base import PreviewFrame, PreviewSink
 from vision_module.backend.preview.manager import PreviewManager
+from vision_module.backend.runtime_supervisor import RuntimeSupervisor
 from vision_module.backend.predictor_manager import PredictorManager
 from vision_module.backend.scheduler import Scheduler
 from vision_module.config.mode_defaults import build_default_mode_profiles
@@ -348,6 +349,86 @@ class SearchStagePlanKindTest(unittest.TestCase):
         perception = output.vision_obs["perception"]
         self.assertEqual(sorted(perception.keys()), ["target_obs"])
         self.assertTrue(perception["target_obs"]["found"])
+
+    def test_target_search_builds_obs_from_yolo_boxes(self):
+        plan, ctx = self._enter("TARGET", target="apple")
+        output = plan.tick(
+            StageTickInput(
+                ts=time.time(),
+                generation=1,
+                results={
+                    "local_perception": {
+                        "has_infer": True,
+                        "rgb_shape": [640, 640, 3],
+                        "class_names": ["apple"],
+                        "box_count": 1,
+                        "infer_boxes": [[120, 180, 260, 340, 0.88, 0]],
+                    },
+                },
+            ),
+            ctx,
+        )
+        target_obs = output.vision_obs["perception"]["target_obs"]
+        self.assertTrue(target_obs["found"])
+        self.assertEqual(target_obs["target"], "apple")
+        self.assertEqual(target_obs["boxes_count"], 1)
+        self.assertEqual(target_obs["best_cls"], "apple")
+        self.assertEqual(target_obs["bbox"], [120, 180, 260, 340])
+
+    def test_target_search_reports_empty_yolo_results(self):
+        plan, ctx = self._enter("TARGET", target="apple")
+        output = plan.tick(
+            StageTickInput(
+                ts=time.time(),
+                generation=1,
+                results={
+                    "local_perception": {
+                        "has_infer": True,
+                        "rgb_shape": [640, 640, 3],
+                        "class_names": ["apple"],
+                        "box_count": 0,
+                        "infer_boxes": [],
+                    },
+                },
+            ),
+            ctx,
+        )
+        target_obs = output.vision_obs["perception"]["target_obs"]
+        self.assertFalse(target_obs["found"])
+        self.assertEqual(target_obs["boxes_count"], 0)
+        self.assertEqual(target_obs["reason"], "no_boxes")
+
+    def test_target_search_update_does_not_clobber_latest_target_obs(self):
+        plan, ctx = self._enter("TARGET", target="apple")
+        first = plan.tick(
+            StageTickInput(
+                ts=time.time(),
+                generation=1,
+                results={
+                    "local_perception": {
+                        "has_infer": True,
+                        "rgb_shape": [640, 640, 3],
+                        "class_names": ["apple"],
+                        "box_count": 1,
+                        "infer_boxes": [[120, 180, 260, 340, 0.88, 0]],
+                    },
+                },
+            ),
+            ctx,
+        )
+        self.assertTrue(first.vision_obs["perception"]["target_obs"]["found"])
+
+        update_req = VisionReq(
+            ts=time.time(),
+            op="UPDATE",
+            stage="SEARCH",
+            target="apple",
+            mode_hint="TRACK_LOCAL",
+            payload={"search_kind": "TARGET", "orchestrator_state": "EDGE_SLIDE_SEARCH"},
+        )
+        plan.on_update(update_req, ctx)
+        self.assertTrue(ctx.stage_state["target_obs"]["found"])
+        self.assertEqual(ctx.stage_state["target_obs"]["best_cls"], "apple")
 
     def test_table_edge_search_outputs_only_table_edge_obs(self):
         plan, ctx = self._enter("TABLE_EDGE")
@@ -712,6 +793,55 @@ class PreviewBehaviorTest(unittest.TestCase):
             manager.stop_runtime()
             scheduler.stop_runtime()
 
+    def test_preview_render_exception_is_reported_without_killing_preview(self):
+        class FailingSink(PreviewSink):
+            sink_name = "failing"
+
+            def __init__(self):
+                self.render_count = 0
+
+            def open(self) -> None:
+                return None
+
+            def render(self, frame: PreviewFrame) -> bool:
+                self.render_count += 1
+                raise RuntimeError("metadata render failure")
+
+            def close(self) -> None:
+                return None
+
+        scheduler = Scheduler()
+        scheduler.start_runtime()
+        scheduler.configure(
+            {
+                "mode": "TRACK_LOCAL",
+                "routes": {
+                    "camera_frames": {"policy": "slot", "scope": "backend"},
+                    "local_perception": {"policy": "slot", "scope": "stage"},
+                    "runtime_status": {"policy": "slot", "scope": "backend"},
+                },
+            },
+            generation=1,
+        )
+        lines = []
+        console = OperatorConsole(mode="operator", default_interval_s=1.0, sink=lines.append)
+        sink = FailingSink()
+        manager = PreviewManager(sink=sink, logger=None, operator_console=console)
+        manager.bind_runtime(scheduler, lambda: 1)
+        scheduler.publish_result("camera_frames", {"rgb": np.zeros((16, 16, 3), dtype=np.uint8)}, generation=1)
+        scheduler.publish_result("runtime_status", {"stage": "SEARCH", "mode": "TRACK_LOCAL", "target": "apple"}, generation=1)
+        scheduler.publish_result("local_perception", {"has_infer": True, "box_count": 0, "infer_boxes": []}, generation=1)
+        try:
+            manager.enable()
+            manager.start_runtime()
+            time.sleep(0.08)
+            self.assertTrue(manager.enabled)
+            self.assertGreaterEqual(sink.render_count, 1)
+            self.assertTrue(any("[VISTA] WARN PREVIEW render_failed" in line for line in lines))
+        finally:
+            manager.stop_runtime()
+            scheduler.stop_runtime()
+
     def test_table_edge_operator_summary_is_rate_limited(self):
         lines = []
         console = OperatorConsole(mode="operator", default_interval_s=1.0, sink=lines.append)
@@ -783,6 +913,7 @@ class PreviewBehaviorTest(unittest.TestCase):
         metadata = sink.frames[-1].overlay.metadata
         self.assertEqual(metadata["source_cameras"], ["rgb"])
         self.assertEqual(metadata["table_edge_obs"], {})
+        self.assertEqual(metadata["preview_layout"], "target_rgb")
 
     def test_track_local_target_summary_found_zero_with_boxes(self):
         manager = PreviewManager(sink=self._ExitSink(), logger=None)
@@ -810,8 +941,81 @@ class PreviewBehaviorTest(unittest.TestCase):
         target = manager._target_overlay(status, local, {"found": True, "target": "apple", "confidence": 0.81, "cx_norm": 0.54, "bbox": [10, 20, 40, 60]})
         line = manager._target_summary_line(status, target)
         self.assertIn("found=1", line)
+        self.assertIn("boxes=1", line)
         self.assertIn("conf=0.81", line)
         self.assertIn("cx=0.54", line)
+
+    def test_target_summary_found_zero_no_boxes_has_reason(self):
+        manager = PreviewManager(sink=self._ExitSink(), logger=None)
+        status = {"mode": "TRACK_LOCAL", "target": "apple"}
+        target = manager._target_overlay(status, {"has_infer": True, "box_count": 0, "infer_boxes": []}, {"found": False, "target": "apple"})
+        line = manager._target_summary_line(status, target)
+        self.assertIn("found=0", line)
+        self.assertIn("boxes=0", line)
+        self.assertIn("reason=no_boxes", line)
+
+    def test_opencv_preview_same_window_reuses_sink(self):
+        class FakeSink:
+            sink_name = "opencv"
+
+            def __init__(self):
+                self.window_name = "VISTA App Dashboard"
+
+        class FakePreviewManager:
+            def __init__(self):
+                self.sink = FakeSink()
+                self.set_sink_calls = 0
+                self.enabled = False
+
+            def set_sink(self, sink):
+                self.set_sink_calls += 1
+                self.sink = sink
+
+            def enable(self):
+                self.enabled = True
+
+            def start_runtime(self):
+                return None
+
+        preview = FakePreviewManager()
+        supervisor = RuntimeSupervisor(Scheduler(), preview_manager=preview)
+        ok = supervisor._configure_preview(
+            {"enabled": True, "sink_name": "opencv", "window_name": "VISTA App Dashboard"}
+        )
+        self.assertTrue(ok)
+        self.assertEqual(preview.set_sink_calls, 0)
+        self.assertTrue(preview.enabled)
+
+    def test_opencv_preview_different_window_replaces_sink(self):
+        class FakeSink:
+            sink_name = "opencv"
+
+            def __init__(self):
+                self.window_name = "old"
+
+        class FakePreviewManager:
+            def __init__(self):
+                self.sink = FakeSink()
+                self.set_sink_calls = 0
+
+            def set_sink(self, sink):
+                self.set_sink_calls += 1
+                self.sink = sink
+
+            def enable(self):
+                return None
+
+            def start_runtime(self):
+                return None
+
+        preview = FakePreviewManager()
+        supervisor = RuntimeSupervisor(Scheduler(), preview_manager=preview)
+        ok = supervisor._configure_preview(
+            {"enabled": True, "sink_name": "opencv", "window_name": "VISTA App Dashboard"}
+        )
+        self.assertTrue(ok)
+        self.assertEqual(preview.set_sink_calls, 1)
+        self.assertEqual(getattr(preview.sink, "window_name", ""), "VISTA App Dashboard")
 
 
 class OperatorConsoleIpcPolicyTest(unittest.TestCase):
@@ -841,6 +1045,19 @@ class OperatorConsoleIpcPolicyTest(unittest.TestCase):
         app.active_interaction_id = None
         app._last_runtime_reconciled_console = ""
         return app, app_module.CONFIG
+
+    def test_target_request_kind_and_sync_reason(self):
+        app, _cfg = self._build_app_shell(mode="operator")
+        req = VisionReq(
+            ts=time.time(),
+            op="START",
+            stage="SEARCH",
+            mode_hint="TRACK_LOCAL",
+            target="apple",
+            payload={"search_kind": "TARGET"},
+        )
+        self.assertEqual(app._request_kind(req, "SEARCH"), "TARGET")
+        self.assertEqual(app._request_sync_reason(req, "SEARCH", "TARGET"), "target_search")
 
     def test_operator_mode_suppresses_ipc_success_console(self):
         app, cfg = self._build_app_shell(mode="operator")

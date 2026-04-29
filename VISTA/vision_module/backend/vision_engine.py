@@ -168,8 +168,13 @@ class VisionEngine:
             self._active_runtime_generation = target_generation
             return bool(self.runtime_supervisor.reconcile(plan=plan_payload, generation=target_generation))
 
+        previous_plan = self._active_runtime_plan
+        previous_generation = self._active_runtime_generation
+        self.scheduler.configure(plan=plan_payload, generation=target_generation)
         ok = bool(self.runtime_supervisor.reconcile(plan=plan_payload, generation=target_generation))
         if not ok:
+            if previous_plan is not None:
+                self.scheduler.configure(plan=previous_plan, generation=previous_generation)
             self._emit_backend_failure(
                 "mode_apply_incomplete",
                 requested_mode=str(plan_payload.get("mode") or "IDLE").strip().upper() or "IDLE",
@@ -178,7 +183,6 @@ class VisionEngine:
             )
             return False
 
-        self.scheduler.configure(plan=plan_payload, generation=target_generation)
         self._active_runtime_plan = plan_payload
         self._active_runtime_generation = target_generation
         self._sync_aliases()

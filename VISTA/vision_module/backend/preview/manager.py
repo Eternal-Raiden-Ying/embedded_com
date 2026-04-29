@@ -48,6 +48,7 @@ class PreviewManager:
         self._last_source_key = ""
         self._last_preview_seq = 0
         self._last_preview_emit_ts = 0.0
+        self._last_render_error_ts = 0.0
         self._stale_warn_s = 1.0
 
     def _emit_operator(self, key: str, line: str) -> None:
@@ -81,15 +82,9 @@ class PreviewManager:
         conf = float(target_obs.get("confidence", 0.0) or 0.0)
         target = str(target_obs.get("target") or status.get("target") or "target").strip()
         mode = str(status.get("mode") or target_obs.get("mode") or "IDLE").upper()
-        if found:
-            cx = float(target_obs.get("cx_norm", target_obs.get("cx", 0.0)) or 0.0)
-            cy = float(target_obs.get("cy_norm", target_obs.get("cy", 0.0)) or 0.0)
-            return f"[VISTA] TARGET mode={mode} target={target[:32]} found=1 conf={conf:.2f} cx={cx:.2f} cy={cy:.2f}"
         boxes = int(target_obs.get("boxes_count", target_obs.get("box_count", 0)) or 0)
         best_cls = str(target_obs.get("best_cls") or target_obs.get("best_class") or "n/a").strip() or "n/a"
         best_conf = float(target_obs.get("best_conf", target_obs.get("best_confidence", 0.0)) or 0.0)
-        fps = target_obs.get("fps")
-        fps_part = f" fps={float(fps):.1f}" if fps is not None else ""
         frame_age = target_obs.get("frame_age_ms")
         infer_age = target_obs.get("infer_age_ms")
         age_part = ""
@@ -97,9 +92,19 @@ class PreviewManager:
             age_part += f" frame_age_ms={int(frame_age)}"
         if infer_age is not None:
             age_part += f" infer_age_ms={int(infer_age)}"
+        if found:
+            cx = float(target_obs.get("cx_norm", target_obs.get("cx", 0.0)) or 0.0)
+            cy = float(target_obs.get("cy_norm", target_obs.get("cy", 0.0)) or 0.0)
+            return (
+                f"[VISTA] TARGET mode={mode} target={target[:32]} found=1 boxes={boxes} "
+                f"best_cls={best_cls[:32]} best_conf={best_conf:.2f} conf={conf:.2f} cx={cx:.2f} cy={cy:.2f}{age_part}"
+            )
+        fps = target_obs.get("fps")
+        fps_part = f" fps={float(fps):.1f}" if fps is not None else ""
+        reason_part = " reason=no_boxes" if boxes <= 0 else ""
         return (
             f"[VISTA] TARGET mode={mode} target={target[:32]} found=0 "
-            f"boxes={boxes} best_cls={best_cls[:32]} best_conf={best_conf:.2f}{fps_part}{age_part}"
+            f"boxes={boxes} best_cls={best_cls[:32]} best_conf={best_conf:.2f}{fps_part}{age_part}{reason_part}"
         )
 
     def _target_overlay(self, status: Dict[str, Any], local: Dict[str, Any], target_obs: Dict[str, Any]) -> Dict[str, Any]:
@@ -284,6 +289,7 @@ class PreviewManager:
             if not target_obs:
                 lines.append("target_obs=unavailable")
             if mode == "TRACK_LOCAL":
+                lines.append("preview_layout=target_rgb")
                 lines.append(
                     f"target_found={int(bool(target_obs.get('found', False)))} "
                     f"target_conf={float(target_obs.get('confidence', 0.0) or 0.0):.2f} "
@@ -293,31 +299,43 @@ class PreviewManager:
                 )
             if stale_age >= self._stale_warn_s:
                 lines.append(f"frame_stale age={stale_age:.2f}s")
-            ok = self.render(
-                PreviewFrame(
-                    ts=float(frame_slot.get("ts", now) or now),
-                    image=dict(frames),
-                    stage=str(status.get("stage") or "IDLE").upper(),
-                    mode=str(status.get("mode") or "IDLE").upper(),
-                    overlay=PreviewOverlay(
-                        title="VISTA Preview",
-                        lines=lines,
-                        metadata={
-                            "frame_seq": seq,
-                            "frame_meta": frame_meta,
-                            "runtime_status": status,
-                            "local_perception": local,
-                            "table_edge_obs": table_edge,
-                            "target_obs": target_obs,
-                            "source_cameras": cameras,
-                            "frame_stale": stale_age >= self._stale_warn_s,
-                            "frame_age_s": stale_age,
-                            "infer_age_s": infer_age,
-                            "target": target_obs.get("target") or status.get("target"),
-                        },
-                    ),
+            try:
+                ok = self.render(
+                    PreviewFrame(
+                        ts=float(frame_slot.get("ts", now) or now),
+                        image=dict(frames),
+                        stage=str(status.get("stage") or "IDLE").upper(),
+                        mode=str(status.get("mode") or "IDLE").upper(),
+                        overlay=PreviewOverlay(
+                            title="VISTA Preview",
+                            lines=lines,
+                            metadata={
+                                "frame_seq": seq,
+                                "frame_meta": frame_meta,
+                                "runtime_status": status,
+                                "local_perception": local,
+                                "table_edge_obs": table_edge,
+                                "target_obs": target_obs,
+                                "source_cameras": cameras,
+                                "frame_stale": stale_age >= self._stale_warn_s,
+                                "frame_age_s": stale_age,
+                                "infer_age_s": infer_age,
+                                "target": target_obs.get("target") or status.get("target"),
+                                "preview_layout": "target_rgb" if mode == "TRACK_LOCAL" else "rgb_depth_edge",
+                            },
+                        ),
+                    )
                 )
-            )
+            except Exception as exc:
+                ok = True
+                if now - self._last_render_error_ts >= 1.0:
+                    self._last_render_error_ts = now
+                    if self.logger is not None:
+                        self.logger.exception("preview render failed | error=%s", exc)
+                    self._emit_operator(
+                        "preview:render_failed",
+                        f"[VISTA] WARN PREVIEW render_failed error={str(exc)[:96]}",
+                    )
             self._last_preview_seq = seq
             self._last_preview_emit_ts = now
             if not ok:
