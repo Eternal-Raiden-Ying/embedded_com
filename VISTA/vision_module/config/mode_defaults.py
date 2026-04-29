@@ -71,6 +71,23 @@ def build_default_mode_profiles(active_model: str) -> Dict[str, ModeProfile]:
                 }
             },
         ),
+        "TABLE_EDGE_PERCEPTION": ModeProfile(
+            name="TABLE_EDGE_PERCEPTION",
+            enabled_cameras=("rgb", "depth"),
+            predictor_enabled=True,
+            predictor_model=active_model,
+            preview=PreviewProfile(enabled=True, sink_name="opencv"),
+            release_cooldown_s=2.0,
+            metadata={
+                "contract": {
+                    "cameras": ["rgb", "depth"],
+                    "predictor": "required",
+                    "table_edge": "required",
+                    "remote": "disabled",
+                    "perception": ["local_perception", "table_edge_obs"],
+                }
+            },
+        ),
         "MICRO_ADJUST": ModeProfile(
             name="MICRO_ADJUST",
             enabled_cameras=("rgb", "depth"),

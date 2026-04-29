@@ -41,6 +41,11 @@ class TableEdgeManager:
         self._detector_cfg = None
         self._detector_error = ""
         self._target_dist_m = 0.5
+        self._last_valid_quadrant: Optional[str] = None
+        self._last_valid_quadrant_ts = 0.0
+        self._last_valid_quadrant_ttl_s = 1.0
+        self._last_valid_table_bbox = None
+        self._last_valid_table_center_norm = None
         self._load_detector()
 
     def _emit(self, action: str, **fields: Any) -> None:
@@ -184,20 +189,41 @@ class TableEdgeManager:
         roi_meta = build_table_roi(local, local.get("rgb_shape"), depth_shape, fallback)
         manual_static = self._manual_static_roi_enabled()
         quadrant = roi_meta.get("table_quadrant")
+        table_bbox = roi_meta.get("table_bbox")
+        if quadrant:
+            self._last_valid_quadrant = str(quadrant).strip().upper()
+            self._last_valid_quadrant_ts = time.time()
+            self._last_valid_table_bbox = table_bbox
+            self._last_valid_table_center_norm = roi_meta.get("table_center_norm")
         if manual_static:
             roi_source = "manual_static"
+            roi_reason = "manual_static_roi_enabled"
             depth_edge_roi = fallback
         elif quadrant:
             if depth_shape is not None and len(depth_shape) >= 2:
                 depth_edge_roi = quadrant_to_roi(quadrant, int(depth_shape[1]), int(depth_shape[0]))
             else:
                 depth_edge_roi = roi_meta.get("depth_edge_roi")
-            roi_source = "yolo_table_quadrant"
+            roi_source = "local_perception_table_bbox"
+            roi_reason = "table_bbox_detected"
+        elif self._last_valid_quadrant and (time.time() - float(self._last_valid_quadrant_ts or 0.0)) <= self._last_valid_quadrant_ttl_s:
+            quadrant = self._last_valid_quadrant
+            if depth_shape is not None and len(depth_shape) >= 2:
+                depth_edge_roi = quadrant_to_roi(quadrant, int(depth_shape[1]), int(depth_shape[0]))
+            else:
+                depth_edge_roi = roi_meta.get("depth_edge_roi")
+            roi_source = "last_valid_quadrant"
+            roi_reason = "table_bbox_lost_using_history"
+            roi_meta["table_quadrant"] = quadrant
+            roi_meta["table_bbox"] = self._last_valid_table_bbox
+            roi_meta["table_center_norm"] = self._last_valid_table_center_norm
         else:
             depth_edge_roi = fallback
             roi_source = "static_fallback"
+            roi_reason = "table_bbox_unavailable"
         roi_meta["depth_edge_roi"] = depth_edge_roi
         roi_meta["roi_source"] = roi_source
+        roi_meta["roi_reason"] = roi_reason
         return roi_meta
 
     def _roi_payload(self, roi_box=None, roi_meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -208,12 +234,14 @@ class TableEdgeManager:
         meta = dict(roi_meta or {})
         payload: Dict[str, Any] = {
             "table_bbox": meta.get("table_bbox"),
+            "table_center_norm": meta.get("table_center_norm"),
             "table_quadrant": meta.get("table_quadrant"),
             "rgb_search_roi": meta.get("rgb_search_roi"),
             "depth_edge_roi": roi,
             "table_edge_roi": roi,
             "edge_roi": roi,
             "roi_source": meta.get("roi_source") or "static_fallback",
+            "roi_reason": meta.get("roi_reason") or "",
             "roi_format": "xyxy",
         }
         if cfg is not None:
@@ -320,4 +348,5 @@ class TableEdgeManager:
             "last_publish_ts": float(self._last_publish_ts),
             "frame_id": int(self._frame_id),
             "target_dist_m": float(self._target_dist_m),
+            "last_valid_quadrant": self._last_valid_quadrant,
         }

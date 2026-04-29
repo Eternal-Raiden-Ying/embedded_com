@@ -112,6 +112,15 @@ class StageController:
         if self._mode_controller is None:
             self._last_applied_mode = target_mode
             return True
+        if (
+            target_mode == "TABLE_EDGE_PERCEPTION"
+            and normalize_upper(self._ctx.current_stage, "IDLE") == "SEARCH"
+            and normalize_upper(self._ctx.stage_state.get("search_kind"), "") == "TABLE_EDGE"
+        ):
+            resolver = getattr(self._mode_controller, "resolve_profile", None)
+            if callable(resolver) and resolver(target_mode) is None and resolver("DEPTH_PERCEPTION") is not None:
+                target_mode = "DEPTH_PERCEPTION"
+                self._ctx.current_mode = target_mode
         try:
             profile = self._mode_controller.switch_mode(
                 target_mode,

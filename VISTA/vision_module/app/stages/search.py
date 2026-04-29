@@ -102,7 +102,7 @@ class SearchStagePlan(BaseStagePlan):
     def _resolve_mode(self, req: VisionReq) -> str:
         if req.mode_hint:
             return normalize_upper(req.mode_hint, self.default_mode)
-        return "DEPTH_PERCEPTION" if _search_kind(req, self.default_mode) == "TABLE_EDGE" else self.default_mode
+        return "TABLE_EDGE_PERCEPTION" if _search_kind(req, self.default_mode) == "TABLE_EDGE" else self.default_mode
 
     def on_enter(self, req: VisionReq, ctx: StageContext) -> None:
         """Prepare target metadata and choose the initial local tracking mode."""

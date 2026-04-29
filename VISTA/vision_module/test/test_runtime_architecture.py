@@ -15,6 +15,7 @@ except ImportError:
 from vision_module.app.stage_controller import StageController
 from vision_module.app.stages.base import StageContext, StageTickInput
 from vision_module.app.stages.grasp import GraspStagePlan
+from vision_module.app.stages.search import SearchStagePlan
 from vision_module.backend.mode_controller import ModeController
 from vision_module.backend.preview.base import PreviewFrame, PreviewSink
 from vision_module.backend.preview.manager import PreviewManager
@@ -143,6 +144,114 @@ class RuntimeSupervisorModeApplyTest(unittest.TestCase):
             snapshot = runtime.runtime_snapshot()
             self.assertEqual(snapshot["runtime_supervisor"]["camera"]["enabled_cameras"], [])
             self.assertIsNone(snapshot["runtime_supervisor"]["predictor"]["active_model_name"])
+        finally:
+            runtime.stop()
+
+    def test_table_edge_search_falls_back_when_preferred_mode_unregistered(self):
+        args = SimpleNamespace(
+            rgb_device="mock_rgb",
+            depth_device="mock_depth",
+            ir_device="mock_ir",
+            rgb_in_w=1280,
+            rgb_in_h=720,
+            rgb_out_w=640,
+            rgb_out_h=640,
+            rgb_fps=30,
+            depth_width=424,
+            depth_height=240,
+            depth_fps=15,
+            ir_in_w=640,
+            ir_in_h=480,
+            ir_out_w=640,
+            ir_out_h=480,
+            ir_fps=30,
+            model_path="",
+            model_width=640,
+            model_height=640,
+            conf_thres=0.25,
+            iou_thres=0.15,
+            class_num=80,
+        )
+        cfg = build_test_config(args)
+        cfg.runtime.capability_placeholder = True
+        engine_module = importlib.import_module("vision_module.backend.vision_engine")
+        patch_engine_backends(engine_module, "mock", "mock")
+        runtime = engine_module.VisionEngine(cfg, logger=PrintLogger("table_edge_fallback"))
+        mode_controller = ModeController(logger=PrintLogger("table_edge_fallback"), preview_allowed=bool(cfg.debug.preview))
+        profiles = build_default_mode_profiles(cfg.model.active_model)
+        mode_controller.register_profile(profiles["IDLE"])
+        mode_controller.register_profile(profiles["DEPTH_PERCEPTION"])
+        stage_controller = StageController(
+            logger=PrintLogger("table_edge_fallback"),
+            mode_controller=mode_controller,
+            runtime_service=runtime,
+        )
+        stage_controller.register_plan(SearchStagePlan())
+        try:
+            runtime.init()
+            runtime.start()
+            out = stage_controller.handle_request(
+                VisionReq(
+                    ts=time.time(),
+                    op="START",
+                    stage="SEARCH",
+                    payload={"search_kind": "TABLE_EDGE"},
+                )
+            )
+            self.assertIsNotNone(out)
+            self.assertEqual(stage_controller.context().current_mode, "DEPTH_PERCEPTION")
+            self.assertEqual(mode_controller.current_mode(), "DEPTH_PERCEPTION")
+        finally:
+            runtime.stop()
+
+    def test_table_edge_perception_starts_rgb_depth_predictor_and_table_edge(self):
+        args = SimpleNamespace(
+            rgb_device="mock_rgb",
+            depth_device="mock_depth",
+            ir_device="mock_ir",
+            rgb_in_w=1280,
+            rgb_in_h=720,
+            rgb_out_w=640,
+            rgb_out_h=640,
+            rgb_fps=30,
+            depth_width=424,
+            depth_height=240,
+            depth_fps=15,
+            ir_in_w=640,
+            ir_in_h=480,
+            ir_out_w=640,
+            ir_out_h=480,
+            ir_fps=30,
+            model_path="",
+            model_width=640,
+            model_height=640,
+            conf_thres=0.25,
+            iou_thres=0.15,
+            class_num=80,
+        )
+        cfg = build_test_config(args)
+        cfg.runtime.capability_placeholder = True
+        engine_module = importlib.import_module("vision_module.backend.vision_engine")
+        patch_engine_backends(engine_module, "mock", "mock")
+
+        runtime, _, stage_controller = build_runtime_stack(engine_module, cfg, PrintLogger("table_edge_mode"))
+        try:
+            runtime.init()
+            runtime.start()
+            self.assertTrue(stage_controller.set_runtime_mode("TABLE_EDGE_PERCEPTION", reason="table_edge_test", force=True))
+            snapshot = runtime.runtime_snapshot()
+            supervisor = snapshot["runtime_supervisor"]
+            plan = snapshot["active_runtime_plan"]
+            self.assertEqual(set(supervisor["camera"]["enabled_cameras"]), {"rgb", "depth"})
+            self.assertTrue(supervisor["camera"]["runtime_running"])
+            self.assertTrue(supervisor["predictor"]["runtime_running"])
+            self.assertTrue(supervisor["predictor"]["inference_enabled"])
+            self.assertEqual(supervisor["predictor"]["active_model_name"], "test_model")
+            self.assertTrue(supervisor["table_edge"]["runtime_running"])
+            self.assertEqual(
+                plan["contract"]["capability"]["perception"],
+                ["local_perception", "table_edge_obs"],
+            )
         finally:
             runtime.stop()
 

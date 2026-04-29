@@ -149,6 +149,7 @@ class ModeController:
                     "enabled": bool(
                         "depth" in set(profile.enabled_cameras or ())
                         or str(profile.name or "").strip().upper() == "DEPTH_PERCEPTION"
+                        or str(profile.name or "").strip().upper() == "TABLE_EDGE_PERCEPTION"
                     ),
                 },
                 "preview": {

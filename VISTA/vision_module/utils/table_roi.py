@@ -41,6 +41,18 @@ def _parse_bbox(value: Any) -> Optional[list[int]]:
     return [x1, y1, x2, y2]
 
 
+def bbox_center_norm(bbox: Any, image_shape: Any) -> Optional[list[float]]:
+    parsed = _parse_bbox(bbox)
+    shape = _parse_shape(image_shape)
+    if parsed is None or shape is None:
+        return None
+    height, width = shape
+    x1, y1, x2, y2 = parsed
+    cx = ((float(x1) + float(x2)) * 0.5) / float(width)
+    cy = ((float(y1) + float(y2)) * 0.5) / float(height)
+    return [max(0.0, min(1.0, cx)), max(0.0, min(1.0, cy))]
+
+
 def _clip_roi(roi: Sequence[int], width: int, height: int) -> list[int]:
     x1, y1, x2, y2 = [int(v) for v in roi[:4]]
     x1 = max(0, min(width - 1, x1))
@@ -81,16 +93,40 @@ def find_table_bbox(local_perception: Any) -> Optional[list[int]]:
     if not isinstance(boxes, list):
         return None
     for row in boxes:
-        if not isinstance(row, (list, tuple)) or len(row) < 6:
+        if isinstance(row, dict):
+            class_id_raw = row.get("cls_id", row.get("class_id", row.get("cls", row.get("class"))))
+            class_name = str(row.get("class_name", row.get("name", row.get("label", ""))) or "").strip().lower()
+            is_table = False
+            try:
+                is_table = int(float(class_id_raw)) in TABLE_CLASS_IDS
+            except (TypeError, ValueError):
+                pass
+            if class_name in TABLE_CLASS_NAMES or is_table:
+                return _parse_bbox(row)
             continue
-        try:
-            class_id = int(float(row[5]))
-            class_name = str(row[6]).strip().lower() if len(row) > 6 else ""
-        except (TypeError, ValueError):
+        if not isinstance(row, (list, tuple)) or len(row) < 4:
             continue
+        class_id = None
+        class_name = ""
+        if len(row) > 5:
+            try:
+                class_id = int(float(row[5]))
+            except (TypeError, ValueError):
+                class_id = None
+        if len(row) > 6:
+            class_name = str(row[6]).strip().lower()
         if class_name in TABLE_CLASS_NAMES or class_id in TABLE_CLASS_IDS:
             return _parse_bbox(row)
     return None
+
+
+def table_bbox_meta(local_perception: Any, image_shape: Any) -> Dict[str, Any]:
+    table_bbox = find_table_bbox(local_perception)
+    return {
+        "table_bbox": table_bbox,
+        "table_center_norm": bbox_center_norm(table_bbox, image_shape),
+        "table_quadrant": bbox_to_quadrant(table_bbox, image_shape) if table_bbox is not None else None,
+    }
 
 
 def bbox_to_quadrant(bbox: Any, image_shape: Any) -> Optional[str]:
@@ -137,6 +173,7 @@ def build_table_roi(
     rgb_hw = _parse_shape(rgb_shape or local.get("rgb_shape"))
     depth_hw = _parse_shape(depth_shape)
     table_quadrant = bbox_to_quadrant(table_bbox, rgb_hw) if table_bbox is not None else None
+    table_center = bbox_center_norm(table_bbox, rgb_hw) if table_bbox is not None else None
     if table_quadrant is None:
         table_quadrant = _normalize_quadrant(local.get("table_quadrant"))
     rgb_search_roi = None
@@ -151,6 +188,7 @@ def build_table_roi(
     source = "yolo_table_bbox" if table_bbox is not None else "fallback"
     return {
         "table_bbox": table_bbox,
+        "table_center_norm": table_center,
         "table_quadrant": table_quadrant,
         "rgb_search_roi": rgb_search_roi,
         "depth_edge_roi": depth_edge_roi,
