@@ -46,6 +46,9 @@ class PreviewManager:
         self._last_frame_seq = 0
         self._exit_requested = False
         self._last_source_key = ""
+        self._last_preview_seq = 0
+        self._last_preview_emit_ts = 0.0
+        self._stale_warn_s = 1.0
 
     def _emit_operator(self, key: str, line: str) -> None:
         if self.operator_console is None:
@@ -74,18 +77,75 @@ class PreviewManager:
         )
 
     def _target_summary_line(self, status: Dict[str, Any], target_obs: Dict[str, Any]) -> str:
-        if format_target_summary is not None:
-            return format_target_summary(status, target_obs)
         found = bool(target_obs.get("found", False))
         conf = float(target_obs.get("confidence", 0.0) or 0.0)
         target = str(target_obs.get("target") or status.get("target") or "target").strip()
-        cx = float(target_obs.get("cx_norm", 0.0) or 0.0)
-        size = float(target_obs.get("size_norm", target_obs.get("area_norm", 0.0)) or 0.0)
+        mode = str(status.get("mode") or target_obs.get("mode") or "IDLE").upper()
+        if found:
+            cx = float(target_obs.get("cx_norm", target_obs.get("cx", 0.0)) or 0.0)
+            cy = float(target_obs.get("cy_norm", target_obs.get("cy", 0.0)) or 0.0)
+            return f"[VISTA] TARGET mode={mode} target={target[:32]} found=1 conf={conf:.2f} cx={cx:.2f} cy={cy:.2f}"
+        boxes = int(target_obs.get("boxes_count", target_obs.get("box_count", 0)) or 0)
+        best_cls = str(target_obs.get("best_cls") or target_obs.get("best_class") or "n/a").strip() or "n/a"
+        best_conf = float(target_obs.get("best_conf", target_obs.get("best_confidence", 0.0)) or 0.0)
+        fps = target_obs.get("fps")
+        fps_part = f" fps={float(fps):.1f}" if fps is not None else ""
+        frame_age = target_obs.get("frame_age_ms")
+        infer_age = target_obs.get("infer_age_ms")
+        age_part = ""
+        if frame_age is not None:
+            age_part += f" frame_age_ms={int(frame_age)}"
+        if infer_age is not None:
+            age_part += f" infer_age_ms={int(infer_age)}"
         return (
-            f"[VISTA] TARGET stage={str(status.get('stage') or 'IDLE').upper()} "
-            f"mode={str(status.get('mode') or 'IDLE').upper()} target={target[:32]} "
-            f"found={int(found)} conf={conf:.2f} cx={cx:+.3f} size={size:.3f}"
+            f"[VISTA] TARGET mode={mode} target={target[:32]} found=0 "
+            f"boxes={boxes} best_cls={best_cls[:32]} best_conf={best_conf:.2f}{fps_part}{age_part}"
         )
+
+    def _target_overlay(self, status: Dict[str, Any], local: Dict[str, Any], target_obs: Dict[str, Any]) -> Dict[str, Any]:
+        target = str(target_obs.get("target") or status.get("target") or local.get("target") or "target").strip() or "target"
+        boxes = local.get("infer_boxes")
+        if not isinstance(boxes, list):
+            boxes = []
+        class_names = local.get("class_names") if isinstance(local.get("class_names"), (list, tuple)) else []
+        best_cls = "n/a"
+        best_conf = 0.0
+        for row in boxes:
+            try:
+                conf = float(row[4])
+                cls_id = int(float(row[5]))
+                cls_name = str(row[6]).strip() if len(row) > 6 else ""
+                if not cls_name and 0 <= cls_id < len(class_names):
+                    cls_name = str(class_names[cls_id])
+                if conf >= best_conf:
+                    best_conf = conf
+                    best_cls = cls_name or str(cls_id)
+            except Exception:
+                continue
+        out = dict(target_obs or {})
+        out.setdefault("target", target)
+        out.setdefault("found", bool(target_obs.get("found", False)))
+        if out.get("bbox") and out.get("cy_norm") is None:
+            try:
+                rgb_shape = local.get("rgb_shape") or {}
+                h = float(rgb_shape[0])
+                y1, y2 = float(out["bbox"][1]), float(out["bbox"][3])
+                out["cy_norm"] = max(0.0, min(1.0, ((y1 + y2) / 2.0) / max(1.0, h)))
+            except Exception:
+                pass
+        out["boxes_count"] = int(local.get("box_count", len(boxes)) or len(boxes))
+        out["best_cls"] = best_cls
+        out["best_conf"] = float(best_conf)
+        out["fps"] = self._fps_snapshot()
+        return out
+
+    def _fps_snapshot(self) -> Optional[float]:
+        sink = self.sink
+        value = getattr(sink, "_fps", None)
+        try:
+            return float(value) if value is not None else None
+        except Exception:
+            return None
 
     def _emit(self, action: str, **fields: Any) -> None:
         if self._capability_sink is None:
@@ -140,10 +200,20 @@ class PreviewManager:
             if generation != self._last_frame_generation:
                 self._last_frame_generation = generation
                 self._last_frame_seq = 0
-            if seq <= self._last_frame_seq or not isinstance(frames, dict):
+                self._last_preview_seq = 0
+                self._last_preview_emit_ts = 0.0
+            if not isinstance(frames, dict):
                 self._worker_stop.wait(timeout=self._worker_interval_s)
                 continue
-            self._last_frame_seq = seq
+            now = time.time()
+            stale_age = max(0.0, now - float(frame_slot.get("ts", now) or now))
+            is_stale_repeat = seq <= self._last_frame_seq
+            if is_stale_repeat:
+                if stale_age < self._stale_warn_s or now - self._last_preview_emit_ts < 0.5:
+                    self._worker_stop.wait(timeout=self._worker_interval_s)
+                    continue
+            else:
+                self._last_frame_seq = seq
             image = frames.get("rgb")
             if image is None and frames:
                 image = next(iter(frames.values()))
@@ -152,10 +222,20 @@ class PreviewManager:
                 continue
             status = dict(scheduler.read_result("runtime_status", default={}) or {})
             frame_meta = dict(scheduler.read_result("frame_meta", default={}) or {})
-            local = dict(scheduler.read_result("local_perception", default={}) or {})
+            local_slot = scheduler.read_slot("local_perception")
+            local = dict((local_slot or {}).get("payload") or {})
+            infer_age = max(0.0, now - float((local_slot or {}).get("ts", now) or now)) if local_slot else None
             table_edge = dict(scheduler.read_result("table_edge_obs", default={}) or {})
             target_obs = dict(scheduler.read_result("target_obs", default={}) or {})
-            now = time.time()
+            mode = str(status.get("mode") or "IDLE").upper()
+            if mode == "TRACK_LOCAL":
+                table_edge = {}
+                target_obs = self._target_overlay(status, local, target_obs)
+                target_obs["frame_age_ms"] = int(round(stale_age * 1000.0))
+                if infer_age is not None:
+                    target_obs["infer_age_ms"] = int(round(infer_age * 1000.0))
+            if stale_age >= self._stale_warn_s:
+                self._emit_operator("preview:target_rgb_stale", f"[VISTA] WARN TARGET rgb_frame_stale age={stale_age:.2f}s")
             cameras = sorted(str(k) for k in frames.keys())
             source_key = ",".join(cameras) or "none"
             if source_key != self._last_source_key:
@@ -191,13 +271,31 @@ class PreviewManager:
                 if reason:
                     lines.append(f"reason={reason[:42]}")
                 self._emit_operator("preview:table_edge_obs", self._table_edge_summary_line(status, table_edge))
+            if mode == "TRACK_LOCAL" and not bool(local.get("has_infer", bool(local.get("infer_boxes")))):
+                self._emit_operator("preview:target_predictor_not_ready", f"[VISTA] WARN TARGET predictor_not_ready mode={mode}")
+            if mode == "TRACK_LOCAL" and bool(target_obs.get("class_not_supported")):
+                available = ",".join(str(v) for v in list(target_obs.get("available_classes") or [])[:16])
+                self._emit_operator(
+                    "preview:target_class_not_supported",
+                    f"[VISTA] WARN TARGET class_not_supported target={target_obs.get('target') or status.get('target') or 'target'} available={available or 'n/a'}",
+                )
             if target_obs:
                 self._emit_operator("preview:target_obs", self._target_summary_line(status, target_obs))
             if not target_obs:
                 lines.append("target_obs=unavailable")
+            if mode == "TRACK_LOCAL":
+                lines.append(
+                    f"target_found={int(bool(target_obs.get('found', False)))} "
+                    f"target_conf={float(target_obs.get('confidence', 0.0) or 0.0):.2f} "
+                    f"boxes_count={int(target_obs.get('boxes_count', local.get('box_count', 0)) or 0)} "
+                    f"frame_age_ms={int(round(stale_age * 1000.0))} "
+                    f"infer_age_ms={int(round(infer_age * 1000.0)) if infer_age is not None else -1}"
+                )
+            if stale_age >= self._stale_warn_s:
+                lines.append(f"frame_stale age={stale_age:.2f}s")
             ok = self.render(
                 PreviewFrame(
-                    ts=now,
+                    ts=float(frame_slot.get("ts", now) or now),
                     image=dict(frames),
                     stage=str(status.get("stage") or "IDLE").upper(),
                     mode=str(status.get("mode") or "IDLE").upper(),
@@ -212,10 +310,16 @@ class PreviewManager:
                             "table_edge_obs": table_edge,
                             "target_obs": target_obs,
                             "source_cameras": cameras,
+                            "frame_stale": stale_age >= self._stale_warn_s,
+                            "frame_age_s": stale_age,
+                            "infer_age_s": infer_age,
+                            "target": target_obs.get("target") or status.get("target"),
                         },
                     ),
                 )
             )
+            self._last_preview_seq = seq
+            self._last_preview_emit_ts = now
             if not ok:
                 self._exit_requested = True
                 self.disable()

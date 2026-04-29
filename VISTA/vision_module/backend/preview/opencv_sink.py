@@ -82,7 +82,8 @@ class OpenCVPreviewSink(PreviewSink):
 
         frames = frame.image if isinstance(frame.image, dict) else {}
         metadata = dict(getattr(frame.overlay, "metadata", {}) or {})
-        table_edge = metadata.get("table_edge_obs") or {}
+        mode = str(dict(metadata.get("runtime_status") or {}).get("mode") or frame.mode or "").upper()
+        table_edge = {} if mode == "TRACK_LOCAL" else (metadata.get("table_edge_obs") or {})
         target_obs = metadata.get("target_obs") or {}
 
         panel_w = max(320, self.canvas_w // 2)
@@ -129,27 +130,38 @@ class OpenCVPreviewSink(PreviewSink):
             return panel
         local = dict(metadata.get("local_perception") or {})
         target_obs = dict(metadata.get("target_obs") or {})
+        status = dict(metadata.get("runtime_status") or {})
+        mode = str(status.get("mode") or "").upper()
+        target_name = str(target_obs.get("target") or metadata.get("target") or status.get("target") or "").strip()
         panel, scale, offset = self._fit_with_transform(self._to_bgr(image, prefer_rgb=True), size)
         self._title(panel, "RGB")
-        table_bbox = self._find_table_bbox(local, getattr(image, "shape", None))
-        if table_bbox is None:
-            self._corner_note(panel, "table_bbox unavailable", fg=YELLOW)
+        if mode == "TRACK_LOCAL":
+            self._draw_detection_boxes(panel, local, scale, offset, target_name)
         else:
-            self._draw_roi(panel, table_bbox, scale, offset, "table_bbox", YELLOW, dashed=False)
-            table_quadrant = self._table_quadrant(local, metadata)
-            if table_quadrant:
-                self._corner_note(panel, f"table_quadrant={table_quadrant}", fg=YELLOW)
-        search_roi = local.get("rgb_search_roi") or local.get("search_roi") or metadata.get("rgb_search_roi") or metadata.get("search_roi")
-        object_roi = local.get("object_search_roi") or metadata.get("object_search_roi")
-        quadrant_roi = local.get("quadrant_roi") or metadata.get("quadrant_roi") or self._quadrant_roi(table_bbox, local, metadata)
-        if search_roi:
-            self._draw_roi(panel, search_roi, scale, offset, "search_roi", YELLOW, dashed=True)
-        if quadrant_roi:
-            self._draw_roi(panel, quadrant_roi, scale, offset, "quadrant_roi", CYAN, dashed=True)
-        if object_roi:
-            self._draw_roi(panel, object_roi, scale, offset, "object_roi", CYAN, dashed=True)
+            table_bbox = self._find_table_bbox(local, getattr(image, "shape", None))
+            if table_bbox is None:
+                self._corner_note(panel, "table_bbox unavailable", fg=YELLOW)
+            else:
+                self._draw_roi(panel, table_bbox, scale, offset, "table_bbox", YELLOW, dashed=False)
+                table_quadrant = self._table_quadrant(local, metadata)
+                if table_quadrant:
+                    self._corner_note(panel, f"table_quadrant={table_quadrant}", fg=YELLOW)
+            search_roi = local.get("rgb_search_roi") or local.get("search_roi") or metadata.get("rgb_search_roi") or metadata.get("search_roi")
+            object_roi = local.get("object_search_roi") or metadata.get("object_search_roi")
+            quadrant_roi = local.get("quadrant_roi") or metadata.get("quadrant_roi") or self._quadrant_roi(table_bbox, local, metadata)
+            if search_roi:
+                self._draw_roi(panel, search_roi, scale, offset, "search_roi", YELLOW, dashed=True)
+            if quadrant_roi:
+                self._draw_roi(panel, quadrant_roi, scale, offset, "quadrant_roi", CYAN, dashed=True)
+            if object_roi:
+                self._draw_roi(panel, object_roi, scale, offset, "object_roi", CYAN, dashed=True)
         if isinstance(target_obs.get("bbox"), (list, tuple)):
-            self._draw_roi(panel, target_obs.get("bbox"), scale, offset, "target_bbox", (90, 180, 255), dashed=False)
+            if mode == "TRACK_LOCAL":
+                self._draw_roi(panel, target_obs.get("bbox"), scale, offset, f"target:{target_name or 'target'}", (0, 255, 80), dashed=False)
+            else:
+                self._draw_roi(panel, target_obs.get("bbox"), scale, offset, "target_bbox", (90, 180, 255), dashed=False)
+        if metadata.get("frame_stale"):
+            self._text_block(panel, [f"frame_stale age={float(metadata.get('frame_age_s') or 0.0):.2f}s"], (16, panel.shape[0] - 24), fg=(80, 210, 255))
         return panel
 
     def _make_depth_panel(self, image: Any, table_edge: Dict[str, Any], size: Tuple[int, int]) -> np.ndarray:
@@ -234,7 +246,8 @@ class OpenCVPreviewSink(PreviewSink):
         local = dict(metadata.get("local_perception") or {})
         self._title(panel, "STATUS / TOP VIEW")
         self._draw_status_sections(panel, status, table_edge, target_obs, local, source_cameras, target_name, frame_age)
-        self._draw_top_view(panel, table_edge, graph=(w - 250, h - 170, w - 18, h - 18))
+        if str(status.get("mode") or "").upper() != "TRACK_LOCAL":
+            self._draw_top_view(panel, table_edge, graph=(w - 250, h - 170, w - 18, h - 18))
         return panel
 
     def _to_bgr(self, image: np.ndarray, prefer_rgb: bool = False) -> np.ndarray:
@@ -471,6 +484,36 @@ class OpenCVPreviewSink(PreviewSink):
             cv2.rectangle(panel, p1, p2, color, 2)
         self._label(panel, label, (p1[0], max(42, p1[1] - 6)), color)
 
+    def _draw_detection_boxes(
+        self,
+        panel: np.ndarray,
+        local: Dict[str, Any],
+        scale: float,
+        offset: Tuple[int, int],
+        target_name: str,
+    ) -> None:
+        boxes = local.get("infer_boxes")
+        if not isinstance(boxes, list):
+            boxes = []
+        class_names = local.get("class_names") if isinstance(local.get("class_names"), (list, tuple)) else []
+        target_norm = str(target_name or "").strip().lower()
+        for row in boxes:
+            try:
+                if len(row) < 6:
+                    continue
+                cls_id = int(float(row[5]))
+                cls_name = str(row[6]).strip() if len(row) > 6 else ""
+                if not cls_name and 0 <= cls_id < len(class_names):
+                    cls_name = str(class_names[cls_id])
+                conf = float(row[4])
+                label = f"{cls_name or cls_id}:{conf:.2f}"
+                is_target = bool(target_norm and cls_name.strip().lower() == target_norm)
+                color = (0, 255, 80) if is_target else (90, 180, 255)
+                self._draw_roi(panel, row[:4], scale, offset, label, color, dashed=False)
+            except Exception:
+                continue
+        self._corner_note(panel, f"target={target_name or 'n/a'} boxes={len(boxes)}", fg=(0, 255, 80) if boxes else (80, 210, 255))
+
     def _dashed_rect(self, panel: np.ndarray, p1: Tuple[int, int], p2: Tuple[int, int], color, thickness: int) -> None:
         x1, y1 = p1
         x2, y2 = p2
@@ -528,10 +571,15 @@ class OpenCVPreviewSink(PreviewSink):
             ("TARGET", [
                 f"target={target_name}",
                 f"has_target_obs={bool(target_obs)}",
+                f"target_found={self._boolish(target_obs.get('found'))} conf={self._fmt(target_obs.get('confidence'))}",
+                f"boxes_count={target_obs.get('boxes_count', local.get('box_count', 0))}",
+                f"best_cls={target_obs.get('best_cls', 'n/a')} best_conf={self._fmt(target_obs.get('best_conf'))}",
+                f"frame_age_ms={int(frame_age * 1000.0)} infer_age_ms={int(float(target_obs.get('infer_age_ms', -1) or -1))}",
                 f"predictor={predictor}",
             ]),
             ("PERF", [
                 f"fps={self._fps:.1f} frame_age={frame_age:.2f}s",
+                f"frame_stale={self._boolish(frame_age > 1.0)}",
                 f"source_cameras={source_cameras}",
             ]),
         ]

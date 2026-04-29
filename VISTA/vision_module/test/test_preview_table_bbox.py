@@ -124,6 +124,45 @@ class PreviewTableBboxTest(unittest.TestCase):
         sink._make_rgb_panel(np.zeros((20, 20, 3), dtype=np.uint8), {}, (40, 40))
         self.assertIn(("table_bbox unavailable", YELLOW), sink.notes)
 
+    def test_track_local_rgb_panel_draws_yolo_boxes_not_table_overlay(self):
+        class RecordingSink(OpenCVPreviewSink):
+            def __init__(self):
+                super().__init__()
+                self.draws = []
+                self.notes = []
+
+            def _fit_with_transform(self, image, size):
+                return np.zeros((size[1], size[0], 3), dtype=np.uint8), 1.0, (0, 0)
+
+            def _title(self, panel, title):
+                return None
+
+            def _draw_roi(self, panel, roi, scale, offset, label, color, dashed=False):
+                self.draws.append((label, list(roi), color, dashed))
+
+            def _corner_note(self, panel, text, fg=(230, 230, 230)):
+                self.notes.append((text, fg))
+
+        sink = RecordingSink()
+        sink._make_rgb_panel(
+            np.zeros((100, 100, 3), dtype=np.uint8),
+            {
+                "runtime_status": {"mode": "TRACK_LOCAL"},
+                "target": "apple",
+                "local_perception": {
+                    "table_bbox": [10, 20, 80, 90],
+                    "class_names": ["apple", "bottle"],
+                    "infer_boxes": [[1, 2, 30, 40, 0.81, 0], [4, 5, 50, 60, 0.62, 1]],
+                },
+            },
+            (120, 120),
+        )
+        labels = [item[0] for item in sink.draws]
+        self.assertIn("apple:0.81", labels)
+        self.assertIn("bottle:0.62", labels)
+        self.assertNotIn("table_bbox", labels)
+        self.assertIn(("target=apple boxes=2", (0, 255, 80)), sink.notes)
+
 
 if __name__ == "__main__":
     unittest.main()

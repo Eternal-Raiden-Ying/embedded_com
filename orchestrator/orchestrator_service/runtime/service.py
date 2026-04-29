@@ -4,6 +4,7 @@
 import queue
 import signal
 import time
+import os
 from typing import Any, Dict, List, Optional
 
 from ..bridge.simple_car_protocol import SimpleCarMapper, parse_car_state_line
@@ -22,6 +23,7 @@ from ..ipc.transport import AsyncJsonlClientSender, JsonlClientSender, JsonlInbo
 from .common import RunLogger, ensure_dir, safe_dump
 from .state_machine import OrchestratorCore
 from common.base_module import BaseModule
+from common.runtime_logging import OperatorConsole
 
 
 class OrchestratorService(BaseModule):
@@ -33,6 +35,17 @@ class OrchestratorService(BaseModule):
         ensure_dir(cfg.runtime.pid_dir)
         self.run_logger = RunLogger("orch", cfg.runtime.runs_dir, cfg.runtime.stack_run_id)
         self.core = OrchestratorCore(cfg.control, cfg.car, cfg.docking, logger=self.log)
+        self.core.transition_observer = self._on_state_transition
+        self.operator_console = OperatorConsole(
+            mode=os.getenv("ORCH_CONSOLE_MODE", "operator"),
+            default_interval_s=self._env_float("ORCH_OPERATOR_SUMMARY_INTERVAL_S", 1.0),
+        )
+        self._ipc_console_enabled = self._env_bool("ORCH_IPC_CONSOLE", False)
+        self._heartbeat_console_enabled = self._env_bool("ORCH_HEARTBEAT_CONSOLE", False)
+        self._uart_console_mode = self._env_choice("ORCH_UART_CONSOLE", "operator", {"operator", "full", "silent"})
+        self._mobile_status_console_mode = self._env_choice("ORCH_MOBILE_STATUS_CONSOLE", "change", {"change", "full", "silent"})
+        self._last_obs_flags = {"table_edge": False, "target": False}
+        self._last_target_obs_console_payload: Dict[str, Any] = {}
         self.mapper = SimpleCarMapper(cfg.car)
         self._async_result_queue: "queue.Queue[Dict[str, Any]]" = queue.Queue()
         self._boot_ts = time.time()
@@ -74,16 +87,151 @@ class OrchestratorService(BaseModule):
         self.tts_sender = self._build_sender(cfg.tts_event_out, "tts_event_out", async_allowed=True)
         self._running = False
 
+    @staticmethod
+    def _env_bool(name: str, default: bool) -> bool:
+        raw = os.getenv(name)
+        if raw is None:
+            return bool(default)
+        return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _env_float(name: str, default: float) -> float:
+        try:
+            return float(os.getenv(name, str(default)) or default)
+        except (TypeError, ValueError):
+            return float(default)
+
+    @staticmethod
+    def _env_choice(name: str, default: str, choices: set) -> str:
+        value = str(os.getenv(name, default) or default).strip().lower()
+        return value if value in choices else default
+
+    @staticmethod
+    def _short_err(value: Any, limit: int = 96) -> str:
+        text = " ".join(str(value or "").strip().split())
+        return text[:limit] if len(text) <= limit else text[: max(0, limit - 3)] + "..."
+
+    @staticmethod
+    def _fmt_float(value: Any, digits: int = 3, signed: bool = True) -> str:
+        if value is None:
+            return "n/a"
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return "n/a"
+        sign = "+" if signed else ""
+        return f"{number:{sign}.{digits}f}"
+
+    def _target_obs_console_line(self, payload: Dict[str, Any]) -> str:
+        target = str(payload.get("target") or self.core.ctx.active_target or "").strip() or "target"
+        found = bool(payload.get("found", False))
+        if found:
+            return (
+                f"[ORCH] OBS target={target} found=1 "
+                f"conf={self._fmt_float(payload.get('confidence', payload.get('score')), 2, signed=False)} "
+                f"cx={self._fmt_float(payload.get('cx_norm', payload.get('cx')), 2, signed=False)} "
+                f"cy={self._fmt_float(payload.get('cy_norm', payload.get('cy')), 2, signed=False)}"
+            )
+        boxes = payload.get("boxes_count", payload.get("box_count", payload.get("boxes", 0)))
+        if isinstance(boxes, list):
+            boxes = len(boxes)
+        mode = str(payload.get("vision_mode") or payload.get("mode") or self.core.ctx.active_vision_mode or "").strip() or "n/a"
+        return f"[ORCH] OBS target={target} found=0 boxes={int(boxes or 0)} mode={mode}"
+
+    def _emit_target_obs_console(self, payload: Dict[str, Any]) -> None:
+        state = str(getattr(self.core.ctx.state, "value", self.core.ctx.state) or "")
+        if state not in {"SEARCH_TARGET_INIT", "EDGE_SLIDE_SEARCH"}:
+            return
+        self._last_target_obs_console_payload = dict(payload or {})
+        line = self._target_obs_console_line(payload)
+        self.operator_console.emit_rate_limited("target_obs", line, self.operator_console.default_interval_s)
+
+    def _operator_emit(self, line: str) -> bool:
+        return self.operator_console.emit(line)
+
+    def _endpoint_for_channel(self, channel: str) -> Optional[SocketEndpoint]:
+        return {
+            "task_cmd_in": self.cfg.task_cmd_in,
+            "vision_obs_in": self.cfg.vision_obs_in,
+            "task_ack_out": self.cfg.task_ack_out,
+            "vision_req_out": self.cfg.vision_req_out,
+            "tts_event_out": self.cfg.tts_event_out,
+        }.get(str(channel or ""))
+
+    def _endpoint_parts(self, channel: str) -> List[str]:
+        ep = self._endpoint_for_channel(channel)
+        if ep is None:
+            return []
+        if ep.transport == "tcp":
+            return [f"host={ep.host}", f"port={ep.port}"]
+        if ep.transport == "uds":
+            return [f"path={ep.uds_path}"]
+        return [f"transport={ep.transport}"]
+
+    def _operator_ipc_line(self, channel: str, event: str, details: Dict[str, Any]) -> str:
+        level = "ERROR" if event in {"send_failed", "invalid_json"} else ("WARN" if "failed" in event or "closed" in event else "IPC")
+        parts = [f"[ORCH] {level} {channel} {event}"]
+        parts.extend(self._endpoint_parts(channel))
+        if details.get("peer"):
+            parts.append(f"peer={details.get('peer')}")
+        if details.get("error"):
+            parts.append(f"err={self._short_err(details.get('error'))}")
+        if details.get("fail_count") is not None:
+            parts.append(f"retry={details.get('fail_count')}")
+        return " ".join(parts)
+
+    def _operator_ipc_event(self, channel: str, event: str, details: Dict[str, Any]) -> None:
+        success_events = {"send_ok", "send_attempt", "async_enqueue", "enqueue_ok", "received", "envelope_received", "ack_sent"}
+        connectivity_events = {
+            "connected",
+            "listening",
+            "peer_connected",
+            "peer_closed",
+            "connect_failed",
+            "send_failed",
+            "ack_send_failed",
+            "enqueue_failed",
+            "async_queue_full_drop_new",
+            "async_queue_full_drop_oldest",
+            "async_queue_full_retry_failed",
+            "invalid_json",
+            "bad_payload",
+        }
+        if self.operator_console.full or self._ipc_console_enabled:
+            if event in success_events or event in connectivity_events:
+                self.operator_console.emit_rate_limited(f"ipc:{channel}:{event}", self._operator_ipc_line(channel, event, details), 0.2)
+            return
+        if event not in connectivity_events:
+            return
+        line = self._operator_ipc_line(channel, event, details)
+        if event in {"connect_failed", "send_failed", "ack_send_failed", "invalid_json", "bad_payload"}:
+            self.operator_console.emit_error(f"ipc:{channel}:{event}:{details.get('error', '')}", line)
+        else:
+            self.operator_console.emit_change(f"ipc:{channel}:{event}", line)
+
+    def _on_state_transition(self, old_state: str, new_state: str, reason: str) -> None:
+        reason = str(reason or "state_transition").strip() or "state_transition"
+        if old_state == "EDGE_SLIDE_SEARCH" and new_state in {"LEAVE_EDGE", "NEXT_TABLE"} and "未找到目标" in reason:
+            reason = f"target_not_found timeout_s={float(self.cfg.control.target_search_timeout_s):.1f}"
+        self.operator_console.emit_change(
+            "state",
+            f"[ORCH] STATE {old_state} -> {new_state} reason={reason}",
+        )
+
     def _log_json(self, payload):
         level = payload.get("level", "info")
         event = payload.get("event", "")
         name = payload.get("name", payload.get("src", "module"))
         extra = {k: v for k, v in payload.items() if k not in {"level", "msg"}}
         message = event or payload.get("msg", "")
-        self.log(level, "ipc", f"{name} {message}".strip(), extra or None)
+        log_level = level
+        if payload.get("src") == "ipc" and not self.operator_console.full:
+            log_level = "info"
+        self.log(log_level, "ipc", f"{name} {message}".strip(), extra or None)
         if payload.get("src") == "ipc":
             ipc_fields = {k: v for k, v in payload.items() if k not in {"level", "src", "name", "event", "msg"}}
             self.run_logger.write_ipc(name, event or "log", direction=self._ipc_direction_for(name), **ipc_fields)
+            self._operator_ipc_event(str(name), str(event or "log"), ipc_fields)
 
     def _ipc_direction_for(self, channel: str) -> str:
         return "RX" if str(channel).endswith("_in") else "TX"
@@ -133,6 +281,12 @@ class OrchestratorService(BaseModule):
             "log_file": self.cfg.runtime.log_file,
             "tick_hz": self.cfg.runtime.tick_hz,
             "heartbeat_period_s": self.cfg.runtime.heartbeat_period_s,
+            "console_mode": self.operator_console.mode,
+            "operator_summary_interval_s": self.operator_console.default_interval_s,
+            "ipc_console": self._ipc_console_enabled,
+            "heartbeat_console": self._heartbeat_console_enabled,
+            "uart_console": self._uart_console_mode,
+            "mobile_status_console": self._mobile_status_console_mode,
             "runs_dir": self.cfg.runtime.runs_dir,
             "pid_dir": self.cfg.runtime.pid_dir,
             "pid_file": self.cfg.runtime.pid_file,
@@ -251,6 +405,8 @@ class OrchestratorService(BaseModule):
     def _uart_event_key(self, payload: Dict[str, Any]) -> str:
         key_fields = {
             "raw": payload.get("raw", ""),
+            "uart_kind": payload.get("uart_kind", ""),
+            "rendered_line": payload.get("rendered_line", ""),
             "mode": payload.get("mode", ""),
             "kind": payload.get("kind", ""),
             "stop_class": payload.get("stop_class", ""),
@@ -299,29 +455,66 @@ class OrchestratorService(BaseModule):
         return bool(self.cfg.serial.dry_run_quiet_idle_stop) and stop_class in {"idle_stop", "boot_init_stop"}
 
     def _console_message(self, payload: Dict[str, Any], emit_reason: str, repeat_count: int) -> str:
-        rendered = self._render_uart_line(payload)
-        stop_class = str(payload.get("stop_class", "") or "")
-        stop_reason = str(payload.get("stop_reason", "") or "")
-        extras: List[str] = []
-        if stop_class:
-            extras.append(f"stop_class={stop_class}")
-        if stop_reason and stop_class not in {"idle_stop", "boot_init_stop"}:
-            extras.append(f"reason={stop_reason}")
-        if emit_reason == "periodic":
-            prefix = f"[fake-car summary] repeat={int(max(1, repeat_count))}"
-        else:
-            prefix = "[fake-car]"
-        body = f"{prefix} {rendered}".strip()
-        if extras:
-            body += " | " + " | ".join(extras)
-        return body
+        del emit_reason, repeat_count
+        uart_kind = str(payload.get("uart_kind") or "").strip()
+        if uart_kind == "mode":
+            return f"[ORCH] CAR_MODE mode={payload.get('car_mode') or payload.get('mode') or 'UNKNOWN'}"
+        if uart_kind == "vel":
+            return (
+                f"[ORCH] CAR_VEL "
+                f"vx={self._fmt_float(payload.get('actual_vx_norm', payload.get('vx_norm', 0.0)))} "
+                f"vy={self._fmt_float(payload.get('actual_vy_norm', payload.get('vy_norm', 0.0)))} "
+                f"wz={self._fmt_float(payload.get('actual_wz_norm', payload.get('wz_norm', 0.0)))} "
+                f"hold={int(payload.get('actual_hold_ms', payload.get('hold_ms', 0)) or 0)}ms"
+            )
+        if uart_kind == "stop":
+            return f"[ORCH] CAR_STOP mode={payload.get('mode') or 'STOP'}"
+        if uart_kind == "brake":
+            return f"[ORCH] CAR_BRAKE mode={payload.get('mode') or 'BRAKE'}"
+        mode = str(payload.get("mode") or payload.get("state") or "").strip() or "UNKNOWN"
+        kind = str(payload.get("kind") or "").strip()
+        if kind == "stop" or str(payload.get("raw", "")).strip().upper().endswith("STOP"):
+            return f"[ORCH] CAR_STOP mode={mode}"
+        return (
+            f"[ORCH] CAR_VEL "
+            f"vx={self._fmt_float(payload.get('vx_norm', 0.0))} "
+            f"vy={self._fmt_float(payload.get('vy_norm', 0.0))} "
+            f"wz={self._fmt_float(payload.get('wz_norm', 0.0))} "
+            f"hold={int(payload.get('hold_ms', 0) or 0)}ms"
+        )
 
     def _emit_uart_console(self, payload: Dict[str, Any], emit_reason: str, repeat_count: int):
-        if self._should_quiet_console(payload):
+        if self._uart_console_mode == "silent" or self._should_quiet_console(payload):
             return
-        self.log_info("uart", self._console_message(payload, emit_reason, repeat_count))
+        line = self._console_message(payload, emit_reason, repeat_count)
+        if self._uart_console_mode == "full" or self.operator_console.full:
+            self.operator_console.emit(line)
+        elif emit_reason in {"initial", "change"}:
+            self.operator_console.emit_change("car", line)
+        else:
+            self.operator_console.emit_rate_limited("car", line, self.operator_console.default_interval_s)
+
+    def _uart_changed_for_operator(self, payload: Dict[str, Any]) -> bool:
+        last = self._uart_console_last_payload
+        if last is None:
+            return True
+        if str(payload.get("mode", "")) != str(last.get("mode", "")):
+            return True
+        if str(payload.get("uart_kind", "")) != str(last.get("uart_kind", "")):
+            return True
+        if str(payload.get("kind", "")) != str(last.get("kind", "")):
+            return True
+        for key in ("vx_norm", "vy_norm", "wz_norm", "actual_vx_norm", "actual_vy_norm", "actual_wz_norm"):
+            try:
+                if abs(float(payload.get(key, 0.0) or 0.0) - float(last.get(key, 0.0) or 0.0)) > 0.005:
+                    return True
+            except (TypeError, ValueError):
+                return True
+        return False
 
     def _update_uart_console(self, payload: Dict[str, Any]):
+        if self._uart_console_mode == "silent":
+            return
         if not (payload.get("dry_run") and self.cfg.serial.dry_run_echo_stdout):
             return
         key = payload.get("summary_key", "")
@@ -333,7 +526,7 @@ class OrchestratorService(BaseModule):
             self._uart_console_last_emit_ts = now
             self._emit_uart_console(payload, "initial", 1)
             return
-        if key != self._uart_console_key:
+        if key != self._uart_console_key and (self._uart_console_mode == "full" or self._uart_changed_for_operator(payload)):
             self._uart_console_key = key
             self._uart_console_last_payload = dict(payload)
             self._uart_console_repeat_count = 1
@@ -353,6 +546,53 @@ class OrchestratorService(BaseModule):
             self._emit_uart_console(payload, "periodic", self._uart_console_repeat_count)
             self._uart_console_repeat_count = 0
 
+    def _actual_uart_payloads(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for line in str(payload.get("raw", "") or "").splitlines():
+            text = line.strip()
+            if not text:
+                continue
+            parts = text.split()
+            item = dict(payload)
+            item["rendered_line"] = text
+            upper = parts[0].upper() if parts else ""
+            if upper == "MODE" and len(parts) >= 2:
+                item["uart_kind"] = "mode"
+                item["car_mode"] = parts[1].upper()
+            elif upper == "VEL" and len(parts) >= 5:
+                item["uart_kind"] = "vel"
+                try:
+                    item["actual_vx_norm"] = float(parts[1])
+                    item["actual_vy_norm"] = float(parts[2])
+                    item["actual_wz_norm"] = float(parts[3])
+                    item["actual_hold_ms"] = int(float(parts[4]))
+                except Exception:
+                    pass
+            elif upper == "STOP":
+                item["uart_kind"] = "stop"
+            elif upper == "BRAKE":
+                item["uart_kind"] = "brake"
+            else:
+                item["uart_kind"] = "raw"
+            item["summary_key"] = self._uart_event_key(item)
+            item["rendered"] = self._render_uart_line(item)
+            out.append(item)
+        return out
+
+    def _emit_no_vel_if_needed(self, payload: Dict[str, Any], actual_payloads: List[Dict[str, Any]]) -> None:
+        expected_vx = float(payload.get("vx_norm", 0.0) or 0.0)
+        expected_vy = float(payload.get("vy_norm", 0.0) or 0.0)
+        expected_wz = float(payload.get("wz_norm", 0.0) or 0.0)
+        expects_vel = any(abs(v) > 1e-9 for v in (expected_vx, expected_vy, expected_wz)) or str(payload.get("kind")) == "cmd_vel"
+        has_vel = any(str(item.get("uart_kind")) == "vel" for item in actual_payloads)
+        if expects_vel and not has_vel:
+            state = str(payload.get("state") or self.core.ctx.state.value)
+            reason = str(payload.get("reason") or "no_vel_line").strip() or "no_vel_line"
+            self.operator_console.emit_error(
+                f"no_vel_sent:{state}:{reason}",
+                f"[ORCH] WARN no_vel_sent state={state} reason={reason}",
+            )
+
     def _on_uart_tx(self, raw_line: str, dry_run: bool, tx_meta: Optional[Dict[str, Any]] = None):
         self._last_uart_tx_ts = time.time()
         payload = {
@@ -366,10 +606,14 @@ class OrchestratorService(BaseModule):
         payload["rendered"] = self._render_uart_line(payload)
         self.run_logger.write_jsonl("uart_tx", payload)
         self._update_uart_lowfreq(payload)
-        self._update_uart_console(payload)
+        actual_payloads = self._actual_uart_payloads(payload)
+        self._emit_no_vel_if_needed(payload, actual_payloads)
+        for item in actual_payloads or [payload]:
+            self._update_uart_console(item)
 
     def start(self):
         cfg_dump = self._config_dump()
+        self._operator_emit(f"[ORCH] STARTING run={self.run_logger.stack_run_id}")
         self.run_logger.write_meta({
             "service": "orch",
             "run_dir": str(self.run_logger.run_dir),
@@ -385,6 +629,8 @@ class OrchestratorService(BaseModule):
         self.vision_server.start()
         self._running = True
         self.run_logger.write_service_event("SERVICE_READY", run_dir=str(self.run_logger.run_dir))
+        uart_mode = "fake" if self.cfg.serial.dry_run else str(self.cfg.serial.port)
+        self._operator_emit(f"[ORCH] READY state={self.core.ctx.state.value} dry_run={int(bool(self.cfg.serial.dry_run))} uart={uart_mode}")
         self.log_info("runtime", "SERVICE_READY", {"run_dir": str(self.run_logger.run_dir)})
         self._emit_heartbeat_if_needed(force=True)
 
@@ -413,6 +659,7 @@ class OrchestratorService(BaseModule):
         self.tts_sender.close()
         self.run_logger.write_service_event("SERVICE_STOPPED")
         self.run_logger.write_timeline("STOP")
+        self._operator_emit(" ".join([f"[ORCH] STOPPED", "reason=service_stop"]))
         self.run_logger.close()
 
     def run_forever(self):
@@ -518,6 +765,11 @@ class OrchestratorService(BaseModule):
             ok=sent,
             reason=reason,
         )
+        self._operator_ipc_event(
+            "task_ack_out",
+            "ack_sent" if sent else "ack_send_failed",
+            {"cmd_id": cmd.cmd_id, "accepted": accepted, "error": "" if sent else reason},
+        )
         self.log_ipc("TX", "task_ack", "sent" if sent else "failed", {"cmd_id": cmd.cmd_id, "accepted": accepted})
 
     def _drain_task_cmds(self):
@@ -528,7 +780,11 @@ class OrchestratorService(BaseModule):
             try:
                 cmd = TaskCmd.from_dict(payload, set(self.cfg.frozen_targets.keys()))
             except Exception as exc:
-                self.log_warn("task_cmd", f"bad task_cmd: {payload} ({exc})")
+                self.log_warn("task_cmd", f"bad task_cmd err={self._short_err(exc)}")
+                self.operator_console.emit_error(
+                    f"task_cmd_bad:{exc}",
+                    f"[ORCH] ERROR task_cmd invalid err={self._short_err(exc)}",
+                )
                 self.run_logger.write_event(f"bad task_cmd: {payload} ({exc})")
                 self.run_logger.write_ipc(
                     "task_cmd_in",
@@ -541,6 +797,10 @@ class OrchestratorService(BaseModule):
                 self.run_logger.write_timeline("TASK_CMD_BAD", payload=safe_dump(payload), error=str(exc))
                 continue
             accepted, reason = self.core.handle_task_cmd(cmd)
+            self.operator_console.emit_change(
+                f"task:{cmd.session_id}:{cmd.epoch}:{cmd.cmd_id}",
+                f"[ORCH] TASK cmd={cmd.intent.lower()} target={cmd.target or ''} session={cmd.session_id or ''} epoch={cmd.epoch}",
+            )
             self.run_logger.write_jsonl("task_cmd", cmd.to_dict())
             self.run_logger.write_ipc(
                 "task_cmd_in",
@@ -562,6 +822,13 @@ class OrchestratorService(BaseModule):
             env = VisionObsEnvelope.from_dict(payload)
             self.run_logger.write_jsonl("vision_obs", env.to_dict())
             perception = dict(env.perception or {})
+            has_table_edge = isinstance(perception.get("table_edge_obs"), dict)
+            has_target = isinstance(perception.get("target_obs"), dict)
+            if has_table_edge != self._last_obs_flags.get("table_edge") or has_target != self._last_obs_flags.get("target"):
+                self._last_obs_flags["table_edge"] = has_table_edge
+                self._last_obs_flags["target"] = has_target
+                line = f"[ORCH] OBS table_edge={int(has_table_edge)} target={int(has_target)} mode={env.mode} req={env.req_id or ''}"
+                self.operator_console.emit_change("obs:flags", line)
             self.log_ipc("RX", "vision_obs", "received", {
                 "req_id": env.req_id,
                 "stage": env.stage,
@@ -569,8 +836,8 @@ class OrchestratorService(BaseModule):
                 "status": env.status,
                 "session_id": env.session_id,
                 "epoch": env.epoch,
-                "has_table_edge_obs": isinstance(perception.get("table_edge_obs"), dict),
-                "has_target_obs": isinstance(perception.get("target_obs"), dict),
+                "has_table_edge_obs": has_table_edge,
+                "has_target_obs": has_target,
             })
             self.run_logger.write_ipc(
                 "vision_obs_in",
@@ -583,8 +850,8 @@ class OrchestratorService(BaseModule):
                 stage=env.stage,
                 mode=env.mode,
                 status=env.status,
-                has_table_edge_obs=isinstance(perception.get("table_edge_obs"), dict),
-                has_target_obs=isinstance(perception.get("target_obs"), dict),
+                has_table_edge_obs=has_table_edge,
+                has_target_obs=has_target,
             )
         return iter_vision_perception_payloads(payload)
 
@@ -664,6 +931,7 @@ class OrchestratorService(BaseModule):
                             latest_target = parsed
                             latest_target_priority = priority
                         self._last_vision_obs_recv_ts = recv_ts
+                        self._emit_target_obs_console(payload)
                         self.run_logger.write_ipc(
                             "vision_obs_in",
                             "received",
@@ -687,7 +955,11 @@ class OrchestratorService(BaseModule):
                             msg_type=msg_type,
                         )
                 except Exception as exc:
-                    self.log_warn("vision", f"bad vision msg: {payload} ({exc})")
+                    self.log_warn("vision", f"bad vision msg type={msg_type} err={self._short_err(exc)}")
+                    self.operator_console.emit_error(
+                        f"vision_bad:{msg_type}:{exc}",
+                        f"[ORCH] ERROR vision_obs invalid_json peer={item.get('peer', '')} err={self._short_err(exc)}",
+                    )
                     self.run_logger.write_event(f"bad vision msg: {payload} ({exc})")
                     self.run_logger.write_ipc(
                         "vision_obs_in",
@@ -823,9 +1095,116 @@ class OrchestratorService(BaseModule):
             )
             self.log_ipc("TX", "tts_event", "sent" if sent else "failed", {"text": msg.get("text"), "interrupt": msg.get("interrupt")})
 
+    def _control_summary_with_context(self, decision) -> Dict[str, Any]:
+        summary = dict(getattr(decision, "control_summary", None) or {})
+        cmd = decision.cmd
+        summary.setdefault("state", self.core.ctx.state.value)
+        summary.setdefault("cmd", {"vx": cmd.vx_norm, "vy": cmd.vy_norm, "wz": cmd.wz_norm, "hold_ms": cmd.hold_ms})
+        block = self.core.export_state_block()
+        for key in (
+            "edge_found",
+            "confidence",
+            "yaw_err_rad",
+            "dist_err_m",
+            "target_dist_m",
+            "lock_ready",
+            "lock_reason",
+        ):
+            if summary.get(key) is None:
+                summary[key] = block.get(key)
+        if block.get("lock_reason"):
+            summary["lock_reason"] = block.get("lock_reason")
+        if summary.get("measured_distance_m") is None and summary.get("target_dist_m") is not None and summary.get("dist_err_m") is not None:
+            summary["measured_distance_m"] = float(summary["target_dist_m"]) + float(summary["dist_err_m"])
+        summary["current_edge_id"] = self.core.ctx.current_edge_id
+        if block.get("lock_reason") and str(summary.get("state")) in {"CONTROLLED_APPROACH", "FINAL_LOCK", "COARSE_ALIGN"}:
+            summary["reason"] = block.get("lock_reason")
+        else:
+            summary.setdefault("reason", summary.get("lock_reason") or self.core.ctx.last_enter_reason or "")
+        return summary
+
+    def _operator_control_line(self, summary: Dict[str, Any]) -> str:
+        cmd = dict(summary.get("cmd") or {})
+        state = str(summary.get("state") or self.core.ctx.state.value)
+        reason = str(summary.get("reason") or summary.get("lock_reason") or "").strip() or "n/a"
+        base = (
+            f"state={state} edge={int(bool(summary.get('edge_found')))} "
+            f"conf={self._fmt_float(summary.get('confidence'), 2, signed=False)} "
+            f"yaw={self._fmt_float(summary.get('yaw_err_rad'))} "
+            f"dist={self._fmt_float(summary.get('dist_err_m'))} "
+            f"lock={int(bool(summary.get('lock_ready')))} reason={reason} "
+            f"cmd vx={self._fmt_float(cmd.get('vx'))} vy={self._fmt_float(cmd.get('vy'))} wz={self._fmt_float(cmd.get('wz'))}"
+        )
+        if state == "FINAL_LOCK":
+            stable = int(self.core.ctx.table_lock_frames)
+            needed = int(self.cfg.control.final_lock_frames_to_arrive)
+            return (
+                f"[ORCH] LOCK edge={self.core.ctx.current_edge_id} "
+                f"conf={self._fmt_float(summary.get('confidence'), 2, signed=False)} "
+                f"yaw={self._fmt_float(summary.get('yaw_err_rad'))} "
+                f"dist={self._fmt_float(summary.get('dist_err_m'))} stable={stable}/{needed} "
+                f"ready={int(bool(summary.get('lock_ready')))} reason={reason} "
+                f"cmd vx={self._fmt_float(cmd.get('vx'))} vy={self._fmt_float(cmd.get('vy'))} wz={self._fmt_float(cmd.get('wz'))}"
+            )
+        if state == "EDGE_SLIDE_SEARCH":
+            zero_cmd = all(abs(float(cmd.get(key, 0.0) or 0.0)) <= 1e-9 for key in ("vx", "vy", "wz"))
+            if zero_cmd:
+                reason = self._edge_slide_zero_reason(summary, reason)
+            obs = dict(getattr(self, "_last_target_obs_console_payload", {}) or {})
+            boxes = obs.get("boxes_count", obs.get("box_count", 0))
+            if isinstance(boxes, list):
+                boxes = len(boxes)
+            found = bool(obs.get("found", False))
+            search_note = "target_locked" if found else "searching"
+            edge_visible = bool(summary.get("edge_found", False))
+            return (
+                f"[ORCH] SLIDE edge={int(edge_visible)} target={int(found)} boxes={int(boxes or 0)} status={search_note} "
+                f"cmd vx={self._fmt_float(cmd.get('vx'))} vy={self._fmt_float(cmd.get('vy'))} wz={self._fmt_float(cmd.get('wz'))} "
+                f"reason={reason}"
+            )
+        return f"[ORCH] CTRL {base}"
+
+    def _edge_slide_zero_reason(self, summary: Dict[str, Any], reason: str) -> str:
+        raw = str(reason or summary.get("reason") or "").strip()
+        if raw in {
+            "safety_hold_no_edge",
+            "waiting_first_target_obs",
+            "waiting_target_obs",
+            "edge_slide_vy_zero",
+            "target_search_hold",
+            "config_disabled",
+            "no_table_edge_obs_in_track_local",
+        }:
+            return raw
+        if raw in {"config_zero_vy", "edge_slide_vy_zero"}:
+            return "edge_slide_vy_zero"
+        if raw in {"target_confirming", "target_track", "stop"}:
+            return "target_search_hold"
+        if raw in {"edge_missing", "safety_hold_no_edge"}:
+            return "safety_hold_no_edge"
+        if raw in {"safety_hold", "waiting_target_obs"}:
+            if self.core.ctx.last_target_obs is None:
+                return "waiting_target_obs"
+            return "target_search_hold"
+        if str(self.core.ctx.active_vision_mode or "").upper() == "TRACK_LOCAL" and self.core.ctx.last_table_obs is None:
+            return "no_table_edge_obs_in_track_local"
+        if not bool(getattr(self.cfg.control, "edge_relocate_enabled", True)):
+            return "config_disabled"
+        return "target_search_hold"
+
+    def _emit_operator_control(self, decision) -> None:
+        summary = self._control_summary_with_context(decision)
+        state = str(summary.get("state") or self.core.ctx.state.value)
+        if state in {"IDLE", "DONE", "ERROR_RECOVERY"} and not self.operator_console.full:
+            return
+        line = self._operator_control_line(summary)
+        key = "lock" if state == "FINAL_LOCK" else ("slide" if state == "EDGE_SLIDE_SEARCH" else "ctrl")
+        self.operator_console.emit_rate_limited(key, line, self.operator_console.default_interval_s)
+
     def _emit_motion(self, decision):
         cmd = decision.cmd
         self.run_logger.write_jsonl("cmd_vel", cmd.to_dict())
+        self._emit_operator_control(decision)
         car_cmd = self.mapper.from_cmd_vel(cmd, cx_norm_abs=decision.cx_norm_abs, distance_ratio=decision.distance_ratio)
         tx_meta = self._build_uart_tx_meta(car_cmd)
         car_record = {
@@ -910,6 +1289,12 @@ class OrchestratorService(BaseModule):
             f"task_rx_age={summary['last_rx']['task_cmd_age_s']} vision_rx_age={summary['last_rx']['vision_obs_age_s']} "
             f"vision_req_link={vision_req_snap.get('link_state')} tts_link={tts_snap.get('link_state')}"
         )
+        if self.operator_console.full or self._heartbeat_console_enabled:
+            self.operator_console.emit_rate_limited(
+                "heartbeat",
+                f"[ORCH] HEARTBEAT state={summary['state']} vision_req={vision_req_snap.get('link_state')} task_cmd={int(bool(task_snap.get('listening')))}",
+                1.0,
+            )
 
 
 def run_orchestrator_service(cfg: OrchestratorConfig):

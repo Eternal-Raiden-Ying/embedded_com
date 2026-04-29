@@ -7,7 +7,17 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Callable, Dict, Optional
+import sys
+from typing import Any, Callable, Dict, Optional
+
+try:
+    from common.runtime_logging import colorize_operator_line, should_use_console_color
+except Exception:  # pragma: no cover
+    def colorize_operator_line(line: str, enabled: bool = True) -> str:
+        return str(line or "")
+
+    def should_use_console_color(color_mode=None, stream=None, *, sink_provided: bool = False) -> bool:
+        return False
 
 
 def _console_mode(default: str = "operator") -> str:
@@ -32,6 +42,8 @@ class OperatorConsole:
         mode: Optional[str] = None,
         default_interval_s: Optional[float] = None,
         sink: Optional[Callable[[str], None]] = None,
+        color_mode: Optional[str] = None,
+        stream: Optional[Any] = None,
     ):
         self.mode = _console_mode() if mode is None else str(mode or "operator").strip().lower()
         if self.mode == "concise":
@@ -42,6 +54,14 @@ class OperatorConsole:
             _summary_interval_s()
             if default_interval_s is None
             else max(0.0, float(default_interval_s))
+        )
+        self.color_mode = str(color_mode or os.getenv("ROBOT_CONSOLE_COLOR", "auto") or "auto").strip().lower()
+        if self.color_mode not in {"auto", "always", "never"}:
+            self.color_mode = "auto"
+        self._color_enabled = should_use_console_color(
+            self.color_mode,
+            stream=stream if stream is not None else (None if sink is not None else sys.stdout),
+            sink_provided=sink is not None,
         )
         self._sink = sink or print
         self._last_by_key: Dict[str, str] = {}
@@ -61,7 +81,7 @@ class OperatorConsole:
         text = str(line or "").strip()
         if not text:
             return False
-        self._sink(text)
+        self._sink(colorize_operator_line(text, self._color_enabled))
         return True
 
     def emit_change(self, key: str, line: str) -> bool:

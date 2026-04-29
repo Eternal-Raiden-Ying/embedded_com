@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from ..config.schema import CarMotionConfig, ControlThresholds
 from ..control.docking_controller import DockingController
@@ -15,6 +15,7 @@ class MotionDecision:
     cmd: CmdVel
     cx_norm_abs: float = 0.0
     distance_ratio: float = 0.0
+    control_summary: Optional[Dict[str, Any]] = None
 
 
 class MotionController:
@@ -50,6 +51,42 @@ class MotionController:
             brake=bool(brake),
         )
 
+    def _summary(
+        self,
+        mode: str,
+        cmd: CmdVel,
+        obs: Optional[TableEdgeObs] = None,
+        *,
+        reason: str = "",
+        lock_ready: Optional[bool] = None,
+        lock_reason: str = "",
+        edge_found: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        measured_distance = None
+        target_distance = None
+        if obs is not None:
+            target_distance = obs.target_dist_m
+            if obs.dist_err_m is not None and target_distance is not None:
+                measured_distance = float(target_distance) + float(obs.dist_err_m)
+        return {
+            "state": mode,
+            "edge_found": bool(edge_found if edge_found is not None else (obs.edge_found if obs is not None else False)),
+            "confidence": (float(obs.confidence) if obs is not None and obs.confidence is not None else None),
+            "yaw_err_rad": (float(obs.yaw_err_rad) if obs is not None and obs.yaw_err_rad is not None else None),
+            "dist_err_m": (float(obs.dist_err_m) if obs is not None and obs.dist_err_m is not None else None),
+            "target_dist_m": target_distance,
+            "measured_distance_m": measured_distance,
+            "lock_ready": lock_ready,
+            "lock_reason": lock_reason or reason,
+            "reason": reason or lock_reason,
+            "cmd": {
+                "vx": float(cmd.vx_norm),
+                "vy": float(cmd.vy_norm),
+                "wz": float(cmd.wz_norm),
+                "hold_ms": int(cmd.hold_ms),
+            },
+        }
+
     def _scaled_turn(self, x_abs: float) -> float:
         x_abs = self._clamp(x_abs, 0.0, 1.0)
         lo = float(self.car_cfg.fallback_align_turn_norm_min)
@@ -82,30 +119,41 @@ class MotionController:
     def stop_cmd(self, mode: str = "STOP", brake: bool = False) -> MotionDecision:
         self._reset_fallback_memory()
         self.docking.reset()
-        return MotionDecision(cmd=self._cmd(mode, brake=brake))
+        cmd = self._cmd(mode, brake=brake)
+        return MotionDecision(cmd=cmd, control_summary=self._summary(mode, cmd, reason="stop"))
 
     def search_table_cmd(self, turn_sign: int = 1) -> MotionDecision:
         self._reset_fallback_memory()
         wz = float(self.car_cfg.search_table_wz_norm) * (1.0 if int(turn_sign) >= 0 else -1.0)
-        return MotionDecision(cmd=self._cmd("SEARCH_TABLE", wz=wz), cx_norm_abs=abs(wz), distance_ratio=1.0)
+        cmd = self._cmd("SEARCH_TABLE", wz=wz)
+        return MotionDecision(cmd=cmd, cx_norm_abs=abs(wz), distance_ratio=1.0, control_summary=self._summary("SEARCH_TABLE", cmd, reason="search_table"))
 
     def next_table_cmd(self, turn_sign: int = 1) -> MotionDecision:
         return self.search_table_cmd(turn_sign=turn_sign)
 
     def leave_edge_cmd(self) -> MotionDecision:
         self._reset_fallback_memory()
-        return MotionDecision(cmd=self._cmd("LEAVE_EDGE", vx=float(self.car_cfg.leave_edge_vx_norm)))
+        cmd = self._cmd("LEAVE_EDGE", vx=float(self.car_cfg.leave_edge_vx_norm))
+        return MotionDecision(cmd=cmd, control_summary=self._summary("LEAVE_EDGE", cmd, reason="leave_edge"))
 
     def relocate_cmd(self, turn_sign: int = 1) -> MotionDecision:
         self._reset_fallback_memory()
         wz = float(self.car_cfg.relocate_turn_wz_norm) * (1.0 if int(turn_sign) >= 0 else -1.0)
-        return MotionDecision(cmd=self._cmd("RELOCATE_TO_EDGE", wz=wz), cx_norm_abs=abs(wz))
+        cmd = self._cmd("RELOCATE_TO_EDGE", wz=wz)
+        return MotionDecision(cmd=cmd, cx_norm_abs=abs(wz), control_summary=self._summary("RELOCATE_TO_EDGE", cmd, reason="relocate"))
 
     def edge_slide_search_cmd(self, elapsed_s: float, direction_sign: int = 1) -> MotionDecision:
         if float(elapsed_s) < float(self.cfg.edge_slide_pause_s):
-            return MotionDecision(cmd=self._cmd("EDGE_SLIDE_SEARCH"))
+            cmd = self._cmd("EDGE_SLIDE_SEARCH")
+            return MotionDecision(cmd=cmd, control_summary=self._summary("EDGE_SLIDE_SEARCH", cmd, reason="waiting_target_obs"))
         vy = float(self.car_cfg.edge_slide_vy_norm) * (1.0 if int(direction_sign) >= 0 else -1.0)
-        return MotionDecision(cmd=self._cmd("EDGE_SLIDE_SEARCH", vy=vy), cx_norm_abs=abs(vy), distance_ratio=1.0)
+        reason = "edge_slide_vy_zero" if abs(vy) <= 1e-9 else "edge_slide"
+        cmd = self._cmd("EDGE_SLIDE_SEARCH", vy=vy)
+        return MotionDecision(cmd=cmd, cx_norm_abs=abs(vy), distance_ratio=1.0, control_summary=self._summary("EDGE_SLIDE_SEARCH", cmd, reason=reason))
+
+    def edge_slide_hold_cmd(self, reason: str = "safety_hold_no_edge") -> MotionDecision:
+        cmd = self._cmd("EDGE_SLIDE_SEARCH")
+        return MotionDecision(cmd=cmd, control_summary=self._summary("EDGE_SLIDE_SEARCH", cmd, reason=reason, edge_found=False))
 
     def avoid_cmd(self, turn_dir: Optional[str]) -> MotionDecision:
         turn_dir = str(turn_dir or "").strip().lower()
@@ -120,11 +168,13 @@ class MotionController:
             vx = -abs(float(self.car_cfg.avoid_reverse_vx_norm))
         else:
             wz = abs(float(self.car_cfg.avoid_turn_norm))
-        return MotionDecision(cmd=self._cmd("AVOID_OBSTACLE", vx=vx, vy=vy, wz=wz), cx_norm_abs=abs(wz), distance_ratio=max(0.0, 1.0 - abs(vx)))
+        cmd = self._cmd("AVOID_OBSTACLE", vx=vx, vy=vy, wz=wz)
+        return MotionDecision(cmd=cmd, cx_norm_abs=abs(wz), distance_ratio=max(0.0, 1.0 - abs(vx)), control_summary=self._summary("AVOID_OBSTACLE", cmd, reason="avoid_obstacle"))
 
     def _fallback_table_cmd(self, obs: Optional[TableEdgeObs], mode: str, allow_forward: bool) -> MotionDecision:
         if obs is None:
-            return MotionDecision(cmd=self._cmd(mode))
+            cmd = self._cmd(mode)
+            return MotionDecision(cmd=cmd, control_summary=self._summary(mode, cmd, reason="edge_missing"))
         cx = self._clamp(float(obs.table_cx_norm or 0.0), -1.0, 1.0)
         size = self._clamp(float(obs.table_size_norm or 0.0), 0.0, 1.0)
         x_abs = abs(cx)
@@ -154,7 +204,9 @@ class MotionController:
         if abs(wz) < 0.02:
             wz = 0.0
         self._last_fallback_vx, self._last_fallback_wz = vx, wz
-        return MotionDecision(cmd=self._cmd(mode, vx=vx, wz=wz), cx_norm_abs=x_abs, distance_ratio=distance_ratio)
+        cmd = self._cmd(mode, vx=vx, wz=wz)
+        reason = "fallback_table"
+        return MotionDecision(cmd=cmd, cx_norm_abs=x_abs, distance_ratio=distance_ratio, control_summary=self._summary(mode, cmd, obs, reason=reason))
 
     def _edge_obs_from_table(self, obs: Optional[TableEdgeObs]) -> Optional[EdgeControlObservation]:
         if obs is None:
@@ -179,10 +231,12 @@ class MotionController:
         out = self.docking.update(mode, edge_obs)
         if not out.valid:
             return self._fallback_table_cmd(obs, mode=mode, allow_forward=fallback_forward)
+        cmd = self._cmd(mode, vx=out.vx, vy=out.vy, wz=out.wz)
         return MotionDecision(
-            cmd=self._cmd(mode, vx=out.vx, vy=out.vy, wz=out.wz),
+            cmd=cmd,
             cx_norm_abs=abs(float(edge_obs.yaw_err_rad or 0.0)),
             distance_ratio=abs(float(edge_obs.dist_err_m or 0.0)),
+            control_summary=self._summary(mode, cmd, obs, reason="docking_control"),
         )
 
     def coarse_align_cmd(self, obs: Optional[TableEdgeObs]) -> MotionDecision:
@@ -196,28 +250,38 @@ class MotionController:
 
     def target_track_cmd(self, obs: Optional[TargetObs]) -> MotionDecision:
         if obs is None:
-            return MotionDecision(cmd=self._cmd("EDGE_SLIDE_SEARCH"))
+            cmd = self._cmd("EDGE_SLIDE_SEARCH")
+            return MotionDecision(cmd=cmd, control_summary=self._summary("EDGE_SLIDE_SEARCH", cmd, reason="edge_missing"))
         explicit = self._extract_norm_triplet(obs.vx_norm, obs.vy_norm, obs.wz_norm)
         if explicit is None:
-            return MotionDecision(cmd=self._cmd("EDGE_SLIDE_SEARCH"))
+            cmd = self._cmd("EDGE_SLIDE_SEARCH")
+            return MotionDecision(cmd=cmd, control_summary=self._summary("EDGE_SLIDE_SEARCH", cmd, reason="target_confirming"))
         vx, vy, wz = explicit
+        cmd = self._cmd("EDGE_SLIDE_SEARCH", vx=vx, vy=vy, wz=wz)
         return MotionDecision(
-            cmd=self._cmd("EDGE_SLIDE_SEARCH", vx=vx, vy=vy, wz=wz),
+            cmd=cmd,
             cx_norm_abs=abs(float(obs.cx_norm)),
             distance_ratio=max(0.0, min(1.0, 1.0 - float(obs.size_norm))),
+            control_summary={
+                **self._summary("EDGE_SLIDE_SEARCH", cmd, reason="target_track"),
+                "confidence": obs.confidence,
+            },
         )
 
     def return_hold_cmd(self) -> MotionDecision:
-        return MotionDecision(cmd=self._cmd("RETURN_HOME"))
+        cmd = self._cmd("RETURN_HOME")
+        return MotionDecision(cmd=cmd, control_summary=self._summary("RETURN_HOME", cmd, reason="return_hold"))
 
     def return_cmd(self, obs: HomeTagObs) -> MotionDecision:
         explicit = self._extract_norm_triplet(obs.vx_norm, obs.vy_norm, obs.wz_norm)
         if explicit is not None:
             vx, vy, wz = explicit
+            cmd = self._cmd("RETURN_HOME", vx=vx, vy=vy, wz=wz)
             return MotionDecision(
-                cmd=self._cmd("RETURN_HOME", vx=vx, vy=vy, wz=wz),
+                cmd=cmd,
                 cx_norm_abs=abs(float(obs.yaw_err_rad)),
                 distance_ratio=float(obs.distance_m or 0.0),
+                control_summary=self._summary("RETURN_HOME", cmd, reason="return_track"),
             )
         yaw = float(obs.yaw_err_rad)
         distance = float(obs.distance_m or 0.0)
@@ -226,16 +290,20 @@ class MotionController:
             wz_mag = float(self.car_cfg.return_turn_norm_min) + (
                 float(self.car_cfg.return_turn_norm_max) - float(self.car_cfg.return_turn_norm_min)
             ) * min(1.0, abs(yaw))
+            cmd = self._cmd("RETURN_HOME", wz=wz_mag if yaw > 0 else -wz_mag)
             return MotionDecision(
-                cmd=self._cmd("RETURN_HOME", wz=wz_mag if yaw > 0 else -wz_mag),
+                cmd=cmd,
                 cx_norm_abs=abs(yaw),
                 distance_ratio=ratio,
+                control_summary=self._summary("RETURN_HOME", cmd, reason="return_yaw_align"),
             )
         vx = float(self.car_cfg.return_vx_norm_min) + (
             float(self.car_cfg.return_vx_norm_max) - float(self.car_cfg.return_vx_norm_min)
         ) * ratio
+        cmd = self._cmd("RETURN_HOME", vx=vx)
         return MotionDecision(
-            cmd=self._cmd("RETURN_HOME", vx=vx),
+            cmd=cmd,
             cx_norm_abs=abs(yaw),
             distance_ratio=ratio,
+            control_summary=self._summary("RETURN_HOME", cmd, reason="return_approach"),
         )

@@ -94,8 +94,8 @@ def env_flag(name: str, default: str = "0") -> bool:
     return str(os.getenv(name, default)).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def operator_console_mode(default: str = "operator") -> str:
-    mode = str(os.getenv("VISION_CONSOLE_MODE", default)).strip().lower()
+def operator_console_mode(default: str = "operator", env_name: str = "VISION_CONSOLE_MODE") -> str:
+    mode = str(os.getenv(env_name, default)).strip().lower()
     if mode == "concise":
         mode = "operator"
     if mode not in {"operator", "full", "silent"}:
@@ -103,11 +103,88 @@ def operator_console_mode(default: str = "operator") -> str:
     return mode
 
 
-def operator_summary_interval_s(default: float = 1.0) -> float:
+def operator_summary_interval_s(default: float = 1.0, env_name: str = "VISION_OPERATOR_SUMMARY_INTERVAL_S") -> float:
     try:
-        return max(0.0, float(os.getenv("VISION_OPERATOR_SUMMARY_INTERVAL_S", str(default)) or default))
+        return max(0.0, float(os.getenv(env_name, str(default)) or default))
     except (TypeError, ValueError):
         return float(default)
+
+
+ANSI_RESET = "\033[0m"
+ANSI_BOLD_CYAN = "\033[1;36m"
+ANSI_BLUE = "\033[34m"
+ANSI_GREEN = "\033[32m"
+ANSI_BRIGHT_GREEN = "\033[92m"
+ANSI_YELLOW = "\033[33m"
+ANSI_CYAN = "\033[36m"
+ANSI_MAGENTA = "\033[35m"
+ANSI_RED = "\033[31m"
+ANSI_GRAY = "\033[90m"
+
+
+def _color_mode(default: str = "auto") -> str:
+    value = str(os.getenv("ROBOT_CONSOLE_COLOR", default) or default).strip().lower()
+    return value if value in {"auto", "always", "never"} else default
+
+
+def _env_truthy(name: str) -> bool:
+    return str(os.getenv(name, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def should_use_console_color(
+    color_mode: Optional[str] = None,
+    stream: Optional[Any] = None,
+    *,
+    sink_provided: bool = False,
+) -> bool:
+    """Resolve ANSI color policy for operator console output only."""
+    if _env_truthy("NO_COLOR"):
+        return False
+    if _env_truthy("FORCE_COLOR"):
+        return True
+    mode = _color_mode() if color_mode is None else str(color_mode or "auto").strip().lower()
+    if mode == "never":
+        return False
+    if mode == "always":
+        return True
+    if sink_provided and stream is None:
+        return False
+    stream = stream if stream is not None else sys.stdout
+    try:
+        return bool(stream.isatty())
+    except Exception:
+        return False
+
+
+def _ansi(text: str, color: str) -> str:
+    return f"{color}{text}{ANSI_RESET}"
+
+
+def colorize_operator_line(line: str, enabled: bool = True) -> str:
+    """Apply small ANSI highlights to operator-facing status lines."""
+    text = str(line or "")
+    if not enabled or not text:
+        return text
+
+    replacements = (
+        ("[VISTA]", _ansi("[VISTA]", ANSI_BLUE)),
+        ("[ORCH]", _ansi("[ORCH]", ANSI_GREEN)),
+        ("[GATEWAY]", _ansi("[GATEWAY]", ANSI_YELLOW)),
+        ("[phone-gateway]", _ansi("[phone-gateway]", ANSI_GRAY)),
+        (" FATAL ", f" {_ansi('FATAL', ANSI_RED)} "),
+        (" ERROR ", f" {_ansi('ERROR', ANSI_RED)} "),
+        (" WARN ", f" {_ansi('WARN', ANSI_YELLOW)} "),
+        (" STATE ", f" {_ansi('STATE', ANSI_BOLD_CYAN)} "),
+        (" MODE ", f" {_ansi('MODE', ANSI_BLUE)} "),
+        (" CTRL ", f" {_ansi('CTRL', ANSI_GREEN)} "),
+        (" CAR ", f" {_ansi('CAR', ANSI_MAGENTA)} "),
+        (" EDGE ", f" {_ansi('EDGE', ANSI_CYAN)} "),
+        (" TARGET ", f" {_ansi('TARGET', ANSI_YELLOW)} "),
+    )
+    padded = f" {text} "
+    for needle, repl in replacements:
+        padded = padded.replace(needle, repl)
+    return padded[1:-1]
 
 
 class OperatorConsole:
@@ -118,6 +195,8 @@ class OperatorConsole:
         mode: Optional[str] = None,
         default_interval_s: Optional[float] = None,
         sink: Optional[Callable[[str], None]] = None,
+        color_mode: Optional[str] = None,
+        stream: Optional[Any] = None,
     ):
         self.mode = operator_console_mode() if mode is None else str(mode or "operator").strip().lower()
         if self.mode == "concise":
@@ -126,6 +205,14 @@ class OperatorConsole:
             operator_summary_interval_s()
             if default_interval_s is None
             else max(0.0, float(default_interval_s))
+        )
+        self.color_mode = _color_mode() if color_mode is None else str(color_mode or "auto").strip().lower()
+        if self.color_mode not in {"auto", "always", "never"}:
+            self.color_mode = "auto"
+        self._color_enabled = should_use_console_color(
+            self.color_mode,
+            stream=stream,
+            sink_provided=sink is not None,
         )
         self._sink = sink or print
         self._last_by_key: Dict[str, str] = {}
@@ -145,7 +232,7 @@ class OperatorConsole:
         text = str(line or "").strip()
         if not text:
             return False
-        self._sink(text)
+        self._sink(colorize_operator_line(text, self._color_enabled))
         return True
 
     def emit_change(self, key: str, line: str) -> bool:
@@ -292,9 +379,18 @@ def configure_stream_logger(
         except Exception:
             pass
 
+    logger_prefix = str(name or "").split(".", 1)[0].strip().upper()
+    console_default = "operator" if logger_prefix == "ORCH" else ""
+    console_mode = str(os.getenv(f"{logger_prefix}_CONSOLE_MODE", console_default)).strip().lower()
+    if console_mode == "concise":
+        console_mode = "operator"
+    stream_level = level
+    if console_mode in {"operator", "silent"}:
+        stream_level = logging.WARNING
+
     if stream_handler is None:
         stream_handler = logging.StreamHandler(sys.stdout)
-    stream_handler.setLevel(level)
+    stream_handler.setLevel(stream_level)
     stream_handler.setFormatter(formatter)
     logger.addHandler(stream_handler)
 

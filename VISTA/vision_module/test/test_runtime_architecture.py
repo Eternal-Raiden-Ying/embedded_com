@@ -733,6 +733,86 @@ class PreviewBehaviorTest(unittest.TestCase):
         self.assertEqual(lines, [line])
         self.assertIn("[VISTA] EDGE stage=SEARCH mode=DEPTH_PERCEPTION", line)
 
+    def test_track_local_preview_renders_without_depth_frame(self):
+        class RecordingSink(PreviewSink):
+            sink_name = "recording"
+
+            def __init__(self):
+                self.frames = []
+
+            def open(self) -> None:
+                return None
+
+            def render(self, frame: PreviewFrame) -> bool:
+                self.frames.append(frame)
+                return True
+
+            def close(self) -> None:
+                return None
+
+        scheduler = Scheduler()
+        scheduler.start_runtime()
+        scheduler.configure(
+            {
+                "mode": "TRACK_LOCAL",
+                "routes": {
+                    "camera_frames": {"policy": "slot", "scope": "backend"},
+                    "frame_meta": {"policy": "slot", "scope": "stage"},
+                    "local_perception": {"policy": "slot", "scope": "stage"},
+                    "runtime_status": {"policy": "slot", "scope": "backend"},
+                    "target_obs": {"policy": "slot", "scope": "stage"},
+                    "table_edge_obs": {"policy": "slot", "scope": "stage"},
+                },
+            },
+            generation=1,
+        )
+        sink = RecordingSink()
+        manager = PreviewManager(sink=sink, logger=None)
+        manager.bind_runtime(scheduler, lambda: 1)
+        scheduler.publish_result("camera_frames", {"rgb": np.zeros((16, 16, 3), dtype=np.uint8)}, generation=1)
+        scheduler.publish_result("runtime_status", {"stage": "SEARCH", "mode": "TRACK_LOCAL", "target": "apple"}, generation=1)
+        scheduler.publish_result("local_perception", {"has_infer": True, "box_count": 0, "infer_boxes": []}, generation=1)
+        try:
+            manager.enable()
+            manager.start_runtime()
+            time.sleep(0.08)
+        finally:
+            manager.stop_runtime()
+            scheduler.stop_runtime()
+        self.assertGreaterEqual(len(sink.frames), 1)
+        metadata = sink.frames[-1].overlay.metadata
+        self.assertEqual(metadata["source_cameras"], ["rgb"])
+        self.assertEqual(metadata["table_edge_obs"], {})
+
+    def test_track_local_target_summary_found_zero_with_boxes(self):
+        manager = PreviewManager(sink=self._ExitSink(), logger=None)
+        status = {"mode": "TRACK_LOCAL", "target": "apple"}
+        local = {
+            "has_infer": True,
+            "box_count": 3,
+            "class_names": ["apple", "banana", "bottle"],
+            "infer_boxes": [
+                [0, 0, 10, 10, 0.31, 0],
+                [0, 0, 10, 10, 0.62, 2],
+                [0, 0, 10, 10, 0.44, 1],
+            ],
+        }
+        target = manager._target_overlay(status, local, {"found": False, "target": "apple"})
+        line = manager._target_summary_line(status, target)
+        self.assertIn("found=0", line)
+        self.assertIn("boxes=3", line)
+        self.assertIn("best_cls=bottle", line)
+
+    def test_track_local_target_summary_found_one(self):
+        manager = PreviewManager(sink=self._ExitSink(), logger=None)
+        status = {"mode": "TRACK_LOCAL", "target": "apple"}
+        local = {"has_infer": True, "rgb_shape": [100, 100, 3], "infer_boxes": [[10, 20, 40, 60, 0.81, 0]], "class_names": ["apple"]}
+        target = manager._target_overlay(status, local, {"found": True, "target": "apple", "confidence": 0.81, "cx_norm": 0.54, "bbox": [10, 20, 40, 60]})
+        line = manager._target_summary_line(status, target)
+        self.assertIn("found=1", line)
+        self.assertIn("conf=0.81", line)
+        self.assertIn("cx=0.54", line)
+
 
 class OperatorConsoleIpcPolicyTest(unittest.TestCase):
     class _RunLogger:

@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 import queue
 import signal
 import sys
@@ -14,7 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional, Set, Tuple
 
 from common.base_module import BaseModule
-from common.runtime_logging import RunLogger, ensure_dir, safe_dump
+from common.runtime_logging import OperatorConsole, RunLogger, ensure_dir, safe_dump
 from orchestrator_service.ipc.transport import JsonlClientSender, JsonlInboundServer
 
 from ..adapters.mqtt_adapter import MqttAdapter
@@ -328,6 +329,14 @@ class MobileGatewayService(BaseModule):
         self._session_epochs: Dict[str, int] = {}
         self._status_seq: Deque[str] = deque(maxlen=8)
         self._last_status_key = ""
+        self._last_operator_status_key = ""
+        self._mobile_status_console_mode = str(os.getenv("ORCH_MOBILE_STATUS_CONSOLE", "change") or "change").strip().lower()
+        if self._mobile_status_console_mode not in {"change", "full", "silent"}:
+            self._mobile_status_console_mode = "change"
+        self.operator_console = OperatorConsole(
+            mode=os.getenv("ORCH_CONSOLE_MODE", "operator"),
+            default_interval_s=float(os.getenv("ORCH_OPERATOR_SUMMARY_INTERVAL_S", "1.0") or 1.0),
+        )
         self._last_status_ts = 0.0
         self._last_heartbeat_emit_ts = 0.0
         self._last_heartbeat_log_ts = 0.0
@@ -933,7 +942,8 @@ class MobileGatewayService(BaseModule):
             data={"payload": payload},
         )
         self._log_status_event(payload, force=force)
-        if self.cfg.runtime.status_stdout:
+        self._emit_mobile_status_console(payload)
+        if self.cfg.runtime.status_stdout and self._mobile_status_console_mode == "full":
             print(json.dumps(payload, ensure_ascii=False))
         if self.cfg.status_out.transport != "disabled":
             self.status_sender.send(payload)
@@ -1178,6 +1188,32 @@ class MobileGatewayService(BaseModule):
                 "error_code": payload.get("error_code"),
                 "message": payload.get("message"),
             })
+
+    def _emit_mobile_status_console(self, payload: Dict[str, Any]) -> None:
+        if self._mobile_status_console_mode == "silent":
+            return
+        state = str(payload.get("state") or "").strip()
+        backend = str(payload.get("backend_state") or payload.get("raw_backend_state") or "").strip()
+        progress = payload.get("progress")
+        target = str(payload.get("target") or "").strip()
+        reason = str(payload.get("lock_reason") or payload.get("reason") or "").strip()
+        key = safe_dump({
+            "state": state,
+            "backend": backend,
+            "progress": progress,
+            "target": target,
+            "reason": reason,
+        })
+        line = f"[ORCH] MOBILE state={state} backend={backend} target={target} progress={progress}"
+        if reason:
+            line += f" reason={reason}"
+        if self._mobile_status_console_mode == "full":
+            self.operator_console.emit(line)
+            return
+        if key == self._last_operator_status_key:
+            return
+        self._last_operator_status_key = key
+        self.operator_console.emit_change("mobile_status", line)
 
     def _log_heartbeat_summary(self, now: float) -> None:
         interval = max(1.0, float(self.cfg.runtime.heartbeat_log_interval_s or 30.0))

@@ -3,6 +3,7 @@
 
 from typing import Dict, Optional
 
+from ...config.data import ASR_VOCAB_MAP, normalize_class_name
 from ...ipc.protocol import VisionReq
 from ...utils.detect import compute_target_obs
 from .base import BaseStagePlan, StageContext, StageOutput, StageTickInput, normalize_upper, resolve_stage_summary
@@ -84,6 +85,35 @@ def _target_obs_from_results(results: Dict[str, object], target: Optional[str]) 
     class_names = local.get("class_names")
     rgb_shape = local.get("rgb_shape")
     weak_payload = {"found": False, "target": target}
+    normalized_target = normalize_class_name(target)
+    valid_names = set(ASR_VOCAB_MAP.get(normalized_target, set()))
+    available_names = [str(name) for name in class_names] if isinstance(class_names, (list, tuple)) else []
+    if valid_names and available_names:
+        normalized_available = {normalize_class_name(name) for name in available_names}
+        if not (valid_names & normalized_available):
+            weak_payload["class_not_supported"] = True
+            weak_payload["available_classes"] = available_names[:32]
+            contract_warnings.append(
+                f"class_not_supported target={target} available={','.join(available_names[:16])}"
+            )
+    if isinstance(boxes, list):
+        weak_payload["boxes_count"] = int(local.get("box_count", len(boxes)) or len(boxes))
+        best_cls = "n/a"
+        best_conf = 0.0
+        for row in boxes:
+            try:
+                conf = float(row[4])
+                cls_id = int(float(row[5]))
+                cls_name = str(row[6]).strip() if len(row) > 6 else ""
+                if not cls_name and isinstance(class_names, (list, tuple)) and 0 <= cls_id < len(class_names):
+                    cls_name = str(class_names[cls_id])
+                if conf >= best_conf:
+                    best_conf = conf
+                    best_cls = cls_name or str(cls_id)
+            except Exception:
+                continue
+        weak_payload["best_cls"] = best_cls
+        weak_payload["best_conf"] = float(best_conf)
     if contract_error:
         weak_payload["contract_error"] = contract_error
     if contract_warnings:
@@ -96,9 +126,17 @@ def _target_obs_from_results(results: Dict[str, object], target: Optional[str]) 
         weak_payload["contract_error"] = weak_payload.get("contract_error") or f"invalid_local_perception:{exc}"
         return weak_payload
     if obs is None:
-        return weak_payload if (not contract_ok or contract_error or contract_warnings) else None
+        return weak_payload if (isinstance(boxes, list) or not contract_ok or contract_error or contract_warnings) else None
     payload = {"found": True, "target": target}
     payload.update(obs)
+    payload.update({k: v for k, v in weak_payload.items() if k in {"boxes_count", "best_cls", "best_conf"}})
+    try:
+        if payload.get("bbox") and rgb_shape:
+            h = float(rgb_shape[0])
+            y1, y2 = float(payload["bbox"][1]), float(payload["bbox"][3])
+            payload["cy_norm"] = max(0.0, min(1.0, ((y1 + y2) / 2.0) / max(1.0, h)))
+    except Exception:
+        pass
     payload.setdefault("target", target)
     if contract_error:
         payload["contract_error"] = contract_error

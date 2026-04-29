@@ -53,6 +53,7 @@ class StageController:
             "req_id": self._ctx.req_id,
             "epoch": int(self._ctx.epoch),
             "interaction_id": self._ctx.interaction_id,
+            "target": self._ctx.target_name,
         }
 
     def _emit_event(self, event: str, trigger: str = "stage_controller", data=None, **fields) -> None:

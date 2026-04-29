@@ -62,6 +62,23 @@ class DetectClassVocabularyTest(unittest.TestCase):
         self.assertEqual(obs["target"], "cup")
         self.assertEqual(obs["bbox"], [20, 30, 180, 260])
 
+    def test_search_target_obs_warns_when_class_name_not_supported(self):
+        payload = {
+            "local_perception": {
+                "has_infer": True,
+                "contract_ok": True,
+                "rgb_shape": [100, 100, 3],
+                "class_names": ["person", "bottle"],
+                "box_count": 1,
+                "infer_boxes": [[10, 10, 30, 30, 0.62, 1]],
+            }
+        }
+        obs = search_target_obs_from_results(payload, "apple")
+        self.assertIsInstance(obs, dict)
+        self.assertFalse(obs["found"])
+        self.assertTrue(obs["class_not_supported"])
+        self.assertIn("class_not_supported target=apple", "\n".join(obs["contract_warnings"]))
+
 
 class PredictorManagerContractTest(unittest.TestCase):
     class _DummyPredictor:

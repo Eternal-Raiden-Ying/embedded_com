@@ -84,6 +84,7 @@ class OrchestratorCore:
         self.ctx = RuntimeContext()
         self._logger = logger
         self.controller = MotionController(cfg, car_cfg, docking_cfg)
+        self.transition_observer: Optional[Callable[[str, str, str], None]] = None
         self._last_req_mono = 0.0
         self._last_stop_mono = 0.0
 
@@ -257,6 +258,11 @@ class OrchestratorCore:
         self.ctx.state_enter_wall_ts = time.time()
         self.ctx.last_enter_reason = reason
         self.ctx.clear_motion_counters()
+        if self.transition_observer is not None:
+            try:
+                self.transition_observer(old_state.value, new_state.value, reason)
+            except Exception:
+                pass
         self._on_enter_state(new_state)
 
     def _on_enter_state(self, state: State):
@@ -429,6 +435,8 @@ class OrchestratorCore:
         if obs is not None and obs.found and self._target_matches_active(obs):
             self._transition(State.TARGET_CONFIRM, "检测到目标候选，开始确认")
             return self.controller.stop_cmd("TARGET_CONFIRM")
+        if str(self.ctx.active_vision_mode or "").upper() == "TRACK_LOCAL" and self._fresh_table_obs() is None:
+            return self.controller.edge_slide_hold_cmd("no_table_edge_obs_in_track_local")
         if self._state_elapsed() >= float(self.cfg.target_search_timeout_s):
             self.ctx.last_fail_reason = "当前桌边未找到目标"
             if self._can_relocate_edge():
@@ -767,7 +775,7 @@ class OrchestratorCore:
             f"lock_ready={bool(lock_ready)}",
             f"reason={reason or status['reason']}",
         ]
-        self._log("info" if lock_ready else "warn", "\n".join(lines))
+        self._log("info", "\n".join(lines))
 
     def _target_matches_active(self, obs: TargetObs) -> bool:
         if not self.ctx.active_target or not obs.target:

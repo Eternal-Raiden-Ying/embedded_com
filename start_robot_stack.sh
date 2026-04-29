@@ -90,9 +90,9 @@ mkdir -p "$VISION_LOG_DIR" "$ORCH_LOG_DIR" "$GATEWAY_LOG_DIR" \
 # ---------- pretty output ----------
 if [[ -t 1 ]]; then
   C_RESET="\033[0m"; C_BOLD="\033[1m"
-  C_BLUE="\033[34m"; C_CYAN="\033[36m"; C_GREEN="\033[32m"; C_YELLOW="\033[33m"; C_RED="\033[31m"; C_MAGENTA="\033[35m"
+  C_BLUE="\033[34m"; C_CYAN="\033[36m"; C_GREEN="\033[32m"; C_YELLOW="\033[33m"; C_RED="\033[31m"; C_MAGENTA="\033[35m"; C_GRAY="\033[90m"; C_BRIGHT_GREEN="\033[92m"; C_BOLD_CYAN="\033[1;36m"
 else
-  C_RESET=""; C_BOLD=""; C_BLUE=""; C_CYAN=""; C_GREEN=""; C_YELLOW=""; C_RED=""; C_MAGENTA=""
+  C_RESET=""; C_BOLD=""; C_BLUE=""; C_CYAN=""; C_GREEN=""; C_YELLOW=""; C_RED=""; C_MAGENTA=""; C_GRAY=""; C_BRIGHT_GREEN=""; C_BOLD_CYAN=""
 fi
 
 mark() {
@@ -111,6 +111,92 @@ mark() {
 
 divider() {
   printf '%b%s%b\n' "$C_BLUE" "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" "$C_RESET"
+}
+
+env_truthy() {
+  case "${!1:-}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+console_color_enabled() {
+  [[ -t 1 ]] || return 1
+  env_truthy NO_COLOR && return 1
+  env_truthy FORCE_COLOR && return 0
+  local mode="${ROBOT_CONSOLE_COLOR:-auto}"
+  case "$mode" in
+    never) return 1 ;;
+    always) return 0 ;;
+    auto|"") ;;
+    *) mode="auto" ;;
+  esac
+  [[ "$mode" == "auto" ]]
+}
+
+colorize_line() {
+  local line="$1"
+  if ! console_color_enabled; then
+    printf '%s\n' "$line"
+    return 0
+  fi
+
+  case "$line" in
+    *ERROR*|*FATAL*)
+      printf '%b%s%b\n' "$C_RED" "$line" "$C_RESET"
+      return 0
+      ;;
+    *WARN*|*WARNING*)
+      printf '%b%s%b\n' "$C_YELLOW" "$line" "$C_RESET"
+      return 0
+      ;;
+    *"phone command path"*)
+      printf '%b%s%b\n' "$C_GRAY" "$line" "$C_RESET"
+      return 0
+      ;;
+  esac
+
+  case "$line" in
+    *STATE*)
+      printf '%b%s%b\n' "$C_BOLD_CYAN" "$line" "$C_RESET"
+      return 0
+      ;;
+    *MODE*|*"mode switched"*)
+      printf '%b%s%b\n' "$C_BLUE" "$line" "$C_RESET"
+      return 0
+      ;;
+    *CTRL*)
+      printf '%b%s%b\n' "$C_GREEN" "$line" "$C_RESET"
+      return 0
+      ;;
+    *CAR*)
+      printf '%b%s%b\n' "$C_MAGENTA" "$line" "$C_RESET"
+      return 0
+      ;;
+    *EDGE*)
+      printf '%b%s%b\n' "$C_CYAN" "$line" "$C_RESET"
+      return 0
+      ;;
+    *TARGET*)
+      printf '%b%s%b\n' "$C_YELLOW" "$line" "$C_RESET"
+      return 0
+      ;;
+  esac
+
+  case "$line" in
+    "[orchestrator]"*|"[ORCH]"*)
+      printf '%b%s%b\n' "$C_GREEN" "$line" "$C_RESET"
+      ;;
+    "[vista]"*|"[VISTA]"*)
+      printf '%b%s%b\n' "$C_BLUE" "$line" "$C_RESET"
+      ;;
+    "[phone-gateway]"*)
+      printf '%b%s%b\n' "$C_YELLOW" "$line" "$C_RESET"
+      ;;
+    *)
+      printf '%s\n' "$line"
+      ;;
+  esac
 }
 
 headline() {
@@ -276,6 +362,8 @@ start_vision_bg() {
 set -euo pipefail
 cd "$VISION_ROOT"
 export PYTHONUNBUFFERED="$PYTHONUNBUFFERED"
+export ROBOT_CONSOLE_COLOR=never
+unset FORCE_COLOR
 export VISTA_TABLE_BBOX_ENABLE="$VISTA_TABLE_BBOX_ENABLE"
 export VISTA_TABLE_MODEL="$VISTA_TABLE_MODEL"
 export VISTA_PREVIEW_RGB="$VISTA_PREVIEW_RGB"
@@ -311,6 +399,8 @@ start_orch_bg() {
 set -euo pipefail
 cd "$ORCH_ROOT"
 export PYTHONUNBUFFERED="$PYTHONUNBUFFERED"
+export ROBOT_CONSOLE_COLOR=never
+unset FORCE_COLOR
 export ORCH_SERIAL_DRY_RUN="$ORCH_SERIAL_DRY_RUN"
 export ORCH_SERIAL_PORT="$UART_DEV"
 export ORCH_SERIAL_BAUDRATE="$UART_BAUDRATE"
@@ -349,6 +439,8 @@ start_gateway_bg() {
 set -euo pipefail
 cd "$STACK_ROOT"
 export PYTHONUNBUFFERED="$PYTHONUNBUFFERED"
+export ROBOT_CONSOLE_COLOR=never
+unset FORCE_COLOR
 export PYTHONPATH="$ORCH_ROOT"
 export MOBILE_GATEWAY_ORCH_TASK_CMD_HOST="127.0.0.1"
 export MOBILE_GATEWAY_ORCH_TASK_CMD_PORT="9001"
@@ -518,6 +610,7 @@ tail_stack_summary() {
   headline "单终端日志"
   log "显示 mobile_gateway / orchestrator / VISTA 的关键日志。"
   log "按 Ctrl+C 只退出日志显示，不会停止服务；需要结束时执行：./start_robot_stack.sh stop"
+  log "彩色显示测试：ROBOT_CONSOLE_COLOR=always ./start_robot_stack.sh"
   divider
   tail -n "$LOG_TAIL_N" -F "$GATEWAY_LOG_FILE" "$ORCH_LOG_FILE" "$VISION_LOG_FILE" 2>/dev/null | \
   awk -v orch_pat="$ORCH_SUMMARY_PATTERN" \
@@ -542,12 +635,14 @@ tail_stack_summary() {
       }
       if (show) {
         if ($0 ~ /(mobile_cmd|cmd received|gateway_ack|task_ack|fetch_object|status changed|stop)/) {
-          print "-------------------- phone command path --------------------"
+          print "···· phone command path ····"
         }
         print tag " " $0
       }
     }
-  '
+  ' | while IFS= read -r line; do
+    colorize_line "$line"
+  done
 }
 
 start_stack() {
