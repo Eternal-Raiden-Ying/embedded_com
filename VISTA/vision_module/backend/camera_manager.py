@@ -5,10 +5,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import os
 import threading
 import time
 from threading import RLock
 from typing import Any, Callable, Dict, Optional
+
+import numpy as np
+
+try:
+    import aidcv as cv2
+except ImportError:
+    import cv2
 
 from .camera import ColorCamera, IRCamera, RealSenseDepthCamera, camera_backend_status
 from ..config.schema import VisionServiceConfig
@@ -21,6 +29,158 @@ CapabilitySink = Optional[Callable[[str, str, Dict[str, Any]], None]]
 class CameraSpec:
     name: str
     params: tuple
+
+
+class _SharedRgbdStreamProxy:
+    def __init__(self, owner: "CameraManager", stream_name: str):
+        self._owner = owner
+        self._stream_name = str(stream_name)
+
+    def read_frame(self):
+        return self._owner._read_shared_rgbd_stream(self._stream_name)
+
+    def release(self) -> None:
+        pass
+
+
+class _SharedRealSenseRgbdSession:
+    """Read RealSense depth and color together so the color stream is not starved."""
+
+    def __init__(self, depth_params: Dict[str, Any], rgb_params: Dict[str, Any], logger: logging.Logger):
+        import pyrealsense2 as rs
+
+        self.rs = rs
+        self.log = logger
+        self.depth_params = dict(depth_params or {})
+        self.rgb_params = dict(rgb_params or {})
+        self.depth_sensor = None
+        self.color_sensor = None
+        self.depth_queue = rs.frame_queue(1)
+        self.color_queue = rs.frame_queue(1)
+        self.depth_profile = None
+        self.color_profile = None
+        self.color_w = 0
+        self.color_h = 0
+        self.output_format = str(self.rgb_params.get("format") or "BGR").strip().upper()
+
+        ctx = rs.context()
+        devices = ctx.query_devices()
+        if len(devices) <= 0:
+            raise RuntimeError("RealSense device not found")
+        dev = devices[0]
+        self.depth_sensor = dev.first_depth_sensor()
+        for sensor in dev.query_sensors():
+            try:
+                if sensor.get_info(rs.camera_info.name) == "RGB Camera":
+                    self.color_sensor = sensor
+                    break
+            except Exception:
+                continue
+        if self.color_sensor is None:
+            raise RuntimeError("RealSense RGB Camera sensor not found")
+
+        depth_w = int(self.depth_params.get("width") or 424)
+        depth_h = int(self.depth_params.get("height") or 240)
+        depth_fps = int(self.depth_params.get("fps") or 15)
+        color_w = int(self.rgb_params.get("in_w") or 1280)
+        color_h = int(self.rgb_params.get("in_h") or 720)
+        requested_color_fps = int(self.rgb_params.get("fps") or depth_fps or 15)
+        self.depth_profile = self._find_profile(self.depth_sensor, rs.stream.depth, rs.format.z16, depth_w, depth_h, depth_fps)
+        self.color_profile = self._find_color_yuyv_profile(color_w, color_h, requested_color_fps, depth_fps)
+        vp = self.color_profile.as_video_stream_profile()
+        self.color_w = int(vp.width())
+        self.color_h = int(vp.height())
+
+        self.depth_sensor.open(self.depth_profile)
+        self.color_sensor.open(self.color_profile)
+        self.depth_sensor.start(self.depth_queue)
+        self.color_sensor.start(self.color_queue)
+        self.log.info(
+            "shared realsense rgbd started: depth=%sx%s@%s color=%sx%s@%s yuyv",
+            depth_w,
+            depth_h,
+            depth_fps,
+            self.color_w,
+            self.color_h,
+            int(vp.fps()),
+        )
+
+    def _find_profile(self, sensor, stream, fmt, width: int, height: int, fps: int):
+        for profile in sensor.get_stream_profiles():
+            if profile.stream_type() == stream and profile.format() == fmt:
+                vp = profile.as_video_stream_profile()
+                if int(vp.width()) == int(width) and int(vp.height()) == int(height) and int(vp.fps()) == int(fps):
+                    return profile
+        raise RuntimeError(f"RealSense profile not found: stream={stream} format={fmt} {width}x{height}@{fps}")
+
+    def _find_color_yuyv_profile(self, width: int, height: int, requested_fps: int, depth_fps: int):
+        candidates = []
+        for profile in self.color_sensor.get_stream_profiles():
+            if profile.stream_type() == self.rs.stream.color and profile.format() == self.rs.format.yuyv:
+                vp = profile.as_video_stream_profile()
+                if int(vp.width()) == int(width) and int(vp.height()) == int(height):
+                    candidates.append((int(vp.fps()), profile))
+        if not candidates:
+            raise RuntimeError(f"RealSense YUYV color profile not found: {width}x{height}")
+        preferred = [int(requested_fps), int(depth_fps), 15, 30, 6]
+        by_fps = {fps: profile for fps, profile in candidates}
+        for fps in preferred:
+            if fps in by_fps:
+                return by_fps[fps]
+        return sorted(candidates, key=lambda item: abs(item[0] - int(depth_fps or requested_fps or 15)))[0][1]
+
+    def read_bundle(self) -> Dict[str, Any]:
+        depth_frame = None
+        color_frame = None
+        try:
+            depth_frame = self.depth_queue.wait_for_frame(1000)
+        except Exception:
+            depth_frame = None
+        try:
+            color_frame = self.color_queue.wait_for_frame(1000)
+        except Exception:
+            color_frame = None
+        depth = np.asanyarray(depth_frame.get_data()).copy() if depth_frame is not None else np.array([])
+        color = self._convert_color(color_frame) if color_frame is not None else np.array([])
+        return {"depth": depth, "rgb": color}
+
+    def _convert_color(self, color_frame) -> np.ndarray:
+        raw = np.asanyarray(color_frame.get_data())
+        if raw.size <= 0:
+            return np.array([])
+        yuyv = raw.view(np.uint8).reshape((self.color_h, self.color_w, 2))
+        bgr = cv2.cvtColor(yuyv, cv2.COLOR_YUV2BGR_YUY2)
+        crop_x = int(self.rgb_params.get("crop_x") or 0)
+        crop_y = int(self.rgb_params.get("crop_y") or 0)
+        crop_w = int(self.rgb_params.get("crop_w") or 0)
+        crop_h = int(self.rgb_params.get("crop_h") or 0)
+        if crop_w > 0 and crop_h > 0:
+            x0 = max(0, min(bgr.shape[1] - 1, crop_x))
+            y0 = max(0, min(bgr.shape[0] - 1, crop_y))
+            x1 = max(x0 + 1, min(bgr.shape[1], x0 + crop_w))
+            y1 = max(y0 + 1, min(bgr.shape[0], y0 + crop_h))
+            bgr = bgr[y0:y1, x0:x1]
+        out_w = int(self.rgb_params.get("out_w") or bgr.shape[1])
+        out_h = int(self.rgb_params.get("out_h") or bgr.shape[0])
+        if out_w > 0 and out_h > 0 and (bgr.shape[1], bgr.shape[0]) != (out_w, out_h):
+            bgr = cv2.resize(bgr, (out_w, out_h), interpolation=cv2.INTER_AREA)
+        if self.output_format == "RGB":
+            return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        return bgr
+
+    def release(self) -> None:
+        for sensor in (self.color_sensor, self.depth_sensor):
+            if sensor is None:
+                continue
+            try:
+                sensor.stop()
+            except Exception:
+                pass
+            try:
+                sensor.close()
+            except Exception:
+                pass
+        self.log.info("shared realsense rgbd closed")
 
 
 def _freeze_params(params: Dict[str, Any]) -> tuple:
@@ -52,6 +212,15 @@ class CameraManager:
         self._last_frame_seq = 0
         self._backend_status = camera_backend_status()
         self._active_implementation = str(self._backend_status.get("resolved_backend") or "mock")
+        self._params: Dict[str, Dict[str, Any]] = {}
+        self._shared_rgbd: Optional[_SharedRealSenseRgbdSession] = None
+        self._shared_rgbd_signature = None
+        self._shared_rgbd_cycle_bundle: Optional[Dict[str, Any]] = None
+
+    @staticmethod
+    def _shared_rgbd_enabled() -> bool:
+        raw = os.getenv("VISTA_SHARED_REALSENSE_RGBD", "1")
+        return str(raw or "").strip().lower() not in {"0", "false", "no", "off"}
 
     def _emit(self, action: str, resource_name: str, **fields: Any) -> None:
         if self._capability_sink is None:
@@ -160,6 +329,8 @@ class CameraManager:
 
     def _worker_loop(self) -> None:
         while self._runtime_running and not self._worker_stop.is_set():
+            self._ensure_shared_rgbd_if_needed()
+            self._shared_rgbd_cycle_bundle = None
             active = self.iter_cameras()
             if not active:
                 self._publish_result("frame_meta", {"has_frames": False, "cameras": []})
@@ -201,6 +372,7 @@ class CameraManager:
                 },
             )
             self._worker_stop.wait(timeout=self._worker_interval_s)
+            self._shared_rgbd_cycle_bundle = None
 
     def active_names(self) -> set:
         with self._lock:
@@ -228,6 +400,7 @@ class CameraManager:
 
             old_cam = self.cams.pop(name, None)
             self._specs.pop(name, None)
+            self._params.pop(name, None)
 
         if old_cam is not None:
             try:
@@ -248,6 +421,7 @@ class CameraManager:
         with self._lock:
             self.cams[name] = camera
             self._specs[name] = target_spec
+            self._params[name] = dict(params)
             self._active_implementation = implementation
         self.log.info("camera enabled: %s", name)
         self._emit(
@@ -262,6 +436,9 @@ class CameraManager:
         with self._lock:
             camera = self.cams.pop(name, None)
             self._specs.pop(name, None)
+            self._params.pop(name, None)
+        if name in {"rgb", "depth"}:
+            self._release_shared_rgbd()
         if camera is None:
             return False
         try:
@@ -274,18 +451,93 @@ class CameraManager:
 
     def release_all(self) -> None:
         self.stop_runtime()
+        self._release_shared_rgbd()
         with self._lock:
             names = list(self.cams.keys())
         for name in names:
             self.disable_camera(name)
 
+    def _ensure_shared_rgbd_if_needed(self) -> None:
+        if not self._shared_rgbd_enabled():
+            return
+        with self._lock:
+            has_rgb_depth = {"rgb", "depth"}.issubset(set(self.cams.keys()))
+            rgb_cam = self.cams.get("rgb")
+            depth_cam = self.cams.get("depth")
+            rgb_params = dict(self._params.get("rgb") or {})
+            depth_params = dict(self._params.get("depth") or {})
+        if not has_rgb_depth:
+            self._release_shared_rgbd()
+            return
+        if type(rgb_cam).__name__ == "MockCamera" or type(depth_cam).__name__ == "MockCamera":
+            return
+        signature = (
+            tuple(sorted(rgb_params.items())),
+            tuple(sorted(depth_params.items())),
+        )
+        if self._shared_rgbd is not None and self._shared_rgbd_signature == signature:
+            return
+        self._release_shared_rgbd()
+        old_cams = []
+        with self._lock:
+            for stream_name in ("rgb", "depth"):
+                old_cam = self.cams.get(stream_name)
+                if old_cam is not None and type(old_cam).__name__ != "_SharedRgbdStreamProxy":
+                    old_cams.append((stream_name, old_cam))
+        for _stream_name, old_cam in old_cams:
+            try:
+                old_cam.release()
+            except Exception as exc:
+                self.log.warning("camera release failed before shared rgbd: %s", exc)
+        try:
+            session = _SharedRealSenseRgbdSession(depth_params=depth_params, rgb_params=rgb_params, logger=self.log)
+        except Exception as exc:
+            self.log.warning("shared realsense rgbd unavailable: %s", exc)
+            restored = {}
+            for stream_name, stream_params in (("depth", depth_params), ("rgb", rgb_params)):
+                try:
+                    restored[stream_name] = self._build_camera(stream_name, stream_params)
+                except Exception as restore_exc:
+                    self.log.warning("camera restore failed after shared rgbd fallback | name=%s error=%s", stream_name, restore_exc)
+            with self._lock:
+                for stream_name, camera in restored.items():
+                    self.cams[stream_name] = camera
+            return
+        with self._lock:
+            for stream_name in ("rgb", "depth"):
+                self.cams[stream_name] = _SharedRgbdStreamProxy(self, stream_name)
+            self._shared_rgbd = session
+            self._shared_rgbd_signature = signature
+            self._active_implementation = "realsense_shared_rgbd"
+
+    def _release_shared_rgbd(self) -> None:
+        session = self._shared_rgbd
+        self._shared_rgbd = None
+        self._shared_rgbd_signature = None
+        self._shared_rgbd_cycle_bundle = None
+        if session is not None:
+            try:
+                session.release()
+            except Exception:
+                pass
+
+    def _read_shared_rgbd_stream(self, stream_name: str):
+        session = self._shared_rgbd
+        if session is None:
+            return np.array([])
+        if self._shared_rgbd_cycle_bundle is None:
+            self._shared_rgbd_cycle_bundle = session.read_bundle()
+        frame = (self._shared_rgbd_cycle_bundle or {}).get(stream_name)
+        return frame if frame is not None else np.array([])
+
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:
             return {
-                "enabled_cameras": sorted(self.cams.keys()),
+                "enabled_cameras": sorted(self._specs.keys()),
                 "camera_specs": sorted(self._specs.keys()),
                 "runtime_running": bool(self._runtime_running),
                 "last_frame_seq": int(self._last_frame_seq),
                 "implementation": str(self._active_implementation or "real"),
                 "backend_status": dict(self._backend_status or {}),
+                "shared_rgbd_running": bool(self._shared_rgbd is not None),
             }
