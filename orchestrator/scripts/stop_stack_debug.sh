@@ -19,6 +19,5 @@ kill_pid_file() {
 
 kill_pid_file "$REPO_ROOT/orchestrator/pids/orchestrator.pid"
 kill_pid_file "$REPO_ROOT/VISTA/pids/vision.pid"
-kill_pid_file "$REPO_ROOT/Voice/pids/voice.pid"
 
 echo "[stop_stack_debug] 完成。"

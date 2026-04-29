@@ -67,15 +67,15 @@ Recommended transport split:
 
 - mini-program sends structured `mobile_cmd`
 - mini-program subscribes to `ack/status/heartbeat`
-- ASR text is converted into `mobile_cmd` in the mini-program or a lightweight cloud-side helper
+- microphone/ASR text, if used, is converted into `mobile_cmd` in the mini-program or a lightweight cloud-side helper
 
-## 3. ASR Text To Structured Command Mapping
+## 3. Microphone Text To Structured Command Mapping
 
-When remote ASR is added later, do not let raw text enter orchestrator directly.
+Do not let raw speech text enter Orchestrator directly. The board-side `Voice/ASR` service has been archived out of the repository; current microphone handling should produce the same structured mobile command contract.
 
 Recommended pipeline:
 
-1. ASR text
+1. microphone/ASR text
 2. intent parser at mobile or cloud edge
 3. structured `mobile_cmd`
 4. board-side gateway validation
@@ -91,11 +91,11 @@ Examples:
 
 Implementation guidance:
 
-- avoid sending raw ASR text to the board
+- avoid sending raw speech text to the board
 - keep the board-side gateway deterministic and whitelist-driven
 - let the mobile side or a lightweight backend own NLU ambiguity handling
 
-## 4. Voice Feedback For Blind Users
+## 4. Audio Feedback For Blind Users
 
 For a visually impaired user flow, status feedback should be short, consistent, and state-based.
 
@@ -119,7 +119,7 @@ Before connecting a real mobile client, add:
 
 - `cmd_id` deduplication cache
 - session timeout and stale epoch rejection
-- optional fan-out if Voice and mobile need simultaneous `task_ack`
+- optional fan-out only if another future upstream needs the same `task_ack`
 - reconnect-safe status replay on gateway restart
 - authentication for MQTT/WebSocket clients
 

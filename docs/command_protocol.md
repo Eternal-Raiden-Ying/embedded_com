@@ -184,12 +184,18 @@ Back-end state mapping:
 
 - `IDLE -> idle`
 - `SEARCH_TABLE -> searching`
-- `SEARCH_OBJECT -> searching`
+- `COARSE_ALIGN -> running`
+- `CONTROLLED_APPROACH -> running`
+- `FINAL_LOCK -> running`
+- `AT_TABLE_EDGE -> running`
 - `SEARCH_TARGET_INIT -> searching`
-- `GRASPING -> running`
+- `EDGE_SLIDE_SEARCH -> searching`
+- `TARGET_CONFIRM -> running`
+- `TARGET_LOCKED -> running`
+- `FREEZE_BASE -> running`
+- `DONE -> idle`
 - `ERROR_RECOVERY -> error`
-- `STOP -> stopped`
-- `STOPPED -> stopped`
+- accepted `STOP` commands publish `stopped`
 
 Display-oriented messages should be directly usable by the mini-program UI, for example:
 
