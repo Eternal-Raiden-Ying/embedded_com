@@ -471,6 +471,16 @@ class SearchStagePlanKindTest(unittest.TestCase):
         self.assertEqual(alias_ctx.stage_state["search_kind"], "TARGET_ON_EDGE")
 
 
+class StageControllerStatusTest(unittest.TestCase):
+    def test_runtime_status_includes_active_target(self):
+        controller = StageController()
+        controller._ctx.current_stage = "SEARCH"
+        controller._ctx.current_mode = "TRACK_LOCAL"
+        controller._ctx.target_name = "apple"
+        status = controller._runtime_status_payload()
+        self.assertEqual(status["target"], "apple")
+
+
 class RuntimeSupervisorModeApplyTest(unittest.TestCase):
     def test_runtime_supervisor_reconciles_managers_from_mode(self):
         args = SimpleNamespace(
@@ -1185,6 +1195,53 @@ class BackendSelectionContractTest(unittest.TestCase):
                 },
             )
             self.assertIsInstance(camera, self._SentinelCamera)
+        finally:
+            manager_module.ColorCamera = original_cls
+
+    def test_camera_manager_restores_rgb_after_shared_depth_is_disabled(self):
+        args = SimpleNamespace(
+            rgb_device="mock_rgb",
+            depth_device="mock_depth",
+            ir_device="mock_ir",
+            rgb_in_w=1280,
+            rgb_in_h=720,
+            rgb_out_w=640,
+            rgb_out_h=640,
+            rgb_fps=30,
+            depth_width=424,
+            depth_height=240,
+            depth_fps=15,
+            ir_in_w=640,
+            ir_in_h=480,
+            ir_out_w=640,
+            ir_out_h=480,
+            ir_fps=30,
+            model_path="",
+            model_width=640,
+            model_height=640,
+            conf_thres=0.25,
+            iou_thres=0.15,
+            class_num=20,
+        )
+        cfg = build_test_config(args)
+        manager_module = importlib.import_module("vision_module.backend.camera_manager")
+        original_cls = manager_module.ColorCamera
+        manager_module.ColorCamera = self._SentinelCamera
+        try:
+            manager = CameraManager(cfg=cfg, logger=PrintLogger("camera_restore"))
+            rgb_params = manager._resolve_params("rgb", None)
+            depth_params = manager._resolve_params("depth", None)
+            manager.cams["rgb"] = manager_module._SharedRgbdStreamProxy(manager, "rgb")
+            manager.cams["depth"] = manager_module._SharedRgbdStreamProxy(manager, "depth")
+            manager._params["rgb"] = dict(rgb_params or {})
+            manager._params["depth"] = dict(depth_params or {})
+
+            self.assertTrue(manager.disable_camera("depth"))
+
+            restored = manager.cams.get("rgb")
+            self.assertIsInstance(restored, self._SentinelCamera)
+            frame = restored.read_frame()
+            self.assertEqual(tuple(frame.shape), (4, 4, 3))
         finally:
             manager_module.ColorCamera = original_cls
 

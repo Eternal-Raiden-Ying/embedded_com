@@ -239,6 +239,7 @@ class StageController:
             "req_id": self._ctx.req_id,
             "epoch": int(self._ctx.epoch),
             "interaction_id": self._ctx.interaction_id,
+            "target": self._ctx.target_name,
         }
 
     def _publish_runtime_status(self) -> None:

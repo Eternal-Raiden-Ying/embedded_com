@@ -439,6 +439,7 @@ class CameraManager:
             self._params.pop(name, None)
         if name in {"rgb", "depth"}:
             self._release_shared_rgbd()
+            self._restore_shared_rgbd_proxies()
         if camera is None:
             return False
         try:
@@ -520,6 +521,26 @@ class CameraManager:
                 session.release()
             except Exception:
                 pass
+
+    def _restore_shared_rgbd_proxies(self) -> None:
+        restore_items = []
+        with self._lock:
+            for stream_name in ("rgb", "depth"):
+                camera = self.cams.get(stream_name)
+                if type(camera).__name__ != "_SharedRgbdStreamProxy":
+                    continue
+                params = dict(self._params.get(stream_name) or {})
+                if params:
+                    restore_items.append((stream_name, params))
+        for stream_name, params in restore_items:
+            try:
+                camera = self._build_camera(stream_name, params)
+            except Exception as exc:
+                self.log.warning("camera restore failed after shared rgbd release | name=%s error=%s", stream_name, exc)
+                continue
+            with self._lock:
+                self.cams[stream_name] = camera
+            self.log.info("camera restored after shared rgbd release: %s", stream_name)
 
     def _read_shared_rgbd_stream(self, stream_name: str):
         session = self._shared_rgbd
