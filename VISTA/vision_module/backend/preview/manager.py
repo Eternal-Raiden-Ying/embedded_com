@@ -8,9 +8,12 @@ from typing import Any, Callable, Dict, Optional
 from .base import PreviewFrame, PreviewOverlay, PreviewSink
 
 try:
-    from common.runtime_logging import OperatorConsole
-except Exception:  # pragma: no cover - fallback for direct package execution
+    from ...diagnostics.operator_console import OperatorConsole
+    from ...diagnostics.summaries import format_table_edge_summary, format_target_summary
+except Exception:  # pragma: no cover
     OperatorConsole = None
+    format_table_edge_summary = None
+    format_target_summary = None
 
 
 class PreviewManager:
@@ -53,6 +56,8 @@ class PreviewManager:
             pass
 
     def _table_edge_summary_line(self, status: Dict[str, Any], table_edge: Dict[str, Any]) -> str:
+        if format_table_edge_summary is not None:
+            return format_table_edge_summary(status, table_edge)
         found = bool(table_edge.get("table_found", table_edge.get("found", False)))
         edge_found = bool(table_edge.get("edge_found", False))
         conf = float(table_edge.get("confidence", 0.0) or 0.0)
@@ -69,6 +74,8 @@ class PreviewManager:
         )
 
     def _target_summary_line(self, status: Dict[str, Any], target_obs: Dict[str, Any]) -> str:
+        if format_target_summary is not None:
+            return format_target_summary(status, target_obs)
         found = bool(target_obs.get("found", False))
         conf = float(target_obs.get("confidence", 0.0) or 0.0)
         target = str(target_obs.get("target") or status.get("target") or "target").strip()

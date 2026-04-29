@@ -11,12 +11,13 @@ if str(STACK_ROOT) not in sys.path:
     sys.path.insert(0, str(STACK_ROOT))
 
 from common.base_module import BaseModule
-from common.runtime_logging import OperatorConsole, RunLogger, ensure_dir, env_flag
+from common.runtime_logging import RunLogger, ensure_dir, env_flag
 
 from ..backend.mode_controller import ModeController
 from ..backend.vision_engine import VisionEngine
 from ..config.mode_defaults import build_default_mode_profiles
 from ..config.board_config import CONFIG
+from ..diagnostics.operator_console import OperatorConsole
 from ..ipc.protocol import VisionReq
 from ..ipc.transport import JsonlClientSender, JsonlInboundServer
 from .stage_controller import StageController

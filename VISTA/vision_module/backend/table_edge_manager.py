@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict, Optional
 
 import numpy as np
 
-from ..utils.table_roi import build_table_roi, quadrant_to_roi
+from .table_edge_roi import choose_depth_roi
 
 
 CapabilitySink = Optional[Callable[[str, Dict[str, Any]], None]]
@@ -186,44 +186,29 @@ class TableEdgeManager:
         fallback = self._static_roi()
         local = self._local_perception()
         depth_shape = getattr(depth_frame, "shape", None)
-        roi_meta = build_table_roi(local, local.get("rgb_shape"), depth_shape, fallback)
         manual_static = self._manual_static_roi_enabled()
+        last_age_s = None
+        if self._last_valid_quadrant_ts:
+            last_age_s = time.time() - float(self._last_valid_quadrant_ts or 0.0)
+        roi_meta = choose_depth_roi(
+            local,
+            local.get("rgb_shape"),
+            depth_shape,
+            fallback,
+            last_valid_table_bbox=self._last_valid_table_bbox,
+            last_valid_table_center_norm=self._last_valid_table_center_norm,
+            last_valid_quadrant=self._last_valid_quadrant,
+            last_valid_age_s=last_age_s,
+            last_valid_ttl_s=self._last_valid_quadrant_ttl_s,
+            manual_static=manual_static,
+        )
         quadrant = roi_meta.get("table_quadrant")
         table_bbox = roi_meta.get("table_bbox")
-        if quadrant:
+        if quadrant and roi_meta.get("roi_source") == "local_perception_table_bbox":
             self._last_valid_quadrant = str(quadrant).strip().upper()
             self._last_valid_quadrant_ts = time.time()
             self._last_valid_table_bbox = table_bbox
             self._last_valid_table_center_norm = roi_meta.get("table_center_norm")
-        if manual_static:
-            roi_source = "manual_static"
-            roi_reason = "manual_static_roi_enabled"
-            depth_edge_roi = fallback
-        elif quadrant:
-            if depth_shape is not None and len(depth_shape) >= 2:
-                depth_edge_roi = quadrant_to_roi(quadrant, int(depth_shape[1]), int(depth_shape[0]))
-            else:
-                depth_edge_roi = roi_meta.get("depth_edge_roi")
-            roi_source = "local_perception_table_bbox"
-            roi_reason = "table_bbox_detected"
-        elif self._last_valid_quadrant and (time.time() - float(self._last_valid_quadrant_ts or 0.0)) <= self._last_valid_quadrant_ttl_s:
-            quadrant = self._last_valid_quadrant
-            if depth_shape is not None and len(depth_shape) >= 2:
-                depth_edge_roi = quadrant_to_roi(quadrant, int(depth_shape[1]), int(depth_shape[0]))
-            else:
-                depth_edge_roi = roi_meta.get("depth_edge_roi")
-            roi_source = "last_valid_quadrant"
-            roi_reason = "table_bbox_lost_using_history"
-            roi_meta["table_quadrant"] = quadrant
-            roi_meta["table_bbox"] = self._last_valid_table_bbox
-            roi_meta["table_center_norm"] = self._last_valid_table_center_norm
-        else:
-            depth_edge_roi = fallback
-            roi_source = "static_fallback"
-            roi_reason = "table_bbox_unavailable"
-        roi_meta["depth_edge_roi"] = depth_edge_roi
-        roi_meta["roi_source"] = roi_source
-        roi_meta["roi_reason"] = roi_reason
         return roi_meta
 
     def _roi_payload(self, roi_box=None, roi_meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

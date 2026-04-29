@@ -20,6 +20,8 @@ dist/
 # Logs - strict patterns
 *.out
 *.log
+vision.out*
+logs/
 **/logs/
 **/logs/*
 
@@ -32,15 +34,17 @@ Voice/logs/
 Voice/pids/
 Voice/runs/
 
-# Architecture-specific binaries
-*.so
-**/*.aarch64*
+# Architecture-specific native libraries may be required at runtime on board.
+# Do not ignore *.so globally; keep intentional native camera extensions visible.
 **/cxx/
 
 # PID files
+pids/
+**/pids/
 **/pids/*.pid
 
 # Run data (runtime generated)
+runs/
 **/runs/
 
 # Large QNN model binaries (consider git LFS for these)

@@ -27,7 +27,10 @@ from vision_module.backend.predictor_manager import PredictorManager
 from vision_module.backend.scheduler import Scheduler
 from vision_module.config.mode_defaults import build_default_mode_profiles
 from vision_module.ipc.protocol import VisionReq
-from common.runtime_logging import OperatorConsole
+try:
+    from common.runtime_logging import OperatorConsole
+except ImportError:
+    from vision_module.diagnostics.operator_console import OperatorConsole
 
 
 def build_runtime_stack(engine_module, cfg, logger, event_sink=None):

@@ -21,7 +21,10 @@ class _FakeCV2(types.SimpleNamespace):
 
 sys.modules.setdefault("cv2", _FakeCV2())
 
-from VISTA.vision_module.backend.preview.opencv_sink import CYAN, YELLOW, OpenCVPreviewSink
+try:
+    from VISTA.vision_module.backend.preview.opencv_sink import CYAN, YELLOW, OpenCVPreviewSink
+except ImportError:
+    from vision_module.backend.preview.opencv_sink import CYAN, YELLOW, OpenCVPreviewSink
 
 
 class PreviewTableBboxTest(unittest.TestCase):
