@@ -1245,6 +1245,63 @@ class BackendSelectionContractTest(unittest.TestCase):
         finally:
             manager_module.ColorCamera = original_cls
 
+    def test_camera_manager_keeps_shared_rgb_alive_when_depth_is_disabled(self):
+        class _DummyShared:
+            def __init__(self):
+                self.released = False
+
+            def release(self):
+                self.released = True
+
+        args = SimpleNamespace(
+            rgb_device="mock_rgb",
+            depth_device="mock_depth",
+            ir_device="mock_ir",
+            rgb_in_w=1280,
+            rgb_in_h=720,
+            rgb_out_w=640,
+            rgb_out_h=640,
+            rgb_fps=30,
+            depth_width=424,
+            depth_height=240,
+            depth_fps=15,
+            ir_in_w=640,
+            ir_in_h=480,
+            ir_out_w=640,
+            ir_out_h=480,
+            ir_fps=30,
+            model_path="",
+            model_width=640,
+            model_height=640,
+            conf_thres=0.25,
+            iou_thres=0.15,
+            class_num=20,
+        )
+        cfg = build_test_config(args)
+        manager_module = importlib.import_module("vision_module.backend.camera_manager")
+        manager = CameraManager(cfg=cfg, logger=PrintLogger("camera_shared_keepalive"))
+        rgb_params = manager._resolve_params("rgb", None)
+        depth_params = manager._resolve_params("depth", None)
+        shared = _DummyShared()
+        manager.cams["rgb"] = manager_module._SharedRgbdStreamProxy(manager, "rgb")
+        manager.cams["depth"] = manager_module._SharedRgbdStreamProxy(manager, "depth")
+        manager._params["rgb"] = dict(rgb_params or {})
+        manager._params["depth"] = dict(depth_params or {})
+        manager._specs["rgb"] = manager_module.CameraSpec("rgb", manager_module._freeze_params(rgb_params or {}))
+        manager._specs["depth"] = manager_module.CameraSpec("depth", manager_module._freeze_params(depth_params or {}))
+        manager._shared_rgbd = shared
+        manager._shared_rgbd_signature = manager._shared_signature_for_params(rgb_params or {}, depth_params or {})
+
+        self.assertTrue(manager.disable_camera("depth"))
+        manager._ensure_shared_rgbd_if_needed()
+
+        self.assertIs(manager._shared_rgbd, shared)
+        self.assertFalse(shared.released)
+        self.assertEqual(type(manager.cams.get("rgb")).__name__, "_SharedRgbdStreamProxy")
+
+        self.assertTrue(manager.ensure_camera("depth"))
+        self.assertEqual(type(manager.cams.get("depth")).__name__, "_SharedRgbdStreamProxy")
+
 
 class ModeProfileCameraContractTest(unittest.TestCase):
     def test_default_mode_profiles_expose_distinct_bgr_camera_overrides(self):

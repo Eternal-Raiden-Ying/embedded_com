@@ -222,6 +222,10 @@ class CameraManager:
         raw = os.getenv("VISTA_SHARED_REALSENSE_RGBD", "1")
         return str(raw or "").strip().lower() not in {"0", "false", "no", "off"}
 
+    @staticmethod
+    def _is_shared_proxy(camera: Any) -> bool:
+        return type(camera).__name__ == "_SharedRgbdStreamProxy"
+
     def _emit(self, action: str, resource_name: str, **fields: Any) -> None:
         if self._capability_sink is None:
             return
@@ -392,6 +396,8 @@ class CameraManager:
             self.log.error("camera config not found: %s", name)
             return False
         target_spec = CameraSpec(name=name, params=_freeze_params(params))
+        if name in {"rgb", "depth"} and self._attach_existing_shared_rgbd_proxy(name, params, target_spec):
+            return True
 
         with self._lock:
             current = self._specs.get(name)
@@ -438,8 +444,7 @@ class CameraManager:
             self._specs.pop(name, None)
             self._params.pop(name, None)
         if name in {"rgb", "depth"}:
-            self._release_shared_rgbd()
-            self._restore_shared_rgbd_proxies()
+            self._release_or_restore_shared_rgbd_after_disable()
         if camera is None:
             return False
         try:
@@ -448,6 +453,41 @@ class CameraManager:
             self.log.warning("camera release failed: %s", exc)
         self.log.info("camera disabled: %s", name)
         self._emit("disabled", name)
+        return True
+
+    def _shared_signature_for_params(self, rgb_params: Dict[str, Any], depth_params: Dict[str, Any]):
+        return (
+            tuple(sorted(dict(rgb_params or {}).items())),
+            tuple(sorted(dict(depth_params or {}).items())),
+        )
+
+    def _attach_existing_shared_rgbd_proxy(self, name: str, params: Dict[str, Any], target_spec: CameraSpec) -> bool:
+        if self._shared_rgbd is None:
+            return False
+        with self._lock:
+            rgb_params = dict(self._params.get("rgb") or {})
+            depth_params = dict(self._params.get("depth") or {})
+            if name == "rgb":
+                rgb_params = dict(params or {})
+            if name == "depth":
+                depth_params = dict(params or {})
+            if not rgb_params or not depth_params:
+                return False
+            signature = self._shared_signature_for_params(rgb_params, depth_params)
+            if signature != self._shared_rgbd_signature:
+                return False
+            current = self._specs.get(name)
+            if name in self.cams and current == target_spec:
+                return False
+            old_cam = self.cams.get(name)
+            if old_cam is not None and not self._is_shared_proxy(old_cam):
+                return False
+            self.cams[name] = _SharedRgbdStreamProxy(self, name)
+            self._specs[name] = target_spec
+            self._params[name] = dict(params or {})
+            self._active_implementation = "realsense_shared_rgbd"
+        self.log.info("camera attached to shared rgbd: %s", name)
+        self._emit("enabled", name, params=params, implementation="realsense_shared_rgbd")
         return True
 
     def release_all(self) -> None:
@@ -468,6 +508,10 @@ class CameraManager:
             rgb_params = dict(self._params.get("rgb") or {})
             depth_params = dict(self._params.get("depth") or {})
         if not has_rgb_depth:
+            if self._shared_rgbd is not None and (
+                self._is_shared_proxy(rgb_cam) or self._is_shared_proxy(depth_cam)
+            ):
+                return
             self._release_shared_rgbd()
             return
         if type(rgb_cam).__name__ == "MockCamera" or type(depth_cam).__name__ == "MockCamera":
@@ -510,6 +554,20 @@ class CameraManager:
             self._shared_rgbd = session
             self._shared_rgbd_signature = signature
             self._active_implementation = "realsense_shared_rgbd"
+
+    def _release_or_restore_shared_rgbd_after_disable(self) -> None:
+        if self._shared_rgbd is None:
+            self._restore_shared_rgbd_proxies()
+            return
+        with self._lock:
+            has_remaining_proxy = any(
+                self._is_shared_proxy(self.cams.get(stream_name))
+                for stream_name in ("rgb", "depth")
+            )
+        if has_remaining_proxy:
+            return
+        self._release_shared_rgbd()
+        self._restore_shared_rgbd_proxies()
 
     def _release_shared_rgbd(self) -> None:
         session = self._shared_rgbd
