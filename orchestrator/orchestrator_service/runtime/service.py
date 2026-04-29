@@ -46,6 +46,7 @@ class OrchestratorService(BaseModule):
         self._mobile_status_console_mode = self._env_choice("ORCH_MOBILE_STATUS_CONSOLE", "change", {"change", "full", "silent"})
         self._last_obs_flags = {"table_edge": False, "target": False}
         self._last_target_obs_console_payload: Dict[str, Any] = {}
+        self._last_target_search_req_console_key = ""
         self.mapper = SimpleCarMapper(cfg.car)
         self._async_result_queue: "queue.Queue[Dict[str, Any]]" = queue.Queue()
         self._boot_ts = time.time()
@@ -138,6 +139,19 @@ class OrchestratorService(BaseModule):
         mode = str(payload.get("vision_mode") or payload.get("mode") or self.core.ctx.active_vision_mode or "").strip() or "n/a"
         return f"[ORCH] OBS target={target} found=0 boxes={int(boxes or 0)} mode={mode}"
 
+    def _vision_req_console_summary(self, payload: Dict[str, Any]) -> Optional[str]:
+        if str(payload.get("type") or "").strip() != "vision_req":
+            return None
+        req_payload = dict(payload.get("payload") or {})
+        kind = str(req_payload.get("search_kind") or payload.get("kind") or "").strip().upper()
+        stage = str(payload.get("stage") or "").strip().upper()
+        mode_hint = str(payload.get("mode_hint") or "").strip().upper()
+        if stage != "SEARCH" or kind != "TARGET":
+            return None
+        target = str(payload.get("target") or self.core.ctx.active_target or "target").strip() or "target"
+        req_id = str(payload.get("req_id") or "").strip()
+        return f"[ORCH] REQ target_search stage={stage} kind={kind} target={target} mode_hint={mode_hint or 'n/a'} req={req_id}"
+
     def _emit_target_obs_console(self, payload: Dict[str, Any]) -> None:
         state = str(getattr(self.core.ctx.state, "value", self.core.ctx.state) or "")
         if state not in {"SEARCH_TARGET_INIT", "EDGE_SLIDE_SEARCH"}:
@@ -213,6 +227,8 @@ class OrchestratorService(BaseModule):
         reason = str(reason or "state_transition").strip() or "state_transition"
         if old_state == "EDGE_SLIDE_SEARCH" and new_state in {"LEAVE_EDGE", "NEXT_TABLE"} and "未找到目标" in reason:
             reason = f"target_not_found timeout_s={float(self.cfg.control.target_search_timeout_s):.1f}"
+        if old_state == "EDGE_SLIDE_SEARCH" and new_state == "TARGET_CONFIRM":
+            reason = "target_found"
         self.operator_console.emit_change(
             "state",
             f"[ORCH] STATE {old_state} -> {new_state} reason={reason}",
@@ -1025,6 +1041,12 @@ class OrchestratorService(BaseModule):
     def _flush_pending_msgs(self):
         for msg in self.core.drain_vision_msgs():
             self.run_logger.write_jsonl(msg.get("type", "vision_req"), msg)
+            summary_line = self._vision_req_console_summary(msg)
+            if summary_line is not None:
+                key = str(msg.get("req_id") or summary_line)
+                if key != self._last_target_search_req_console_key:
+                    self._last_target_search_req_console_key = key
+                    self.operator_console.emit(summary_line)
             if isinstance(self.vision_req_sender, AsyncJsonlClientSender):
                 queued = self._enqueue_async_or_fail(self.vision_req_sender, "vision_req_out", msg)
                 if not queued:
@@ -1169,7 +1191,6 @@ class OrchestratorService(BaseModule):
         if raw in {
             "safety_hold_no_edge",
             "waiting_first_target_obs",
-            "waiting_target_obs",
             "edge_slide_vy_zero",
             "target_search_hold",
             "config_disabled",
@@ -1184,13 +1205,40 @@ class OrchestratorService(BaseModule):
             return "safety_hold_no_edge"
         if raw in {"safety_hold", "waiting_target_obs"}:
             if self.core.ctx.last_target_obs is None:
-                return "waiting_target_obs"
+                return "waiting_first_target_obs"
             return "target_search_hold"
         if str(self.core.ctx.active_vision_mode or "").upper() == "TRACK_LOCAL" and self.core.ctx.last_table_obs is None:
             return "no_table_edge_obs_in_track_local"
         if not bool(getattr(self.cfg.control, "edge_relocate_enabled", True)):
             return "config_disabled"
         return "target_search_hold"
+
+    def _emit_target_obs_missing_warning(self) -> None:
+        if str(getattr(self.core.ctx.state, "value", self.core.ctx.state) or "") != "EDGE_SLIDE_SEARCH":
+            return
+        try:
+            elapsed = self.core._state_elapsed()
+        except Exception:
+            elapsed = 0.0
+        if elapsed < 1.0:
+            return
+        try:
+            fresh = self.core._fresh_target_obs()
+        except Exception:
+            fresh = self.core.ctx.last_target_obs
+        if fresh is not None:
+            return
+        last_obs = getattr(self.core.ctx, "last_target_obs", None)
+        if last_obs is not None and getattr(last_obs, "ts", 0.0):
+            age = max(0.0, time.time() - float(getattr(last_obs, "ts", 0.0) or 0.0))
+        else:
+            age = max(0.0, float(elapsed))
+        mode = str(getattr(self.core.ctx, "active_vision_mode", "") or "n/a").strip() or "n/a"
+        self.operator_console.emit_rate_limited(
+            "target_obs_missing",
+            f"[ORCH] WARN target_obs_missing mode={mode} age={age:.1f}s",
+            self.operator_console.default_interval_s,
+        )
 
     def _emit_operator_control(self, decision) -> None:
         summary = self._control_summary_with_context(decision)
@@ -1200,6 +1248,7 @@ class OrchestratorService(BaseModule):
         line = self._operator_control_line(summary)
         key = "lock" if state == "FINAL_LOCK" else ("slide" if state == "EDGE_SLIDE_SEARCH" else "ctrl")
         self.operator_console.emit_rate_limited(key, line, self.operator_console.default_interval_s)
+        self._emit_target_obs_missing_warning()
 
     def _emit_motion(self, decision):
         cmd = decision.cmd

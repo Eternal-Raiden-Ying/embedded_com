@@ -52,6 +52,7 @@ def _service(lines, mode="operator"):
     svc._uart_lowfreq_repeat_count = 0
     svc._uart_lowfreq_last_payload = None
     svc._last_target_obs_console_payload = {}
+    svc._last_target_search_req_console_key = ""
     svc._last_uart_tx_ts = 0.0
     svc.run_logger = _RunLogger()
     svc.core = SimpleNamespace(
@@ -207,6 +208,26 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         svc._emit_target_obs_console({"type": "target_obs", "target": "apple", "found": True, "confidence": 0.81, "cx_norm": 0.54, "cy_norm": 0.47})
         self.assertIn("[ORCH] OBS target=apple found=1 conf=0.81 cx=0.54 cy=0.47", lines[-1])
 
+    def test_target_obs_keeps_detection_summary_fields(self) -> None:
+        obs = TargetObs.from_dict(
+            {
+                "type": "target_obs",
+                "target": "apple",
+                "found": False,
+                "boxes_count": 2,
+                "best_cls": "cup",
+                "best_conf": 0.67,
+                "cy_norm": 0.44,
+                "reason": "no_boxes",
+            }
+        )
+        payload = obs.to_dict()
+        self.assertEqual(payload["boxes_count"], 2)
+        self.assertEqual(payload["best_cls"], "cup")
+        self.assertAlmostEqual(payload["best_conf"], 0.67)
+        self.assertAlmostEqual(payload["cy_norm"], 0.44)
+        self.assertEqual(payload["reason"], "no_boxes")
+
     def test_edge_slide_zero_cmd_has_operator_reason(self) -> None:
         lines = []
         svc = _service(lines, mode="operator")
@@ -219,7 +240,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         svc._emit_operator_control(decision)
         self.assertEqual(len(lines), 1)
         self.assertIn("[ORCH] SLIDE edge=1 target=0 boxes=0 status=searching cmd vx=+0.000 vy=+0.000 wz=+0.000", lines[0])
-        self.assertIn("reason=waiting_target_obs", lines[0])
+        self.assertIn("reason=waiting_first_target_obs", lines[0])
 
     def test_edge_lost_hold_reason_is_visible(self) -> None:
         lines = []
@@ -238,6 +259,27 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         svc = _service(lines, mode="operator")
         svc._on_state_transition("EDGE_SLIDE_SEARCH", "LEAVE_EDGE", "当前桌边未找到目标，切换到边 right")
         self.assertEqual(lines, ["[ORCH] STATE EDGE_SLIDE_SEARCH -> LEAVE_EDGE reason=target_not_found timeout_s=10.0"])
+
+    def test_state_transition_target_found_is_diagnostic(self) -> None:
+        lines = []
+        svc = _service(lines, mode="operator")
+        svc._on_state_transition("EDGE_SLIDE_SEARCH", "TARGET_CONFIRM", "检测到目标候选，开始确认")
+        self.assertEqual(lines, ["[ORCH] STATE EDGE_SLIDE_SEARCH -> TARGET_CONFIRM reason=target_found"])
+
+    def test_target_search_req_summary_is_compact(self) -> None:
+        lines = []
+        svc = _service(lines, mode="operator")
+        line = svc._vision_req_console_summary(
+            {
+                "type": "vision_req",
+                "stage": "SEARCH",
+                "mode_hint": "TRACK_LOCAL",
+                "target": "apple",
+                "req_id": "req_1",
+                "payload": {"search_kind": "TARGET"},
+            }
+        )
+        self.assertEqual(line, "[ORCH] REQ target_search stage=SEARCH kind=TARGET target=apple mode_hint=TRACK_LOCAL req=req_1")
 
     def test_target_obs_found_enters_confirm_stop_logic(self) -> None:
         cfg = OrchestratorConfig()

@@ -388,7 +388,11 @@ class OrchestratorCore:
     def _tick_final_lock(self) -> MotionDecision:
         obs = self._fresh_table_obs()
         if not self._table_visible(obs):
-            self._log_final_lock_summary(obs, lock_ready=False, reason="table_lost", stable_count=self.ctx.table_lock_frames)
+            stale_obs = self.ctx.last_table_obs if obs is None else obs
+            reason = str(self._final_lock_status(stale_obs if stale_obs is not None else obs, stable_count=self.ctx.table_lock_frames)["reason"])
+            if obs is None and self.ctx.last_table_obs is not None:
+                reason = "vision_stale"
+            self._log_final_lock_summary(obs, lock_ready=False, reason=reason, stable_count=self.ctx.table_lock_frames)
             return self._handle_table_loss("最终锁边时桌边丢失，回到搜索", State.SEARCH_TABLE, "FINAL_LOCK_HOLD")
         self._reset_table_loss()
         lock_status = self._final_lock_status(obs, stable_count=self.ctx.table_lock_frames)
@@ -396,8 +400,8 @@ class OrchestratorCore:
             self.ctx.table_lock_frames += 1
             if self.ctx.table_lock_frames >= int(self.cfg.final_lock_frames_to_arrive):
                 self.ctx.dock_retry_count = 0
-                self._log_final_lock_summary(obs, lock_ready=True, reason="ok", stable_count=self.ctx.table_lock_frames)
-                self._transition(State.AT_TABLE_EDGE, "已完成桌边停靠")
+                self._log_final_lock_summary(obs, lock_ready=True, reason="lock_ready", stable_count=self.ctx.table_lock_frames)
+                self._transition(State.AT_TABLE_EDGE, "lock_ready")
                 self._queue_tts("已完成桌边停靠")
                 return self.controller.stop_cmd("AT_TABLE_EDGE")
         else:
@@ -433,10 +437,8 @@ class OrchestratorCore:
         self._maybe_resend_req(self._active_req_payload())
         obs = self._fresh_target_obs()
         if obs is not None and obs.found and self._target_matches_active(obs):
-            self._transition(State.TARGET_CONFIRM, "检测到目标候选，开始确认")
+            self._transition(State.TARGET_CONFIRM, "target_found")
             return self.controller.stop_cmd("TARGET_CONFIRM")
-        if str(self.ctx.active_vision_mode or "").upper() == "TRACK_LOCAL" and self._fresh_table_obs() is None:
-            return self.controller.edge_slide_hold_cmd("no_table_edge_obs_in_track_local")
         if self._state_elapsed() >= float(self.cfg.target_search_timeout_s):
             self.ctx.last_fail_reason = "当前桌边未找到目标"
             if self._can_relocate_edge():
@@ -447,6 +449,8 @@ class OrchestratorCore:
             self._transition(State.NEXT_TABLE, f"{self.ctx.last_fail_reason}，准备切换下一张桌")
             self._queue_tts("当前桌位未找到目标，尝试下一张桌")
             return self.controller.next_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+        if str(self.ctx.active_vision_mode or "").upper() == "TRACK_LOCAL" and self._fresh_table_obs() is None:
+            return self.controller.edge_slide_hold_cmd("no_table_edge_obs_in_track_local")
         if self._obs_has_motion(obs):
             return self.controller.target_track_cmd(obs)
         direction = self._edge_slide_direction()
@@ -706,8 +710,8 @@ class OrchestratorCore:
         return bool(self._final_lock_status(obs, stable_count=self.ctx.table_lock_frames)["lock_ready"])
 
     def _final_lock_status(self, obs: Optional[TableEdgeObs], stable_count: int = 0) -> Dict[str, object]:
-        if obs is None or not obs.edge_found:
-            reason = "table_lost" if obs is None or not bool(getattr(obs, "table_found", False)) else "table_lost"
+        if obs is None:
+            reason = "vision_stale" if self.ctx.last_table_obs is not None else "table_lost"
             return {
                 "lock_ready": False,
                 "reason": reason,
@@ -716,10 +720,37 @@ class OrchestratorCore:
                 "lat_locked": False,
                 "stable_count": int(stable_count),
             }
+        if not bool(getattr(obs, "table_found", False)):
+            return {
+                "lock_ready": False,
+                "reason": "table_lost",
+                "yaw_locked": False,
+                "dist_locked": False,
+                "lat_locked": False,
+                "stable_count": int(stable_count),
+            }
+        if not bool(obs.edge_found):
+            return {
+                "lock_ready": False,
+                "reason": "no_edge",
+                "yaw_locked": False,
+                "dist_locked": False,
+                "lat_locked": False,
+                "stable_count": int(stable_count),
+            }
+        if float(obs.confidence or 0.0) < float(getattr(self.controller.docking.cfg, "min_confidence", 0.0)):
+            return {
+                "lock_ready": False,
+                "reason": "low_confidence",
+                "yaw_locked": False,
+                "dist_locked": False,
+                "lat_locked": False,
+                "stable_count": int(stable_count),
+            }
         if obs.depth_valid is False:
             return {
                 "lock_ready": False,
-                "reason": "depth_invalid",
+                "reason": "vision_stale",
                 "yaw_locked": False,
                 "dist_locked": False,
                 "lat_locked": False,
@@ -728,11 +759,11 @@ class OrchestratorCore:
         yaw_ok = obs.yaw_err_rad is not None and abs(float(obs.yaw_err_rad)) <= float(self.cfg.final_lock_yaw_tol_rad)
         dist_ok = obs.dist_err_m is not None and abs(float(obs.dist_err_m)) <= float(self.cfg.final_lock_dist_tol_m)
         lat_ok = obs.lateral_err_m is None or abs(float(obs.lateral_err_m)) <= float(self.cfg.final_lock_lateral_tol_m)
-        reason = "ok"
+        reason = "stable_count_not_enough"
         if not yaw_ok:
             reason = "yaw_not_aligned"
         elif obs.dist_err_m is None:
-            reason = "depth_invalid"
+            reason = "vision_stale"
         elif not dist_ok:
             reason = "distance_too_far" if float(obs.dist_err_m) > 0 else "distance_too_close"
         elif not lat_ok:

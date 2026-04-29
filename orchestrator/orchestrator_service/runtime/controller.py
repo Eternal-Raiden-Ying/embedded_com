@@ -145,7 +145,7 @@ class MotionController:
     def edge_slide_search_cmd(self, elapsed_s: float, direction_sign: int = 1) -> MotionDecision:
         if float(elapsed_s) < float(self.cfg.edge_slide_pause_s):
             cmd = self._cmd("EDGE_SLIDE_SEARCH")
-            return MotionDecision(cmd=cmd, control_summary=self._summary("EDGE_SLIDE_SEARCH", cmd, reason="waiting_target_obs"))
+            return MotionDecision(cmd=cmd, control_summary=self._summary("EDGE_SLIDE_SEARCH", cmd, reason="waiting_first_target_obs"))
         vy = float(self.car_cfg.edge_slide_vy_norm) * (1.0 if int(direction_sign) >= 0 else -1.0)
         reason = "edge_slide_vy_zero" if abs(vy) <= 1e-9 else "edge_slide"
         cmd = self._cmd("EDGE_SLIDE_SEARCH", vy=vy)
