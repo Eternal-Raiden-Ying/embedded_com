@@ -7,6 +7,11 @@ from typing import Any, Callable, Dict, Optional
 
 from .base import PreviewFrame, PreviewOverlay, PreviewSink
 
+try:
+    from common.runtime_logging import OperatorConsole
+except Exception:  # pragma: no cover - fallback for direct package execution
+    OperatorConsole = None
+
 
 class PreviewManager:
     """Own preview sink selection and sink lifecycle.
@@ -21,10 +26,12 @@ class PreviewManager:
         sink: Optional[PreviewSink] = None,
         logger=None,
         capability_sink: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+        operator_console=None,
     ):
         self.sink = sink
         self.logger = logger
         self._capability_sink = capability_sink
+        self.operator_console = operator_console or (OperatorConsole() if OperatorConsole is not None else None)
         self.enabled = False
         self._scheduler = None
         self._generation_getter = lambda: 0
@@ -36,7 +43,42 @@ class PreviewManager:
         self._last_frame_seq = 0
         self._exit_requested = False
         self._last_source_key = ""
-        self._last_table_summary_ts = 0.0
+
+    def _emit_operator(self, key: str, line: str) -> None:
+        if self.operator_console is None:
+            return
+        try:
+            self.operator_console.emit_rate_limited(key, line)
+        except Exception:
+            pass
+
+    def _table_edge_summary_line(self, status: Dict[str, Any], table_edge: Dict[str, Any]) -> str:
+        found = bool(table_edge.get("table_found", table_edge.get("found", False)))
+        edge_found = bool(table_edge.get("edge_found", False))
+        conf = float(table_edge.get("confidence", 0.0) or 0.0)
+        yaw = float(table_edge.get("yaw_err_rad") or 0.0)
+        dist = float(table_edge.get("dist_err_m") or 0.0)
+        roi = str(table_edge.get("roi_source") or table_edge.get("depth_edge_roi") or table_edge.get("edge_roi") or "n/a").strip()
+        pts = int(table_edge.get("point_count", table_edge.get("table_point_count", 0)) or 0)
+        reason = str(table_edge.get("reason") or "").strip() or "ok"
+        return (
+            f"[VISTA] EDGE stage={str(status.get('stage') or 'IDLE').upper()} "
+            f"mode={str(status.get('mode') or 'IDLE').upper()} "
+            f"found={int(found)} edge={int(edge_found)} conf={conf:.2f} "
+            f"yaw={yaw:+.3f} dist={dist:+.3f} roi={roi[:32]} pts={pts} reason={reason[:42]}"
+        )
+
+    def _target_summary_line(self, status: Dict[str, Any], target_obs: Dict[str, Any]) -> str:
+        found = bool(target_obs.get("found", False))
+        conf = float(target_obs.get("confidence", 0.0) or 0.0)
+        target = str(target_obs.get("target") or status.get("target") or "target").strip()
+        cx = float(target_obs.get("cx_norm", 0.0) or 0.0)
+        size = float(target_obs.get("size_norm", target_obs.get("area_norm", 0.0)) or 0.0)
+        return (
+            f"[VISTA] TARGET stage={str(status.get('stage') or 'IDLE').upper()} "
+            f"mode={str(status.get('mode') or 'IDLE').upper()} target={target[:32]} "
+            f"found={int(found)} conf={conf:.2f} cx={cx:+.3f} size={size:.3f}"
+        )
 
     def _emit(self, action: str, **fields: Any) -> None:
         if self._capability_sink is None:
@@ -141,23 +183,9 @@ class PreviewManager:
                     lines.append(f"yaw={float(yaw or 0.0):+.3f} dist={float(dist or 0.0):+.3f}m")
                 if reason:
                     lines.append(f"reason={reason[:42]}")
-                if now - self._last_table_summary_ts >= 1.0:
-                    self._last_table_summary_ts = now
-                    if self.logger is not None:
-                        self.logger.info(
-                            "table_edge_obs summary | found=%s edge_found=%s confidence=%.3f yaw_err=%s dist_err=%s points=%s table_points=%s roi_source=%s table_quadrant=%s depth_edge_roi=%s reason=%s",
-                            found,
-                            edge_found,
-                            conf,
-                            table_edge.get("yaw_err_rad"),
-                            table_edge.get("dist_err_m"),
-                            table_edge.get("point_count"),
-                            table_edge.get("table_point_count"),
-                            table_edge.get("roi_source"),
-                            table_edge.get("table_quadrant"),
-                            table_edge.get("depth_edge_roi") or table_edge.get("edge_roi"),
-                            reason or "",
-                        )
+                self._emit_operator("preview:table_edge_obs", self._table_edge_summary_line(status, table_edge))
+            if target_obs:
+                self._emit_operator("preview:target_obs", self._target_summary_line(status, target_obs))
             if not target_obs:
                 lines.append("target_obs=unavailable")
             ok = self.render(

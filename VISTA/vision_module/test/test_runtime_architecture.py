@@ -27,6 +27,7 @@ from vision_module.backend.predictor_manager import PredictorManager
 from vision_module.backend.scheduler import Scheduler
 from vision_module.config.mode_defaults import build_default_mode_profiles
 from vision_module.ipc.protocol import VisionReq
+from common.runtime_logging import OperatorConsole
 
 
 def build_runtime_stack(engine_module, cfg, logger, event_sink=None):
@@ -707,6 +708,124 @@ class PreviewBehaviorTest(unittest.TestCase):
         finally:
             manager.stop_runtime()
             scheduler.stop_runtime()
+
+    def test_table_edge_operator_summary_is_rate_limited(self):
+        lines = []
+        console = OperatorConsole(mode="operator", default_interval_s=1.0, sink=lines.append)
+        manager = PreviewManager(sink=self._ExitSink(), logger=None, operator_console=console)
+        status = {"stage": "SEARCH", "mode": "DEPTH_PERCEPTION"}
+        table_edge = {
+            "table_found": True,
+            "edge_found": True,
+            "confidence": 0.76,
+            "yaw_err_rad": 0.02,
+            "dist_err_m": 0.034,
+            "roi_source": "static_fallback",
+            "point_count": 418,
+            "reason": "ok",
+        }
+        line = manager._table_edge_summary_line(status, table_edge)
+        manager._emit_operator("preview:table_edge_obs", line)
+        manager._emit_operator("preview:table_edge_obs", line)
+        self.assertEqual(lines, [line])
+        self.assertIn("[VISTA] EDGE stage=SEARCH mode=DEPTH_PERCEPTION", line)
+
+
+class OperatorConsoleIpcPolicyTest(unittest.TestCase):
+    class _RunLogger:
+        def __init__(self):
+            self.ipc = []
+
+        def write_ipc_record(self, **payload):
+            self.ipc.append(dict(payload))
+
+    def _build_app_shell(self, mode="operator"):
+        app_module = importlib.import_module("vision_module.app.app")
+        app = app_module.VistaApp.__new__(app_module.VistaApp)
+        app.run_logger = self._RunLogger()
+        app.operator_console_lines = []
+        app.operator_console = OperatorConsole(mode=mode, default_interval_s=1.0, sink=app.operator_console_lines.append)
+        app.log_lines = []
+        app.log = lambda level, src, msg, data=None: app.log_lines.append((level, src, msg, data))
+        app.log_info = lambda src, msg, data=None: app.log_lines.append(("info", src, msg, data))
+        app.log_warn = lambda src, msg, data=None: app.log_lines.append(("warn", src, msg, data))
+        app.log_error = lambda src, msg, data=None: app.log_lines.append(("error", src, msg, data))
+        app.current_stage = "IDLE"
+        app.current_mode = "IDLE"
+        app.current_session_id = None
+        app.current_req_id = None
+        app.current_epoch = 0
+        app.active_interaction_id = None
+        app._last_runtime_reconciled_console = ""
+        return app, app_module.CONFIG
+
+    def test_operator_mode_suppresses_ipc_success_console(self):
+        app, cfg = self._build_app_shell(mode="operator")
+        old_console_mode, old_ipc_console, old_log_mode, old_debug = (
+            cfg.runtime.console_mode,
+            cfg.runtime.ipc_console,
+            cfg.runtime.log_mode,
+            cfg.runtime.debug,
+        )
+        try:
+            cfg.runtime.console_mode = "operator"
+            cfg.runtime.ipc_console = False
+            cfg.runtime.log_mode = "concise"
+            cfg.runtime.debug = False
+            for event in ("recv_ok", "send_ok", "enqueue_ok"):
+                app._log_ipc_event({"level": "info", "name": "obs_out", "event": event})
+            self.assertEqual(app.operator_console_lines, [])
+            self.assertEqual(app.log_lines, [])
+            self.assertEqual([item["event"] for item in app.run_logger.ipc], ["recv_ok", "send_ok", "enqueue_ok"])
+        finally:
+            cfg.runtime.console_mode = old_console_mode
+            cfg.runtime.ipc_console = old_ipc_console
+            cfg.runtime.log_mode = old_log_mode
+            cfg.runtime.debug = old_debug
+
+    def test_operator_mode_reports_ipc_connectivity_events(self):
+        app, cfg = self._build_app_shell(mode="operator")
+        old_console_mode, old_ipc_console, old_log_mode, old_debug = (
+            cfg.runtime.console_mode,
+            cfg.runtime.ipc_console,
+            cfg.runtime.log_mode,
+            cfg.runtime.debug,
+        )
+        try:
+            cfg.runtime.console_mode = "operator"
+            cfg.runtime.ipc_console = False
+            cfg.runtime.log_mode = "concise"
+            cfg.runtime.debug = False
+            app._log_ipc_event({"level": "info", "name": "obs_out", "event": "connected", "transport": "tcp"})
+            app._log_ipc_event({"level": "warn", "name": "obs_out", "event": "connect_failed", "error": "refused"})
+            self.assertTrue(any("obs_out connected" in line for line in app.operator_console_lines))
+            self.assertTrue(any("obs_out connect_failed" in line for line in app.operator_console_lines))
+        finally:
+            cfg.runtime.console_mode = old_console_mode
+            cfg.runtime.ipc_console = old_ipc_console
+            cfg.runtime.log_mode = old_log_mode
+            cfg.runtime.debug = old_debug
+
+    def test_full_mode_allows_ipc_success_console(self):
+        app, cfg = self._build_app_shell(mode="full")
+        old_console_mode, old_ipc_console, old_log_mode, old_debug = (
+            cfg.runtime.console_mode,
+            cfg.runtime.ipc_console,
+            cfg.runtime.log_mode,
+            cfg.runtime.debug,
+        )
+        try:
+            cfg.runtime.console_mode = "full"
+            cfg.runtime.ipc_console = False
+            cfg.runtime.log_mode = "full"
+            cfg.runtime.debug = False
+            app._log_ipc_event({"level": "info", "name": "obs_out", "event": "send_ok"})
+            self.assertEqual(app.log_lines[0][2], "obs_out send_ok")
+        finally:
+            cfg.runtime.console_mode = old_console_mode
+            cfg.runtime.ipc_console = old_ipc_console
+            cfg.runtime.log_mode = old_log_mode
+            cfg.runtime.debug = old_debug
 
 
 class BackendSelectionContractTest(unittest.TestCase):

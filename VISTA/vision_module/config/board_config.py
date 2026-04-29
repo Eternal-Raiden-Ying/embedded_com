@@ -50,6 +50,10 @@ _placeholder_default = "1" if platform.system().lower().startswith("win") else "
 CONFIG.runtime.capability_placeholder = os.getenv("VISION_CAPABILITY_PLACEHOLDER", _placeholder_default).strip().lower() in {"1", "true", "yes"}
 CONFIG.runtime.heartbeat_enabled = os.getenv("VISION_HEARTBEAT_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
 CONFIG.runtime.heartbeat_interval_s = float(os.getenv("VISION_HEARTBEAT_INTERVAL_S", "2.0") or 2.0)
+CONFIG.runtime.console_mode = os.getenv("VISION_CONSOLE_MODE", "operator").strip().lower() or "operator"
+CONFIG.runtime.operator_summary_interval_s = float(os.getenv("VISION_OPERATOR_SUMMARY_INTERVAL_S", "1.0") or 1.0)
+CONFIG.runtime.ipc_console = os.getenv("VISION_IPC_CONSOLE", "0").strip().lower() in {"1", "true", "yes"}
+CONFIG.runtime.heartbeat_console = os.getenv("VISION_HEARTBEAT_CONSOLE", "0").strip().lower() in {"1", "true", "yes"}
 
 # camera config
 rgb = CONFIG.camera.streams["rgb"]

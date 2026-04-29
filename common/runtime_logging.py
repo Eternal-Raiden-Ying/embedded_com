@@ -9,7 +9,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Callable, Dict, Iterable, Optional
 
 
 TEXT_LOG_FORMAT = "%(asctime)s | %(levelname)-5s | %(name)s | %(message)s"
@@ -88,6 +88,88 @@ def _copy_mapping(value: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 def logging_level_for_mode(mode: str) -> int:
     return logging.DEBUG if str(mode).strip().lower() == "full" else logging.INFO
+
+
+def env_flag(name: str, default: str = "0") -> bool:
+    return str(os.getenv(name, default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def operator_console_mode(default: str = "operator") -> str:
+    mode = str(os.getenv("VISION_CONSOLE_MODE", default)).strip().lower()
+    if mode == "concise":
+        mode = "operator"
+    if mode not in {"operator", "full", "silent"}:
+        mode = default
+    return mode
+
+
+def operator_summary_interval_s(default: float = 1.0) -> float:
+    try:
+        return max(0.0, float(os.getenv("VISION_OPERATOR_SUMMARY_INTERVAL_S", str(default)) or default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+class OperatorConsole:
+    """Small console-only reporter for operator-facing status lines."""
+
+    def __init__(
+        self,
+        mode: Optional[str] = None,
+        default_interval_s: Optional[float] = None,
+        sink: Optional[Callable[[str], None]] = None,
+    ):
+        self.mode = operator_console_mode() if mode is None else str(mode or "operator").strip().lower()
+        if self.mode == "concise":
+            self.mode = "operator"
+        self.default_interval_s = (
+            operator_summary_interval_s()
+            if default_interval_s is None
+            else max(0.0, float(default_interval_s))
+        )
+        self._sink = sink or print
+        self._last_by_key: Dict[str, str] = {}
+        self._last_ts_by_key: Dict[str, float] = {}
+
+    @property
+    def enabled(self) -> bool:
+        return self.mode != "silent"
+
+    @property
+    def full(self) -> bool:
+        return self.mode == "full"
+
+    def emit(self, line: str) -> bool:
+        if not self.enabled:
+            return False
+        text = str(line or "").strip()
+        if not text:
+            return False
+        self._sink(text)
+        return True
+
+    def emit_change(self, key: str, line: str) -> bool:
+        key = str(key or "default").strip() or "default"
+        text = str(line or "").strip()
+        if self._last_by_key.get(key) == text:
+            return False
+        self._last_by_key[key] = text
+        return self.emit(text)
+
+    def emit_rate_limited(self, key: str, line: str, interval_s: Optional[float] = None) -> bool:
+        key = str(key or "default").strip() or "default"
+        interval = self.default_interval_s if interval_s is None else max(0.0, float(interval_s))
+        now = time.time()
+        if now - self._last_ts_by_key.get(key, 0.0) < interval:
+            return False
+        self._last_ts_by_key[key] = now
+        return self.emit(line)
+
+    def emit_error(self, key: str, line: str, interval_s: Optional[float] = None) -> bool:
+        return self.emit_rate_limited(f"error:{key}", line, interval_s)
+
+
+ConsoleReporter = OperatorConsole
 
 
 def _close_handlers(logger: logging.Logger) -> None:

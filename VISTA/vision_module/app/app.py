@@ -11,7 +11,7 @@ if str(STACK_ROOT) not in sys.path:
     sys.path.insert(0, str(STACK_ROOT))
 
 from common.base_module import BaseModule
-from common.runtime_logging import RunLogger, ensure_dir
+from common.runtime_logging import OperatorConsole, RunLogger, ensure_dir, env_flag
 
 from ..backend.mode_controller import ModeController
 from ..backend.vision_engine import VisionEngine
@@ -34,6 +34,10 @@ class VistaApp(BaseModule):
             CONFIG.runtime.runs_dir,
             CONFIG.runtime.stack_run_id,
             enable_text_events=False,
+        )
+        self.operator_console = OperatorConsole(
+            mode=CONFIG.runtime.console_mode,
+            default_interval_s=CONFIG.runtime.operator_summary_interval_s,
         )
         self.log_paths = self.run_logger.structured_paths(heartbeat_enabled=CONFIG.runtime.heartbeat_enabled)
         mode_controller = ModeController(
@@ -90,6 +94,7 @@ class VistaApp(BaseModule):
         self._running = False
         self._stopped = False
         self._last_heartbeat_ts = 0.0
+        self._last_runtime_reconciled_console = ""
 
     def _config_dump(self):
         return {
@@ -160,9 +165,11 @@ class VistaApp(BaseModule):
         level = str(payload.pop("level", "info")).strip().lower() or "info"
         trigger = str(payload.pop("trigger", "stage_controller")).strip() or "stage_controller"
         data = dict(payload.pop("data", {}) or {})
-        self.log(level, "stage", str(event or "STAGE_EVENT").strip().lower(), data or None)
+        event_name = str(event or "STAGE_EVENT").strip().upper()
+        if self._console_allows_event(event_name, level=level):
+            self.log(level, "stage", str(event or "STAGE_EVENT").strip().lower(), data or None)
         self.run_logger.write_event_record(
-            event=str(event or "STAGE_EVENT").strip().upper(),
+            event=event_name,
             level=level,
             trigger=trigger,
             data=data,
@@ -172,10 +179,6 @@ class VistaApp(BaseModule):
     def _record_backend_event(self, event: str, fields):
         payload = dict(fields or {})
         event_name = str(event or "BACKEND_EVENT").strip().upper()
-        if event_name == "BACKEND_DIAGNOSTIC" and not (
-            str(CONFIG.runtime.log_mode).strip().lower() == "full" or bool(CONFIG.runtime.debug)
-        ):
-            return
         level = str(payload.pop("level", "info")).strip().lower() or "info"
         data = dict(payload or {})
 
@@ -200,7 +203,8 @@ class VistaApp(BaseModule):
         if event_name == "BACKEND_MODE_CHANGED":
             mode_override = self._safe_mode_text(data.get("current_mode", mode_override))
 
-        self.log(level, "backend", event_name.lower(), data or None)
+        if self._console_allows_event(event_name, level=level, data=data):
+            self.log(level, "backend", event_name.lower(), data or None)
         self._record_event(
             event_name,
             level=level,
@@ -217,12 +221,63 @@ class VistaApp(BaseModule):
     def _ipc_direction_for(self, channel: str) -> str:
         return "RX" if str(channel).endswith("_in") else "TX"
 
+    def _console_is_full(self) -> bool:
+        return (
+            self.operator_console.full
+            or str(CONFIG.runtime.log_mode).strip().lower() == "full"
+            or bool(CONFIG.runtime.debug)
+        )
+
+    def _ipc_console_enabled(self) -> bool:
+        return self._console_is_full() or bool(CONFIG.runtime.ipc_console) or env_flag("VISION_IPC_CONSOLE", "0")
+
+    def _heartbeat_console_enabled(self) -> bool:
+        return self._console_is_full() or bool(CONFIG.runtime.heartbeat_console) or env_flag("VISION_HEARTBEAT_CONSOLE", "0")
+
+    def _console_allows_event(self, event_name: str, level: str = "info", data=None) -> bool:
+        if self.operator_console.mode == "silent":
+            return False
+        if self._console_is_full():
+            return True
+        level = str(level or "info").strip().lower()
+        event_name = str(event_name or "").strip().upper()
+        if level in {"error", "fatal", "warning", "warn"}:
+            return True
+        if event_name in {"BACKEND_DIAGNOSTIC", "HEARTBEAT"}:
+            return False
+        if event_name == "BACKEND_RUNTIME_RECONCILED":
+            data = dict(data or {})
+            key = f"{data.get('mode')}:{data.get('ok')}:{data.get('generation')}"
+            if key == self._last_runtime_reconciled_console:
+                return False
+            self._last_runtime_reconciled_console = key
+            return True
+        return event_name in {
+            "SERVICE_STARTING",
+            "SERVICE_READY",
+            "SERVICE_STOPPED",
+            "STAGE_CHANGED",
+            "MODE_CHANGED",
+            "BACKEND_MODE_CHANGED",
+        }
+
+    def _operator_ipc_line(self, channel: str, event: str, details: Dict[str, object]) -> str:
+        parts = [f"[VISTA] IPC {channel} {event}"]
+        if details.get("transport"):
+            parts.append(f"transport={details.get('transport')}")
+        if details.get("bind"):
+            parts.append(f"bind={details.get('bind')}")
+        if details.get("peer"):
+            parts.append(f"peer={details.get('peer')}")
+        if details.get("error"):
+            parts.append(f"error={details.get('error')}")
+        return " ".join(str(p) for p in parts)
+
     def _log_ipc_event(self, payload):
         level = payload.get("level", "info")
         channel = payload.get("name", payload.get("src", "ipc"))
         event = payload.get("event", payload.get("msg", "log"))
         details = {k: v for k, v in payload.items() if k not in {"level", "src", "name", "event", "msg"}}
-        self.log(level, "ipc", f"{channel} {event}".strip(), details or None)
         self._record_ipc(
             direction=self._ipc_direction_for(channel),
             channel=channel,
@@ -230,6 +285,29 @@ class VistaApp(BaseModule):
             level=level,
             **details,
         )
+        success_events = {"recv_ok", "send_ok", "send_attempt", "enqueue_ok"}
+        noisy_success = str(event).strip().lower() in success_events
+        console_events = {
+            "listening",
+            "connected",
+            "connect_failed",
+            "send_failed",
+            "invalid_json",
+            "queue_drop_oldest",
+            "queue_drop_new",
+            "queue_drop_failed",
+        }
+        if noisy_success and not self._ipc_console_enabled():
+            return
+        if self._ipc_console_enabled():
+            self.log(level, "ipc", f"{channel} {event}".strip(), details or None)
+            return
+        if str(event).strip().lower() in console_events:
+            line = self._operator_ipc_line(channel, event, details)
+            if str(level).strip().lower() in {"warn", "warning", "error", "fatal"}:
+                self.operator_console.emit_error(f"ipc:{channel}:{event}:{details.get('error', '')}", line)
+            else:
+                self.operator_console.emit_rate_limited(f"ipc:{channel}:{event}", line)
 
     def _safe_mode_text(self, mode: str) -> str:
         return str(mode or "IDLE").strip().upper()
@@ -258,6 +336,16 @@ class VistaApp(BaseModule):
         )
         if not queued:
             self.log_warn("runtime", "obs_out queue busy; skipped enqueue")
+        elif self._ipc_console_enabled():
+            self.log_info(
+                "ipc",
+                "obs_out enqueue_ok",
+                {
+                    "req_id": out_payload.get("req_id"),
+                    "epoch": out_payload.get("epoch"),
+                    "msg_type": out_payload.get("type"),
+                },
+            )
         return queued
 
     def _enter_hot_standby(self, current_mode: str, target_name, epoch: int):
@@ -325,6 +413,13 @@ class VistaApp(BaseModule):
                 },
             },
         )
+        if self._heartbeat_console_enabled():
+            self.operator_console.emit_rate_limited(
+                "heartbeat",
+                f"[VISTA] HEARTBEAT stage={self.current_stage} mode={self.current_mode} "
+                f"req={self.current_req_id or ''} epoch={self.current_epoch}",
+                interval_s=interval_s,
+            )
 
     def _send_interval_s(self) -> float:
         return 1.0 / max(0.5, CONFIG.runtime.send_hz)
@@ -358,7 +453,18 @@ class VistaApp(BaseModule):
                 "req_id": self.current_req_id,
                 "epoch": self.current_epoch,
             }
-            self.log_info("runtime", "stage/mode changed", payload)
+            if prev_stage != self.current_stage:
+                self.operator_console.emit_change(
+                    "stage",
+                    f"[VISTA] STAGE {prev_stage} -> {self.current_stage} reason={reason}",
+                )
+            if prev_mode != self.current_mode:
+                self.operator_console.emit_change(
+                    "mode",
+                    f"[VISTA] MODE {prev_mode} -> {self.current_mode} reason={reason}",
+                )
+            if self._console_is_full():
+                self.log_info("runtime", "stage/mode changed", payload)
 
     def _apply_stage_output(self, output, now: float, force_send: bool = False) -> bool:
         if output is None:
@@ -414,6 +520,15 @@ class VistaApp(BaseModule):
         req = VisionReq.from_dict(payload)
         request_stage = self._safe_stage_text(req.stage)
         self._sync_runtime_request_context(req)
+        req_kind = str(
+            payload.get("kind")
+            or (req.payload or {}).get("kind")
+            or ("TABLE_EDGE" if request_stage == "SEARCH" else request_stage)
+        ).strip().upper()
+        self.operator_console.emit(
+            f"[VISTA] REQ stage={request_stage} kind={req_kind} target={req.target or ''} "
+            f"req={req.req_id or ''} epoch={int(req.epoch)}"
+        )
         req_event_data = {
             "op": req.op,
             "mode_hint": req.mode_hint,
@@ -509,7 +624,9 @@ class VistaApp(BaseModule):
             }
         )
         self._record_event("SERVICE_STARTING", trigger="start", data={"run_dir": str(self.run_logger.run_dir)})
-        self.log_info("runtime", "structured logs ready", self.log_paths)
+        self.operator_console.emit(f"[VISTA] SERVICE_STARTING run={self.run_logger.stack_run_id}")
+        if self._console_is_full():
+            self.log_info("runtime", "structured logs ready", self.log_paths)
         self.req_server.start()
         self.runtime.init()
         self.runtime.start()
@@ -517,17 +634,19 @@ class VistaApp(BaseModule):
         self._sync_runtime_from_stage_context(reason="service_start")
         self._running = True
         self._record_event("SERVICE_READY", trigger="start")
-        self.log_info(
-            "runtime",
-            "SERVICE_READY",
-            {
-                "run_dir": str(self.run_logger.run_dir),
-                "event_file": self.log_paths.get("event"),
-                "ipc_file": self.log_paths.get("ipc"),
-                "meta_file": self.log_paths.get("meta"),
-                "heartbeat_file": self.log_paths.get("heartbeat", "disabled"),
-            },
-        )
+        self.operator_console.emit(f"[VISTA] READY mode={self.current_mode} run={self.run_logger.stack_run_id}")
+        if self._console_is_full():
+            self.log_info(
+                "runtime",
+                "SERVICE_READY",
+                {
+                    "run_dir": str(self.run_logger.run_dir),
+                    "event_file": self.log_paths.get("event"),
+                    "ipc_file": self.log_paths.get("ipc"),
+                    "meta_file": self.log_paths.get("meta"),
+                    "heartbeat_file": self.log_paths.get("heartbeat", "disabled"),
+                },
+            )
         self._emit_heartbeat_if_needed(force=True)
 
     def stop(self):
@@ -540,7 +659,9 @@ class VistaApp(BaseModule):
         self.obs_sender.close()
         self.runtime.stop()
         self._record_event("SERVICE_STOPPED", trigger="stop")
-        self.log_info("runtime", "SERVICE_STOPPED")
+        self.operator_console.emit(f"[VISTA] SERVICE_STOPPED run={self.run_logger.stack_run_id}")
+        if self._console_is_full():
+            self.log_info("runtime", "SERVICE_STOPPED")
         self.run_logger.close()
 
     def run(self):

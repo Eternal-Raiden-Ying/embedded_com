@@ -32,6 +32,10 @@ class RuntimeConfig:
     capability_placeholder: bool = False
     heartbeat_enabled: bool = False
     heartbeat_interval_s: float = 5.0
+    heartbeat_console: bool = False
+    console_mode: str = "operator"
+    operator_summary_interval_s: float = 1.0
+    ipc_console: bool = False
     log_mode: str = "concise"
     log_enabled: bool = True
     debug: bool = False
