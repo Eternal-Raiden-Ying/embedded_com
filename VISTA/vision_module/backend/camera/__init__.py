@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-Camera backend selector.
+from __future__ import annotations
 
-Priority:
-1. `VISTA_BACKEND=mock|real|auto`
-2. legacy `ENV=mock|prod`
-3. auto-detect by platform/import availability
-"""
-
+import logging
 import os
 import platform
+from typing import Dict
 
 from .base import ICamera  # noqa: F401
+from .mock import MockCamera  # noqa: F401
+
+
+_LOG = logging.getLogger("vision.camera")
+
+ColorCamera = None  # type: ignore
+IRCamera = None  # type: ignore
+HardwareCamera = None  # type: ignore
+RealSenseDepthCamera = None  # type: ignore
 
 
 def _requested_backend() -> str:
@@ -32,34 +36,70 @@ def _prefer_mock_platform() -> bool:
     return platform.system().lower().startswith("win")
 
 
+def _set_mock_exports() -> None:
+    global ColorCamera, IRCamera, HardwareCamera, RealSenseDepthCamera
+
+    ColorCamera = MockCamera
+    IRCamera = MockCamera
+    HardwareCamera = MockCamera
+    RealSenseDepthCamera = MockCamera
+
+
+def _set_real_exports() -> None:
+    global ColorCamera, IRCamera, HardwareCamera, RealSenseDepthCamera
+
+    from .ColorCamera import ColorCamera as _ColorCamera
+    from .IRCamera import IRCamera as _IRCamera
+    from .HardwareCamera import HardwareCamera as _HardwareCamera
+    from .RealSenseDepthCamera import RealSenseDepthCamera as _RealSenseDepthCamera
+
+    ColorCamera = _ColorCamera
+    IRCamera = _IRCamera
+    HardwareCamera = _HardwareCamera
+    RealSenseDepthCamera = _RealSenseDepthCamera
+
+
 _BACKEND = _requested_backend()
+_RESOLVED_BACKEND = ""
+_BACKEND_NOTE = ""
 
 if _BACKEND == "mock":
-    from .mock import MockCamera as ColorCamera  # noqa: F401
-    from .mock import MockCamera as IRCamera  # noqa: F401
-    from .mock import MockCamera as HardwareCamera  # noqa: F401
-    from .mock import MockCamera as RealSenseDepthCamera  # noqa: F401
+    _set_mock_exports()
+    _RESOLVED_BACKEND = "mock"
 elif _BACKEND == "real":
-    from .ColorCamera import ColorCamera  # noqa: F401
-    from .IRCamera import IRCamera  # noqa: F401
-    from .HardwareCamera import HardwareCamera  # noqa: F401
-    from .RealSenseDepthCamera import RealSenseDepthCamera  # noqa: F401
+    _set_real_exports()
+    _RESOLVED_BACKEND = "real"
 else:
     if _prefer_mock_platform():
-        from .mock import MockCamera as ColorCamera  # noqa: F401
-        from .mock import MockCamera as IRCamera  # noqa: F401
-        from .mock import MockCamera as HardwareCamera  # noqa: F401
-        from .mock import MockCamera as RealSenseDepthCamera  # noqa: F401
+        _set_mock_exports()
+        _RESOLVED_BACKEND = "mock"
+        _BACKEND_NOTE = "auto resolved to mock on Windows; set VISTA_BACKEND=real to validate the real camera path"
+        _LOG.info(_BACKEND_NOTE)
     else:
         try:
-            from .ColorCamera import ColorCamera  # noqa: F401
-            from .IRCamera import IRCamera  # noqa: F401
-            from .HardwareCamera import HardwareCamera  # noqa: F401
-            from .RealSenseDepthCamera import RealSenseDepthCamera  # noqa: F401
-        except Exception:
-            from .mock import MockCamera as ColorCamera  # noqa: F401
-            from .mock import MockCamera as IRCamera  # noqa: F401
-            from .mock import MockCamera as HardwareCamera  # noqa: F401
-            from .mock import MockCamera as RealSenseDepthCamera  # noqa: F401
+            _set_real_exports()
+            _RESOLVED_BACKEND = "real"
+        except Exception as exc:
+            _set_mock_exports()
+            _RESOLVED_BACKEND = "mock"
+            _BACKEND_NOTE = f"auto fallback to mock after real camera import failed: {exc}"
+            _LOG.warning(_BACKEND_NOTE)
 
-__all__ = ["ICamera", "ColorCamera", "IRCamera", "HardwareCamera", "RealSenseDepthCamera"]
+
+def camera_backend_status() -> Dict[str, str]:
+    return {
+        "requested_backend": _BACKEND,
+        "resolved_backend": _RESOLVED_BACKEND,
+        "note": _BACKEND_NOTE,
+    }
+
+
+__all__ = [
+    "ICamera",
+    "MockCamera",
+    "ColorCamera",
+    "IRCamera",
+    "HardwareCamera",
+    "RealSenseDepthCamera",
+    "camera_backend_status",
+]

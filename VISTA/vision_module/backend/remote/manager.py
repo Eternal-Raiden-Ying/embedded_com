@@ -13,9 +13,8 @@ except ImportError:
     except ImportError:
         cv2 = None  # type: ignore
 
-from ...config.data import ASR_VOCAB_MAP, TARGET_CLASSES
 from .client import RemoteGraspClient
-from .protocol import RemoteMetadata, RemotePredictRequest, RemotePredictResponse
+from .protocol import RemoteMetadata, RemotePredictRequest, RemotePredictResponse, image_encoding_info, normalize_image_encoding
 
 
 class RemoteManager:
@@ -38,6 +37,25 @@ class RemoteManager:
         self._worker_stop = threading.Event()
         self._worker_interval_s = 0.05
         self._sequence = 0
+        self._runtime_profile: Dict[str, Any] = {
+            "base_url": None,
+            "command": "predict",
+            "require_depth": False,
+            "timeout_s": 10.0,
+            "metadata": {},
+            "rgb_encoding": "jpeg",
+            "depth_encoding": "png",
+            "rgb_quality": 90,
+            "depth_compression": 3,
+        }
+        self._service_init_state = "uninitialized"
+        self._service_init_confirmed = False
+        self._service_init_attempts = 0
+        self._service_init_last_error = ""
+        self._service_init_last_ok = False
+        self._service_init_last_ts: Optional[float] = None
+        self._service_init_pending = False
+        self._service_init_inflight = False
         self._last_result: Dict[str, Any] = {
             "enabled": False,
             "state": "disabled",
@@ -50,6 +68,13 @@ class RemoteManager:
             "request_id": None,
             "sequence": 0,
             "ts": 0.0,
+            "init_confirmed": False,
+            "service_init_state": "uninitialized",
+            "service_init_confirmed": False,
+            "service_init_attempts": 0,
+            "service_init_last_error": "",
+            "service_init_last_ok": False,
+            "service_init_last_ts": None,
         }
 
     def _emit(self, action: str, **fields: Any) -> None:
@@ -71,8 +96,87 @@ class RemoteManager:
         if callable(fn):
             fn(text)
 
+    def _service_has_base_url(self) -> bool:
+        return bool(str(self._runtime_profile.get("base_url") or "").strip())
+
+    def _reset_service_init_state(
+        self,
+        *,
+        state: str = "uninitialized",
+        confirmed: bool = False,
+        attempts: int = 0,
+        last_error: str = "",
+        last_ok: bool = False,
+        last_ts: Optional[float] = None,
+        pending: bool = False,
+    ) -> None:
+        self._service_init_state = str(state or "uninitialized")
+        self._service_init_confirmed = bool(confirmed)
+        self._service_init_attempts = int(attempts or 0)
+        self._service_init_last_error = str(last_error or "")
+        self._service_init_last_ok = bool(last_ok)
+        self._service_init_last_ts = last_ts
+        self._service_init_pending = bool(pending)
+        self._service_init_inflight = False
+
+    def _service_init_fields(self) -> Dict[str, Any]:
+        return {
+            "init_confirmed": bool(self._service_init_confirmed),
+            "service_init_state": str(self._service_init_state or "uninitialized"),
+            "service_init_confirmed": bool(self._service_init_confirmed),
+            "service_init_attempts": int(self._service_init_attempts),
+            "service_init_last_error": str(self._service_init_last_error or ""),
+            "service_init_last_ok": bool(self._service_init_last_ok),
+            "service_init_last_ts": self._service_init_last_ts,
+        }
+
+    def _schedule_service_init(self) -> None:
+        if not self.enabled or not self._service_has_base_url():
+            return
+        if self._service_init_confirmed or self._service_init_inflight:
+            return
+        self._service_init_pending = True
+
+    def _effective_runtime_field(self, cmd: Dict[str, Any], key: str, default=None):
+        if key in cmd and cmd.get(key) is not None:
+            return cmd.get(key)
+        if key in self._runtime_profile:
+            return self._runtime_profile.get(key, default)
+        return default
+
     def set_client(self, client: RemoteGraspClient) -> None:
         self.client = client
+
+    def configure_runtime(self, payload: Dict[str, Any]) -> None:
+        previous_base_url = str(self._runtime_profile.get("base_url") or "").strip()
+        profile = dict(payload or {})
+        next_profile = dict(self._runtime_profile)
+        next_profile.update(
+            {
+                "base_url": str(profile.get("base_url") or "").strip() or None,
+                "command": str(profile.get("command") or "predict").strip() or "predict",
+                "require_depth": bool(profile.get("require_depth", False)),
+                "timeout_s": float(profile.get("timeout_s", 10.0) or 10.0),
+                "metadata": dict(profile.get("metadata") or {}) if isinstance(profile.get("metadata"), dict) else {},
+                "rgb_encoding": normalize_image_encoding(profile.get("rgb_encoding"), default="jpeg"),
+                "depth_encoding": normalize_image_encoding(profile.get("depth_encoding"), default="png"),
+                "rgb_quality": int(profile.get("rgb_quality", 90) or 90),
+                "depth_compression": int(profile.get("depth_compression", 3) or 3),
+            }
+        )
+        self._runtime_profile = next_profile
+        next_base_url = str(next_profile.get("base_url") or "").strip()
+        if self.client is not None and next_profile.get("base_url"):
+            try:
+                self.client.configure(next_profile["base_url"])
+            except Exception:
+                pass
+        if not next_base_url:
+            self._reset_service_init_state()
+        elif next_base_url != previous_base_url:
+            self._reset_service_init_state(pending=self.enabled)
+        elif self.enabled and not self._service_init_confirmed and self._service_init_attempts <= 0:
+            self._schedule_service_init()
 
     def bind_runtime(self, scheduler, generation_getter=None) -> None:
         self._scheduler = scheduler
@@ -121,30 +225,27 @@ class RemoteManager:
         except Exception:
             pass
 
-    def _resolve_class_id(self, target: Optional[str], explicit_class_id: Any = None) -> Optional[int]:
-        if explicit_class_id is not None:
-            try:
-                return int(explicit_class_id)
-            except Exception:
-                return None
-        target_name = str(target or "").strip()
-        if not target_name:
+    def _resolve_class_id(self, explicit_class_id: Any = None) -> Optional[int]:
+        if explicit_class_id is None:
             return None
-        if target_name in TARGET_CLASSES:
-            return TARGET_CLASSES.index(target_name)
-        valid_names = ASR_VOCAB_MAP.get(target_name, set())
-        for class_name in sorted(valid_names):
-            if class_name in TARGET_CLASSES:
-                return TARGET_CLASSES.index(class_name)
-        return None
+        try:
+            return int(explicit_class_id)
+        except Exception:
+            return None
 
-    def _encode_frame(self, ext: str, frame, params=None) -> Optional[bytes]:
+    def _encode_frame(self, encoding: str, frame, *, quality: int = 90, compression: int = 3) -> Optional[bytes]:
         if frame is None:
             return None
         if cv2 is None:
             return None
+        ext, _ = image_encoding_info(encoding, default="png")
+        params = []
+        if ext == ".jpg":
+            params = [int(cv2.IMWRITE_JPEG_QUALITY), max(0, min(100, int(quality)))]
+        elif ext == ".png":
+            params = [int(cv2.IMWRITE_PNG_COMPRESSION), max(0, min(9, int(compression)))]
         try:
-            ok, encoded = cv2.imencode(ext, frame, list(params or ()))
+            ok, encoded = cv2.imencode(ext, frame, params)
         except Exception:
             return None
         if not ok:
@@ -160,45 +261,47 @@ class RemoteManager:
             return None
         frame_slot = scheduler.read_slot("camera_frames")
         frames = frame_slot.get("payload") if isinstance(frame_slot, dict) else None
+        request_id = cmd.get("request_id")
         if not isinstance(frames, dict):
             self._update_result(
                 action="predict",
                 state="predict_failed",
                 ok=False,
                 error="missing_camera_frames",
-                request_id=cmd.get("request_id"),
+                request_id=request_id,
             )
             return None
 
         rgb = frames.get("rgb")
         depth = frames.get("depth")
+        require_depth = bool(cmd.get("need_depth", self._runtime_profile.get("require_depth", False)))
         if rgb is None:
             self._update_result(
                 action="predict",
                 state="predict_failed",
                 ok=False,
                 error="missing_rgb_frame",
-                request_id=cmd.get("request_id"),
+                request_id=request_id,
             )
             return None
-        if bool(cmd.get("need_depth", False)) and depth is None:
+        if require_depth and depth is None:
             self._update_result(
                 action="predict",
                 state="predict_failed",
                 ok=False,
                 error="missing_depth_frame",
-                request_id=cmd.get("request_id"),
+                request_id=request_id,
             )
             return None
 
-        class_id = self._resolve_class_id(cmd.get("target"), cmd.get("class_id"))
+        class_id = self._resolve_class_id(cmd.get("class_id"))
         if class_id is None:
             self._update_result(
                 action="predict",
                 state="predict_failed",
                 ok=False,
                 error="missing_class_id",
-                request_id=cmd.get("request_id"),
+                request_id=request_id,
             )
             return None
         if cv2 is None:
@@ -210,41 +313,161 @@ class RemoteManager:
                 request_id=cmd.get("request_id"),
             )
             return None
-        rgb_bytes = self._encode_frame(".jpg", rgb, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
-        depth_bytes = self._encode_frame(".png", depth, [int(cv2.IMWRITE_PNG_COMPRESSION), 3]) if depth is not None else None
+
+        rgb_encoding = normalize_image_encoding(self._runtime_profile.get("rgb_encoding", "jpeg"), default="jpeg")
+        depth_encoding = normalize_image_encoding(self._runtime_profile.get("depth_encoding", "png"), default="png")
+        rgb_bytes = self._encode_frame(
+            rgb_encoding,
+            rgb,
+            quality=int(self._runtime_profile.get("rgb_quality", 90) or 90),
+        )
+        depth_bytes = None
+        if depth is not None:
+            depth_bytes = self._encode_frame(
+                depth_encoding,
+                depth,
+                compression=int(self._runtime_profile.get("depth_compression", 3) or 3),
+            )
         if rgb_bytes is None:
             self._update_result(
                 action="predict",
                 state="predict_failed",
                 ok=False,
                 error="rgb_encode_failed",
-                request_id=cmd.get("request_id"),
+                request_id=request_id,
+            )
+            return None
+        if require_depth and depth_bytes is None:
+            self._update_result(
+                action="predict",
+                state="predict_failed",
+                ok=False,
+                error="depth_encode_failed",
+                request_id=request_id,
             )
             return None
 
+        profile_metadata = dict(self._runtime_profile.get("metadata") or {})
+        request_metadata = dict(cmd.get("metadata") or {}) if isinstance(cmd.get("metadata"), dict) else {}
+        extras = dict(profile_metadata)
+        extras.update(request_metadata)
+        extras.setdefault("target", cmd.get("target"))
+        extras.setdefault("request_id", request_id)
+        extras.setdefault("frame_seq", int(frame_slot.get("seq", 0) or 0))
+        extras.setdefault("camera_names", sorted(frames.keys()))
         metadata = RemoteMetadata(
             robot_id=str(cmd.get("robot_id") or "arm_001"),
-            command=str(cmd.get("command") or "predict"),
+            command=str(self._effective_runtime_field(cmd, "command", self._runtime_profile.get("command", "predict")) or "predict"),
             class_id=class_id,
-            extras=dict(cmd.get("metadata") or {}) if isinstance(cmd.get("metadata"), dict) else {},
+            extras=extras,
         )
-        metadata.extras.setdefault("target", cmd.get("target"))
-        metadata.extras.setdefault("request_id", cmd.get("request_id"))
         return RemotePredictRequest(
             rgb_bytes=rgb_bytes,
             depth_bytes=depth_bytes,
-            seg_bytes=None,
             class_id=class_id,
             metadata=metadata,
-            timeout_s=float(cmd.get("timeout_s", 10.0) or 10.0),
+            timeout_s=float(self._effective_runtime_field(cmd, "timeout_s", self._runtime_profile.get("timeout_s", 10.0)) or 10.0),
+            rgb_encoding=rgb_encoding,
+            depth_encoding=depth_encoding,
         )
+
+    def _runtime_base_url(self) -> str:
+        return str(self._runtime_profile.get("base_url") or "").strip()
+
+    def _record_service_init_result(self, response: Optional[RemotePredictResponse]) -> Optional[RemotePredictResponse]:
+        now = time.time()
+        ok = bool(response is not None and response.ok)
+        error = str((response.error if response is not None else "") or "")
+        payload = response.payload if isinstance(getattr(response, "payload", None), dict) else {}
+        status_code = getattr(response, "status_code", None)
+        self._service_init_confirmed = bool(ok)
+        self._service_init_state = "ready" if ok else "failed"
+        self._service_init_last_error = "" if ok else (error or "init_failed")
+        self._service_init_last_ok = bool(ok)
+        self._service_init_last_ts = now
+        self._service_init_pending = False
+        self._service_init_inflight = False
+        self._update_result(
+            action="init",
+            state="init_ok" if ok else "init_failed",
+            ok=bool(ok),
+            error="" if ok else self._service_init_last_error,
+            status_code=status_code,
+            result=payload if payload else None,
+            request_id=None,
+        )
+        return response
+
+    def _service_init_unavailable(self, *, timeout_s: float, reason: str) -> Dict[str, Any]:
+        now = time.time()
+        self._service_init_attempts = int(self._service_init_attempts) + 1
+        self._service_init_confirmed = False
+        self._service_init_state = "failed"
+        self._service_init_last_error = str(reason or "init_unavailable")
+        self._service_init_last_ok = False
+        self._service_init_last_ts = now
+        self._service_init_pending = False
+        self._service_init_inflight = False
+        self._update_result(
+            action="init",
+            state="init_failed",
+            ok=False,
+            error=self._service_init_last_error,
+            request_id=None,
+        )
+        return {
+            "op": "INIT",
+            "ok": False,
+            "reason": self._service_init_last_error,
+            "status_code": None,
+            "request_id": None,
+            "timeout_s": float(timeout_s),
+        }
+
+    def _run_service_init(self, *, timeout_s: float, source: str = "service") -> Dict[str, Any]:
+        client = self.client
+        base_url = self._runtime_base_url()
+        if not self.enabled or client is None:
+            return self._service_init_unavailable(timeout_s=timeout_s, reason="remote_disabled")
+        if not base_url:
+            return self._service_init_unavailable(timeout_s=timeout_s, reason="missing_base_url")
+        try:
+            client.configure(base_url)
+        except Exception:
+            pass
+        self._service_init_pending = False
+        self._service_init_inflight = True
+        self._service_init_state = "initializing"
+        self._service_init_attempts = int(self._service_init_attempts) + 1
+        try:
+            response = self.init_server(timeout_s=timeout_s)
+        except Exception as exc:
+            response = RemotePredictResponse(ok=False, error=str(exc), status_code=None)
+        self._record_service_init_result(response)
+        return {
+            "op": "INIT",
+            "ok": bool(response is not None and response.ok),
+            "reason": str((response.error if response is not None else "") or ""),
+            "status_code": getattr(response, "status_code", None),
+            "request_id": None,
+            "source": str(source or "service"),
+        }
+
+    def _release_service_if_ready(self, timeout_s: float = 5.0) -> None:
+        if not self.enabled or self.client is None or not self._service_init_confirmed:
+            return
+        try:
+            self.release_server(timeout_s=timeout_s)
+        except Exception:
+            pass
+        self._reset_service_init_state()
 
     def _handle_command(self, cmd: Dict[str, Any]) -> Dict[str, Any]:
         op = str(cmd.get("op") or "").strip().upper()
-        timeout_s = float(cmd.get("timeout_s", 5.0) or 5.0)
+        timeout_s = float(self._effective_runtime_field(cmd, "timeout_s", self._runtime_profile.get("timeout_s", 5.0)) or 5.0)
         request_id = cmd.get("request_id")
         client = self.client
-        base_url = str(cmd.get("base_url") or "").strip()
+        base_url = self._runtime_base_url()
         if client is not None and base_url:
             try:
                 client.configure(base_url)
@@ -253,15 +476,22 @@ class RemoteManager:
         ack = {"op": op, "ok": False, "reason": "unsupported", "request_id": request_id}
         try:
             if op == "INIT":
-                resp = self.init_server(timeout_s=timeout_s, request_id=request_id)
-                ack = {
-                    "op": op,
-                    "ok": bool(resp is not None and resp.ok),
-                    "reason": str((resp.error if resp is not None else "") or ""),
-                    "status_code": getattr(resp, "status_code", None),
-                    "request_id": request_id,
-                }
+                ack = self._run_service_init(timeout_s=timeout_s, source="command")
             elif op == "PREDICT":
+                if not self._service_init_confirmed:
+                    self._update_result(
+                        action="predict",
+                        state="predict_failed",
+                        ok=False,
+                        error="init_not_confirmed",
+                        request_id=request_id,
+                    )
+                    return {
+                        "op": op,
+                        "ok": False,
+                        "reason": "init_not_confirmed",
+                        "request_id": request_id,
+                    }
                 request = self._build_predict_request(cmd)
                 resp = self.predict(request, request_id=request_id) if request is not None else None
                 ack = {
@@ -272,7 +502,8 @@ class RemoteManager:
                     "request_id": request_id,
                 }
             elif op == "RELEASE":
-                resp = self.release_server(timeout_s=timeout_s, request_id=request_id)
+                resp = self.release_server(timeout_s=timeout_s)
+                self._reset_service_init_state()
                 ack = {
                     "op": op,
                     "ok": bool(resp is not None and resp.ok),
@@ -293,13 +524,16 @@ class RemoteManager:
 
     def _worker_loop(self) -> None:
         while self._runtime_running and not self._worker_stop.is_set():
-            self._publish_result("remote_result", self.result_summary())
+            if self._service_init_pending and not self._service_init_inflight:
+                timeout_s = float(self._runtime_profile.get("timeout_s", 10.0) or 10.0)
+                self._run_service_init(timeout_s=timeout_s, source="startup")
             scheduler = self._scheduler
             if scheduler is not None:
                 cmd = scheduler.consume_event("remote_cmd")
                 if isinstance(cmd, dict):
                     ack = self._handle_command(cmd)
                     self._publish_event("remote_ack", ack)
+            self._publish_result("remote_result", self.result_summary())
             self._worker_stop.wait(timeout=self._worker_interval_s)
 
     def _update_result(
@@ -326,6 +560,7 @@ class RemoteManager:
             "request_id": request_id,
             "sequence": int(self._sequence),
             "ts": time.time(),
+            **self._service_init_fields(),
         }
 
     def enable(self) -> bool:
@@ -333,7 +568,14 @@ class RemoteManager:
             return False
         self.enabled = True
         if self.client is not None:
+            base_url = str(self._runtime_profile.get("base_url") or "").strip()
+            if base_url:
+                try:
+                    self.client.configure(base_url)
+                except Exception:
+                    pass
             self.client.open()
+        self._schedule_service_init()
         self._update_result(action="enable", state="enabled", ok=True)
         self._emit("enabled", enabled=True)
         return True
@@ -341,7 +583,9 @@ class RemoteManager:
     def disable(self) -> bool:
         if not self.enabled:
             return False
+        self._release_service_if_ready(timeout_s=float(self._runtime_profile.get("timeout_s", 5.0) or 5.0))
         self.enabled = False
+        self._reset_service_init_state()
         if self.client is not None:
             self.client.close()
         self._update_result(action="disable", state="disabled", ok=True)
@@ -376,9 +620,10 @@ class RemoteManager:
         return response
 
     def init_server(self, timeout_s: float = 15.0, request_id: Optional[str] = None) -> Optional[RemotePredictResponse]:
+        _ = request_id
         if not self.enabled or self.client is None:
             return None
-        return self._record_response("init", self.client.init_server(timeout_s=timeout_s), request_id=request_id)
+        return self._record_response("init", self.client.init_server(timeout_s=timeout_s), request_id=None)
 
     def predict(
         self,
@@ -390,13 +635,15 @@ class RemoteManager:
         return self._record_response("predict", self.client.predict(request), request_id=request_id)
 
     def release_server(self, timeout_s: float = 5.0, request_id: Optional[str] = None) -> Optional[RemotePredictResponse]:
+        _ = request_id
         if not self.enabled or self.client is None:
             return None
-        return self._record_response("release", self.client.release_server(timeout_s=timeout_s), request_id=request_id)
+        return self._record_response("release", self.client.release_server(timeout_s=timeout_s), request_id=None)
 
     def result_summary(self) -> Dict[str, Any]:
         payload = dict(self._last_result or {})
         payload["enabled"] = bool(self.enabled)
+        payload.update(self._service_init_fields())
         return payload
 
     def snapshot(self) -> Dict[str, Any]:
@@ -405,4 +652,6 @@ class RemoteManager:
             "client": self.client.snapshot() if self.client is not None else None,
             "result_summary": self.result_summary(),
             "runtime_running": bool(self._runtime_running),
+            "runtime_profile": dict(self._runtime_profile or {}),
+            "service_init": self._service_init_fields(),
         }

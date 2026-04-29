@@ -10,8 +10,7 @@ import time
 from threading import RLock
 from typing import Any, Callable, Dict, Optional
 
-from .camera import ColorCamera, IRCamera, RealSenseDepthCamera
-from .camera.mock import MockCamera
+from .camera import ColorCamera, IRCamera, RealSenseDepthCamera, camera_backend_status
 from ..config.schema import VisionServiceConfig
 
 
@@ -51,9 +50,8 @@ class CameraManager:
         max_fps = int(getattr(getattr(self.cfg, "camera", None), "max_fps", 30) or 30)
         self._worker_interval_s = 1.0 / max(1, max_fps)
         self._last_frame_seq = 0
-
-    def _use_placeholder(self) -> bool:
-        return bool(getattr(self.cfg.runtime, "capability_placeholder", False))
+        self._backend_status = camera_backend_status()
+        self._active_implementation = str(self._backend_status.get("resolved_backend") or "mock")
 
     def _emit(self, action: str, resource_name: str, **fields: Any) -> None:
         if self._capability_sink is None:
@@ -120,8 +118,6 @@ class CameraManager:
         }
 
     def _build_camera(self, name: str, params: Dict[str, Any]) -> Any:
-        if self._use_placeholder():
-            return MockCamera(**params)
         if name == "depth":
             return RealSenseDepthCamera(**params)
         if name in {"ir", "grey"}:
@@ -247,15 +243,18 @@ class CameraManager:
             self._emit("enable_failed", name, error=str(exc))
             return False
 
+        implementation = "mock" if type(camera).__name__ == "MockCamera" else str(self._backend_status.get("resolved_backend") or "real")
+
         with self._lock:
             self.cams[name] = camera
             self._specs[name] = target_spec
+            self._active_implementation = implementation
         self.log.info("camera enabled: %s", name)
         self._emit(
             "enabled",
             name,
             params=params,
-            implementation="mock" if self._use_placeholder() else "real",
+            implementation=implementation,
         )
         return True
 
@@ -287,4 +286,6 @@ class CameraManager:
                 "camera_specs": sorted(self._specs.keys()),
                 "runtime_running": bool(self._runtime_running),
                 "last_frame_seq": int(self._last_frame_seq),
+                "implementation": str(self._active_implementation or "real"),
+                "backend_status": dict(self._backend_status or {}),
             }

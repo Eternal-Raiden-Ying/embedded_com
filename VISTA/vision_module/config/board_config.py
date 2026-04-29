@@ -44,6 +44,9 @@ CONFIG.runtime.log_mode = os.getenv("VISION_LOG_MODE", "concise")
 CONFIG.runtime.log_enabled = os.getenv("VISION_LOG_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
 CONFIG.runtime.debug = os.getenv("VISION_DEBUG", "0").strip().lower() in {"1", "true", "yes"}
 _placeholder_default = "1" if platform.system().lower().startswith("win") else "0"
+# This flag is retained for tests and explicit mock scaffolding only.
+# Camera/predictor runtime backend selection now belongs to package-level
+# selectors via VISTA_BACKEND, not to this config field.
 CONFIG.runtime.capability_placeholder = os.getenv("VISION_CAPABILITY_PLACEHOLDER", _placeholder_default).strip().lower() in {"1", "true", "yes"}
 CONFIG.runtime.heartbeat_enabled = os.getenv("VISION_HEARTBEAT_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
 CONFIG.runtime.heartbeat_interval_s = float(os.getenv("VISION_HEARTBEAT_INTERVAL_S", "2.0") or 2.0)
@@ -55,7 +58,7 @@ rgb.in_w = 1280
 rgb.in_h = 720
 rgb.out_w = 640
 rgb.out_h = 640
-rgb.format = "RGB"
+rgb.format = "BGR"
 rgb.crop_x = 280
 rgb.crop_y = 0
 rgb.crop_w = 720

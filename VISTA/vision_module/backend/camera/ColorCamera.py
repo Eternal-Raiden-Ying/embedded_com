@@ -13,7 +13,7 @@ class ColorCamera(FastGstCameraBase):
         out_w: int = 640,
         out_h: int = 640,
         fps: int = 30,
-        format: str = "RGB",
+        format: str = "BGR",
         in_format: str = "YUY2",
         flip_h: bool = False,
         flip_v: bool = False,

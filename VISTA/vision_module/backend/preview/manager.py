@@ -32,6 +32,7 @@ class PreviewManager:
         self._worker_thread: Optional[threading.Thread] = None
         self._worker_stop = threading.Event()
         self._worker_interval_s = 0.02
+        self._last_frame_generation = 0
         self._last_frame_seq = 0
         self._exit_requested = False
         self._last_source_key = ""
@@ -58,6 +59,8 @@ class PreviewManager:
         self._runtime_running = True
         self._exit_requested = False
         self._worker_stop.clear()
+        self._last_frame_generation = 0
+        self._last_frame_seq = 0
         self._worker_thread = threading.Thread(target=self._worker_loop, name="preview_manager.loop", daemon=True)
         self._worker_thread.start()
 
@@ -82,8 +85,12 @@ class PreviewManager:
             if not isinstance(frame_slot, dict):
                 self._worker_stop.wait(timeout=self._worker_interval_s)
                 continue
+            generation = int(frame_slot.get("generation", 0) or 0)
             seq = int(frame_slot.get("seq", 0) or 0)
             frames = frame_slot.get("payload")
+            if generation != self._last_frame_generation:
+                self._last_frame_generation = generation
+                self._last_frame_seq = 0
             if seq <= self._last_frame_seq or not isinstance(frames, dict):
                 self._worker_stop.wait(timeout=self._worker_interval_s)
                 continue
@@ -237,6 +244,7 @@ class PreviewManager:
             "enabled": self.enabled,
             "sink": self.sink.snapshot() if self.sink is not None else None,
             "runtime_running": bool(self._runtime_running),
+            "last_frame_generation": int(self._last_frame_generation),
             "last_frame_seq": int(self._last_frame_seq),
             "exit_requested": bool(self._exit_requested),
         }

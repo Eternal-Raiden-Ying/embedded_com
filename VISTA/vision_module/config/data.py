@@ -1,15 +1,121 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+from __future__ import annotations
+
+from typing import Dict, Iterable, Tuple
+
+
+def normalize_class_name(name: object) -> str:
+    return " ".join(str(name or "").strip().lower().split())
+
+
+def normalize_class_names(names: Iterable[object] | None) -> Tuple[str, ...]:
+    if not names:
+        return ()
+    return tuple(normalize_class_name(name) for name in tuple(names))
+
+
+def normalize_vocab_map(vocab_map: Dict[object, Iterable[object]]) -> Dict[str, set]:
+    normalized: Dict[str, set] = {}
+    for key, values in dict(vocab_map or {}).items():
+        normalized_key = normalize_class_name(key)
+        if not normalized_key:
+            continue
+        normalized_values = {
+            normalize_class_name(value)
+            for value in tuple(values or ())
+            if normalize_class_name(value)
+        }
+        normalized[normalized_key] = normalized_values
+    return normalized
+
+
 #########################################
 #              yolo target              #
 #########################################
 
 coco80 = (
-    "person", "bicycle", "car", "motorbike ", "aeroplane ", "bus ", "train", "truck ", "boat", "traffic light",
-    "fire hydrant", "stop sign ", "parking meter", "bench", "bird", "cat", "dog ", "horse ", "sheep", "cow", "elephant",
-    "bear", "zebra ", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball", "kite",
-    "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket", "bottle", "wine glass", "cup", "fork", "knife ",
-    "spoon", "bowl", "banana", "apple", "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza ", "donut", "cake", "chair", "sofa",
-    "pottedplant", "bed", "diningtable", "toilet ", "tvmonitor", "laptop", "mouse", "remote ", "keyboard ", "cell phone", "microwave ",
-    "oven ", "toaster", "sink", "refrigerator ", "book", "clock", "vase", "scissors ", "teddy bear ", "hair drier", "toothbrush "
+    "person",
+    "bicycle",
+    "car",
+    "motorcycle",
+    "airplane",
+    "bus",
+    "train",
+    "truck",
+    "boat",
+    "traffic light",
+    "fire hydrant",
+    "stop sign",
+    "parking meter",
+    "bench",
+    "bird",
+    "cat",
+    "dog",
+    "horse",
+    "sheep",
+    "cow",
+    "elephant",
+    "bear",
+    "zebra",
+    "giraffe",
+    "backpack",
+    "umbrella",
+    "handbag",
+    "tie",
+    "suitcase",
+    "frisbee",
+    "skis",
+    "snowboard",
+    "sports ball",
+    "kite",
+    "baseball bat",
+    "baseball glove",
+    "skateboard",
+    "surfboard",
+    "tennis racket",
+    "bottle",
+    "wine glass",
+    "cup",
+    "fork",
+    "knife",
+    "spoon",
+    "bowl",
+    "banana",
+    "apple",
+    "sandwich",
+    "orange",
+    "broccoli",
+    "carrot",
+    "hot dog",
+    "pizza",
+    "donut",
+    "cake",
+    "chair",
+    "couch",
+    "potted plant",
+    "bed",
+    "dining table",
+    "toilet",
+    "tv",
+    "laptop",
+    "mouse",
+    "remote",
+    "keyboard",
+    "cell phone",
+    "microwave",
+    "oven",
+    "toaster",
+    "sink",
+    "refrigerator",
+    "book",
+    "clock",
+    "vase",
+    "scissors",
+    "teddy bear",
+    "hair drier",
+    "toothbrush",
 )
 
 
@@ -33,14 +139,11 @@ grasping_coco20 = (
     "clock",
     "scissors",
     "teddy bear",
-    "toothbrush"
-    )
+    "toothbrush",
+)
 
-
-
-
-
-
+COCO80_CLASSES = normalize_class_names(coco80)
+GRASPING_COCO20_CLASSES = normalize_class_names(grasping_coco20)
 
 
 #########################################
@@ -55,20 +158,11 @@ asr_class_map = {
     "apple": {"apple"},
     "banana": {"banana"},
     "book": {"book"},
-    # 以下目标当前模型里没有可靠类别，先保留接口，返回 found=false
+    # The following targets do not have a reliable class in the current model.
     "medicine_box": set(),
     "keys": set(),
     "wallet": set(),
-    
-    "mouse":{"mouse"},  # 暂时用于测试
+    "mouse": {"mouse"},
 }
 
-
-
-
-
-
-
-
-
-TARGET_CLASSES, ASR_VOCAB_MAP = grasping_coco20, asr_class_map
+ASR_VOCAB_MAP = normalize_vocab_map(asr_class_map)

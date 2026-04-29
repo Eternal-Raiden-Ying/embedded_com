@@ -23,7 +23,15 @@ logger = logging.getLogger("vision.inference")
 
 
 class QNN_YOLO_Dectec_Predictor(IPredictor):
-    """QNN YOLO detector predictor adapted from the local tmp benchmark code."""
+    """QNN YOLO detector predictor adapted from the local tmp benchmark code.
+
+    Runtime contract:
+    - input: BGR frame as HWC numpy array
+    - output: Nx6 numpy array in [x1, y1, x2, y2, score, class_id]
+
+    This predictor intentionally keeps its own flattened detect contract instead
+    of mirroring the tmp benchmark's per-class xywh list output.
+    """
 
     def __init__(self, args) -> None:
         self._lock = threading.RLock()
@@ -102,13 +110,13 @@ class QNN_YOLO_Dectec_Predictor(IPredictor):
                 self.interpreter = None
             logger.info("qnn detect predictor released")
 
-    def predict_frame(self, orig_img_rgb: np.ndarray):
+    def predict_frame(self, orig_img_bgr: np.ndarray):
         with self._lock:
             interpreter = self.interpreter
             if interpreter is None:
                 return [], []
 
-            input_img = preprocess_img(orig_img_rgb, target_shape=(self.height, self.width))
+            input_img = preprocess_img(orig_img_bgr, target_shape=(self.height, self.width))
             interpreter.set_input_tensor(0, input_img)
             interpreter.invoke()
 
@@ -120,7 +128,7 @@ class QNN_YOLO_Dectec_Predictor(IPredictor):
         pred = self.yolo_head(outputs)
         detections = detect_postprocess(
             pred,
-            image_shape=orig_img_rgb.shape,
+            image_shape=orig_img_bgr.shape,
             input_shape=(self.height, self.width),
             conf_thres=self.conf,
             iou_thres=self.iou,
@@ -129,4 +137,3 @@ class QNN_YOLO_Dectec_Predictor(IPredictor):
 
 
 QNN_YOLO_Detect_Predictor = QNN_YOLO_Dectec_Predictor
-QNNPredictor = QNN_YOLO_Dectec_Predictor

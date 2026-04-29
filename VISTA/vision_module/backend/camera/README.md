@@ -1,31 +1,70 @@
-# AidLux Fast Camera 🚀
+# VISTA Camera Backend
 
-专为 AidLux / 高通边缘计算平台打造的**硬件加速、零拷贝 (Zero-Copy)** 摄像头采集模块。
-完美解决 USB 摄像头高分辨率 YUYV 裸流导致 CPU 占用率爆满、推流卡顿的问题。
+This directory contains the camera backend used by VISTA runtime managers.
 
-## 🧠 核心实现原理
+It is not a standalone demo package. It is part of the current VISTA stage/mode architecture.
 
+## Current Role
 
+The camera backend provides the low-level camera implementations selected by `CameraManager`.
 
-本模块绕过了 Python OpenCV 传统的软解码路径，采用 C++ 与 GStreamer 底层 API 重构了图像采集流水线：
-1. **DMA-BUF 零拷贝**: 图像数据从 USB (`v4l2src`) 进入内存后，全程驻留在硬件隔离区（DMA-BUF），不经过任何用户态与内核态的内存拷贝（Memcpy）。
-2. **高通硬件级前处理 (`qtivtransform`)**: 色彩空间转换（YUYV -> RGB）、缩放（Resize）、裁剪（Crop）、翻转等极其消耗算力的操作，全部由高通芯片底层的硬件处理单元（GPU/VPE）完成，CPU 参与度降至 0%。
-3. **Pybind11 显存直通**: C++ 层捕获硬件内存指针后，直接将其伪装成 NumPy 数组递给 Python。AI 模型（如 QNN HTP）可以直接读取这块物理显存进行极速推理。
-4. **异步 GIL 释放**: 在 C++ 阻塞等待画面时主动释放 Python 全局解释器锁（GIL），彻底解决 AidLux CVS 网页端推流的心跳死锁问题。
+Current exported runtime classes:
 
-## 🛠️ 编译与安装
+- `ColorCamera`
+- `IRCamera`
+- `HardwareCamera`
+- `RealSenseDepthCamera`
 
-由于涉及底层硬件加速驱动，本模块需要使用 CMake 编译。
+The import selector lives in `__init__.py` and currently supports:
 
-1. 进入 C++ 源码目录：
-   ```bash
-   cd aidlux_cam/csrc
-   mkdir build && cd build
-   cmake ..
-   make  
-  
-2. 将编译完成得到的.so文件移到此目录下
+- `VISTA_BACKEND=mock`
+- `VISTA_BACKEND=real`
+- `VISTA_BACKEND=auto`
 
-## 帮助
+## Current Directory Contents
 
-python API 请参考__init__.py
+- `ColorCamera.py`: color camera implementation
+- `IRCamera.py`: IR camera implementation
+- `HardwareCamera.py`: hardware-accelerated camera path
+- `RealSenseDepthCamera.py`: depth camera implementation
+- `base.py`: camera abstraction base
+- `mock.py`: mock backend
+- `_fast_gst_camera.py`: Python bridge for the fast camera path
+- `fast_cam.cpython-38-aarch64-linux-gnu.so`: prebuilt target-device binary
+- `cxx/`: native source/build directory for camera extension work
+- `camera_info.md`: raw capability notes for the current hardware
+
+## Build Path
+
+If the native camera extension needs to be rebuilt on the target device, use the current repo path:
+
+```bash
+cd VISTA/vision_module/backend/camera/cxx
+mkdir -p build
+cd build
+cmake ..
+make
+```
+
+The old `aidlux_cam/csrc` path is obsolete for this repository.
+
+## Current Architectural Notes
+
+- Camera lifecycle is owned by `vision_module/backend/camera_manager.py`, not by the app layer.
+- Camera instances are selected and reconfigured according to runtime mode plans.
+- Current board defaults still live in `vision_module/config/board_config.py`.
+- `GRASP_REMOTE` now consumes explicit `ModeProfile.camera_overrides` instead of implicitly reusing local tracking defaults.
+- Board config still provides the source defaults, but runtime ownership now belongs to mode/profile data.
+- The default color camera baseline is now `BGR`, and mode profiles own the final per-mode RGB-camera format / crop / fps contract.
+
+## Current Limitations
+
+- The real runtime target is AidLux / QCS6490, not Windows.
+- On Windows or unsupported environments, the backend may resolve to `mock` depending on runtime settings.
+- `camera_info.md` is a hardware note, not the authoritative architecture contract.
+
+## Related Docs
+
+- `VISTA/ReadMe.md`
+- `VISTA/ARCHITECTURE.md`
+- `VISTA/PRODUCT_REQUIREMENTS.md`

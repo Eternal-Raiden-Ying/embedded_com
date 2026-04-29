@@ -262,6 +262,12 @@ class RuntimeSupervisor:
             return True
         enabled = bool(payload.get("enabled", False))
         ok = True
+        configurator = getattr(self.remote_manager, "configure_runtime", None)
+        if callable(configurator):
+            try:
+                configurator(dict(payload or {}))
+            except Exception:
+                ok = False
         client = getattr(self.remote_manager, "client", None)
         base_url = str(payload.get("base_url") or "").strip()
         if client is not None and base_url:
@@ -269,7 +275,8 @@ class RuntimeSupervisor:
                 client.configure(base_url)
             except Exception:
                 ok = False
-        if enabled:
+        service_available = bool(base_url)
+        if service_available:
             try:
                 self.remote_manager.enable()
                 self.remote_manager.start_runtime()
@@ -284,6 +291,8 @@ class RuntimeSupervisor:
                 self.remote_manager.disable()
             except Exception:
                 ok = False
+        if enabled and not service_available:
+            ok = False
         return ok
 
     def _configure_table_edge(self, payload: Dict[str, Any]) -> bool:

@@ -17,6 +17,15 @@ def _merge(base: Dict[str, object], override: Optional[Dict[str, object]]) -> Di
     return merged
 
 
+def _coerce_optional_int(value) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
 def _default_target_obs(target: Optional[str]) -> Dict[str, object]:
     return {
         "found": True,
@@ -57,49 +66,80 @@ def _next_remote_request_id() -> str:
     return f"rr_{int(time.time() * 1000)}"
 
 
+def _required_remote_cameras(need_depth: bool) -> list:
+    cameras = ["rgb"]
+    if bool(need_depth):
+        cameras.append("depth")
+    return cameras
+
+
 def _grasp_state_from_req(req: VisionReq, target: Optional[str]) -> Dict[str, object]:
     payload = req.payload if isinstance(req.payload, dict) else {}
+    need_depth = bool(payload.get("need_depth", True))
     return {
         "target_obs": _merge(_default_target_obs(target), payload.get("target_obs") or payload.get("mock_target_obs")),
         "proposal": _merge(_default_proposal(), payload.get("proposal")),
         "result_template": _merge(_default_result(target), payload.get("result")),
         "remote_grasp": bool(payload.get("remote_grasp", True)),
-        "need_depth": bool(payload.get("need_depth", True)),
+        "need_depth": need_depth,
         "adjust_round": 0,
         "last_response": None,
         "last_feedback": None,
         "remote_request_id": None,
+        "remote_predict_sent": False,
         "remote_result_sent": False,
-        "remote_release_sent": False,
+        "remote_ready_frame_seq": 0,
+        "remote_init_retry_count": 0,
+        "remote_init_retry_limit": 3,
+        "remote_init_retry_inflight": False,
+        "remote_init_retry_target_attempt": 0,
         "remote_robot_id": str(payload.get("robot_id") or "arm_001"),
         "remote_timeout_s": float(payload.get("remote_timeout_s", 10.0) or 10.0),
-        "remote_class_id": payload.get("class_id"),
-        "remote_base_url": str(payload.get("remote_base_url") or "").strip() or None,
+        "remote_class_id": _coerce_optional_int(payload.get("class_id")),
         "remote_metadata": dict(payload.get("remote_metadata") or {}) if isinstance(payload.get("remote_metadata"), dict) else {},
+        "remote_required_cameras": _required_remote_cameras(need_depth),
     }
 
 
 def _target_obs_from_results(results: Dict[str, object], target: Optional[str]) -> Optional[Dict[str, object]]:
     local = dict((results or {}).get("local_perception") or {})
+    contract_ok = bool(local.get("contract_ok", True))
+    contract_error = str(local.get("contract_error") or "")
+    contract_warnings = list(local.get("contract_warnings") or [])
     target_obs = local.get("target_obs")
     if isinstance(target_obs, dict):
         merged = {"found": bool(target_obs.get("found", True)), "target": target}
         merged.update(target_obs)
         merged.setdefault("target", target)
+        if contract_error:
+            merged.setdefault("contract_error", contract_error)
+        if contract_warnings:
+            merged.setdefault("contract_warnings", contract_warnings)
         return merged
     boxes = local.get("infer_boxes")
+    class_names = local.get("class_names")
     rgb_shape = local.get("rgb_shape")
+    weak_payload = {"found": False, "target": target}
+    if contract_error:
+        weak_payload["contract_error"] = contract_error
+    if contract_warnings:
+        weak_payload["contract_warnings"] = contract_warnings
     if not isinstance(boxes, list) or not rgb_shape:
-        return None
+        return weak_payload if (not contract_ok or contract_error or contract_warnings) else None
     try:
-        obs = compute_target_obs(tuple(rgb_shape), target, boxes)
-    except Exception:
-        return None
+        obs = compute_target_obs(tuple(rgb_shape), target, boxes, class_names=class_names)
+    except Exception as exc:
+        weak_payload["contract_error"] = weak_payload.get("contract_error") or f"invalid_local_perception:{exc}"
+        return weak_payload
     if obs is None:
-        return None
+        return weak_payload if (not contract_ok or contract_error or contract_warnings) else None
     payload = {"found": True, "target": target}
     payload.update(obs)
     payload.setdefault("target", target)
+    if contract_error:
+        payload["contract_error"] = contract_error
+    if contract_warnings:
+        payload["contract_warnings"] = contract_warnings
     return payload
 
 
@@ -111,6 +151,39 @@ def _remote_effect(op: str, payload: Dict[str, object]) -> Dict[str, object]:
             "op": normalize_upper(op, "UNKNOWN"),
             **dict(payload or {}),
         },
+    }
+
+
+def _remote_command_payload(stage_state: Dict[str, object], target: Optional[str], request_id: str) -> Dict[str, object]:
+    return {
+        "request_id": request_id,
+        "timeout_s": float(stage_state.get("remote_timeout_s", 10.0) or 10.0),
+        "target": target,
+        "robot_id": str(stage_state.get("remote_robot_id") or "arm_001"),
+        "need_depth": bool(stage_state.get("need_depth", True)),
+        "class_id": _coerce_optional_int(stage_state.get("remote_class_id")),
+        "metadata": dict(stage_state.get("remote_metadata") or {}),
+    }
+
+
+def _remote_service_init_payload(stage_state: Dict[str, object]) -> Dict[str, object]:
+    return {
+        "timeout_s": float(stage_state.get("remote_timeout_s", 10.0) or 10.0),
+    }
+
+
+def _frame_ready_for_remote(results: Dict[str, object], required_cameras) -> Dict[str, object]:
+    frame_meta = dict((results or {}).get("frame_meta") or {})
+    available_cameras = sorted(str(name) for name in tuple(frame_meta.get("cameras") or ()))
+    required = [str(name) for name in tuple(required_cameras or ("rgb",))]
+    has_frames = bool(frame_meta.get("has_frames", False))
+    frame_seq = int(frame_meta.get("frame_seq", 0) or 0)
+    ready = bool(has_frames and frame_seq > 0 and set(required).issubset(set(available_cameras)))
+    return {
+        "ready": ready,
+        "frame_seq": frame_seq,
+        "available_cameras": available_cameras,
+        "required_cameras": required,
     }
 
 
@@ -136,7 +209,19 @@ class GraspStagePlan(BaseStagePlan):
         if isinstance(req.payload, dict):
             refreshed = _grasp_state_from_req(req, ctx.target_name)
             for key, value in refreshed.items():
-                if key in {"adjust_round", "last_response", "last_feedback", "remote_request_id", "remote_result_sent", "remote_release_sent"}:
+                if key in {
+                    "adjust_round",
+                    "last_response",
+                    "last_feedback",
+                    "remote_request_id",
+                    "remote_predict_sent",
+                    "remote_result_sent",
+                    "remote_ready_frame_seq",
+                    "remote_init_retry_count",
+                    "remote_init_retry_limit",
+                    "remote_init_retry_inflight",
+                    "remote_init_retry_target_attempt",
+                }:
                     continue
                 ctx.stage_state[key] = value
         return StageOutput()
@@ -167,8 +252,12 @@ class GraspStagePlan(BaseStagePlan):
             ctx.current_mode = "MICRO_ADJUST"
             ctx.interaction_id = None
             stage_state["remote_request_id"] = None
+            stage_state["remote_predict_sent"] = False
             stage_state["remote_result_sent"] = False
-            stage_state["remote_release_sent"] = False
+            stage_state["remote_ready_frame_seq"] = 0
+            stage_state["remote_init_retry_count"] = 0
+            stage_state["remote_init_retry_inflight"] = False
+            stage_state["remote_init_retry_target_attempt"] = 0
             return StageOutput(signals={"response": decision or "REJECT"})
 
         if not bool(stage_state.get("remote_grasp", True)):
@@ -187,53 +276,39 @@ class GraspStagePlan(BaseStagePlan):
                 signals={"response": "ACCEPT"},
             )
 
+        class_id = _coerce_optional_int(stage_state.get("remote_class_id"))
+        if class_id is None:
+            ctx.current_mode = "MICRO_ADJUST"
+            ctx.interaction_id = None
+            return StageOutput(
+                vision_obs=self.build_obs(
+                    ctx,
+                    status="FAILED",
+                    perception={"target_obs": target_obs},
+                    result={"reason": "missing_class_id"},
+                ),
+                signals={"response": "ERROR", "reason": "missing_class_id"},
+            )
+
         request_id = _next_remote_request_id()
-        timeout_s = float(stage_state.get("remote_timeout_s", 10.0) or 10.0)
-        base_payload = {
-            "request_id": request_id,
-            "timeout_s": timeout_s,
-            "target": ctx.target_name,
-            "robot_id": str(stage_state.get("remote_robot_id") or "arm_001"),
-            "need_depth": bool(stage_state.get("need_depth", True)),
-            "class_id": stage_state.get("remote_class_id"),
-            "base_url": stage_state.get("remote_base_url"),
-            "metadata": dict(stage_state.get("remote_metadata") or {}),
-        }
+        stage_state["remote_class_id"] = class_id
         stage_state["remote_request_id"] = request_id
+        stage_state["remote_predict_sent"] = False
         stage_state["remote_result_sent"] = False
-        stage_state["remote_release_sent"] = False
+        stage_state["remote_ready_frame_seq"] = 0
+        stage_state["remote_init_retry_count"] = 0
+        stage_state["remote_init_retry_inflight"] = False
+        stage_state["remote_init_retry_target_attempt"] = 0
         ctx.current_mode = "GRASP_REMOTE"
         ctx.interaction_id = None
-        return StageOutput(
-            signals={"response": "ACCEPT"},
-            effects=[
-                _remote_effect("INIT", base_payload),
-                _remote_effect("PREDICT", base_payload),
-            ],
-        )
+        return StageOutput(signals={"response": "ACCEPT"})
 
     def on_stop(self, req: VisionReq, ctx: StageContext) -> Optional[StageOutput]:
         _ = req
-        request_id = str(ctx.stage_state.get("remote_request_id") or "").strip()
-        should_release = bool(request_id) and not bool(ctx.stage_state.get("remote_release_sent", False))
         ctx.current_stage = "IDLE"
         ctx.current_mode = "IDLE"
         ctx.interaction_id = None
-        if not should_release:
-            return None
-        ctx.stage_state["remote_release_sent"] = True
-        return StageOutput(
-            effects=[
-                _remote_effect(
-                    "RELEASE",
-                    {
-                        "request_id": request_id,
-                        "timeout_s": float(ctx.stage_state.get("remote_timeout_s", 5.0) or 5.0),
-                        "base_url": ctx.stage_state.get("remote_base_url"),
-                    },
-                )
-            ]
-        )
+        return None
 
     def tick(self, tick_input: StageTickInput, ctx: StageContext) -> Optional[StageOutput]:
         results = dict(tick_input.results or {})
@@ -255,23 +330,102 @@ class GraspStagePlan(BaseStagePlan):
             matched = bool(request_id) and str(remote_result.get("request_id") or "").strip() == request_id
             last_action = normalize_upper(remote_result.get("last_action"), "")
             remote_error = str(remote_result.get("last_error") or "")
+            service_init_confirmed = bool(
+                remote_result.get("service_init_confirmed", remote_result.get("init_confirmed", False))
+            )
+            service_init_state = str(remote_result.get("service_init_state") or "")
+            service_init_attempts = int(remote_result.get("service_init_attempts", 0) or 0)
+            service_init_error = str(remote_result.get("service_init_last_error") or remote_error or "")
+            retry_count = int(stage_state.get("remote_init_retry_count", 0) or 0)
+            retry_limit = int(stage_state.get("remote_init_retry_limit", 3) or 3)
+            retry_inflight = bool(stage_state.get("remote_init_retry_inflight", False))
+            retry_target_attempt = int(stage_state.get("remote_init_retry_target_attempt", 0) or 0)
+
+            if retry_inflight and service_init_attempts >= retry_target_attempt and last_action == "INIT":
+                stage_state["remote_init_retry_inflight"] = False
+                retry_inflight = False
+
+            frame_gate = _frame_ready_for_remote(results, stage_state.get("remote_required_cameras"))
+
+            if not service_init_confirmed:
+                if not retry_inflight and retry_count < retry_limit:
+                    next_attempt = int(service_init_attempts) + 1
+                    stage_state["remote_init_retry_count"] = retry_count + 1
+                    stage_state["remote_init_retry_inflight"] = True
+                    stage_state["remote_init_retry_target_attempt"] = next_attempt
+                    return StageOutput(
+                        vision_obs=self.build_obs(
+                            ctx,
+                            status="RUNNING",
+                            perception={"target_obs": target_obs},
+                            result={
+                                "remote_state": "retrying_init",
+                                "request_id": request_id,
+                                "init_confirmed": False,
+                                "service_init_state": service_init_state or "uninitialized",
+                                "service_init_attempts": service_init_attempts,
+                                "init_retry_count": int(stage_state.get("remote_init_retry_count", 0) or 0),
+                                "init_retry_limit": retry_limit,
+                                "remote_error": service_init_error,
+                            },
+                        ),
+                        effects=[_remote_effect("INIT", _remote_service_init_payload(stage_state))],
+                        snapshot=output_snapshot,
+                    )
+                if not retry_inflight and retry_count >= retry_limit:
+                    if stage_state.get("remote_result_sent", False):
+                        return None
+                    stage_state["remote_result_sent"] = True
+                    return StageOutput(
+                        vision_obs=self.build_obs(
+                            ctx,
+                            status="FAILED",
+                            perception={"target_obs": target_obs},
+                            result={
+                                "reason": "remote_init_failed",
+                                "request_id": request_id,
+                                "remote_error": service_init_error or "init_failed",
+                                "init_attempts": retry_limit,
+                                "init_confirmed": False,
+                                "service_init_state": service_init_state or "failed",
+                                "service_init_attempts": service_init_attempts,
+                                "status_code": remote_result.get("status_code"),
+                            },
+                        ),
+                        snapshot=output_snapshot,
+                    )
+
+            if service_init_confirmed and not bool(stage_state.get("remote_predict_sent", False)):
+                if frame_gate["ready"]:
+                    stage_state["remote_predict_sent"] = True
+                    stage_state["remote_ready_frame_seq"] = int(frame_gate["frame_seq"])
+                    return StageOutput(
+                        vision_obs=self.build_obs(
+                            ctx,
+                            status="RUNNING",
+                            perception={"target_obs": target_obs},
+                            result={
+                                "remote_state": "predict_requested",
+                                "request_id": request_id,
+                                "init_confirmed": True,
+                                "service_init_state": service_init_state or "ready",
+                                "service_init_attempts": service_init_attempts,
+                                "frame_ready": True,
+                                "frame_seq": int(frame_gate["frame_seq"]),
+                                "required_cameras": list(frame_gate["required_cameras"]),
+                                "available_cameras": list(frame_gate["available_cameras"]),
+                            },
+                        ),
+                        effects=[
+                            _remote_effect("PREDICT", _remote_command_payload(stage_state, ctx.target_name, request_id)),
+                        ],
+                        snapshot=output_snapshot,
+                    )
+
             if matched and last_action == "PREDICT" and bool(remote_result.get("last_ok", False)) and bool(remote_result.get("has_result", False)):
                 if stage_state.get("remote_result_sent", False):
                     return None
                 stage_state["remote_result_sent"] = True
-                effects = []
-                if not stage_state.get("remote_release_sent", False):
-                    stage_state["remote_release_sent"] = True
-                    effects.append(
-                        _remote_effect(
-                            "RELEASE",
-                            {
-                                "request_id": request_id,
-                                "timeout_s": float(stage_state.get("remote_timeout_s", 5.0) or 5.0),
-                                "base_url": stage_state.get("remote_base_url"),
-                            },
-                        )
-                    )
                 result = deepcopy(remote_result.get("result") or {})
                 result.setdefault("target", ctx.target_name)
                 result["source"] = "remote_grasp_client"
@@ -283,7 +437,6 @@ class GraspStagePlan(BaseStagePlan):
                         perception={"target_obs": target_obs},
                         result=result,
                     ),
-                    effects=effects,
                     snapshot=output_snapshot,
                 )
 
@@ -291,19 +444,6 @@ class GraspStagePlan(BaseStagePlan):
                 if stage_state.get("remote_result_sent", False):
                     return None
                 stage_state["remote_result_sent"] = True
-                effects = []
-                if not stage_state.get("remote_release_sent", False):
-                    stage_state["remote_release_sent"] = True
-                    effects.append(
-                        _remote_effect(
-                            "RELEASE",
-                            {
-                                "request_id": request_id,
-                                "timeout_s": float(stage_state.get("remote_timeout_s", 5.0) or 5.0),
-                                "base_url": stage_state.get("remote_base_url"),
-                            },
-                        )
-                    )
                 return StageOutput(
                     vision_obs=self.build_obs(
                         ctx,
@@ -316,9 +456,16 @@ class GraspStagePlan(BaseStagePlan):
                             "status_code": remote_result.get("status_code"),
                         },
                     ),
-                    effects=effects,
                     snapshot=output_snapshot,
                 )
+
+            remote_state = "awaiting_remote"
+            if not service_init_confirmed:
+                remote_state = "awaiting_init_retry" if retry_inflight else "awaiting_init"
+            elif not bool(stage_state.get("remote_predict_sent", False)):
+                remote_state = "awaiting_fresh_frames"
+            else:
+                remote_state = "awaiting_predict_result"
 
             return StageOutput(
                 vision_obs=self.build_obs(
@@ -326,7 +473,7 @@ class GraspStagePlan(BaseStagePlan):
                     status="RUNNING",
                     perception={"target_obs": target_obs},
                     result={
-                        "remote_state": str(remote_result.get("state") or "awaiting_remote"),
+                        "remote_state": remote_state,
                         "request_id": request_id,
                         "last_response": deepcopy(stage_state.get("last_response")),
                         "remote_enabled": bool(remote_result.get("enabled")),
@@ -334,6 +481,17 @@ class GraspStagePlan(BaseStagePlan):
                         "remote_sequence": int(remote_result.get("sequence", 0) or 0),
                         "remote_last_action": str(remote_result.get("last_action") or ""),
                         "remote_last_ok": bool(remote_result.get("last_ok", False)),
+                        "init_confirmed": service_init_confirmed,
+                        "service_init_state": service_init_state or ("ready" if service_init_confirmed else "failed"),
+                        "service_init_attempts": service_init_attempts,
+                        "init_retry_count": int(stage_state.get("remote_init_retry_count", 0) or 0),
+                        "init_retry_limit": retry_limit,
+                        "init_retry_inflight": bool(stage_state.get("remote_init_retry_inflight", False)),
+                        "predict_sent": bool(stage_state.get("remote_predict_sent", False)),
+                        "frame_ready": bool(frame_gate["ready"]),
+                        "frame_seq": int(frame_gate["frame_seq"]),
+                        "required_cameras": list(frame_gate["required_cameras"]),
+                        "available_cameras": list(frame_gate["available_cameras"]),
                     },
                 ),
                 snapshot=output_snapshot,
