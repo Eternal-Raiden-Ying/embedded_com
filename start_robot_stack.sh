@@ -72,6 +72,8 @@ STOP_GRACE_S="${STOP_GRACE_S:-3}"
 VISION_LOG_DIR="$VISION_ROOT/logs"
 ORCH_LOG_DIR="$ORCH_ROOT/logs"
 GATEWAY_LOG_DIR="$STACK_ROOT/logs"
+STACK_RUNS_ROOT="$STACK_ROOT/logs/runs"
+LATEST_RUN_ID_FILE="$STACK_RUNS_ROOT/latest_run_id"
 VISION_PID_DIR="$VISION_ROOT/pids"
 ORCH_PID_DIR="$ORCH_ROOT/pids"
 GATEWAY_PID_DIR="$STACK_ROOT/pids"
@@ -85,7 +87,7 @@ ORCH_LOG_FILE="$ORCH_LOG_DIR/orchestrator.out"
 GATEWAY_LOG_FILE="$GATEWAY_LOG_DIR/mobile_gateway.out"
 
 mkdir -p "$VISION_LOG_DIR" "$ORCH_LOG_DIR" "$GATEWAY_LOG_DIR" \
-         "$VISION_PID_DIR" "$ORCH_PID_DIR" "$GATEWAY_PID_DIR" "$STACK_SOCK_DIR"
+         "$STACK_RUNS_ROOT" "$VISION_PID_DIR" "$ORCH_PID_DIR" "$GATEWAY_PID_DIR" "$STACK_SOCK_DIR"
 
 # ---------- pretty output ----------
 if [[ -t 1 ]]; then
@@ -232,6 +234,7 @@ apply_profile_defaults() {
 
 show_banner() {
   headline "robot stack controller v6"
+  [[ -n "${STACK_RUN_ID:-}" ]] && printf '%brun id%b         : %s\n' "$C_BOLD" "$C_RESET" "$STACK_RUN_ID"
   printf '%bprofile%b        : %s\n' "$C_BOLD" "$C_RESET" "$STACK_PROFILE"
   printf '%bmobile input%b   : mobile_gateway (voice disabled)\n' "$C_BOLD" "$C_RESET"
   printf '%bvision root%b    : %s\n' "$C_BOLD" "$C_RESET" "$VISION_ROOT"
@@ -245,6 +248,41 @@ show_banner() {
   printf '%bsudo%b           : requested=%s effective=%s\n' "$C_BOLD" "$C_RESET" "$ORCH_USE_SUDO" "$([[ $(orch_use_sudo_effective; echo $?) -eq 0 ]] && echo 1 || echo 0)"
   printf '%bdry-run%b        : ORCH_SERIAL_DRY_RUN=%s  ORCH_DRY_RUN_ECHO_STDOUT=%s\n' "$C_BOLD" "$C_RESET" "$ORCH_SERIAL_DRY_RUN" "$ORCH_DRY_RUN_ECHO_STDOUT"
   printf '%bports%b          : %s\n' "$C_BOLD" "$C_RESET" "$STACK_PORTS"
+}
+
+make_run_id() {
+  printf 'run_%s_%06x\n' "$(date +%Y%m%d_%H%M%S)" "$((RANDOM * RANDOM % 16777216))"
+}
+
+apply_run_log_paths() {
+  local run_id="$1"
+  local run_dir="$STACK_RUNS_ROOT/$run_id"
+  STACK_RUN_ID="$run_id"
+  STACK_RUN_DIR="$run_dir"
+  VISION_LOG_DIR="$run_dir/vision"
+  ORCH_LOG_DIR="$run_dir/orchestrator"
+  GATEWAY_LOG_DIR="$run_dir/mobile_gateway"
+  VISION_LOG_FILE="$VISION_LOG_DIR/vision.out"
+  ORCH_LOG_FILE="$ORCH_LOG_DIR/orchestrator.out"
+  GATEWAY_LOG_FILE="$GATEWAY_LOG_DIR/mobile_gateway.out"
+  mkdir -p "$VISION_LOG_DIR" "$ORCH_LOG_DIR" "$GATEWAY_LOG_DIR" "$STACK_RUNS_ROOT"
+}
+
+prepare_start_run_paths() {
+  local run_id="${STACK_RUN_ID:-}"
+  [[ -n "$run_id" ]] || run_id="$(make_run_id)"
+  apply_run_log_paths "$run_id"
+  printf '%s\n' "$run_id" > "$LATEST_RUN_ID_FILE"
+  ln -sfn "$run_id" "$STACK_RUNS_ROOT/latest" 2>/dev/null || true
+}
+
+prepare_latest_run_paths() {
+  if [[ -z "${STACK_RUN_ID:-}" && -f "$LATEST_RUN_ID_FILE" ]]; then
+    STACK_RUN_ID="$(cat "$LATEST_RUN_ID_FILE" 2>/dev/null || true)"
+  fi
+  if [[ -n "${STACK_RUN_ID:-}" && -d "$STACK_RUNS_ROOT/$STACK_RUN_ID" ]]; then
+    apply_run_log_paths "$STACK_RUN_ID"
+  fi
 }
 
 path_user_writable_or_creatable() {
@@ -363,6 +401,10 @@ set -euo pipefail
 cd "$VISION_ROOT"
 export PYTHONUNBUFFERED="$PYTHONUNBUFFERED"
 export ROBOT_CONSOLE_COLOR=never
+export ROBOT_RUN_MODULE_SUBDIRS=1
+export STACK_RUN_ID="$STACK_RUN_ID"
+export VISION_LOG_DIR="$VISION_LOG_DIR"
+export VISION_RUNS_DIR="$STACK_RUNS_ROOT"
 unset FORCE_COLOR
 export VISTA_TABLE_BBOX_ENABLE="$VISTA_TABLE_BBOX_ENABLE"
 export VISTA_TABLE_MODEL="$VISTA_TABLE_MODEL"
@@ -400,6 +442,10 @@ set -euo pipefail
 cd "$ORCH_ROOT"
 export PYTHONUNBUFFERED="$PYTHONUNBUFFERED"
 export ROBOT_CONSOLE_COLOR=never
+export ROBOT_RUN_MODULE_SUBDIRS=1
+export STACK_RUN_ID="$STACK_RUN_ID"
+export ORCH_LOG_DIR="$ORCH_LOG_DIR"
+export ORCH_RUNS_DIR="$STACK_RUNS_ROOT"
 unset FORCE_COLOR
 export ORCH_SERIAL_DRY_RUN="$ORCH_SERIAL_DRY_RUN"
 export ORCH_SERIAL_PORT="$UART_DEV"
@@ -440,8 +486,15 @@ set -euo pipefail
 cd "$STACK_ROOT"
 export PYTHONUNBUFFERED="$PYTHONUNBUFFERED"
 export ROBOT_CONSOLE_COLOR=never
+export ROBOT_RUN_MODULE_SUBDIRS=1
+export STACK_RUN_ID="$STACK_RUN_ID"
 unset FORCE_COLOR
 export PYTHONPATH="$ORCH_ROOT"
+export MOBILE_GATEWAY_LOG_DIR="$GATEWAY_LOG_DIR"
+export MOBILE_GATEWAY_LOG_FILE="$GATEWAY_LOG_DIR/mobile_gateway.log"
+export MOBILE_GATEWAY_RUNS_DIR="$STACK_RUNS_ROOT"
+export MOBILE_GATEWAY_ORCH_RUNS_DIR="$STACK_RUNS_ROOT"
+export MOBILE_GATEWAY_ORCH_STATE_BLOCKS_PATH="$STACK_RUN_DIR/orchestrator/state_blocks.jsonl"
 export MOBILE_GATEWAY_ORCH_TASK_CMD_HOST="127.0.0.1"
 export MOBILE_GATEWAY_ORCH_TASK_CMD_PORT="9001"
 export MOBILE_GATEWAY_ORCH_TASK_ACK_HOST="127.0.0.1"
@@ -646,6 +699,7 @@ tail_stack_summary() {
 }
 
 start_stack() {
+  prepare_start_run_paths
   show_banner
   stop_all || true
 
@@ -681,6 +735,7 @@ start_stack() {
 }
 
 stop_stack() {
+  prepare_latest_run_paths
   show_banner
   stop_all
   status_all
@@ -697,6 +752,7 @@ main() {
       stop_stack
       ;;
     status|状态)
+      prepare_latest_run_paths
       status_all
       ;;
     *)

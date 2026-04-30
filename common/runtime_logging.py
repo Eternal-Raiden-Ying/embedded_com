@@ -408,11 +408,22 @@ class RunLogger:
     def __init__(self, module_name: str, runs_root: str, stack_run_id: str = "", enable_text_events: bool = True):
         self.module_name = str(module_name).strip()
         self.stack_run_id = str(stack_run_id).strip() or make_stack_run_id()
-        self.run_dir = Path(runs_root) / self.stack_run_id
+        self.run_dir = self._resolve_run_dir(runs_root)
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self._event_fp = None
         if enable_text_events:
             self._event_fp = open(self.run_dir / "events.log", "a", encoding="utf-8")
+
+    def _module_dir_name(self) -> str:
+        if self.module_name == "orch":
+            return "orchestrator"
+        return self.module_name or "module"
+
+    def _resolve_run_dir(self, runs_root: str) -> Path:
+        root = Path(runs_root)
+        if env_flag("ROBOT_RUN_MODULE_SUBDIRS", "0"):
+            return root / self.stack_run_id / self._module_dir_name()
+        return root / self.stack_run_id
 
     def _with_common_fields(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         out = dict(payload)
@@ -618,6 +629,7 @@ class RunLogger:
 
     def write_state_block(self, block: Dict[str, Any]) -> None:
         self.write_jsonl("state_blocks", block)
+        self.write_jsonl("state_trace", block)
         one_line = (
             f"state={block.get('state')} target={block.get('active_target')} "
             f"session={block.get('session_id')} epoch={block.get('epoch')} "
