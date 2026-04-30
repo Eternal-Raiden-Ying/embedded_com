@@ -548,8 +548,12 @@ class OrchestratorCore:
 
     def _tick_edge_slide_search(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
-        obs = self._fresh_target_obs()
-        if obs is not None and obs.found and self._target_matches_active(obs):
+        target_obs = self._fresh_target_obs()
+        if (
+            target_obs is not None
+            and target_obs.found
+            and self._target_matches_active(target_obs)
+        ):
             self._transition(State.TARGET_CONFIRM, "target_found")
             return self.controller.stop_cmd("TARGET_CONFIRM")
         if self._state_elapsed() >= float(self.cfg.target_search_timeout_s):
@@ -562,17 +566,66 @@ class OrchestratorCore:
             self._transition(State.NEXT_TABLE, f"{self.ctx.last_fail_reason}，准备切换下一张桌")
             self._queue_tts("当前桌位未找到目标，尝试下一张桌")
             return self.controller.next_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
-        if str(self.ctx.active_vision_mode or "").upper() == "TRACK_LOCAL" and self._fresh_table_obs() is None:
-            return self.controller.edge_slide_hold_cmd("no_table_edge_obs_in_track_local")
-        if self._obs_has_motion(obs):
-            return self.controller.target_track_cmd(obs)
+        edge_obs = self._fresh_table_obs()
+        if edge_obs is None or not self._table_visible(edge_obs):
+            return self._handle_edge_slide_edge_loss("edge_obs_missing" if edge_obs is None else "edge_not_visible")
+        if edge_obs.dist_err_m is None:
+            return self._handle_edge_slide_edge_loss("dist_err_missing")
+        if abs(float(edge_obs.dist_err_m)) > float(self.cfg.edge_slide_dist_tolerance_m):
+            self._start_loss_timer("table_loss_since_mono")
+            lost_s = self._loss_elapsed(self.ctx.table_loss_since_mono)
+            self.ctx.last_fail_reason = f"沿边距离偏差超过容忍: dist_err={float(edge_obs.dist_err_m):+.3f}m"
+            if lost_s >= float(self.cfg.table_loss_hold_s):
+                fallback_state = self._edge_slide_fallback_state()
+                self._transition(
+                    fallback_state,
+                    (
+                        "edge_distance_out_of_tolerance "
+                        f"dist={float(edge_obs.dist_err_m):+.3f} "
+                        f"tol={float(self.cfg.edge_slide_dist_tolerance_m):.3f} "
+                        f"hold_s={lost_s:.2f}"
+                    ),
+                )
+                return self._edge_slide_fallback_cmd(fallback_state, edge_obs)
+        else:
+            self._reset_table_loss()
+        if self._obs_has_motion(target_obs):
+            return self.controller.target_track_cmd(target_obs)
         direction = self._edge_slide_direction()
-        return self.controller.edge_slide_search_cmd(self._segment_elapsed(self.cfg.edge_slide_segment_s), direction_sign=direction)
+        return self.controller.edge_slide_search_cmd(
+            self._segment_elapsed(self.cfg.edge_slide_segment_s),
+            direction_sign=direction,
+            edge_obs=edge_obs,
+        )
+
+    def _edge_slide_fallback_state(self) -> State:
+        raw = str(getattr(self.cfg, "edge_slide_fallback_state", "") or "").strip().upper()
+        if raw == State.FINAL_LOCK.value:
+            return State.FINAL_LOCK
+        return State.CONTROLLED_APPROACH
+
+    def _edge_slide_fallback_cmd(self, state: State, edge_obs: Optional[TableEdgeObs]) -> MotionDecision:
+        if state == State.FINAL_LOCK:
+            return self.controller.final_lock_cmd(edge_obs)
+        return self.controller.controlled_approach_cmd(edge_obs)
+
+    def _handle_edge_slide_edge_loss(self, reason: str) -> MotionDecision:
+        self._start_loss_timer("table_loss_since_mono")
+        lost_s = self._loss_elapsed(self.ctx.table_loss_since_mono)
+        if lost_s < float(self.cfg.table_loss_hold_s):
+            return self.controller.edge_slide_hold_cmd(f"{reason}_hold lost_s={lost_s:.2f}")
+        fallback_state = self._edge_slide_fallback_state()
+        self._transition(fallback_state, f"{reason} lost_s={lost_s:.2f}")
+        return self._edge_slide_fallback_cmd(fallback_state, self.ctx.last_table_obs)
 
     def _tick_target_confirm(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
         obs = self._fresh_target_obs()
-        if obs is not None and obs.found and self._target_matches_active(obs):
+        if (
+            obs is not None
+            and obs.found
+            and self._target_matches_active(obs)
+        ):
             self.ctx.target_found_frames += 1
             self.ctx.target_lost_frames = 0
             if self.ctx.target_found_frames >= int(self.cfg.target_found_frames_to_confirm):
@@ -734,7 +787,8 @@ class OrchestratorCore:
                 target=self.ctx.active_target,
                 payload={
                     "search_kind": "TARGET",
-                    "need_depth": False,
+                    "need_depth": True,
+                    "edge_follow": True,
                     "current_edge_id": self.ctx.current_edge_id,
                     "orchestrator_state": state.value,
                     "edge_visit_index": int(self.ctx.edge_visit_index),

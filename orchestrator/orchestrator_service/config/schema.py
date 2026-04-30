@@ -102,6 +102,7 @@ class ControlThresholds:
     edge_slide_pause_s: float = 0.20
     edge_slide_segment_s: float = 1.20
     edge_slide_dist_tolerance_m: float = 0.05
+    edge_slide_fallback_state: str = "CONTROLLED_APPROACH"
 
     edge_relocate_enabled: bool = True
     max_edge_transitions_per_task: int = 3

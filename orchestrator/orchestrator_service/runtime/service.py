@@ -1183,6 +1183,16 @@ class OrchestratorService(BaseModule):
         if summary.get("measured_distance_m") is None and summary.get("target_dist_m") is not None and summary.get("dist_err_m") is not None:
             summary["measured_distance_m"] = float(summary["target_dist_m"]) + float(summary["dist_err_m"])
         summary["current_edge_id"] = self.core.ctx.current_edge_id
+        if str(summary.get("state")) == "EDGE_SLIDE_SEARCH":
+            target_obs = self.core.ctx.last_target_obs
+            summary["target_found"] = bool(getattr(target_obs, "found", False)) if target_obs is not None else False
+            summary["target_conf"] = (
+                getattr(target_obs, "confidence", None)
+                if target_obs is not None
+                else None
+            )
+            summary["fallback_reason"] = summary.get("reason") or self.core.ctx.last_fail_reason or ""
+            summary["edge_loss_elapsed_s"] = self.core._loss_elapsed(self.core.ctx.table_loss_since_mono)
         if block.get("lock_reason") and str(summary.get("state")) in {"CONTROLLED_APPROACH", "FINAL_LOCK", "COARSE_ALIGN"}:
             summary["reason"] = block.get("lock_reason")
         else:
@@ -1221,10 +1231,15 @@ class OrchestratorService(BaseModule):
             if isinstance(boxes, list):
                 boxes = len(boxes)
             found = bool(obs.get("found", False))
+            target_conf = summary.get("target_conf", obs.get("confidence", obs.get("best_conf")))
             search_note = "target_locked" if found else "searching"
             edge_visible = bool(summary.get("edge_found", False))
             return (
                 f"[ORCH] SLIDE edge={int(edge_visible)} target={int(found)} boxes={int(boxes or 0)} status={search_note} "
+                f"conf={self._fmt_float(summary.get('confidence'), 2, signed=False)} "
+                f"yaw={self._fmt_float(summary.get('yaw_err_rad'))} "
+                f"dist={self._fmt_float(summary.get('dist_err_m'))} "
+                f"target_conf={self._fmt_float(target_conf, 2, signed=False)} "
                 f"cmd vx={self._fmt_float(cmd.get('vx'))} vy={self._fmt_float(cmd.get('vy'))} wz={self._fmt_float(cmd.get('wz'))} "
                 f"reason={reason}"
             )
@@ -1297,6 +1312,7 @@ class OrchestratorService(BaseModule):
     def _emit_motion(self, decision):
         cmd = decision.cmd
         self.run_logger.write_jsonl("cmd_vel", cmd.to_dict())
+        self._emit_edge_slide_trace(decision)
         self._emit_operator_control(decision)
         self._flush_state_traces(decision)
         car_cmd = self.mapper.from_cmd_vel(cmd, cx_norm_abs=decision.cx_norm_abs, distance_ratio=decision.distance_ratio)
@@ -1315,6 +1331,41 @@ class OrchestratorService(BaseModule):
         car_record.update({k: v for k, v in tx_meta.items() if v not in (None, "")})
         self.run_logger.write_jsonl("car_cmd", car_record)
         self.uart.send_car_command(car_cmd, tx_meta=tx_meta)
+
+    def _emit_edge_slide_trace(self, decision) -> None:
+        if str(getattr(self.core.ctx.state, "value", self.core.ctx.state) or "") != "EDGE_SLIDE_SEARCH":
+            return
+        edge_obs = self.core.ctx.last_table_obs
+        target_obs = self.core.ctx.last_target_obs
+        cmd = decision.cmd
+        reason = str((getattr(decision, "control_summary", None) or {}).get("reason") or self.core.ctx.last_fail_reason or "")
+        record = {
+            "state": "EDGE_SLIDE_SEARCH",
+            "edge_found": bool(getattr(edge_obs, "edge_found", False)) if edge_obs is not None else False,
+            "edge_conf": getattr(edge_obs, "confidence", None) if edge_obs is not None else None,
+            "dist_err": getattr(edge_obs, "dist_err_m", None) if edge_obs is not None else None,
+            "yaw_err": getattr(edge_obs, "yaw_err_rad", None) if edge_obs is not None else None,
+            "target_found": bool(getattr(target_obs, "found", False)) if target_obs is not None else False,
+            "target_conf": (
+                getattr(target_obs, "confidence", None)
+                if target_obs is not None and getattr(target_obs, "confidence", None) is not None
+                else (getattr(target_obs, "best_conf", None) if target_obs is not None else None)
+            ),
+            "target_cls": (
+                getattr(target_obs, "best_cls", None) or getattr(target_obs, "target", None)
+                if target_obs is not None
+                else None
+            ),
+            "vx": float(cmd.vx_norm),
+            "vy": float(cmd.vy_norm),
+            "wz": float(cmd.wz_norm),
+            "fallback_reason": reason,
+            "edge_loss_elapsed_s": self.core._loss_elapsed(self.core.ctx.table_loss_since_mono),
+            "keep_dist_tolerance_m": float(self.cfg.control.edge_slide_dist_tolerance_m),
+            "edge_lost_hold_s": float(self.cfg.control.table_loss_hold_s),
+            "fallback_state": str(getattr(self.cfg.control, "edge_slide_fallback_state", "CONTROLLED_APPROACH") or "CONTROLLED_APPROACH"),
+        }
+        self.run_logger.write_jsonl("edge_slide_search", record)
 
     def _flush_state_traces(self, decision) -> None:
         if not self._pending_state_traces:

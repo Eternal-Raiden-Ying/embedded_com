@@ -301,10 +301,28 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         core.ctx.state = State.EDGE_SLIDE_SEARCH
         core.ctx.active_vision_mode = "TRACK_LOCAL"
         core.ctx.state_enter_mono = monotonic_ts() - 1.0
-        core.handle_table_obs(TableEdgeObs(ts=now_ts(), table_found=True, edge_found=True, confidence=0.9))
+        core.handle_table_obs(TableEdgeObs(ts=now_ts(), table_found=True, edge_found=True, confidence=0.9, yaw_err_rad=0.01, dist_err_m=0.02))
         decision = core.tick()
         self.assertEqual(decision.cmd.mode, "EDGE_SLIDE_SEARCH")
         self.assertAlmostEqual(decision.cmd.vy_norm, 0.04, places=6)
+        self.assertNotEqual(decision.cmd.vx_norm, 0.0)
+
+    def test_edge_slide_distance_out_of_tolerance_recovers_approach(self) -> None:
+        cfg = OrchestratorConfig()
+        cfg.control.edge_slide_pause_s = 0.0
+        cfg.control.edge_slide_dist_tolerance_m = 0.05
+        core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
+        core.ctx.state = State.EDGE_SLIDE_SEARCH
+        core.ctx.active_vision_mode = "TRACK_LOCAL"
+        core.ctx.state_enter_mono = monotonic_ts() - 1.0
+        core.handle_table_obs(TableEdgeObs(ts=now_ts(), table_found=True, edge_found=True, confidence=0.9, yaw_err_rad=0.01, dist_err_m=0.08))
+        decision = core.tick()
+        self.assertEqual(core.ctx.state, State.EDGE_SLIDE_SEARCH)
+        self.assertEqual(decision.cmd.mode, "EDGE_SLIDE_SEARCH")
+        core.ctx.table_loss_since_mono = monotonic_ts() - float(cfg.control.table_loss_hold_s) - 0.1
+        decision = core.tick()
+        self.assertEqual(core.ctx.state, State.CONTROLLED_APPROACH)
+        self.assertEqual(decision.cmd.mode, "CONTROLLED_APPROACH")
 
     def test_track_local_without_table_edge_holds_with_reason(self) -> None:
         cfg = OrchestratorConfig()
@@ -316,7 +334,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         decision = core.tick()
         self.assertEqual(decision.cmd.mode, "EDGE_SLIDE_SEARCH")
         self.assertEqual(decision.cmd.vy_norm, 0.0)
-        self.assertEqual(decision.control_summary["reason"], "no_table_edge_obs_in_track_local")
+        self.assertIn("edge_obs_missing_hold", decision.control_summary["reason"])
 
 
 if __name__ == "__main__":
