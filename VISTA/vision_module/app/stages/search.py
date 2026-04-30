@@ -4,9 +4,9 @@
 import os
 from typing import Dict, Optional
 
-from ...config.data import ASR_VOCAB_MAP, normalize_class_name
+from ...config.data import normalize_class_name
 from ...ipc.protocol import VisionReq
-from ...utils.detect import compute_target_obs
+from ...utils.detect import compute_target_obs, resolve_target_classes
 from .base import BaseStagePlan, StageContext, StageOutput, StageTickInput, normalize_upper, resolve_stage_summary
 
 
@@ -30,10 +30,18 @@ def _is_edge_follow_target(search_kind: str) -> bool:
 def _target_obs_from_payload(payload: Optional[Dict[str, object]], target: Optional[str]) -> Dict[str, object]:
     base: Dict[str, object] = {
         "found": False,
+        "target_found": False,
         "target": target,
         "boxes_count": 0,
         "best_cls": "n/a",
         "best_conf": 0.0,
+        "matched_cls": None,
+        "matched_conf": None,
+        "matched_bbox": None,
+        "matched_center": None,
+        "matched_area": None,
+        "matched_rank_in_all_boxes": None,
+        "num_target_candidates": 0,
         "reason": "waiting_local_perception",
     }
     source = None
@@ -42,7 +50,8 @@ def _target_obs_from_payload(payload: Optional[Dict[str, object]], target: Optio
     if isinstance(source, dict):
         base.update(source)
     base.setdefault("target", target)
-    base["found"] = bool(base.get("found", False))
+    base["target_found"] = bool(base.get("target_found", base.get("found", False)))
+    base["found"] = bool(base["target_found"])
     return base
 
 
@@ -110,7 +119,8 @@ def _target_obs_from_results(results: Dict[str, object], target: Optional[str]) 
     contract_warnings = list(local.get("contract_warnings") or [])
     target_obs = local.get("target_obs")
     if isinstance(target_obs, dict):
-        merged = {"found": bool(target_obs.get("found", True)), "target": target}
+        target_found = bool(target_obs.get("target_found", target_obs.get("found", True)))
+        merged = {"found": target_found, "target_found": target_found, "target": target}
         merged.update(target_obs)
         merged.setdefault("target", target)
         if contract_error:
@@ -124,10 +134,18 @@ def _target_obs_from_results(results: Dict[str, object], target: Optional[str]) 
     rgb_shape = local.get("rgb_shape")
     weak_payload = {
         "found": False,
+        "target_found": False,
         "target": target,
         "boxes_count": int(local.get("box_count", 0) or 0),
         "best_cls": "n/a",
         "best_conf": 0.0,
+        "matched_cls": None,
+        "matched_conf": None,
+        "matched_bbox": None,
+        "matched_center": None,
+        "matched_area": None,
+        "matched_rank_in_all_boxes": None,
+        "num_target_candidates": 0,
     }
     if not local:
         weak_payload["reason"] = "no_local_perception"
@@ -135,13 +153,19 @@ def _target_obs_from_results(results: Dict[str, object], target: Optional[str]) 
         weak_payload["reason"] = "rgb_unavailable"
     elif not bool(local.get("has_infer", False)):
         weak_payload["reason"] = "predictor_not_ready"
-    normalized_target = normalize_class_name(target)
-    valid_names = set(ASR_VOCAB_MAP.get(normalized_target, set()))
+    valid_names = resolve_target_classes(target, class_names=class_names)
     available_names = [str(name) for name in class_names] if isinstance(class_names, (list, tuple)) else []
+    if available_names:
+        weak_payload["all_candidate_classes"] = available_names[:32]
+    if not valid_names:
+        weak_payload["target_unmapped"] = True
+        weak_payload["reason"] = "target_unmapped"
+        contract_warnings.append(f"target_unmapped target={target}")
     if valid_names and available_names:
         normalized_available = {normalize_class_name(name) for name in available_names}
         if not (valid_names & normalized_available):
             weak_payload["class_not_supported"] = True
+            weak_payload["target_unmapped"] = True
             weak_payload["available_classes"] = available_names[:32]
             contract_warnings.append(
                 f"class_not_supported target={target} available={','.join(available_names[:16])}"
@@ -166,6 +190,8 @@ def _target_obs_from_results(results: Dict[str, object], target: Optional[str]) 
         weak_payload["best_conf"] = float(best_conf)
         if not boxes:
             weak_payload.setdefault("reason", "no_boxes")
+        elif not weak_payload.get("reason"):
+            weak_payload["reason"] = "no_target_candidate"
     if contract_error:
         weak_payload["contract_error"] = contract_error
     if contract_warnings:
@@ -179,9 +205,10 @@ def _target_obs_from_results(results: Dict[str, object], target: Optional[str]) 
         return weak_payload
     if obs is None:
         return weak_payload if (isinstance(boxes, list) or not contract_ok or contract_error or contract_warnings) else None
-    payload = {"found": True, "target": target}
+    payload = {"found": True, "target_found": True, "target": target}
     payload.update(obs)
-    payload.update({k: v for k, v in weak_payload.items() if k in {"boxes_count", "best_cls", "best_conf"}})
+    payload.update({k: v for k, v in weak_payload.items() if k in {"boxes_count"}})
+    payload["found"] = bool(payload.get("target_found", payload.get("found", True)))
     try:
         if payload.get("bbox") and rgb_shape:
             h = float(rgb_shape[0])

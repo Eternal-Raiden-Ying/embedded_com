@@ -62,6 +62,51 @@ class DetectClassVocabularyTest(unittest.TestCase):
         self.assertEqual(obs["target"], "cup")
         self.assertEqual(obs["bbox"], [20, 30, 180, 260])
 
+    def test_compute_target_obs_matches_target_not_top1_box(self):
+        boxes = [
+            [10.0, 20.0, 220.0, 260.0, 0.92, 0.0],
+            [250.0, 240.0, 360.0, 420.0, 0.78, 1.0],
+            [380.0, 120.0, 520.0, 300.0, 0.60, 2.0],
+        ]
+        obs = compute_target_obs(
+            frame_shape=(640, 640, 3),
+            target="apple",
+            det_pred=boxes,
+            class_names=("keyboard", "apple", "mouse"),
+        )
+        self.assertIsNotNone(obs)
+        self.assertTrue(obs["target_found"])
+        self.assertEqual(obs["matched_cls"], "apple")
+        self.assertAlmostEqual(obs["matched_conf"], 0.78)
+        self.assertEqual(obs["matched_rank_in_all_boxes"], 2)
+        self.assertEqual(obs["num_target_candidates"], 1)
+        self.assertEqual(obs["best_cls"], "keyboard")
+        self.assertAlmostEqual(obs["best_conf"], 0.92)
+
+    def test_search_target_obs_reports_best_when_target_absent(self):
+        payload = {
+            "local_perception": {
+                "has_infer": True,
+                "contract_ok": True,
+                "rgb_shape": [640, 640, 3],
+                "class_names": ["keyboard", "apple", "mouse"],
+                "box_count": 2,
+                "infer_boxes": [
+                    [10, 20, 220, 260, 0.92, 0],
+                    [380, 120, 520, 300, 0.60, 2],
+                ],
+            }
+        }
+        obs = search_target_obs_from_results(payload, "apple")
+        self.assertIsInstance(obs, dict)
+        self.assertFalse(obs["found"])
+        self.assertFalse(obs["target_found"])
+        self.assertEqual(obs["best_cls"], "keyboard")
+        self.assertAlmostEqual(obs["best_conf"], 0.92)
+        self.assertIsNone(obs["matched_cls"])
+        self.assertEqual(obs["num_target_candidates"], 0)
+        self.assertEqual(obs["reason"], "no_target_candidate")
+
     def test_search_target_obs_warns_when_class_name_not_supported(self):
         payload = {
             "local_perception": {

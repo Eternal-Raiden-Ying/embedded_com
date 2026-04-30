@@ -78,13 +78,15 @@ class PreviewManager:
         )
 
     def _target_summary_line(self, status: Dict[str, Any], target_obs: Dict[str, Any]) -> str:
-        found = bool(target_obs.get("found", False))
+        found = bool(target_obs.get("target_found", target_obs.get("found", False)))
         conf = float(target_obs.get("confidence", 0.0) or 0.0)
         target = str(target_obs.get("target") or status.get("target") or "target").strip()
         mode = str(status.get("mode") or target_obs.get("mode") or "IDLE").upper()
         boxes = int(target_obs.get("boxes_count", target_obs.get("box_count", 0)) or 0)
         best_cls = str(target_obs.get("best_cls") or target_obs.get("best_class") or "n/a").strip() or "n/a"
         best_conf = float(target_obs.get("best_conf", target_obs.get("best_confidence", 0.0)) or 0.0)
+        matched_cls = str(target_obs.get("matched_cls") or target_obs.get("target_cls") or "n/a").strip() or "n/a"
+        matched_conf = float(target_obs.get("matched_conf", target_obs.get("confidence", 0.0)) or 0.0)
         frame_age = target_obs.get("frame_age_ms")
         infer_age = target_obs.get("infer_age_ms")
         age_part = ""
@@ -97,6 +99,7 @@ class PreviewManager:
             cy = float(target_obs.get("cy_norm", target_obs.get("cy", 0.0)) or 0.0)
             return (
                 f"[VISTA] TARGET mode={mode} target={target[:32]} found=1 boxes={boxes} "
+                f"matched_cls={matched_cls[:32]} matched_conf={matched_conf:.2f} "
                 f"best_cls={best_cls[:32]} best_conf={best_conf:.2f} conf={conf:.2f} cx={cx:.2f} cy={cy:.2f}{age_part}"
             )
         fps = target_obs.get("fps")
@@ -104,7 +107,8 @@ class PreviewManager:
         reason_part = " reason=no_boxes" if boxes <= 0 else ""
         return (
             f"[VISTA] TARGET mode={mode} target={target[:32]} found=0 "
-            f"boxes={boxes} best_cls={best_cls[:32]} best_conf={best_conf:.2f}{fps_part}{age_part}{reason_part}"
+            f"boxes={boxes} matched_cls={matched_cls[:32]} matched_conf={matched_conf:.2f} "
+            f"best_cls={best_cls[:32]} best_conf={best_conf:.2f}{fps_part}{age_part}{reason_part}"
         )
 
     def _target_overlay(self, status: Dict[str, Any], local: Dict[str, Any], target_obs: Dict[str, Any]) -> Dict[str, Any]:
@@ -141,6 +145,8 @@ class PreviewManager:
         out["boxes_count"] = int(local.get("box_count", len(boxes)) or len(boxes))
         out["best_cls"] = best_cls
         out["best_conf"] = float(best_conf)
+        out.setdefault("matched_cls", target_obs.get("matched_cls"))
+        out.setdefault("matched_conf", target_obs.get("matched_conf", target_obs.get("confidence")))
         out["fps"] = self._fps_snapshot()
         return out
 
@@ -290,8 +296,11 @@ class PreviewManager:
             if mode == "TRACK_LOCAL":
                 lines.append("preview_layout=target_rgb")
                 lines.append(
-                    f"target_found={int(bool(target_obs.get('found', False)))} "
-                    f"target_conf={float(target_obs.get('confidence', 0.0) or 0.0):.2f} "
+                    f"target_found={int(bool(target_obs.get('target_found', target_obs.get('found', False))))} "
+                    f"matched_cls={str(target_obs.get('matched_cls') or 'n/a')[:32]} "
+                    f"matched_conf={float(target_obs.get('matched_conf', target_obs.get('confidence', 0.0)) or 0.0):.2f} "
+                    f"best_cls={str(target_obs.get('best_cls') or 'n/a')[:32]} "
+                    f"best_conf={float(target_obs.get('best_conf', 0.0) or 0.0):.2f} "
                     f"boxes_count={int(target_obs.get('boxes_count', local.get('box_count', 0)) or 0)} "
                     f"frame_age_ms={int(round(stale_age * 1000.0))} "
                     f"infer_age_ms={int(round(infer_age * 1000.0)) if infer_age is not None else -1}"

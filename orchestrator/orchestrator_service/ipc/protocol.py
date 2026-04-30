@@ -383,6 +383,15 @@ class TargetObs:
     ts: float
     found: bool
     target: Optional[str] = None
+    target_found: Optional[bool] = None
+    matched_cls: Optional[str] = None
+    matched_conf: Optional[float] = None
+    matched_bbox: Optional[list] = None
+    matched_center: Optional[Dict[str, Any]] = None
+    matched_area: Optional[float] = None
+    matched_rank_in_all_boxes: Optional[int] = None
+    num_target_candidates: Optional[int] = None
+    all_candidate_classes: Optional[list] = None
     confidence: Optional[float] = None
     cx_norm: float = 0.0
     cy_norm: Optional[float] = None
@@ -412,16 +421,31 @@ class TargetObs:
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "TargetObs":
+        matched_center = _pick_optional_dict(payload, "matched_center")
+        cx_value = payload.get("cx_norm", 0.0)
+        cy_value = payload.get("cy_norm", payload.get("cy"))
+        if isinstance(matched_center, dict):
+            cx_value = matched_center.get("cx_norm", cx_value)
+            cy_value = matched_center.get("cy_norm", matched_center.get("y_norm", cy_value))
         return cls(
             ts=_payload_ts(payload),
-            found=bool(payload.get("found", False)),
+            found=bool(payload.get("target_found", payload.get("found", False))),
             target=(str(payload.get("target")).strip() if payload.get("target") is not None else None),
-            confidence=_pick_optional_float(payload, "confidence", "score"),
-            cx_norm=float(payload.get("cx_norm", 0.0)),
-            cy_norm=_pick_optional_float(payload, "cy_norm", "cy"),
-            size_norm=float(payload.get("size_norm", payload.get("area_norm", 0.0))),
+            target_found=_pick_optional_bool(payload, "target_found"),
+            matched_cls=_pick_optional_str(payload, "matched_cls", "target_cls"),
+            matched_conf=_pick_optional_float(payload, "matched_conf", "target_conf"),
+            matched_bbox=payload.get("matched_bbox"),
+            matched_center=matched_center,
+            matched_area=_pick_optional_float(payload, "matched_area"),
+            matched_rank_in_all_boxes=_pick_optional_int(payload, "matched_rank_in_all_boxes"),
+            num_target_candidates=_pick_optional_int(payload, "num_target_candidates"),
+            all_candidate_classes=payload.get("all_candidate_classes"),
+            confidence=_pick_optional_float(payload, "matched_conf", "confidence", "score"),
+            cx_norm=float(cx_value or 0.0),
+            cy_norm=(float(cy_value) if cy_value is not None else None),
+            size_norm=float(payload.get("matched_area", payload.get("size_norm", payload.get("area_norm", 0.0))) or 0.0),
             track_id=_pick_optional_int(payload, "track_id"),
-            bbox=payload.get("bbox"),
+            bbox=payload.get("matched_bbox") or payload.get("bbox"),
             boxes_count=_pick_optional_int(payload, "boxes_count", "box_count"),
             best_cls=_pick_optional_str(payload, "best_cls", "best_class"),
             best_conf=_pick_optional_float(payload, "best_conf", "best_confidence"),

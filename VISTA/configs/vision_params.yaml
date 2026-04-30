@@ -55,6 +55,13 @@ model:
     iou_thres: 0.15
     backend: qnn
 
+target_detection:
+  target_min_conf: 0.25
+  min_bbox_area: 0.001
+  use_roi_filter: false
+  prefer_center_region: false
+  class_alias_file: configs/target_aliases.json
+
 preview:
   enabled_default_on_board: true
   draw_boxes: true

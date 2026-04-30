@@ -379,7 +379,11 @@ class OrchestratorCore:
             "lost_ms": self._transition_lost_ms(old_state),
             "target_found": bool(target_obs.found) if target_obs is not None else None,
             "target_conf": self._float_or_none(target_obs.confidence if target_obs is not None else None),
-            "target_cls": (target_obs.best_cls or target_obs.target if target_obs is not None else None),
+            "target_cls": (target_obs.matched_cls or target_obs.target if target_obs is not None else None),
+            "matched_cls": (target_obs.matched_cls if target_obs is not None else None),
+            "matched_conf": self._float_or_none(target_obs.matched_conf if target_obs is not None else None),
+            "best_cls": (target_obs.best_cls if target_obs is not None else None),
+            "best_conf": self._float_or_none(target_obs.best_conf if target_obs is not None else None),
             "target_center": self._target_center(target_obs),
             "target_stable_ms": self._frames_to_ms(self.ctx.target_found_frames or self.ctx.target_lock_frames),
             "car_mode": car_state.mode if car_state is not None else None,
@@ -563,7 +567,7 @@ class OrchestratorCore:
             and target_obs.found
             and self._target_quality_ok(target_obs, self.cfg.target_confirm_conf_th)
         ):
-            self._transition(State.TARGET_CONFIRM, "target_found")
+            self._transition(State.TARGET_CONFIRM, self._target_found_reason(target_obs))
             return self.controller.stop_cmd("TARGET_CONFIRM")
         if self._state_elapsed() >= float(self.cfg.target_search_timeout_s):
             self.ctx.last_fail_reason = "当前桌边未找到目标"
@@ -1052,19 +1056,10 @@ class OrchestratorCore:
         return str(obs.target).strip() == str(self.ctx.active_target).strip()
 
     def _target_cls_matches_active(self, obs: TargetObs) -> bool:
-        if not self.ctx.active_target:
-            return True
-        active = str(self.ctx.active_target).strip().lower()
-        best_cls = str(obs.best_cls or "").strip().lower()
-        if best_cls:
-            return best_cls == active
-        target = str(obs.target or "").strip().lower()
-        if target:
-            return target == active
-        return True
+        return self._target_matches_active(obs)
 
     def _target_conf_value(self, obs: TargetObs) -> Optional[float]:
-        value = obs.confidence if obs.confidence is not None else obs.best_conf
+        value = obs.matched_conf if obs.matched_conf is not None else obs.confidence
         if value is None:
             return None
         try:
@@ -1072,7 +1067,16 @@ class OrchestratorCore:
         except Exception:
             return None
 
+    def _target_found_reason(self, obs: TargetObs) -> str:
+        matched_cls = str(obs.matched_cls or obs.target or "").strip() or "n/a"
+        conf = self._target_conf_value(obs)
+        if conf is None:
+            return f"target_found matched_cls={matched_cls} matched_conf=n/a"
+        return f"target_found matched_cls={matched_cls} matched_conf={float(conf):.3f}"
+
     def _target_quality_ok(self, obs: TargetObs, conf_th: float) -> bool:
+        if not bool(obs.found):
+            return False
         if not self._target_cls_matches_active(obs):
             return False
         if not self._target_matches_active(obs):

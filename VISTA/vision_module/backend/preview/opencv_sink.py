@@ -588,8 +588,9 @@ class OpenCVPreviewSink(PreviewSink):
             ("TARGET", [
                 f"target={target_name}",
                 f"has_target_obs={bool(target_obs)}",
-                f"target_found={self._boolish(target_obs.get('found'))} conf={self._fmt(target_obs.get('confidence'))}",
+                f"target_found={self._boolish(target_obs.get('target_found', target_obs.get('found')))} conf={self._fmt(target_obs.get('confidence'))}",
                 f"boxes_count={target_obs.get('boxes_count', local.get('box_count', 0))}",
+                f"matched_cls={target_obs.get('matched_cls', 'n/a')} matched_conf={self._fmt(target_obs.get('matched_conf'))}",
                 f"best_cls={target_obs.get('best_cls', 'n/a')} best_conf={self._fmt(target_obs.get('best_conf'))}",
                 f"frame_age_ms={int(frame_age * 1000.0)} infer_age_ms={int(float(target_obs.get('infer_age_ms', -1) or -1))}",
                 f"predictor={predictor}",

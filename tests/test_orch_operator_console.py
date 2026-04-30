@@ -53,6 +53,7 @@ def _service(lines, mode="operator"):
     svc._uart_lowfreq_last_payload = None
     svc._last_target_obs_console_payload = {}
     svc._last_target_search_req_console_key = ""
+    svc._pending_state_traces = []
     svc._last_uart_tx_ts = 0.0
     svc.run_logger = _RunLogger()
     svc.core = SimpleNamespace(
@@ -207,8 +208,18 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         svc._emit_target_obs_console(payload)
         self.assertEqual(lines, ["[ORCH] OBS target=apple found=0 boxes=3 mode=TRACK_LOCAL"])
         svc.operator_console._last_ts_by_key.clear()
-        svc._emit_target_obs_console({"type": "target_obs", "target": "apple", "found": True, "confidence": 0.81, "cx_norm": 0.54, "cy_norm": 0.47})
-        self.assertIn("[ORCH] OBS target=apple found=1 conf=0.81 cx=0.54 cy=0.47", lines[-1])
+        svc._emit_target_obs_console({
+            "type": "target_obs",
+            "target": "apple",
+            "target_found": True,
+            "matched_cls": "apple",
+            "matched_conf": 0.81,
+            "best_cls": "keyboard",
+            "best_conf": 0.92,
+            "cx_norm": 0.54,
+            "cy_norm": 0.47,
+        })
+        self.assertIn("[ORCH] OBS target=apple found=1 matched_cls=apple matched_conf=0.81 best_cls=keyboard best_conf=0.92 cx=0.54 cy=0.47", lines[-1])
 
     def test_target_obs_keeps_detection_summary_fields(self) -> None:
         obs = TargetObs.from_dict(
@@ -217,6 +228,8 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
                 "target": "apple",
                 "found": False,
                 "boxes_count": 2,
+                "matched_cls": "cup",
+                "matched_conf": 0.55,
                 "best_cls": "cup",
                 "best_conf": 0.67,
                 "cy_norm": 0.44,
@@ -225,6 +238,8 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         )
         payload = obs.to_dict()
         self.assertEqual(payload["boxes_count"], 2)
+        self.assertEqual(payload["matched_cls"], "cup")
+        self.assertAlmostEqual(payload["matched_conf"], 0.55)
         self.assertEqual(payload["best_cls"], "cup")
         self.assertAlmostEqual(payload["best_conf"], 0.67)
         self.assertAlmostEqual(payload["cy_norm"], 0.44)
@@ -269,6 +284,18 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         svc._on_state_transition("EDGE_SLIDE_SEARCH", "TARGET_CONFIRM", "检测到目标候选，开始确认")
         self.assertEqual(lines, ["[ORCH] STATE EDGE_SLIDE_SEARCH -> TARGET_CONFIRM reason=target_found"])
 
+    def test_state_trace_preserves_matched_target_reason(self) -> None:
+        lines = []
+        svc = _service(lines, mode="operator")
+        svc.core.last_transition_snapshot = {
+            "event": "state_transition",
+            "previous_state": "EDGE_SLIDE_SEARCH",
+            "next_state": "TARGET_CONFIRM",
+            "reason": "",
+        }
+        svc._on_state_transition("EDGE_SLIDE_SEARCH", "TARGET_CONFIRM", "target_found matched_cls=apple matched_conf=0.780")
+        self.assertEqual(svc._pending_state_traces[-1]["reason"], "target_found matched_cls=apple matched_conf=0.780")
+
     def test_target_search_req_summary_is_compact(self) -> None:
         lines = []
         svc = _service(lines, mode="operator")
@@ -296,7 +323,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         self.assertEqual(core.ctx.state, State.TARGET_CONFIRM)
         self.assertEqual(decision.cmd.mode, "TARGET_CONFIRM")
 
-    def test_edge_slide_ignores_wrong_target_class_candidate(self) -> None:
+    def test_edge_slide_accepts_matched_target_even_when_best_cls_differs(self) -> None:
         cfg = OrchestratorConfig()
         cfg.control.edge_slide_pause_s = 0.0
         cfg.control.target_confirm_conf_th = 0.65
@@ -306,10 +333,25 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         core.ctx.task_start_wall_ts = 1.0
         core.ctx.state_enter_mono = monotonic_ts() - 1.0
         core.handle_table_obs(TableEdgeObs(ts=now_ts(), table_found=True, edge_found=True, confidence=0.9, yaw_err_rad=0.01, dist_err_m=0.02))
-        core.handle_target_obs(TargetObs(ts=now_ts(), found=True, target="apple", best_cls="keyboard", confidence=0.92, cx_norm=0.54))
+        core.handle_target_obs(
+            TargetObs(
+                ts=now_ts(),
+                found=True,
+                target_found=True,
+                target="apple",
+                matched_cls="apple",
+                matched_conf=0.78,
+                best_cls="keyboard",
+                best_conf=0.92,
+                confidence=0.78,
+                cx_norm=0.54,
+            )
+        )
         decision = core.tick()
-        self.assertEqual(core.ctx.state, State.EDGE_SLIDE_SEARCH)
-        self.assertEqual(decision.cmd.mode, "EDGE_SLIDE_SEARCH")
+        self.assertEqual(core.ctx.state, State.TARGET_CONFIRM)
+        self.assertEqual(decision.cmd.mode, "TARGET_CONFIRM")
+        self.assertIn("matched_cls=apple", core.ctx.last_enter_reason)
+        self.assertIn("matched_conf=0.780", core.ctx.last_enter_reason)
 
     def test_target_confirm_requires_configured_confidence(self) -> None:
         cfg = OrchestratorConfig()
@@ -325,7 +367,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         self.assertEqual(core.ctx.state, State.EDGE_SLIDE_SEARCH)
         self.assertEqual(decision.cmd.mode, "TARGET_CONFIRM")
 
-    def test_target_locked_rejects_wrong_class_before_freeze(self) -> None:
+    def test_target_locked_accepts_matched_target_even_when_best_cls_differs(self) -> None:
         cfg = OrchestratorConfig()
         cfg.control.target_lock_conf_th = 0.70
         cfg.control.target_confirm_lost_frames = 1
@@ -333,10 +375,23 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         core.ctx.state = State.TARGET_LOCKED
         core.ctx.active_target = "apple"
         core.ctx.task_start_wall_ts = 1.0
-        core.handle_target_obs(TargetObs(ts=now_ts(), found=True, target="apple", best_cls="mouse", confidence=0.95, cx_norm=0.54))
+        core.handle_target_obs(
+            TargetObs(
+                ts=now_ts(),
+                found=True,
+                target_found=True,
+                target="apple",
+                matched_cls="apple",
+                matched_conf=0.81,
+                best_cls="mouse",
+                best_conf=0.95,
+                confidence=0.81,
+                cx_norm=0.54,
+            )
+        )
         decision = core.tick()
-        self.assertEqual(core.ctx.state, State.EDGE_SLIDE_SEARCH)
-        self.assertEqual(decision.cmd.mode, "EDGE_SLIDE_SEARCH")
+        self.assertEqual(core.ctx.state, State.TARGET_LOCKED)
+        self.assertEqual(decision.cmd.mode, "TARGET_LOCKED")
 
     def test_edge_slide_config_nonzero_outputs_nonzero_vy(self) -> None:
         cfg = OrchestratorConfig()

@@ -1,0 +1,14 @@
+{
+  "cup": ["cup"],
+  "bottle": ["bottle", "cup"],
+  "water bottle": ["bottle"],
+  "\u6c34\u74f6": ["bottle"],
+  "\u74f6\u5b50": ["bottle"],
+  "phone": ["cell phone"],
+  "\u624b\u673a": ["cell phone"],
+  "remote": ["remote"],
+  "apple": ["apple"],
+  "banana": ["banana"],
+  "book": ["book"],
+  "mouse": ["mouse"]
+}

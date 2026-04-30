@@ -127,11 +127,16 @@ class OrchestratorService(BaseModule):
 
     def _target_obs_console_line(self, payload: Dict[str, Any]) -> str:
         target = str(payload.get("target") or self.core.ctx.active_target or "").strip() or "target"
-        found = bool(payload.get("found", False))
+        found = bool(payload.get("target_found", payload.get("found", False)))
+        matched_cls = str(payload.get("matched_cls") or payload.get("target_cls") or "").strip() or "n/a"
+        matched_conf = payload.get("matched_conf", payload.get("confidence", payload.get("score")))
+        best_cls = str(payload.get("best_cls") or payload.get("best_class") or "").strip() or "n/a"
+        best_conf = payload.get("best_conf", payload.get("best_confidence"))
         if found:
             return (
                 f"[ORCH] OBS target={target} found=1 "
-                f"conf={self._fmt_float(payload.get('confidence', payload.get('score')), 2, signed=False)} "
+                f"matched_cls={matched_cls} matched_conf={self._fmt_float(matched_conf, 2, signed=False)} "
+                f"best_cls={best_cls} best_conf={self._fmt_float(best_conf, 2, signed=False)} "
                 f"cx={self._fmt_float(payload.get('cx_norm', payload.get('cx')), 2, signed=False)} "
                 f"cy={self._fmt_float(payload.get('cy_norm', payload.get('cy')), 2, signed=False)}"
             )
@@ -229,7 +234,7 @@ class OrchestratorService(BaseModule):
         reason = str(reason or "state_transition").strip() or "state_transition"
         if old_state == "EDGE_SLIDE_SEARCH" and new_state in {"LEAVE_EDGE", "NEXT_TABLE"} and "未找到目标" in reason:
             reason = f"target_not_found timeout_s={float(self.cfg.control.target_search_timeout_s):.1f}"
-        if old_state == "EDGE_SLIDE_SEARCH" and new_state == "TARGET_CONFIRM":
+        if old_state == "EDGE_SLIDE_SEARCH" and new_state == "TARGET_CONFIRM" and "matched_cls=" not in reason:
             reason = "target_found"
         trace = dict(getattr(self.core, "last_transition_snapshot", {}) or {})
         if trace:
@@ -1204,15 +1209,22 @@ class OrchestratorService(BaseModule):
             table_obs = self.core.ctx.last_table_obs
             summary["target_found"] = bool(getattr(target_obs, "found", False)) if target_obs is not None else False
             summary["target_conf"] = (
-                getattr(target_obs, "confidence", None)
-                if target_obs is not None
-                else None
+                getattr(target_obs, "matched_conf", None)
+                if target_obs is not None and getattr(target_obs, "matched_conf", None) is not None
+                else (getattr(target_obs, "confidence", None) if target_obs is not None else None)
             )
             summary["matched_cls"] = (
-                getattr(target_obs, "best_cls", None) or getattr(target_obs, "target", None)
+                getattr(target_obs, "matched_cls", None) or getattr(target_obs, "target", None)
                 if target_obs is not None
                 else None
             )
+            summary["matched_conf"] = (
+                getattr(target_obs, "matched_conf", None)
+                if target_obs is not None
+                else None
+            )
+            summary["best_cls"] = getattr(target_obs, "best_cls", None) if target_obs is not None else None
+            summary["best_conf"] = getattr(target_obs, "best_conf", None) if target_obs is not None else None
             summary["edge_obs_age_ms"] = block.get("table_edge_obs_age_ms")
             summary["edge_obs_is_stale"] = bool(block.get("edge_obs_is_stale", False))
             summary["edge_obs_frame_id"] = block.get("table_edge_obs_frame_id")
@@ -1257,8 +1269,12 @@ class OrchestratorService(BaseModule):
             boxes = obs.get("boxes_count", obs.get("box_count", 0))
             if isinstance(boxes, list):
                 boxes = len(boxes)
-            found = bool(obs.get("found", False))
+            found = bool(obs.get("target_found", obs.get("found", False)))
             target_conf = summary.get("target_conf", obs.get("confidence", obs.get("best_conf")))
+            matched_cls = summary.get("matched_cls", obs.get("matched_cls", "n/a"))
+            matched_conf = summary.get("matched_conf", obs.get("matched_conf", target_conf))
+            best_cls = summary.get("best_cls", obs.get("best_cls", "n/a"))
+            best_conf = summary.get("best_conf", obs.get("best_conf"))
             search_note = "target_locked" if found else "searching"
             edge_visible = bool(summary.get("edge_found", False))
             return (
@@ -1268,7 +1284,8 @@ class OrchestratorService(BaseModule):
                 f"dist={self._fmt_float(summary.get('dist_err_m'))} "
                 f"age={self._fmt_float(summary.get('edge_obs_age_ms'), 0, signed=False)}ms "
                 f"stale={int(bool(summary.get('edge_obs_is_stale')))} "
-                f"target_conf={self._fmt_float(target_conf, 2, signed=False)} "
+                f"matched_cls={matched_cls or 'n/a'} matched_conf={self._fmt_float(matched_conf, 2, signed=False)} "
+                f"best_cls={best_cls or 'n/a'} best_conf={self._fmt_float(best_conf, 2, signed=False)} "
                 f"cmd vx={self._fmt_float(cmd.get('vx'))} vy={self._fmt_float(cmd.get('vy'))} wz={self._fmt_float(cmd.get('wz'))} "
                 f"reason={reason}"
             )
@@ -1376,7 +1393,7 @@ class OrchestratorService(BaseModule):
         edge_age_ms = self.core._table_obs_age_ms(edge_obs)
         edge_is_stale = self.core._edge_obs_is_stale(edge_obs)
         matched_cls = (
-            getattr(target_obs, "best_cls", None) or getattr(target_obs, "target", None)
+            getattr(target_obs, "matched_cls", None) or getattr(target_obs, "target", None)
             if target_obs is not None
             else None
         )
@@ -1397,12 +1414,19 @@ class OrchestratorService(BaseModule):
             "edge_obs_source_mode": getattr(edge_obs, "source_mode", None) if edge_obs is not None else None,
             "target_found": bool(getattr(target_obs, "found", False)) if target_obs is not None else False,
             "target_conf": (
-                getattr(target_obs, "confidence", None)
-                if target_obs is not None and getattr(target_obs, "confidence", None) is not None
-                else (getattr(target_obs, "best_conf", None) if target_obs is not None else None)
+                getattr(target_obs, "matched_conf", None)
+                if target_obs is not None and getattr(target_obs, "matched_conf", None) is not None
+                else (getattr(target_obs, "confidence", None) if target_obs is not None and getattr(target_obs, "confidence", None) is not None else None)
+            ),
+            "matched_conf": (
+                getattr(target_obs, "matched_conf", None)
+                if target_obs is not None
+                else None
             ),
             "matched_cls": matched_cls,
             "target_cls": matched_cls,
+            "best_cls": getattr(target_obs, "best_cls", None) if target_obs is not None else None,
+            "best_conf": getattr(target_obs, "best_conf", None) if target_obs is not None else None,
             "vx": float(cmd.vx_norm),
             "vy": float(cmd.vy_norm),
             "wz": float(cmd.wz_norm),
@@ -1450,6 +1474,10 @@ class OrchestratorService(BaseModule):
             "target_found",
             "target_conf",
             "target_cls",
+            "matched_cls",
+            "matched_conf",
+            "best_cls",
+            "best_conf",
             "target_center",
             "target_stable_ms",
             "car_mode",
