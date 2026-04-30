@@ -66,3 +66,12 @@ preview:
   enabled_default_on_board: true
   draw_boxes: true
   draw_masks: false
+  mode_layouts:
+    IDLE: "rgb_minimal"
+    TABLE_EDGE_PERCEPTION: "rgb_depth_edge"
+    TRACK_LOCAL: "rgb_yolo_edge_overlay"
+    IDLE_HOT: "rgb_hot_preview"
+  debug_four_panel_in_track_local: false
+  show_edge_overlay_in_track_local: true
+  show_age_ms: true
+  clear_overlay_on_mode_switch: true

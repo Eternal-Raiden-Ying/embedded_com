@@ -3,6 +3,7 @@
 
 import os
 import platform
+from typing import Dict
 from pathlib import Path
 
 from .schema import VisionServiceConfig, SingleModelConfig
@@ -157,6 +158,49 @@ _preview_default = "0" if platform.system().lower().startswith("win") else "1"
 CONFIG.debug.preview = os.getenv("VISION_PREVIEW", _preview_default).strip().lower() in {"1", "true", "yes"}
 CONFIG.debug.draw_boxes = os.getenv("VISION_DRAW_BOXES", "1").strip().lower() in {"1", "true", "yes"}
 CONFIG.debug.draw_masks = os.getenv("VISION_DRAW_MASKS", "0").strip().lower() in {"1", "true", "yes"}
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return bool(default)
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _preview_mode_layouts(defaults: Dict[str, str]) -> Dict[str, str]:
+    layouts = {str(k).upper(): str(v).strip() for k, v in dict(defaults or {}).items()}
+    raw = os.getenv("VISION_PREVIEW_MODE_LAYOUTS", "").strip()
+    if raw:
+        for item in raw.replace(";", ",").split(","):
+            if ":" not in item:
+                continue
+            mode, layout = item.split(":", 1)
+            mode = mode.strip().upper()
+            layout = layout.strip()
+            if mode and layout:
+                layouts[mode] = layout
+    for mode in list(layouts):
+        env_key = f"VISION_PREVIEW_LAYOUT_{mode}"
+        value = os.getenv(env_key)
+        if value is not None and value.strip():
+            layouts[mode] = value.strip()
+    return layouts
+
+
+CONFIG.preview.mode_layouts = _preview_mode_layouts(CONFIG.preview.mode_layouts)
+CONFIG.preview.debug_four_panel_in_track_local = _env_bool(
+    "VISION_PREVIEW_DEBUG_FOUR_PANEL_IN_TRACK_LOCAL",
+    CONFIG.preview.debug_four_panel_in_track_local,
+)
+CONFIG.preview.show_edge_overlay_in_track_local = _env_bool(
+    "VISION_PREVIEW_SHOW_EDGE_OVERLAY_IN_TRACK_LOCAL",
+    CONFIG.preview.show_edge_overlay_in_track_local,
+)
+CONFIG.preview.show_age_ms = _env_bool("VISION_PREVIEW_SHOW_AGE_MS", CONFIG.preview.show_age_ms)
+CONFIG.preview.clear_overlay_on_mode_switch = _env_bool(
+    "VISION_PREVIEW_CLEAR_OVERLAY_ON_MODE_SWITCH",
+    CONFIG.preview.clear_overlay_on_mode_switch,
+)
 
 # orchestrator -> vision
 CONFIG.req_in.transport = os.getenv("VISION_REQ_TRANSPORT", "tcp").strip() or "tcp"

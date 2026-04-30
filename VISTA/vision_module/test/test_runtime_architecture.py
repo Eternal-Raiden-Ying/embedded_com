@@ -929,7 +929,79 @@ class PreviewBehaviorTest(unittest.TestCase):
         metadata = sink.frames[-1].overlay.metadata
         self.assertEqual(metadata["source_cameras"], ["rgb"])
         self.assertEqual(metadata["table_edge_obs"], {})
-        self.assertEqual(metadata["preview_layout"], "target_rgb")
+        self.assertEqual(metadata["preview_layout"], "rgb_yolo_edge_overlay")
+
+    def test_preview_mode_switch_logs_layout_and_updates_sink_without_rebuild(self):
+        class LayoutSink(PreviewSink):
+            sink_name = "layout"
+
+            def __init__(self):
+                self.layouts = []
+                self.open_count = 0
+                self.close_count = 0
+
+            def open(self) -> None:
+                self.open_count += 1
+
+            def render(self, frame: PreviewFrame) -> bool:
+                return True
+
+            def close(self) -> None:
+                self.close_count += 1
+
+            def set_layout(self, layout: str, reason: str = "") -> None:
+                self.layouts.append((layout, reason))
+
+        lines = []
+        console = OperatorConsole(mode="operator", default_interval_s=0.0, sink=lines.append)
+        sink = LayoutSink()
+        manager = PreviewManager(sink=sink, logger=None, operator_console=console)
+        metadata = {
+            "mode_layouts": {
+                "TABLE_EDGE_PERCEPTION": "rgb_depth_edge",
+                "TRACK_LOCAL": "rgb_yolo_edge_overlay",
+                "IDLE_HOT": "rgb_hot_preview",
+            },
+            "clear_overlay_on_mode_switch": True,
+        }
+        manager.configure_preview_mode("TABLE_EDGE_PERCEPTION", metadata=metadata, reason="unit")
+        manager.configure_preview_mode("TRACK_LOCAL", metadata=metadata, reason="unit")
+        manager.configure_preview_mode("TRACK_LOCAL", metadata=metadata, reason="target_confirm")
+
+        self.assertIn(("rgb_depth_edge", "unit"), sink.layouts)
+        self.assertIn(("rgb_yolo_edge_overlay", "unit"), sink.layouts)
+        self.assertEqual(sink.open_count, 0)
+        self.assertEqual(sink.close_count, 0)
+        joined = "\n".join(lines)
+        self.assertIn("old_mode=TABLE_EDGE_PERCEPTION new_mode=TRACK_LOCAL", joined)
+        self.assertIn("old_layout=rgb_depth_edge new_layout=rgb_yolo_edge_overlay", joined)
+
+    def test_preview_unsupported_layout_falls_back_to_rgb_minimal(self):
+        class LayoutSink(PreviewSink):
+            sink_name = "layout"
+
+            def __init__(self):
+                self.layouts = []
+
+            def open(self) -> None:
+                return None
+
+            def render(self, frame: PreviewFrame) -> bool:
+                return True
+
+            def close(self) -> None:
+                return None
+
+            def set_layout(self, layout: str, reason: str = "") -> None:
+                self.layouts.append(layout)
+
+        lines = []
+        console = OperatorConsole(mode="operator", default_interval_s=0.0, sink=lines.append)
+        sink = LayoutSink()
+        manager = PreviewManager(sink=sink, logger=None, operator_console=console)
+        manager.configure_preview_mode("TRACK_LOCAL", metadata={"layout": "unknown_panel"}, reason="unit")
+        self.assertEqual(sink.layouts[-1], "rgb_minimal")
+        self.assertTrue(any("layout_unsupported" in line for line in lines))
 
     def test_track_local_target_summary_found_zero_with_boxes(self):
         manager = PreviewManager(sink=self._ExitSink(), logger=None)

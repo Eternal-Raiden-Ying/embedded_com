@@ -40,6 +40,7 @@ class OpenCVPreviewSink(PreviewSink):
         self.show_rgb = self._env_bool("VISTA_PREVIEW_RGB_PANEL", self._env_bool("VISTA_PREVIEW_RGB", True))
         self.show_depth = self._env_bool("VISTA_PREVIEW_DEPTH", True)
         self.show_edge = self._env_bool("VISTA_PREVIEW_EDGE", True)
+        self._supported_layouts = {"rgb_minimal", "rgb_depth_edge", "rgb_yolo_edge_overlay", "rgb_hot_preview"}
         self._opened = False
         self._last_frame_ts = 0.0
         self._last_render_ts = 0.0
@@ -76,6 +77,11 @@ class OpenCVPreviewSink(PreviewSink):
             cv2.namedWindow(self.window_name)
         self._opened = True
 
+    def set_layout(self, layout: str, reason: str = "") -> None:
+        """Switch layout without replacing or rebuilding the OpenCV window."""
+        value = str(layout or "").strip() or "rgb_minimal"
+        self.layout = value if value in self._supported_layouts else "rgb_minimal"
+
     def render(self, frame: PreviewFrame) -> bool:
         """Render one frame bundle and return False when the user asks to exit."""
         if not self._opened:
@@ -86,23 +92,28 @@ class OpenCVPreviewSink(PreviewSink):
         mode = str(dict(metadata.get("runtime_status") or {}).get("mode") or frame.mode or "").upper()
         table_edge = metadata.get("table_edge_obs") or {}
         target_obs = metadata.get("target_obs") or {}
+        layout = str(metadata.get("preview_layout") or self.layout or "rgb_minimal").strip()
+        if layout not in self._supported_layouts:
+            layout = "rgb_minimal"
+        self.layout = layout
 
-        if mode == "TRACK_LOCAL":
+        if layout == "rgb_yolo_edge_overlay":
             rgb_w = max(480, int(self.canvas_w * 0.68))
             info_w = max(280, self.canvas_w - rgb_w)
             target_metadata = dict(metadata)
-            target_metadata["preview_layout"] = "target_rgb"
+            target_metadata["preview_layout"] = layout
             target_metadata["window_id"] = self.window_id
             rgb_panel = self._make_rgb_panel(frames.get("rgb") if frames else frame.image, target_metadata, (rgb_w, self.canvas_h))
-            info_panel = self._make_info_panel(frame, target_metadata, {}, target_obs, (info_w, self.canvas_h))
+            info_table_edge = table_edge if bool(metadata.get("show_edge_overlay_in_track_local", True)) else {}
+            info_panel = self._make_info_panel(frame, target_metadata, info_table_edge, target_obs, (info_w, self.canvas_h))
             canvas = np.hstack([rgb_panel, info_panel])
-        else:
+        elif layout == "rgb_depth_edge":
             panel_w = max(320, self.canvas_w // 2)
             panel_h = max(220, self.canvas_h // 2)
             panel_size = (panel_w, panel_h)
 
             edge_metadata = dict(metadata)
-            edge_metadata["preview_layout"] = "rgb_depth_edge"
+            edge_metadata["preview_layout"] = layout
             edge_metadata["window_id"] = self.window_id
             rgb_panel = self._make_rgb_panel(frames.get("rgb") if frames else frame.image, edge_metadata, panel_size)
             depth_panel = self._make_depth_panel(frames.get("depth") if frames else frame.image, table_edge, panel_size)
@@ -112,6 +123,12 @@ class OpenCVPreviewSink(PreviewSink):
             top = np.hstack([rgb_panel, depth_panel])
             bottom = np.hstack([edge_panel, info_panel])
             canvas = np.vstack([top, bottom])
+        else:
+            minimal_metadata = dict(metadata)
+            minimal_metadata["preview_layout"] = layout
+            minimal_metadata["window_id"] = self.window_id
+            title = "RGB HOT PREVIEW" if layout == "rgb_hot_preview" else "RGB MINIMAL"
+            canvas = self._make_minimal_rgb_panel(frames.get("rgb") if frames else frame.image, minimal_metadata, (self.canvas_w, self.canvas_h), title=title)
 
         if self.canvas_w > 0 and self.canvas_h > 0 and canvas.shape[:2] != (self.canvas_h, self.canvas_w):
             canvas = cv2.resize(canvas, (self.canvas_w, self.canvas_h), interpolation=cv2.INTER_AREA)
@@ -178,11 +195,30 @@ class OpenCVPreviewSink(PreviewSink):
             self._text_block(panel, [f"frame_stale age={float(metadata.get('frame_age_s') or 0.0):.2f}s"], (16, panel.shape[0] - 24), fg=(80, 210, 255))
         return panel
 
+    def _make_minimal_rgb_panel(self, image: Any, metadata: Dict[str, Any], size: Tuple[int, int], title: str = "RGB MINIMAL") -> np.ndarray:
+        if not isinstance(image, np.ndarray) or image.size == 0:
+            return self._blank(size, title, "rgb stale/null")
+        panel, _scale, _offset = self._fit_with_transform(self._to_bgr(image, prefer_rgb=True), size)
+        self._title(panel, title)
+        status = dict(metadata.get("runtime_status") or {})
+        lines = [
+            f"stage={status.get('stage', 'IDLE')}",
+            f"mode={status.get('mode', 'IDLE')}",
+            f"preview_layout={metadata.get('preview_layout') or self.layout}",
+        ]
+        frame_age = metadata.get("frame_age_s")
+        if frame_age is not None and bool(metadata.get("show_age_ms", True)):
+            lines.append(f"frame_age_ms={int(float(frame_age or 0.0) * 1000.0)}")
+        if metadata.get("frame_stale"):
+            lines.append("rgb stale")
+        self._text_block(panel, lines, (16, 64), fg=(230, 235, 240))
+        return panel
+
     def _make_depth_panel(self, image: Any, table_edge: Dict[str, Any], size: Tuple[int, int]) -> np.ndarray:
         if not self.show_depth:
             return self._blank(size, "DEPTH", "depth panel disabled")
         if not isinstance(image, np.ndarray) or image.size == 0:
-            return self._blank(size, "DEPTH", "depth unavailable")
+            return self._blank(size, "DEPTH", "depth stale/null")
         panel, scale, offset = self._fit_with_transform(self._depth_colormap(image), size)
         self._title(panel, "DEPTH COLORMAP")
         for name, color in (
@@ -210,7 +246,7 @@ class OpenCVPreviewSink(PreviewSink):
         if isinstance(depth, np.ndarray) and depth.size:
             panel, scale, offset = self._fit_with_transform(self._edge_debug_image(depth, table_edge), size)
         else:
-            panel = self._blank(size, "EDGE / TOP VIEW", "depth unavailable")
+            panel = self._blank(size, "EDGE / TOP VIEW", "depth stale/null")
             scale, offset = 1.0, (0, 0)
         self._title(panel, "BINARY EDGE DEBUG")
         if not table_edge:
@@ -566,7 +602,7 @@ class OpenCVPreviewSink(PreviewSink):
             ("TASK", [
                 f"stage={status.get('stage', 'IDLE')}",
                 f"mode={status.get('mode', 'IDLE')}",
-                f"preview_layout={metadata.get('preview_layout') or ('target_rgb' if str(status.get('mode') or '').upper() == 'TRACK_LOCAL' else 'rgb_depth_edge')}",
+                f"preview_layout={metadata.get('preview_layout') or self.layout or 'rgb_minimal'}",
                 f"window_id={metadata.get('window_id') or self.window_id}",
                 f"session={status.get('session_id') or ''}",
                 f"epoch={status.get('epoch', 0)}",
@@ -576,6 +612,7 @@ class OpenCVPreviewSink(PreviewSink):
                 f"table_found={self._boolish(table_edge.get('table_found', table_edge.get('found')))} edge_found={self._boolish(table_edge.get('edge_found'))}",
                 f"conf={self._fmt(table_edge.get('confidence'))} yaw={self._fmt(table_edge.get('yaw_err_rad'))}",
                 f"dist={self._fmt(table_edge.get('dist_err_m'))} stable={table_edge.get('stable_count', 'n/a')}",
+                f"age_ms={table_edge.get('age_ms', table_edge.get('edge_obs_age_ms', table_edge.get('frame_age_ms', 'stale/null')))}",
                 f"lock_ready={table_edge.get('lock_ready', 'n/a')}",
             ]),
             ("ROI", [
@@ -598,6 +635,7 @@ class OpenCVPreviewSink(PreviewSink):
             ("PERF", [
                 f"fps={self._fps:.1f} frame_age={frame_age:.2f}s",
                 f"frame_stale={self._boolish(frame_age > 1.0)}",
+                f"depth_status={'ok' if 'depth' in set(source_cameras or []) else 'stale/null'}",
                 f"source_cameras={source_cameras}",
             ]),
         ]

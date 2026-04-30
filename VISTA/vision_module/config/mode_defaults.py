@@ -173,6 +173,35 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
     depth_perception_cameras = _camera_overrides_for(cfg, depth_cameras)
     if "rgb" in depth_cameras:
         depth_perception_cameras["rgb"] = track_local_rgb
+    preview_layout_defaults = {
+        "IDLE": "rgb_minimal",
+        "DEPTH_PERCEPTION": "rgb_depth_edge",
+        "TABLE_EDGE_PERCEPTION": "rgb_depth_edge",
+        "TRACK_LOCAL": "rgb_yolo_edge_overlay",
+        "MICRO_ADJUST": "rgb_minimal",
+        "GRASP_REMOTE": "rgb_depth_edge",
+        "IDLE_HOT": "rgb_hot_preview",
+    }
+    preview_layouts = {
+        str(k).strip().upper(): str(v).strip()
+        for k, v in dict(getattr(getattr(cfg, "preview", None), "mode_layouts", preview_layout_defaults) or preview_layout_defaults).items()
+    }
+
+    def preview_profile(mode: str, *, enabled: bool, sink_name: str = "opencv") -> PreviewProfile:
+        mode_name = str(mode or "IDLE").strip().upper() or "IDLE"
+        preview_cfg = getattr(cfg, "preview", None)
+        return PreviewProfile(
+            enabled=bool(enabled),
+            sink_name=sink_name,
+            metadata={
+                "layout": preview_layouts.get(mode_name, preview_layouts.get("IDLE", "rgb_minimal")),
+                "mode_layouts": dict(preview_layouts),
+                "debug_four_panel_in_track_local": bool(getattr(preview_cfg, "debug_four_panel_in_track_local", False)),
+                "show_edge_overlay_in_track_local": bool(getattr(preview_cfg, "show_edge_overlay_in_track_local", True)),
+                "show_age_ms": bool(getattr(preview_cfg, "show_age_ms", True)),
+                "clear_overlay_on_mode_switch": bool(getattr(preview_cfg, "clear_overlay_on_mode_switch", True)),
+            },
+        )
 
     return {
         "IDLE": ModeProfile(
@@ -181,7 +210,7 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             predictor_enabled=False,
             predictor_model=None,
             remote=_default_remote_profile(enabled=False),
-            preview=PreviewProfile(enabled=False, sink_name="null"),
+            preview=preview_profile("IDLE", enabled=False, sink_name="null"),
             release_cooldown_s=0.0,
             metadata={"contract": {"stage": "IDLE"}},
         ),
@@ -192,7 +221,7 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             predictor_enabled=True,
             predictor_model=active_model,
             remote=_default_remote_profile(enabled=False),
-            preview=PreviewProfile(enabled=True, sink_name="opencv"),
+            preview=preview_profile("TRACK_LOCAL", enabled=True),
             release_cooldown_s=2.0,
             metadata={
                 "contract": {
@@ -211,7 +240,7 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             predictor_enabled=table_bbox_enabled,
             predictor_model=table_model if table_bbox_enabled else None,
             remote=_default_remote_profile(enabled=False),
-            preview=PreviewProfile(enabled=True, sink_name="opencv"),
+            preview=preview_profile("DEPTH_PERCEPTION", enabled=True),
             release_cooldown_s=2.0,
             metadata={
                 "contract": {
@@ -229,7 +258,7 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             predictor_enabled=True,
             predictor_model=active_model,
             remote=_default_remote_profile(enabled=False),
-            preview=PreviewProfile(enabled=True, sink_name="opencv"),
+            preview=preview_profile("TABLE_EDGE_PERCEPTION", enabled=True),
             release_cooldown_s=2.0,
             metadata={
                 "contract": {
@@ -248,7 +277,7 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             predictor_enabled=True,
             predictor_model=active_model,
             remote=_default_remote_profile(enabled=False),
-            preview=PreviewProfile(enabled=True, sink_name="opencv"),
+            preview=preview_profile("MICRO_ADJUST", enabled=True),
             release_cooldown_s=2.0,
             metadata={"contract": {"interaction": "MOVE_HINT"}},
         ),
@@ -259,7 +288,7 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             predictor_enabled=False,
             predictor_model=None,
             remote=_default_remote_profile(enabled=True, require_depth=True),
-            preview=PreviewProfile(enabled=True, sink_name="opencv"),
+            preview=preview_profile("GRASP_REMOTE", enabled=True),
             release_cooldown_s=3.0,
             metadata={
                 "contract": {
@@ -277,7 +306,7 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             predictor_enabled=False,
             predictor_model=None,
             remote=_default_remote_profile(enabled=False),
-            preview=PreviewProfile(enabled=True, sink_name="opencv"),
+            preview=preview_profile("IDLE_HOT", enabled=True),
             release_cooldown_s=5.0,
             metadata={"contract": {"stage": "IDLE_HOT"}},
         ),

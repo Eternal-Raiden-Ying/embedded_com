@@ -50,6 +50,22 @@ class PreviewManager:
         self._last_preview_emit_ts = 0.0
         self._last_render_error_ts = 0.0
         self._stale_warn_s = 1.0
+        self._mode_layouts: Dict[str, str] = {
+            "IDLE": "rgb_minimal",
+            "DEPTH_PERCEPTION": "rgb_depth_edge",
+            "TABLE_EDGE_PERCEPTION": "rgb_depth_edge",
+            "TRACK_LOCAL": "rgb_yolo_edge_overlay",
+            "MICRO_ADJUST": "rgb_minimal",
+            "GRASP_REMOTE": "rgb_depth_edge",
+            "IDLE_HOT": "rgb_hot_preview",
+        }
+        self._supported_layouts = {"rgb_minimal", "rgb_depth_edge", "rgb_yolo_edge_overlay", "rgb_hot_preview"}
+        self._debug_four_panel_in_track_local = False
+        self._show_edge_overlay_in_track_local = True
+        self._show_age_ms = True
+        self._clear_overlay_on_mode_switch = True
+        self._current_mode = "IDLE"
+        self._current_layout = self._mode_layouts["IDLE"]
 
     def _emit_operator(self, key: str, line: str) -> None:
         if self.operator_console is None:
@@ -58,6 +74,92 @@ class PreviewManager:
             self.operator_console.emit_rate_limited(key, line)
         except Exception:
             pass
+
+    def _warn_operator(self, key: str, line: str) -> None:
+        if self.operator_console is None:
+            return
+        try:
+            emitter = getattr(self.operator_console, "emit_error", None)
+            if callable(emitter):
+                emitter(key, line)
+            else:
+                self.operator_console.emit_rate_limited(key, line)
+        except Exception:
+            pass
+
+    def configure_preview_mode(
+        self,
+        mode: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        reason: str = "mode_switch",
+    ) -> None:
+        cfg = dict(metadata or {})
+        layouts = cfg.get("mode_layouts")
+        if isinstance(layouts, dict):
+            self._mode_layouts.update(
+                {
+                    str(key).strip().upper(): str(value).strip()
+                    for key, value in layouts.items()
+                    if str(key).strip() and str(value).strip()
+                }
+            )
+        mode_name = str(mode or "IDLE").strip().upper() or "IDLE"
+        if cfg.get("layout"):
+            self._mode_layouts[mode_name] = str(cfg.get("layout")).strip()
+        self._debug_four_panel_in_track_local = bool(cfg.get("debug_four_panel_in_track_local", self._debug_four_panel_in_track_local))
+        self._show_edge_overlay_in_track_local = bool(cfg.get("show_edge_overlay_in_track_local", self._show_edge_overlay_in_track_local))
+        self._show_age_ms = bool(cfg.get("show_age_ms", self._show_age_ms))
+        self._clear_overlay_on_mode_switch = bool(cfg.get("clear_overlay_on_mode_switch", self._clear_overlay_on_mode_switch))
+
+        old_mode = self._current_mode
+        old_layout = self._current_layout
+        new_layout = self._resolve_layout(mode_name)
+        if mode_name == "TRACK_LOCAL" and self._debug_four_panel_in_track_local:
+            new_layout = "rgb_depth_edge"
+        if new_layout not in self._supported_layouts:
+            self._warn_operator(
+                f"preview:layout_unsupported:{mode_name}:{new_layout}",
+                f"[VISTA] WARN PREVIEW layout_unsupported mode={mode_name} layout={new_layout} fallback=rgb_minimal",
+            )
+            new_layout = "rgb_minimal"
+
+        mode_changed = mode_name != old_mode
+        layout_changed = new_layout != old_layout
+        if mode_changed or layout_changed:
+            if self.logger is not None:
+                self.logger.info(
+                    "preview layout switch | old_mode=%s new_mode=%s old_layout=%s new_layout=%s reason=%s",
+                    old_mode,
+                    mode_name,
+                    old_layout,
+                    new_layout,
+                    reason,
+                )
+            self._emit_operator(
+                f"preview:layout_switch:{old_mode}->{mode_name}:{old_layout}->{new_layout}",
+                (
+                    "[VISTA] PREVIEW_LAYOUT_SWITCH "
+                    f"old_mode={old_mode} new_mode={mode_name} "
+                    f"old_layout={old_layout} new_layout={new_layout} reason={reason}"
+                ),
+            )
+            if self._clear_overlay_on_mode_switch:
+                self._last_source_key = ""
+                self._last_preview_seq = 0
+                self._last_preview_emit_ts = 0.0
+                self._last_frame_seq = 0
+        self._current_mode = mode_name
+        self._current_layout = new_layout
+        setter = getattr(self.sink, "set_layout", None)
+        if callable(setter):
+            try:
+                setter(new_layout, reason=reason)
+            except Exception:
+                pass
+
+    def _resolve_layout(self, mode: str) -> str:
+        mode_name = str(mode or "IDLE").strip().upper() or "IDLE"
+        return str(self._mode_layouts.get(mode_name) or self._mode_layouts.get("IDLE") or "rgb_minimal").strip()
 
     def _table_edge_summary_line(self, status: Dict[str, Any], table_edge: Dict[str, Any]) -> str:
         if format_table_edge_summary is not None:
@@ -239,13 +341,19 @@ class PreviewManager:
             table_edge = dict(scheduler.read_result("table_edge_obs", default={}) or {})
             target_obs = dict(scheduler.read_result("target_obs", default={}) or {})
             mode = str(status.get("mode") or "IDLE").upper()
+            preview_layout = self._resolve_layout(mode)
+            if mode == "TRACK_LOCAL" and self._debug_four_panel_in_track_local:
+                preview_layout = "rgb_depth_edge"
+            if preview_layout not in self._supported_layouts:
+                preview_layout = "rgb_minimal"
             if mode == "TRACK_LOCAL":
                 target_obs = self._target_overlay(status, local, target_obs)
-                target_obs["frame_age_ms"] = int(round(stale_age * 1000.0))
-                if infer_age is not None:
+                if self._show_age_ms:
+                    target_obs["frame_age_ms"] = int(round(stale_age * 1000.0))
+                if infer_age is not None and self._show_age_ms:
                     target_obs["infer_age_ms"] = int(round(infer_age * 1000.0))
             if stale_age >= self._stale_warn_s:
-                self._emit_operator("preview:target_rgb_stale", f"[VISTA] WARN TARGET rgb_frame_stale age={stale_age:.2f}s")
+                self._emit_operator("preview:rgb_stale", f"[VISTA] WARN PREVIEW rgb_frame_stale age={stale_age:.2f}s")
             cameras = sorted(str(k) for k in frames.keys())
             source_key = ",".join(cameras) or "none"
             if source_key != self._last_source_key:
@@ -294,7 +402,7 @@ class PreviewManager:
             if not target_obs:
                 lines.append("target_obs=unavailable")
             if mode == "TRACK_LOCAL":
-                lines.append("preview_layout=target_rgb")
+                lines.append(f"preview_layout={preview_layout}")
                 lines.append(
                     f"target_found={int(bool(target_obs.get('target_found', target_obs.get('found', False))))} "
                     f"matched_cls={str(target_obs.get('matched_cls') or 'n/a')[:32]} "
@@ -302,8 +410,8 @@ class PreviewManager:
                     f"best_cls={str(target_obs.get('best_cls') or 'n/a')[:32]} "
                     f"best_conf={float(target_obs.get('best_conf', 0.0) or 0.0):.2f} "
                     f"boxes_count={int(target_obs.get('boxes_count', local.get('box_count', 0)) or 0)} "
-                    f"frame_age_ms={int(round(stale_age * 1000.0))} "
-                    f"infer_age_ms={int(round(infer_age * 1000.0)) if infer_age is not None else -1}"
+                    f"frame_age_ms={int(round(stale_age * 1000.0)) if self._show_age_ms else -1} "
+                    f"infer_age_ms={int(round(infer_age * 1000.0)) if infer_age is not None and self._show_age_ms else -1}"
                 )
             if stale_age >= self._stale_warn_s:
                 lines.append(f"frame_stale age={stale_age:.2f}s")
@@ -329,7 +437,9 @@ class PreviewManager:
                                 "frame_age_s": stale_age,
                                 "infer_age_s": infer_age,
                                 "target": target_obs.get("target") or status.get("target"),
-                                "preview_layout": "target_rgb" if mode == "TRACK_LOCAL" else "rgb_depth_edge",
+                                "preview_layout": preview_layout,
+                                "show_edge_overlay_in_track_local": bool(self._show_edge_overlay_in_track_local),
+                                "show_age_ms": bool(self._show_age_ms),
                             },
                         ),
                     )
@@ -412,4 +522,7 @@ class PreviewManager:
             "last_frame_generation": int(self._last_frame_generation),
             "last_frame_seq": int(self._last_frame_seq),
             "exit_requested": bool(self._exit_requested),
+            "current_mode": self._current_mode,
+            "current_layout": self._current_layout,
+            "mode_layouts": dict(self._mode_layouts),
         }

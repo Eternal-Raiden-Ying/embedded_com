@@ -319,7 +319,7 @@ class RuntimeSupervisor:
             return OpenCVPreviewSink(window_name=window_name)
         return NullPreviewSink()
 
-    def _configure_preview(self, payload: Dict[str, Any]) -> bool:
+    def _configure_preview(self, payload: Dict[str, Any], mode_name: str = "IDLE") -> bool:
         if self.preview_manager is None:
             return True
         enabled = bool(payload.get("enabled", False))
@@ -336,6 +336,16 @@ class RuntimeSupervisor:
                 self.preview_manager.set_sink(sink)
         except Exception:
             ok = False
+        configurator = getattr(self.preview_manager, "configure_preview_mode", None)
+        if callable(configurator):
+            try:
+                configurator(
+                    str(mode_name or "IDLE").strip().upper() or "IDLE",
+                    metadata=dict(payload.get("metadata") or {}),
+                    reason="mode_switch",
+                )
+            except Exception:
+                ok = False
         if enabled:
             try:
                 self.preview_manager.enable()
@@ -361,7 +371,7 @@ class RuntimeSupervisor:
         ok = self._configure_predictor(dict(capabilities.get("predictor") or {})) and ok
         ok = self._configure_remote(dict(capabilities.get("remote") or {})) and ok
         ok = self._configure_table_edge(dict(capabilities.get("table_edge") or {})) and ok
-        ok = self._configure_preview(dict(capabilities.get("preview") or {})) and ok
+        ok = self._configure_preview(dict(capabilities.get("preview") or {}), mode_name=mode_name) and ok
         self._last_apply_result = {
             "ok": bool(ok),
             "reason": "reconciled" if ok else "apply_failed",

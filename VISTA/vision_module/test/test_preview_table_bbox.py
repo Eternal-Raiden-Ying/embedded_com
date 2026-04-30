@@ -173,7 +173,7 @@ class PreviewTableBboxTest(unittest.TestCase):
             panel = np.zeros((420, 360, 3), dtype=np.uint8)
             sink._draw_status_sections(
                 panel,
-                {"preview_layout": "target_rgb", "window_id": "VISTA App Dashboard#1"},
+                {"preview_layout": "rgb_yolo_edge_overlay", "window_id": "VISTA App Dashboard#1"},
                 {"stage": "SEARCH", "mode": "TRACK_LOCAL", "req_id": "req-test"},
                 {"edge_found": True, "table_found": True, "confidence": 0.8},
                 {"target": "apple", "found": False, "boxes_count": 0},
@@ -187,7 +187,7 @@ class PreviewTableBboxTest(unittest.TestCase):
                 delattr(cv2_obj, "putText")
             else:
                 cv2_obj.putText = old_put_text
-        self.assertIn("preview_layout=target_rgb", calls)
+        self.assertIn("preview_layout=rgb_yolo_edge_overlay", calls)
         self.assertIn("window_id=VISTA App Dashboard#1", calls)
         self.assertIn("mode=TRACK_LOCAL", calls)
 

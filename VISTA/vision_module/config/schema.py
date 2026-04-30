@@ -132,10 +132,28 @@ class DebugConfig:
 
 
 @dataclass
+class PreviewConfig:
+    mode_layouts: Dict[str, str] = field(default_factory=lambda: {
+        "IDLE": "rgb_minimal",
+        "DEPTH_PERCEPTION": "rgb_depth_edge",
+        "TABLE_EDGE_PERCEPTION": "rgb_depth_edge",
+        "TRACK_LOCAL": "rgb_yolo_edge_overlay",
+        "MICRO_ADJUST": "rgb_minimal",
+        "GRASP_REMOTE": "rgb_depth_edge",
+        "IDLE_HOT": "rgb_hot_preview",
+    })
+    debug_four_panel_in_track_local: bool = False
+    show_edge_overlay_in_track_local: bool = True
+    show_age_ms: bool = True
+    clear_overlay_on_mode_switch: bool = True
+
+
+@dataclass
 class VisionServiceConfig:
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     camera: CameraConfig = field(default_factory=CameraConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     debug: DebugConfig = field(default_factory=DebugConfig)
+    preview: PreviewConfig = field(default_factory=PreviewConfig)
     req_in: IPCConfig = field(default_factory=IPCConfig)
     obs_out: IPCConfig = field(default_factory=IPCConfig)
