@@ -262,6 +262,13 @@ class OrchestratorCore:
             "yaw_err_rad": table_obs.yaw_err_rad if table_obs is not None else None,
             "dist_err_m": table_obs.dist_err_m if table_obs is not None else None,
             "target_dist_m": table_obs.target_dist_m if table_obs is not None else None,
+            "table_edge_obs_ts": table_obs.obs_ts if table_obs is not None else None,
+            "table_edge_obs_age_ms": self._table_obs_age_ms(table_obs),
+            "table_edge_obs_frame_id": table_obs.frame_id if table_obs is not None else None,
+            "table_edge_obs_seq": table_obs.seq if table_obs is not None else None,
+            "table_edge_obs_source_mode": table_obs.source_mode if table_obs is not None else None,
+            "edge_obs_is_stale": self._edge_obs_is_stale(table_obs),
+            "edge_follow_stale": self._edge_obs_is_stale(table_obs) if self.ctx.state == State.EDGE_SLIDE_SEARCH else False,
         }
 
     def _transition(self, new_state: State, reason: str):
@@ -366,6 +373,8 @@ class OrchestratorCore:
             "edge_conf": self._float_or_none(table_obs.confidence if table_obs is not None else None),
             "yaw_err": self._float_or_none(table_obs.yaw_err_rad if table_obs is not None else None),
             "dist_err": self._float_or_none(table_obs.dist_err_m if table_obs is not None else None),
+            "edge_obs_age_ms": self._table_obs_age_ms(table_obs),
+            "edge_obs_is_stale": self._edge_obs_is_stale(table_obs),
             "stable_ms": self._transition_stable_ms(old_state),
             "lost_ms": self._transition_lost_ms(old_state),
             "target_found": bool(target_obs.found) if target_obs is not None else None,
@@ -569,6 +578,22 @@ class OrchestratorCore:
         edge_obs = self._fresh_table_obs()
         if edge_obs is None or not self._table_visible(edge_obs):
             return self._handle_edge_slide_edge_loss("edge_obs_missing" if edge_obs is None else "edge_not_visible")
+        if self._edge_obs_is_stale(edge_obs):
+            age_ms = self._table_obs_age_ms(edge_obs)
+            age_text = "unknown" if age_ms is None else f"{age_ms:.0f}"
+            self.ctx.last_fail_reason = f"edge_follow_stale age_ms={age_text}"
+            return self._handle_edge_slide_edge_loss(
+                "edge_follow_stale",
+                fallback_state=self._edge_slide_stale_fallback_state(),
+                use_last_obs_for_fallback=False,
+            )
+        min_edge_conf = float(getattr(self.cfg, "edge_follow_min_edge_conf", 0.0) or 0.0)
+        if float(edge_obs.confidence or 0.0) < min_edge_conf:
+            self.ctx.last_fail_reason = (
+                f"edge_conf_low conf={float(edge_obs.confidence or 0.0):.2f} "
+                f"min={min_edge_conf:.2f}"
+            )
+            return self._handle_edge_slide_edge_loss("edge_conf_low")
         if edge_obs.dist_err_m is None:
             return self._handle_edge_slide_edge_loss("dist_err_missing")
         if abs(float(edge_obs.dist_err_m)) > float(self.cfg.edge_slide_dist_tolerance_m):
@@ -604,19 +629,31 @@ class OrchestratorCore:
             return State.FINAL_LOCK
         return State.CONTROLLED_APPROACH
 
+    def _edge_slide_stale_fallback_state(self) -> State:
+        raw = str(getattr(self.cfg, "edge_follow_stale_fallback_state", "") or "").strip().upper()
+        if raw == State.CONTROLLED_APPROACH.value:
+            return State.CONTROLLED_APPROACH
+        return State.FINAL_LOCK
+
     def _edge_slide_fallback_cmd(self, state: State, edge_obs: Optional[TableEdgeObs]) -> MotionDecision:
         if state == State.FINAL_LOCK:
             return self.controller.final_lock_cmd(edge_obs)
         return self.controller.controlled_approach_cmd(edge_obs)
 
-    def _handle_edge_slide_edge_loss(self, reason: str) -> MotionDecision:
+    def _handle_edge_slide_edge_loss(
+        self,
+        reason: str,
+        fallback_state: Optional[State] = None,
+        use_last_obs_for_fallback: bool = True,
+    ) -> MotionDecision:
         self._start_loss_timer("table_loss_since_mono")
         lost_s = self._loss_elapsed(self.ctx.table_loss_since_mono)
         if lost_s < float(self.cfg.table_loss_hold_s):
             return self.controller.edge_slide_hold_cmd(f"{reason}_hold lost_s={lost_s:.2f}")
-        fallback_state = self._edge_slide_fallback_state()
+        fallback_state = fallback_state or self._edge_slide_fallback_state()
         self._transition(fallback_state, f"{reason} lost_s={lost_s:.2f}")
-        return self._edge_slide_fallback_cmd(fallback_state, self.ctx.last_table_obs)
+        fallback_obs = self.ctx.last_table_obs if use_last_obs_for_fallback else None
+        return self._edge_slide_fallback_cmd(fallback_state, fallback_obs)
 
     def _tick_target_confirm(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
@@ -823,6 +860,32 @@ class OrchestratorCore:
         if obs.session_id and self.ctx.active_session_id and obs.session_id != self.ctx.active_session_id:
             return None
         return obs
+
+    def _table_obs_age_ms(self, obs: Optional[TableEdgeObs]) -> Optional[float]:
+        if obs is None:
+            return None
+        age_ms: Optional[float] = None
+        obs_ts = obs.obs_ts if obs.obs_ts is not None else obs.ts
+        try:
+            age_ms = max(0.0, (time.time() - float(obs_ts)) * 1000.0)
+        except Exception:
+            age_ms = None
+        if obs.age_ms is not None:
+            try:
+                age_ms = max(float(age_ms or 0.0), float(obs.age_ms))
+            except Exception:
+                pass
+        return age_ms
+
+    def _edge_obs_is_stale(self, obs: Optional[TableEdgeObs]) -> bool:
+        if obs is None:
+            return True
+        if bool(getattr(obs, "is_stale", False)):
+            return True
+        age_ms = self._table_obs_age_ms(obs)
+        if age_ms is None:
+            return True
+        return float(age_ms) > float(getattr(self.cfg, "table_edge_obs_max_age_ms", 500) or 500)
 
     def _fresh_target_obs(self) -> Optional[TargetObs]:
         obs = self.ctx.last_target_obs

@@ -332,7 +332,7 @@ class SearchStagePlanKindTest(unittest.TestCase):
         plan.on_enter(req, ctx)
         return plan, ctx
 
-    def test_target_search_outputs_only_target_obs(self):
+    def test_target_search_outputs_target_and_table_edge_obs(self):
         plan, ctx = self._enter("TARGET")
         self.assertEqual(ctx.current_mode, "TRACK_LOCAL")
         output = plan.tick(
@@ -341,14 +341,19 @@ class SearchStagePlanKindTest(unittest.TestCase):
                 generation=1,
                 results={
                     "local_perception": {"target_obs": {"found": True, "target": "cup"}},
-                    "table_edge_obs": {"edge_found": True},
+                    "table_edge_obs": {"edge_found": True, "obs_ts": time.time()},
                 },
             ),
             ctx,
         )
         perception = output.vision_obs["perception"]
-        self.assertEqual(sorted(perception.keys()), ["target_obs"])
+        self.assertEqual(sorted(perception.keys()), ["table_edge_obs", "target_obs"])
         self.assertTrue(perception["target_obs"]["found"])
+        self.assertTrue(perception["table_edge_obs"]["edge_found"])
+        self.assertIn("obs_ts", perception["table_edge_obs"])
+        self.assertIn("age_ms", perception["table_edge_obs"])
+        self.assertEqual(perception["table_edge_obs"]["source_mode"], "TRACK_LOCAL")
+        self.assertFalse(perception["table_edge_obs"]["is_stale"])
 
     def test_target_search_builds_obs_from_yolo_boxes(self):
         plan, ctx = self._enter("TARGET", target="apple")
@@ -465,6 +470,7 @@ class SearchStagePlanKindTest(unittest.TestCase):
         self.assertEqual(sorted(perception.keys()), ["table_edge_obs", "target_obs"])
         self.assertTrue(perception["target_obs"]["found"])
         self.assertFalse(perception["table_edge_obs"]["edge_found"])
+        self.assertTrue(perception["table_edge_obs"]["is_stale"])
 
         alias_plan, alias_ctx = self._enter("TARGET_ON_EDGE")
         self.assertEqual(alias_ctx.current_mode, "TABLE_EDGE_PERCEPTION")

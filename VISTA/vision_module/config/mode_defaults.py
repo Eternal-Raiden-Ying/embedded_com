@@ -187,7 +187,7 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
         ),
         "TRACK_LOCAL": ModeProfile(
             name="TRACK_LOCAL",
-            enabled_cameras=("rgb",),
+            enabled_cameras=("rgb", "depth"),
             camera_overrides={"rgb": track_local_rgb},
             predictor_enabled=True,
             predictor_model=active_model,
@@ -196,10 +196,11 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             release_cooldown_s=2.0,
             metadata={
                 "contract": {
-                    "cameras": ["rgb"],
+                    "cameras": ["rgb", "depth"],
                     "predictor": "required",
+                    "table_edge": "required",
                     "remote": "disabled",
-                    "perception": "target_obs",
+                    "perception": ["target_obs", "table_edge_obs"],
                 }
             },
         ),

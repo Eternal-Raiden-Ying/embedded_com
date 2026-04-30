@@ -84,7 +84,7 @@ class OpenCVPreviewSink(PreviewSink):
         frames = frame.image if isinstance(frame.image, dict) else {}
         metadata = dict(getattr(frame.overlay, "metadata", {}) or {})
         mode = str(dict(metadata.get("runtime_status") or {}).get("mode") or frame.mode or "").upper()
-        table_edge = {} if mode == "TRACK_LOCAL" else (metadata.get("table_edge_obs") or {})
+        table_edge = metadata.get("table_edge_obs") or {}
         target_obs = metadata.get("target_obs") or {}
 
         if mode == "TRACK_LOCAL":

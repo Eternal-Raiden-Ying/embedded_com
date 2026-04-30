@@ -292,6 +292,12 @@ class TableEdgeObs:
     table_found: bool
     edge_found: bool
     confidence: float = 0.0
+    obs_ts: Optional[float] = None
+    age_ms: Optional[float] = None
+    frame_id: Optional[int] = None
+    seq: Optional[int] = None
+    source_mode: Optional[str] = None
+    is_stale: bool = False
     yaw_err_rad: Optional[float] = None
     dist_err_m: Optional[float] = None
     lateral_err_m: Optional[float] = None
@@ -326,11 +332,18 @@ class TableEdgeObs:
         table_found = bool(payload.get("table_found", payload.get("found", False)))
         edge_found = bool(payload.get("edge_found", payload.get("table_edge_found", table_found)))
         confidence = _pick_optional_float(payload, "confidence", "score", "edge_confidence", "table_confidence") or 0.0
+        obs_ts = _pick_optional_float(payload, "obs_ts", "observation_ts", "frame_ts", "ts")
         return cls(
-            ts=_payload_ts(payload),
+            ts=float(obs_ts) if obs_ts is not None else _payload_ts(payload),
             table_found=table_found,
             edge_found=edge_found,
             confidence=float(confidence),
+            obs_ts=obs_ts,
+            age_ms=_pick_optional_float(payload, "age_ms", "edge_obs_age_ms"),
+            frame_id=_pick_optional_int(payload, "frame_id"),
+            seq=_pick_optional_int(payload, "seq", "frame_seq"),
+            source_mode=_pick_optional_str(payload, "source_mode", "vision_mode", "mode"),
+            is_stale=bool(payload.get("is_stale", payload.get("edge_obs_is_stale", False))),
             yaw_err_rad=_pick_optional_float(payload, "yaw_err_rad", "edge_yaw_err_rad", "yaw_error_rad"),
             dist_err_m=_pick_optional_float(payload, "dist_err_m", "edge_dist_err_m", "distance_error_m", "table_edge_distance_m", "edge_distance_m"),
             lateral_err_m=_pick_optional_float(payload, "lateral_err_m", "edge_lateral_err_m", "lateral_error_m"),

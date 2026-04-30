@@ -234,7 +234,6 @@ class PreviewManager:
             target_obs = dict(scheduler.read_result("target_obs", default={}) or {})
             mode = str(status.get("mode") or "IDLE").upper()
             if mode == "TRACK_LOCAL":
-                table_edge = {}
                 target_obs = self._target_overlay(status, local, target_obs)
                 target_obs["frame_age_ms"] = int(round(stale_age * 1000.0))
                 if infer_age is not None:

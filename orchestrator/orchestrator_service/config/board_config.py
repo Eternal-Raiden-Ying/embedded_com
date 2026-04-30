@@ -127,6 +127,7 @@ def _apply_stage_params(data: Dict[str, Any]) -> None:
     final_lock = dict(data.get("final_lock") or {})
     controlled = dict(data.get("controlled_approach") or {})
     edge_slide = dict(data.get("edge_slide_search") or {})
+    edge_follow = dict(data.get("edge_follow") or {})
     target_confirm = dict(data.get("target_confirm") or {})
     target_locked = dict(data.get("target_locked") or {})
 
@@ -153,6 +154,11 @@ def _apply_stage_params(data: Dict[str, Any]) -> None:
     CONFIG.control.table_loss_hold_s = _ms_to_s(edge_slide.get("edge_lost_hold_ms"), CONFIG.control.table_loss_hold_s)
     CONFIG.control.approach_min_dwell_s = _ms_to_s(edge_slide.get("min_dwell_ms"), CONFIG.control.approach_min_dwell_s)
     CONFIG.control.edge_slide_fallback_state = str(edge_slide.get("fallback_state", CONFIG.control.edge_slide_fallback_state)).strip().upper()
+
+    CONFIG.control.table_edge_obs_max_age_ms = int(edge_follow.get("table_edge_obs_max_age_ms", CONFIG.control.table_edge_obs_max_age_ms))
+    CONFIG.control.edge_follow_log_period_ms = int(edge_follow.get("log_period_ms", CONFIG.control.edge_follow_log_period_ms))
+    CONFIG.control.edge_follow_min_edge_conf = float(edge_follow.get("min_edge_conf", CONFIG.control.edge_follow_min_edge_conf))
+    CONFIG.control.edge_follow_stale_fallback_state = str(edge_follow.get("stale_fallback_state", CONFIG.control.edge_follow_stale_fallback_state)).strip().upper()
 
     CONFIG.control.target_confirm_conf_th = float(target_confirm.get("confirm_conf_th", CONFIG.control.target_confirm_conf_th))
     CONFIG.control.target_found_frames_to_confirm = int(target_confirm.get("confirm_enter_frames", CONFIG.control.target_found_frames_to_confirm))
@@ -258,6 +264,10 @@ CONFIG.control.target_lock_center_jitter_th = _env_float("ORCH_TARGET_LOCK_CENTE
 CONFIG.control.target_lock_lost_hold_s = _env_float("ORCH_TARGET_LOCK_LOST_HOLD_S", CONFIG.control.target_lock_lost_hold_s)
 CONFIG.control.freeze_settle_s = _env_float("ORCH_FREEZE_SETTLE_S", CONFIG.control.freeze_settle_s)
 CONFIG.control.edge_slide_pause_s = _env_float("ORCH_EDGE_SLIDE_PAUSE_S", CONFIG.control.edge_slide_pause_s)
+CONFIG.control.table_edge_obs_max_age_ms = _env_int("ORCH_EDGE_FOLLOW_TABLE_EDGE_OBS_MAX_AGE_MS", CONFIG.control.table_edge_obs_max_age_ms)
+CONFIG.control.edge_follow_log_period_ms = _env_int("ORCH_EDGE_FOLLOW_LOG_PERIOD_MS", CONFIG.control.edge_follow_log_period_ms)
+CONFIG.control.edge_follow_min_edge_conf = _env_float("ORCH_EDGE_FOLLOW_MIN_EDGE_CONF", CONFIG.control.edge_follow_min_edge_conf)
+CONFIG.control.edge_follow_stale_fallback_state = _env_str("ORCH_EDGE_FOLLOW_STALE_FALLBACK_STATE", CONFIG.control.edge_follow_stale_fallback_state).strip().upper()
 CONFIG.control.edge_slide_segment_s = _env_float("ORCH_EDGE_SLIDE_SEGMENT_S", CONFIG.control.edge_slide_segment_s)
 CONFIG.control.edge_slide_dist_tolerance_m = _env_float("ORCH_EDGE_SLIDE_DIST_TOL_M", CONFIG.control.edge_slide_dist_tolerance_m)
 CONFIG.control.edge_slide_fallback_state = _env_str("ORCH_EDGE_SLIDE_FALLBACK_STATE", CONFIG.control.edge_slide_fallback_state).upper()

@@ -381,6 +381,42 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         self.assertEqual(decision.cmd.vy_norm, 0.0)
         self.assertIn("edge_obs_missing_hold", decision.control_summary["reason"])
 
+    def test_edge_slide_rejects_stale_table_edge_obs(self) -> None:
+        cfg = OrchestratorConfig()
+        cfg.control.edge_slide_pause_s = 0.0
+        cfg.control.table_edge_obs_max_age_ms = 500
+        cfg.control.edge_follow_stale_fallback_state = "FINAL_LOCK"
+        core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
+        core.ctx.state = State.EDGE_SLIDE_SEARCH
+        core.ctx.active_vision_mode = "TRACK_LOCAL"
+        core.ctx.state_enter_mono = monotonic_ts() - 1.0
+        stale_ts = now_ts() - 0.8
+        core.handle_table_obs(
+            TableEdgeObs(
+                ts=stale_ts,
+                obs_ts=stale_ts,
+                age_ms=800.0,
+                table_found=True,
+                edge_found=True,
+                confidence=0.9,
+                yaw_err_rad=0.01,
+                dist_err_m=0.02,
+                frame_id=7,
+                seq=7,
+                source_mode="TRACK_LOCAL",
+            )
+        )
+        decision = core.tick()
+        self.assertEqual(core.ctx.state, State.EDGE_SLIDE_SEARCH)
+        self.assertEqual(decision.cmd.mode, "EDGE_SLIDE_SEARCH")
+        self.assertEqual(decision.cmd.vy_norm, 0.0)
+        self.assertIn("edge_follow_stale_hold", decision.control_summary["reason"])
+        core.ctx.table_loss_since_mono = monotonic_ts() - float(cfg.control.table_loss_hold_s) - 0.1
+        decision = core.tick()
+        self.assertEqual(core.ctx.state, State.FINAL_LOCK)
+        self.assertEqual(decision.cmd.mode, "FINAL_LOCK")
+        self.assertEqual(decision.cmd.vx_norm, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -21,6 +21,12 @@ edge_slide_search:
   fallback_state: CONTROLLED_APPROACH
   min_dwell_ms: 800
 
+edge_follow:
+  table_edge_obs_max_age_ms: 500
+  log_period_ms: 500
+  min_edge_conf: 0.60
+  stale_fallback_state: FINAL_LOCK
+
 target_confirm:
   confirm_conf_th: 0.65
   confirm_enter_frames: 3

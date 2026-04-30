@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import os
 from typing import Dict, Optional
 
 from ...config.data import ASR_VOCAB_MAP, normalize_class_name
@@ -69,6 +70,12 @@ def _default_table_edge_obs() -> Dict[str, object]:
         "depth_valid": False,
         "point_count": 0,
         "table_point_count": 0,
+        "obs_ts": None,
+        "age_ms": None,
+        "frame_id": None,
+        "seq": None,
+        "source_mode": "",
+        "is_stale": True,
         "source": "vision_table_edge_manager",
         "type": "table_edge_obs",
     }
@@ -197,7 +204,56 @@ def _table_edge_obs_from_results(results: Dict[str, object]) -> Optional[Dict[st
     merged = _default_table_edge_obs()
     merged.update(table_edge)
     merged["type"] = "table_edge_obs"
+    if "is_stale" not in table_edge:
+        merged["is_stale"] = False
     return merged
+
+
+def _table_edge_stale_ms() -> float:
+    try:
+        return max(0.0, float(os.getenv("VISTA_TABLE_EDGE_STALE_MS", "500") or 500.0))
+    except Exception:
+        return 500.0
+
+
+def _annotate_table_edge_obs(
+    obs: Dict[str, object],
+    *,
+    tick_ts: float,
+    source: str,
+    source_mode: str,
+) -> Dict[str, object]:
+    out = dict(obs or _default_table_edge_obs())
+    out["type"] = "table_edge_obs"
+    out["source_mode"] = str(source_mode or "").strip().upper()
+    out.setdefault("edge_conf", out.get("confidence"))
+    out.setdefault("seq", out.get("frame_seq", out.get("frame_id")))
+    obs_ts = out.get("obs_ts", out.get("ts"))
+    age_ms = None
+    try:
+        if obs_ts is not None:
+            obs_ts_f = float(obs_ts)
+            out["obs_ts"] = obs_ts_f
+            age_ms = max(0.0, (float(tick_ts) - obs_ts_f) * 1000.0)
+    except Exception:
+        age_ms = None
+    if age_ms is None:
+        out.setdefault("obs_ts", None)
+        out["age_ms"] = None
+        stale = True
+    else:
+        upstream_age = out.get("age_ms")
+        try:
+            age_ms = max(float(age_ms), float(upstream_age))
+        except Exception:
+            pass
+        out["age_ms"] = float(age_ms)
+        stale = bool(age_ms > _table_edge_stale_ms())
+    if source != "results":
+        stale = True
+        out.setdefault("reason", "no_new_table_edge_obs_result")
+    out["is_stale"] = bool(out.get("is_stale", False) or stale)
+    return out
 
 
 class SearchStagePlan(BaseStagePlan):
@@ -255,6 +311,13 @@ class SearchStagePlan(BaseStagePlan):
                 result_factory=_table_edge_obs_from_results,
                 result_route="table_edge_obs",
             )
+            table_edge_obs = _annotate_table_edge_obs(
+                table_edge_obs,
+                tick_ts=tick_input.ts,
+                source=source,
+                source_mode=ctx.current_mode,
+            )
+            ctx.stage_state["table_edge_obs"] = dict(table_edge_obs)
             if _is_edge_follow_target(search_kind):
                 target_obs, target_source = resolve_stage_summary(
                     results=results,
@@ -300,16 +363,34 @@ class SearchStagePlan(BaseStagePlan):
             default_factory=lambda: _target_obs_from_payload(None, ctx.target_name),
             result_factory=lambda payload: _target_obs_from_results(payload, ctx.target_name),
         )
+        table_edge_obs, table_edge_source = resolve_stage_summary(
+            results=results,
+            stage_state=ctx.stage_state,
+            state_key="table_edge_obs",
+            default_factory=lambda: _table_edge_obs_from_payload(None),
+            result_factory=_table_edge_obs_from_results,
+            result_route="table_edge_obs",
+        )
+        table_edge_obs = _annotate_table_edge_obs(
+            table_edge_obs,
+            tick_ts=tick_input.ts,
+            source=table_edge_source,
+            source_mode=ctx.current_mode,
+        )
+        ctx.stage_state["table_edge_obs"] = dict(table_edge_obs)
         return StageOutput(
             vision_obs=self.build_obs(
                 ctx,
                 status="RUNNING",
-                perception={"target_obs": target_obs},
+                perception={
+                    "target_obs": target_obs,
+                    "table_edge_obs": table_edge_obs,
+                },
             ),
             snapshot={
                 "generation": int(tick_input.generation),
                 "result_keys": sorted(results.keys()),
-                "source": source,
+                "source": {"target_obs": source, "table_edge_obs": table_edge_source},
                 "search_kind": search_kind,
             },
         )

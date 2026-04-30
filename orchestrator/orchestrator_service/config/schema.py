@@ -103,6 +103,10 @@ class ControlThresholds:
     edge_slide_segment_s: float = 1.20
     edge_slide_dist_tolerance_m: float = 0.05
     edge_slide_fallback_state: str = "CONTROLLED_APPROACH"
+    table_edge_obs_max_age_ms: int = 500
+    edge_follow_log_period_ms: int = 500
+    edge_follow_min_edge_conf: float = 0.60
+    edge_follow_stale_fallback_state: str = "FINAL_LOCK"
 
     edge_relocate_enabled: bool = True
     max_edge_transitions_per_task: int = 3

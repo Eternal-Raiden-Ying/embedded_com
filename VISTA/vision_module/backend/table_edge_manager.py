@@ -33,7 +33,8 @@ class TableEdgeManager:
         self._runtime_running = False
         self._worker_thread: Optional[threading.Thread] = None
         self._worker_stop = threading.Event()
-        self._worker_interval_s = 0.05
+        edge_hz = float(os.getenv("VISTA_TABLE_EDGE_HZ", "10") or 10.0)
+        self._worker_interval_s = 1.0 / max(1.0, edge_hz)
         self._last_camera_seq = 0
         self._last_publish_ts = 0.0
         self._frame_id = 0
@@ -126,6 +127,27 @@ class TableEdgeManager:
             self._last_publish_ts = time.time()
         except Exception:
             pass
+
+    def _active_mode(self) -> str:
+        scheduler = self._scheduler
+        if scheduler is None:
+            return ""
+        try:
+            return str((scheduler.snapshot().get("active_mode") or "")).strip().upper()
+        except Exception:
+            return ""
+
+    def _with_freshness(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        out = dict(payload or {})
+        obs_ts = time.time()
+        out["ts"] = float(obs_ts)
+        out["obs_ts"] = float(obs_ts)
+        out["age_ms"] = 0.0
+        out["is_stale"] = False
+        out["source_mode"] = self._active_mode()
+        out.setdefault("seq", out.get("frame_seq", out.get("frame_id")))
+        out.setdefault("edge_conf", out.get("confidence"))
+        return out
 
     def _default_result(
         self,
@@ -318,7 +340,7 @@ class TableEdgeManager:
                 )
             else:
                 payload = self._process_depth(depth, seq)
-            self._publish_result("table_edge_obs", payload)
+            self._publish_result("table_edge_obs", self._with_freshness(payload))
             self._worker_stop.wait(timeout=self._worker_interval_s)
 
     def release_all(self) -> None:

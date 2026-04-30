@@ -48,6 +48,7 @@ class OrchestratorService(BaseModule):
         self._last_target_obs_console_payload: Dict[str, Any] = {}
         self._last_target_search_req_console_key = ""
         self._pending_state_traces: List[Dict[str, Any]] = []
+        self._last_edge_slide_trace_ts = 0.0
         self.mapper = SimpleCarMapper(cfg.car)
         self._async_result_queue: "queue.Queue[Dict[str, Any]]" = queue.Queue()
         self._boot_ts = time.time()
@@ -944,6 +945,12 @@ class OrchestratorService(BaseModule):
                             "found": parsed.table_found,
                             "edge_found": parsed.edge_found,
                             "depth_valid": parsed.depth_valid,
+                            "obs_ts": parsed.obs_ts,
+                            "age_ms": parsed.age_ms,
+                            "frame_id": parsed.frame_id,
+                            "seq": parsed.seq,
+                            "source_mode": parsed.source_mode,
+                            "is_stale": parsed.is_stale,
                             "point_count": parsed.point_count,
                             "table_point_count": parsed.table_point_count,
                             "reason": reason or None,
@@ -959,6 +966,12 @@ class OrchestratorService(BaseModule):
                             found=parsed.table_found,
                             edge_found=parsed.edge_found,
                             depth_valid=parsed.depth_valid,
+                            obs_ts=parsed.obs_ts,
+                            age_ms=parsed.age_ms,
+                            frame_id=parsed.frame_id,
+                            seq=parsed.seq,
+                            source_mode=parsed.source_mode,
+                            is_stale=parsed.is_stale,
                             point_count=parsed.point_count,
                             table_point_count=parsed.table_point_count,
                             reason=reason,
@@ -1173,6 +1186,9 @@ class OrchestratorService(BaseModule):
             "yaw_err_rad",
             "dist_err_m",
             "target_dist_m",
+            "table_edge_obs_age_ms",
+            "edge_obs_is_stale",
+            "edge_follow_stale",
             "lock_ready",
             "lock_reason",
         ):
@@ -1185,12 +1201,23 @@ class OrchestratorService(BaseModule):
         summary["current_edge_id"] = self.core.ctx.current_edge_id
         if str(summary.get("state")) == "EDGE_SLIDE_SEARCH":
             target_obs = self.core.ctx.last_target_obs
+            table_obs = self.core.ctx.last_table_obs
             summary["target_found"] = bool(getattr(target_obs, "found", False)) if target_obs is not None else False
             summary["target_conf"] = (
                 getattr(target_obs, "confidence", None)
                 if target_obs is not None
                 else None
             )
+            summary["matched_cls"] = (
+                getattr(target_obs, "best_cls", None) or getattr(target_obs, "target", None)
+                if target_obs is not None
+                else None
+            )
+            summary["edge_obs_age_ms"] = block.get("table_edge_obs_age_ms")
+            summary["edge_obs_is_stale"] = bool(block.get("edge_obs_is_stale", False))
+            summary["edge_obs_frame_id"] = block.get("table_edge_obs_frame_id")
+            summary["edge_obs_seq"] = block.get("table_edge_obs_seq")
+            summary["edge_obs_source_mode"] = block.get("table_edge_obs_source_mode") or getattr(table_obs, "source_mode", None)
             summary["fallback_reason"] = summary.get("reason") or self.core.ctx.last_fail_reason or ""
             summary["edge_loss_elapsed_s"] = self.core._loss_elapsed(self.core.ctx.table_loss_since_mono)
         if block.get("lock_reason") and str(summary.get("state")) in {"CONTROLLED_APPROACH", "FINAL_LOCK", "COARSE_ALIGN"}:
@@ -1239,6 +1266,8 @@ class OrchestratorService(BaseModule):
                 f"conf={self._fmt_float(summary.get('confidence'), 2, signed=False)} "
                 f"yaw={self._fmt_float(summary.get('yaw_err_rad'))} "
                 f"dist={self._fmt_float(summary.get('dist_err_m'))} "
+                f"age={self._fmt_float(summary.get('edge_obs_age_ms'), 0, signed=False)}ms "
+                f"stale={int(bool(summary.get('edge_obs_is_stale')))} "
                 f"target_conf={self._fmt_float(target_conf, 2, signed=False)} "
                 f"cmd vx={self._fmt_float(cmd.get('vx'))} vy={self._fmt_float(cmd.get('vy'))} wz={self._fmt_float(cmd.get('wz'))} "
                 f"reason={reason}"
@@ -1335,27 +1364,45 @@ class OrchestratorService(BaseModule):
     def _emit_edge_slide_trace(self, decision) -> None:
         if str(getattr(self.core.ctx.state, "value", self.core.ctx.state) or "") != "EDGE_SLIDE_SEARCH":
             return
+        now = time.time()
+        period_ms = max(0, int(getattr(self.cfg.control, "edge_follow_log_period_ms", 500) or 500))
+        if period_ms > 0 and (now - float(getattr(self, "_last_edge_slide_trace_ts", 0.0) or 0.0)) < (period_ms / 1000.0):
+            return
+        self._last_edge_slide_trace_ts = now
         edge_obs = self.core.ctx.last_table_obs
         target_obs = self.core.ctx.last_target_obs
         cmd = decision.cmd
         reason = str((getattr(decision, "control_summary", None) or {}).get("reason") or self.core.ctx.last_fail_reason or "")
+        edge_age_ms = self.core._table_obs_age_ms(edge_obs)
+        edge_is_stale = self.core._edge_obs_is_stale(edge_obs)
+        matched_cls = (
+            getattr(target_obs, "best_cls", None) or getattr(target_obs, "target", None)
+            if target_obs is not None
+            else None
+        )
         record = {
+            "ts": now,
             "state": "EDGE_SLIDE_SEARCH",
+            "target": self.core.ctx.active_target,
             "edge_found": bool(getattr(edge_obs, "edge_found", False)) if edge_obs is not None else False,
             "edge_conf": getattr(edge_obs, "confidence", None) if edge_obs is not None else None,
             "dist_err": getattr(edge_obs, "dist_err_m", None) if edge_obs is not None else None,
             "yaw_err": getattr(edge_obs, "yaw_err_rad", None) if edge_obs is not None else None,
+            "edge_obs_ts": getattr(edge_obs, "obs_ts", None) if edge_obs is not None else None,
+            "edge_obs_age_ms": edge_age_ms,
+            "edge_obs_is_stale": bool(edge_is_stale),
+            "edge_follow_stale": bool(edge_is_stale),
+            "edge_obs_frame_id": getattr(edge_obs, "frame_id", None) if edge_obs is not None else None,
+            "edge_obs_seq": getattr(edge_obs, "seq", None) if edge_obs is not None else None,
+            "edge_obs_source_mode": getattr(edge_obs, "source_mode", None) if edge_obs is not None else None,
             "target_found": bool(getattr(target_obs, "found", False)) if target_obs is not None else False,
             "target_conf": (
                 getattr(target_obs, "confidence", None)
                 if target_obs is not None and getattr(target_obs, "confidence", None) is not None
                 else (getattr(target_obs, "best_conf", None) if target_obs is not None else None)
             ),
-            "target_cls": (
-                getattr(target_obs, "best_cls", None) or getattr(target_obs, "target", None)
-                if target_obs is not None
-                else None
-            ),
+            "matched_cls": matched_cls,
+            "target_cls": matched_cls,
             "vx": float(cmd.vx_norm),
             "vy": float(cmd.vy_norm),
             "wz": float(cmd.wz_norm),
@@ -1396,6 +1443,8 @@ class OrchestratorService(BaseModule):
             "edge_conf",
             "yaw_err",
             "dist_err",
+            "edge_obs_age_ms",
+            "edge_obs_is_stale",
             "stable_ms",
             "lost_ms",
             "target_found",
