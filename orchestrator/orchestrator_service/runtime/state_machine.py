@@ -552,7 +552,7 @@ class OrchestratorCore:
         if (
             target_obs is not None
             and target_obs.found
-            and self._target_matches_active(target_obs)
+            and self._target_quality_ok(target_obs, self.cfg.target_confirm_conf_th)
         ):
             self._transition(State.TARGET_CONFIRM, "target_found")
             return self.controller.stop_cmd("TARGET_CONFIRM")
@@ -589,7 +589,7 @@ class OrchestratorCore:
                 return self._edge_slide_fallback_cmd(fallback_state, edge_obs)
         else:
             self._reset_table_loss()
-        if self._obs_has_motion(target_obs):
+        if self._obs_has_motion(target_obs) and self._target_quality_ok(target_obs, self.cfg.target_confirm_conf_th):
             return self.controller.target_track_cmd(target_obs)
         direction = self._edge_slide_direction()
         return self.controller.edge_slide_search_cmd(
@@ -624,7 +624,7 @@ class OrchestratorCore:
         if (
             obs is not None
             and obs.found
-            and self._target_matches_active(obs)
+            and self._target_quality_ok(obs, self.cfg.target_confirm_conf_th)
         ):
             self.ctx.target_found_frames += 1
             self.ctx.target_lost_frames = 0
@@ -640,9 +640,17 @@ class OrchestratorCore:
     def _tick_target_locked(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
         obs = self._fresh_target_obs()
-        if obs is None or not obs.found or not self._target_matches_active(obs):
-            self._transition(State.EDGE_SLIDE_SEARCH, "目标锁定丢失，恢复沿边搜索")
-            return self.controller.stop_cmd("EDGE_SLIDE_SEARCH")
+        if (
+            obs is None
+            or not obs.found
+            or not self._target_quality_ok(obs, self.cfg.target_lock_conf_th)
+        ):
+            self.ctx.target_lost_frames += 1
+            if self.ctx.target_lost_frames >= int(self.cfg.target_confirm_lost_frames):
+                self._transition(State.EDGE_SLIDE_SEARCH, "目标锁定丢失，恢复沿边搜索")
+                return self.controller.stop_cmd("EDGE_SLIDE_SEARCH")
+            return self.controller.stop_cmd("TARGET_LOCKED")
+        self.ctx.target_lost_frames = 0
         self.ctx.target_lock_frames += 1
         if self._state_elapsed() >= float(self.cfg.target_lock_settle_s):
             self._transition(State.FREEZE_BASE, "目标稳定，冻结底盘")
@@ -979,6 +987,37 @@ class OrchestratorCore:
         if not self.ctx.active_target or not obs.target:
             return True
         return str(obs.target).strip() == str(self.ctx.active_target).strip()
+
+    def _target_cls_matches_active(self, obs: TargetObs) -> bool:
+        if not self.ctx.active_target:
+            return True
+        active = str(self.ctx.active_target).strip().lower()
+        best_cls = str(obs.best_cls or "").strip().lower()
+        if best_cls:
+            return best_cls == active
+        target = str(obs.target or "").strip().lower()
+        if target:
+            return target == active
+        return True
+
+    def _target_conf_value(self, obs: TargetObs) -> Optional[float]:
+        value = obs.confidence if obs.confidence is not None else obs.best_conf
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    def _target_quality_ok(self, obs: TargetObs, conf_th: float) -> bool:
+        if not self._target_cls_matches_active(obs):
+            return False
+        if not self._target_matches_active(obs):
+            return False
+        conf = self._target_conf_value(obs)
+        if conf is None:
+            return float(conf_th or 0.0) <= 0.0
+        return conf >= float(conf_th or 0.0)
 
     def _obs_has_motion(self, obs: Optional[TargetObs]) -> bool:
         if obs is None:

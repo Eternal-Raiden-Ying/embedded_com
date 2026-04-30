@@ -22,13 +22,13 @@ edge_slide_search:
   min_dwell_ms: 800
 
 target_confirm:
-  confirm_conf_th: 0.0
-  confirm_enter_frames: 2
+  confirm_conf_th: 0.65
+  confirm_enter_frames: 3
   confirm_dwell_ms: 0
   lost_hold_ms: 0
 
 target_locked:
-  lock_conf_th: 0.0
-  lock_stable_ms: 500
+  lock_conf_th: 0.70
+  lock_stable_ms: 1200
   center_jitter_th: 0.0
   lost_hold_ms: 0

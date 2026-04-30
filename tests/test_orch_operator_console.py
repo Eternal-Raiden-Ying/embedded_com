@@ -64,10 +64,12 @@ def _service(lines, mode="operator"):
             last_target_obs=None,
             last_table_obs=None,
             table_lock_frames=0,
+            table_loss_since_mono=0.0,
             target_found_frames=0,
             target_lost_frames=0,
             last_enter_reason="distance_too_far",
         ),
+        _loss_elapsed=lambda started_mono: 0.0,
         export_state_block=lambda: {
             "edge_found": True,
             "confidence": 0.86,
@@ -239,7 +241,8 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         )
         svc._emit_operator_control(decision)
         self.assertEqual(len(lines), 1)
-        self.assertIn("[ORCH] SLIDE edge=1 target=0 boxes=0 status=searching cmd vx=+0.000 vy=+0.000 wz=+0.000", lines[0])
+        self.assertIn("[ORCH] SLIDE edge=1 target=0 boxes=0 status=searching", lines[0])
+        self.assertIn("cmd vx=+0.000 vy=+0.000 wz=+0.000", lines[0])
         self.assertIn("reason=waiting_first_target_obs", lines[0])
 
     def test_edge_lost_hold_reason_is_visible(self) -> None:
@@ -292,6 +295,48 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         decision = core.tick()
         self.assertEqual(core.ctx.state, State.TARGET_CONFIRM)
         self.assertEqual(decision.cmd.mode, "TARGET_CONFIRM")
+
+    def test_edge_slide_ignores_wrong_target_class_candidate(self) -> None:
+        cfg = OrchestratorConfig()
+        cfg.control.edge_slide_pause_s = 0.0
+        cfg.control.target_confirm_conf_th = 0.65
+        core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
+        core.ctx.state = State.EDGE_SLIDE_SEARCH
+        core.ctx.active_target = "apple"
+        core.ctx.task_start_wall_ts = 1.0
+        core.ctx.state_enter_mono = monotonic_ts() - 1.0
+        core.handle_table_obs(TableEdgeObs(ts=now_ts(), table_found=True, edge_found=True, confidence=0.9, yaw_err_rad=0.01, dist_err_m=0.02))
+        core.handle_target_obs(TargetObs(ts=now_ts(), found=True, target="apple", best_cls="keyboard", confidence=0.92, cx_norm=0.54))
+        decision = core.tick()
+        self.assertEqual(core.ctx.state, State.EDGE_SLIDE_SEARCH)
+        self.assertEqual(decision.cmd.mode, "EDGE_SLIDE_SEARCH")
+
+    def test_target_confirm_requires_configured_confidence(self) -> None:
+        cfg = OrchestratorConfig()
+        cfg.control.target_confirm_conf_th = 0.65
+        cfg.control.target_found_frames_to_confirm = 1
+        cfg.control.target_confirm_lost_frames = 1
+        core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
+        core.ctx.state = State.TARGET_CONFIRM
+        core.ctx.active_target = "apple"
+        core.ctx.task_start_wall_ts = 1.0
+        core.handle_target_obs(TargetObs(ts=now_ts(), found=True, target="apple", best_cls="apple", confidence=0.61, cx_norm=0.54))
+        decision = core.tick()
+        self.assertEqual(core.ctx.state, State.EDGE_SLIDE_SEARCH)
+        self.assertEqual(decision.cmd.mode, "TARGET_CONFIRM")
+
+    def test_target_locked_rejects_wrong_class_before_freeze(self) -> None:
+        cfg = OrchestratorConfig()
+        cfg.control.target_lock_conf_th = 0.70
+        cfg.control.target_confirm_lost_frames = 1
+        core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
+        core.ctx.state = State.TARGET_LOCKED
+        core.ctx.active_target = "apple"
+        core.ctx.task_start_wall_ts = 1.0
+        core.handle_target_obs(TargetObs(ts=now_ts(), found=True, target="apple", best_cls="mouse", confidence=0.95, cx_norm=0.54))
+        decision = core.tick()
+        self.assertEqual(core.ctx.state, State.EDGE_SLIDE_SEARCH)
+        self.assertEqual(decision.cmd.mode, "EDGE_SLIDE_SEARCH")
 
     def test_edge_slide_config_nonzero_outputs_nonzero_vy(self) -> None:
         cfg = OrchestratorConfig()
