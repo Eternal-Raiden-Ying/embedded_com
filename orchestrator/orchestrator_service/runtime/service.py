@@ -47,6 +47,7 @@ class OrchestratorService(BaseModule):
         self._last_obs_flags = {"table_edge": False, "target": False}
         self._last_target_obs_console_payload: Dict[str, Any] = {}
         self._last_target_search_req_console_key = ""
+        self._pending_state_traces: List[Dict[str, Any]] = []
         self.mapper = SimpleCarMapper(cfg.car)
         self._async_result_queue: "queue.Queue[Dict[str, Any]]" = queue.Queue()
         self._boot_ts = time.time()
@@ -229,6 +230,13 @@ class OrchestratorService(BaseModule):
             reason = f"target_not_found timeout_s={float(self.cfg.control.target_search_timeout_s):.1f}"
         if old_state == "EDGE_SLIDE_SEARCH" and new_state == "TARGET_CONFIRM":
             reason = "target_found"
+        trace = dict(getattr(self.core, "last_transition_snapshot", {}) or {})
+        if trace:
+            trace["reason"] = reason
+            trace.setdefault("previous_state", old_state)
+            trace.setdefault("next_state", new_state)
+            trace.setdefault("planned_cmd", {"vx": None, "vy": None, "wz": None})
+            self._pending_state_traces.append(trace)
         self.operator_console.emit_change(
             "state",
             f"[ORCH] STATE {old_state} -> {new_state} reason={reason}",
@@ -1254,6 +1262,7 @@ class OrchestratorService(BaseModule):
         cmd = decision.cmd
         self.run_logger.write_jsonl("cmd_vel", cmd.to_dict())
         self._emit_operator_control(decision)
+        self._flush_state_traces(decision)
         car_cmd = self.mapper.from_cmd_vel(cmd, cx_norm_abs=decision.cx_norm_abs, distance_ratio=decision.distance_ratio)
         tx_meta = self._build_uart_tx_meta(car_cmd)
         car_record = {
@@ -1270,6 +1279,53 @@ class OrchestratorService(BaseModule):
         car_record.update({k: v for k, v in tx_meta.items() if v not in (None, "")})
         self.run_logger.write_jsonl("car_cmd", car_record)
         self.uart.send_car_command(car_cmd, tx_meta=tx_meta)
+
+    def _flush_state_traces(self, decision) -> None:
+        if not self._pending_state_traces:
+            return
+        cmd = decision.cmd
+        planned_cmd = {
+            "vx": float(cmd.vx_norm),
+            "vy": float(cmd.vy_norm),
+            "wz": float(cmd.wz_norm),
+        }
+        while self._pending_state_traces:
+            trace = self._pending_state_traces.pop(0)
+            trace["planned_cmd"] = planned_cmd
+            trace["planned_cmd_mode"] = cmd.mode
+            self.run_logger.write_jsonl("state_trace", self._normalize_state_trace(trace))
+
+    def _normalize_state_trace(self, trace: Dict[str, Any]) -> Dict[str, Any]:
+        fixed_fields = (
+            "event",
+            "previous_state",
+            "next_state",
+            "reason",
+            "target",
+            "session_id",
+            "epoch",
+            "req_id",
+            "edge_id",
+            "edge_conf",
+            "yaw_err",
+            "dist_err",
+            "stable_ms",
+            "lost_ms",
+            "target_found",
+            "target_conf",
+            "target_cls",
+            "target_center",
+            "target_stable_ms",
+            "car_mode",
+            "planned_cmd",
+            "planned_cmd_mode",
+            "condition",
+        )
+        out = {key: trace.get(key) for key in fixed_fields}
+        out["event"] = out.get("event") or "state_transition"
+        out["planned_cmd"] = out.get("planned_cmd") or {"vx": None, "vy": None, "wz": None}
+        out["condition"] = out.get("condition") or {}
+        return out
 
     def _emit_state_block_if_needed(self):
         block = self.core.export_state_block()

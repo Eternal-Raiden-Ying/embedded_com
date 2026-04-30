@@ -3,7 +3,7 @@
 
 import time
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..config.schema import CarMotionConfig, ControlThresholds
 from ..control.types import DockingControlConfig
@@ -56,6 +56,23 @@ TARGET_VISION_STATES = {
 }
 
 
+TABLE_APPROACH_STATES = {
+    State.SEARCH_TABLE,
+    State.COARSE_ALIGN,
+    State.CONTROLLED_APPROACH,
+    State.FINAL_LOCK,
+}
+
+
+TARGET_SEARCH_STATES = {
+    State.SEARCH_TARGET_INIT,
+    State.EDGE_SLIDE_SEARCH,
+    State.TARGET_CONFIRM,
+    State.TARGET_LOCKED,
+    State.FREEZE_BASE,
+}
+
+
 @dataclass
 class ObstacleSignal:
     active: bool
@@ -85,6 +102,7 @@ class OrchestratorCore:
         self._logger = logger
         self.controller = MotionController(cfg, car_cfg, docking_cfg)
         self.transition_observer: Optional[Callable[[str, str, str], None]] = None
+        self.last_transition_snapshot: Dict[str, Any] = {}
         self._last_req_mono = 0.0
         self._last_stop_mono = 0.0
 
@@ -251,12 +269,14 @@ class OrchestratorCore:
         if old_state == new_state:
             self.ctx.last_enter_reason = reason
             return
+        snapshot = self._build_transition_snapshot(old_state, new_state, reason)
         self._log("info", f"状态切换 {old_state.value} -> {new_state.value} ({reason})")
         self.ctx.prev_state = old_state
         self.ctx.state = new_state
         self.ctx.state_enter_mono = monotonic_ts()
         self.ctx.state_enter_wall_ts = time.time()
         self.ctx.last_enter_reason = reason
+        self.last_transition_snapshot = snapshot
         self.ctx.clear_motion_counters()
         if self.transition_observer is not None:
             try:
@@ -264,6 +284,99 @@ class OrchestratorCore:
             except Exception:
                 pass
         self._on_enter_state(new_state)
+
+    def _float_or_none(self, value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    def _target_center(self, obs: Optional[TargetObs]) -> Optional[Dict[str, Optional[float]]]:
+        if obs is None:
+            return None
+        return {
+            "cx": self._float_or_none(obs.cx_norm),
+            "cy": self._float_or_none(obs.cy_norm),
+        }
+
+    def _frames_to_ms(self, frames: int) -> int:
+        try:
+            tick_hz = max(1.0, float(getattr(self.cfg, "tick_hz", 10.0)))
+        except Exception:
+            tick_hz = 10.0
+        return int(round((max(0, int(frames)) / tick_hz) * 1000.0))
+
+    def _transition_stable_ms(self, old_state: State) -> int:
+        if old_state == State.SEARCH_TABLE:
+            return self._frames_to_ms(self.ctx.table_found_frames)
+        if old_state == State.COARSE_ALIGN:
+            return self._frames_to_ms(self.ctx.approach_aligned_frames)
+        if old_state == State.FINAL_LOCK:
+            return self._frames_to_ms(self.ctx.table_lock_frames)
+        if old_state in {State.TARGET_CONFIRM, State.TARGET_LOCKED}:
+            return self._frames_to_ms(self.ctx.target_found_frames or self.ctx.target_lock_frames)
+        return int(round(self._state_elapsed() * 1000.0))
+
+    def _transition_lost_ms(self, old_state: State) -> int:
+        if old_state in TABLE_APPROACH_STATES and self.ctx.table_loss_since_mono:
+            return int(round(self._loss_elapsed(self.ctx.table_loss_since_mono) * 1000.0))
+        if old_state in TARGET_SEARCH_STATES and self.ctx.target_loss_since_mono:
+            return int(round(self._loss_elapsed(self.ctx.target_loss_since_mono) * 1000.0))
+        return 0
+
+    def _transition_condition_snapshot(self, old_state: State, new_state: State) -> Dict[str, Any]:
+        return {
+            "old_state": old_state.value,
+            "new_state": new_state.value,
+            "state_elapsed_ms": int(round(self._state_elapsed() * 1000.0)),
+            "table_found_frames": int(self.ctx.table_found_frames),
+            "table_found_frames_to_approach": int(self.cfg.table_found_frames_to_approach),
+            "coarse_align_frames": int(self.ctx.approach_aligned_frames),
+            "coarse_align_frames_to_advance": int(self.cfg.coarse_align_frames_to_advance),
+            "table_lock_frames": int(self.ctx.table_lock_frames),
+            "final_lock_frames_to_arrive": int(self.cfg.final_lock_frames_to_arrive),
+            "target_found_frames": int(self.ctx.target_found_frames),
+            "target_found_frames_to_confirm": int(self.cfg.target_found_frames_to_confirm),
+            "target_lost_frames": int(self.ctx.target_lost_frames),
+            "target_confirm_lost_frames": int(self.cfg.target_confirm_lost_frames),
+            "edge_settle_ms": int(round(float(self.cfg.edge_settle_s) * 1000.0)),
+            "search_target_init_hold_ms": int(round(float(self.cfg.search_target_init_hold_s) * 1000.0)),
+            "target_lock_settle_ms": int(round(float(self.cfg.target_lock_settle_s) * 1000.0)),
+            "freeze_settle_ms": int(round(float(self.cfg.freeze_settle_s) * 1000.0)),
+            "approach_timeout_ms": int(round(float(self.cfg.approach_timeout_s) * 1000.0)),
+            "target_search_timeout_ms": int(round(float(self.cfg.target_search_timeout_s) * 1000.0)),
+        }
+
+    def _build_transition_snapshot(self, old_state: State, new_state: State, reason: str) -> Dict[str, Any]:
+        table_obs = self.ctx.last_table_obs
+        target_obs = self.ctx.last_target_obs
+        car_state = self.ctx.last_car_state
+        return {
+            "event": "state_transition",
+            "previous_state": old_state.value,
+            "next_state": new_state.value,
+            "reason": str(reason or ""),
+            "target": self.ctx.active_target,
+            "session_id": self.ctx.active_session_id,
+            "epoch": self.ctx.active_epoch,
+            "req_id": self.ctx.active_req_id,
+            "edge_id": self.ctx.current_edge_id,
+            "edge_conf": self._float_or_none(table_obs.confidence if table_obs is not None else None),
+            "yaw_err": self._float_or_none(table_obs.yaw_err_rad if table_obs is not None else None),
+            "dist_err": self._float_or_none(table_obs.dist_err_m if table_obs is not None else None),
+            "stable_ms": self._transition_stable_ms(old_state),
+            "lost_ms": self._transition_lost_ms(old_state),
+            "target_found": bool(target_obs.found) if target_obs is not None else None,
+            "target_conf": self._float_or_none(target_obs.confidence if target_obs is not None else None),
+            "target_cls": (target_obs.best_cls or target_obs.target if target_obs is not None else None),
+            "target_center": self._target_center(target_obs),
+            "target_stable_ms": self._frames_to_ms(self.ctx.target_found_frames or self.ctx.target_lock_frames),
+            "car_mode": car_state.mode if car_state is not None else None,
+            "planned_cmd": {"vx": None, "vy": None, "wz": None},
+            "condition": self._transition_condition_snapshot(old_state, new_state),
+        }
 
     def _on_enter_state(self, state: State):
         if state == State.IDLE:

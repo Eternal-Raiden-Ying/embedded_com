@@ -629,7 +629,6 @@ class RunLogger:
 
     def write_state_block(self, block: Dict[str, Any]) -> None:
         self.write_jsonl("state_blocks", block)
-        self.write_jsonl("state_trace", block)
         one_line = (
             f"state={block.get('state')} target={block.get('active_target')} "
             f"session={block.get('session_id')} epoch={block.get('epoch')} "
