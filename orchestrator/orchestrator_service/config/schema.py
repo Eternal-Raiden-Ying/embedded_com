@@ -92,12 +92,17 @@ class ControlThresholds:
     target_found_frames_to_confirm: int = 2
     target_confirm_conf_th: float = 0.0
     target_confirm_dwell_s: float = 0.0
+    target_confirm_min_s: float = 0.60
+    target_confirm_timeout_s: float = 2.50
     target_confirm_lost_frames: int = 2
     target_confirm_lost_hold_s: float = 0.0
+    target_confirm_min_bbox_area: float = 0.0
     target_lock_conf_th: float = 0.0
     target_lock_settle_s: float = 0.50
+    target_lock_stable_s: float = 1.20
     target_lock_center_jitter_th: float = 0.0
     target_lock_lost_hold_s: float = 0.0
+    target_locked_freeze_after_s: float = 0.80
     freeze_settle_s: float = 0.60
     edge_slide_pause_s: float = 0.20
     edge_slide_segment_s: float = 1.20

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import math
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -245,6 +246,9 @@ class OrchestratorCore:
             "target_found_frames": self.ctx.target_found_frames,
             "target_lost_frames": self.ctx.target_lost_frames,
             "target_lock_frames": self.ctx.target_lock_frames,
+            "target_stable_ms": self._target_stable_ms(),
+            "center_jitter": float(self.ctx.target_last_center_jitter),
+            "lost_reason": self.ctx.target_last_lost_reason,
             "tag_lost_frames": self.ctx.tag_lost_frames,
             "tag_arrived_frames": self.ctx.tag_arrived_frames,
             "dock_retry_count": self.ctx.dock_retry_count,
@@ -276,6 +280,12 @@ class OrchestratorCore:
         if old_state == new_state:
             self.ctx.last_enter_reason = reason
             return
+        preserve_target_debounce = (
+            old_state in {State.EDGE_SLIDE_SEARCH, State.TARGET_CONFIRM, State.TARGET_LOCKED}
+            and new_state in {State.TARGET_CONFIRM, State.TARGET_LOCKED, State.FREEZE_BASE}
+        )
+        target_debounce = self._target_debounce_snapshot() if preserve_target_debounce else {}
+        self.ctx.target_last_transition_reason = str(reason or "")
         snapshot = self._build_transition_snapshot(old_state, new_state, reason)
         self._log("info", f"状态切换 {old_state.value} -> {new_state.value} ({reason})")
         self.ctx.prev_state = old_state
@@ -285,6 +295,8 @@ class OrchestratorCore:
         self.ctx.last_enter_reason = reason
         self.last_transition_snapshot = snapshot
         self.ctx.clear_motion_counters()
+        if preserve_target_debounce:
+            self._restore_target_debounce_snapshot(target_debounce)
         if self.transition_observer is not None:
             try:
                 self.transition_observer(old_state.value, new_state.value, reason)
@@ -323,7 +335,7 @@ class OrchestratorCore:
         if old_state == State.FINAL_LOCK:
             return self._frames_to_ms(self.ctx.table_lock_frames)
         if old_state in {State.TARGET_CONFIRM, State.TARGET_LOCKED}:
-            return self._frames_to_ms(self.ctx.target_found_frames or self.ctx.target_lock_frames)
+            return self._target_stable_ms()
         return int(round(self._state_elapsed() * 1000.0))
 
     def _transition_lost_ms(self, old_state: State) -> int:
@@ -348,6 +360,16 @@ class OrchestratorCore:
             "target_found_frames_to_confirm": int(self.cfg.target_found_frames_to_confirm),
             "target_lost_frames": int(self.ctx.target_lost_frames),
             "target_confirm_lost_frames": int(self.cfg.target_confirm_lost_frames),
+            "confirm_conf_th": float(self.cfg.target_confirm_conf_th),
+            "confirm_min_ms": int(round(float(self.cfg.target_confirm_min_s) * 1000.0)),
+            "confirm_timeout_ms": int(round(float(self.cfg.target_confirm_timeout_s) * 1000.0)),
+            "confirm_lost_hold_ms": int(round(float(self.cfg.target_confirm_lost_hold_s) * 1000.0)),
+            "min_bbox_area": float(self.cfg.target_confirm_min_bbox_area),
+            "lock_conf_th": float(self.cfg.target_lock_conf_th),
+            "lock_stable_ms": int(round(float(self.cfg.target_lock_stable_s) * 1000.0)),
+            "center_jitter_th": float(self.cfg.target_lock_center_jitter_th),
+            "locked_lost_hold_ms": int(round(float(self.cfg.target_lock_lost_hold_s) * 1000.0)),
+            "freeze_after_locked_ms": int(round(float(self.cfg.target_locked_freeze_after_s) * 1000.0)),
             "edge_settle_ms": int(round(float(self.cfg.edge_settle_s) * 1000.0)),
             "search_target_init_hold_ms": int(round(float(self.cfg.search_target_init_hold_s) * 1000.0)),
             "target_lock_settle_ms": int(round(float(self.cfg.target_lock_settle_s) * 1000.0)),
@@ -385,7 +407,15 @@ class OrchestratorCore:
             "best_cls": (target_obs.best_cls if target_obs is not None else None),
             "best_conf": self._float_or_none(target_obs.best_conf if target_obs is not None else None),
             "target_center": self._target_center(target_obs),
-            "target_stable_ms": self._frames_to_ms(self.ctx.target_found_frames or self.ctx.target_lock_frames),
+            "matched_center": self._target_center(target_obs),
+            "found_frames": int(self.ctx.target_found_frames),
+            "lost_frames": int(self.ctx.target_lost_frames),
+            "confirm_elapsed_ms": int(round(self._state_elapsed() * 1000.0)) if old_state == State.TARGET_CONFIRM else 0,
+            "lock_elapsed_ms": int(round(self._state_elapsed() * 1000.0)) if old_state == State.TARGET_LOCKED else 0,
+            "target_stable_ms": self._target_stable_ms(),
+            "center_jitter": float(self.ctx.target_last_center_jitter),
+            "lost_reason": str(self.ctx.target_last_lost_reason or ""),
+            "transition_reason": str(reason or ""),
             "car_mode": car_state.mode if car_state is not None else None,
             "planned_cmd": {"vx": None, "vy": None, "wz": None},
             "condition": self._transition_condition_snapshot(old_state, new_state),
@@ -401,6 +431,32 @@ class OrchestratorCore:
         req = self._active_req_payload()
         if req is not None:
             self._queue_vision_req(req, force=True)
+
+    def _target_debounce_snapshot(self) -> Dict[str, Any]:
+        return {
+            "target_found_frames": int(self.ctx.target_found_frames),
+            "target_lost_frames": int(self.ctx.target_lost_frames),
+            "target_lock_frames": int(self.ctx.target_lock_frames),
+            "target_loss_since_mono": float(self.ctx.target_loss_since_mono),
+            "target_stable_since_mono": float(self.ctx.target_stable_since_mono),
+            "target_center_history": [dict(item) for item in self.ctx.target_center_history],
+            "target_last_center_jitter": float(self.ctx.target_last_center_jitter),
+            "target_last_lost_reason": str(self.ctx.target_last_lost_reason or ""),
+            "target_last_transition_reason": str(self.ctx.target_last_transition_reason or ""),
+        }
+
+    def _restore_target_debounce_snapshot(self, snapshot: Dict[str, Any]) -> None:
+        if not snapshot:
+            return
+        self.ctx.target_found_frames = int(snapshot.get("target_found_frames", 0) or 0)
+        self.ctx.target_lost_frames = int(snapshot.get("target_lost_frames", 0) or 0)
+        self.ctx.target_lock_frames = int(snapshot.get("target_lock_frames", 0) or 0)
+        self.ctx.target_loss_since_mono = float(snapshot.get("target_loss_since_mono", 0.0) or 0.0)
+        self.ctx.target_stable_since_mono = float(snapshot.get("target_stable_since_mono", 0.0) or 0.0)
+        self.ctx.target_center_history = [dict(item) for item in snapshot.get("target_center_history", [])]
+        self.ctx.target_last_center_jitter = float(snapshot.get("target_last_center_jitter", 0.0) or 0.0)
+        self.ctx.target_last_lost_reason = str(snapshot.get("target_last_lost_reason", "") or "")
+        self.ctx.target_last_transition_reason = str(snapshot.get("target_last_transition_reason", "") or "")
 
     def _interrupt_to_idle(self, reason: str, tts_text: Optional[str] = None, interrupt_tts: bool = False, send_vision_idle: bool = False):
         if send_vision_idle:
@@ -562,13 +618,24 @@ class OrchestratorCore:
     def _tick_edge_slide_search(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
         target_obs = self._fresh_target_obs()
-        if (
-            target_obs is not None
-            and target_obs.found
-            and self._target_quality_ok(target_obs, self.cfg.target_confirm_conf_th)
-        ):
-            self._transition(State.TARGET_CONFIRM, self._target_found_reason(target_obs))
-            return self.controller.stop_cmd("TARGET_CONFIRM")
+        candidate_ok, candidate_reason = self._target_candidate_status(
+            target_obs,
+            self.cfg.target_confirm_conf_th,
+            min_area=self.cfg.target_confirm_min_bbox_area,
+        )
+        if candidate_ok and target_obs is not None:
+            self.ctx.target_found_frames += 1
+            self.ctx.target_lost_frames = 0
+            self._update_target_stability(target_obs)
+            if self.ctx.target_found_frames >= int(self.cfg.target_found_frames_to_confirm):
+                self._transition(
+                    State.TARGET_CONFIRM,
+                    self._format_target_transition_reason("target_found", target_obs),
+                )
+                return self.controller.stop_cmd("TARGET_CONFIRM")
+        else:
+            self.ctx.target_found_frames = 0
+            self._reset_target_stability(candidate_reason)
         if self._state_elapsed() >= float(self.cfg.target_search_timeout_s):
             self.ctx.last_fail_reason = "当前桌边未找到目标"
             if self._can_relocate_edge():
@@ -662,39 +729,87 @@ class OrchestratorCore:
     def _tick_target_confirm(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
         obs = self._fresh_target_obs()
-        if (
-            obs is not None
-            and obs.found
-            and self._target_quality_ok(obs, self.cfg.target_confirm_conf_th)
-        ):
+        visible_ok, visible_reason = self._target_candidate_status(
+            obs,
+            self.cfg.target_confirm_conf_th,
+            min_area=self.cfg.target_confirm_min_bbox_area,
+        )
+        lock_ok, lock_reason = self._target_candidate_status(obs, self.cfg.target_lock_conf_th, min_area=0.0)
+        if visible_ok and obs is not None:
             self.ctx.target_found_frames += 1
             self.ctx.target_lost_frames = 0
-            if self.ctx.target_found_frames >= int(self.cfg.target_found_frames_to_confirm):
-                self._transition(State.TARGET_LOCKED, "目标确认完成")
+            center_jitter = self._update_target_stability(obs)
+            confirm_elapsed_s = self._state_elapsed()
+            confirm_min_ok = confirm_elapsed_s >= float(self.cfg.target_confirm_min_s)
+            stable_ok = self._target_stable_ms() >= int(round(float(self.cfg.target_lock_stable_s) * 1000.0))
+            jitter_ok = center_jitter <= float(self.cfg.target_lock_center_jitter_th)
+            if lock_ok and confirm_min_ok and stable_ok and jitter_ok:
+                self._transition(
+                    State.TARGET_LOCKED,
+                    self._format_target_transition_reason("target_confirmed", obs),
+                )
                 return self.controller.stop_cmd("TARGET_LOCKED")
+            if self._state_elapsed() >= float(self.cfg.target_confirm_timeout_s):
+                reasons = []
+                if not lock_ok:
+                    reasons.append(lock_reason)
+                if not confirm_min_ok:
+                    reasons.append("confirm_min_not_reached")
+                if not stable_ok:
+                    reasons.append("target_stable_not_enough")
+                if not jitter_ok:
+                    reasons.append("center_jitter_high")
+                self.ctx.target_last_lost_reason = ",".join(reasons) or "lock_condition_timeout"
+                self._transition(
+                    State.EDGE_SLIDE_SEARCH,
+                    self._format_target_transition_reason("confirm_timeout", obs),
+                )
             return self.controller.stop_cmd("TARGET_CONFIRM")
+        self.ctx.target_found_frames = 0
         self.ctx.target_lost_frames += 1
-        if self.ctx.target_lost_frames >= int(self.cfg.target_confirm_lost_frames):
-            self._transition(State.EDGE_SLIDE_SEARCH, "目标确认失败，恢复沿边搜索")
+        self._start_loss_timer("target_loss_since_mono")
+        self._reset_target_stability(visible_reason)
+        lost_s = self._loss_elapsed(self.ctx.target_loss_since_mono)
+        if lost_s >= float(self.cfg.target_confirm_lost_hold_s):
+            self._transition(
+                State.EDGE_SLIDE_SEARCH,
+                self._format_target_transition_reason("confirm_lost_hold_exceeded", obs),
+            )
         return self.controller.stop_cmd("TARGET_CONFIRM")
 
     def _tick_target_locked(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
         obs = self._fresh_target_obs()
-        if (
-            obs is None
-            or not obs.found
-            or not self._target_quality_ok(obs, self.cfg.target_lock_conf_th)
-        ):
+        lock_ok, lock_reason = self._target_candidate_status(obs, self.cfg.target_lock_conf_th, min_area=0.0)
+        if not lock_ok or obs is None:
             self.ctx.target_lost_frames += 1
-            if self.ctx.target_lost_frames >= int(self.cfg.target_confirm_lost_frames):
-                self._transition(State.EDGE_SLIDE_SEARCH, "目标锁定丢失，恢复沿边搜索")
+            self._start_loss_timer("target_loss_since_mono")
+            self._reset_target_stability(lock_reason)
+            lost_s = self._loss_elapsed(self.ctx.target_loss_since_mono)
+            if lost_s >= float(self.cfg.target_lock_lost_hold_s):
+                self._transition(
+                    State.EDGE_SLIDE_SEARCH,
+                    self._format_target_transition_reason("locked_lost_hold_exceeded", obs),
+                )
                 return self.controller.stop_cmd("EDGE_SLIDE_SEARCH")
             return self.controller.stop_cmd("TARGET_LOCKED")
         self.ctx.target_lost_frames = 0
         self.ctx.target_lock_frames += 1
-        if self._state_elapsed() >= float(self.cfg.target_lock_settle_s):
-            self._transition(State.FREEZE_BASE, "目标稳定，冻结底盘")
+        center_jitter = self._update_target_stability(obs)
+        stable_ok = self._target_stable_ms() >= int(round(float(self.cfg.target_lock_stable_s) * 1000.0))
+        jitter_ok = center_jitter <= float(self.cfg.target_lock_center_jitter_th)
+        conf_stable = self._target_quality_ok(obs, self.cfg.target_lock_conf_th)
+        if (
+            self._state_elapsed() >= float(self.cfg.target_locked_freeze_after_s)
+            and stable_ok
+            and jitter_ok
+            and conf_stable
+            and self.ctx.target_loss_since_mono <= 0.0
+        ):
+            self._transition(
+                State.FREEZE_BASE,
+                self._format_target_transition_reason("locked_stable_freeze", obs),
+            )
             return self.controller.stop_cmd("FREEZE_BASE")
         return self.controller.stop_cmd("TARGET_LOCKED")
 
@@ -1056,7 +1171,13 @@ class OrchestratorCore:
         return str(obs.target).strip() == str(self.ctx.active_target).strip()
 
     def _target_cls_matches_active(self, obs: TargetObs) -> bool:
-        return self._target_matches_active(obs)
+        active = str(self.ctx.active_target or "").strip()
+        if not active:
+            return True
+        candidate_cls = str(obs.matched_cls or obs.target or "").strip()
+        if not candidate_cls:
+            return True
+        return candidate_cls == active
 
     def _target_conf_value(self, obs: TargetObs) -> Optional[float]:
         value = obs.matched_conf if obs.matched_conf is not None else obs.confidence
@@ -1075,16 +1196,121 @@ class OrchestratorCore:
         return f"target_found matched_cls={matched_cls} matched_conf={float(conf):.3f}"
 
     def _target_quality_ok(self, obs: TargetObs, conf_th: float) -> bool:
+        return self._target_candidate_status(obs, conf_th, min_area=0.0)[0]
+
+    def _target_stable_ms(self) -> int:
+        if self.ctx.target_stable_since_mono <= 0.0:
+            return 0
+        return int(round(max(0.0, monotonic_ts() - self.ctx.target_stable_since_mono) * 1000.0))
+
+    def _target_center_pair(self, obs: Optional[TargetObs]) -> Optional[Tuple[float, float]]:
+        if obs is None:
+            return None
+        cx = self._float_or_none(obs.cx_norm)
+        cy = self._float_or_none(obs.cy_norm)
+        if cx is None and cy is None:
+            return None
+        return (float(cx if cx is not None else 0.0), float(cy if cy is not None else 0.0))
+
+    def _target_bbox_area(self, obs: TargetObs) -> Optional[float]:
+        for value in (obs.matched_area, obs.size_norm, obs.mask_area_ratio):
+            numeric = self._float_or_none(value)
+            if numeric is not None and numeric > 0.0:
+                return numeric
+        bbox = obs.matched_bbox or obs.bbox or obs.mask_bbox
+        if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+            values = [self._float_or_none(item) for item in bbox[:4]]
+            if all(item is not None for item in values):
+                x1, y1, x2, y2 = [float(item) for item in values]  # type: ignore[arg-type]
+                width = abs(x2 - x1)
+                height = abs(y2 - y1)
+                if width > 1.0 or height > 1.0:
+                    return None
+                return width * height
+        return None
+
+    def _target_candidate_status(
+        self,
+        obs: Optional[TargetObs],
+        conf_th: float,
+        *,
+        min_area: float = 0.0,
+    ) -> Tuple[bool, str]:
+        if obs is None:
+            return False, "vision_stale"
         if not bool(obs.found):
-            return False
+            return False, "target_lost"
         if not self._target_cls_matches_active(obs):
-            return False
+            return False, "class_mismatch"
         if not self._target_matches_active(obs):
-            return False
+            return False, "target_mismatch"
         conf = self._target_conf_value(obs)
         if conf is None:
-            return float(conf_th or 0.0) <= 0.0
-        return conf >= float(conf_th or 0.0)
+            if float(conf_th or 0.0) > 0.0:
+                return False, "conf_missing"
+        elif conf < float(conf_th or 0.0):
+            return False, f"conf_low conf={conf:.3f} th={float(conf_th or 0.0):.3f}"
+        area_th = float(min_area or 0.0)
+        area = self._target_bbox_area(obs)
+        if area_th > 0.0 and area is not None and area < area_th:
+            return False, f"bbox_area_low area={area:.4f} th={area_th:.4f}"
+        return True, "target_visible"
+
+    def _update_target_stability(self, obs: TargetObs) -> float:
+        now_m = monotonic_ts()
+        if self.ctx.target_stable_since_mono <= 0.0:
+            self.ctx.target_stable_since_mono = now_m
+        self.ctx.target_loss_since_mono = 0.0
+        self.ctx.target_last_lost_reason = ""
+        center = self._target_center_pair(obs)
+        if center is not None:
+            self.ctx.target_center_history.append({"t": now_m, "cx": center[0], "cy": center[1]})
+        window_s = max(float(self.cfg.target_lock_stable_s), float(self.cfg.target_confirm_min_s), 0.5)
+        cutoff = now_m - window_s
+        self.ctx.target_center_history = [
+            item for item in self.ctx.target_center_history if float(item.get("t", 0.0) or 0.0) >= cutoff
+        ][-30:]
+        self.ctx.target_last_center_jitter = self._target_center_jitter()
+        return self.ctx.target_last_center_jitter
+
+    def _target_center_jitter(self) -> float:
+        points = self.ctx.target_center_history
+        if len(points) < 2:
+            return 0.0
+        mean_cx = sum(float(item.get("cx", 0.0) or 0.0) for item in points) / float(len(points))
+        mean_cy = sum(float(item.get("cy", 0.0) or 0.0) for item in points) / float(len(points))
+        return max(
+            math.hypot(float(item.get("cx", 0.0) or 0.0) - mean_cx, float(item.get("cy", 0.0) or 0.0) - mean_cy)
+            for item in points
+        )
+
+    def _reset_target_stability(self, reason: str) -> None:
+        self.ctx.target_stable_since_mono = 0.0
+        self.ctx.target_center_history.clear()
+        self.ctx.target_last_center_jitter = 0.0
+        self.ctx.target_last_lost_reason = str(reason or "")
+
+    def _format_target_transition_reason(self, reason: str, obs: Optional[TargetObs] = None) -> str:
+        obs = obs or self.ctx.last_target_obs
+        matched_cls = str(obs.matched_cls or obs.target or "").strip() if obs is not None else ""
+        conf = self._target_conf_value(obs) if obs is not None else None
+        center = self._target_center(obs)
+        parts = [
+            str(reason or "target_transition"),
+            f"found_frames={int(self.ctx.target_found_frames)}",
+            f"lost_frames={int(self.ctx.target_lost_frames)}",
+            f"target_stable_ms={self._target_stable_ms()}",
+        ]
+        if matched_cls:
+            parts.append(f"matched_cls={matched_cls}")
+        if conf is not None:
+            parts.append(f"matched_conf={float(conf):.3f}")
+        if center is not None:
+            parts.append(f"matched_center={center}")
+        parts.append(f"center_jitter={float(self.ctx.target_last_center_jitter):.3f}")
+        if self.ctx.target_last_lost_reason:
+            parts.append(f"lost_reason={self.ctx.target_last_lost_reason}")
+        return " ".join(parts)
 
     def _obs_has_motion(self, obs: Optional[TargetObs]) -> bool:
         if obs is None:

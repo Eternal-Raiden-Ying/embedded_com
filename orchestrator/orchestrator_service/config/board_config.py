@@ -163,12 +163,34 @@ def _apply_stage_params(data: Dict[str, Any]) -> None:
     CONFIG.control.target_confirm_conf_th = float(target_confirm.get("confirm_conf_th", CONFIG.control.target_confirm_conf_th))
     CONFIG.control.target_found_frames_to_confirm = int(target_confirm.get("confirm_enter_frames", CONFIG.control.target_found_frames_to_confirm))
     CONFIG.control.target_confirm_dwell_s = _ms_to_s(target_confirm.get("confirm_dwell_ms"), CONFIG.control.target_confirm_dwell_s)
-    CONFIG.control.target_confirm_lost_hold_s = _ms_to_s(target_confirm.get("lost_hold_ms"), CONFIG.control.target_confirm_lost_hold_s)
+    CONFIG.control.target_confirm_min_s = _ms_to_s(
+        target_confirm.get("confirm_min_ms", target_confirm.get("confirm_dwell_ms")),
+        CONFIG.control.target_confirm_min_s,
+    )
+    CONFIG.control.target_confirm_timeout_s = _ms_to_s(
+        target_confirm.get("confirm_timeout_ms"),
+        CONFIG.control.target_confirm_timeout_s,
+    )
+    CONFIG.control.target_confirm_lost_hold_s = _ms_to_s(
+        target_confirm.get("confirm_lost_hold_ms", target_confirm.get("lost_hold_ms")),
+        CONFIG.control.target_confirm_lost_hold_s,
+    )
+    CONFIG.control.target_confirm_min_bbox_area = float(
+        target_confirm.get("min_bbox_area", CONFIG.control.target_confirm_min_bbox_area)
+    )
 
     CONFIG.control.target_lock_conf_th = float(target_locked.get("lock_conf_th", CONFIG.control.target_lock_conf_th))
-    CONFIG.control.target_lock_settle_s = _ms_to_s(target_locked.get("lock_stable_ms"), CONFIG.control.target_lock_settle_s)
+    CONFIG.control.target_lock_stable_s = _ms_to_s(target_locked.get("lock_stable_ms"), CONFIG.control.target_lock_stable_s)
+    CONFIG.control.target_lock_settle_s = CONFIG.control.target_lock_stable_s
     CONFIG.control.target_lock_center_jitter_th = float(target_locked.get("center_jitter_th", CONFIG.control.target_lock_center_jitter_th))
-    CONFIG.control.target_lock_lost_hold_s = _ms_to_s(target_locked.get("lost_hold_ms"), CONFIG.control.target_lock_lost_hold_s)
+    CONFIG.control.target_lock_lost_hold_s = _ms_to_s(
+        target_locked.get("locked_lost_hold_ms", target_locked.get("lost_hold_ms")),
+        CONFIG.control.target_lock_lost_hold_s,
+    )
+    CONFIG.control.target_locked_freeze_after_s = _ms_to_s(
+        target_locked.get("freeze_after_locked_ms"),
+        CONFIG.control.target_locked_freeze_after_s,
+    )
 
 
 def _apply_car_cmd_params(data: Dict[str, Any]) -> None:
@@ -256,12 +278,19 @@ CONFIG.control.search_target_init_hold_s = _env_float("ORCH_SEARCH_TARGET_INIT_H
 CONFIG.control.target_found_frames_to_confirm = _env_int("ORCH_TARGET_CONFIRM_FRAMES", CONFIG.control.target_found_frames_to_confirm)
 CONFIG.control.target_confirm_conf_th = _env_float("ORCH_TARGET_CONFIRM_CONF_TH", CONFIG.control.target_confirm_conf_th)
 CONFIG.control.target_confirm_dwell_s = _env_float("ORCH_TARGET_CONFIRM_DWELL_S", CONFIG.control.target_confirm_dwell_s)
+CONFIG.control.target_confirm_min_s = _env_float("ORCH_TARGET_CONFIRM_MIN_S", CONFIG.control.target_confirm_min_s)
+CONFIG.control.target_confirm_timeout_s = _env_float("ORCH_TARGET_CONFIRM_TIMEOUT_S", CONFIG.control.target_confirm_timeout_s)
 CONFIG.control.target_confirm_lost_frames = _env_int("ORCH_TARGET_CONFIRM_LOST_FRAMES", CONFIG.control.target_confirm_lost_frames)
 CONFIG.control.target_confirm_lost_hold_s = _env_float("ORCH_TARGET_CONFIRM_LOST_HOLD_S", CONFIG.control.target_confirm_lost_hold_s)
+CONFIG.control.target_confirm_min_bbox_area = _env_float("ORCH_TARGET_CONFIRM_MIN_BBOX_AREA", CONFIG.control.target_confirm_min_bbox_area)
 CONFIG.control.target_lock_conf_th = _env_float("ORCH_TARGET_LOCK_CONF_TH", CONFIG.control.target_lock_conf_th)
 CONFIG.control.target_lock_settle_s = _env_float("ORCH_TARGET_LOCK_SETTLE_S", CONFIG.control.target_lock_settle_s)
+CONFIG.control.target_lock_stable_s = _env_float("ORCH_TARGET_LOCK_STABLE_S", CONFIG.control.target_lock_stable_s)
+if "ORCH_TARGET_LOCK_STABLE_S" not in os.environ and "ORCH_TARGET_LOCK_SETTLE_S" in os.environ:
+    CONFIG.control.target_lock_stable_s = CONFIG.control.target_lock_settle_s
 CONFIG.control.target_lock_center_jitter_th = _env_float("ORCH_TARGET_LOCK_CENTER_JITTER_TH", CONFIG.control.target_lock_center_jitter_th)
 CONFIG.control.target_lock_lost_hold_s = _env_float("ORCH_TARGET_LOCK_LOST_HOLD_S", CONFIG.control.target_lock_lost_hold_s)
+CONFIG.control.target_locked_freeze_after_s = _env_float("ORCH_TARGET_LOCKED_FREEZE_AFTER_S", CONFIG.control.target_locked_freeze_after_s)
 CONFIG.control.freeze_settle_s = _env_float("ORCH_FREEZE_SETTLE_S", CONFIG.control.freeze_settle_s)
 CONFIG.control.edge_slide_pause_s = _env_float("ORCH_EDGE_SLIDE_PAUSE_S", CONFIG.control.edge_slide_pause_s)
 CONFIG.control.table_edge_obs_max_age_ms = _env_int("ORCH_EDGE_FOLLOW_TABLE_EDGE_OBS_MAX_AGE_MS", CONFIG.control.table_edge_obs_max_age_ms)

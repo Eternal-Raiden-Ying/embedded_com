@@ -120,7 +120,11 @@ def main():
     cfg.edge_settle_s = 0.1
     cfg.search_target_init_hold_s = 0.05
     cfg.target_found_frames_to_confirm = 2
+    cfg.target_confirm_min_s = 0.0
+    cfg.target_confirm_timeout_s = 1.0
+    cfg.target_lock_stable_s = 0.0
     cfg.target_lock_settle_s = 0.05
+    cfg.target_locked_freeze_after_s = 0.05
     cfg.freeze_settle_s = 0.05
     cfg.done_hold_s = 0.05
     cfg.req_resend_period_s = 0.0

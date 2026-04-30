@@ -327,6 +327,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         cfg = OrchestratorConfig()
         cfg.control.edge_slide_pause_s = 0.0
         cfg.control.target_confirm_conf_th = 0.65
+        cfg.control.target_found_frames_to_confirm = 1
         core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
         core.ctx.state = State.EDGE_SLIDE_SEARCH
         core.ctx.active_target = "apple"
@@ -392,6 +393,88 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         decision = core.tick()
         self.assertEqual(core.ctx.state, State.TARGET_LOCKED)
         self.assertEqual(decision.cmd.mode, "TARGET_LOCKED")
+
+    def test_edge_slide_requires_consecutive_target_frames(self) -> None:
+        cfg = OrchestratorConfig()
+        cfg.control.edge_slide_pause_s = 0.0
+        cfg.control.target_confirm_conf_th = 0.30
+        cfg.control.target_found_frames_to_confirm = 3
+        core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
+        core.ctx.state = State.EDGE_SLIDE_SEARCH
+        core.ctx.active_target = "apple"
+        core.ctx.task_start_wall_ts = 1.0
+        core.ctx.state_enter_mono = monotonic_ts() - 1.0
+        core.handle_table_obs(TableEdgeObs(ts=now_ts(), table_found=True, edge_found=True, confidence=0.9, yaw_err_rad=0.01, dist_err_m=0.02))
+
+        for expected_state in (State.EDGE_SLIDE_SEARCH, State.EDGE_SLIDE_SEARCH, State.TARGET_CONFIRM):
+            core.handle_target_obs(TargetObs(ts=now_ts(), found=True, target="apple", matched_cls="apple", matched_conf=0.50, cx_norm=0.54))
+            decision = core.tick()
+            self.assertEqual(core.ctx.state, expected_state)
+
+        self.assertEqual(decision.cmd.mode, "TARGET_CONFIRM")
+        self.assertEqual(core.ctx.target_found_frames, 3)
+
+    def test_target_confirm_respects_min_stable_before_lock(self) -> None:
+        cfg = OrchestratorConfig()
+        cfg.control.target_confirm_conf_th = 0.30
+        cfg.control.target_lock_conf_th = 0.40
+        cfg.control.target_confirm_min_s = 0.60
+        cfg.control.target_lock_stable_s = 1.20
+        cfg.control.target_lock_center_jitter_th = 0.08
+        core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
+        core.ctx.state = State.TARGET_CONFIRM
+        core.ctx.active_target = "apple"
+        core.ctx.task_start_wall_ts = 1.0
+        obs = TargetObs(ts=now_ts(), found=True, target="apple", matched_cls="apple", matched_conf=0.80, cx_norm=0.54, cy_norm=0.50)
+
+        core.handle_target_obs(obs)
+        decision = core.tick()
+        self.assertEqual(core.ctx.state, State.TARGET_CONFIRM)
+        self.assertEqual(decision.cmd.mode, "TARGET_CONFIRM")
+
+        core.ctx.state_enter_mono = monotonic_ts() - 0.70
+        core.ctx.target_stable_since_mono = monotonic_ts() - 1.30
+        core.handle_target_obs(obs)
+        decision = core.tick()
+        self.assertEqual(core.ctx.state, State.TARGET_LOCKED)
+        self.assertEqual(decision.cmd.mode, "TARGET_LOCKED")
+
+    def test_target_locked_holds_short_loss(self) -> None:
+        cfg = OrchestratorConfig()
+        cfg.control.target_lock_conf_th = 0.40
+        cfg.control.target_lock_lost_hold_s = 1.20
+        core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
+        core.ctx.state = State.TARGET_LOCKED
+        core.ctx.active_target = "apple"
+        core.ctx.task_start_wall_ts = 1.0
+
+        core.handle_target_obs(TargetObs(ts=now_ts(), found=False, target="apple", matched_cls="apple", matched_conf=0.0))
+        decision = core.tick()
+        self.assertEqual(core.ctx.state, State.TARGET_LOCKED)
+        self.assertEqual(decision.cmd.mode, "TARGET_LOCKED")
+
+        core.ctx.target_loss_since_mono = monotonic_ts() - 1.30
+        decision = core.tick()
+        self.assertEqual(core.ctx.state, State.EDGE_SLIDE_SEARCH)
+        self.assertEqual(decision.cmd.mode, "EDGE_SLIDE_SEARCH")
+
+    def test_target_locked_reaches_freeze_when_stable(self) -> None:
+        cfg = OrchestratorConfig()
+        cfg.control.target_lock_conf_th = 0.40
+        cfg.control.target_lock_stable_s = 1.20
+        cfg.control.target_lock_center_jitter_th = 0.08
+        cfg.control.target_locked_freeze_after_s = 0.80
+        core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
+        core.ctx.state = State.TARGET_LOCKED
+        core.ctx.active_target = "apple"
+        core.ctx.task_start_wall_ts = 1.0
+        core.ctx.state_enter_mono = monotonic_ts() - 0.90
+        core.ctx.target_stable_since_mono = monotonic_ts() - 1.50
+        core.handle_target_obs(TargetObs(ts=now_ts(), found=True, target="apple", matched_cls="apple", matched_conf=0.80, cx_norm=0.54, cy_norm=0.50))
+
+        decision = core.tick()
+        self.assertEqual(core.ctx.state, State.FREEZE_BASE)
+        self.assertEqual(decision.cmd.mode, "FREEZE_BASE")
 
     def test_edge_slide_config_nonzero_outputs_nonzero_vy(self) -> None:
         cfg = OrchestratorConfig()
