@@ -1,0 +1,61 @@
+# Reference defaults for VISTA perception tuning.
+# This file documents the high-impact knobs currently configured in
+# VISTA/vision_module/config/board_config.py. It is not loaded by runtime yet.
+camera:
+  max_fps: 30
+  rgb:
+    source: "6"
+    in_w: 1280
+    in_h: 720
+    out_w: 640
+    out_h: 640
+    in_format: YUY2
+    format: BGR
+    fps: 30
+    crop_x: 280
+    crop_y: 0
+    crop_w: 720
+    crop_h: 720
+    auto_exposure: true
+    exposure: null
+    brightness: null
+  depth:
+    source: "2"
+    width: 424
+    height: 240
+    fps: 15
+  grey:
+    source: "4"
+    in_w: 640
+    in_h: 480
+    out_w: 640
+    out_h: 480
+    in_format: GRAY8
+    format: BGR
+    fps: 30
+
+model:
+  active_model: yolov7_detect
+  yolov7_detect:
+    width: 640
+    height: 640
+    conf_thres: 0.25
+    iou_thres: 0.45
+    backend: qnn
+  yolov8s_seg:
+    width: 640
+    height: 640
+    conf_thres: 0.45
+    iou_thres: 0.45
+    backend: qnn
+  yolo26s_seg:
+    width: 640
+    height: 640
+    conf_thres: 0.25
+    iou_thres: 0.15
+    backend: qnn
+
+preview:
+  enabled_default_on_board: true
+  draw_boxes: true
+  draw_masks: false

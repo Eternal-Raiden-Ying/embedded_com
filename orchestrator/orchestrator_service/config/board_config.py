@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import json
 import os
 from pathlib import Path
+from typing import Any, Dict
 
 from .schema import OrchestratorConfig
 
@@ -40,6 +42,140 @@ def _env_str(name: str, default: str) -> str:
     return str(raw).strip() if raw is not None else str(default)
 
 
+def _ms_to_s(value: Any, default_s: float) -> float:
+    try:
+        return max(0.0, float(value) / 1000.0)
+    except Exception:
+        return float(default_s)
+
+
+def _ms_to_frames(value: Any, tick_hz: float, default_frames: int) -> int:
+    try:
+        return max(1, int(round((float(value) / 1000.0) * max(1.0, float(tick_hz)))))
+    except Exception:
+        return int(default_frames)
+
+
+def _load_config_dict(path: str) -> Dict[str, Any]:
+    file_path = str(path or "").strip()
+    if not file_path or not Path(file_path).is_file():
+        return {}
+    if file_path.lower().endswith(".json"):
+        with open(file_path, "r", encoding="utf-8") as fp:
+            return dict(json.load(fp) or {})
+    if file_path.lower().endswith((".yaml", ".yml")):
+        try:
+            import yaml  # type: ignore
+        except ImportError:
+            return _parse_simple_yaml(Path(file_path).read_text(encoding="utf-8"))
+        with open(file_path, "r", encoding="utf-8") as fp:
+            return dict(yaml.safe_load(fp) or {})
+    return {}
+
+
+def _parse_simple_yaml(text: str) -> Dict[str, Any]:
+    root: Dict[str, Any] = {}
+    stack = [(-1, root)]
+
+    def _scalar(raw: str) -> Any:
+        value = str(raw).strip()
+        if value == "":
+            return ""
+        if value in {'""', "''"}:
+            return ""
+        if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+            return value[1:-1]
+        lowered = value.lower()
+        if lowered == "true":
+            return True
+        if lowered == "false":
+            return False
+        try:
+            if "." in value:
+                return float(value)
+            return int(value)
+        except Exception:
+            return value
+
+    for raw_line in text.splitlines():
+        line = raw_line.split("#", 1)[0].rstrip()
+        if not line.strip() or ":" not in line:
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        key, value = line.strip().split(":", 1)
+        while stack and indent <= stack[-1][0]:
+            stack.pop()
+        current = stack[-1][1]
+        if value.strip() == "":
+            child: Dict[str, Any] = {}
+            current[key.strip()] = child
+            stack.append((indent, child))
+        else:
+            current[key.strip()] = _scalar(value)
+    return root
+
+
+def _loaded(path: str) -> None:
+    path = str(path or "").strip()
+    if path and Path(path).is_file() and path not in CONFIG.runtime.loaded_config_files:
+        CONFIG.runtime.loaded_config_files.append(path)
+
+
+def _apply_stage_params(data: Dict[str, Any]) -> None:
+    if not data:
+        return
+    final_lock = dict(data.get("final_lock") or {})
+    controlled = dict(data.get("controlled_approach") or {})
+    edge_slide = dict(data.get("edge_slide_search") or {})
+    target_confirm = dict(data.get("target_confirm") or {})
+    target_locked = dict(data.get("target_locked") or {})
+
+    CONFIG.control.final_lock_yaw_tol_rad = float(final_lock.get("yaw_abs_th", CONFIG.control.final_lock_yaw_tol_rad))
+    CONFIG.control.final_lock_dist_tol_m = float(final_lock.get("dist_abs_th_m", CONFIG.control.final_lock_dist_tol_m))
+    CONFIG.docking.min_confidence = float(final_lock.get("edge_conf_th", CONFIG.docking.min_confidence))
+    CONFIG.control.final_lock_frames_to_arrive = _ms_to_frames(
+        final_lock.get("stable_ms"),
+        CONFIG.runtime.tick_hz,
+        CONFIG.control.final_lock_frames_to_arrive,
+    )
+    CONFIG.control.approach_timeout_s = _ms_to_s(final_lock.get("timeout_ms"), CONFIG.control.approach_timeout_s)
+
+    CONFIG.docking.precise_dist_tol_m = float(controlled.get("target_dist_m", CONFIG.docking.precise_dist_tol_m))
+    CONFIG.docking.approach_max_vx_norm = float(controlled.get("max_vx_norm", CONFIG.docking.approach_max_vx_norm))
+    CONFIG.docking.approach_max_wz_norm = float(controlled.get("max_wz_norm", CONFIG.docking.approach_max_wz_norm))
+    CONFIG.docking.dist_pid.kp = float(controlled.get("dist_kp", CONFIG.docking.dist_pid.kp))
+    CONFIG.docking.yaw_pid.kp = float(controlled.get("yaw_kp", CONFIG.docking.yaw_pid.kp))
+
+    CONFIG.car.edge_slide_vy_norm = float(edge_slide.get("slide_vy_norm", CONFIG.car.edge_slide_vy_norm))
+    CONFIG.car.edge_slide_max_vx_norm = float(edge_slide.get("max_vx_correction_norm", CONFIG.car.edge_slide_max_vx_norm))
+    CONFIG.car.edge_slide_max_wz_norm = float(edge_slide.get("max_wz_correction_norm", CONFIG.car.edge_slide_max_wz_norm))
+    CONFIG.control.edge_slide_dist_tolerance_m = float(edge_slide.get("keep_dist_tolerance_m", CONFIG.control.edge_slide_dist_tolerance_m))
+    CONFIG.control.table_loss_hold_s = _ms_to_s(edge_slide.get("edge_lost_hold_ms"), CONFIG.control.table_loss_hold_s)
+    CONFIG.control.approach_min_dwell_s = _ms_to_s(edge_slide.get("min_dwell_ms"), CONFIG.control.approach_min_dwell_s)
+
+    CONFIG.control.target_confirm_conf_th = float(target_confirm.get("confirm_conf_th", CONFIG.control.target_confirm_conf_th))
+    CONFIG.control.target_found_frames_to_confirm = int(target_confirm.get("confirm_enter_frames", CONFIG.control.target_found_frames_to_confirm))
+    CONFIG.control.target_confirm_dwell_s = _ms_to_s(target_confirm.get("confirm_dwell_ms"), CONFIG.control.target_confirm_dwell_s)
+    CONFIG.control.target_confirm_lost_hold_s = _ms_to_s(target_confirm.get("lost_hold_ms"), CONFIG.control.target_confirm_lost_hold_s)
+
+    CONFIG.control.target_lock_conf_th = float(target_locked.get("lock_conf_th", CONFIG.control.target_lock_conf_th))
+    CONFIG.control.target_lock_settle_s = _ms_to_s(target_locked.get("lock_stable_ms"), CONFIG.control.target_lock_settle_s)
+    CONFIG.control.target_lock_center_jitter_th = float(target_locked.get("center_jitter_th", CONFIG.control.target_lock_center_jitter_th))
+    CONFIG.control.target_lock_lost_hold_s = _ms_to_s(target_locked.get("lost_hold_ms"), CONFIG.control.target_lock_lost_hold_s)
+
+
+def _apply_car_cmd_params(data: Dict[str, Any]) -> None:
+    car_cmd = dict(data.get("car_cmd") or data or {})
+    CONFIG.car.send_period_ms = int(car_cmd.get("send_period_ms", CONFIG.car.send_period_ms))
+    if CONFIG.car.send_period_ms > 0:
+        CONFIG.runtime.tick_hz = 1000.0 / float(CONFIG.car.send_period_ms)
+    CONFIG.car.cmd_hold_ms = int(car_cmd.get("hold_ms", CONFIG.car.cmd_hold_ms))
+    CONFIG.car.max_vx_norm = float(car_cmd.get("max_vx_norm", CONFIG.car.max_vx_norm))
+    CONFIG.car.max_vy_norm = float(car_cmd.get("max_vy_norm", CONFIG.car.max_vy_norm))
+    CONFIG.car.max_wz_norm = float(car_cmd.get("max_wz_norm", CONFIG.car.max_wz_norm))
+    CONFIG.car.stop_on_state_enter = bool(car_cmd.get("stop_on_state_enter", CONFIG.car.stop_on_state_enter))
+
+
 CONFIG = OrchestratorConfig()
 
 _DEFAULT_PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -60,6 +196,19 @@ CONFIG.runtime.log_enabled = _env_bool("ORCH_LOG_ENABLED", CONFIG.runtime.log_en
 CONFIG.runtime.debug = _env_bool("ORCH_DEBUG", CONFIG.runtime.debug)
 CONFIG.runtime.state_block_period_s = _env_float("ORCH_STATE_BLOCK_PERIOD_S", CONFIG.runtime.state_block_period_s)
 CONFIG.runtime.heartbeat_period_s = _env_float("ORCH_HEARTBEAT_PERIOD_S", CONFIG.runtime.heartbeat_period_s)
+CONFIG.runtime.stage_params_file = _env_str(
+    "ORCH_STAGE_PARAMS_FILE",
+    str(Path(CONFIG.runtime.project_root) / "configs" / "stage_params.yaml"),
+)
+CONFIG.runtime.car_cmd_params_file = _env_str(
+    "ORCH_CAR_CMD_PARAMS_FILE",
+    str(Path(CONFIG.runtime.project_root) / "configs" / "car_cmd_params.yaml"),
+)
+_apply_car_cmd_params(_load_config_dict(CONFIG.runtime.car_cmd_params_file))
+_loaded(CONFIG.runtime.car_cmd_params_file)
+CONFIG.runtime.tick_hz = _env_float("ORCH_TICK_HZ", CONFIG.runtime.tick_hz)
+_apply_stage_params(_load_config_dict(CONFIG.runtime.stage_params_file))
+_loaded(CONFIG.runtime.stage_params_file)
 
 CONFIG.serial.port = _env_str("ORCH_SERIAL_PORT", CONFIG.serial.port)
 CONFIG.serial.baudrate = _env_int("ORCH_SERIAL_BAUDRATE", CONFIG.serial.baudrate)
@@ -98,11 +247,18 @@ CONFIG.control.dock_retry_backoff_s = _env_float("ORCH_DOCK_RETRY_BACKOFF_S", CO
 
 CONFIG.control.search_target_init_hold_s = _env_float("ORCH_SEARCH_TARGET_INIT_HOLD_S", CONFIG.control.search_target_init_hold_s)
 CONFIG.control.target_found_frames_to_confirm = _env_int("ORCH_TARGET_CONFIRM_FRAMES", CONFIG.control.target_found_frames_to_confirm)
+CONFIG.control.target_confirm_conf_th = _env_float("ORCH_TARGET_CONFIRM_CONF_TH", CONFIG.control.target_confirm_conf_th)
+CONFIG.control.target_confirm_dwell_s = _env_float("ORCH_TARGET_CONFIRM_DWELL_S", CONFIG.control.target_confirm_dwell_s)
 CONFIG.control.target_confirm_lost_frames = _env_int("ORCH_TARGET_CONFIRM_LOST_FRAMES", CONFIG.control.target_confirm_lost_frames)
+CONFIG.control.target_confirm_lost_hold_s = _env_float("ORCH_TARGET_CONFIRM_LOST_HOLD_S", CONFIG.control.target_confirm_lost_hold_s)
+CONFIG.control.target_lock_conf_th = _env_float("ORCH_TARGET_LOCK_CONF_TH", CONFIG.control.target_lock_conf_th)
 CONFIG.control.target_lock_settle_s = _env_float("ORCH_TARGET_LOCK_SETTLE_S", CONFIG.control.target_lock_settle_s)
+CONFIG.control.target_lock_center_jitter_th = _env_float("ORCH_TARGET_LOCK_CENTER_JITTER_TH", CONFIG.control.target_lock_center_jitter_th)
+CONFIG.control.target_lock_lost_hold_s = _env_float("ORCH_TARGET_LOCK_LOST_HOLD_S", CONFIG.control.target_lock_lost_hold_s)
 CONFIG.control.freeze_settle_s = _env_float("ORCH_FREEZE_SETTLE_S", CONFIG.control.freeze_settle_s)
 CONFIG.control.edge_slide_pause_s = _env_float("ORCH_EDGE_SLIDE_PAUSE_S", CONFIG.control.edge_slide_pause_s)
 CONFIG.control.edge_slide_segment_s = _env_float("ORCH_EDGE_SLIDE_SEGMENT_S", CONFIG.control.edge_slide_segment_s)
+CONFIG.control.edge_slide_dist_tolerance_m = _env_float("ORCH_EDGE_SLIDE_DIST_TOL_M", CONFIG.control.edge_slide_dist_tolerance_m)
 
 CONFIG.control.edge_relocate_enabled = _env_bool("ORCH_EDGE_RELOCATE_ENABLED", CONFIG.control.edge_relocate_enabled)
 CONFIG.control.max_edge_transitions_per_task = _env_int("ORCH_MAX_EDGE_TRANSITIONS", CONFIG.control.max_edge_transitions_per_task)
@@ -143,11 +299,22 @@ CONFIG.car.return_turn_norm_max = _env_float("ORCH_RETURN_TURN_NORM_MAX", CONFIG
 CONFIG.car.return_vx_norm_min = _env_float("ORCH_RETURN_VX_NORM_MIN", CONFIG.car.return_vx_norm_min)
 CONFIG.car.return_vx_norm_max = _env_float("ORCH_RETURN_VX_NORM_MAX", CONFIG.car.return_vx_norm_max)
 CONFIG.car.edge_slide_vy_norm = _env_float("ORCH_EDGE_SLIDE_VY", CONFIG.car.edge_slide_vy_norm)
+CONFIG.car.edge_slide_dist_kp_norm_per_m = _env_float("ORCH_EDGE_SLIDE_DIST_KP", CONFIG.car.edge_slide_dist_kp_norm_per_m)
+CONFIG.car.edge_slide_yaw_kp_norm_per_rad = _env_float("ORCH_EDGE_SLIDE_YAW_KP", CONFIG.car.edge_slide_yaw_kp_norm_per_rad)
+CONFIG.car.edge_slide_max_vx_norm = _env_float("ORCH_EDGE_SLIDE_MAX_VX", CONFIG.car.edge_slide_max_vx_norm)
+CONFIG.car.edge_slide_max_wz_norm = _env_float("ORCH_EDGE_SLIDE_MAX_WZ", CONFIG.car.edge_slide_max_wz_norm)
 CONFIG.car.leave_edge_vx_norm = _env_float("ORCH_LEAVE_EDGE_VX", CONFIG.car.leave_edge_vx_norm)
 CONFIG.car.relocate_turn_wz_norm = _env_float("ORCH_RELOCATE_WZ", CONFIG.car.relocate_turn_wz_norm)
 CONFIG.car.avoid_turn_norm = _env_float("ORCH_AVOID_TURN_WZ", CONFIG.car.avoid_turn_norm)
 CONFIG.car.avoid_reverse_vx_norm = _env_float("ORCH_AVOID_REVERSE_VX", CONFIG.car.avoid_reverse_vx_norm)
 CONFIG.car.cmd_hold_ms = _env_int("ORCH_CMD_HOLD_MS", CONFIG.car.cmd_hold_ms)
+CONFIG.car.send_period_ms = _env_int("ORCH_CAR_SEND_PERIOD_MS", CONFIG.car.send_period_ms)
+if CONFIG.car.send_period_ms > 0 and "ORCH_TICK_HZ" not in os.environ:
+    CONFIG.runtime.tick_hz = 1000.0 / float(CONFIG.car.send_period_ms)
+CONFIG.car.max_vx_norm = _env_float("ORCH_CAR_MAX_VX", CONFIG.car.max_vx_norm)
+CONFIG.car.max_vy_norm = _env_float("ORCH_CAR_MAX_VY", CONFIG.car.max_vy_norm)
+CONFIG.car.max_wz_norm = _env_float("ORCH_CAR_MAX_WZ", CONFIG.car.max_wz_norm)
+CONFIG.car.stop_on_state_enter = _env_bool("ORCH_STOP_ON_STATE_ENTER", CONFIG.car.stop_on_state_enter)
 CONFIG.car.mode_line_on_change = _env_bool("ORCH_MODE_LINE_ON_CHANGE", CONFIG.car.mode_line_on_change)
 CONFIG.car.mode_line_every_cmd = _env_bool("ORCH_MODE_LINE_EVERY_CMD", CONFIG.car.mode_line_every_cmd)
 CONFIG.car.serial_float_digits = _env_int("ORCH_SERIAL_FLOAT_DIGITS", CONFIG.car.serial_float_digits)

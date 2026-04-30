@@ -314,6 +314,11 @@ class OrchestratorService(BaseModule):
             "runs_dir": self.cfg.runtime.runs_dir,
             "pid_dir": self.cfg.runtime.pid_dir,
             "pid_file": self.cfg.runtime.pid_file,
+            "config_files": {
+                "stage_params": self.cfg.runtime.stage_params_file,
+                "car_cmd_params": self.cfg.runtime.car_cmd_params_file,
+                "loaded": list(self.cfg.runtime.loaded_config_files),
+            },
             "serial": {
                 "port": self.cfg.serial.port,
                 "baudrate": self.cfg.serial.baudrate,
@@ -329,8 +334,24 @@ class OrchestratorService(BaseModule):
                 "search_table_timeout_s": self.cfg.control.search_table_timeout_s,
                 "approach_timeout_s": self.cfg.control.approach_timeout_s,
                 "target_search_timeout_s": self.cfg.control.target_search_timeout_s,
+                "final_lock_yaw_tol_rad": self.cfg.control.final_lock_yaw_tol_rad,
+                "final_lock_dist_tol_m": self.cfg.control.final_lock_dist_tol_m,
+                "final_lock_frames_to_arrive": self.cfg.control.final_lock_frames_to_arrive,
+                "edge_slide_dist_tolerance_m": self.cfg.control.edge_slide_dist_tolerance_m,
+                "target_confirm_conf_th": self.cfg.control.target_confirm_conf_th,
+                "target_found_frames_to_confirm": self.cfg.control.target_found_frames_to_confirm,
+                "target_lock_conf_th": self.cfg.control.target_lock_conf_th,
+                "target_lock_settle_s": self.cfg.control.target_lock_settle_s,
                 "edge_relocate_enabled": self.cfg.control.edge_relocate_enabled,
                 "max_edge_transitions_per_task": self.cfg.control.max_edge_transitions_per_task,
+            },
+            "car_cmd": {
+                "send_period_ms": self.cfg.car.send_period_ms,
+                "hold_ms": self.cfg.car.cmd_hold_ms,
+                "max_vx_norm": self.cfg.car.max_vx_norm,
+                "max_vy_norm": self.cfg.car.max_vy_norm,
+                "max_wz_norm": self.cfg.car.max_wz_norm,
+                "stop_on_state_enter": self.cfg.car.stop_on_state_enter,
             },
             "docking": {
                 "min_confidence": self.cfg.docking.min_confidence,
@@ -648,6 +669,21 @@ class OrchestratorService(BaseModule):
         self.run_logger.write_service_event("SERVICE_STARTING", run_dir=str(self.run_logger.run_dir))
         self.run_logger.write_jsonl("config", cfg_dump)
         self.run_logger.write_timeline("BOOT", run_dir=str(self.run_logger.run_dir), config=cfg_dump)
+        loaded_files = ",".join(self.cfg.runtime.loaded_config_files) or "<defaults>"
+        self._operator_emit(
+            "[ORCH] CONFIG "
+            f"stage={self.cfg.runtime.stage_params_file} car_cmd={self.cfg.runtime.car_cmd_params_file} "
+            f"loaded={loaded_files}"
+        )
+        self._operator_emit(
+            "[ORCH] PARAMS "
+            f"tick_hz={float(self.cfg.runtime.tick_hz):.2f} send_period_ms={int(self.cfg.car.send_period_ms)} "
+            f"final_lock yaw={self.cfg.control.final_lock_yaw_tol_rad:.3f} "
+            f"dist={self.cfg.control.final_lock_dist_tol_m:.3f} "
+            f"stable_frames={int(self.cfg.control.final_lock_frames_to_arrive)} "
+            f"edge_conf={self.cfg.docking.min_confidence:.2f} "
+            f"slide_vy={self.cfg.car.edge_slide_vy_norm:.2f}"
+        )
         self.uart.start()
         self.task_server.start()
         self.vision_server.start()

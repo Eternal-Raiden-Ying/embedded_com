@@ -1,0 +1,7 @@
+car_cmd:
+  send_period_ms: 100
+  hold_ms: 150
+  max_vx_norm: 1.0
+  max_vy_norm: 1.0
+  max_wz_norm: 1.0
+  stop_on_state_enter: false

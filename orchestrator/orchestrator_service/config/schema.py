@@ -55,6 +55,9 @@ class RuntimeConfig:
     debug: bool = False
     state_block_period_s: float = 1.0
     heartbeat_period_s: float = 1.0
+    stage_params_file: str = ""
+    car_cmd_params_file: str = ""
+    loaded_config_files: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -87,11 +90,18 @@ class ControlThresholds:
 
     search_target_init_hold_s: float = 0.25
     target_found_frames_to_confirm: int = 2
+    target_confirm_conf_th: float = 0.0
+    target_confirm_dwell_s: float = 0.0
     target_confirm_lost_frames: int = 2
+    target_confirm_lost_hold_s: float = 0.0
+    target_lock_conf_th: float = 0.0
     target_lock_settle_s: float = 0.50
+    target_lock_center_jitter_th: float = 0.0
+    target_lock_lost_hold_s: float = 0.0
     freeze_settle_s: float = 0.60
     edge_slide_pause_s: float = 0.20
     edge_slide_segment_s: float = 1.20
+    edge_slide_dist_tolerance_m: float = 0.05
 
     edge_relocate_enabled: bool = True
     max_edge_transitions_per_task: int = 3
@@ -139,12 +149,21 @@ class CarMotionConfig:
     return_vx_norm_max: float = 0.45
 
     edge_slide_vy_norm: float = 0.14
+    edge_slide_dist_kp_norm_per_m: float = 1.20
+    edge_slide_yaw_kp_norm_per_rad: float = 1.20
+    edge_slide_max_vx_norm: float = 0.10
+    edge_slide_max_wz_norm: float = 0.12
     leave_edge_vx_norm: float = -0.12
     relocate_turn_wz_norm: float = 0.28
     avoid_turn_norm: float = 0.38
     avoid_reverse_vx_norm: float = 0.12
 
     cmd_hold_ms: int = 150
+    send_period_ms: int = 100
+    max_vx_norm: float = 1.0
+    max_vy_norm: float = 1.0
+    max_wz_norm: float = 1.0
+    stop_on_state_enter: bool = False
     mode_line_on_change: bool = True
     mode_line_every_cmd: bool = False
     serial_float_digits: int = 3

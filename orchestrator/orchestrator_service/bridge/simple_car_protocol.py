@@ -47,6 +47,13 @@ class SimpleCarMapper:
         digits = max(0, int(self.cfg.serial_float_digits))
         return f"{float(v):.{digits}f}"
 
+    @staticmethod
+    def _clamp_abs(v: float, limit: float) -> float:
+        limit = abs(float(limit or 0.0))
+        if limit <= 0.0:
+            return 0.0
+        return max(-limit, min(limit, float(v)))
+
     def _mode_prefix(self, mode: str) -> str:
         mode = mode.upper().strip() or "IDLE"
         send_mode = bool(self.cfg.mode_line_every_cmd) or (
@@ -60,9 +67,9 @@ class SimpleCarMapper:
     def from_cmd_vel(self, cmd: CmdVel, cx_norm_abs: Optional[float] = None, distance_ratio: Optional[float] = None) -> SimpleCarCommand:
         del cx_norm_abs, distance_ratio
         mode = (cmd.mode or "IDLE").upper().strip() or "IDLE"
-        vx = float(cmd.vx_norm)
-        vy = float(cmd.vy_norm)
-        wz = float(cmd.wz_norm)
+        vx = self._clamp_abs(float(cmd.vx_norm), getattr(self.cfg, "max_vx_norm", 1.0))
+        vy = self._clamp_abs(float(cmd.vy_norm), getattr(self.cfg, "max_vy_norm", 1.0))
+        wz = self._clamp_abs(float(cmd.wz_norm), getattr(self.cfg, "max_wz_norm", 1.0))
         hold_ms = int(max(0, int(getattr(cmd, "hold_ms", self.cfg.cmd_hold_ms))))
         brake = bool(getattr(cmd, "brake", False))
         prefix = self._mode_prefix(mode)

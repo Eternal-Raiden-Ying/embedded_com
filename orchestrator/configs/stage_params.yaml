@@ -1,0 +1,34 @@
+final_lock:
+  yaw_abs_th: 0.04
+  dist_abs_th_m: 0.03
+  edge_conf_th: 0.55
+  stable_ms: 300
+  timeout_ms: 14000
+
+controlled_approach:
+  target_dist_m: 0.015
+  max_vx_norm: 0.28
+  max_wz_norm: 0.32
+  dist_kp: 1.4
+  yaw_kp: 1.8
+
+edge_slide_search:
+  slide_vy_norm: 0.14
+  max_vx_correction_norm: 0.10
+  max_wz_correction_norm: 0.12
+  keep_dist_tolerance_m: 0.05
+  edge_lost_hold_ms: 1200
+  fallback_state: CONTROLLED_APPROACH
+  min_dwell_ms: 800
+
+target_confirm:
+  confirm_conf_th: 0.0
+  confirm_enter_frames: 2
+  confirm_dwell_ms: 0
+  lost_hold_ms: 0
+
+target_locked:
+  lock_conf_th: 0.0
+  lock_stable_ms: 500
+  center_jitter_th: 0.0
+  lost_hold_ms: 0
