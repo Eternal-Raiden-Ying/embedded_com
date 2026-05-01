@@ -39,9 +39,13 @@ def _target_obs_from_payload(payload: Optional[Dict[str, object]], target: Optio
         "matched_conf": None,
         "matched_bbox": None,
         "matched_center": None,
+        "matched_center_full_norm": None,
+        "matched_center_offset_norm": None,
         "matched_area": None,
         "matched_rank_in_all_boxes": None,
         "num_target_candidates": 0,
+        "bbox_valid": None,
+        "bbox_invalid_reason": None,
         "reason": "waiting_local_perception",
     }
     source = None
@@ -66,17 +70,37 @@ def _payload_has_table_edge_obs(payload: Optional[Dict[str, object]]) -> bool:
         isinstance(payload.get("table_edge_obs"), dict) or isinstance(payload.get("mock_table_edge_obs"), dict)
     )
 
+def _sync_edge_follow_payload(req: VisionReq, ctx: StageContext) -> None:
+    payload = req.payload if isinstance(req.payload, dict) else {}
+    for key in (
+        "locked_edge_id",
+        "locked_edge_line",
+        "locked_roi",
+        "locked_yaw_err",
+        "locked_dist_err",
+        "locked_edge_conf",
+        "locked_obs_seq",
+        "current_edge_id",
+    ):
+        if key in payload:
+            ctx.stage_state[key] = payload.get(key)
+
 
 def _default_table_edge_obs() -> Dict[str, object]:
     return {
         "table_found": False,
         "edge_found": False,
+        "edge_valid": False,
         "confidence": 0.0,
+        "edge_conf": 0.0,
         "yaw_err_rad": None,
+        "yaw_err": None,
         "dist_err_m": None,
+        "dist_err": None,
         "edge_k": None,
         "edge_b": None,
         "depth_valid": False,
+        "edge_obs_unavailable": True,
         "point_count": 0,
         "table_point_count": 0,
         "obs_ts": None,
@@ -123,6 +147,10 @@ def _target_obs_from_results(results: Dict[str, object], target: Optional[str]) 
         merged = {"found": target_found, "target_found": target_found, "target": target}
         merged.update(target_obs)
         merged.setdefault("target", target)
+        merged.setdefault("obs_ts", local.get("obs_ts"))
+        merged.setdefault("frame_id", local.get("frame_seq"))
+        merged.setdefault("seq", local.get("frame_seq"))
+        merged.setdefault("age_ms", local.get("age_ms"))
         if contract_error:
             merged.setdefault("contract_error", contract_error)
         if contract_warnings:
@@ -136,6 +164,10 @@ def _target_obs_from_results(results: Dict[str, object], target: Optional[str]) 
         "found": False,
         "target_found": False,
         "target": target,
+        "obs_ts": local.get("obs_ts"),
+        "frame_id": local.get("frame_seq"),
+        "seq": local.get("frame_seq"),
+        "age_ms": local.get("age_ms"),
         "boxes_count": int(local.get("box_count", 0) or 0),
         "best_cls": "n/a",
         "best_conf": 0.0,
@@ -143,9 +175,13 @@ def _target_obs_from_results(results: Dict[str, object], target: Optional[str]) 
         "matched_conf": None,
         "matched_bbox": None,
         "matched_center": None,
+        "matched_center_full_norm": None,
+        "matched_center_offset_norm": None,
         "matched_area": None,
         "matched_rank_in_all_boxes": None,
         "num_target_candidates": 0,
+        "bbox_valid": None,
+        "bbox_invalid_reason": None,
     }
     if not local:
         weak_payload["reason"] = "no_local_perception"
@@ -208,6 +244,9 @@ def _target_obs_from_results(results: Dict[str, object], target: Optional[str]) 
     payload = {"found": True, "target_found": True, "target": target}
     payload.update(obs)
     payload.update({k: v for k, v in weak_payload.items() if k in {"boxes_count"}})
+    for key in ("obs_ts", "frame_id", "seq", "age_ms"):
+        if weak_payload.get(key) is not None:
+            payload[key] = weak_payload.get(key)
     payload["found"] = bool(payload.get("target_found", payload.get("found", True)))
     try:
         if payload.get("bbox") and rgb_shape:
@@ -231,6 +270,13 @@ def _table_edge_obs_from_results(results: Dict[str, object]) -> Optional[Dict[st
     merged = _default_table_edge_obs()
     merged.update(table_edge)
     merged["type"] = "table_edge_obs"
+    if "edge_obs_unavailable" not in table_edge:
+        merged["edge_obs_unavailable"] = str(merged.get("reason") or "") in {
+            "depth_unavailable",
+            "depth_frame_missing",
+            "depth_frame_not_2d",
+            "detector_unavailable",
+        }
     if "is_stale" not in table_edge:
         merged["is_stale"] = False
     return merged
@@ -253,8 +299,16 @@ def _annotate_table_edge_obs(
     out = dict(obs or _default_table_edge_obs())
     out["type"] = "table_edge_obs"
     out["source_mode"] = str(source_mode or "").strip().upper()
-    out.setdefault("edge_conf", out.get("confidence"))
+    out["edge_conf"] = float(out.get("edge_conf", out.get("confidence", 0.0)) or 0.0)
+    out["yaw_err"] = out.get("yaw_err", out.get("yaw_err_rad"))
+    out["dist_err"] = out.get("dist_err", out.get("dist_err_m"))
     out.setdefault("seq", out.get("frame_seq", out.get("frame_id")))
+    out.setdefault("frame_id", out.get("frame_seq", out.get("seq")))
+    out["edge_obs_unavailable"] = bool(
+        out.get("edge_obs_unavailable", False)
+        or out.get("reason") in {"depth_unavailable", "depth_frame_missing", "depth_frame_not_2d", "detector_unavailable"}
+    )
+    out["edge_valid"] = bool(out.get("edge_found", False) and not out.get("edge_obs_unavailable", False))
     obs_ts = out.get("obs_ts", out.get("ts"))
     age_ms = None
     try:
@@ -279,7 +333,7 @@ def _annotate_table_edge_obs(
     if source != "results":
         stale = True
         out.setdefault("reason", "no_new_table_edge_obs_result")
-    out["is_stale"] = bool(out.get("is_stale", False) or stale)
+    out["is_stale"] = bool(out.get("is_stale", False) or stale or out.get("edge_obs_unavailable", False))
     return out
 
 
@@ -306,6 +360,7 @@ class SearchStagePlan(BaseStagePlan):
         ctx.stage_state["search_kind"] = _search_kind(req, self.default_mode)
         ctx.stage_state["target_obs"] = _target_obs_from_payload(req.payload, ctx.target_name)
         ctx.stage_state["table_edge_obs"] = _table_edge_obs_from_payload(req.payload)
+        _sync_edge_follow_payload(req, ctx)
 
     def on_update(self, req: VisionReq, ctx: StageContext) -> Optional[StageOutput]:
         """Refresh target or search parameters without leaving SEARCH."""
@@ -314,6 +369,7 @@ class SearchStagePlan(BaseStagePlan):
         ctx.current_mode = self._resolve_mode(req)
         if isinstance(req.payload, dict):
             ctx.stage_state["search_kind"] = _search_kind(req, self.default_mode)
+            _sync_edge_follow_payload(req, ctx)
             if _payload_has_target_obs(req.payload):
                 ctx.stage_state["target_obs"] = _target_obs_from_payload(req.payload, ctx.target_name)
             else:

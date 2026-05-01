@@ -24,6 +24,7 @@ from vision_module.backend.mode_controller import ModeController
 from vision_module.backend.preview.base import PreviewFrame, PreviewSink
 from vision_module.backend.preview.manager import PreviewManager
 from vision_module.backend.runtime_supervisor import RuntimeSupervisor
+from vision_module.backend.table_edge_manager import TableEdgeManager
 from vision_module.backend.predictor_manager import PredictorManager
 from vision_module.backend.scheduler import Scheduler
 from vision_module.config.mode_defaults import build_default_mode_profiles
@@ -350,6 +351,10 @@ class SearchStagePlanKindTest(unittest.TestCase):
         self.assertEqual(sorted(perception.keys()), ["table_edge_obs", "target_obs"])
         self.assertTrue(perception["target_obs"]["found"])
         self.assertTrue(perception["table_edge_obs"]["edge_found"])
+        self.assertTrue(perception["table_edge_obs"]["edge_valid"])
+        self.assertIn("edge_conf", perception["table_edge_obs"])
+        self.assertIn("yaw_err", perception["table_edge_obs"])
+        self.assertIn("dist_err", perception["table_edge_obs"])
         self.assertIn("obs_ts", perception["table_edge_obs"])
         self.assertIn("age_ms", perception["table_edge_obs"])
         self.assertEqual(perception["table_edge_obs"]["source_mode"], "TRACK_LOCAL")
@@ -1537,6 +1542,53 @@ class GenerationAwareFrameConsumptionTest(unittest.TestCase):
             self.assertEqual(manager.snapshot()["last_camera_generation"], 2)
         finally:
             manager_module.QNN_YOLO_Dectec_Predictor = original_cls
+            manager.release_all()
+            scheduler.stop_runtime()
+
+    def test_table_edge_resumes_after_generation_reset(self):
+        scheduler = Scheduler()
+        scheduler.start_runtime()
+        plan = {
+            "mode": "TRACK_LOCAL",
+            "routes": {
+                "camera_frames": {"policy": "slot", "scope": "backend"},
+                "local_perception": {"policy": "slot", "scope": "stage"},
+                "table_edge_obs": {"policy": "slot", "scope": "stage"},
+                "runtime_status": {"policy": "slot", "scope": "backend"},
+            },
+        }
+        scheduler.configure(plan, generation=1)
+        generation = {"value": 1}
+        manager = TableEdgeManager(logger=PrintLogger("table_edge_generation"))
+        manager.bind_runtime(scheduler, lambda: generation["value"])
+        try:
+            manager.start_runtime()
+            scheduler.publish_result("runtime_status", {"stage": "SEARCH", "mode": "TRACK_LOCAL", "epoch": 1}, generation=1)
+            scheduler.publish_result("camera_frames", {"depth": np.zeros((16, 16), dtype=np.uint16)}, generation=1)
+            scheduler.publish_result("camera_frames", {"depth": np.zeros((16, 16), dtype=np.uint16)}, generation=1)
+            deadline = time.time() + 1.0
+            while time.time() < deadline:
+                if manager.snapshot()["last_camera_seq"] >= 2:
+                    break
+                time.sleep(0.05)
+            self.assertGreaterEqual(manager.snapshot()["last_camera_seq"], 2)
+
+            generation["value"] = 2
+            scheduler.configure(plan, generation=2)
+            scheduler.publish_result("runtime_status", {"stage": "SEARCH", "mode": "TRACK_LOCAL", "epoch": 2}, generation=2)
+            scheduler.publish_result("camera_frames", {"depth": np.zeros((16, 16), dtype=np.uint16)}, generation=2)
+            payload = None
+            deadline = time.time() + 1.0
+            while time.time() < deadline:
+                payload = scheduler.read_result("table_edge_obs", default=None)
+                snapshot = manager.snapshot()
+                if isinstance(payload, dict) and snapshot["last_camera_generation"] == 2:
+                    break
+                time.sleep(0.05)
+            self.assertIsInstance(payload, dict)
+            self.assertEqual(payload["source_mode"], "TRACK_LOCAL")
+            self.assertEqual(manager.snapshot()["last_camera_generation"], 2)
+        finally:
             manager.release_all()
             scheduler.stop_runtime()
 

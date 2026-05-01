@@ -36,12 +36,22 @@ def _upper_text(value: Any, default: str = "") -> str:
     return text or str(default).strip().upper()
 
 
+_PRESERVE_NONE_KEYS = {
+    "yaw_err",
+    "dist_err",
+    "obs_ts",
+    "age_ms",
+    "frame_id",
+    "seq",
+}
+
+
 def _compact(value: Any) -> Any:
     if isinstance(value, dict):
         out = {}
         for key, item in value.items():
             compacted = _compact(item)
-            if compacted is None:
+            if compacted is None and key not in _PRESERVE_NONE_KEYS:
                 continue
             if compacted == {}:
                 continue
@@ -101,6 +111,7 @@ class VisionReq:
     mode_hint: Optional[str] = None
     session_id: Optional[str] = None
     req_id: Optional[str] = None
+    req_type: Optional[str] = None
     epoch: int = 0
     interaction_id: Optional[str] = None
     response: Optional[Dict[str, Any]] = None
@@ -119,6 +130,7 @@ class VisionReq:
             mode_hint=_upper_text(payload.get("mode_hint", "")) or None,
             session_id=_opt_str(payload, "session_id"),
             req_id=_opt_str(payload, "req_id"),
+            req_type=_opt_str(payload, "req_type"),
             epoch=_opt_int(payload, "epoch", 0),
             interaction_id=_opt_str(payload, "interaction_id"),
             response=_opt_dict(payload, "response"),

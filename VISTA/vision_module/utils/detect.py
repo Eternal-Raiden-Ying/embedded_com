@@ -134,6 +134,17 @@ def _detection_rows(frame_shape, det_pred, class_names=None):
     )
 
 
+def _bbox_validity(x1: float, y1: float, x2: float, y2: float, w: float, h: float) -> tuple:
+    values = (x1, y1, x2, y2, w, h)
+    if not all(np.isfinite(float(v)) for v in values):
+        return False, "bbox_non_finite"
+    if x2 <= x1 or y2 <= y1:
+        return False, "bbox_non_positive_area"
+    if x1 < 0.0 or y1 < 0.0 or x2 > float(w) or y2 > float(h):
+        return False, "bbox_out_of_frame"
+    return True, ""
+
+
 def compute_target_obs(
     frame_shape,
     target: str,
@@ -197,15 +208,29 @@ def compute_target_obs(
     area_norm = float(matched["area_norm"])
     cx = (x1 + x2) / 2.0
     cy = (y1 + y2) / 2.0
-    cx_norm = (w / 2.0 - cx) / (w / 2.0)
-    cx_norm = float(np.clip(cx_norm, -1.0, 1.0))
+    full_cx_norm = float(np.clip(cx / max(1.0, float(w)), 0.0, 1.0))
+    full_cy_norm = float(np.clip(cy / max(1.0, float(h)), 0.0, 1.0))
+    # Keep the historic control convention: positive means target is left of center.
+    cx_offset_norm = float(np.clip((w / 2.0 - cx) / max(1.0, w / 2.0), -1.0, 1.0))
+    cy_offset_norm = float(np.clip((h / 2.0 - cy) / max(1.0, h / 2.0), -1.0, 1.0))
     size_norm = ((x2 - x1) * (y2 - y1)) / float(max(1, w * h))
     bbox = [int(x1), int(y1), int(x2), int(y2)]
+    bbox_valid, bbox_invalid_reason = _bbox_validity(x1, y1, x2, y2, float(w), float(h))
+    matched_center_full_norm = {
+        "cx": full_cx_norm,
+        "cy": full_cy_norm,
+    }
+    matched_center_offset_norm = {
+        "dx": cx_offset_norm,
+        "dy": cy_offset_norm,
+    }
     matched_center = {
-        "x_norm": float(np.clip(cx / max(1.0, float(w)), 0.0, 1.0)),
-        "y_norm": float(np.clip(cy / max(1.0, float(h)), 0.0, 1.0)),
-        "cx_norm": float(cx_norm),
-        "cy_norm": float(np.clip(cy / max(1.0, float(h)), 0.0, 1.0)),
+        "cx": full_cx_norm,
+        "cy": full_cy_norm,
+        "x_norm": full_cx_norm,
+        "y_norm": full_cy_norm,
+        "cx_norm": full_cx_norm,
+        "cy_norm": full_cy_norm,
     }
     all_candidate_classes = []
     for det in detections:
@@ -219,6 +244,8 @@ def compute_target_obs(
         "matched_conf": float(conf),
         "matched_bbox": bbox,
         "matched_center": matched_center,
+        "matched_center_full_norm": matched_center_full_norm,
+        "matched_center_offset_norm": matched_center_offset_norm,
         "matched_area": float(np.clip(area_norm, 0.0, 1.0)),
         "matched_rank_in_all_boxes": int(matched["rank_in_all_boxes"]),
         "num_target_candidates": int(len(candidates)),
@@ -226,10 +253,14 @@ def compute_target_obs(
         "best_cls": best["cls_name"],
         "best_conf": float(best["conf"]),
         "confidence": float(conf),
-        "cx_norm": float(cx_norm),
-        "cy_norm": matched_center["cy_norm"],
+        "x_norm": full_cx_norm,
+        "y_norm": full_cy_norm,
+        "cx_norm": cx_offset_norm,
+        "cy_norm": full_cy_norm,
         "size_norm": float(np.clip(size_norm, 0.0, 1.0)),
         "bbox": bbox,
+        "bbox_valid": bool(bbox_valid),
+        "bbox_invalid_reason": bbox_invalid_reason or None,
         "center_priority": float(np.clip(center_pri, 0.0, 1.0)),
         "area_norm": float(np.clip(area_norm, 0.0, 1.0)),
     }

@@ -227,9 +227,11 @@ class RealProtocolMappingTest(unittest.TestCase):
             "epoch": 3,
             "active_target": "apple",
             "last_enter_reason": "任务完成",
+            "warnings": ["distance_too_far"],
         })
         self.assertEqual(published[-1]["state"], "idle")
         self.assertEqual(published[-1]["kind"], "status")
+        self.assertEqual(published[-1]["message"], "任务完成，已锁定目标 apple")
 
     def test_vision_connect_failure_maps_to_error_status(self) -> None:
         service = self._make_service()

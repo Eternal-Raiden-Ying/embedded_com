@@ -71,7 +71,9 @@ class MotionController:
         return {
             "state": mode,
             "edge_found": bool(edge_found if edge_found is not None else (obs.edge_found if obs is not None else False)),
+            "edge_valid": bool(getattr(obs, "edge_valid", obs.edge_found) if obs is not None else False),
             "confidence": (float(obs.confidence) if obs is not None and obs.confidence is not None else None),
+            "edge_conf": (float(getattr(obs, "edge_conf", obs.confidence)) if obs is not None and getattr(obs, "edge_conf", obs.confidence) is not None else None),
             "yaw_err_rad": (float(obs.yaw_err_rad) if obs is not None and obs.yaw_err_rad is not None else None),
             "dist_err_m": (float(obs.dist_err_m) if obs is not None and obs.dist_err_m is not None else None),
             "target_dist_m": target_distance,
@@ -147,45 +149,91 @@ class MotionController:
         elapsed_s: float,
         direction_sign: int = 1,
         edge_obs: Optional[TableEdgeObs] = None,
+        vy_norm: Optional[float] = None,
+        reason: str = "edge_slide",
     ) -> MotionDecision:
         if float(elapsed_s) < float(self.cfg.edge_slide_pause_s):
             cmd = self._cmd("EDGE_SLIDE_SEARCH")
+            summary = self._summary("EDGE_SLIDE_SEARCH", cmd, edge_obs, reason="waiting_first_target_obs")
+            summary.update(
+                {
+                    "slide_vy_norm": float(self.car_cfg.edge_slide_vy_norm),
+                    "weak_slide_vy_norm": float(self.car_cfg.edge_slide_weak_vy_norm),
+                    "vx_from_dist": 0.0,
+                    "wz_from_yaw": 0.0,
+                    "final_vx": 0.0,
+                    "final_vy": 0.0,
+                    "final_wz": 0.0,
+                    "stop_reason": "initial_pause",
+                }
+            )
             return MotionDecision(
                 cmd=cmd,
-                control_summary=self._summary("EDGE_SLIDE_SEARCH", cmd, edge_obs, reason="waiting_first_target_obs"),
+                control_summary=summary,
             )
-        vy = float(self.car_cfg.edge_slide_vy_norm) * (1.0 if int(direction_sign) >= 0 else -1.0)
+        base_vy = float(self.car_cfg.edge_slide_vy_norm if vy_norm is None else vy_norm)
+        vy = base_vy * (1.0 if int(direction_sign) >= 0 else -1.0)
         vx = 0.0
         wz = 0.0
+        vx_from_dist = 0.0
+        wz_from_yaw = 0.0
         if edge_obs is not None:
             dist_err = float(edge_obs.dist_err_m or 0.0)
             yaw_err = float(edge_obs.yaw_err_rad or 0.0)
-            vx = self._clamp(
+            vx_from_dist = self._clamp(
                 dist_err * float(self.car_cfg.edge_slide_dist_kp_norm_per_m),
                 -abs(float(self.car_cfg.edge_slide_max_vx_norm)),
                 abs(float(self.car_cfg.edge_slide_max_vx_norm)),
             )
-            wz = self._clamp(
+            wz_from_yaw = self._clamp(
                 yaw_err * float(self.car_cfg.edge_slide_yaw_kp_norm_per_rad),
                 -abs(float(self.car_cfg.edge_slide_max_wz_norm)),
                 abs(float(self.car_cfg.edge_slide_max_wz_norm)),
             )
+            vx = vx_from_dist
+            wz = wz_from_yaw
             if abs(vx) < 0.01:
                 vx = 0.0
             if abs(wz) < 0.01:
                 wz = 0.0
-        reason = "edge_slide_vy_zero" if abs(vy) <= 1e-9 else "edge_slide"
+        reason = "edge_slide_vy_zero" if abs(vy) <= 1e-9 else (str(reason or "edge_slide"))
         cmd = self._cmd("EDGE_SLIDE_SEARCH", vx=vx, vy=vy, wz=wz)
+        summary = self._summary("EDGE_SLIDE_SEARCH", cmd, edge_obs, reason=reason)
+        summary.update(
+            {
+                "slide_vy_norm": float(self.car_cfg.edge_slide_vy_norm),
+                "weak_slide_vy_norm": float(self.car_cfg.edge_slide_weak_vy_norm),
+                "vx_from_dist": float(vx_from_dist),
+                "wz_from_yaw": float(wz_from_yaw),
+                "final_vx": float(vx),
+                "final_vy": float(vy),
+                "final_wz": float(wz),
+                "stop_reason": "" if abs(vy) > 1e-9 else "vy_zero",
+            }
+        )
         return MotionDecision(
             cmd=cmd,
             cx_norm_abs=abs(vy),
             distance_ratio=abs(float(edge_obs.dist_err_m or 0.0)) if edge_obs is not None else 1.0,
-            control_summary=self._summary("EDGE_SLIDE_SEARCH", cmd, edge_obs, reason=reason),
+            control_summary=summary,
         )
 
-    def edge_slide_hold_cmd(self, reason: str = "safety_hold_no_edge") -> MotionDecision:
+    def edge_slide_hold_cmd(self, reason: str = "safety_hold_no_edge", edge_obs: Optional[TableEdgeObs] = None) -> MotionDecision:
         cmd = self._cmd("EDGE_SLIDE_SEARCH")
-        return MotionDecision(cmd=cmd, control_summary=self._summary("EDGE_SLIDE_SEARCH", cmd, reason=reason, edge_found=False))
+        summary = self._summary("EDGE_SLIDE_SEARCH", cmd, edge_obs, reason=reason, edge_found=False if edge_obs is None else None)
+        summary.update(
+            {
+                "slide_vy_norm": float(self.car_cfg.edge_slide_vy_norm),
+                "weak_slide_vy_norm": float(self.car_cfg.edge_slide_weak_vy_norm),
+                "vx_from_dist": 0.0,
+                "wz_from_yaw": 0.0,
+                "final_vx": 0.0,
+                "final_vy": 0.0,
+                "final_wz": 0.0,
+                "stop_reason": str(reason or "hold"),
+            }
+        )
+        return MotionDecision(cmd=cmd, control_summary=summary)
 
     def avoid_cmd(self, turn_dir: Optional[str]) -> MotionDecision:
         turn_dir = str(turn_dir or "").strip().lower()

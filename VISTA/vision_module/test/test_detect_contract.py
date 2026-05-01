@@ -83,6 +83,37 @@ class DetectClassVocabularyTest(unittest.TestCase):
         self.assertEqual(obs["best_cls"], "keyboard")
         self.assertAlmostEqual(obs["best_conf"], 0.92)
 
+    def test_compute_target_obs_separates_full_center_from_offset(self):
+        boxes = [[1200.0, 340.0, 1270.0, 388.0, 0.90, 1.0]]
+        obs = compute_target_obs(
+            frame_shape=(720, 1280, 3),
+            target="apple",
+            det_pred=boxes,
+            class_names=("keyboard", "apple"),
+        )
+        self.assertIsNotNone(obs)
+        full = obs["matched_center_full_norm"]
+        offset = obs["matched_center_offset_norm"]
+        self.assertGreaterEqual(full["cx"], 0.0)
+        self.assertLessEqual(full["cx"], 1.0)
+        self.assertGreaterEqual(full["cy"], 0.0)
+        self.assertLessEqual(full["cy"], 1.0)
+        self.assertLess(offset["dx"], 0.0)
+        self.assertAlmostEqual(obs["matched_center"]["cx"], full["cx"])
+        self.assertAlmostEqual(obs["cx_norm"], offset["dx"])
+
+    def test_compute_target_obs_marks_out_of_frame_bbox(self):
+        boxes = [[-10.0, 10.0, 40.0, 60.0, 0.90, 1.0]]
+        obs = compute_target_obs(
+            frame_shape=(100, 100, 3),
+            target="apple",
+            det_pred=boxes,
+            class_names=("keyboard", "apple"),
+        )
+        self.assertIsNotNone(obs)
+        self.assertFalse(obs["bbox_valid"])
+        self.assertEqual(obs["bbox_invalid_reason"], "bbox_out_of_frame")
+
     def test_search_target_obs_reports_best_when_target_absent(self):
         payload = {
             "local_perception": {

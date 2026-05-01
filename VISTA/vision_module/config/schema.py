@@ -24,6 +24,7 @@ class RuntimeConfig:
     stack_run_id: str = ""
     loop_hz: float = 8.0
     send_hz: float = 5.0
+    track_local_send_hz: float = 8.0
     stale_req_s: float = 3.0
     hot_standby_s: float = 30.0
     keep_preview_after_stop: bool = True

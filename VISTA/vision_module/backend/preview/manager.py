@@ -3,6 +3,7 @@
 
 import threading
 import time
+from collections import deque
 from typing import Any, Callable, Dict, Optional
 
 from .base import PreviewFrame, PreviewOverlay, PreviewSink
@@ -48,6 +49,7 @@ class PreviewManager:
         self._last_source_key = ""
         self._last_preview_seq = 0
         self._last_preview_emit_ts = 0.0
+        self._render_times = deque(maxlen=120)
         self._last_render_error_ts = 0.0
         self._stale_warn_s = 1.0
         self._mode_layouts: Dict[str, str] = {
@@ -197,8 +199,11 @@ class PreviewManager:
         if infer_age is not None:
             age_part += f" infer_age_ms={int(infer_age)}"
         if found:
-            cx = float(target_obs.get("cx_norm", target_obs.get("cx", 0.0)) or 0.0)
-            cy = float(target_obs.get("cy_norm", target_obs.get("cy", 0.0)) or 0.0)
+            full_center = target_obs.get("matched_center_full_norm")
+            if not isinstance(full_center, dict):
+                full_center = target_obs.get("matched_center") if isinstance(target_obs.get("matched_center"), dict) else {}
+            cx = float(full_center.get("cx", full_center.get("x_norm", target_obs.get("x_norm", target_obs.get("cx_norm", 0.0)))) or 0.0)
+            cy = float(full_center.get("cy", full_center.get("y_norm", target_obs.get("y_norm", target_obs.get("cy_norm", 0.0)))) or 0.0)
             return (
                 f"[VISTA] TARGET mode={mode} target={target[:32]} found=1 boxes={boxes} "
                 f"matched_cls={matched_cls[:32]} matched_conf={matched_conf:.2f} "
@@ -456,6 +461,7 @@ class PreviewManager:
                     )
             self._last_preview_seq = seq
             self._last_preview_emit_ts = now
+            self._render_times.append(now)
             if not ok:
                 self._exit_requested = True
                 self.disable()
@@ -515,6 +521,9 @@ class PreviewManager:
 
     def snapshot(self) -> Dict[str, Any]:
         """Expose preview manager and sink state for diagnostics."""
+        now = time.time()
+        recent = [float(ts) for ts in self._render_times if now - float(ts) <= 5.0]
+        preview_fps = (len(recent) / 5.0) if recent else 0.0
         return {
             "enabled": self.enabled,
             "sink": self.sink.snapshot() if self.sink is not None else None,
@@ -525,4 +534,5 @@ class PreviewManager:
             "current_mode": self._current_mode,
             "current_layout": self._current_layout,
             "mode_layouts": dict(self._mode_layouts),
+            "preview_fps": float(preview_fps),
         }

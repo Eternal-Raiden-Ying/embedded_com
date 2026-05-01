@@ -84,6 +84,14 @@ def _service(lines, mode="operator"):
     return svc
 
 
+def _set_slide_ref(core, yaw=0.01, dist=0.02, conf=0.9):
+    core.ctx.slide_ref_ready = True
+    core.ctx.slide_ref_yaw_err = yaw
+    core.ctx.slide_ref_dist_err = dist
+    core.ctx.slide_ref_edge_conf = conf
+    core.ctx.handoff_state = "ready"
+
+
 class OrchestratorOperatorConsoleTest(unittest.TestCase):
     def test_operator_mode_suppresses_ipc_success_and_heartbeat(self) -> None:
         lines = []
@@ -216,10 +224,54 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
             "matched_conf": 0.81,
             "best_cls": "keyboard",
             "best_conf": 0.92,
+            "matched_center_full_norm": {"cx": 0.54, "cy": 0.47},
+            "matched_center_offset_norm": {"dx": -0.08, "dy": 0.06},
             "cx_norm": 0.54,
             "cy_norm": 0.47,
         })
         self.assertIn("[ORCH] OBS target=apple found=1 matched_cls=apple matched_conf=0.81 best_cls=keyboard best_conf=0.92 cx=0.54 cy=0.47", lines[-1])
+
+    def test_target_obs_keeps_full_center_separate_from_offset(self) -> None:
+        obs = TargetObs.from_dict(
+            {
+                "type": "target_obs",
+                "target": "apple",
+                "target_found": True,
+                "matched_center": {"cx": 0.92, "cy": 0.50},
+                "matched_center_full_norm": {"cx": 0.92, "cy": 0.50},
+                "matched_center_offset_norm": {"dx": -0.84, "dy": 0.0},
+                "cx_norm": -0.84,
+                "cy_norm": 0.50,
+                "bbox_valid": False,
+                "bbox_invalid_reason": "bbox_out_of_frame",
+            }
+        )
+        payload = obs.to_dict()
+        self.assertAlmostEqual(payload["matched_center_full_norm"]["cx"], 0.92)
+        self.assertAlmostEqual(payload["matched_center_offset_norm"]["dx"], -0.84)
+        self.assertAlmostEqual(payload["cx_norm"], -0.84)
+        self.assertFalse(payload["bbox_valid"])
+        self.assertEqual(payload["bbox_invalid_reason"], "bbox_out_of_frame")
+
+    def test_state_trace_center_reconstructs_legacy_offset_center(self) -> None:
+        cfg = OrchestratorConfig()
+        core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
+        obs = TargetObs.from_dict(
+            {
+                "type": "target_obs",
+                "target": "apple",
+                "target_found": True,
+                "matched_center": {"cx": -0.7890625, "cy": 0.50546875},
+                "cx_norm": -0.7890625,
+                "cy_norm": 0.50546875,
+            }
+        )
+        center = core._target_center(obs)
+        self.assertIsNotNone(center)
+        self.assertGreaterEqual(center["cx"], 0.0)
+        self.assertLessEqual(center["cx"], 1.0)
+        self.assertAlmostEqual(center["cx"], 0.89453125)
+        self.assertAlmostEqual(center["cy"], 0.50546875)
 
     def test_target_obs_keeps_detection_summary_fields(self) -> None:
         obs = TargetObs.from_dict(
@@ -245,6 +297,82 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         self.assertAlmostEqual(payload["cy_norm"], 0.44)
         self.assertEqual(payload["reason"], "no_boxes")
 
+    def test_target_confirm_holds_through_short_lost_obs(self) -> None:
+        cfg = OrchestratorConfig()
+        cfg.control.target_confirm_min_s = 0.8
+        cfg.control.target_confirm_lost_hold_s = 1.2
+        core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
+        core.ctx.state = State.TARGET_CONFIRM
+        core.ctx.active_target = "apple"
+        core.ctx.task_start_wall_ts = 1.0
+        core.ctx.state_enter_mono = monotonic_ts()
+        core.ctx.last_target_obs = TargetObs.from_dict(
+            {
+                "type": "target_obs",
+                "target": "apple",
+                "target_found": False,
+                "matched_cls": "apple",
+                "matched_conf": 0.0,
+                "ts": now_ts(),
+            }
+        )
+        core.tick()
+        self.assertEqual(core.ctx.state, State.TARGET_CONFIRM)
+        self.assertEqual(core.ctx.target_lost_frames, 1)
+
+    def test_target_locked_holds_through_single_lost_obs(self) -> None:
+        cfg = OrchestratorConfig()
+        cfg.control.target_lock_lost_hold_s = 1.5
+        core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
+        core.ctx.state = State.TARGET_LOCKED
+        core.ctx.active_target = "apple"
+        core.ctx.task_start_wall_ts = 1.0
+        core.ctx.state_enter_mono = monotonic_ts()
+        core.ctx.last_target_obs = TargetObs.from_dict(
+            {
+                "type": "target_obs",
+                "target": "apple",
+                "target_found": False,
+                "matched_cls": "apple",
+                "matched_conf": 0.0,
+                "ts": now_ts(),
+            }
+        )
+        core.tick()
+        self.assertEqual(core.ctx.state, State.TARGET_LOCKED)
+        self.assertEqual(core.ctx.target_lost_frames, 1)
+
+    def test_target_locked_uses_window_stats_to_freeze(self) -> None:
+        cfg = OrchestratorConfig()
+        cfg.control.target_lock_conf_th = 0.4
+        cfg.control.target_lock_found_ratio_th = 0.6
+        cfg.control.target_lock_stable_s = 0.1
+        cfg.control.target_locked_freeze_after_s = 0.1
+        cfg.control.target_lock_center_jitter_th = 0.08
+        core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
+        core.ctx.state = State.TARGET_LOCKED
+        core.ctx.active_target = "apple"
+        core.ctx.task_start_wall_ts = 1.0
+        core.ctx.state_enter_mono = monotonic_ts() - 0.2
+        core.ctx.target_stable_since_mono = monotonic_ts() - 0.2
+        core.ctx.last_target_obs = TargetObs.from_dict(
+            {
+                "type": "target_obs",
+                "target": "apple",
+                "target_found": True,
+                "matched_cls": "apple",
+                "matched_conf": 0.82,
+                "matched_center_full_norm": {"cx": 0.52, "cy": 0.48},
+                "matched_center_offset_norm": {"dx": -0.04, "dy": 0.04},
+                "cx_norm": -0.04,
+                "cy_norm": 0.48,
+                "bbox_valid": True,
+                "ts": now_ts(),
+            }
+        )
+        core.tick()
+        self.assertEqual(core.ctx.state, State.FREEZE_BASE)
+
     def test_edge_slide_zero_cmd_has_operator_reason(self) -> None:
         lines = []
         svc = _service(lines, mode="operator")
@@ -256,8 +384,9 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         )
         svc._emit_operator_control(decision)
         self.assertEqual(len(lines), 1)
-        self.assertIn("[ORCH] SLIDE edge=1 target=0 boxes=0 status=searching", lines[0])
-        self.assertIn("cmd vx=+0.000 vy=+0.000 wz=+0.000", lines[0])
+        self.assertIn("[ORCH][SLIDE] mode=strong edge_valid=1", lines[0])
+        self.assertIn("found=0 boxes=0", lines[0])
+        self.assertIn("vx=+0.000 vy=+0.000 wz=+0.000", lines[0])
         self.assertIn("reason=waiting_first_target_obs", lines[0])
 
     def test_edge_lost_hold_reason_is_visible(self) -> None:
@@ -269,7 +398,8 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
             control_summary={"state": "EDGE_SLIDE_SEARCH", "reason": "safety_hold_no_edge", "edge_found": False},
         )
         svc._emit_operator_control(decision)
-        self.assertIn("[ORCH] SLIDE edge=0 target=0", lines[0])
+        self.assertIn("[ORCH][SLIDE] mode=strong edge_valid=0", lines[0])
+        self.assertIn("found=0", lines[0])
         self.assertIn("reason=safety_hold_no_edge", lines[0])
 
     def test_state_transition_edge_slide_timeout_is_diagnostic(self) -> None:
@@ -296,6 +426,54 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         svc._on_state_transition("EDGE_SLIDE_SEARCH", "TARGET_CONFIRM", "target_found matched_cls=apple matched_conf=0.780")
         self.assertEqual(svc._pending_state_traces[-1]["reason"], "target_found matched_cls=apple matched_conf=0.780")
 
+    def test_search_table_entry_clears_stale_edge_and_locks(self) -> None:
+        cfg = OrchestratorConfig()
+        core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
+        core.ctx.state = State.CONTROLLED_APPROACH
+        core.ctx.active_target = "apple"
+        core.ctx.active_session_id = "sess_reset"
+        core.ctx.last_table_obs = TableEdgeObs(ts=now_ts(), table_found=True, edge_found=True, confidence=0.9, yaw_err_rad=0.1, dist_err_m=0.02)
+        core.ctx.locked_edge_conf = 0.9
+        core.ctx.locked_yaw_err = 0.1
+        core.ctx.slide_ref_ready = True
+        core._transition(State.SEARCH_TABLE, "reset_for_new_search")
+        self.assertIsNone(core.ctx.last_table_obs)
+        self.assertIsNone(core.ctx.locked_edge_conf)
+        self.assertFalse(core.ctx.slide_ref_ready)
+        block = core.export_state_block()
+        self.assertFalse(block["edge_valid"])
+        self.assertIsNone(block["confidence"])
+        self.assertIsNone(block["yaw_err_rad"])
+        self.assertFalse(block["lock_ready"])
+        self.assertTrue(any(t.get("reset_state") == "edge" for t in core._pending_reset_traces))
+
+    def test_done_and_idle_console_are_explicit_and_warning_is_not_reason(self) -> None:
+        lines = []
+        svc = _service(lines, mode="operator")
+        svc.core.ctx = SimpleNamespace(
+            state=SimpleNamespace(value="DONE"),
+            active_session_id="sess_done",
+            active_target="apple",
+            task_start_wall_ts=now_ts() - 3.0,
+            dock_retry_count=1,
+            edge_transition_count=2,
+            task_slide_entries_count=4,
+            task_target_confirm_count=2,
+            task_target_locked_count=1,
+            task_warning_history=["distance_too_far"],
+            last_fail_reason="edge_follow_stale",
+            last_target_obs=TargetObs(ts=now_ts(), found=True, target="apple", matched_cls="apple", matched_conf=0.82),
+            last_table_obs=TableEdgeObs(ts=now_ts(), table_found=True, edge_found=True, confidence=0.77),
+        )
+        svc._on_state_transition("FREEZE_BASE", "DONE", "已在桌边锁定 apple")
+        joined = "\n".join(lines)
+        self.assertIn("[ORCH][TASK_DONE]", joined)
+        self.assertIn("result=success", joined)
+        self.assertIn("reason=已在桌边锁定 apple", joined)
+        self.assertIn("warnings=['distance_too_far', 'edge_follow_stale']", joined)
+        svc._on_state_transition("DONE", "IDLE", "任务完成，回到空闲")
+        self.assertIn("[ORCH][IDLE] task finished, waiting for next command", "\n".join(lines))
+
     def test_target_search_req_summary_is_compact(self) -> None:
         lines = []
         svc = _service(lines, mode="operator")
@@ -309,7 +487,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
                 "payload": {"search_kind": "TARGET"},
             }
         )
-        self.assertEqual(line, "[ORCH] REQ target_search stage=SEARCH kind=TARGET target=apple mode_hint=TRACK_LOCAL req=req_1")
+        self.assertEqual(line, "[ORCH] REQ target_update stage=SEARCH kind=TARGET target=apple mode_hint=TRACK_LOCAL req=req_1")
 
     def test_target_obs_found_enters_confirm_stop_logic(self) -> None:
         cfg = OrchestratorConfig()
@@ -333,6 +511,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         core.ctx.active_target = "apple"
         core.ctx.task_start_wall_ts = 1.0
         core.ctx.state_enter_mono = monotonic_ts() - 1.0
+        _set_slide_ref(core)
         core.handle_table_obs(TableEdgeObs(ts=now_ts(), table_found=True, edge_found=True, confidence=0.9, yaw_err_rad=0.01, dist_err_m=0.02))
         core.handle_target_obs(
             TargetObs(
@@ -365,8 +544,9 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         core.ctx.task_start_wall_ts = 1.0
         core.handle_target_obs(TargetObs(ts=now_ts(), found=True, target="apple", best_cls="apple", confidence=0.61, cx_norm=0.54))
         decision = core.tick()
-        self.assertEqual(core.ctx.state, State.EDGE_SLIDE_SEARCH)
+        self.assertEqual(core.ctx.state, State.TARGET_CONFIRM)
         self.assertEqual(decision.cmd.mode, "TARGET_CONFIRM")
+        self.assertIn("conf_low", core.ctx.target_last_lost_reason)
 
     def test_target_locked_accepts_matched_target_even_when_best_cls_differs(self) -> None:
         cfg = OrchestratorConfig()
@@ -404,6 +584,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         core.ctx.active_target = "apple"
         core.ctx.task_start_wall_ts = 1.0
         core.ctx.state_enter_mono = monotonic_ts() - 1.0
+        _set_slide_ref(core)
         core.handle_table_obs(TableEdgeObs(ts=now_ts(), table_found=True, edge_found=True, confidence=0.9, yaw_err_rad=0.01, dist_err_m=0.02))
 
         for expected_state in (State.EDGE_SLIDE_SEARCH, State.EDGE_SLIDE_SEARCH, State.TARGET_CONFIRM):
@@ -484,13 +665,112 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         core.ctx.state = State.EDGE_SLIDE_SEARCH
         core.ctx.active_vision_mode = "TRACK_LOCAL"
         core.ctx.state_enter_mono = monotonic_ts() - 1.0
+        _set_slide_ref(core)
         core.handle_table_obs(TableEdgeObs(ts=now_ts(), table_found=True, edge_found=True, confidence=0.9, yaw_err_rad=0.01, dist_err_m=0.02))
         decision = core.tick()
         self.assertEqual(decision.cmd.mode, "EDGE_SLIDE_SEARCH")
         self.assertAlmostEqual(decision.cmd.vy_norm, 0.04, places=6)
         self.assertNotEqual(decision.cmd.vx_norm, 0.0)
 
-    def test_edge_slide_distance_out_of_tolerance_recovers_approach(self) -> None:
+    def test_track_local_weak_edge_conf_continues_slow_slide(self) -> None:
+        cfg = OrchestratorConfig()
+        cfg.control.edge_slide_pause_s = 0.0
+        cfg.car.edge_slide_vy_norm = 0.14
+        cfg.car.edge_slide_weak_vy_norm = 0.05
+        core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
+        core.ctx.state = State.EDGE_SLIDE_SEARCH
+        core.ctx.active_vision_mode = "TRACK_LOCAL"
+        core.ctx.locked_yaw_err = -0.03
+        core.ctx.locked_dist_err = 0.02
+        core.ctx.locked_edge_conf = 0.82
+        _set_slide_ref(core, yaw=-0.035, dist=0.023, conf=0.22)
+        core.ctx.state_enter_mono = monotonic_ts() - 1.0
+        core.handle_table_obs(
+            TableEdgeObs(
+                ts=now_ts(),
+                table_found=True,
+                edge_found=True,
+                edge_valid=True,
+                confidence=0.22,
+                yaw_err_rad=-0.035,
+                dist_err_m=0.023,
+                source_mode="TRACK_LOCAL",
+            )
+        )
+        decision = core.tick()
+        self.assertEqual(core.ctx.state, State.EDGE_SLIDE_SEARCH)
+        self.assertEqual(decision.cmd.mode, "EDGE_SLIDE_SEARCH")
+        self.assertAlmostEqual(decision.cmd.vy_norm, 0.05, places=6)
+        self.assertEqual(decision.control_summary["reason"], "weak_edge_slide")
+        self.assertEqual(core.ctx.last_edge_quality.get("mode"), "weak")
+        self.assertTrue(core.ctx.last_edge_quality.get("edge_identity_ok"))
+
+    def test_search_target_init_builds_slide_ref_from_track_local_light_edge(self) -> None:
+        cfg = OrchestratorConfig()
+        cfg.control.edge_slide_pause_s = 0.0
+        cfg.control.edge_handoff_samples = 3
+        cfg.control.edge_handoff_min_s = 0.5
+        core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
+        core.ctx.state = State.SEARCH_TARGET_INIT
+        core.ctx.active_vision_mode = "TRACK_LOCAL"
+        core.ctx.locked_yaw_err = -0.035
+        core.ctx.locked_dist_err = 0.016
+        core.ctx.locked_edge_conf = 0.798
+        core.ctx.handoff_state = "collecting"
+        core.ctx.state_enter_mono = monotonic_ts() - 0.6
+
+        for seq, yaw, dist, conf in (
+            (1, -0.37, 0.036, 0.30),
+            (2, -0.38, 0.038, 0.31),
+            (3, -0.39, 0.040, 0.32),
+        ):
+            core.handle_table_obs(
+                TableEdgeObs(
+                    ts=now_ts(),
+                    table_found=True,
+                    edge_found=True,
+                    edge_valid=True,
+                    confidence=conf,
+                    yaw_err_rad=yaw,
+                    dist_err_m=dist,
+                    frame_id=seq,
+                    seq=seq,
+                    source_mode="TRACK_LOCAL",
+                )
+            )
+            decision = core.tick()
+
+        self.assertEqual(core.ctx.state, State.EDGE_SLIDE_SEARCH)
+        self.assertEqual(decision.cmd.mode, "SEARCH_TARGET_INIT")
+        self.assertTrue(core.ctx.slide_ref_ready)
+        self.assertAlmostEqual(core.ctx.slide_ref_yaw_err, -0.38, places=6)
+        self.assertAlmostEqual(core.ctx.slide_ref_dist_err, 0.038, places=6)
+        self.assertAlmostEqual(core._full_vs_light_yaw_offset(), -0.345, places=6)
+
+        core.ctx.state_enter_mono = monotonic_ts() - 1.0
+        core.handle_table_obs(
+            TableEdgeObs(
+                ts=now_ts(),
+                table_found=True,
+                edge_found=True,
+                edge_valid=True,
+                confidence=0.31,
+                yaw_err_rad=-0.385,
+                dist_err_m=0.039,
+                frame_id=4,
+                seq=4,
+                source_mode="TRACK_LOCAL",
+            )
+        )
+        decision = core.tick()
+        self.assertEqual(core.ctx.state, State.EDGE_SLIDE_SEARCH)
+        self.assertEqual(decision.control_summary["reason"], "weak_edge_slide")
+        self.assertEqual(core.ctx.last_edge_quality.get("edge_identity_basis"), "slide_ref")
+        self.assertTrue(core.ctx.last_edge_quality.get("edge_identity_ok"))
+        self.assertLess(abs(float(core.ctx.last_edge_quality.get("yaw_delta_from_slide_ref"))), 0.01)
+        self.assertGreater(abs(float(core.ctx.last_edge_quality.get("yaw_delta_from_locked"))), 0.30)
+
+    def test_edge_slide_distance_out_of_tolerance_recovers_final_lock(self) -> None:
         cfg = OrchestratorConfig()
         cfg.control.edge_slide_pause_s = 0.0
         cfg.control.edge_slide_dist_tolerance_m = 0.05
@@ -498,14 +778,58 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         core.ctx.state = State.EDGE_SLIDE_SEARCH
         core.ctx.active_vision_mode = "TRACK_LOCAL"
         core.ctx.state_enter_mono = monotonic_ts() - 1.0
+        _set_slide_ref(core, yaw=0.01, dist=0.08, conf=0.9)
         core.handle_table_obs(TableEdgeObs(ts=now_ts(), table_found=True, edge_found=True, confidence=0.9, yaw_err_rad=0.01, dist_err_m=0.08))
         decision = core.tick()
         self.assertEqual(core.ctx.state, State.EDGE_SLIDE_SEARCH)
         self.assertEqual(decision.cmd.mode, "EDGE_SLIDE_SEARCH")
-        core.ctx.table_loss_since_mono = monotonic_ts() - float(cfg.control.table_loss_hold_s) - 0.1
+        core.ctx.table_loss_since_mono = monotonic_ts() - float(cfg.control.edge_slide_recover_timeout_s) - 0.1
         decision = core.tick()
-        self.assertEqual(core.ctx.state, State.CONTROLLED_APPROACH)
-        self.assertEqual(decision.cmd.mode, "CONTROLLED_APPROACH")
+        self.assertEqual(core.ctx.state, State.FINAL_LOCK)
+        self.assertEqual(decision.cmd.mode, "FINAL_LOCK")
+
+    def test_edge_slide_identity_mismatch_is_reported_before_fallback(self) -> None:
+        cfg = OrchestratorConfig()
+        cfg.control.edge_slide_pause_s = 0.0
+        cfg.control.edge_follow_low_conf_exit_s = 3.0
+        cfg.control.edge_slide_recover_timeout_s = 5.0
+        core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
+        core.ctx.state = State.EDGE_SLIDE_SEARCH
+        core.ctx.active_vision_mode = "TRACK_LOCAL"
+        core.ctx.locked_yaw_err = 0.0
+        core.ctx.locked_dist_err = 0.02
+        core.ctx.locked_edge_conf = 0.80
+        _set_slide_ref(core, yaw=0.0, dist=0.02, conf=0.45)
+        core.ctx.state_enter_mono = monotonic_ts() - 1.0
+        core.handle_table_obs(
+            TableEdgeObs(
+                ts=now_ts(),
+                table_found=True,
+                edge_found=True,
+                edge_valid=True,
+                confidence=0.45,
+                yaw_err_rad=0.20,
+                dist_err_m=0.02,
+                source_mode="TRACK_LOCAL",
+            )
+        )
+        decision = core.tick()
+        self.assertEqual(core.ctx.state, State.EDGE_SLIDE_SEARCH)
+        self.assertEqual(decision.cmd.mode, "EDGE_SLIDE_SEARCH")
+        self.assertIn("edge_pause", decision.control_summary["reason"])
+        self.assertEqual(decision.control_summary["stop_reason"], "edge_identity_mismatch")
+        self.assertEqual(core.ctx.last_edge_quality.get("mode"), "pause")
+        self.assertEqual(core.ctx.last_edge_quality.get("raw_mode"), "identity_mismatch")
+        self.assertFalse(core.ctx.last_edge_quality.get("edge_identity_ok"))
+        core.ctx.table_loss_since_mono = monotonic_ts() - float(cfg.control.edge_follow_low_conf_exit_s) - 0.1
+        decision = core.tick()
+        self.assertEqual(core.ctx.state, State.EDGE_SLIDE_SEARCH)
+        self.assertEqual(decision.cmd.mode, "EDGE_SLIDE_SEARCH")
+        self.assertIn("edge_recover", decision.control_summary["reason"])
+        core.ctx.table_loss_since_mono = monotonic_ts() - float(cfg.control.edge_slide_recover_timeout_s) - 0.1
+        decision = core.tick()
+        self.assertEqual(core.ctx.state, State.FINAL_LOCK)
+        self.assertEqual(decision.cmd.mode, "FINAL_LOCK")
 
     def test_track_local_without_table_edge_holds_with_reason(self) -> None:
         cfg = OrchestratorConfig()
@@ -515,9 +839,10 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         core.ctx.active_vision_mode = "TRACK_LOCAL"
         core.ctx.state_enter_mono = monotonic_ts() - 1.0
         decision = core.tick()
-        self.assertEqual(decision.cmd.mode, "EDGE_SLIDE_SEARCH")
+        self.assertEqual(core.ctx.state, State.SEARCH_TARGET_INIT)
+        self.assertEqual(decision.cmd.mode, "SEARCH_TARGET_INIT")
         self.assertEqual(decision.cmd.vy_norm, 0.0)
-        self.assertIn("edge_obs_missing_hold", decision.control_summary["reason"])
+        self.assertIn("stop", decision.control_summary["reason"])
 
     def test_edge_slide_rejects_stale_table_edge_obs(self) -> None:
         cfg = OrchestratorConfig()
@@ -528,6 +853,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         core.ctx.state = State.EDGE_SLIDE_SEARCH
         core.ctx.active_vision_mode = "TRACK_LOCAL"
         core.ctx.state_enter_mono = monotonic_ts() - 1.0
+        _set_slide_ref(core)
         stale_ts = now_ts() - 0.8
         core.handle_table_obs(
             TableEdgeObs(

@@ -36,6 +36,7 @@ CONFIG.runtime.pid_file = os.getenv("VISION_PID_FILE", f"{CONFIG.runtime.pid_dir
 CONFIG.runtime.stack_run_id = os.getenv("STACK_RUN_ID", "")
 CONFIG.runtime.loop_hz = 8.0
 CONFIG.runtime.send_hz = 5.0
+CONFIG.runtime.track_local_send_hz = float(os.getenv("VISION_TRACK_LOCAL_SEND_HZ", "8.0") or 8.0)
 CONFIG.runtime.stale_req_s = 3.0
 CONFIG.runtime.hot_standby_s = 30.0
 CONFIG.runtime.keep_preview_after_stop = True

@@ -337,6 +337,9 @@ class PredictorManager:
                 boxes, masks = self.predict_frame(rgb)
 
             payload = self._build_local_perception_payload(rgb_shape, boxes, masks, has_infer)
+            payload["obs_ts"] = time.time()
+            payload["frame_seq"] = int(seq)
+            payload["age_ms"] = 0.0
             contract_error = str(payload.get("contract_error") or "")
             if contract_error:
                 self.log.warning(

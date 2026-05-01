@@ -65,8 +65,11 @@ def format_target_summary(
     found = bool(target.get("found", False))
     cls = target.get("class_name") or target.get("cls") or target.get("target") or status.get("target") or "target"
     conf = target.get("confidence", target.get("conf", 0.0))
-    cx = target.get("cx_norm", target.get("cx", 0.0))
-    cy = target.get("cy_norm", target.get("cy", 0.0))
+    full_center = target.get("matched_center_full_norm")
+    if not isinstance(full_center, dict):
+        full_center = target.get("matched_center") if isinstance(target.get("matched_center"), dict) else {}
+    cx = full_center.get("cx", full_center.get("x_norm", target.get("x_norm", target.get("cx", 0.0))))
+    cy = full_center.get("cy", full_center.get("y_norm", target.get("y_norm", target.get("cy_norm", target.get("cy", 0.0)))))
     return (
         f"[VISTA] TARGET stage={_upper(status.get('stage') or target.get('stage'))} "
         f"mode={_upper(status.get('mode') or target.get('mode'))} "

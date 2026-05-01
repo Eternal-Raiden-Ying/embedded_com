@@ -53,6 +53,23 @@ class RuntimeContext:
     table_cycle_count: int = 0
     relocate_turn_sign: int = 1
     slide_direction_sign: int = 1
+    locked_edge_id: str = ""
+    locked_edge_line: Optional[Dict[str, float]] = None
+    locked_roi: Optional[list] = None
+    locked_yaw_err: Optional[float] = None
+    locked_dist_err: Optional[float] = None
+    locked_edge_conf: Optional[float] = None
+    locked_obs_seq: Optional[int] = None
+    slide_ref_ready: bool = False
+    slide_ref_yaw_err: Optional[float] = None
+    slide_ref_dist_err: Optional[float] = None
+    slide_ref_edge_conf: Optional[float] = None
+    slide_ref_roi: Optional[list] = None
+    slide_ref_seq: Optional[int] = None
+    slide_ref_samples: List[Dict[str, object]] = field(default_factory=list)
+    slide_ref_last_sample_key: str = ""
+    handoff_state: str = ""
+    last_edge_quality: Dict[str, object] = field(default_factory=dict)
 
     last_task_cmd: Optional[TaskCmd] = None
     last_table_obs: Optional[TableEdgeObs] = None
@@ -91,9 +108,15 @@ class RuntimeContext:
     tag_loss_since_mono: float = 0.0
     target_stable_since_mono: float = 0.0
     target_center_history: List[Dict[str, float]] = field(default_factory=list)
+    target_obs_window: List[Dict[str, object]] = field(default_factory=list)
     target_last_center_jitter: float = 0.0
     target_last_lost_reason: str = ""
     target_last_transition_reason: str = ""
+    task_slide_entries_count: int = 0
+    task_target_confirm_count: int = 0
+    task_target_locked_count: int = 0
+    task_warning_history: List[str] = field(default_factory=list)
+    task_done_summary_emitted: bool = False
 
     def clear_motion_counters(self):
         self.table_found_frames = 0
@@ -111,6 +134,7 @@ class RuntimeContext:
         self.tag_loss_since_mono = 0.0
         self.target_stable_since_mono = 0.0
         self.target_center_history.clear()
+        self.target_obs_window.clear()
         self.target_last_center_jitter = 0.0
         self.target_last_lost_reason = ""
         self.target_last_transition_reason = ""
@@ -126,6 +150,23 @@ class RuntimeContext:
         self.edge_transition_count = 0
         self.relocate_turn_sign = 1
         self.slide_direction_sign = 1
+        self.locked_edge_id = ""
+        self.locked_edge_line = None
+        self.locked_roi = None
+        self.locked_yaw_err = None
+        self.locked_dist_err = None
+        self.locked_edge_conf = None
+        self.locked_obs_seq = None
+        self.slide_ref_ready = False
+        self.slide_ref_yaw_err = None
+        self.slide_ref_dist_err = None
+        self.slide_ref_edge_conf = None
+        self.slide_ref_roi = None
+        self.slide_ref_seq = None
+        self.slide_ref_samples.clear()
+        self.slide_ref_last_sample_key = ""
+        self.handoff_state = ""
+        self.last_edge_quality.clear()
 
     def advance_edge(self) -> bool:
         if not self.edge_visit_order:
@@ -150,10 +191,17 @@ class RuntimeContext:
         self.task_start_wall_ts = 0.0
         self.resume_state = None
         self.last_safety_reason = ""
+        self.last_fail_reason = ""
+        self.last_enter_reason = ""
         self.table_cycle_count = 0
         self.avoid_retry_count = 0
         self.dock_retry_count = 0
         self.vision_req_fail_streak = 0
+        self.task_slide_entries_count = 0
+        self.task_target_confirm_count = 0
+        self.task_target_locked_count = 0
+        self.task_warning_history.clear()
+        self.task_done_summary_emitted = False
         self.reset_edge_plan()
         self.clear_perception_cache()
         self.clear_motion_counters()

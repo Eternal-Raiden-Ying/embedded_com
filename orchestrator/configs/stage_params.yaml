@@ -14,30 +14,55 @@ controlled_approach:
 
 edge_slide_search:
   slide_vy_norm: 0.14
-  max_vx_correction_norm: 0.10
-  max_wz_correction_norm: 0.12
+  weak_slide_vy_norm: 0.05
+  max_vx_correction_norm: 0.08
+  max_wz_correction_norm: 0.18
+  dist_kp: 1.0
+  yaw_kp: 1.0
+  strong_edge_conf_track_local: 0.35
+  weak_edge_conf_track_local: 0.15
   keep_dist_tolerance_m: 0.05
+  pause_hold_ms: 800
+  recover_timeout_ms: 2500
   edge_lost_hold_ms: 1200
-  fallback_state: CONTROLLED_APPROACH
+  fallback_state: FINAL_LOCK
+  direct_fallback_to_controlled_approach: false
   min_dwell_ms: 800
 
 edge_follow:
   table_edge_obs_max_age_ms: 500
-  log_period_ms: 500
   min_edge_conf: 0.60
+  min_edge_conf_table_edge_perception: 0.60
+  min_edge_conf_track_local: 0.20
+  weak_edge_conf_track_local: 0.15
+  strong_edge_conf_track_local: 0.35
+  low_conf_hold_ms: 2000
+  low_conf_exit_ms: 3000
+  recover_conf_th: 0.25
+  identity_yaw_mismatch_rad: 0.15
+  identity_dist_mismatch_m: 0.04
+  log_period_ms: 500
+  track_local_edge_update_hz: 5
+  handoff_min_ms: 500
+  handoff_max_ms: 1000
+  handoff_samples: 3
+  stale_hold_ms: 1200
   stale_fallback_state: FINAL_LOCK
 
 target_confirm:
   confirm_conf_th: 0.30
   confirm_enter_frames: 3
-  confirm_min_ms: 600
-  confirm_timeout_ms: 2500
-  confirm_lost_hold_ms: 800
+  confirm_min_ms: 800
+  confirm_timeout_ms: 3000
+  confirm_lost_hold_ms: 1200
+  window_ms: 1500
+  confirm_found_ratio_th: 0.50
   min_bbox_area: 0.002
 
 target_locked:
   lock_conf_th: 0.40
+  lock_found_ratio_th: 0.60
   lock_stable_ms: 1200
   center_jitter_th: 0.08
-  locked_lost_hold_ms: 1200
-  freeze_after_locked_ms: 800
+  locked_lost_hold_ms: 1500
+  freeze_after_locked_ms: 1000

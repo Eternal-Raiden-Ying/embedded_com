@@ -3,8 +3,9 @@
 
 import sys
 import time
+from collections import deque
 from pathlib import Path
-from typing import Dict
+from typing import Any, Dict, Optional
 
 STACK_ROOT = Path(__file__).resolve().parents[3]
 if str(STACK_ROOT) not in sys.path:
@@ -96,6 +97,19 @@ class VistaApp(BaseModule):
         self._stopped = False
         self._last_heartbeat_ts = 0.0
         self._last_runtime_reconciled_console = ""
+        self._rate_window_s = 10.0
+        self._last_rate_emit_ts = 0.0
+        self._rate_target_ts = deque(maxlen=256)
+        self._rate_edge_ts = deque(maxlen=256)
+        self._rate_edge_age_samples = deque(maxlen=256)
+        self._rate_request_ts = deque(maxlen=256)
+        self._rate_mode_request_ts = deque(maxlen=128)
+        self._rate_target_update_ts = deque(maxlen=128)
+        self._rate_idempotent_request_ts = deque(maxlen=128)
+        self._rate_mode_reset_ts = deque(maxlen=64)
+        self._last_rate_target_key = None
+        self._last_rate_edge_key = None
+        self._last_request_trace_ts = 0.0
 
     def _config_dump(self):
         return {
@@ -108,6 +122,7 @@ class VistaApp(BaseModule):
             "pid_file": CONFIG.runtime.pid_file,
             "loop_hz": CONFIG.runtime.loop_hz,
             "send_hz": CONFIG.runtime.send_hz,
+            "track_local_send_hz": CONFIG.runtime.track_local_send_hz,
             "hot_standby_s": CONFIG.runtime.hot_standby_s,
             "keep_preview_after_stop": CONFIG.runtime.keep_preview_after_stop,
             "keep_model_hot_in_standby": CONFIG.runtime.keep_model_hot_in_standby,
@@ -349,6 +364,190 @@ class VistaApp(BaseModule):
             )
         return queued
 
+    def _trim_rate_window(self, now: float) -> None:
+        cutoff = float(now) - float(self._rate_window_s)
+        for samples in (
+            self._rate_target_ts,
+            self._rate_edge_ts,
+            self._rate_edge_age_samples,
+            self._rate_request_ts,
+            self._rate_mode_request_ts,
+            self._rate_target_update_ts,
+            self._rate_idempotent_request_ts,
+            self._rate_mode_reset_ts,
+        ):
+            while samples and float(samples[0][0] if isinstance(samples[0], tuple) else samples[0]) < cutoff:
+                samples.popleft()
+
+    @staticmethod
+    def _percentile(values, percentile: float) -> Optional[float]:
+        nums = sorted(float(v) for v in values if v is not None)
+        if not nums:
+            return None
+        idx = int(round((len(nums) - 1) * max(0.0, min(1.0, float(percentile)))))
+        return nums[idx]
+
+    @staticmethod
+    def _fmt_rate_value(value: Any, digits: int = 1) -> str:
+        if value is None:
+            return "n/a"
+        try:
+            return f"{float(value):.{digits}f}"
+        except Exception:
+            return "n/a"
+
+    def _hz_for_samples(self, samples, now: float) -> float:
+        if not samples:
+            return 0.0
+        oldest = float(samples[0][0] if isinstance(samples[0], tuple) else samples[0])
+        span_s = min(float(self._rate_window_s), max(1.0, float(now) - oldest))
+        return float(len(samples)) / span_s
+
+    def _preview_fps_snapshot(self) -> Optional[float]:
+        try:
+            preview = dict(self.runtime.runtime_snapshot().get("capabilities", {}).get("preview") or {})
+            value = preview.get("preview_fps")
+            return float(value) if value is not None else None
+        except Exception:
+            return None
+
+    def _record_rate_sample(self, out_payload: Dict[str, Any], sent_ts: float) -> None:
+        if str(out_payload.get("type") or "") != "vision_obs":
+            return
+        if str(out_payload.get("mode") or "").strip().upper() != "TRACK_LOCAL":
+            return
+        perception = out_payload.get("perception")
+        if not isinstance(perception, dict):
+            return
+        target_obs = perception.get("target_obs")
+        if isinstance(target_obs, dict):
+            target_key = (
+                target_obs.get("frame_id"),
+                target_obs.get("seq"),
+                target_obs.get("obs_ts"),
+            )
+            if target_key != self._last_rate_target_key:
+                self._last_rate_target_key = target_key
+                self._rate_target_ts.append(float(sent_ts))
+        edge_obs = perception.get("table_edge_obs")
+        if isinstance(edge_obs, dict):
+            profile = edge_obs.get("edge_profile")
+            if isinstance(profile, dict):
+                self.run_logger.write_jsonl(
+                    "edge_profile",
+                    {
+                        "mode": out_payload.get("mode"),
+                        "stage": out_payload.get("stage"),
+                        "req_id": out_payload.get("req_id"),
+                        "session_id": out_payload.get("session_id"),
+                        "epoch": out_payload.get("epoch"),
+                        "frame_id": edge_obs.get("frame_id"),
+                        "seq": edge_obs.get("seq"),
+                        "obs_ts": edge_obs.get("obs_ts"),
+                        "edge_process_path": edge_obs.get("edge_process_path"),
+                        **profile,
+                    },
+                )
+            edge_key = (
+                edge_obs.get("source_mode"),
+                edge_obs.get("frame_id"),
+                edge_obs.get("seq"),
+                edge_obs.get("obs_ts"),
+            )
+            if edge_key != self._last_rate_edge_key:
+                self._last_rate_edge_key = edge_key
+                self._rate_edge_ts.append(float(sent_ts))
+            age_ms = edge_obs.get("age_ms")
+            try:
+                self._rate_edge_age_samples.append((float(sent_ts), float(age_ms)))
+            except Exception:
+                pass
+
+    def _emit_rate_summary_if_needed(self, force: bool = False) -> None:
+        if self.current_mode != "TRACK_LOCAL":
+            return
+        now = time.time()
+        period_s = max(0.5, float(CONFIG.runtime.operator_summary_interval_s))
+        if not force and (now - float(self._last_rate_emit_ts or 0.0)) < period_s:
+            return
+        self._last_rate_emit_ts = now
+        self._trim_rate_window(now)
+        window_s = max(1.0, float(self._rate_window_s))
+        target_hz = self._hz_for_samples(self._rate_target_ts, now)
+        edge_hz = self._hz_for_samples(self._rate_edge_ts, now)
+        ages = [sample[1] for sample in self._rate_edge_age_samples]
+        p50 = self._percentile(ages, 0.50)
+        p95 = self._percentile(ages, 0.95)
+        preview_fps = self._preview_fps_snapshot()
+        request_hz = self._hz_for_samples(self._rate_request_ts, now)
+        mode_request_hz = self._hz_for_samples(self._rate_mode_request_ts, now)
+        target_update_hz = self._hz_for_samples(self._rate_target_update_ts, now)
+        record = {
+            "mode": self.current_mode,
+            "request_rate_hz": float(request_hz),
+            "mode_request_rate_hz": float(mode_request_hz),
+            "target_update_rate_hz": float(target_update_hz),
+            "idempotent_request_count": int(len(self._rate_idempotent_request_ts)),
+            "mode_reset_count": int(len(self._rate_mode_reset_ts)),
+            "target_obs_hz": float(target_hz),
+            "table_edge_obs_hz": float(edge_hz),
+            "edge_update_hz": float(edge_hz),
+            "preview_fps": preview_fps,
+            "edge_age_p50": p50,
+            "edge_age_p95": p95,
+            "window_s": float(window_s),
+        }
+        self.run_logger.write_jsonl("rate", record)
+        self.operator_console.emit_rate_limited(
+            "vision_rate",
+            "[VISION][RATE] "
+            f"mode=TRACK_LOCAL "
+            f"request_rate_hz={self._fmt_rate_value(request_hz)} "
+            f"mode_request_rate_hz={self._fmt_rate_value(mode_request_hz)} "
+            f"target_update_rate_hz={self._fmt_rate_value(target_update_hz)} "
+            f"target_obs_hz={self._fmt_rate_value(target_hz)} "
+            f"table_edge_obs_hz={self._fmt_rate_value(edge_hz)} "
+            f"preview_fps={self._fmt_rate_value(preview_fps)} "
+            f"edge_age_p50={self._fmt_rate_value(p50, 0)} "
+            f"edge_age_p95={self._fmt_rate_value(p95, 0)}",
+            interval_s=period_s,
+        )
+
+    def _record_request_trace(self, req: VisionReq) -> None:
+        now = time.time()
+        trace = dict(getattr(self.stage_controller, "last_request_trace", {}) or {})
+        payload = req.payload if isinstance(req.payload, dict) else {}
+        req_type = str(trace.get("req_type") or getattr(req, "req_type", "") or payload.get("req_type") or "").strip().lower()
+        if req_type not in {"mode_request", "target_update", "keepalive"}:
+            req_type = "mode_request" if req.op in {"START", "STOP"} else "target_update"
+        previous_ts = float(self._last_request_trace_ts or 0.0)
+        elapsed_ms = None if previous_ts <= 0.0 else max(0.0, (now - previous_ts) * 1000.0)
+        self._last_request_trace_ts = now
+        record = {
+            "ts": now,
+            "req_id": trace.get("req_id", req.req_id),
+            "req_type": req_type,
+            "session_id": trace.get("session_id", req.session_id),
+            "target": trace.get("target", req.target),
+            "requested_mode": trace.get("requested_mode", req.mode_hint),
+            "current_mode_before": trace.get("current_mode_before"),
+            "current_mode_after": trace.get("current_mode_after", self.current_mode),
+            "changed_mode": bool(trace.get("changed_mode", False)),
+            "idempotent": bool(trace.get("idempotent", False)),
+            "reason": trace.get("reason", ""),
+            "time_since_last_request_ms": elapsed_ms,
+        }
+        self.run_logger.write_jsonl("vision_request_trace", record)
+        self._rate_request_ts.append(now)
+        if req_type == "mode_request":
+            self._rate_mode_request_ts.append(now)
+        elif req_type == "target_update":
+            self._rate_target_update_ts.append(now)
+        if bool(record["idempotent"]):
+            self._rate_idempotent_request_ts.append(now)
+        if bool(record["changed_mode"]):
+            self._rate_mode_reset_ts.append(now)
+
     def _enter_hot_standby(self, current_mode: str, target_name, epoch: int):
         self.stage_controller.set_runtime_mode("IDLE_HOT", reason="enter_hot_standby", force=True)
         new_until = time.time() + float(CONFIG.runtime.hot_standby_s)
@@ -423,7 +622,10 @@ class VistaApp(BaseModule):
             )
 
     def _send_interval_s(self) -> float:
-        return 1.0 / max(0.5, CONFIG.runtime.send_hz)
+        send_hz = float(CONFIG.runtime.send_hz)
+        if self.current_mode == "TRACK_LOCAL":
+            send_hz = max(send_hz, float(getattr(CONFIG.runtime, "track_local_send_hz", send_hz) or send_hz))
+        return 1.0 / max(0.5, send_hz)
 
     def _sync_runtime_request_context(self, req: VisionReq):
         if req.session_id:
@@ -498,6 +700,8 @@ class VistaApp(BaseModule):
         queued = self._send_obs(output.vision_obs)
         if queued:
             self.last_send_ts = now
+            self._record_rate_sample(output.vision_obs, now)
+            self._emit_rate_summary_if_needed()
         return queued
 
     def _handle_stop_request(self, stage: str, stop_state=None):
@@ -564,6 +768,7 @@ class VistaApp(BaseModule):
             }
             stage_output = self.stage_controller.handle_request(req)
             self._sync_runtime_from_stage_context(reason=f"request:{req.op}")
+            self._record_request_trace(req)
             self._record_event(
                 "VISION_REQ",
                 trigger="req_in",
@@ -590,6 +795,7 @@ class VistaApp(BaseModule):
         stage_output = self.stage_controller.handle_request(req)
         sync_reason = self._request_sync_reason(req, request_stage, req_kind)
         self._sync_runtime_from_stage_context(reason=sync_reason)
+        self._record_request_trace(req)
         if request_stage == "SEARCH" and req_kind == "TARGET" and self.current_mode == "TRACK_LOCAL":
             self.operator_console.emit_change(
                 "target_view",

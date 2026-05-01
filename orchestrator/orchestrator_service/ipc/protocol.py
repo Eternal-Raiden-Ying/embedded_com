@@ -106,6 +106,7 @@ class VisionReqMsg:
     mode_hint: Optional[str] = None
     session_id: Optional[str] = None
     req_id: Optional[str] = None
+    req_type: Optional[str] = None
     epoch: int = 0
     interaction_id: Optional[str] = None
     response: Optional[Dict[str, Any]] = None
@@ -128,6 +129,7 @@ class VisionReqMsg:
             mode_hint=_pick_optional_str(payload, "mode_hint"),
             session_id=_pick_optional_str(payload, "session_id"),
             req_id=_pick_optional_str(payload, "req_id"),
+            req_type=_pick_optional_str(payload, "req_type"),
             epoch=int(payload.get("epoch", 0) or 0),
             interaction_id=_pick_optional_str(payload, "interaction_id"),
             response=_pick_optional_dict(payload, "response"),
@@ -291,11 +293,15 @@ class TableEdgeObs:
     ts: float
     table_found: bool
     edge_found: bool
+    edge_valid: Optional[bool] = None
     confidence: float = 0.0
+    edge_conf: Optional[float] = None
     obs_ts: Optional[float] = None
     age_ms: Optional[float] = None
     frame_id: Optional[int] = None
     seq: Optional[int] = None
+    edge_update_interval_ms: Optional[float] = None
+    edge_process_ms: Optional[float] = None
     source_mode: Optional[str] = None
     is_stale: bool = False
     yaw_err_rad: Optional[float] = None
@@ -330,22 +336,27 @@ class TableEdgeObs:
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "TableEdgeObs":
         table_found = bool(payload.get("table_found", payload.get("found", False)))
-        edge_found = bool(payload.get("edge_found", payload.get("table_edge_found", table_found)))
-        confidence = _pick_optional_float(payload, "confidence", "score", "edge_confidence", "table_confidence") or 0.0
+        edge_valid = _pick_optional_bool(payload, "edge_valid")
+        edge_found = bool(payload.get("edge_found", payload.get("table_edge_found", edge_valid if edge_valid is not None else table_found)))
+        confidence = _pick_optional_float(payload, "confidence", "edge_conf", "score", "edge_confidence", "table_confidence") or 0.0
         obs_ts = _pick_optional_float(payload, "obs_ts", "observation_ts", "frame_ts", "ts")
         return cls(
             ts=float(obs_ts) if obs_ts is not None else _payload_ts(payload),
             table_found=table_found,
             edge_found=edge_found,
+            edge_valid=edge_valid if edge_valid is not None else edge_found,
             confidence=float(confidence),
+            edge_conf=_pick_optional_float(payload, "edge_conf", "confidence", "edge_confidence"),
             obs_ts=obs_ts,
             age_ms=_pick_optional_float(payload, "age_ms", "edge_obs_age_ms"),
             frame_id=_pick_optional_int(payload, "frame_id"),
             seq=_pick_optional_int(payload, "seq", "frame_seq"),
+            edge_update_interval_ms=_pick_optional_float(payload, "edge_update_interval_ms", "edge_obs_period_ms"),
+            edge_process_ms=_pick_optional_float(payload, "edge_process_ms"),
             source_mode=_pick_optional_str(payload, "source_mode", "vision_mode", "mode"),
             is_stale=bool(payload.get("is_stale", payload.get("edge_obs_is_stale", False))),
-            yaw_err_rad=_pick_optional_float(payload, "yaw_err_rad", "edge_yaw_err_rad", "yaw_error_rad"),
-            dist_err_m=_pick_optional_float(payload, "dist_err_m", "edge_dist_err_m", "distance_error_m", "table_edge_distance_m", "edge_distance_m"),
+            yaw_err_rad=_pick_optional_float(payload, "yaw_err_rad", "yaw_err", "edge_yaw_err_rad", "yaw_error_rad"),
+            dist_err_m=_pick_optional_float(payload, "dist_err_m", "dist_err", "edge_dist_err_m", "distance_error_m", "table_edge_distance_m", "edge_distance_m"),
             lateral_err_m=_pick_optional_float(payload, "lateral_err_m", "edge_lateral_err_m", "lateral_error_m"),
             edge_angle_rad=_pick_optional_float(payload, "edge_angle_rad"),
             edge_k=_pick_optional_float(payload, "edge_k"),
@@ -388,11 +399,15 @@ class TargetObs:
     matched_conf: Optional[float] = None
     matched_bbox: Optional[list] = None
     matched_center: Optional[Dict[str, Any]] = None
+    matched_center_full_norm: Optional[Dict[str, Any]] = None
+    matched_center_offset_norm: Optional[Dict[str, Any]] = None
     matched_area: Optional[float] = None
     matched_rank_in_all_boxes: Optional[int] = None
     num_target_candidates: Optional[int] = None
     all_candidate_classes: Optional[list] = None
     confidence: Optional[float] = None
+    x_norm: Optional[float] = None
+    y_norm: Optional[float] = None
     cx_norm: float = 0.0
     cy_norm: Optional[float] = None
     size_norm: float = 0.0
@@ -401,6 +416,8 @@ class TargetObs:
     boxes_count: Optional[int] = None
     best_cls: Optional[str] = None
     best_conf: Optional[float] = None
+    bbox_valid: Optional[bool] = None
+    bbox_invalid_reason: Optional[str] = None
     reason: Optional[str] = None
     depth_m: Optional[float] = None
     mask_ready: bool = False
@@ -422,11 +439,12 @@ class TargetObs:
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "TargetObs":
         matched_center = _pick_optional_dict(payload, "matched_center")
+        matched_center_full_norm = _pick_optional_dict(payload, "matched_center_full_norm")
+        matched_center_offset_norm = _pick_optional_dict(payload, "matched_center_offset_norm")
         cx_value = payload.get("cx_norm", 0.0)
         cy_value = payload.get("cy_norm", payload.get("cy"))
-        if isinstance(matched_center, dict):
-            cx_value = matched_center.get("cx_norm", cx_value)
-            cy_value = matched_center.get("cy_norm", matched_center.get("y_norm", cy_value))
+        if cy_value is None and isinstance(matched_center_full_norm, dict):
+            cy_value = matched_center_full_norm.get("cy")
         return cls(
             ts=_payload_ts(payload),
             found=bool(payload.get("target_found", payload.get("found", False))),
@@ -436,11 +454,15 @@ class TargetObs:
             matched_conf=_pick_optional_float(payload, "matched_conf", "target_conf"),
             matched_bbox=payload.get("matched_bbox"),
             matched_center=matched_center,
+            matched_center_full_norm=matched_center_full_norm,
+            matched_center_offset_norm=matched_center_offset_norm,
             matched_area=_pick_optional_float(payload, "matched_area"),
             matched_rank_in_all_boxes=_pick_optional_int(payload, "matched_rank_in_all_boxes"),
             num_target_candidates=_pick_optional_int(payload, "num_target_candidates"),
             all_candidate_classes=payload.get("all_candidate_classes"),
             confidence=_pick_optional_float(payload, "matched_conf", "confidence", "score"),
+            x_norm=_pick_optional_float(payload, "x_norm"),
+            y_norm=_pick_optional_float(payload, "y_norm"),
             cx_norm=float(cx_value or 0.0),
             cy_norm=(float(cy_value) if cy_value is not None else None),
             size_norm=float(payload.get("matched_area", payload.get("size_norm", payload.get("area_norm", 0.0))) or 0.0),
@@ -449,6 +471,8 @@ class TargetObs:
             boxes_count=_pick_optional_int(payload, "boxes_count", "box_count"),
             best_cls=_pick_optional_str(payload, "best_cls", "best_class"),
             best_conf=_pick_optional_float(payload, "best_conf", "best_confidence"),
+            bbox_valid=_pick_optional_bool(payload, "bbox_valid"),
+            bbox_invalid_reason=_pick_optional_str(payload, "bbox_invalid_reason"),
             reason=_pick_optional_str(payload, "reason"),
             depth_m=_pick_optional_float(payload, "depth_m"),
             mask_ready=bool(payload.get("mask_ready", payload.get("mask_available", False))),
@@ -604,6 +628,7 @@ def make_vision_req(
     op: str = "START",
     stage: str = "SEARCH",
     mode_hint: str = "",
+    req_type: str = "",
     interaction_id: str = "",
     response: Optional[Dict[str, Any]] = None,
     payload: Optional[Dict[str, Any]] = None,
@@ -616,6 +641,7 @@ def make_vision_req(
         mode_hint=(str(mode_hint).strip().upper() if mode_hint else None),
         session_id=(str(session_id).strip() if session_id else None),
         req_id=req_id or _new_id("req"),
+        req_type=(str(req_type).strip().lower() if req_type else None),
         epoch=int(epoch),
         interaction_id=(str(interaction_id).strip() if interaction_id else None),
         response=dict(response or {}) if isinstance(response, dict) else None,
@@ -652,6 +678,7 @@ def make_vision_idle(session_id: str = "", epoch: int = 0, req_id: str = "") -> 
         req_id=req_id,
         op="STOP",
         stage="IDLE",
+        req_type="mode_request",
     )
 
 

@@ -878,9 +878,11 @@ class MobileGatewayService(BaseModule):
         elif raw_state == "DONE":
             unified_state = "idle"
             progress = 100
-            message = f"任务完成，目标 {target}" if target else "任务完成，回到空闲"
+            message = f"任务完成，已锁定目标 {target}" if target else "target locked, task done"
             self._active_template = None
             self._paused_template = None
+        elif raw_state == "IDLE" and str(payload.get("prev_state") or "").strip().upper() == "DONE":
+            message = "任务完成，回到空闲"
         elif raw_state == "ERROR_RECOVERY":
             unified_state = "error"
             progress = 0
@@ -909,6 +911,8 @@ class MobileGatewayService(BaseModule):
         status["has_target_obs"] = bool(payload.get("has_target_obs", False))
         status["lock_ready"] = bool(payload.get("lock_ready", False))
         status["lock_reason"] = str(payload.get("lock_reason") or "")
+        if isinstance(payload.get("warnings"), list):
+            status["warnings"] = list(payload.get("warnings") or [])
         if error_info is not None:
             status["raw_error"] = error_info["raw_error"]
         self.run_logger.write_jsonl("orchestrator_state_block", payload)

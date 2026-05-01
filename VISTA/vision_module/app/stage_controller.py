@@ -25,6 +25,8 @@ class StageController:
         self._runtime_service = runtime_service
         self._last_applied_mode = "IDLE"
         self._last_interaction_state_key = None
+        self._last_request_signature = None
+        self.last_request_trace: Dict[str, Any] = {}
         if self._mode_controller is not None:
             try:
                 self._last_applied_mode = normalize_upper(self._mode_controller.current_mode(), "IDLE")
@@ -44,6 +46,74 @@ class StageController:
         self._ctx.epoch = int(req.epoch)
         if req.target:
             self._ctx.target_name = req.target
+
+    @staticmethod
+    def _request_type(req: VisionReq) -> str:
+        payload = req.payload if isinstance(req.payload, dict) else {}
+        req_type = str(getattr(req, "req_type", "") or payload.get("req_type") or "").strip().lower()
+        if req_type in {"mode_request", "target_update", "keepalive"}:
+            return req_type
+        op = normalize_upper(req.op, "START")
+        if req.is_stop() or op in {"START", "STOP"}:
+            return "mode_request"
+        return "target_update"
+
+    @staticmethod
+    def _request_signature(req: VisionReq) -> tuple:
+        payload = req.payload if isinstance(req.payload, dict) else {}
+        roi = payload.get("locked_roi") or payload.get("roi") or payload.get("target_roi") or []
+        return (
+            StageController._request_type(req),
+            str(req.session_id or "").strip(),
+            str(req.target or "").strip(),
+            normalize_upper(req.stage, "IDLE"),
+            normalize_upper(req.mode_hint, ""),
+            normalize_upper(payload.get("search_kind"), ""),
+            str(payload.get("current_edge_id") or "").strip(),
+            str(payload.get("locked_edge_id") or "").strip(),
+            repr(roi),
+        )
+
+    def _store_request_trace(
+        self,
+        req: VisionReq,
+        before: StageContext,
+        *,
+        req_type: str,
+        idempotent: bool,
+        reason: str,
+    ) -> None:
+        current_mode_before = normalize_upper(before.current_mode, "IDLE")
+        current_mode_after = normalize_upper(self._ctx.current_mode, "IDLE")
+        self.last_request_trace = {
+            "req_id": req.req_id,
+            "req_type": req_type,
+            "session_id": req.session_id or self._ctx.session_id,
+            "target": req.target or self._ctx.target_name,
+            "requested_mode": normalize_upper(req.mode_hint, ""),
+            "current_mode_before": current_mode_before,
+            "current_mode_after": current_mode_after,
+            "current_stage_before": normalize_upper(before.current_stage, "IDLE"),
+            "current_stage_after": normalize_upper(self._ctx.current_stage, "IDLE"),
+            "changed_mode": current_mode_before != current_mode_after,
+            "idempotent": bool(idempotent),
+            "reason": str(reason or ""),
+        }
+
+    def _finalize_request(
+        self,
+        plan: Optional[BaseStagePlan],
+        output: Optional[StageOutput],
+        req: VisionReq,
+        before: StageContext,
+        *,
+        req_type: str,
+        idempotent: bool,
+        reason: str,
+    ) -> Optional[StageOutput]:
+        self._store_request_trace(req, before, req_type=req_type, idempotent=idempotent, reason=reason)
+        self._last_request_signature = self._request_signature(req)
+        return self._finalize_output(plan, output)
 
     def _event_context(self) -> Dict[str, Any]:
         return {
@@ -232,7 +302,7 @@ class StageController:
                 pass
 
     def _runtime_status_payload(self) -> Dict[str, Any]:
-        return {
+        payload = {
             "stage": normalize_upper(self._ctx.current_stage, "IDLE"),
             "mode": normalize_upper(self._ctx.current_mode, "IDLE"),
             "session_id": self._ctx.session_id,
@@ -241,6 +311,19 @@ class StageController:
             "interaction_id": self._ctx.interaction_id,
             "target": self._ctx.target_name,
         }
+        for key in (
+            "locked_edge_id",
+            "locked_edge_line",
+            "locked_roi",
+            "locked_yaw_err",
+            "locked_dist_err",
+            "locked_edge_conf",
+            "locked_obs_seq",
+            "current_edge_id",
+        ):
+            if key in self._ctx.stage_state:
+                payload[key] = self._ctx.stage_state.get(key)
+        return payload
 
     def _publish_runtime_status(self) -> None:
         if self._runtime_service is None:
@@ -317,6 +400,7 @@ class StageController:
         Later implementation should normalize START/UPDATE/RESPOND/STOP and
         handle cross-stage transitions here.
         """
+        req_type = self._request_type(req)
         self._sync_request_context(req)
         stage = normalize_upper(req.stage, "IDLE")
         op = normalize_upper(req.op, "START")
@@ -324,31 +408,91 @@ class StageController:
         prev_stage = normalize_upper(self._ctx.current_stage, "IDLE")
         prev_mode = normalize_upper(self._ctx.current_mode, "IDLE")
         ctx_before = self._clone_context()
+        request_signature = self._request_signature(req)
+        same_stage = normalize_upper(self._ctx.current_stage, "IDLE") == stage
+        requested_mode = normalize_upper(req.mode_hint, "")
+        same_mode = not requested_mode or normalize_upper(self._ctx.current_mode, "IDLE") == requested_mode
+        idempotent = bool(self._last_request_signature == request_signature and same_stage and same_mode)
+
+        if req_type == "keepalive":
+            return self._finalize_request(
+                current,
+                StageOutput(signals={"request_op": op, "req_type": req_type}),
+                req,
+                ctx_before,
+                req_type=req_type,
+                idempotent=True,
+                reason="keepalive",
+            )
+
+        if idempotent and current is not None and same_stage:
+            output = current.on_update(req, self._ctx)
+            requested_mode = normalize_upper(self._ctx.current_mode, "IDLE")
+            if not self._apply_context_mode(reason="idempotent_update", force=False):
+                self._restore_context(ctx_before)
+                return self._finalize_request(
+                    self.current_plan(),
+                    self._mode_apply_failed_output(op, stage, requested_mode, reason="idempotent_mode_apply_failed"),
+                    req,
+                    ctx_before,
+                    req_type=req_type,
+                    idempotent=True,
+                    reason="idempotent_mode_apply_failed",
+                )
+            self._log("stage idempotent_update", stage=stage, mode=self._ctx.current_mode, req_id=req.req_id)
+            return self._finalize_request(
+                current,
+                output or StageOutput(signals={"request_op": op, "req_type": req_type, "idempotent": True}),
+                req,
+                ctx_before,
+                req_type=req_type,
+                idempotent=True,
+                reason="idempotent_update",
+            )
 
         if req.is_stop() or op == "STOP":
             stop_output = current.on_stop(req, self._ctx) if current is not None else None
             self._transition_to("IDLE")
             if not self._apply_context_mode(reason="stop", force=False):
                 self._restore_context(ctx_before)
-                return self._finalize_output(
+                return self._finalize_request(
                     self.current_plan(),
                     self._mode_apply_failed_output(op, stage, "IDLE", reason="stop_mode_apply_failed"),
+                    req,
+                    ctx_before,
+                    req_type=req_type,
+                    idempotent=False,
+                    reason="stop_mode_apply_failed",
                 )
             self._log("stage stop", stage=stage, req_id=req.req_id, session_id=req.session_id)
             self._emit_transition("stop", op, prev_stage, prev_mode, stage)
-            return self._finalize_output(current, stop_output or StageOutput())
+            return self._finalize_request(
+                current,
+                stop_output or StageOutput(),
+                req,
+                ctx_before,
+                req_type=req_type,
+                idempotent=False,
+                reason="stop",
+            )
 
         if op == "RESPOND":
             plan = current if current is not None and normalize_upper(current.stage_name) == stage else self.plan_for(stage)
             if plan is None:
+                self._store_request_trace(req, ctx_before, req_type=req_type, idempotent=False, reason="respond_no_plan")
                 return None
             output = plan.on_respond(req, self._ctx)
             requested_mode = normalize_upper(self._ctx.current_mode, "IDLE")
             if not self._apply_context_mode(reason="respond", force=False):
                 self._restore_context(ctx_before)
-                return self._finalize_output(
+                return self._finalize_request(
                     self.current_plan(),
                     self._mode_apply_failed_output(op, stage, requested_mode, reason="respond_mode_apply_failed"),
+                    req,
+                    ctx_before,
+                    req_type=req_type,
+                    idempotent=False,
+                    reason="respond_mode_apply_failed",
                 )
             self._log("stage respond", stage=self._ctx.current_stage, mode=self._ctx.current_mode, req_id=req.req_id)
             self._emit_event(
@@ -359,44 +503,91 @@ class StageController:
                     "request_stage": stage,
                 },
             )
-            return self._finalize_output(plan, output)
+            return self._finalize_request(
+                plan,
+                output,
+                req,
+                ctx_before,
+                req_type=req_type,
+                idempotent=False,
+                reason="respond",
+            )
 
         if current is None or normalize_upper(self._ctx.current_stage) != stage:
             plan = self._transition_to(stage, req=req)
             requested_mode = normalize_upper(self._ctx.current_mode, "IDLE")
             if not self._apply_context_mode(reason="enter", force=False):
                 self._restore_context(ctx_before)
-                return self._finalize_output(
+                return self._finalize_request(
                     self.current_plan(),
                     self._mode_apply_failed_output(op, stage, requested_mode, reason="enter_mode_apply_failed"),
+                    req,
+                    ctx_before,
+                    req_type=req_type,
+                    idempotent=False,
+                    reason="enter_mode_apply_failed",
                 )
             self._log("stage enter", stage=stage, mode=self._ctx.current_mode, req_id=req.req_id)
             self._emit_transition("enter", op, prev_stage, prev_mode, stage)
-            return self._finalize_output(plan, StageOutput(signals={"request_op": op, "transition": "enter"}))
+            return self._finalize_request(
+                plan,
+                StageOutput(signals={"request_op": op, "transition": "enter", "req_type": req_type}),
+                req,
+                ctx_before,
+                req_type=req_type,
+                idempotent=False,
+                reason="enter",
+            )
 
         if op == "START":
             plan = self._transition_to(stage, req=req)
             requested_mode = normalize_upper(self._ctx.current_mode, "IDLE")
             if not self._apply_context_mode(reason="restart", force=False):
                 self._restore_context(ctx_before)
-                return self._finalize_output(
+                return self._finalize_request(
                     self.current_plan(),
                     self._mode_apply_failed_output(op, stage, requested_mode, reason="restart_mode_apply_failed"),
+                    req,
+                    ctx_before,
+                    req_type=req_type,
+                    idempotent=False,
+                    reason="restart_mode_apply_failed",
                 )
             self._log("stage restart", stage=stage, mode=self._ctx.current_mode, req_id=req.req_id)
             self._emit_transition("restart", op, prev_stage, prev_mode, stage)
-            return self._finalize_output(plan, StageOutput(signals={"request_op": op, "transition": "restart"}))
+            return self._finalize_request(
+                plan,
+                StageOutput(signals={"request_op": op, "transition": "restart", "req_type": req_type}),
+                req,
+                ctx_before,
+                req_type=req_type,
+                idempotent=False,
+                reason="restart",
+            )
 
         output = current.on_update(req, self._ctx)
         requested_mode = normalize_upper(self._ctx.current_mode, "IDLE")
         if not self._apply_context_mode(reason="update", force=False):
             self._restore_context(ctx_before)
-            return self._finalize_output(
+            return self._finalize_request(
                 self.current_plan(),
                 self._mode_apply_failed_output(op, stage, requested_mode, reason="update_mode_apply_failed"),
+                req,
+                ctx_before,
+                req_type=req_type,
+                idempotent=False,
+                reason="update_mode_apply_failed",
             )
         self._log("stage update", stage=stage, mode=self._ctx.current_mode, req_id=req.req_id)
-        return self._finalize_output(current, output)
+        return self._finalize_request(
+            current,
+            output,
+            req,
+            ctx_before,
+            req_type=req_type,
+            idempotent=False,
+            reason="update",
+        )
 
     def tick(self, tick_input: StageTickInput) -> Optional[StageOutput]:
         """Execute one stage tick and return the stage-level output envelope."""
