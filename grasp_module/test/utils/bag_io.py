@@ -88,6 +88,69 @@ def postprocess_depth_image(depth_img, cfgs):
     return processed
 
 
+def apply_rs_official_filters(rs_module, depth_frame, cfgs):
+    """
+    Apply a RealSense SDK filter chain on a depth frame.
+    The current chain is threshold -> spatial -> hole_filling, with
+    optional temporal filtering for sequential bag replay experiments.
+    """
+    frame = depth_frame
+
+    threshold = rs_module.threshold_filter()
+    threshold.set_option(
+        rs_module.option.min_distance,
+        float(getattr(cfgs, "rs_threshold_min_m", getattr(cfgs, "depth_min_mm", 1) / 1000.0)),
+    )
+    threshold.set_option(
+        rs_module.option.max_distance,
+        float(getattr(cfgs, "rs_threshold_max_m", getattr(cfgs, "depth_max_mm", 2000) / 1000.0)),
+    )
+    frame = threshold.process(frame)
+
+    spatial = rs_module.spatial_filter()
+    spatial.set_option(
+        rs_module.option.filter_magnitude,
+        float(getattr(cfgs, "rs_spatial_magnitude", 2)),
+    )
+    spatial.set_option(
+        rs_module.option.filter_smooth_alpha,
+        float(getattr(cfgs, "rs_spatial_alpha", 0.5)),
+    )
+    spatial.set_option(
+        rs_module.option.filter_smooth_delta,
+        float(getattr(cfgs, "rs_spatial_delta", 20)),
+    )
+    spatial.set_option(
+        rs_module.option.holes_fill,
+        float(getattr(cfgs, "rs_spatial_holes_fill", 1)),
+    )
+    frame = spatial.process(frame)
+
+    if bool(getattr(cfgs, "rs_temporal_enable", False)):
+        temporal = rs_module.temporal_filter()
+        temporal.set_option(
+            rs_module.option.filter_smooth_alpha,
+            float(getattr(cfgs, "rs_temporal_alpha", 0.4)),
+        )
+        temporal.set_option(
+            rs_module.option.filter_smooth_delta,
+            float(getattr(cfgs, "rs_temporal_delta", 20)),
+        )
+        temporal.set_option(
+            rs_module.option.holes_fill,
+            float(getattr(cfgs, "rs_temporal_holes_fill", 3)),
+        )
+        frame = temporal.process(frame)
+
+    hole_filling = rs_module.hole_filling_filter()
+    hole_filling.set_option(
+        rs_module.option.holes_fill,
+        float(getattr(cfgs, "rs_hole_fill_mode", 1)),
+    )
+    frame = hole_filling.process(frame)
+    return frame
+
+
 def convert_color_frame_to_rgb(rs_module, color_frame):
     color_data = np.asanyarray(color_frame.get_data())
     stream_format = color_frame.get_profile().as_video_stream_profile().format()
@@ -166,7 +229,45 @@ def compute_scene_stats(points):
     }
 
 
-def _collect_aligned_bag_frames(cfgs, output_dir, metadata_description):
+def _extract_sdk_point_cloud_from_aligned_frames(rs_module, aligned_depth_frame, aligned_color_frame, color_img, valid_mask=None):
+    pointcloud = rs_module.pointcloud()
+    pointcloud.map_to(aligned_color_frame)
+    rs_points = pointcloud.calculate(aligned_depth_frame)
+
+    vertices = np.asarray(rs_points.get_vertices()).view(np.float32).reshape(-1, 3)
+    texcoords = np.asarray(rs_points.get_texture_coordinates()).view(np.float32).reshape(-1, 2)
+
+    finite_mask = np.isfinite(vertices).all(axis=1) & (vertices[:, 2] > 0)
+    tex_mask = (
+        np.isfinite(texcoords).all(axis=1)
+        & (texcoords[:, 0] >= 0.0)
+        & (texcoords[:, 0] <= 1.0)
+        & (texcoords[:, 1] >= 0.0)
+        & (texcoords[:, 1] <= 1.0)
+    )
+    final_mask = finite_mask & tex_mask
+    if valid_mask is not None:
+        final_mask &= valid_mask.reshape(-1)
+
+    points = vertices[final_mask].astype(np.float32, copy=True)
+    if points.size == 0:
+        return points, None
+
+    image_h, image_w = color_img.shape[:2]
+    selected_tex = texcoords[final_mask]
+    u = np.clip(np.rint(selected_tex[:, 0] * (image_w - 1)).astype(np.int32), 0, image_w - 1)
+    v = np.clip(np.rint(selected_tex[:, 1] * (image_h - 1)).astype(np.int32), 0, image_h - 1)
+    colors = color_img[v, u].astype(np.float32) / 255.0
+    return points, colors
+
+
+def _collect_aligned_bag_frames(
+    cfgs,
+    output_dir,
+    metadata_description,
+    include_sdk_cloud=False,
+    include_official_variants=False,
+):
     try:
         import pyrealsense2 as rs
     except ImportError as exc:
@@ -230,6 +331,17 @@ def _collect_aligned_bag_frames(cfgs, output_dir, metadata_description):
             )
             postprocessed_depth_img = postprocess_depth_image(filtered_depth_img, cfgs)
 
+            official_depth_img = None
+            official_depth_frame = None
+            if include_official_variants:
+                official_depth_frame = apply_rs_official_filters(rs, aligned_depth_frame, cfgs)
+                official_depth_img = normalize_depth_shape(np.asanyarray(official_depth_frame.get_data()))
+                official_depth_img = sanitize_depth_image(
+                    official_depth_img,
+                    depth_min_mm=getattr(cfgs, "depth_min_mm", 1),
+                    depth_max_mm=getattr(cfgs, "depth_max_mm", 2000),
+                )
+
             sampled_frames += 1
             zero_count = int((filtered_depth_img == 0).sum())
             valid_ratio = float((filtered_depth_img > 0).sum() / filtered_depth_img.size)
@@ -238,18 +350,39 @@ def _collect_aligned_bag_frames(cfgs, output_dir, metadata_description):
                     break
                 continue
 
-            frames_out.append(
-                {
-                    "frame_index": total_frames - 1,
-                    "color_img": color_img.copy(),
-                    "depth_raw_img": raw_depth_img.copy(),
-                    "depth_filtered_img": filtered_depth_img.copy(),
-                    "depth_postprocessed_img": postprocessed_depth_img.copy(),
-                    "depth_img": postprocessed_depth_img.copy(),
-                    "zero_count": zero_count,
-                    "valid_ratio": valid_ratio,
-                }
-            )
+            frame_item = {
+                "frame_index": total_frames - 1,
+                "color_img": color_img.copy(),
+                "depth_raw_img": raw_depth_img.copy(),
+                "depth_filtered_img": filtered_depth_img.copy(),
+                "depth_postprocessed_img": postprocessed_depth_img.copy(),
+                "depth_img": postprocessed_depth_img.copy(),
+                "zero_count": zero_count,
+                "valid_ratio": valid_ratio,
+            }
+            if official_depth_img is not None:
+                frame_item["depth_official_img"] = official_depth_img.copy()
+            if include_sdk_cloud:
+                sdk_points, sdk_colors = _extract_sdk_point_cloud_from_aligned_frames(
+                    rs,
+                    aligned_depth_frame,
+                    aligned_color_frame,
+                    color_img,
+                    valid_mask=(filtered_depth_img > 0),
+                )
+                frame_item["sdk_points"] = sdk_points
+                frame_item["sdk_colors"] = sdk_colors
+                if official_depth_frame is not None:
+                    sdk_official_points, sdk_official_colors = _extract_sdk_point_cloud_from_aligned_frames(
+                        rs,
+                        official_depth_frame,
+                        aligned_color_frame,
+                        color_img,
+                        valid_mask=(official_depth_img > 0),
+                    )
+                    frame_item["sdk_points_official"] = sdk_official_points
+                    frame_item["sdk_colors_official"] = sdk_official_colors
+            frames_out.append(frame_item)
             if cfgs.bag_max_frames > 0 and sampled_frames >= cfgs.bag_max_frames:
                 break
     finally:
@@ -313,6 +446,61 @@ def collect_bag_candidates(cfgs, output_dir, metadata_description="Camera intrin
         )
         if len(candidates) >= cfgs.bag_top_k:
             break
+    return candidates, metadata_path, camera_info
+
+
+def collect_bag_comparison_frames(
+    cfgs,
+    output_dir,
+    metadata_description="Camera intrinsics exported from bag for depth/point-cloud comparison",
+):
+    frames_out, metadata_path, metadata = _collect_aligned_bag_frames(
+        cfgs,
+        output_dir,
+        metadata_description,
+        include_sdk_cloud=True,
+        include_official_variants=True,
+    )
+    camera_info = build_camera_info_from_metadata(metadata)
+    candidates = []
+    for item in frames_out[: cfgs.bag_top_k]:
+        filtered_points, filtered_colors = create_colored_point_cloud_from_rgbd(
+            item["color_img"],
+            item["depth_filtered_img"],
+            camera_info,
+            mask=None,
+        )
+        postprocessed_points, postprocessed_colors = create_colored_point_cloud_from_rgbd(
+            item["color_img"],
+            item["depth_postprocessed_img"],
+            camera_info,
+            mask=None,
+        )
+        official_points = None
+        official_colors = None
+        if "depth_official_img" in item:
+            official_points, official_colors = create_colored_point_cloud_from_rgbd(
+                item["color_img"],
+                item["depth_official_img"],
+                camera_info,
+                mask=None,
+            )
+        sdk_points, sdk_colors = item["sdk_points"], item["sdk_colors"]
+        candidates.append(
+            {
+                **item,
+                "filtered_points": filtered_points,
+                "filtered_colors": filtered_colors,
+                "postprocessed_points": postprocessed_points,
+                "postprocessed_colors": postprocessed_colors,
+                "official_points": official_points,
+                "official_colors": official_colors,
+                "sdk_points_filtered": sdk_points,
+                "sdk_colors_filtered": sdk_colors,
+                "sdk_points_official": item.get("sdk_points_official"),
+                "sdk_colors_official": item.get("sdk_colors_official"),
+            }
+        )
     return candidates, metadata_path, camera_info
 
 

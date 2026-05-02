@@ -1,20 +1,15 @@
-""" Collision detection to remove collided grasp pose predictions.
-Author: chenxi-wang
-"""
+"""Collision detection to remove collided grasp pose predictions."""
 
-import os
-import sys
 import numpy as np
 import open3d as o3d
 
 class ModelFreeCollisionDetector():
-    """ Collision detection in scenes without object labels. Current finger width and length are fixed.
+    """Collision detection in scenes without object labels.
 
-        Input:
-                scene_points: [numpy.ndarray, (N,3), numpy.float32]
-                    the scene points to detect
-                voxel_size: [float]
-                    used for downsample
+        The geometric occupancy used for collision tests is parameterized by
+        `finger_width`, `finger_length`, and an optional `height_override`.
+        These values are intended to come from predictor config rather than
+        graspnetAPI runtime defaults.
 
         Example usage:
             mfcdetector = ModelFreeCollisionDetector(scene_points, voxel_size=0.005)

@@ -21,6 +21,7 @@ from .utils.data_utils import (
     write_open3d_point_cloud,
 )
 from .utils.frames import FrameTransformer
+from .utils.gripper_mesh import build_gripper_mesh
 from .utils.yolo_utils import load_yolo_model, predict_target_masks
 
 
@@ -35,6 +36,7 @@ class RealSenseGraspPredictor:
         self.seg_model = None
         self.rng = np.random.default_rng(getattr(self.cfgs, 'random_seed', 0))
         self.frames = FrameTransformer.from_config(self.cfgs)
+        self._last_yolo_info = None
 
         torch.manual_seed(getattr(self.cfgs, 'random_seed', 0))
         if torch.cuda.is_available():
@@ -211,13 +213,18 @@ class RealSenseGraspPredictor:
         for i in range(len(grasp_group)):
             grasp = grasp_group[i]
             color = self._score_to_color(float(grasp.score), min_score, max_score)
-            try:
-                combined_grippers += grasp.to_open3d_geometry(color=color, gripper_params=gripper_params)
-            except TypeError:
-                # Compatibility path: the runtime environment may import an older
-                # graspnetAPI package from site-packages whose Grasp.to_open3d_geometry
-                # only accepts `color`.
-                combined_grippers += grasp.to_open3d_geometry(color=color)
+            combined_grippers += build_gripper_mesh(
+                center=grasp.translation,
+                rotation_matrix=grasp.rotation_matrix,
+                width=grasp.width,
+                depth=grasp.depth,
+                score=grasp.score,
+                color=color,
+                height=gripper_params["height"],
+                finger_width=gripper_params["finger_width"],
+                tail_length=gripper_params["tail_length"],
+                depth_base=gripper_params["depth_base"],
+            )
         return combined_grippers
 
     def _print_debug_timings(self, timings, extras=None):
@@ -302,6 +309,9 @@ class RealSenseGraspPredictor:
             "position_frame": "robot",
             "angle_frame": "robot",
         }
+
+    def get_last_yolo_info(self):
+        return self._last_yolo_info
 
     def build_protocol_targets(self, grasp_group):
         feasible_grasp_group = self.build_protocol_grasp_group(grasp_group)
@@ -429,6 +439,7 @@ class RealSenseGraspPredictor:
 
         stage_tic = time.perf_counter()
         seg_mask, bbox_mask, overlay_img, yolo_info = self._resolve_masks(color_img, int(class_id))
+        self._last_yolo_info = dict(yolo_info)
         timings['mask'] = time.perf_counter() - stage_tic
         if seg_mask.sum() == 0:
             logger.warning("No valid target mask found")

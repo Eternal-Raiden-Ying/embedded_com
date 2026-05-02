@@ -444,3 +444,17 @@ E:\Documents_E\vscode\embedded_com\env\python.exe E:\Documents_E\vscode\embedded
 2. 再用 `test_engine.py` 跑 grasp
 3. 如果主要看点云质量或手眼标定，使用 `handeye_from_bag.py`
 4. 如果主要看服务端接口联调，使用 `simulate_client_request.py`
+## Gripper Geometry Notes
+
+- Debug grasp mesh is now built inside the repo and no longer depends on
+  `graspnetAPI.Grasp.to_open3d_geometry(...)` runtime signatures.
+- The following predictor config arguments affect debug mesh geometry in both
+  test replay and main runtime:
+  - `--gripper_height_m`
+  - `--gripper_finger_width_m`
+  - `--gripper_depth_base_m`
+  - `--gripper_tail_length_m`
+- Collision filtering keeps using its own occupancy geometry parameters:
+  - `--collision_finger_width_m`
+  - `--collision_finger_length_m`
+  - `--collision_height_override_m`

@@ -20,10 +20,17 @@ class PredictorConfig:
     random_seed: int = 0
     scene_max_depth: float = 3.0
     debug_grasp_count: int = 15
+
+    # ---- Debug gripper mesh (PLY visualisation only) ----
+    # These only affect save_debug_visualizations() / test replay mesh export.
+    # They do NOT influence collision detection or downstream protocol output.
     gripper_height_m: float = 0.028
     gripper_finger_width_m: float = 0.018
     gripper_depth_base_m: float = 0.0
     gripper_tail_length_m: float = 0.04
+
+    # ---- Collision detection occupancy parameters ----
+    # Used by ModelFreeCollisionDetector. Independent of the debug mesh above.
     collision_finger_width_m: float = 0.02
     collision_finger_length_m: float = 0.07
     collision_height_override_m: float = -1.0
@@ -70,13 +77,13 @@ def add_predictor_args(parser, default_overrides=None):
     parser.add_argument('--random_seed', type=int, default=defaults['random_seed'], help='Random seed for reproducible point sampling')
     parser.add_argument('--scene_max_depth', type=float, default=defaults['scene_max_depth'], help='Maximum depth in meters for debug scene cloud')
     parser.add_argument('--debug_grasp_count', type=int, default=defaults['debug_grasp_count'], help='Number of top grasps to export in debug mesh')
-    parser.add_argument('--gripper_height_m', type=float, default=defaults['gripper_height_m'], help='Debug gripper mesh height in meters')
-    parser.add_argument('--gripper_finger_width_m', type=float, default=defaults['gripper_finger_width_m'], help='Debug gripper finger width in meters')
-    parser.add_argument('--gripper_depth_base_m', type=float, default=defaults['gripper_depth_base_m'], help='Debug gripper rear offset (depth base) in meters')
-    parser.add_argument('--gripper_tail_length_m', type=float, default=defaults['gripper_tail_length_m'], help='Debug gripper tail length in meters')
-    parser.add_argument('--collision_finger_width_m', type=float, default=defaults['collision_finger_width_m'], help='Collision gripper finger width in meters')
-    parser.add_argument('--collision_finger_length_m', type=float, default=defaults['collision_finger_length_m'], help='Collision gripper finger length in meters')
-    parser.add_argument('--collision_height_override_m', type=float, default=defaults['collision_height_override_m'], help='Override grasp height used in collision detection; <=0 keeps raw grasp height')
+    parser.add_argument('--gripper_height_m', type=float, default=defaults['gripper_height_m'], help='Repo-local debug gripper mesh total height in meters')
+    parser.add_argument('--gripper_finger_width_m', type=float, default=defaults['gripper_finger_width_m'], help='Repo-local debug gripper finger thickness in meters')
+    parser.add_argument('--gripper_depth_base_m', type=float, default=defaults['gripper_depth_base_m'], help='Repo-local debug gripper rear offset from grasp origin in meters')
+    parser.add_argument('--gripper_tail_length_m', type=float, default=defaults['gripper_tail_length_m'], help='Repo-local debug gripper tail length in meters')
+    parser.add_argument('--collision_finger_width_m', type=float, default=defaults['collision_finger_width_m'], help='Collision occupancy finger thickness in meters')
+    parser.add_argument('--collision_finger_length_m', type=float, default=defaults['collision_finger_length_m'], help='Collision occupancy finger length in meters')
+    parser.add_argument('--collision_height_override_m', type=float, default=defaults['collision_height_override_m'], help='Override grasp total height used in collision detection; <=0 keeps raw grasp height')
 
     parser.add_argument('--rgb_path', type=str, default=defaults['rgb_path'], help='Path to RGB image')
     parser.add_argument('--depth_path', type=str, default=defaults['depth_path'], help='Path to depth image')

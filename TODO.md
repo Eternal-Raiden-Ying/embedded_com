@@ -1,6 +1,6 @@
 # TODO
 
-更新时间：2026-04-26
+更新时间：2026-05-02
 
 状态约定：
 - `todo`：未开始
@@ -22,7 +22,25 @@
   - `py_compile` 通过
   - 单图推理验证通过
 
-### 2. 中间结果可观测性
+### 2. 下游输出格式完善与冻结
+- 状态：`done`
+- 优先级：`P0`
+- 已推进内容：
+  - 新建 `grasp_module/backend/protocol/` 包，提取 `build_downstream_response` 为唯一实现
+  - 消除 `server_app.py` 与 `test/utils/reporting.py` 之间的重复代码
+  - 响应新增 `format_version: "1.1"` 字段
+  - `message` 字段在所有 6 个分支中填充有意义的调试信息
+  - status 三分法（success / reposition_required / failure）
+  - 所有响应新增 `detection` 对象，含 `similar_detection_result` 标记回退
+  - YOLO `no_detection` 与 GraspNet `no_grasp_detected` 分层为 failure
+  - 配置中明确了 debug gripper mesh 参数与碰撞检测参数的两组独立角色
+  - `grasp_module/docs/api_protocol.md` — 完整板端通信协议文档
+- 参考基准（两个 bag 已验证可输出有效抓取）：
+  - `grasp_module/test/data/bag/20260426_165604.bag` — class_id=47 直接命中
+  - `grasp_module/test/data/bag/20260426_170719.bag` — fallback 55 成功
+  - 推理结果保存于 `grasp_module/test/bag_debug/`
+
+### 3. 中间结果可观测性
 - 状态：`doing`
 - 优先级：`P0`
 - 已推进内容：
@@ -39,23 +57,20 @@
 
 ## P1 上游感知稳定
 
-### 3. YOLO 偶发漏检排查
+### 4. YOLO 偶发漏检排查
 - 状态：`doing`
 - 优先级：`P1`
 - 已推进内容：
   - 已扫描多组 bag 导出帧
   - 已完成 `conf / iou / imgsz` 对比
   - 已确认当前主要瓶颈是 `apple=47` 置信度偏低与类别混淆
-  - 已新增 `test_yolo.py` 和测试层 fallback：
-    - `47 -> 32 -> 55`
-- 测试：
-  - 现有 bag 数据已做回归
-  - 默认 `bag_top_k=1` 已验证
+  - 已新增 fallback 路由：`47 -> 32 -> 55`
+  - 两个基准 bag 已验证 fallback 可用
 - 后续方向：
   - 补 `require_single_detection`
   - 评估是否做定向微调
 
-### 4. 3D 投影畸变与线性度问题
+### 5. 3D 投影畸变与线性度问题
 - 状态：`todo`
 - 优先级：`P1`
 - 已知方向：
@@ -63,16 +78,19 @@
   - 核查 `align_mode / intrinsics / factor_depth`
 - 测试：未开始
 
-### 5. 深度后处理验证
-- 状态：`todo`
+### 6. 深度后处理验证
+- 状态：`doing`
 - 优先级：`P1`
-- 已知方向：
-  - 中值滤波
+- 已推进内容：
+  - 中值滤波 + 零值孔洞填充已在 `test_engine.py` 中实现（`postprocess_depth_image`）
+  - RealSense SDK 官方 filter chain 封装在 `bag_io.py`（`apply_rs_official_filters`）
+- 待完成：
   - 双边滤波
-  - spatial / temporal / hole filling
-- 测试：未开始
+  - spatial / temporal / hole filling 效果对比
+  - **暂不集成到 `engine.py` 主分支**，需更多测试数据验证后再决定
+- 测试：test 层进行中
 
-### 6. 边界缺失问题
+### 7. 边界缺失问题
 - 状态：`todo`
 - 优先级：`P1`
 - 已知方向：
@@ -83,17 +101,20 @@
 
 ## P2 机器人约束与执行语义
 
-### 7. 夹爪 / 机械臂执行语义重定义
-- 状态：`todo`
+### 8. 夹爪 / 机械臂执行语义重定义
+- 状态：`doing`
 - 优先级：`P2`
 - 已推进内容：
-  - 当前已区分模型 grasp 输出与协议输出
+  - 已自建 `grasp_module/backend/utils/gripper_mesh.py`，不再依赖 graspnetAPI 运行时签名
+  - 已接入 config 中定义的物理世界夹爪参数
+  - 已明确 gripper_mesh **仅作用于 debug PLY 可视化**，不影响碰撞检测
+  - 碰撞检测使用独立参数组（`collision_finger_width_m` 等）
 - 待实现：
-  - 明确 `grasp pose / gripper pose / tcp pose`
-  - 引入真实夹爪参数与 TCP 外参
+  - 明确 `grasp pose / gripper pose / tcp pose` 三者语义
+  - 确认是否需要在碰撞检测中统一使用同一套夹爪几何参数
 - 测试：未开始
 
-### 8. 机械臂约束过滤优化
+### 9. 机械臂约束过滤优化
 - 状态：`doing`
 - 优先级：`P2`
 - 已推进内容：
@@ -101,7 +122,7 @@
     - `pitch_deg`
     - `roll_deg`
     - `feasible_angle_deg`
-  - 已接入你给定的 `R,t`
+  - 已接入给定的 `R,t`
   - 已做 `5 / 8 / 10 / 15 deg` 阈值对比
 - 待补充：
   - `pitch` 区间优先或硬过滤
@@ -109,7 +130,7 @@
 
 ## P3 碰撞、评分与搜索空间优化
 
-### 9. 可视化被碰撞筛掉的 grasp
+### 10. 可视化被碰撞筛掉的 grasp
 - 状态：`todo`
 - 优先级：`P3`
 - 待实现：
@@ -118,21 +139,21 @@
   - collision scene cloud
 - 测试：未开始
 
-### 10. 场景点云选取优化
+### 11. 场景点云选取优化
 - 状态：`todo`
 - 优先级：`P3`
 - 待实现：
   - 比较 bbox 局部点云 / 深度邻域点云 / mask 外扩点云
 - 测试：未开始
 
-### 11. 评分与筛选逻辑优化
+### 12. 评分与筛选逻辑优化
 - 状态：`todo`
 - 优先级：`P3`
 - 待实现：
   - 结合点云完整度、边界缺失、可达性、碰撞余量
 - 测试：未开始
 
-### 12. 调整 seed / M_POINT / 搜索空间
+### 13. 调整 seed / M_POINT / 搜索空间
 - 状态：`blocked`
 - 优先级：`P3`
 - 原因：
@@ -143,7 +164,7 @@
 
 ## P4 自动化与工具
 
-### 13. 自动化手眼标定流程
+### 14. 自动化手眼标定流程
 - 状态：`todo`
 - 优先级：`P4`
 - 已推进内容：
@@ -154,7 +175,7 @@
 - 待补充：
   - 自动配对与误差报告
 
-### 14. 测试脚本体系整理
+### 15. 测试脚本体系整理
 - 状态：`doing`
 - 优先级：`P4`
 - 已推进内容：
