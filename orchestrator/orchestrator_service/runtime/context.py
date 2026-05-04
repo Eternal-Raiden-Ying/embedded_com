@@ -23,6 +23,7 @@ class State(str, Enum):
     TARGET_CONFIRM = "TARGET_CONFIRM"
     TARGET_LOCKED = "TARGET_LOCKED"
     FREEZE_BASE = "FREEZE_BASE"
+    GRASP = "GRASP"
     LEAVE_EDGE = "LEAVE_EDGE"
     RELOCATE_TO_EDGE = "RELOCATE_TO_EDGE"
     REACQUIRE_EDGE = "REACQUIRE_EDGE"
@@ -118,6 +119,15 @@ class RuntimeContext:
     task_warning_history: List[str] = field(default_factory=list)
     task_done_summary_emitted: bool = False
 
+    grasp_substate: str = ""
+    grasp_result: Optional[Dict] = None
+    grasp_status: str = ""
+    grasp_reason: str = ""
+    grasp_reposition_hint: Optional[Dict] = None
+    grasp_retry_count: int = 0
+    arm_response: Optional[object] = None
+    grasp_timeout_mono: float = 0.0
+
     def clear_motion_counters(self):
         self.table_found_frames = 0
         self.table_lost_frames = 0
@@ -138,6 +148,8 @@ class RuntimeContext:
         self.target_last_center_jitter = 0.0
         self.target_last_lost_reason = ""
         self.target_last_transition_reason = ""
+        self.grasp_retry_count = 0
+        self.grasp_substate = ""
 
     def clear_perception_cache(self):
         self.last_table_obs = None
@@ -202,6 +214,14 @@ class RuntimeContext:
         self.task_target_locked_count = 0
         self.task_warning_history.clear()
         self.task_done_summary_emitted = False
+        self.grasp_substate = ""
+        self.grasp_result = None
+        self.grasp_status = ""
+        self.grasp_reason = ""
+        self.grasp_reposition_hint = None
+        self.grasp_retry_count = 0
+        self.arm_response = None
+        self.grasp_timeout_mono = 0.0
         self.reset_edge_plan()
         self.clear_perception_cache()
         self.clear_motion_counters()

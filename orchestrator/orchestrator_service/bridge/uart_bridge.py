@@ -100,6 +100,18 @@ class UartBridge:
     def send_stop(self, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
         return self._publish_latest("MODE STOP\nSTOP\n", tx_meta=tx_meta)
 
+    def send_arm_command(self, command_line: str, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
+        """Send an arm command directly, bypassing the latest-command-override.
+
+        Arm POSE commands must not be dropped — each one is a discrete
+        trajectory that the arm MCU must execute exactly once.
+        """
+        if not str(command_line or "").strip():
+            return False
+        with self._pending_lock:
+            self._write_line(command_line, tx_meta=tx_meta)
+        return True
+
     def drain_rx_lines(self) -> List[str]:
         items: List[str] = []
         while True:

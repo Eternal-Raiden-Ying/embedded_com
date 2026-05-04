@@ -7,6 +7,7 @@ import time
 import os
 from typing import Any, Dict, List, Optional
 
+from ..bridge.arm_protocol import encode_pose, parse_arm_response
 from ..bridge.simple_car_protocol import SimpleCarMapper, parse_car_state_line
 from ..bridge.uart_bridge import UartBridge
 from ..config.schema import OrchestratorConfig, SocketEndpoint
@@ -866,11 +867,16 @@ class OrchestratorService(BaseModule):
     def _drain_uart_feedback(self):
         for raw in self.uart.drain_rx_lines():
             state = parse_car_state_line(raw)
-            if state is None:
+            if state is not None:
+                self.core.handle_car_state(state)
+                self.run_logger.write_jsonl("car_state", state.to_dict())
+                self.run_logger.write_timeline("CAR_STATE", state=state.state, message=state.message, estop=state.estop, timeout=state.timeout, fault=state.fault)
                 continue
-            self.core.handle_car_state(state)
-            self.run_logger.write_jsonl("car_state", state.to_dict())
-            self.run_logger.write_timeline("CAR_STATE", state=state.state, message=state.message, estop=state.estop, timeout=state.timeout, fault=state.fault)
+            arm_resp = parse_arm_response(raw)
+            if arm_resp is not None:
+                self.core.handle_arm_response(arm_resp)
+                self.run_logger.write_timeline("ARM_RESPONSE", ok=arm_resp.ok, message=arm_resp.message)
+                continue
 
     def _send_task_ack(self, cmd: TaskCmd, accepted: bool, reason: str):
         ack = make_task_ack(cmd, accepted=accepted, reason=reason, state=self.core.ctx.state.value)
@@ -976,15 +982,29 @@ class OrchestratorService(BaseModule):
                 has_table_edge_obs=has_table_edge,
                 has_target_obs=has_target,
             )
-        return iter_vision_perception_payloads(payload)
+        out = list(iter_vision_perception_payloads(payload))
+        if msg_type == "vision_obs":
+            env = VisionObsEnvelope.from_dict(payload)
+            if env.stage == "GRASP" and isinstance(env.result, dict) and env.result:
+                grasp_obs = dict(env.result)
+                grasp_obs["status"] = str(env.status or "")
+                grasp_obs["type"] = "grasp_obs"
+                grasp_obs["ts"] = float(env.ts)
+                grasp_obs["req_id"] = env.req_id
+                grasp_obs["session_id"] = env.session_id
+                grasp_obs["epoch"] = int(env.epoch)
+                out.append(grasp_obs)
+        return out
 
     def _drain_vision_msgs(self):
         latest_table: Optional[TableEdgeObs] = None
         latest_target: Optional[TargetObs] = None
         latest_home: Optional[HomeTagObs] = None
+        latest_grasp: Optional[Dict] = None
         latest_table_priority = -1
         latest_target_priority = -1
         latest_home_priority = -1
+        latest_grasp_priority = -1
         raw_items: List[dict] = self.vision_server.drain()
         for item in raw_items:
             recv_ts = float(item.get("recv_ts", time.time()))
@@ -1080,6 +1100,23 @@ class OrchestratorService(BaseModule):
                             from_envelope=from_envelope,
                             priority=priority,
                         )
+                    elif msg_type == "grasp_obs":
+                        if priority >= latest_grasp_priority:
+                            latest_grasp = dict(payload)
+                            latest_grasp_priority = priority
+                        self._last_vision_obs_recv_ts = recv_ts
+                        self.run_logger.write_ipc(
+                            "vision_obs_in",
+                            "grasp_received",
+                            direction="RX",
+                            req_id=payload.get("req_id"),
+                            session_id=payload.get("session_id"),
+                            epoch=payload.get("epoch"),
+                            ok=True,
+                            grasp_status=payload.get("status"),
+                            from_envelope=from_envelope,
+                            msg_type=msg_type,
+                        )
                     else:
                         self.run_logger.write_ipc(
                             "vision_obs_in",
@@ -1115,6 +1152,8 @@ class OrchestratorService(BaseModule):
         if latest_home is not None:
             self.core.handle_home_obs(latest_home)
             self.run_logger.write_jsonl("home_tag_obs", latest_home.to_dict())
+        if latest_grasp is not None:
+            self.core.handle_grasp_obs(latest_grasp)
 
     def _enqueue_async_or_fail(self, sender: Any, channel: str, msg: Dict[str, Any]) -> bool:
         ok = sender.send(msg)
@@ -1474,6 +1513,16 @@ class OrchestratorService(BaseModule):
         self._emit_target_obs_missing_warning()
 
     def _emit_motion(self, decision):
+        if getattr(decision, "arm_cmd", None) is not None:
+            arm = decision.arm_cmd
+            arm_line = encode_pose(
+                arm.x_cm, arm.y_cm, arm.z_cm,
+                arm.pitch_deg, arm.roll_deg,
+                arm.claw_deg, arm.time_ms,
+            )
+            self.uart.send_arm_command(arm_line)
+            self.run_logger.write_jsonl("arm_cmd", arm.to_dict())
+            return
         cmd = decision.cmd
         self.run_logger.write_jsonl("cmd_vel", cmd.to_dict())
         self._emit_edge_slide_trace(decision)

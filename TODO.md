@@ -1,6 +1,6 @@
 # TODO.md — 项目总后续工作跟踪
 
-更新时间：2026-05-02
+更新时间：2026-05-04
 
 状态约定：
 - `todo`：未开始
@@ -14,130 +14,126 @@
 
 | 模块 | 状态 | 关键未完成项 |
 |------|------|-------------|
-| mobile_gateway | MVP 可用，小程序已稳定 | MQTT broker 生产化、ASR 管线（优先级下调至 P1） |
-| Orchestrator | 状态机升级完成，桌边-沿边搜索-目标锁定主链稳定 | **GRASP 阶段未接入状态机闭环** |
-| VISTA | Detect/Remote/Runtime 线全部 DONE | GraspStagePlan status 检查修复、端到端联调 |
-| grasp server | 推理管线完成，输出字段对齐确认 | 输出协议冻结（加 operating_time） |
-| Voice/ASR | 已从板端归档 | 手机端/云端重建 ASR→NLU→mobile_cmd 管线（P1） |
+| mobile_gateway | MVP 可用，小程序已稳定 | MQTT broker 生产化、ASR 管线（P1） |
+| Orchestrator | **GRASP 状态实现完成**（8 文件，dry-run 验证通过） | 端到端真车联调 |
+| VISTA | **v1.1 适配完成**（三分法 + result 规范化） | 端到端联调 |
+| grasp server | **协议 v1.1 已冻结** | `operating_time`/proposal 后续版本 |
+| Voice/ASR | 已从板端归档 | ASR→NLU→mobile_cmd 管线（P1） |
 
 ---
 
 ## P0 — Grasp 串联进入主链路
 
-对应文档：[docs/grasp_protocol_analysis.md](docs/grasp_protocol_analysis.md)、[SYSTEM_UPGRADE_DELIVERY.md](SYSTEM_UPGRADE_DELIVERY.md)
+参考：
+- [branch_discovery.md](docs/branch_discovery.md) — VISTA IPC 架构发现（Section 1 必须修改项）
+- [grasp_protocol_analysis.md](docs/grasp_protocol_analysis.md) — 全链路协议分析
+- [api_protocol.md](E:/Documents_E/vscode/embedded_com/grasp_module/docs/api_protocol.md) — grasp server v1.1
 
-### 1. Grasp Server 输出协议冻结
-- 状态：`doing`
-- 优先级：`P0`
-- 已确认：
-  - 输出字段（11 个）足够驱动机械臂
-  - 坐标系转换在 server 侧完成（手眼标定），输出为 robot 系
-  - 板端请求已对齐 class_id-only 模式（已确认，无需修改）
-- 待完成：
-  - [ ] 新增 `operating_time` 字段（预留，可 null）
-  - [ ] 确认 `reason` 枚举不变
-  - [ ] 通知板端侧格式已冻结
+### 1. Grasp Server 输出协议 v1.1
+- 状态：`done`
+- 已冻结：
+  - `status` 三分法：`success` / `reposition_required` / `failure`
+  - `reason` 5 值：`null` / `no_detection` / `no_grasp_detected` / `no_feasible_grasp` / `score_below_threshold`
+  - 新增 `detection` 对象（`requested/resolved_class_id`, `found`, `similar_detection_result` 等）
+  - 新增 `format_version`, `message`
+  - `targets[]` 11 字段 + 坐标系约定（robot 系，X前/Y左/Z上）
+- `operating_time` 预留后续版本
 
-### 2. target → class_id 映射函数
+### 2. VISTA 适配 v1.1 协议
+- 状态：`done`
+- 文件：`VISTA/vision_module/app/stages/grasp.py:425-485`
+- 实现：三分法 status (`success→RESULT_READY`, `failure→FAILED`, `reposition_required→RUNNING+reposition_hint`)
+- 验证：`py_compile` 通过
+
+### 3. vision_obs.result 结构规范化
+- 状态：`done`
+- 与 Item 2 同一改动，合并实现：`targets[0]→result.grasp`, `detection→result.detection`，删除调试字段透传
+
+### 4. target → class_id 映射函数
+- 状态：`done`
+- 文件：`orchestrator/orchestrator_service/utils/target_utils.py`
+- 映射：apple→47, banana→46, bottle→39, cup→41
+
+### 5. Orchestrator 侧 GRASP 状态 + 通信基础设施
+- 状态：`done`
+- 8 文件改动：新建 `arm_protocol.py`, `grasp_utils.py`, `test_grasp_dryrun.py`；修改 `protocol.py`, `context.py`, `controller.py`, `uart_bridge.py`, `state_machine.py`, `service.py`
+- 三子状态：`AWAITING_RESPOND → AWAITING_RESULT → AWAITING_ARM → DONE`
+- 验证：`py_compile` 全部通过，`test_grasp_dryrun.py` 全流程通过（FREEZE_BASE→GRASP→POSE→OK POSE→DONE→IDLE）
+
+**过渡策略**：
+- `operating_time` → 默认 500ms
+- `width_to_claw_angle()` → 占位 `int(width_cm * 10)`
+- reposition 微调参数 → 占位 0/空值
+- `width_to_claw_angle()` → 占位转换（后续用 STM32 侧真实查表替换）
+- reposition 微调参数 → 占位 0 值（后期 grasp server proposal 字段）
+
+### 6. 端到端测试
+- 状态：`blocked`（依赖 Item 2+3+5）
+
+---
+
+## P1 — VISTA 代码优化（来自 branch_discovery.md）
+
+### 7. effects 通道正式化
 - 状态：`todo`
-- 优先级：`P0`
 - 内容：
-  - 新建 `orchestrator/orchestrator_service/utils/target_utils.py`
-  - 实现 `target_to_class_id(target: str) -> int`，基于 COCO80 类名查表
-  - 独立函数包装，后续换 YOLO 类别集只需改此函数
-- 阻塞项：无
+  - `BaseStagePlan` 新增 `emit_event(route, payload)` 方法
+  - 替代当前 `grasp.py` 中手写的 `_remote_effect()` dict
+  - `_publish_effects()` 已就绪，只需生产侧规范化
+- 参考：`branch_discovery.md` Section 2.3, Section 6
 
-### 3. VISTA 侧 GraspStagePlan 修复
+### 8. req_type / op 语义清理
 - 状态：`todo`
-- 优先级：`P0`
 - 内容：
-  - `GraspStagePlan.tick()` 增加 `status=="success"` 判断
-  - 当前仅检查 `has_result`，会误将 `reposition_required` 当作 `RESULT_READY`
-- 参考：`VISTA/vision_module/app/stages/grasp.py:425-441`
+  - `StageController._request_type()` 将 RESPOND 归为 `target_update`，语义不准
+  - 建议新增 `respond` 类型或独立归类
+- 参考：`branch_discovery.md` Section 2.1
 
-### 4. Orchestrator 侧 GRASP 状态实现
-- 状态：`blocked`（依赖 Item 2 + Item 1）
-- 优先级：`P0`
+### 9. VistaApp / StageContext 状态双写消除
+- 状态：`todo`
 - 内容：
-  - 新建 `make_grasp_req()` 辅助函数
-  - 状态机新增 `GRASP` 状态：`FREEZE_BASE → GRASP → DONE`
-  - 消费 `vision_obs.result.targets[0]` 获取最优抓取位姿
-  - 通过 UART 向 STM32 发送机械臂控制命令（协议待定）
-- 参考：`orchestrator/orchestrator_service/runtime/state_machine.py`
+  - VistaApp 通过 `self.stage_controller.context()` 直接读取
+  - 去除 `_sync_runtime_from_stage_context()` 同步函数和自有副本
+- 参考：`branch_discovery.md` Section 2.2
 
-### 5. 端到端集成测试
-- 状态：`blocked`（依赖 Item 4）
-- 优先级：`P0`
-- 内容：全链路 `mobile_cmd → search → lock → grasp → DONE`
+### 10. vision_develop TRACK_TABLE 合入评估
+- 状态：`todo`
+- 内容：vision_develop 的 TRACK_TABLE 工作是否合入 up2date
+
+### 11. VISTA ReadMe.md 文档同步
+- 状态：`todo`
+- 内容：DEPTH_PERCEPTION/TABLE_EDGE_PERCEPTION 标注修正 + 日志文件名更新
+
+### 12. release_cooldown_s 决策
+- 状态：`todo`
+- 内容：实现字段行为 或 从 profile schema 移除
+
+### 13. preview/table_edge 设计一致性审查
+- 状态：`todo`
+- 注意：开发前需讨论框架设计
 
 ---
 
 ## P1 — Mobile Gateway 生产化（优先级下调）
 
-小程序框架已稳定可用，不再做架构调整。
+小程序框架稳定，不做架构调整。
 
-### 6. MQTT Broker 选型与部署
-- 状态：`todo` | 优先级：`P1`
-- 参考：`docs/mobile_control_next_steps.md` Section 1
-
-### 7. 小程序端 ASR → 结构化命令管线
-- 状态：`todo` | 优先级：`P1`
-- 参考：`docs/mobile_control_next_steps.md` Section 3
-
-### 8. 视障用户音频反馈
-- 状态：`todo` | 优先级：`P1`
-- 参考：`docs/mobile_control_next_steps.md` Section 4
-
-### 9. 生产加固
-- 状态：`todo` | 优先级：`P1`
-- 参考：`docs/mobile_control_next_steps.md` Section 5
+### 14. MQTT Broker 选型与部署
+- 状态：`todo`
+### 15. 小程序端 ASR → 结构化命令管线
+- 状态：`todo`
+### 16. 视障用户音频反馈
+- 状态：`todo`
+### 17. 生产加固
+- 状态：`todo`
 
 ---
 
-## P1 — 代码结构优化 + 文档同步
+## P2 — 远期
 
-### 10. vision_develop TRACK_TABLE 合入评估
-- 状态：`todo` | 优先级：`P1`
-- 发现：vision_develop 的 VISTA 在 TRACK_TABLE 上领先 up2date 一个工作周期
-- 待评估：是否合入？还是 up2date 已有不同实现覆盖？
-
-### 11. VISTA ReadMe.md 文档同步
-- 状态：`todo` | 优先级：`P1`
-- 发现：ReadMe.md 将 DEPTH_PERCEPTION/TABLE_EDGE_PERCEPTION 列为当前 mode（实际是扩展方向），日志文件名引用已废弃
-
-### 12. `release_cooldown_s` 决策
-- 状态：`todo` | 优先级：`P1`
-- 发现：mode profile 中声明但 runtime 不生效，需实现或移除
-
-### 13. VISTA preview/table_edge 设计一致性审查
-- 状态：`todo` | 优先级：`P1`
-- 内容：审查 `preview/`、`table_edge_*` 与 `vision_engine.py`/`mode_controller.py` 的设计一致性
-- 注意：开发新代码前需讨论框架设计
-
-### 14. vision_module vs vision_module_v2 关系清理
-- 状态：`todo` | 优先级：`P1`
-
-### 15. 日志统一
-- 状态：`todo` | 优先级：`P1`
-- 按 `LOG_STANDARD.md` 对齐各模块
-
----
-
-## P2 — 远期 / 可选
-
-### 16. Vision Module v2 深度桌边提取
-- 状态：`blocked`（等待 Offline_Edge_Test 验证结果）
-- 优先级：`P2`
-
-### 17. 多入口 Control Plane（远期架构）
-- 状态：`todo` | 优先级：`P2`
-- 参考：`docs/mobile_control_next_steps.md` Section 6
-
----
-
-## 状态变更规则
-
-1. 每次推进进度时更新对应条目
-2. 状态变更时同步更新 `next_todo.md`
-3. `blocked` 条目需标注阻塞原因和解除条件
-4. 完成条目不删除，标记为 `done` 并保留最后更新时间
+### 18. Vision Module v2 深度桌边提取
+- 状态：`blocked`（Offline_Edge_Test 验证中）
+### 19. vision_module vs vision_module_v2 关系清理
+- 状态：`todo`
+### 20. 多入口 Control Plane
+- 状态：`todo`

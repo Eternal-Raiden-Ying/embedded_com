@@ -9,18 +9,30 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from ..config.schema import CarMotionConfig, ControlThresholds
 from ..control.types import DockingControlConfig
 from ..ipc.protocol import (
+    ArmCommand,
+    ArmResponse,
     CarState,
     HomeTagObs,
     TableEdgeObs,
     TargetObs,
     TaskCmd,
+    make_grasp_req,
     make_tts_event,
     make_vision_idle,
     make_vision_req,
 )
+from ..bridge.arm_protocol import parse_arm_response
+from ..utils.grasp_utils import grasp_to_pose_params
+from ..utils.target_utils import target_to_class_id
 from .common import monotonic_ts
 from .context import RuntimeContext, State
 from .controller import MotionController, MotionDecision
+
+
+_GRASP_RESPOND_TIMEOUT_S = 5.0
+_GRASP_RESULT_TIMEOUT_S = 15.0
+_GRASP_ARM_TIMEOUT_S = 10.0
+_GRASP_RETRY_LIMIT = 3
 
 
 MOVING_STATES = {
@@ -36,6 +48,7 @@ MOVING_STATES = {
     State.NEXT_TABLE,
     State.RETURN_HOME,
     State.AVOID_OBSTACLE,
+    State.GRASP,
 }
 
 
@@ -153,6 +166,15 @@ class OrchestratorCore:
     def handle_home_obs(self, obs: HomeTagObs):
         self.ctx.last_home_obs = obs
 
+    def handle_grasp_obs(self, obs: Dict[str, Any]):
+        self.ctx.grasp_status = str(obs.get("status") or "")
+        self.ctx.grasp_result = obs.get("grasp") if isinstance(obs.get("grasp"), dict) else None
+        self.ctx.grasp_reason = str(obs.get("reason") or "")
+        self.ctx.grasp_reposition_hint = obs.get("reposition_hint") if isinstance(obs.get("reposition_hint"), dict) else ({"active": True} if obs.get("reposition_hint") else None)
+
+    def handle_arm_response(self, resp: ArmResponse):
+        self.ctx.arm_response = resp
+
     def handle_car_state(self, state: CarState):
         self.ctx.last_car_state = state
         self.ctx.last_car_state_mono = monotonic_ts()
@@ -222,6 +244,7 @@ class OrchestratorCore:
             State.RETURN_HOME: self._tick_return_home,
             State.ERROR_RECOVERY: self._tick_error_recovery,
             State.DONE: self._tick_done,
+            State.GRASP: self._tick_grasp,
         }
         return dispatch.get(self.ctx.state, self._tick_idle)()
 
@@ -586,6 +609,15 @@ class OrchestratorCore:
             self.reset_edge_tracking(reason)
             self.reset_target_tracking(reason)
             self.reset_slide_reference(reason)
+        elif state == State.GRASP:
+            self.ctx.grasp_substate = "AWAITING_RESPOND"
+            self.ctx.grasp_result = None
+            self.ctx.grasp_status = ""
+            self.ctx.grasp_reason = ""
+            self.ctx.grasp_reposition_hint = None
+            self.ctx.grasp_retry_count = 0
+            self.ctx.arm_response = None
+            self.ctx.grasp_timeout_mono = monotonic_ts() + _GRASP_RESPOND_TIMEOUT_S
         elif state == State.DONE:
             if self.ctx.last_fail_reason:
                 warning = str(self.ctx.last_fail_reason).strip()
@@ -1358,9 +1390,109 @@ class OrchestratorCore:
     def _tick_freeze_base(self) -> MotionDecision:
         if self._state_elapsed() < float(self.cfg.freeze_settle_s):
             return self.controller.stop_cmd("FREEZE_BASE")
+        if self.ctx.task_intent == "FIND" and self.ctx.active_target:
+            self._transition(State.GRASP, f"已锁定 {self.ctx.active_target}，开始抓取")
+            self._queue_tts(f"已锁定 {self.ctx.active_target}，开始抓取")
+            return self.controller.stop_cmd("GRASP")
         self._transition(State.DONE, f"已在桌边锁定 {self.ctx.active_target}")
         self._queue_tts(f"已在桌边锁定 {self.ctx.active_target}")
         return self.controller.stop_cmd("DONE")
+
+    def _tick_grasp(self) -> MotionDecision:
+        now_m = monotonic_ts()
+        substate = str(self.ctx.grasp_substate or "")
+
+        if substate == "AWAITING_RESPOND":
+            return self._tick_grasp_awaiting_respond(now_m)
+        if substate == "AWAITING_RESULT":
+            return self._tick_grasp_awaiting_result(now_m)
+        if substate == "AWAITING_ARM":
+            return self._tick_grasp_awaiting_arm(now_m)
+        return self.controller.stop_cmd("GRASP")
+
+    def _tick_grasp_awaiting_respond(self, now_m: float) -> MotionDecision:
+        if self._state_elapsed() < 0.3:
+            return self.controller.stop_cmd("GRASP")
+        if now_m > self.ctx.grasp_timeout_mono:
+            self._enter_error_recovery("grasp respond timeout")
+            return self.controller.stop_cmd("GRASP")
+        if self.ctx.grasp_status == "WAITING_RESPONSE":
+            self._queue_vision_req(
+                make_grasp_req(
+                    target=self.ctx.active_target or "",
+                    class_id=target_to_class_id(self.ctx.active_target or ""),
+                    session_id=self.ctx.active_session_id,
+                    epoch=self.ctx.active_epoch,
+                    op="RESPOND",
+                ),
+                force=True,
+            )
+            self.ctx.grasp_substate = "AWAITING_RESULT"
+            self.ctx.grasp_timeout_mono = now_m + _GRASP_RESULT_TIMEOUT_S
+        return self.controller.stop_cmd("GRASP")
+
+    def _tick_grasp_awaiting_result(self, now_m: float) -> MotionDecision:
+        if now_m > self.ctx.grasp_timeout_mono:
+            self._enter_error_recovery("grasp result timeout")
+            return self.controller.stop_cmd("GRASP")
+
+        status = str(self.ctx.grasp_status or "").upper()
+
+        if status == "RESULT_READY" and isinstance(self.ctx.grasp_result, dict):
+            arm_cmd = grasp_to_pose_params(self.ctx.grasp_result, time_ms=500)
+            self.ctx.grasp_substate = "AWAITING_ARM"
+            self.ctx.grasp_timeout_mono = now_m + _GRASP_ARM_TIMEOUT_S
+            return MotionDecision(cmd=self.controller.stop_cmd("GRASP").cmd, arm_cmd=arm_cmd)
+
+        if status == "RUNNING" and self.ctx.grasp_reposition_hint is not None:
+            self.ctx.grasp_retry_count += 1
+            if self.ctx.grasp_retry_count > _GRASP_RETRY_LIMIT:
+                self._enter_error_recovery("grasp reposition retries exhausted")
+                return self.controller.stop_cmd("GRASP")
+            self.ctx.grasp_substate = "AWAITING_RESPOND"
+            self.ctx.grasp_timeout_mono = now_m + _GRASP_RESPOND_TIMEOUT_S
+            self._queue_vision_req(
+                make_grasp_req(
+                    target=self.ctx.active_target or "",
+                    class_id=target_to_class_id(self.ctx.active_target or ""),
+                    session_id=self.ctx.active_session_id,
+                    epoch=self.ctx.active_epoch,
+                    op="START",
+                ),
+                force=True,
+            )
+            return self.controller.stop_cmd("GRASP")
+
+        if status == "FAILED":
+            reason = str(self.ctx.grasp_reason or "")
+            if reason == "no_detection":
+                self._transition(State.SEARCH_TARGET_INIT, "grasp failed: target not detected")
+                return self.controller.stop_cmd("SEARCH_TARGET_INIT")
+            self._enter_error_recovery(reason or "grasp failed")
+            return self.controller.stop_cmd("GRASP")
+
+        return self.controller.stop_cmd("GRASP")
+
+    def _tick_grasp_awaiting_arm(self, now_m: float) -> MotionDecision:
+        if now_m > self.ctx.grasp_timeout_mono:
+            self._enter_error_recovery("arm response timeout")
+            return self.controller.stop_cmd("GRASP")
+
+        resp = self.ctx.arm_response
+        if resp is not None:
+            if resp.ok:
+                self._transition(State.DONE, "grasp executed successfully")
+                self._queue_tts("抓取完成")
+                return self.controller.stop_cmd("DONE")
+            self.ctx.grasp_retry_count += 1
+            if self.ctx.grasp_retry_count > _GRASP_RETRY_LIMIT:
+                self._enter_error_recovery("arm IK exhausted")
+                return self.controller.stop_cmd("GRASP")
+            self.ctx.grasp_substate = "AWAITING_RESPOND"
+            self.ctx.grasp_timeout_mono = now_m + _GRASP_RESPOND_TIMEOUT_S
+            self.ctx.arm_response = None
+
+        return self.controller.stop_cmd("GRASP")
 
     def _tick_leave_edge(self) -> MotionDecision:
         if self._state_elapsed() < float(self.cfg.leave_edge_backoff_s):
@@ -1538,6 +1670,19 @@ class OrchestratorCore:
                     "locked_obs_seq": self.ctx.locked_obs_seq,
                     "orchestrator_state": state.value,
                     "edge_visit_index": int(self.ctx.edge_visit_index),
+                },
+            )
+        if state == State.GRASP:
+            class_id = target_to_class_id(self.ctx.active_target or "")
+            return VisionStageBinding(
+                stage="GRASP",
+                mode_hint="GRASP_REMOTE",
+                target=self.ctx.active_target,
+                payload={
+                    "class_id": class_id,
+                    "remote_grasp": True,
+                    "need_depth": True,
+                    "orchestrator_state": state.value,
                 },
             )
         if state == State.RETURN_HOME:

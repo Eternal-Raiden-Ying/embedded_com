@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional, Tuple
 from ..config.schema import CarMotionConfig, ControlThresholds
 from ..control.docking_controller import DockingController
 from ..control.types import DockingControlConfig, EdgeControlObservation
-from ..ipc.protocol import CmdVel, HomeTagObs, TableEdgeObs, TargetObs, now_ts
+from ..ipc.protocol import ArmCommand, CmdVel, HomeTagObs, TableEdgeObs, TargetObs, now_ts
 
 
 @dataclass
@@ -16,6 +16,7 @@ class MotionDecision:
     cx_norm_abs: float = 0.0
     distance_ratio: float = 0.0
     control_summary: Optional[Dict[str, Any]] = None
+    arm_cmd: Optional[ArmCommand] = None
 
 
 class MotionController:

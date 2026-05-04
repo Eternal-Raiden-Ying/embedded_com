@@ -607,6 +607,40 @@ class CmdVel:
         }
 
 
+@dataclass
+class ArmCommand:
+    x_cm: float
+    y_cm: float
+    z_cm: float
+    pitch_deg: float
+    roll_deg: float
+    claw_deg: float
+    time_ms: int = 500
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class ArmResponse:
+    ok: bool
+    message: str = ""
+    raw_line: str = ""
+    ts: float = 0.0
+
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any]) -> "ArmResponse":
+        return cls(
+            ok=bool(payload.get("ok", False)),
+            message=str(payload.get("message", "")),
+            raw_line=str(payload.get("raw_line", "")),
+            ts=float(payload.get("ts", now_ts())),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"ok": self.ok, "message": self.message, "raw_line": self.raw_line, "ts": self.ts}
+
+
 def make_task_ack(cmd: TaskCmd, accepted: bool, state: str, reason: str = "") -> Dict[str, Any]:
     return TaskAck(
         ts=now_ts(),
@@ -667,6 +701,31 @@ def make_home_tag_req(
         stage="RETURN",
         mode_hint=mode_hint,
         payload=payload,
+    )
+
+
+def make_grasp_req(
+    target: str,
+    class_id: int,
+    session_id: str = "",
+    epoch: int = 0,
+    req_id: str = "",
+    *,
+    op: str = "START",
+) -> Dict[str, Any]:
+    return make_vision_req(
+        target=target,
+        session_id=session_id,
+        epoch=epoch,
+        req_id=req_id,
+        op=op,
+        stage="GRASP",
+        mode_hint="GRASP_REMOTE",
+        payload={
+            "class_id": int(class_id),
+            "remote_grasp": True,
+            "need_depth": True,
+        },
     )
 
 

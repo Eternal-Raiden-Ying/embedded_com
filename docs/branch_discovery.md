@@ -349,3 +349,178 @@ JsonlInboundServer (TCP :9003)
                  └─ JsonlClientSender.send()
                       └─ queue → worker线程 → TCP JSONL → :9002
 ```
+
+---
+
+## 九、Orchestrator 底盘控制全链路 + GRASP UART 集成规划
+
+分析日期：2026-05-04
+来源：Orch-Code-Inspect（代码探索 Agent）
+
+### 9.1 最小阅读范围
+
+理解底盘控制链路需要阅读的文件（按顺序）：
+
+| # | 文件 | 关键行 | 内容 |
+|---|------|--------|------|
+| 1 | `orchestrator/orchestrator_service/runtime/service.py` | 788-806, 981-1117, 1476 | 主循环 tick、vision_obs 流入、motion 流出 |
+| 2 | `orchestrator/orchestrator_service/runtime/state_machine.py` | 200-226, 881-930, 1555, 1843-1864 | 状态分发、底盘状态 tick、观测新鲜度过滤 |
+| 3 | `orchestrator/orchestrator_service/control/docking_controller.py` | 50-79, 107-163 | PID 参数、per-mode 控制逻辑 |
+| 4 | `orchestrator/orchestrator_service/control/pid.py` | 全文(短) | 离散 PID（死区、积分限幅、输出限幅） |
+| 5 | `orchestrator/orchestrator_service/runtime/controller.py` | 127-147, 238, 254, 307-355 | MotionController: 各状态命令、fallback 转向 |
+| 6 | `orchestrator/orchestrator_service/bridge/simple_car_protocol.py` | 67-99, 103 | CmdVel → UART 行映射 |
+| 7 | `orchestrator/orchestrator_service/bridge/uart_bridge.py` | 95, 140-154, 175, 218 | UART 收发线程、latest-command-override |
+| 8 | `orchestrator/orchestrator_service/ipc/protocol.py` | 275-288, 541-607, 622-649 | TaskAck, CarState, CmdVel, make_vision_req |
+| 9 | `orchestrator/orchestrator_service/config/schema.py` | 30-34, 43-68, 166-200 | SerialConfig, RuntimeConfig, ControlThresholds, CarMotionConfig |
+
+### 9.2 底盘控制全链路（简要）
+
+```
+TCP :9002 → vision_obs
+  |
+  +- _drain_vision_msgs()           [service.py:981]
+  |   解析 VisionObsEnvelope，提取 table_edge_obs/target_obs/home_tag_obs
+  |   每种取最新一条 → RuntimeContext
+  |
+  +- _drain_uart_feedback()         [service.py:866]
+  |   读 STM32: STATE / ESTOP 行 → CarState
+  |
+  +- _drain_task_cmds()             [service.py:898]
+  |   读 mobile_gateway: FIND / RETURN / STOP → TaskCmd
+  |
+  +- core.tick() @ 10Hz             [state_machine.py:200]
+  |   +- _check_safety_interlock()  → 障碍物检测
+  |   +- dispatch 到当前 state._tick_*()
+  |   |   +- _fresh_table_obs()     → 过滤超过1s的过期观测
+  |   |   +- 计数器迟滞               → N帧连续满足才切换
+  |   |   +- 超时检测
+  |   |   +- MotionController       → PID / fallback 比例转向
+  |   |   +- 返回 MotionDecision(CmdVel)
+  |   +- 状态转移判断
+  |
+  +- _flush_pending_msgs()          [service.py:1160]
+  |   发送 vision_req 给 VISTA
+  |
+  +- _emit_motion(decision)         [service.py:1476]
+      mapper.from_cmd_vel()          [simple_car_protocol.py:67]
+        clamp + 3位小数格式化 → "MODE xxx\nVEL vx vy wz hold_ms\n"
+        → uart.send_car_command()    [uart_bridge.py:95]
+          → latest-command-override
+            → ser.write(bytes)       [/dev/ttyHS1 @ 115200]
+```
+
+### 9.3 底盘控制除 UART 发送外的其他工作
+
+| 工作 | 位置 | GRASP 是否需要 |
+|------|------|---------------|
+| 观测解析+类型路由+去重 | `service.py:_drain_vision_msgs` | **需要** — 解析 `vision_obs.result.grasp` |
+| 观测新鲜度过滤(>1s丢弃) | `state_machine.py:_fresh_table_obs` | **需要** — grasp 结果也有时效 |
+| 计数器迟滞(N帧连续满足) | `state_machine.py` 各 `_tick_*` | **不需要** — grasp 是单次结果，非连续帧 |
+| 3轴 PID + 死区 + 积分限幅 + 速率限制 | `docking_controller.py` | **不需要** — grasp 是离散位姿，非连续速度 |
+| fallback 比例转向 | `controller.py:_fallback_table_cmd` | **不需要** — 无 fallback 场景 |
+| 障碍物安全联锁 | `state_machine.py:_check_safety_interlock` | 可复用 |
+| 超时管理 | 各 tick 超时检查 | **需要** — grasp 整体超时 |
+| vision_req 生命周期管理 | `_flush_pending_msgs` | **需要** — GRASP START + RESPOND |
+| 重试计数 | COARSE_ALIGN → DOCK_RETRY 模式 | **需要** — reposition 重试 |
+| 日志记录(timeline/ipc/cmd_vel) | state_machine.py | **需要** |
+| task_ack 发送 | service.py | **需要** — 通知 mobile_gateway |
+
+### 9.4 STM32 机械臂协议
+
+用户提供的 STM32 机械臂指令：
+
+```
+HELP                               → 打印帮助
+RESET                              → 机械臂复位，返回 "OK RESET"
+POSE x y z pitch roll claw time    → 移动机械臂，返回 "OK POSE..." 或 "ERR IK..."
+```
+
+**参数说明**：
+
+| 参数 | 单位 | 类型 | 来源 |
+|------|------|------|------|
+| `x` | cm | int | grasp result `x_cm` 四舍五入 |
+| `y` | cm | int | grasp result `y_cm` 四舍五入 |
+| `z` | cm | int | grasp result `z_cm` 四舍五入 |
+| `pitch` | 度 | int | grasp result `pitch_deg` 四舍五入 |
+| `roll` | 度 | int | grasp result `roll_deg` 归一化到 [-90, +90]（二指夹爪 +-180 等价） |
+| `claw` | 角度(deg) | int | grasp result `gripper_width_cm` 通过查找表转换为张合角度 |
+| `time` | ms | int | 机械臂运行时间，暂缺，后续写死或从上层传入 |
+
+**roll 归一化**: `roll = round(roll_deg) % 180`; 若 `> 90` 则 `roll = roll - 180`
+
+**claw 转换**: `gripper_width_cm → 夹爪张合角度`，查找表由 STM32 侧提供。当前先搭建转换框架（预留 `width_to_angle()` 函数，内部用临时映射表占位）。
+
+**POSE 命令示例**:
+```
+POSE 15 0 12 0 0 40 1000    ← x=15cm y=0cm z=12cm pitch=0 roll=0 claw=40 time=1000ms
+```
+
+### 9.5 GRASP UART 命令集成计划
+
+`SimpleCarMapper` 当前只处理底盘命令（MODE/VEL/STOP/BRAKE）。机械臂命令语义不同（位姿而非速度），**新增独立的 mapper/encoder**，在 `_emit_motion()` 中根据命令类型分发。
+
+#### 新增文件
+
+| 文件 | 职责 |
+|------|------|
+| `bridge/arm_protocol.py` | 机械臂协议编码：POSE 行格式化、RESET、HELP |
+| `utils/target_utils.py` | 已完成：`target_to_class_id()` |
+| `utils/grasp_utils.py` (待定) | grasp result → POSE 参数转换（roll 归一化、claw 查表占位） |
+
+#### 修改文件
+
+| 文件 | 改动 |
+|------|------|
+| `ipc/protocol.py` | 新增 `make_grasp_req(target, class_id, ...)` |
+| `runtime/state_machine.py` | 新增 `GRASP` 状态 + `_tick_grasp()` |
+| `runtime/service.py` | `_emit_motion()` 支持 arm 命令分发；`_drain_vision_msgs()` 提取 `result.grasp` |
+
+#### GRASP 状态 tick 流程（草案）
+
+```
+_tick_grasp():
+  |
+  +- 初次进入 → make_grasp_req(target, class_id)
+  |             → vision_req(stage=GRASP, op=START)
+  |             → substate: AWAITING_RESPOND
+  |
+  +- AWAITING_RESPOND:
+  |   收到 WAITING_RESPONSE → RESPOND(decision=ACCEPT)
+  |   substate: AWAITING_RESULT
+  |
+  +- AWAITING_RESULT:
+  |   超时 → ERROR_RECOVERY
+  |   |
+  |   +- status=RESULT_READY → result.grasp
+  |   |     +- grasp_utils: cm→int, roll归一化, claw查表
+  |   |        → arm_protocol.encode_pose(x,y,z,pitch,roll,claw,time)
+  |   |        → uart.send_arm_command("POSE ...")
+  |   |        → substate: AWAITING_ARM
+  |   |
+  |   +- status=RUNNING + reposition_hint
+  |   |     +- 微调底盘 → 重试计数++
+  |   |        → if >3: ERROR_RECOVERY
+  |   |        → substate: AWAITING_RESPOND (重新发 START)
+  |   |
+  |   +- status=FAILED → 按 reason:
+  |         no_detection → SEARCH_TARGET_INIT
+  |         no_grasp_detected → ERROR_RECOVERY
+  |
+  +- AWAITING_ARM:
+      收到 STM32 "OK POSE" → DONE → task_ack(DONE)
+      收到 STM32 "ERR IK"  → reposition 重试(如果还有余额)
+      超时 → ERROR_RECOVERY
+```
+
+#### GRASP 与底盘状态的关键差异
+
+| 维度 | 底盘状态 | GRASP 状态 |
+|------|---------|-----------|
+| 控制模式 | 连续闭环(PID 每 tick) | 离散开环(POSE 单发等回复) |
+| 观测来源 | VISTA 连续帧 | grasp server HTTP 单次结果 |
+| 迟滞机制 | N帧计数器 | 不需要 |
+| UART 命令 | MODE/VEL (latest-override 可覆盖) | POSE (单次发送, 不可覆盖) |
+| UART 回复 | STATE (每帧) | OK POSE / ERR IK (单次) |
+| 重试方式 | 底盘后退 → DOCK_RETRY | 微调 → reposition → 重发 START |
+| 所需控制器 | PID (3轴) + slew-rate + fallback | 仅 grasp_utils 转换函数 |
