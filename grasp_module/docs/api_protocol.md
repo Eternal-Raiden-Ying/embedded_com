@@ -1,6 +1,6 @@
 # 板端通信协议
 
-协议版本：`1.1`
+协议版本：`1.2`
 
 ## 通信概览
 
@@ -115,6 +115,38 @@ POST /api/v1/release       → 释放资源
 | `no_feasible_grasp` | reposition_required | 所有抓取的可执行角度超过阈值 |
 | `score_below_threshold` | reposition_required | 所有可行抓取的置信度低于最低分阈值 |
 
+#### reposition_proposal 对象（可选）
+
+当 `reason = "no_feasible_grasp"` 且 `build_reposition_proposal()` 成功生成时出现：
+
+```json
+{
+  "dx_cm": 0.0,
+  "dy_cm": -20.0,
+  "reference_line_new_xy_cm": [0.0, -20.0],
+  "distance_lg_cm": 55.9,
+  "capped": false,
+  "reference_grasp": {
+    "score": 0.58,
+    "x_cm": 50.0,
+    "y_cm": 5.0,
+    "z_cm": 7.0,
+    "feasible_distance_cm": 17.9
+  }
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `dx_cm` | float | 参考 Z 线建议移动的 X 距离 (cm) |
+| `dy_cm` | float | 参考 Z 线建议移动的 Y 距离 (cm) |
+| `reference_line_new_xy_cm` | [float, float] | 建议的参考 Z 线新 XY 坐标 |
+| `distance_lg_cm` | float | 新参考线到 grasp 点的 XY 距离 (cm) |
+| `capped` | bool | 是否被 `reposition_max_distance_cm` 截断 |
+| `reference_grasp.score` | float | 参考 grasp 的 GraspNet 置信度 |
+| `reference_grasp.x_cm` / `y_cm` / `z_cm` | float | 参考 grasp 的 robot 坐标 (cm) |
+| `reference_grasp.feasible_distance_cm` | float | 参考 grasp 当前的方向约束距离 (cm) |
+
 #### detection 对象
 
 ```json
@@ -145,15 +177,15 @@ POST /api/v1/release       → 释放资源
 
 ```json
 {
-  "x_cm": 27.55,
-  "y_cm": -1.57,
+  "x_cm": 27.54,
+  "y_cm": -1.43,
   "z_cm": 7.01,
-  "pitch_deg": -29.15,
-  "roll_deg": 175.28,
-  "gripper_width_cm": 8.55,
+  "pitch_deg": -29.22,
+  "roll_deg": -6.18,
+  "gripper_width_cm": 8.66,
   "approach_depth_cm": 4.00,
-  "confidence": 0.5841,
-  "feasible_angle_deg": 1.31,
+  "confidence": 0.5488,
+  "feasible_distance_cm": 1.95,
   "position_frame": "robot",
   "angle_frame": "robot"
 }
@@ -164,12 +196,12 @@ POST /api/v1/release       → 释放资源
 | `x_cm` | float | cm | 夹爪后端中心 X（robot 基坐标，X 前） |
 | `y_cm` | float | cm | 夹爪后端中心 Y（Y 左） |
 | `z_cm` | float | cm | 夹爪后端中心 Z（Z 上） |
-| `pitch_deg` | float | 度 | 接近方向在 XZ 平面的俯仰角 |
-| `roll_deg` | float | 度 | 绕接近轴的旋转角，±180° |
+| `pitch_deg` | float | 度 | 近似后 approach（P 面投影）相对于水平面的仰角 |
+| `roll_deg` | float | 度 | 绕近似后 approach 轴的旋转角（垂直 v_proj 平面内），±180° |
 | `gripper_width_cm` | float | cm | 所需夹爪开口宽度 |
 | `approach_depth_cm` | float | cm | 夹爪沿接近方向的插入深度 |
 | `confidence` | float | — | GraspNet 置信度，[0, 1] |
-| `feasible_angle_deg` | float | 度 | 原始接近向量与约束后向量的夹角，越小越好 |
+| `feasible_distance_cm` | float | cm | approach 直线到参考 Z 线的空间距离（cm），越小越好 |
 | `position_frame` | string | — | 固定 `"robot"` |
 | `angle_frame` | string | — | 固定 `"robot"` |
 
@@ -216,7 +248,7 @@ curl -X POST http://127.0.0.1:6006/api/v1/predict \
   "format_version": "1.1",
   "status": "success",
   "reason": null,
-  "message": "YOLO detected class_id=47, 14 feasible grasps, 3 passed score filter",
+  "message": "YOLO detected class_id=47, 11 feasible grasps, 1 passed score filter",
   "detection": {
     "requested_class_id": 47,
     "resolved_class_id": 47,
@@ -228,19 +260,19 @@ curl -X POST http://127.0.0.1:6006/api/v1/predict \
     "bbox": [554, 228, 778, 436]
   },
   "grasp_count": 1024,
-  "feasible_count": 14,
-  "output_count": 3,
+  "feasible_count": 11,
+  "output_count": 1,
   "targets": [
     {
-      "x_cm": 27.55,
-      "y_cm": -1.57,
+      "x_cm": 27.54,
+      "y_cm": -1.43,
       "z_cm": 7.01,
-      "pitch_deg": -29.15,
-      "roll_deg": 175.28,
-      "gripper_width_cm": 8.55,
+      "pitch_deg": -29.22,
+      "roll_deg": -6.18,
+      "gripper_width_cm": 8.66,
       "approach_depth_cm": 4.00,
-      "confidence": 0.5841,
-      "feasible_angle_deg": 1.31,
+      "confidence": 0.5488,
+      "feasible_distance_cm": 1.95,
       "position_frame": "robot",
       "angle_frame": "robot"
     }
@@ -332,7 +364,7 @@ curl -X POST http://127.0.0.1:6006/api/v1/predict \
   "format_version": "1.1",
   "status": "success",
   "reason": null,
-  "message": "YOLO detected class_id=55, 7 feasible grasps, 4 passed score filter",
+  "message": "YOLO detected class_id=55, 5 feasible grasps, 4 passed score filter",
   "detection": {
     "requested_class_id": 47,
     "resolved_class_id": 55,
@@ -344,19 +376,19 @@ curl -X POST http://127.0.0.1:6006/api/v1/predict \
     "bbox": [513, 248, 729, 463]
   },
   "grasp_count": 1024,
-  "feasible_count": 7,
+  "feasible_count": 5,
   "output_count": 4,
   "targets": [
     {
-      "x_cm": 24.88,
-      "y_cm": 2.58,
-      "z_cm": 6.82,
-      "pitch_deg": -29.15,
-      "roll_deg": 175.28,
+      "x_cm": 24.86,
+      "y_cm": 2.88,
+      "z_cm": 6.81,
+      "pitch_deg": -29.24,
+      "roll_deg": -1.49,
       "gripper_width_cm": 8.39,
       "approach_depth_cm": 4.00,
       "confidence": 0.7023,
-      "feasible_angle_deg": 1.31,
+      "feasible_distance_cm": 2.00,
       "position_frame": "robot",
       "angle_frame": "robot"
     }
@@ -381,5 +413,6 @@ curl -X POST http://127.0.0.1:6006/api/v1/predict \
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
+| 1.2 | 2026-05-04 | 方向约束重构：`feasible_angle_deg` → `feasible_distance_cm`；`pitch_deg`/`roll_deg` 语义更新；新增 `reposition_proposal` |
 | 1.1 | 2026-05-02 | 新增 `failure` status、`detection` 对象、`similar_detection_result` |
 | 1.0 | 2026-05-02 | 初始冻结，`success` / `reposition_required` 两种 status |

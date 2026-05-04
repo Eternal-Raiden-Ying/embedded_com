@@ -1,34 +1,36 @@
 # Next TODO
 
-更新时间：2026-05-02
+更新时间：2026-05-04
 
-## P0 — 下游输出格式冻结
+## P0 — 方向约束重构（刚完成，待验证）
 
-- [x] protocol 包完成，`format_version: "1.1"`，status 三分法，detection 对象含 `similar_detection_result`
-- [x] `summarize_response` 已适配新格式
-- [x] `api_protocol.md` 板端通信协议文档已完成
-- [ ] 板端联调确认协议字段可解析，无 breaking change
+- [x] 方向约束：`feasible_angle_deg` → `feasible_distance_cm`（approach 直线到参考 Z 线空间距离）
+- [x] 过滤顺序统一：碰撞 → 方向过滤 → NMS（只做一次）
+- [x] pitch_deg 重定义：P 面投影后的仰角
+- [x] roll_deg 重定义：垂直 v_proj 平面内绕 approach 轴旋转
+- [x] `build_reposition_proposal`：Step1(dx=0) → Step2(放宽)
+- [x] protocol v1.2：`reposition_proposal` 字段、format_version 升级、文档更新
+- [ ] 两个基准 bag 回归重跑（确认 feasible 数不减少）
+- [ ] 参考线 (lx, ly) 标定值填入 config
 
 ## P1 — 深度后处理 & 点云质量
 
 - [ ] 双边滤波补到 `postprocess_depth_image`，与当前中值滤波做 A/B 对比
-- [ ] RealSense SDK filter chain vs 自研后处理的点云质量对比（利用 `compare_bag_pointclouds.py`）
-- [ ] 明确当前反投影与 SDK 原生 pointcloud 的偏差量级，写入对比报告
-- [ ] **暂不集成到 engine.py**，确认效果后在 test 层再多跑几组 bag
+- [ ] RealSense SDK filter chain vs 自研后处理的点云质量对比
+- [ ] **暂不集成到 engine.py**
 
-## P2 — gripper 参数 & 机械臂约束
+## P2 — 机械臂约束
 
-- [x] debug gripper mesh 与 collision 参数已明确为两组独立参数
-- [ ] 确认碰撞检测是否需要与 debug mesh 统一（如统一则需评估对基准 bag 的影响）
 - [ ] 机械臂约束补 pitch 硬过滤
-- [ ] 调研 IK / reachability 检查的接入方式（需机械臂模型，可能 blocked）
+- [ ] 调研 IK / reachability 检查的接入方式（可能 blocked）
+- [ ] 确认碰撞检测与 debug mesh 参数是否需要统一
 
 ## P3 — 可视化补全
 
 - [ ] 碰撞剔除 grasp 单独可视化为 PLY
-- [ ] 按剔除原因（collision / angle / score）分类输出
+- [ ] 按剔除原因分类输出
 
 ## P4 — 测试基准维护
 
-- [ ] 两个基准 bag 的推理结果纳入正式回归用例
-- [ ] 后续改动 `engine.py`、`collision_detector.py`、`frames.py` 需重跑两个 bag 确认无退化
+- [ ] 两个基准 bag 推理结果纳入正式回归用例
+- [ ] 后续改动 `engine.py`、`collision_detector.py`、`frames.py` 需重跑两个 bag

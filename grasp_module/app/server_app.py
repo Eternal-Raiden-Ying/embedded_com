@@ -193,12 +193,17 @@ async def predict_grasp(
     log_msg(f"Inference finished in {toc - tic:.3f}s")
 
     protocol_targets = global_predictor.build_protocol_targets(grasp_results)
+    reposition_proposal = None
+    if not protocol_targets:
+        reposition_proposal = global_predictor.build_reposition_proposal(grasp_results)
+
     response = build_downstream_response(
         grasp_results,
         protocol_targets,
         global_predictor.cfgs,
         yolo_info=yolo_info,
         requested_class_id=int(class_id),
+        reposition_proposal=reposition_proposal,
     )
     if response["status"] == "success":
         for idx, target in enumerate(response["targets"], start=1):
@@ -207,7 +212,7 @@ async def predict_grasp(
                 f"x={target['x_cm']:.2f}cm y={target['y_cm']:.2f}cm z={target['z_cm']:.2f}cm "
                 f"pitch={target['pitch_deg']:.2f}deg roll={target['roll_deg']:.2f}deg "
                 f"width={target['gripper_width_cm']:.2f}cm depth={target['approach_depth_cm']:.2f}cm "
-                f"score={target['confidence']:.4f} feasible_angle={target['feasible_angle_deg']:.2f}deg"
+                f"score={target['confidence']:.4f} dist={target['feasible_distance_cm']:.2f}cm"
             )
     else:
         log_msg(
@@ -217,6 +222,13 @@ async def predict_grasp(
             f"feasible_count={response.get('feasible_count')}",
             level=logging.WARNING,
         )
+        proposal = response.get('reposition_proposal')
+        if proposal:
+            log_msg(
+                f"Reposition proposal: dx={proposal['dx_cm']:.2f}cm "
+                f"dy={proposal['dy_cm']:.2f}cm dist_lg={proposal['distance_lg_cm']:.2f}cm "
+                f"capped={proposal['capped']}"
+            )
     log_send(f"Sending results back to '{robot_id}'")
     
     return response

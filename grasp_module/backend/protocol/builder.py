@@ -16,7 +16,7 @@ Status semantics (v1.1)
 
 from __future__ import annotations
 
-FORMAT_VERSION = "1.1"
+FORMAT_VERSION = "1.2"
 
 _REASON_NO_DETECTION = "no_detection"
 _REASON_NO_GRASP = "no_grasp_detected"
@@ -30,6 +30,7 @@ def build_downstream_response(
     predictor_cfgs,
     yolo_info=None,
     requested_class_id=None,
+    reposition_proposal=None,
 ):
     """
     Build the downstream protocol response.
@@ -38,12 +39,10 @@ def build_downstream_response(
         grasp_results: GraspGroup or None (raw grasps after collision filtering).
         protocol_targets: list[dict] — feasible targets sorted by confidence desc.
         predictor_cfgs: configuration object (protocol_min_score, response_max_targets,
-                        protocol_feasible_angle_deg).
-        yolo_info: optional dict — YOLO detection result from
-                   ``RealSenseGraspPredictor.get_last_yolo_info()``.
-        requested_class_id: optional int — the class_id originally requested by the
-                            caller (may differ from the resolved class_id when
-                            fallback is in use).
+                        protocol_feasible_distance_cm).
+        yolo_info: optional dict — YOLO detection result.
+        requested_class_id: optional int — class_id requested by the caller.
+        reposition_proposal: optional dict — from ``build_reposition_proposal()``.
 
     Returns:
         dict — a JSON-serialisable response matching the frozen protocol schema.
@@ -78,15 +77,16 @@ def build_downstream_response(
 
     # --- reposition_required: grasps exist but no feasible approach ---
     if feasible_count == 0:
-        angle = float(getattr(predictor_cfgs, "protocol_feasible_angle_deg", 5.0))
+        dist_threshold = float(getattr(predictor_cfgs, "protocol_feasible_distance_cm", 2.0))
         return _respond(
             status="reposition_required",
             reason=_REASON_NO_FEASIBLE,
-            message=_no_feasible_message(detection, raw_grasp_count, angle),
+            message=_no_feasible_message(detection, raw_grasp_count, dist_threshold),
             detection=detection,
             grasp_count=raw_grasp_count,
             feasible_count=0,
             output_count=0,
+            reposition_proposal=reposition_proposal,
         )
 
     # --- reposition_required: feasible grasps exist but all below score ---
@@ -150,7 +150,7 @@ def _build_detection(yolo_info, requested_class_id):
 
 
 def _respond(status, reason, message, detection, grasp_count, feasible_count,
-             output_count, targets=None):
+             output_count, targets=None, reposition_proposal=None):
     resp = {
         "format_version": FORMAT_VERSION,
         "status": status,
@@ -162,6 +162,8 @@ def _respond(status, reason, message, detection, grasp_count, feasible_count,
         "output_count": output_count,
         "targets": targets if targets is not None else [],
     }
+    if reposition_proposal is not None:
+        resp["reposition_proposal"] = reposition_proposal
     return resp
 
 
@@ -190,11 +192,11 @@ def _no_grasp_message(det):
     )
 
 
-def _no_feasible_message(det, raw_count, angle):
+def _no_feasible_message(det, raw_count, dist_threshold):
     cid = _det_cid(det)
     return (
         f"YOLO detected class_id={cid}, {raw_count} grasps generated, "
-        f"but all exceed the feasible angle threshold of {angle} deg"
+        f"but all exceed the feasible distance threshold of {dist_threshold} cm"
     )
 
 

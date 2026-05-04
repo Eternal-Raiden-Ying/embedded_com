@@ -201,9 +201,9 @@ E:\Documents_E\vscode\embedded_com\env\python.exe E:\Documents_E\vscode\embedded
 - `--protocol_depth_base`
   - 输出末端点相对 grasp 原点的偏移
   - 默认：`-0.085`
-- `--protocol_feasible_angle_deg`
-  - 允许的机械臂约束角度
-  - 默认：`5.0`
+- `--protocol_feasible_distance_cm`
+  - 方向约束：approach 直线到参考 Z 线的允许最大距离
+  - 默认：`2.0`
 - `--protocol_min_score`
   - 协议输出的最小置信度阈值
   - 默认：`0.3`

@@ -1,3 +1,4 @@
+import math
 import os
 import sys
 import logging
@@ -270,31 +271,71 @@ class RealSenseGraspPredictor:
         return float(np.degrees(np.arccos(self._clamp_unit_interval(np.dot(vec_a, vec_b)))))
 
     def _build_protocol_target(self, grasp):
+        # approach direction in robot frame
         raw_approach = self._normalize_vector(self.frames.camera_vector_to_robot(grasp.rotation_matrix[:, 0]))
         if raw_approach is None:
             return None
 
-        projected_approach = self._normalize_vector(
-            np.array([raw_approach[0], 0.0, raw_approach[2]], dtype=np.float64)
-        )
-        if projected_approach is None:
-            return None
+        # grasp center in robot frame (cm)
+        grasp_robot_cm = self.frames.camera_point_to_robot_cm(grasp.translation)
+        gx, gy = float(grasp_robot_cm[0]), float(grasp_robot_cm[1])
 
-        feasible_angle_deg = self._angle_between_deg(raw_approach, projected_approach)
+        # reference Z-line XY (cm)
+        lx = float(getattr(self.cfgs, 'reference_line_x_cm', 0.0))
+        ly = float(getattr(self.cfgs, 'reference_line_y_cm', 0.0))
 
+        vx, vy, vz = float(raw_approach[0]), float(raw_approach[1]), float(raw_approach[2])
+        v_xy_norm = math.hypot(vx, vy)
+
+        # ---- projected approach (P plane: vertical, contains L and g) ----
+        dx = gx - lx
+        dy = gy - ly
+        d_norm = math.hypot(dx, dy)
+
+        if v_xy_norm < PROTOCOL_EPS:
+            feasible_distance_cm = 0.0
+            projected_approach = np.asarray(raw_approach, dtype=np.float64)
+        else:
+            e = vy * dx - vx * dy
+            feasible_distance_cm = float(abs(e) / v_xy_norm)
+
+            if d_norm < PROTOCOL_EPS:
+                # grasp directly above reference line — P plane is degenerate,
+                # keep original approach as projection
+                projected_approach = np.asarray(raw_approach, dtype=np.float64)
+            else:
+                n_P = np.array([-dy, dx, 0.0], dtype=np.float64) / d_norm
+                v_proj = np.asarray(raw_approach, dtype=np.float64) - float(np.dot(raw_approach, n_P)) * n_P
+                projected_approach = self._normalize_vector(v_proj)
+                if projected_approach is None:
+                    projected_approach = np.asarray(raw_approach, dtype=np.float64)
+
+        # ---- pitch: elevation of projected approach from horizontal ----
+        pitch_deg = float(np.degrees(math.atan2(
+            float(projected_approach[2]),
+            math.hypot(float(projected_approach[0]), float(projected_approach[1])),
+        )))
+
+        # ---- roll: rotation of width around projected approach axis ----
         raw_width = self.frames.camera_vector_to_robot(grasp.rotation_matrix[:, 1])
-        width_axis = raw_width - float(np.dot(raw_width, projected_approach)) * projected_approach
-        width_axis = self._normalize_vector(width_axis)
-        if width_axis is None:
+
+        # horizontal reference in plane perpendicular to projected_approach
+        h_ref = np.array([projected_approach[1], -projected_approach[0], 0.0], dtype=np.float64)
+        h_ref = self._normalize_vector(h_ref)
+        if h_ref is None:
+            h_ref = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+
+        # project width onto plane perpendicular to projected_approach
+        w = raw_width - float(np.dot(raw_width, projected_approach)) * projected_approach
+        w_plane = self._normalize_vector(w)
+        if w_plane is None:
             return None
 
-        horizontal_axis = np.array([0.0, 1.0, 0.0], dtype=np.float64)
-        pitch_deg = float(np.degrees(np.arctan2(projected_approach[2], projected_approach[0])))
-        roll_deg = self._signed_angle_deg(horizontal_axis, width_axis, projected_approach)
+        roll_deg = self._signed_angle_deg(h_ref, w_plane, projected_approach)
 
+        # ---- rear-edge centre ----
         depth_base_cm = 100.0 * float(getattr(self.cfgs, 'protocol_depth_base', 0.02))
-        grasp_origin_robot_cm = self.frames.camera_point_to_robot_cm(grasp.translation)
-        rear_edge_center_robot_cm = grasp_origin_robot_cm - depth_base_cm * projected_approach
+        rear_edge_center_robot_cm = grasp_robot_cm - depth_base_cm * projected_approach
 
         return {
             "x_cm": float(rear_edge_center_robot_cm[0]),
@@ -305,7 +346,7 @@ class RealSenseGraspPredictor:
             "gripper_width_cm": 100.0 * float(grasp.width),
             "approach_depth_cm": 100.0 * float(grasp.depth),
             "confidence": float(grasp.score),
-            "feasible_angle_deg": feasible_angle_deg,
+            "feasible_distance_cm": feasible_distance_cm,
             "position_frame": "robot",
             "angle_frame": "robot",
         }
@@ -332,13 +373,13 @@ class RealSenseGraspPredictor:
         if grasp_group is None or len(grasp_group) == 0:
             return GraspGroup()
 
-        angle_threshold = float(getattr(self.cfgs, 'protocol_feasible_angle_deg', 5.0))
+        distance_threshold = float(getattr(self.cfgs, 'protocol_feasible_distance_cm', 2.0))
         feasible_grasp_arrays = []
         for grasp in grasp_group:
             target = self._build_protocol_target(grasp)
             if target is None:
                 continue
-            if target['feasible_angle_deg'] > angle_threshold:
+            if target['feasible_distance_cm'] > distance_threshold:
                 continue
             feasible_grasp_arrays.append(grasp.grasp_array.copy())
 
@@ -349,6 +390,83 @@ class RealSenseGraspPredictor:
         feasible_grasp_group = feasible_grasp_group.nms()
         feasible_grasp_group = feasible_grasp_group.sort_by_score()
         return feasible_grasp_group
+
+    def build_reposition_proposal(self, grasp_group):
+        """Suggest an XY reposition when no grasp passes the direction filter.
+
+        Returns a dict with ``dx_cm`` / ``dy_cm`` (the suggested new position
+        for the reference Z-line in robot-frame cm), or ``None`` when the
+        best grasp is already feasible or no valid grasp exists.
+        """
+        if grasp_group is None or len(grasp_group) == 0:
+            return None
+
+        best = grasp_group[0]
+        grasp_robot_cm = self.frames.camera_point_to_robot_cm(best.translation)
+        gx, gy = float(grasp_robot_cm[0]), float(grasp_robot_cm[1])
+
+        lx = float(getattr(self.cfgs, 'reference_line_x_cm', 0.0))
+        ly = float(getattr(self.cfgs, 'reference_line_y_cm', 0.0))
+        max_dist = float(getattr(self.cfgs, 'reposition_max_distance_cm', 20.0))
+        dist_threshold = float(getattr(self.cfgs, 'protocol_feasible_distance_cm', 2.0))
+
+        raw_approach = self._normalize_vector(self.frames.camera_vector_to_robot(best.rotation_matrix[:, 0]))
+        if raw_approach is None:
+            return None
+
+        vx, vy = float(raw_approach[0]), float(raw_approach[1])
+        v_xy_norm = math.hypot(vx, vy)
+        if v_xy_norm < PROTOCOL_EPS:
+            return None
+
+        e = vy * (gx - lx) - vx * (gy - ly)
+        current_dist = abs(e) / v_xy_norm
+        if current_dist <= dist_threshold:
+            return None  # already feasible
+
+        n_x = vx / v_xy_norm
+        n_y = vy / v_xy_norm
+
+        # Step 1 — try pure-Y move (dx_cm = 0)
+        proposed = False
+        dx_cm = 0.0
+        dy_cm = 0.0
+        capped = False
+
+        if abs(vx) >= PROTOCOL_EPS:
+            dy_L = -e / vx
+            dist_lg = math.hypot(lx - gx, ly + dy_L - gy)
+            if dist_lg <= max_dist:
+                dy_cm = float(dy_L)
+                proposed = True
+
+        # Step 2 — relax dx=0, place L' on line g + t*n with |t| <= max_dist
+        if not proposed:
+            t = ((lx - gx) * n_x + (ly - gy) * n_y)
+            if abs(t) > max_dist:
+                capped = True
+                t = max_dist if t > 0 else -max_dist
+            Lx = gx + t * n_x
+            Ly = gy + t * n_y
+            dx_cm = float(Lx - lx)
+            dy_cm = float(Ly - ly)
+
+        distance_lg_cm = float(math.hypot(lx + dx_cm - gx, ly + dy_cm - gy))
+
+        return {
+            "dx_cm": dx_cm,
+            "dy_cm": dy_cm,
+            "reference_line_new_xy_cm": [float(lx + dx_cm), float(ly + dy_cm)],
+            "distance_lg_cm": distance_lg_cm,
+            "capped": capped,
+            "reference_grasp": {
+                "score": float(best.score),
+                "x_cm": gx,
+                "y_cm": gy,
+                "z_cm": float(grasp_robot_cm[2]),
+                "feasible_distance_cm": current_dist,
+            },
+        }
 
     def _prepare_batch_data(self, data_dict):
         batch_data = minkowski_collate_fn([data_dict])
@@ -409,23 +527,9 @@ class RealSenseGraspPredictor:
         )
 
     def post_process_grasps(self, grasp_group):
-        """
-        【预留接口】：处理网络输出的抓取预测 (过滤、排序、NMS)
-        你可以根据实际需求，在此处增加抓取宽度限制、方向限制等。
-        """
         if grasp_group is None or grasp_group.__len__() == 0:
             return grasp_group
-
-        # 1. NMS 过滤重叠抓取
         grasp_group = grasp_group.sort_by_score()
-        
-        # 2. 按分数排序
-        grasp_group = grasp_group.sort_by_score()
-        
-        # 3. 过滤出置信度最高的前 N 个 (例如前 10 个)
-        # if grasp_group.__len__() > 10:
-        #     grasp_group = grasp_group[:10]
-            
         return grasp_group
 
     def infer(self, color_img, depth_img, class_id):
