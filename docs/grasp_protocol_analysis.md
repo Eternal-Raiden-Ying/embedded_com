@@ -180,7 +180,7 @@ VISTA 侧只检查 HTTP 200 + `ok=true`，不检查 `status` 字段。
       "gripper_width_cm": 8.5,
       "approach_depth_cm": 5.0,
       "confidence": 0.87,
-      "feasible_angle_deg": 4.2,
+      "feasible_distance_cm": 4.2,
       "position_frame": "robot",
       "angle_frame": "robot"
     }
@@ -294,7 +294,7 @@ Orchestrator 在此期间等待 `status` 变为 `RESULT_READY` 或 `FAILED`。
         "gripper_width_cm": 8.5,
         "approach_depth_cm": 5.0,
         "confidence": 0.87,
-        "feasible_angle_deg": 4.2,
+        "feasible_distance_cm": 4.2,
         "position_frame": "robot",
         "angle_frame": "robot"
       }
@@ -384,7 +384,7 @@ Orchestrator 在此期间等待 `status` 变为 `RESULT_READY` 或 `FAILED`。
       "gripper_width_cm": 8.5,
       "approach_depth_cm": 5.0,
       "confidence": 0.87,
-      "feasible_angle_deg": 4.2,
+      "feasible_distance_cm": 4.2,
       "position_frame": "robot",
       "angle_frame": "robot"
     }

@@ -33,6 +33,9 @@ _GRASP_RESPOND_TIMEOUT_S = 5.0
 _GRASP_RESULT_TIMEOUT_S = 15.0
 _GRASP_ARM_TIMEOUT_S = 10.0
 _GRASP_RETRY_LIMIT = 3
+_GRASP_REPOSITION_TIMEOUT_S = 5.0
+_GRASP_REPOSITION_SPEED = 0.15
+_GRASP_REPOSITION_SPEED_CM_S = 10.0
 
 
 MOVING_STATES = {
@@ -170,7 +173,8 @@ class OrchestratorCore:
         self.ctx.grasp_status = str(obs.get("status") or "")
         self.ctx.grasp_result = obs.get("grasp") if isinstance(obs.get("grasp"), dict) else None
         self.ctx.grasp_reason = str(obs.get("reason") or "")
-        self.ctx.grasp_reposition_hint = obs.get("reposition_hint") if isinstance(obs.get("reposition_hint"), dict) else ({"active": True} if obs.get("reposition_hint") else None)
+        proposal = obs.get("reposition_proposal")
+        self.ctx.grasp_reposition_proposal = proposal if isinstance(proposal, dict) else None
 
     def handle_arm_response(self, resp: ArmResponse):
         self.ctx.arm_response = resp
@@ -614,7 +618,8 @@ class OrchestratorCore:
             self.ctx.grasp_result = None
             self.ctx.grasp_status = ""
             self.ctx.grasp_reason = ""
-            self.ctx.grasp_reposition_hint = None
+            self.ctx.grasp_reposition_proposal = None
+            self.ctx.grasp_reposition_start_mono = 0.0
             self.ctx.grasp_retry_count = 0
             self.ctx.arm_response = None
             self.ctx.grasp_timeout_mono = monotonic_ts() + _GRASP_RESPOND_TIMEOUT_S
@@ -1406,6 +1411,8 @@ class OrchestratorCore:
             return self._tick_grasp_awaiting_respond(now_m)
         if substate == "AWAITING_RESULT":
             return self._tick_grasp_awaiting_result(now_m)
+        if substate == "REPOSITIONING":
+            return self._tick_grasp_repositioning(now_m)
         if substate == "AWAITING_ARM":
             return self._tick_grasp_awaiting_arm(now_m)
         return self.controller.stop_cmd("GRASP")
@@ -1444,11 +1451,42 @@ class OrchestratorCore:
             self.ctx.grasp_timeout_mono = now_m + _GRASP_ARM_TIMEOUT_S
             return MotionDecision(cmd=self.controller.stop_cmd("GRASP").cmd, arm_cmd=arm_cmd)
 
-        if status == "RUNNING" and self.ctx.grasp_reposition_hint is not None:
+        if status == "RUNNING" and self.ctx.grasp_reposition_proposal is not None:
             self.ctx.grasp_retry_count += 1
             if self.ctx.grasp_retry_count > _GRASP_RETRY_LIMIT:
                 self._enter_error_recovery("grasp reposition retries exhausted")
                 return self.controller.stop_cmd("GRASP")
+            self.ctx.grasp_substate = "REPOSITIONING"
+            self.ctx.grasp_timeout_mono = now_m + _GRASP_REPOSITION_TIMEOUT_S
+            self.ctx.grasp_reposition_start_mono = now_m
+            return self.controller.stop_cmd("GRASP")
+
+        if status == "FAILED":
+            reason = str(self.ctx.grasp_reason or "")
+            if reason == "no_detection":
+                self._transition(State.SEARCH_TARGET_INIT, "grasp failed: target not detected")
+                return self.controller.stop_cmd("SEARCH_TARGET_INIT")
+            self._enter_error_recovery(reason or "grasp failed")
+            return self.controller.stop_cmd("GRASP")
+
+        return self.controller.stop_cmd("GRASP")
+
+    def _tick_grasp_repositioning(self, now_m: float) -> MotionDecision:
+        if now_m > self.ctx.grasp_timeout_mono:
+            self._enter_error_recovery("grasp reposition timeout")
+            return self.controller.stop_cmd("GRASP")
+
+        proposal = self.ctx.grasp_reposition_proposal
+        if not isinstance(proposal, dict):
+            self.ctx.grasp_substate = "AWAITING_RESPOND"
+            self.ctx.grasp_timeout_mono = now_m + _GRASP_RESPOND_TIMEOUT_S
+            return self.controller.stop_cmd("GRASP")
+
+        dx = float(proposal.get("dx_cm", 0.0) or 0.0)
+        dy = float(proposal.get("dy_cm", 0.0) or 0.0)
+        distance = max(abs(dx), abs(dy))
+        if distance < 0.5:
+            self.ctx.grasp_reposition_proposal = None
             self.ctx.grasp_substate = "AWAITING_RESPOND"
             self.ctx.grasp_timeout_mono = now_m + _GRASP_RESPOND_TIMEOUT_S
             self._queue_vision_req(
@@ -1463,14 +1501,29 @@ class OrchestratorCore:
             )
             return self.controller.stop_cmd("GRASP")
 
-        if status == "FAILED":
-            reason = str(self.ctx.grasp_reason or "")
-            if reason == "no_detection":
-                self._transition(State.SEARCH_TARGET_INIT, "grasp failed: target not detected")
-                return self.controller.stop_cmd("SEARCH_TARGET_INIT")
-            self._enter_error_recovery(reason or "grasp failed")
-            return self.controller.stop_cmd("GRASP")
+        duration = min(distance / _GRASP_REPOSITION_SPEED_CM_S, 2.0)
+        elapsed = now_m - self.ctx.grasp_reposition_start_mono
+        if elapsed < duration:
+            vx = _GRASP_REPOSITION_SPEED if dx > 0 else (-_GRASP_REPOSITION_SPEED if dx < 0 else 0.0)
+            vy = _GRASP_REPOSITION_SPEED if dy > 0 else (-_GRASP_REPOSITION_SPEED if dy < 0 else 0.0)
+            cmd = self.controller._cmd("GRASP_REPOSITION", vx=vx, vy=vy, wz=0.0)
+            return MotionDecision(cmd=cmd, control_summary=self.controller._summary(
+                "GRASP_REPOSITION", cmd, reason=f"reposition dx={dx:.1f} dy={dy:.1f}"
+            ))
 
+        self.ctx.grasp_reposition_proposal = None
+        self.ctx.grasp_substate = "AWAITING_RESPOND"
+        self.ctx.grasp_timeout_mono = now_m + _GRASP_RESPOND_TIMEOUT_S
+        self._queue_vision_req(
+            make_grasp_req(
+                target=self.ctx.active_target or "",
+                class_id=target_to_class_id(self.ctx.active_target or ""),
+                session_id=self.ctx.active_session_id,
+                epoch=self.ctx.active_epoch,
+                op="START",
+            ),
+            force=True,
+        )
         return self.controller.stop_cmd("GRASP")
 
     def _tick_grasp_awaiting_arm(self, now_m: float) -> MotionDecision:

@@ -1,6 +1,6 @@
 # TODO.md — 项目总后续工作跟踪
 
-更新时间：2026-05-04
+更新时间：2026-05-05
 
 状态约定：
 - `todo`：未开始
@@ -15,7 +15,7 @@
 | 模块 | 状态 | 关键未完成项 |
 |------|------|-------------|
 | mobile_gateway | MVP 可用，小程序已稳定 | MQTT broker 生产化、ASR 管线（P1） |
-| Orchestrator | **GRASP 状态实现完成**（8 文件，dry-run 验证通过） | 端到端真车联调 |
+| Orchestrator | **GRASP 状态 + v1.2 适配完成**（reposition proposal 集成，dry-run 全通过） | 端到端真车联调 |
 | VISTA | **v1.1 适配完成**（三分法 + result 规范化） | 端到端联调 |
 | grasp server | **协议 v1.1 已冻结** | `operating_time`/proposal 后续版本 |
 | Voice/ASR | 已从板端归档 | ASR→NLU→mobile_cmd 管线（P1） |
@@ -63,9 +63,14 @@
 **过渡策略**：
 - `operating_time` → 默认 500ms
 - `width_to_claw_angle()` → 占位 `int(width_cm * 10)`
-- reposition 微调参数 → 占位 0/空值
-- `width_to_claw_angle()` → 占位转换（后续用 STM32 侧真实查表替换）
-- reposition 微调参数 → 占位 0 值（后期 grasp server proposal 字段）
+- reposition 微调 → `done`（v1.2 `reposition_proposal` 已集成，见 Item 5a）
+
+### 5a. Grasp Server v1.2 协议适配
+- 状态：`done`
+- 变更：`feasible_angle_deg→feasible_distance_cm`，新增 `reposition_proposal` 对象（dx_cm/dy_cm 等）
+- 文件：`VISTA/grasp.py` + `context.py` + `state_machine.py` + `test_grasp_dryrun.py` + `docs/grasp_protocol_analysis.md`
+- 实现：reposition 不再使用占位 boolean，改为透传完整 proposal dict；新增 `REPOSITIONING` 子状态实现底盘微调移动（dx/dy → vx/vy 定时开环移动）
+- 验证：`py_compile` 全部通过，`test_grasp_dryrun.py` 全流程通过含 reposition 步骤，底盘命令方向正确
 
 ### 6. 端到端测试
 - 状态：`blocked`（依赖 Item 2+3+5）

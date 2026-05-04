@@ -451,13 +451,14 @@ class GraspStagePlan(BaseStagePlan):
                     )
 
                 if server_status == "reposition_required":
+                    reposition_proposal = server_response.get("reposition_proposal")
                     return StageOutput(
                         vision_obs=self.build_obs(
                             ctx,
                             status="RUNNING",
                             perception={"target_obs": target_obs},
                             result={
-                                "reposition_hint": True,
+                                "reposition_proposal": reposition_proposal if isinstance(reposition_proposal, dict) else None,
                                 "reason": server_reason or "reposition_required",
                                 "message": server_message,
                                 "detection": server_detection,

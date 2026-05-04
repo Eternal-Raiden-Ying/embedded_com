@@ -46,7 +46,7 @@ def make_grasp_obs(
     status: str,
     *,
     grasp: Optional[Dict] = None,
-    reposition_hint: bool = False,
+    reposition_proposal: Optional[Dict] = None,
     reason: str = "",
     detection: Optional[Dict] = None,
 ) -> Dict[str, Any]:
@@ -58,8 +58,8 @@ def make_grasp_obs(
         result["grasp"] = grasp
     if detection is not None:
         result["detection"] = detection
-    if reposition_hint:
-        result["reposition_hint"] = True
+    if reposition_proposal is not None:
+        result["reposition_proposal"] = reposition_proposal
     if reason:
         result["reason"] = reason
     mode = "MICRO_ADJUST" if status == "WAITING_RESPONSE" else "GRASP_REMOTE"
@@ -86,8 +86,21 @@ MOCK_GRASP = {
     "x_cm": 15.0, "y_cm": 0.0, "z_cm": 12.0,
     "pitch_deg": 0.0, "roll_deg": 0.0,
     "gripper_width_cm": 8.5, "approach_depth_cm": 5.0,
-    "confidence": 0.87, "feasible_angle_deg": 2.5,
+    "confidence": 0.87, "feasible_distance_cm": 2.5,
     "position_frame": "robot", "angle_frame": "robot",
+}
+
+MOCK_REPOSITION_PROPOSAL = {
+    "dx_cm": 5.0,
+    "dy_cm": -10.0,
+    "reference_line_new_xy_cm": [5.0, -10.0],
+    "distance_lg_cm": 55.9,
+    "capped": False,
+    "reference_grasp": {
+        "score": 0.58,
+        "x_cm": 50.0, "y_cm": 5.0, "z_cm": 7.0,
+        "feasible_distance_cm": 17.9,
+    },
 }
 
 
@@ -195,6 +208,47 @@ def main():
 
         print("\n=== GRASP test PASSED ===")
         print(f"Logs: {service.run_logger.run_dir}")
+
+        # --- Reposition test ---
+        print("\n--- Step 6: Reposition test ---")
+        ctx.task_intent = "FIND"
+        ctx.active_target = "cup"
+        ctx.active_session_id = "grasp_repo_test"
+        ctx.active_epoch = 2
+        core._transition(State.FREEZE_BASE, "test: reposition flow")
+        time.sleep(0.3)
+
+        for _ in range(30):
+            if ctx.state == State.GRASP:
+                break
+            time.sleep(0.1)
+        assert ctx.state == State.GRASP, f"Expected GRASP, got {ctx.state.value}"
+
+        # AWAITING_RESPOND → WAITING_RESPONSE
+        time.sleep(0.5)
+        send_jsonl(HOST, VISION_OBS_PORT, make_grasp_obs("grasp_repo_test", 2, "WAITING_RESPONSE"))
+        time.sleep(0.5)
+        assert ctx.grasp_substate == "AWAITING_RESULT"
+
+        # AWAITING_RESULT → send RUNNING with reposition_proposal
+        send_jsonl(HOST, VISION_OBS_PORT, make_grasp_obs(
+            "grasp_repo_test", 2, "RUNNING",
+            reposition_proposal=MOCK_REPOSITION_PROPOSAL,
+            reason="no_feasible_grasp",
+        ))
+        time.sleep(0.5)
+        assert ctx.grasp_substate == "REPOSITIONING", f"Expected REPOSITIONING, got {ctx.grasp_substate}"
+        print(f"  substate={ctx.grasp_substate} proposal={ctx.grasp_reposition_proposal}")
+
+        # Wait for reposition movement to complete (dy=-10cm → distance=10 → ~1s)
+        for _ in range(25):
+            if ctx.grasp_substate != "REPOSITIONING":
+                break
+            time.sleep(0.1)
+        assert ctx.grasp_substate == "AWAITING_RESPOND", f"Expected AWAITING_RESPOND after reposition, got {ctx.grasp_substate}"
+        print(f"  reposition complete, back to {ctx.grasp_substate}")
+
+        print("\n=== All tests PASSED ===")
 
     finally:
         service._running = False

@@ -123,7 +123,8 @@ class RuntimeContext:
     grasp_result: Optional[Dict] = None
     grasp_status: str = ""
     grasp_reason: str = ""
-    grasp_reposition_hint: Optional[Dict] = None
+    grasp_reposition_proposal: Optional[Dict] = None
+    grasp_reposition_start_mono: float = 0.0
     grasp_retry_count: int = 0
     arm_response: Optional[object] = None
     grasp_timeout_mono: float = 0.0
@@ -218,7 +219,8 @@ class RuntimeContext:
         self.grasp_result = None
         self.grasp_status = ""
         self.grasp_reason = ""
-        self.grasp_reposition_hint = None
+        self.grasp_reposition_proposal = None
+        self.grasp_reposition_start_mono = 0.0
         self.grasp_retry_count = 0
         self.arm_response = None
         self.grasp_timeout_mono = 0.0

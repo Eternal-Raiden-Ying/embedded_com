@@ -1,6 +1,6 @@
 # next_todo.md — 已完成事项
 
-更新时间：2026-05-04
+更新时间：2026-05-05
 
 ---
 
@@ -38,7 +38,20 @@
 |----|------|------|
 | operating_time | 500ms 默认 | 外部传入或 server 侧提供 |
 | claw 查表 | `int(width_cm * 10)` | STM32 真实张合角度映射表 |
-| reposition 微调 | 占位 0/空值 | grasp server proposal 字段 |
+| reposition 微调 | ~~占位 0/空值~~ → `done` | grasp server v1.2 `reposition_proposal` 已集成 |
+
+---
+
+## 已完成 — grasp server v1.2 协议适配
+
+### 4. VISTA + Orchestrator 适配 v1.2
+- **文件**: `VISTA/grasp.py:453-469`, `context.py`, `state_machine.py`, `test_grasp_dryrun.py`, `docs/grasp_protocol_analysis.md`
+- **改动**:
+  - VISTA: `reposition_hint: True`(boolean) → `reposition_proposal` dict 透传
+  - context: `grasp_reposition_hint` → `grasp_reposition_proposal` + `grasp_reposition_start_mono`
+  - state_machine: 新增 `REPOSITIONING` 子状态，`dx_cm`/`dy_cm` → vx/vy 定时开环底盘微调
+  - docs: `feasible_angle_deg` → `feasible_distance_cm` (3 处)
+- **验证**: `py_compile` 全部通过；`test_grasp_dryrun.py` 全流程通过（含 reposition 步骤），底盘命令方向正确 (`VEL 0.150 -0.150 0.000 150` for dx=5 dy=-10)
 
 ---
 
