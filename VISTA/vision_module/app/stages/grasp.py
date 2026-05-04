@@ -426,16 +426,60 @@ class GraspStagePlan(BaseStagePlan):
                 if stage_state.get("remote_result_sent", False):
                     return None
                 stage_state["remote_result_sent"] = True
-                result = deepcopy(remote_result.get("result") or {})
-                result.setdefault("target", ctx.target_name)
-                result["source"] = "remote_grasp_client"
-                result["request_id"] = request_id
+                server_response = remote_result.get("result") or {}
+                server_status = str(server_response.get("status") or "").strip().lower()
+                server_detection = server_response.get("detection") if isinstance(server_response.get("detection"), dict) else {}
+                server_reason = str(server_response.get("reason") or "")
+                server_message = str(server_response.get("message") or "")
+
+                if server_status == "success":
+                    targets = server_response.get("targets") if isinstance(server_response.get("targets"), list) else []
+                    grasp = dict(targets[0]) if targets else {}
+                    return StageOutput(
+                        vision_obs=self.build_obs(
+                            ctx,
+                            status="RESULT_READY",
+                            perception={"target_obs": target_obs},
+                            result={
+                                "grasp": grasp,
+                                "detection": server_detection,
+                                "source": "remote_grasp_client",
+                                "request_id": request_id,
+                            },
+                        ),
+                        snapshot=output_snapshot,
+                    )
+
+                if server_status == "reposition_required":
+                    return StageOutput(
+                        vision_obs=self.build_obs(
+                            ctx,
+                            status="RUNNING",
+                            perception={"target_obs": target_obs},
+                            result={
+                                "reposition_hint": True,
+                                "reason": server_reason or "reposition_required",
+                                "message": server_message,
+                                "detection": server_detection,
+                                "source": "remote_grasp_client",
+                                "request_id": request_id,
+                            },
+                        ),
+                        snapshot=output_snapshot,
+                    )
+
                 return StageOutput(
                     vision_obs=self.build_obs(
                         ctx,
-                        status="RESULT_READY",
+                        status="FAILED",
                         perception={"target_obs": target_obs},
-                        result=result,
+                        result={
+                            "reason": server_reason or server_status or "grasp_failed",
+                            "message": server_message,
+                            "detection": server_detection,
+                            "source": "remote_grasp_client",
+                            "request_id": request_id,
+                        },
                     ),
                     snapshot=output_snapshot,
                 )
