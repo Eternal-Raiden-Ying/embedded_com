@@ -34,17 +34,17 @@ Orchestrator --vision_req--> VistaApp
                                        |
                                        v
                                RuntimeSupervisor
-                             /    |      |      \
-                            v     v      v       v
-                   CameraManager Predictor Remote Preview
-                            \      |      /        |
-                             +-----+-----+---------+
+                             /    |      |      \         \
+                            v     v      v       v         v
+                   CameraManager Predictor Remote Preview TableEdgeManager
+                            \      |      /        |         /
+                             +-----+-----+---------+--------+
                                            |
                                            v
                                       Scheduler
                                            |
                                            v
-                      StageController.collect_tick_input() / tick()
+                      VisionEngine.collect_tick_input() / StageController.tick()
                                            |
                                            v
                                  VistaApp --vision_obs--> Orchestrator
@@ -63,14 +63,17 @@ Orchestrator --vision_req--> VistaApp
 
 - `IDLE`
 - `TRACK_LOCAL`
+- `DEPTH_PERCEPTION`
+- `TABLE_EDGE_PERCEPTION`
 - `MICRO_ADJUST`
 - `GRASP_REMOTE`
 - `IDLE_HOT`
 
 说明：
 
-- `DEPTH_PERCEPTION` 等概念仍可作为未来扩展方向
-- 但它们不是当前已注册、已收口的默认 runtime 基线
+- `DEPTH_PERCEPTION` 和 `TABLE_EDGE_PERCEPTION` 是当前已注册、已收口的默认 runtime 基线 mode
+- `DEPTH_PERCEPTION` 提供纯深度桌边感知；`TABLE_EDGE_PERCEPTION` 同时保持 RGB + depth + 本地模型的桌边与目标观测
+- `TableEdgeManager` 是负责 `table_edge_obs` 发布的完整运行时组件，由 `RuntimeSupervisor` 按 mode plan 中的 `table_edge.enabled` 标志启停
 
 ## 分层职责
 
@@ -175,6 +178,7 @@ Orchestrator --vision_req--> VistaApp
 - `frame_meta`：slot，stage scope
 - `local_perception`：slot，stage scope
 - `remote_result`：slot，stage scope
+- `table_edge_obs`：slot，stage scope — 由 `TableEdgeManager` 发布，`SearchStagePlan` 和 `PreviewManager` 消费
 - `runtime_status`：slot，backend scope
 - `remote_cmd`：event，backend scope
 - `remote_ack`：event，backend scope，当前更接近辅助诊断 route，不应被视为主业务 contract 真值
@@ -193,13 +197,15 @@ Orchestrator --vision_req--> VistaApp
 - `vision_module/backend/predictor_manager.py`
 - `vision_module/backend/remote/manager.py`
 - `vision_module/backend/preview/manager.py`
+- `vision_module/backend/table_edge_manager.py`
 
 职责：
 
 - `CameraManager`：相机实例生命周期和采集 worker，发布 `camera_frames`、`frame_meta`
 - `PredictorManager`：模型生命周期和推理 worker，读取 `camera_frames`，发布 `local_perception`
 - `RemoteManager`：远程抓取协作 worker，消费 `remote_cmd`，发布 `remote_result`、`remote_ack`
-- `PreviewManager`：预览 worker，读取 `camera_frames`、`runtime_status`、`local_perception`，渲染调试预览
+- `PreviewManager`：预览 worker，读取 `camera_frames`、`runtime_status`、`local_perception`、`table_edge_obs`，渲染调试预览
+- `TableEdgeManager`：桌边感知 worker，读取 `camera_frames`、`local_perception`、`runtime_status`，发布 `table_edge_obs`
 
 约束：
 
@@ -215,6 +221,7 @@ Orchestrator --vision_req--> VistaApp
 - `vision_module/backend/predictor/*`
 - `vision_module/backend/remote/client.py`
 - `vision_module/backend/preview/*`
+- `vision_module/backend/Online_Edge_Detect/*`
 
 职责：
 
@@ -231,32 +238,37 @@ VistaApp._handle_request_payload()
   -> StageController.handle_request(...)
   -> StagePlan.on_enter / on_update / on_respond / on_stop(...)
   -> StageController._apply_context_mode(...)
-  -> ModeController.prepare_switch(...)
+  -> ModeController.switch_mode(...)           ← 封装了 prepare_switch → apply_mode_plan → commit_switch
   -> VisionEngine.apply_mode_plan(...)
   -> RuntimeSupervisor.reconcile(...)
-  -> ModeController.commit_switch(...)
   -> VistaApp 发送 vision_obs
 ```
+
+注：`StageController` 通过 `ModeController.switch_mode()` 单一方法触发 mode 切换，而非分别调用 `prepare_switch` / `commit_switch`。`switch_mode()` 内部依次执行 prepare → apply_mode_plan 回调 → commit，语义等价但 API 表面是一个统一入口。
 
 ### 控制循环链
 
 ```text
 VistaApp._tick_stage()
-  -> StageController.collect_tick_input(...)
-  -> Scheduler.collect_tick_input(...)
-  -> StageController.tick(...)
+  -> VisionEngine.collect_tick_input(ts=now)   ← vision_engine.py:191
+  -> Scheduler.collect_tick_input(ts=ts)       ← scheduler.py:209
+  -> StageController.tick(tick_input)
   -> StagePlan.tick(...)
   -> VistaApp 发送 vision_obs
 ```
+
+注：`StageController` 没有 `collect_tick_input()` 方法；tick input 收集从 `VistaApp` 直接到 `VisionEngine` 再到 `Scheduler`，绕过 `StageController`。
 
 ### 数据面链路
 
 ```text
 CameraManager -> Scheduler(camera_frames, frame_meta)
 PredictorManager -> Scheduler(local_perception)
+TableEdgeManager -> Scheduler(table_edge_obs)
 RemoteManager -> Scheduler(remote_result, remote_ack)
 StageController effects -> Scheduler(remote_cmd)
-PreviewManager <- Scheduler(camera_frames, runtime_status, local_perception)
+PreviewManager <- Scheduler(camera_frames, runtime_status, local_perception, table_edge_obs)
+TableEdgeManager <- Scheduler(camera_frames, local_perception, runtime_status)
 ```
 
 ## 当前架构的关键边界
@@ -405,7 +417,7 @@ PreviewManager <- Scheduler(camera_frames, runtime_status, local_perception)
 ## 2026-04 Audit Follow-Up Baseline
 
 - Camera and predictor runtime backend ownership now belongs to package-level backend selectors. `VISTA_BACKEND=mock|real|auto` is the control-plane truth. `capability_placeholder` is no longer allowed to choose the main runtime path.
-- `PredictorManager` now validates detect output at the manager boundary before publishing `local_perception`. Stable detect payload fields now include `contract_ok`, `contract_error`, `contract_warnings`, `class_names`, `class_names_source`, and `infer_box_format`.
+- `PredictorManager` now validates detect output at the manager boundary before publishing `local_perception`. Stable detect payload fields now include `contract_ok`, `contract_error`, `contract_warnings`, `class_names`, `class_names_source`, `infer_box_format`, `has_infer`, `implementation`, `model_name`, `predictor_type`, `box_count`, `infer_boxes`, `infer_masks`, `rgb_shape`, `obs_ts`, `frame_seq`, `age_ms`, `table_bbox`, `table_quadrant`, `rgb_search_roi`, `table_roi_source`.
 - Detect class-name fallback no longer returns to the legacy `grasping_coco20` table. Structural fallback is now normalized `coco80`, and weakened payloads are marked with `class_names_source=fallback_coco80`.
 - Frame-consuming managers are now generation-aware. `PredictorManager` and `PreviewManager` gate on `(generation, seq)` rather than raw `seq`, so `Scheduler.configure()` slot reset on mode switch does not stall local inference or freeze preview.
 - The default camera color baseline is now BGR. Detect follows BGR end-to-end to match the tmp benchmark path; the optional segment predictor converts BGR to RGB internally where needed.

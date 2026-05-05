@@ -46,7 +46,7 @@ CONFIG = OnlineEdgeConfig()
 
 _HERE = Path(__file__).resolve().parent
 _DEFAULT_PROJECT_ROOT = str(_HERE)
-_DEFAULT_CALIB = str((_HERE.parent / "Offline_Edge_Test" / "calib.json").resolve())
+_DEFAULT_CALIB = str((_HERE / "calib.json").resolve())
 
 CONFIG.runtime.project_root = _env_str("EDGE_PROJECT_ROOT", _DEFAULT_PROJECT_ROOT)
 CONFIG.runtime.log_dir = _env_str("EDGE_LOG_DIR", str(Path(CONFIG.runtime.project_root) / "logs"))

@@ -11,6 +11,7 @@ for diagnostics, ROI helpers, and future manual tools.
 - `backend/predictor/`: QNN and mock predictors plus YOLO post-processing.
 - `backend/preview/`: OpenCV and null preview sinks.
 - `backend/remote/`: remote grasp interface.
+- `backend/Online_Edge_Detect/`: table edge detector implementation (`OnlineTableEdgeDetector`, board config, calibration).
 - `config/`: `board_config`, schema definitions, and mode defaults.
 - `ipc/`: `vision_req` / `vision_obs` protocol objects and JSONL transport.
 - `diagnostics/`: operator console rate limiting, field summaries, and future debug dump helpers.
@@ -30,8 +31,7 @@ old-path shims.
 - Keep old import paths working when a file is eventually moved.
 - Do not change `vision_req` / `vision_obs` protocol fields during structure cleanup.
 - Do not change stage, mode, or scheduler behavior as part of directory cleanup.
-- Keep `QNN_YOLO_Dectec_Predictor.py` under its current name for now. The typo
-  can be fixed later only with a fully compatible old-path shim.
+- `QNN_YOLO_Detect_Predictor.py` naming has been corrected (was `QNN_YOLO_Dectec_Predictor.py`).
 
 ## Long-Term Direction
 

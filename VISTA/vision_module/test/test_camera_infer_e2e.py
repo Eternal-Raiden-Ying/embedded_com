@@ -17,7 +17,7 @@ if str(VISION_ROOT) not in sys.path:
     sys.path.insert(0, str(VISION_ROOT))
 
 from vision_module.backend.camera.ColorCamera import ColorCamera
-from vision_module.backend.predictor.QNN_YOLO_Dectec_Predictor import QNN_YOLO_Dectec_Predictor
+from vision_module.backend.predictor.QNN_YOLO_Detect_Predictor import QNN_YOLO_Detect_Predictor
 
 
 DEFAULT_MODEL_PATH = (
@@ -84,7 +84,7 @@ def main() -> int:
 
     try:
         # Load predictor first to avoid TLS import-order issues on some images.
-        predictor = QNN_YOLO_Dectec_Predictor(make_predictor_args(args))
+        predictor = QNN_YOLO_Detect_Predictor(make_predictor_args(args))
         if not predictor.is_ready():
             print("FAIL     | predictor not ready")
             return 1

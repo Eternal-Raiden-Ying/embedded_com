@@ -72,8 +72,8 @@ class TableEdgeManager:
 
     def _load_detector(self) -> None:
         candidates = [
-            ("Online_Edge_Detect.board_config", "Online_Edge_Detect.detector"),
-            ("VISTA.Online_Edge_Detect.board_config", "VISTA.Online_Edge_Detect.detector"),
+            ("vision_module.backend.Online_Edge_Detect.board_config", "vision_module.backend.Online_Edge_Detect.detector"),
+            ("VISTA.vision_module.backend.Online_Edge_Detect.board_config", "VISTA.vision_module.backend.Online_Edge_Detect.detector"),
         ]
         last_error = ""
         for cfg_mod_name, det_mod_name in candidates:
