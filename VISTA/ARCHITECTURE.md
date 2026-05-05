@@ -398,10 +398,10 @@ PreviewManager <- Scheduler(camera_frames, runtime_status, local_perception)
 - `ReadMe.md`：当前总览与操作基线
 - `INTERFACES.md`：外部协议基线
 - `ARCHITECTURE.md`：内部结构与已知缺口基线
-- `IMPLEMENTATION_STATUS.md`：总计划与完成状态基线
-- `NEXT_TODO.md`：当前下一轮行动项
+- `EVENT_DESCRIPTION.md`：内部事件与日志语义基线
+- `docs/handover.md`：已完成工作与待处置事项移交
 
-如果代码继续调整，应优先同步这些文件，而不是继续依赖旧的迁移计划文档。
+如果代码继续调整，应优先同步这些文件。
 ## 2026-04 Audit Follow-Up Baseline
 
 - Camera and predictor runtime backend ownership now belongs to package-level backend selectors. `VISTA_BACKEND=mock|real|auto` is the control-plane truth. `capability_placeholder` is no longer allowed to choose the main runtime path.

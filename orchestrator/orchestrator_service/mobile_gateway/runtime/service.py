@@ -56,7 +56,7 @@ ORCHESTRATOR_STATE_MAP: Dict[str, Tuple[str, int]] = {
     "NEXT_TABLE": ("searching", 76),
     "AVOID_OBSTACLE": ("searching", 65),
     "RETURN_HOME": ("running", 75),
-    "GRASPING": ("running", 90),
+    "GRASP": ("running", 90),
     "ERROR_RECOVERY": ("error", 0),
     "STOP": ("stopped", 0),
     "STOPPED": ("stopped", 0),
@@ -1163,7 +1163,7 @@ class MobileGatewayService(BaseModule):
             return "目标检测暂不可用"
         if raw_state == "DOCK_RETRY":
             return "锁边未完成，正在重试"
-        if raw_state in {"TARGET_LOCKED", "GRASPING", "CONTROLLED_APPROACH", "FINAL_LOCK", "AT_TABLE_EDGE"}:
+        if raw_state in {"TARGET_LOCKED", "GRASP", "CONTROLLED_APPROACH", "FINAL_LOCK", "AT_TABLE_EDGE"}:
             return f"正在执行取物任务，目标 {target}" if target else "正在执行取物任务"
         if raw_state in {"STOP", "STOPPED"}:
             return "任务已停止"

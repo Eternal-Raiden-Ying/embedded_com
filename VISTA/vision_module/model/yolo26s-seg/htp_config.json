@@ -1,1 +1,0 @@
-{"graphs": [{"vtcm_mb": 2, "fp16_relaxed_precision": 0, "graph_names": ["yolo26s-seg_split_qcs6490"]}], "devices": [{"dsp_arch": "v68", "soc_id": 35}]}

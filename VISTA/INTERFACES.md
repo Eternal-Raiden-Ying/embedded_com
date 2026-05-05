@@ -310,14 +310,9 @@
 - 上游不应把 `target` 当作 remote `class_id` 的替代字段
 - 上游处理 `GRASP` 时，应支持 `WAITING_RESPONSE -> RESPOND -> RESULT_READY/FAILED` 这一轮交互链路
 
-## 当前未完全收口的地方
+## 当前收口状态
 
-以下项目已经是架构方向，但当前实现仍在收口中：
-
-- remote request 的最小稳定字段集合仍在收缩中
-- segmentation 相关 remote surface 仍待删除
-
-这些属于当前实现债务，不应被上游拿来当正式 contract 依赖。
+remote request 的最小稳定字段集合已收缩完成，segmentation 相关 remote surface 已删除。上游可以依赖当前文档列出的字段作为稳定 contract。
 ## 2026-04 Contract Notes
 
 - `target` and remote `class_id` are different fields. Remote grasp requests must provide explicit `payload.class_id`; VISTA no longer infers `class_id` from `target`.

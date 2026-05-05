@@ -137,8 +137,8 @@
 ## P2 — 远期
 
 ### 18. Vision Module v2 深度桌边提取
-- 状态：`blocked`（Offline_Edge_Test 验证中）
+- 状态：`done(to be check)`（vision_module_v2 已移入 `old/`，Offline_Edge_Test 根级保留为独立数据采集工具）
 ### 19. vision_module vs vision_module_v2 关系清理
-- 状态：`todo`
+- 状态：`done`（v2 已移入 `old/`，handover.md 已记录，残留依赖已确认清除）
 ### 20. 多入口 Control Plane
 - 状态：`todo`
