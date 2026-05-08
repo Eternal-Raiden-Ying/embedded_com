@@ -296,6 +296,7 @@ class OrchestratorCore:
             "tag_lost_frames": self.ctx.tag_lost_frames,
             "tag_arrived_frames": self.ctx.tag_arrived_frames,
             "dock_retry_count": self.ctx.dock_retry_count,
+            "edge_slide_relock_attempts": self.ctx.edge_slide_relock_attempts,
             "avoid_retry_count": self.ctx.avoid_retry_count,
             "table_loss_elapsed_s": self._loss_elapsed(self.ctx.table_loss_since_mono),
             "target_loss_elapsed_s": self._loss_elapsed(self.ctx.target_loss_since_mono),
@@ -810,6 +811,7 @@ class OrchestratorCore:
             "task_slide_entries_count",
             "task_target_confirm_count",
             "task_target_locked_count",
+            "edge_slide_relock_attempts",
             "task_warning_history",
             "task_done_summary_emitted",
         ]
@@ -823,6 +825,7 @@ class OrchestratorCore:
         self.ctx.task_slide_entries_count = 0
         self.ctx.task_target_confirm_count = 0
         self.ctx.task_target_locked_count = 0
+        self.ctx.edge_slide_relock_attempts = 0
         self.ctx.task_warning_history.clear()
         self.ctx.task_done_summary_emitted = False
         self._reset_vision_request_dedupe()
@@ -1107,22 +1110,44 @@ class OrchestratorCore:
         if abs(float(edge_obs.dist_err_m)) > float(self.cfg.edge_slide_dist_tolerance_m):
             self._start_loss_timer("table_loss_since_mono")
             lost_s = self._loss_elapsed(self.ctx.table_loss_since_mono)
-            self.ctx.last_fail_reason = f"沿边距离偏差超过容忍: dist_err={float(edge_obs.dist_err_m):+.3f}m"
-            if lost_s >= float(getattr(self.cfg, "edge_slide_recover_timeout_s", self.cfg.table_loss_hold_s)):
+            dist = float(edge_obs.dist_err_m)
+            tol = float(self.cfg.edge_slide_dist_tolerance_m)
+            hold_s = float(getattr(self.cfg, "edge_slide_dist_out_of_range_hold_s", self.cfg.edge_slide_pause_hold_s) or self.cfg.edge_slide_pause_hold_s)
+            warning = f"edge_distance_out_of_tolerance dist={dist:+.3f} tol={tol:.3f}"
+            if warning not in self.ctx.task_warning_history:
+                self.ctx.task_warning_history.append(warning)
+            if lost_s >= hold_s:
+                self.ctx.edge_slide_relock_attempts += 1
+                max_attempts = max(0, int(getattr(self.cfg, "edge_slide_max_relock_attempts", 3) or 3))
+                fatal = bool(getattr(self.cfg, "edge_slide_relock_failure_is_fatal", True))
+                if fatal and self.ctx.edge_slide_relock_attempts > max_attempts:
+                    reason = "edge_distance_out_of_tolerance_after_retries"
+                    self.ctx.last_fail_reason = reason
+                    self._enter_error_recovery(reason, tts_text="任务失败，无法稳定锁定桌边。", interrupt_tts=True)
+                    return self.controller.stop_cmd("ERROR_RECOVERY", brake=True)
                 fallback_state = self._edge_slide_fallback_state()
                 self._transition(
                     fallback_state,
                     (
                         "edge_distance_out_of_tolerance "
-                        f"dist={float(edge_obs.dist_err_m):+.3f} "
-                        f"tol={float(self.cfg.edge_slide_dist_tolerance_m):.3f} "
-                        f"hold_s={lost_s:.2f}"
+                        f"dist={dist:+.3f} "
+                        f"tol={tol:.3f} "
+                        f"hold_s={lost_s:.2f} "
+                        f"attempt={int(self.ctx.edge_slide_relock_attempts)}/{max_attempts} "
+                        "recoverable=true severity=warning"
                     ),
                 )
                 return self._edge_slide_fallback_cmd(fallback_state, edge_obs)
             quality = dict(quality)
-            quality["mode"] = "pause" if lost_s < float(getattr(self.cfg, "edge_slide_pause_hold_s", 0.8) or 0.8) else "recover"
+            pause_s = float(getattr(self.cfg, "edge_slide_pause_hold_s", 0.8) or 0.8)
+            quality["mode"] = "pause" if lost_s < pause_s else "recover"
             quality["reason"] = "edge_distance_out_of_tolerance"
+            quality["severity"] = "warning"
+            quality["recoverable"] = True
+            quality["dist_err_m"] = dist
+            quality["dist_tolerance_m"] = tol
+            quality["relock_attempts"] = int(self.ctx.edge_slide_relock_attempts)
+            quality["max_relock_attempts"] = int(getattr(self.cfg, "edge_slide_max_relock_attempts", 3) or 3)
             self.ctx.last_edge_quality = dict(quality)
             decision = self.controller.edge_slide_hold_cmd(
                 f"edge_distance_out_of_tolerance_{quality['mode']} elapsed_s={lost_s:.2f}",
@@ -1132,9 +1157,9 @@ class OrchestratorCore:
                 decision,
                 quality,
                 stop_reason="edge_distance_out_of_tolerance",
-                fallback_decision="hold",
-                pause_elapsed_s=min(lost_s, float(getattr(self.cfg, "edge_slide_pause_hold_s", 0.8) or 0.8)),
-                recover_elapsed_s=max(0.0, lost_s - float(getattr(self.cfg, "edge_slide_pause_hold_s", 0.8) or 0.8)),
+                fallback_decision="relock_hold",
+                pause_elapsed_s=min(lost_s, pause_s),
+                recover_elapsed_s=max(0.0, lost_s - pause_s),
             )
         else:
             self._reset_table_loss()
@@ -1202,6 +1227,11 @@ class OrchestratorCore:
                 "recover_elapsed_ms": int(round(max(0.0, float(recover_elapsed_s or 0.0)) * 1000.0)),
                 "fallback_candidate_state": quality.get("fallback_candidate_state", self._edge_slide_fallback_state().value),
                 "fallback_decision": fallback_decision or ("none" if abs(float(cmd.vy_norm or 0.0)) > 0.0 else "hold"),
+                "severity": quality.get("severity"),
+                "recoverable": quality.get("recoverable"),
+                "dist_tolerance_m": quality.get("dist_tolerance_m"),
+                "relock_attempts": quality.get("relock_attempts"),
+                "max_relock_attempts": quality.get("max_relock_attempts"),
             }
         )
         if "vx_from_dist" not in summary:
@@ -1213,7 +1243,12 @@ class OrchestratorCore:
 
     def _edge_slide_pause_or_recover(self, edge_obs: TableEdgeObs, quality: Dict[str, Any]) -> MotionDecision:
         reason = str(quality.get("reason") or quality.get("mode") or "edge_uncertain")
-        self.ctx.last_fail_reason = reason
+        if reason in {"edge_identity_mismatch", "edge_follow_stale", "edge_conf_low", "conf_low", "target_lost"}:
+            warning = f"{reason} recoverable=true severity=warning"
+            if warning not in self.ctx.task_warning_history:
+                self.ctx.task_warning_history.append(warning)
+        else:
+            self.ctx.last_fail_reason = reason
         self._start_loss_timer("table_loss_since_mono")
         elapsed_s = self._loss_elapsed(self.ctx.table_loss_since_mono)
         pause_s = float(getattr(self.cfg, "edge_slide_pause_hold_s", 0.8) or 0.8)

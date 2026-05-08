@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 if str(ORCH_ROOT) not in sys.path:
     sys.path.insert(0, str(ORCH_ROOT))
 
+from common.console_presenter import DemoConsolePresenter  # noqa: E402
 from common.runtime_logging import OperatorConsole  # noqa: E402
 from orchestrator_service.config.schema import OrchestratorConfig  # noqa: E402
 from orchestrator_service.ipc.protocol import CmdVel, TableEdgeObs, now_ts  # noqa: E402
@@ -39,6 +40,8 @@ def _service(lines, mode="operator"):
     svc = OrchestratorService.__new__(OrchestratorService)
     svc.cfg = OrchestratorConfig()
     svc.operator_console = OperatorConsole(mode=mode, default_interval_s=1.0, sink=lines.append)
+    svc.demo_console = DemoConsolePresenter(svc.operator_console, dry_run=svc.cfg.serial.dry_run, emoji_enabled=False)
+    svc.demo_console.level = "demo"
     svc._ipc_console_enabled = False
     svc._heartbeat_console_enabled = False
     svc._uart_console_mode = "operator"
@@ -53,8 +56,12 @@ def _service(lines, mode="operator"):
     svc._uart_lowfreq_last_payload = None
     svc._last_target_obs_console_payload = {}
     svc._last_target_search_req_console_key = ""
+    svc._demo_start_pending_target = ""
+    svc._demo_deferred_phases = []
     svc._pending_state_traces = []
     svc._last_uart_tx_ts = 0.0
+    svc._edge_obs_rate_ts = []
+    svc._target_obs_rate_ts = []
     svc.run_logger = _RunLogger()
     svc.core = SimpleNamespace(
         ctx=SimpleNamespace(
@@ -93,6 +100,59 @@ def _set_slide_ref(core, yaw=0.01, dist=0.02, conf=0.9):
 
 
 class OrchestratorOperatorConsoleTest(unittest.TestCase):
+    def test_demo_presenter_start_phone_health_and_intent(self) -> None:
+        lines = []
+        console = OperatorConsole(mode="operator", default_interval_s=1.0, sink=lines.append)
+        presenter = DemoConsolePresenter(console, dry_run=True, emoji_enabled=False, health_interval_s=3.0)
+        presenter.task_start("apple")
+        presenter.phone_command("apple")
+        presenter.phone_accepted()
+        presenter.health({
+            "state": "EDGE_SLIDE_SEARCH",
+            "target": "apple",
+            "edge": "OK",
+            "edge_hz": 6.1,
+            "yolo_hz": 5.7,
+            "preview": 5.8,
+            "dry_run": True,
+        })
+        presenter.slide_intent(0.02, 0.14, -0.03)
+        joined = "\n".join(lines)
+        self.assertIn("[DEMO][START] target=apple mode=DRY_RUN", joined)
+        self.assertIn("[DEMO][DRY_RUN] car commands are control intentions only; serial port is not opened.", joined)
+        self.assertIn("[DEMO][PHONE] command received target=apple", joined)
+        self.assertIn("[DEMO][PHONE] gateway accepted", joined)
+        self.assertIn("[DEMO][HEALTH] state=EDGE_SLIDE_SEARCH target=apple edge=OK edge_hz=6.1 yolo_hz=5.7 preview=5.8FPS dry_run=1", joined)
+        self.assertIn("[DEMO][SLIDE_INTENT] vx=+0.02 vy=+0.14 wz=-0.03 dry_run=1", joined)
+
+    def test_demo_start_is_before_deferred_table_phase(self) -> None:
+        lines = []
+        svc = _service(lines, mode="operator")
+        svc.cfg.serial.dry_run = True
+        svc.demo_console.dry_run = True
+        svc._demo_start_pending_target = "apple"
+        svc._on_state_transition("IDLE", "SEARCH_TABLE", "开始桌边任务，目标 apple")
+        self.assertNotIn("[DEMO][TABLE] searching edge", lines)
+        svc.demo_console.task_start("apple")
+        svc._flush_demo_deferred_phases()
+        self.assertLess(lines.index("[DEMO][START] target=apple mode=DRY_RUN"), lines.index("[DEMO][TABLE] searching edge"))
+
+    def test_idle_health_uses_off_not_stale(self) -> None:
+        lines = []
+        svc = _service(lines, mode="operator")
+        svc.demo_console.level = "normal"
+        svc.cfg.serial.dry_run = True
+        svc.core.ctx.state = SimpleNamespace(value="IDLE")
+        decision = MotionDecision(
+            cmd=CmdVel(ts=now_ts(), mode="IDLE", vx_norm=0.0, vy_norm=0.0, wz_norm=0.0),
+            control_summary={"state": "IDLE", "edge_obs_is_stale": True},
+        )
+        svc._emit_operator_control(decision)
+        joined = "\n".join(lines)
+        self.assertIn("[DEMO][IDLE] waiting for command", joined)
+        self.assertIn("[DEMO][HEALTH] state=IDLE target=n/a edge=OFF yolo=OFF preview=n/a dry_run=1", joined)
+        self.assertNotIn("edge=STALE", joined)
+
     def test_operator_mode_suppresses_ipc_success_and_heartbeat(self) -> None:
         lines = []
         svc = _service(lines, mode="operator")
@@ -138,7 +198,8 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         svc = _service(lines, mode="operator")
         svc._on_state_transition("SEARCH_TABLE", "COARSE_ALIGN", "table_edge_seen")
         svc._on_state_transition("SEARCH_TABLE", "COARSE_ALIGN", "table_edge_seen")
-        self.assertEqual(lines, ["[ORCH] STATE SEARCH_TABLE -> COARSE_ALIGN reason=table_edge_seen"])
+        self.assertIn("[ORCH] STATE SEARCH_TABLE -> COARSE_ALIGN reason=table_edge_seen", lines)
+        self.assertIn("[DEMO][TABLE] edge found, aligning", lines)
 
     def test_fake_car_repeated_vel_mode_and_speed_policy(self) -> None:
         lines = []
@@ -406,13 +467,15 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         lines = []
         svc = _service(lines, mode="operator")
         svc._on_state_transition("EDGE_SLIDE_SEARCH", "LEAVE_EDGE", "当前桌边未找到目标，切换到边 right")
-        self.assertEqual(lines, ["[ORCH] STATE EDGE_SLIDE_SEARCH -> LEAVE_EDGE reason=target_not_found timeout_s=10.0"])
+        self.assertIn("[ORCH] STATE EDGE_SLIDE_SEARCH -> LEAVE_EDGE reason=target_not_found timeout_s=10.0", lines)
+        self.assertIn("[DEMO][TARGET] current edge timeout, relocating", lines)
 
     def test_state_transition_target_found_is_diagnostic(self) -> None:
         lines = []
         svc = _service(lines, mode="operator")
         svc._on_state_transition("EDGE_SLIDE_SEARCH", "TARGET_CONFIRM", "检测到目标候选，开始确认")
-        self.assertEqual(lines, ["[ORCH] STATE EDGE_SLIDE_SEARCH -> TARGET_CONFIRM reason=target_found"])
+        self.assertIn("[ORCH] STATE EDGE_SLIDE_SEARCH -> TARGET_CONFIRM reason=target_found", lines)
+        self.assertIn("[DEMO][TARGET] candidate found, confirming", lines)
 
     def test_state_trace_preserves_matched_target_reason(self) -> None:
         lines = []
@@ -450,6 +513,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
     def test_done_and_idle_console_are_explicit_and_warning_is_not_reason(self) -> None:
         lines = []
         svc = _service(lines, mode="operator")
+        svc.cfg.serial.dry_run = True
         svc.core.ctx = SimpleNamespace(
             state=SimpleNamespace(value="DONE"),
             active_session_id="sess_done",
@@ -468,11 +532,35 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         svc._on_state_transition("FREEZE_BASE", "DONE", "已在桌边锁定 apple")
         joined = "\n".join(lines)
         self.assertIn("[ORCH][TASK_DONE]", joined)
+        self.assertIn("[DEMO][DRY_RUN] car commands are control intentions only; serial port is not opened.", joined)
+        self.assertIn("[DEMO][SUCCESS] TASK DONE", joined)
+        self.assertIn("next_state    : IDLE_HOT", joined)
+        self.assertIn("preview       : kept alive", joined)
+        self.assertIn("waiting       : next command", joined)
         self.assertIn("result=success", joined)
         self.assertIn("reason=已在桌边锁定 apple", joined)
         self.assertIn("warnings=['distance_too_far', 'edge_follow_stale']", joined)
         svc._on_state_transition("DONE", "IDLE", "任务完成，回到空闲")
         self.assertIn("[ORCH][IDLE] task finished, waiting for next command", "\n".join(lines))
+        self.assertIn("[DEMO][IDLE_HOT] preview kept alive, waiting for next command", "\n".join(lines))
+
+    def test_failed_demo_banner_is_explicit(self) -> None:
+        lines = []
+        svc = _service(lines, mode="operator")
+        svc.core.ctx = SimpleNamespace(
+            state=SimpleNamespace(value="ERROR_RECOVERY"),
+            active_session_id="sess_failed",
+            active_target="apple",
+            task_start_wall_ts=now_ts() - 5.0,
+            last_fail_reason="target_not_found",
+            last_target_obs=None,
+            last_table_obs=None,
+        )
+        svc._on_state_transition("EDGE_SLIDE_SEARCH", "ERROR_RECOVERY", "target_not_found timeout_s=10.0")
+        joined = "\n".join(lines)
+        self.assertIn("[DEMO][FAILED] TASK FAILED", joined)
+        self.assertIn("final_state   : FAILED", joined)
+        self.assertIn("reason        : target_not_found", joined)
 
     def test_target_search_req_summary_is_compact(self) -> None:
         lines = []
@@ -787,6 +875,32 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         decision = core.tick()
         self.assertEqual(core.ctx.state, State.FINAL_LOCK)
         self.assertEqual(decision.cmd.mode, "FINAL_LOCK")
+        self.assertEqual(core.ctx.edge_slide_relock_attempts, 1)
+
+    def test_edge_slide_distance_out_of_tolerance_fails_after_retries(self) -> None:
+        cfg = OrchestratorConfig()
+        cfg.control.edge_slide_pause_s = 0.0
+        cfg.control.edge_slide_dist_tolerance_m = 0.05
+        cfg.control.edge_slide_dist_out_of_range_hold_s = 0.1
+        cfg.control.edge_slide_max_relock_attempts = 1
+        core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
+        core.ctx.state = State.EDGE_SLIDE_SEARCH
+        core.ctx.active_target = "apple"
+        core.ctx.active_vision_mode = "TRACK_LOCAL"
+        _set_slide_ref(core, yaw=0.01, dist=0.08, conf=0.9)
+        core.handle_table_obs(TableEdgeObs(ts=now_ts(), table_found=True, edge_found=True, confidence=0.9, yaw_err_rad=0.01, dist_err_m=0.08))
+        core.ctx.table_loss_since_mono = monotonic_ts() - 0.2
+        decision = core.tick()
+        self.assertEqual(core.ctx.state, State.FINAL_LOCK)
+        self.assertEqual(decision.cmd.mode, "FINAL_LOCK")
+        core.ctx.state = State.EDGE_SLIDE_SEARCH
+        core.ctx.state_enter_mono = monotonic_ts() - 1.0
+        core.ctx.table_loss_since_mono = monotonic_ts() - 0.2
+        core.handle_table_obs(TableEdgeObs(ts=now_ts(), table_found=True, edge_found=True, confidence=0.9, yaw_err_rad=0.01, dist_err_m=0.08))
+        decision = core.tick()
+        self.assertEqual(core.ctx.state, State.ERROR_RECOVERY)
+        self.assertEqual(decision.cmd.mode, "ERROR_RECOVERY")
+        self.assertEqual(core.ctx.last_fail_reason, "edge_distance_out_of_tolerance_after_retries")
 
     def test_edge_slide_identity_mismatch_is_reported_before_fallback(self) -> None:
         cfg = OrchestratorConfig()

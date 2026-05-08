@@ -46,9 +46,10 @@ READY_TIMEOUT_S="${READY_TIMEOUT_S:-35}"
 
 # STOP 后按 Ctrl+C 只退出当前日志显示，不停止服务
 FOLLOW_STACK_LOGS_AFTER_START="${FOLLOW_STACK_LOGS_AFTER_START:-1}"
+ROBOT_CONSOLE_LEVEL="${ROBOT_CONSOLE_LEVEL:-normal}"
 
 # 当前终端显示的状态摘要和手机链路关键字
-ORCH_SUMMARY_PATTERN='状态切换|MODE |DRY_RUN|UART|stop_class=|搜索超时|已发现目标|目标丢失|开始寻找|AUTOEXPLORE|AUTOSEARCH|SEARCH|RETURN|收到 STOP 命令|热待机|重新发现目标|自动搜索超时|TASK_CMD|task_cmd|vision_req'
+ORCH_SUMMARY_PATTERN='状态切换|MODE |DRY_RUN|UART|stop_class=|搜索超时|已发现目标|目标丢失|开始寻找|AUTOEXPLORE|AUTOSEARCH|SEARCH|RETURN|收到 STOP 命令|热待机|重新发现目标|自动搜索超时|TASK_CMD|task_cmd|vision_req|TASK_DONE|DEMO|IDLE_HOT|preview kept alive|waiting for next command|target        :|session_id    :|result        :|final_state   :|reason        :|total_time_s  :|next_state    :|preview       :|waiting       :|━━━━━━━━'
 GATEWAY_SUMMARY_PATTERN='gateway online|mqtt connected|mqtt disconnected|cmd received|gateway_ack sent|task_cmd forwarded|task_ack forwarded|status changed|heartbeat running|fetch_object|mobile_cmd|stop'
 VISION_SUMMARY_PATTERN='SERVICE_READY|vision runtime started|mode switched|camera enabled|model loaded|vision_obs|vision_req|target_obs|table_edge_obs|FAILED|ERROR'
 LOG_TAIL_N="${LOG_TAIL_N:-80}"
@@ -144,6 +145,38 @@ colorize_line() {
   fi
 
   case "$line" in
+    *"[DEMO][DRY_RUN]"*)
+      printf '%b%s%b\n' "$C_YELLOW" "$line" "$C_RESET"
+      return 0
+      ;;
+    *"[DEMO][SUCCESS]"*|*"DEMO SUCCESS"*)
+      printf '%b%s%b\n' "$C_BRIGHT_GREEN" "$line" "$C_RESET"
+      return 0
+      ;;
+    *"[DEMO][FAILED]"*|*"DEMO FAILED"*)
+      printf '%b%s%b\n' "$C_RED" "$line" "$C_RESET"
+      return 0
+      ;;
+    *"[DEMO][IDLE"*|*"IDLE_HOT"*|*"preview kept alive, waiting for next command"*)
+      printf '%b%s%b\n' "$C_BOLD_CYAN" "$line" "$C_RESET"
+      return 0
+      ;;
+    *"[DEMO][HEALTH]"*)
+      printf '%b%s%b\n' "$C_CYAN" "$line" "$C_RESET"
+      return 0
+      ;;
+    *"[DEMO][PHONE]"*|*"[DEMO][START]"*)
+      printf '%b%s%b\n' "$C_MAGENTA" "$line" "$C_RESET"
+      return 0
+      ;;
+    *"[DEMO][PREVIEW]"*|*"[DEMO][WARN]"*|*"[DEMO][RECOVER]"*)
+      printf '%b%s%b\n' "$C_YELLOW" "$line" "$C_RESET"
+      return 0
+      ;;
+    *"[DEMO]"*)
+      printf '%b%s%b\n' "$C_BOLD_CYAN" "$line" "$C_RESET"
+      return 0
+      ;;
     *ERROR*|*FATAL*)
       printf '%b%s%b\n' "$C_RED" "$line" "$C_RESET"
       return 0
@@ -247,6 +280,7 @@ show_banner() {
   printf '%buart device%b    : %s @ %s\n' "$C_BOLD" "$C_RESET" "$UART_DEV" "$UART_BAUDRATE"
   printf '%bsudo%b           : requested=%s effective=%s\n' "$C_BOLD" "$C_RESET" "$ORCH_USE_SUDO" "$([[ $(orch_use_sudo_effective; echo $?) -eq 0 ]] && echo 1 || echo 0)"
   printf '%bdry-run%b        : ORCH_SERIAL_DRY_RUN=%s  ORCH_DRY_RUN_ECHO_STDOUT=%s\n' "$C_BOLD" "$C_RESET" "$ORCH_SERIAL_DRY_RUN" "$ORCH_DRY_RUN_ECHO_STDOUT"
+  printf '%bconsole%b        : ROBOT_CONSOLE_LEVEL=%s  ROBOT_CONSOLE_COLOR=%s\n' "$C_BOLD" "$C_RESET" "$ROBOT_CONSOLE_LEVEL" "${ROBOT_CONSOLE_COLOR:-auto}"
   printf '%bports%b          : %s\n' "$C_BOLD" "$C_RESET" "$STACK_PORTS"
 }
 
@@ -401,6 +435,7 @@ set -euo pipefail
 cd "$VISION_ROOT"
 export PYTHONUNBUFFERED="$PYTHONUNBUFFERED"
 export ROBOT_CONSOLE_COLOR=never
+export ROBOT_CONSOLE_LEVEL="$ROBOT_CONSOLE_LEVEL"
 export ROBOT_RUN_MODULE_SUBDIRS=1
 export STACK_RUN_ID="$STACK_RUN_ID"
 export VISION_LOG_DIR="$VISION_LOG_DIR"
@@ -448,6 +483,7 @@ export ORCH_LOG_DIR="$ORCH_LOG_DIR"
 export ORCH_RUNS_DIR="$STACK_RUNS_ROOT"
 unset FORCE_COLOR
 export ORCH_SERIAL_DRY_RUN="$ORCH_SERIAL_DRY_RUN"
+export ROBOT_CONSOLE_LEVEL="$ROBOT_CONSOLE_LEVEL"
 export ORCH_SERIAL_PORT="$UART_DEV"
 export ORCH_SERIAL_BAUDRATE="$UART_BAUDRATE"
 export ORCH_TTS_EVENT_OUT_TRANSPORT="$ORCH_TTS_EVENT_OUT_TRANSPORT"
@@ -490,6 +526,7 @@ export ROBOT_RUN_MODULE_SUBDIRS=1
 export STACK_RUN_ID="$STACK_RUN_ID"
 unset FORCE_COLOR
 export PYTHONPATH="$ORCH_ROOT"
+export ROBOT_CONSOLE_LEVEL="$ROBOT_CONSOLE_LEVEL"
 export MOBILE_GATEWAY_LOG_DIR="$GATEWAY_LOG_DIR"
 export MOBILE_GATEWAY_LOG_FILE="$GATEWAY_LOG_DIR/mobile_gateway.log"
 export MOBILE_GATEWAY_RUNS_DIR="$STACK_RUNS_ROOT"
@@ -662,18 +699,41 @@ tail_stack_summary() {
   touch "$ORCH_LOG_FILE" "$GATEWAY_LOG_FILE" "$VISION_LOG_FILE"
   headline "单终端日志"
   log "显示 mobile_gateway / orchestrator / VISTA 的关键日志。"
+  log "console level: ROBOT_CONSOLE_LEVEL=$ROBOT_CONSOLE_LEVEL (demo/normal/debug)"
   log "按 Ctrl+C 只退出日志显示，不会停止服务；需要结束时执行：./start_robot_stack.sh stop"
   log "彩色显示测试：ROBOT_CONSOLE_COLOR=always ./start_robot_stack.sh"
   divider
   tail -n "$LOG_TAIL_N" -F "$GATEWAY_LOG_FILE" "$ORCH_LOG_FILE" "$VISION_LOG_FILE" 2>/dev/null | \
   awk -v orch_pat="$ORCH_SUMMARY_PATTERN" \
       -v gw_pat="$GATEWAY_SUMMARY_PATTERN" \
-      -v vista_pat="$VISION_SUMMARY_PATTERN" '
+      -v vista_pat="$VISION_SUMMARY_PATTERN" \
+      -v console_level="$ROBOT_CONSOLE_LEVEL" '
+    function is_demo_line(s) {
+      return (s ~ /\[DEMO\]/ || s ~ /DEMO SUCCESS/ || s ~ /DEMO FAILED/ || s ~ /^━/ ||
+              s ~ /^target        :/ || s ~ /^result        :/ || s ~ /^final_state   :/ ||
+              s ~ /^reason        :/ || s ~ /^next_state    :/ || s ~ /^preview       :/ ||
+              s ~ /^waiting       :/)
+    }
+    function is_warn_error(s) {
+      return (s ~ /WARN/ || s ~ /WARNING/ || s ~ /ERROR/ || s ~ /FATAL/ || s ~ /FAILED/)
+    }
+    function is_key_state(s) {
+      return (s ~ /\[ORCH\] STATE/ || s ~ /SERVICE_READY/ || s ~ /\[VISTA\] READY/ ||
+              s ~ /gateway online/ || s ~ /mqtt connected/ || s ~ /mqtt disabled/)
+    }
     /^==> .* <==$/ {
       src=$0
       next
     }
     {
+      if ($0 ~ /resizeWindow/ && $0 ~ /No UI backends available/) {
+        if (!preview_warned) {
+          preview_warned=1
+          preview_unavailable=1
+          print "[vista] [DEMO][PREVIEW] unavailable: no UI backend, continuing without preview"
+        }
+        next
+      }
       tag="[stack]"
       show=0
       if (src ~ /mobile_gateway\.out/) {
@@ -686,8 +746,18 @@ tail_stack_summary() {
         tag="[vista]"
         show=($0 ~ vista_pat)
       }
+      if (console_level == "debug") {
+        show=1
+      } else if (console_level == "demo") {
+        show=(is_demo_line($0) || is_warn_error($0))
+      } else {
+        show=(is_demo_line($0) || is_warn_error($0) || is_key_state($0))
+      }
       if (show) {
-        if ($0 ~ /(mobile_cmd|cmd received|gateway_ack|task_ack|fetch_object|status changed|stop)/) {
+        if (preview_unavailable && $0 ~ /\[DEMO\]\[HEALTH\]/) {
+          gsub(/preview=n\/a/, "preview=unavailable", $0)
+        }
+        if (console_level == "debug" && $0 ~ /(mobile_cmd|cmd received|gateway_ack|task_ack|fetch_object|status changed|stop)/) {
           print "···· phone command path ····"
         }
         print tag " " $0

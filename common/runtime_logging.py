@@ -120,6 +120,9 @@ ANSI_CYAN = "\033[36m"
 ANSI_MAGENTA = "\033[35m"
 ANSI_RED = "\033[31m"
 ANSI_GRAY = "\033[90m"
+ANSI_BOLD_GREEN = "\033[1;32m"
+ANSI_BOLD_RED = "\033[1;31m"
+ANSI_BOLD_BLUE = "\033[1;34m"
 
 
 def _color_mode(default: str = "auto") -> str:
@@ -140,20 +143,46 @@ def should_use_console_color(
     """Resolve ANSI color policy for operator console output only."""
     if _env_truthy("NO_COLOR"):
         return False
-    if _env_truthy("FORCE_COLOR"):
-        return True
     mode = _color_mode() if color_mode is None else str(color_mode or "auto").strip().lower()
     if mode == "never":
         return False
-    if mode == "always":
-        return True
     if sink_provided and stream is None:
         return False
     stream = stream if stream is not None else sys.stdout
     try:
-        return bool(stream.isatty())
+        is_tty = bool(stream.isatty())
     except Exception:
         return False
+    if not is_tty:
+        return False
+    if _env_truthy("FORCE_COLOR"):
+        return True
+    if mode == "always":
+        return True
+    return True
+
+
+def should_use_console_emoji(
+    stream: Optional[Any] = None,
+    *,
+    sink_provided: bool = False,
+) -> bool:
+    mode = str(os.getenv("ROBOT_CONSOLE_EMOJI", "auto") or "auto").strip().lower()
+    if mode == "never":
+        return False
+    if sink_provided and stream is None:
+        stream = sys.stdout
+    stream = stream if stream is not None else sys.stdout
+    encoding = str(getattr(stream, "encoding", "") or "").lower()
+    can_encode = "utf" in encoding or mode == "always"
+    if not can_encode:
+        return False
+    if mode == "always":
+        return True
+    term = str(os.getenv("TERM", "") or "").strip().lower()
+    if term == "dumb":
+        return False
+    return True
 
 
 def _ansi(text: str, color: str) -> str:
@@ -165,6 +194,23 @@ def colorize_operator_line(line: str, enabled: bool = True) -> str:
     text = str(line or "")
     if not enabled or not text:
         return text
+
+    if "[DEMO][SUCCESS]" in text or "DEMO SUCCESS" in text:
+        return _ansi(text, ANSI_BOLD_GREEN)
+    if "[DEMO][FAILED]" in text or "DEMO FAILED" in text:
+        return _ansi(text, ANSI_BOLD_RED)
+    if "[DEMO][IDLE" in text:
+        return _ansi(text, ANSI_BOLD_BLUE)
+    if "[DEMO][DRY_RUN]" in text:
+        return _ansi(text, ANSI_YELLOW)
+    if "[DEMO][PHONE]" in text or "[DEMO][START]" in text:
+        return _ansi(text, ANSI_MAGENTA)
+    if "[DEMO][HEALTH]" in text:
+        return _ansi(text, ANSI_CYAN)
+    if "[DEMO][PREVIEW]" in text or "[DEMO][WARN]" in text or "[DEMO][RECOVER]" in text:
+        return _ansi(text, ANSI_YELLOW)
+    if "[DEMO]" in text:
+        return _ansi(text, ANSI_BOLD_CYAN)
 
     replacements = (
         ("[VISTA]", _ansi("[VISTA]", ANSI_BLUE)),
@@ -234,6 +280,27 @@ class OperatorConsole:
             return False
         self._sink(colorize_operator_line(text, self._color_enabled))
         return True
+
+    def emit_demo_block(self, lines: Iterable[str], level: str = "info") -> bool:
+        if not self.enabled:
+            return False
+        color = {
+            "success": ANSI_BOLD_GREEN,
+            "failed": ANSI_BOLD_RED,
+            "idle": ANSI_BOLD_BLUE,
+            "warning": ANSI_YELLOW,
+        }.get(str(level or "").strip().lower(), "")
+        emitted = False
+        for line in lines:
+            text = str(line or "").rstrip()
+            if not text:
+                continue
+            if self._color_enabled and color:
+                self._sink(_ansi(text, color))
+            else:
+                self._sink(text)
+            emitted = True
+        return emitted
 
     def emit_change(self, key: str, line: str) -> bool:
         key = str(key or "default").strip() or "default"

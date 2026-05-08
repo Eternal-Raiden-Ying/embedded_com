@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional, Set, Tuple
 
 from common.base_module import BaseModule
+from common.console_presenter import DemoConsolePresenter
 from common.runtime_logging import OperatorConsole, RunLogger, ensure_dir, safe_dump
 from orchestrator_service.ipc.transport import JsonlClientSender, JsonlInboundServer
 
@@ -337,6 +338,10 @@ class MobileGatewayService(BaseModule):
             mode=os.getenv("ORCH_CONSOLE_MODE", "operator"),
             default_interval_s=float(os.getenv("ORCH_OPERATOR_SUMMARY_INTERVAL_S", "1.0") or 1.0),
         )
+        self.demo_console = DemoConsolePresenter(
+            self.operator_console,
+            dry_run=str(os.getenv("ORCH_SERIAL_DRY_RUN", "1")).strip().lower() in {"1", "true", "yes", "on"},
+        )
         self._last_status_ts = 0.0
         self._last_heartbeat_emit_ts = 0.0
         self._last_heartbeat_log_ts = 0.0
@@ -595,6 +600,8 @@ class MobileGatewayService(BaseModule):
             "session_id": command.session_id,
             "target": command.target,
         })
+        if command.cmd not in {"query_status", "stop"}:
+            self.demo_console.phone_command(command.target or "n/a")
         self._publish_gateway_ack(command.to_dict(), accepted=True, message="gateway command accepted")
         if command.cmd != "stop" and self._in_stop_cooldown():
             self._publish_status(make_error_status(
@@ -837,6 +844,9 @@ class MobileGatewayService(BaseModule):
             fallback=str(payload.get("last_fail_reason") or payload.get("last_enter_reason") or raw_state).strip(),
             error_info=error_info,
         )
+        recoverable_message = self._recoverable_backend_warning(payload)
+        if recoverable_message and error_info is None:
+            message = recoverable_message
         target = str(payload.get("active_target") or self._snapshot.get("target") or "").strip() or None
         payload_session_id = str(payload.get("session_id") or "")
         session_id = str(payload_session_id or self._snapshot.get("session_id") or "")
@@ -1038,6 +1048,8 @@ class MobileGatewayService(BaseModule):
             "cmd": ack.get("cmd"),
             "session_id": ack.get("session_id"),
         })
+        if bool(accepted) and str(ack.get("cmd") or "").strip() not in {"query_status", "stop"}:
+            self.demo_console.phone_accepted()
         if self.cfg.runtime.status_stdout:
             print(json.dumps(ack, ensure_ascii=False))
         if self.mqtt_adapter is not None:
@@ -1118,6 +1130,34 @@ class MobileGatewayService(BaseModule):
             }
         return None
 
+    def _recoverable_backend_warning(self, payload: Dict[str, Any]) -> str:
+        tokens: List[str] = []
+        for key in ("last_enter_reason", "last_fail_reason", "reason", "message"):
+            value = payload.get(key)
+            if value not in (None, ""):
+                tokens.append(str(value))
+        edge_quality = payload.get("edge_quality")
+        if isinstance(edge_quality, dict):
+            for key in ("reason", "stop_reason"):
+                value = edge_quality.get(key)
+                if value not in (None, ""):
+                    tokens.append(str(value))
+        lowered = " | ".join(tokens).lower()
+        if "edge_distance_out_of_tolerance_after_retries" in lowered:
+            return ""
+        recoverable = {
+            "edge_distance_out_of_tolerance": "桌边距离偏离，正在重新调整",
+            "edge_identity_mismatch": "桌边识别不稳定，正在重新调整",
+            "edge_follow_stale": "桌边观测延迟，正在重新调整",
+            "conf_low": "识别置信度偏低，继续观察",
+            "edge_conf_low": "桌边置信度偏低，继续观察",
+            "target_lost": "目标暂时丢失，继续搜索",
+        }
+        for token, message in recoverable.items():
+            if token in lowered:
+                return message
+        return ""
+
     def _task_ack_message(
         self,
         payload: Dict[str, Any],
@@ -1149,6 +1189,9 @@ class MobileGatewayService(BaseModule):
     ) -> str:
         if error_info is not None:
             return str(error_info["message"])
+        warning_message = self._recoverable_backend_warning({"state": raw_state, "last_enter_reason": fallback})
+        if warning_message:
+            return warning_message
         if raw_state == "SEARCH_TABLE":
             return "正在寻找桌边"
         if raw_state == "COARSE_ALIGN":
@@ -1163,6 +1206,10 @@ class MobileGatewayService(BaseModule):
             return "目标检测暂不可用"
         if raw_state == "DOCK_RETRY":
             return "锁边未完成，正在重试"
+        if raw_state == "ERROR_RECOVERY":
+            if "edge_distance_out_of_tolerance_after_retries" in str(fallback or "").lower():
+                return "任务失败，无法稳定锁定桌边。"
+            return fallback or "任务失败"
         if raw_state in {"TARGET_LOCKED", "GRASPING", "CONTROLLED_APPROACH", "FINAL_LOCK", "AT_TABLE_EDGE"}:
             return f"正在执行取物任务，目标 {target}" if target else "正在执行取物任务"
         if raw_state in {"STOP", "STOPPED"}:

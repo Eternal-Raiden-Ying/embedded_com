@@ -5,9 +5,13 @@ import queue
 import signal
 import time
 import os
+from collections import deque
 from typing import Any, Dict, List, Optional
 
 from ..bridge.arm_protocol import encode_pose, parse_arm_response
+from common.console_presenter import DemoConsolePresenter
+from common.base_module import BaseModule
+from common.runtime_logging import OperatorConsole
 from ..bridge.simple_car_protocol import SimpleCarMapper, parse_car_state_line
 from ..bridge.uart_bridge import UartBridge
 from ..config.schema import OrchestratorConfig, SocketEndpoint
@@ -23,8 +27,6 @@ from ..ipc.protocol import (
 from ..ipc.transport import AsyncJsonlClientSender, JsonlClientSender, JsonlInboundServer
 from .common import RunLogger, ensure_dir, safe_dump
 from .state_machine import OrchestratorCore
-from common.base_module import BaseModule
-from common.runtime_logging import OperatorConsole
 
 
 class OrchestratorService(BaseModule):
@@ -41,6 +43,7 @@ class OrchestratorService(BaseModule):
             mode=os.getenv("ORCH_CONSOLE_MODE", "operator"),
             default_interval_s=self._env_float("ORCH_OPERATOR_SUMMARY_INTERVAL_S", 1.0),
         )
+        self.demo_console = DemoConsolePresenter(self.operator_console, dry_run=cfg.serial.dry_run)
         self._ipc_console_enabled = self._env_bool("ORCH_IPC_CONSOLE", False)
         self._heartbeat_console_enabled = self._env_bool("ORCH_HEARTBEAT_CONSOLE", False)
         self._uart_console_mode = self._env_choice("ORCH_UART_CONSOLE", "operator", {"operator", "full", "silent"})
@@ -48,6 +51,8 @@ class OrchestratorService(BaseModule):
         self._last_obs_flags = {"table_edge": False, "target": False}
         self._last_target_obs_console_payload: Dict[str, Any] = {}
         self._last_target_search_req_console_key = ""
+        self._demo_start_pending_target = ""
+        self._demo_deferred_phases: List[tuple] = []
         self._pending_state_traces: List[Dict[str, Any]] = []
         self._last_edge_slide_trace_ts = 0.0
         self._last_edge_slide_obs_key = None
@@ -63,6 +68,8 @@ class OrchestratorService(BaseModule):
         self._last_vision_obs_recv_ts = 0.0
         self._last_home_obs_recv_ts = 0.0
         self._last_uart_tx_ts = 0.0
+        self._edge_obs_rate_ts = deque(maxlen=128)
+        self._target_obs_rate_ts = deque(maxlen=128)
         self._last_tx_summary: Dict[str, float] = {
             "task_ack_out": 0.0,
             "vision_req_out": 0.0,
@@ -181,6 +188,54 @@ class OrchestratorService(BaseModule):
     def _operator_emit(self, line: str) -> bool:
         return self.operator_console.emit(line)
 
+    def _emit_demo_dry_run_notice(self, key: str) -> None:
+        self.demo_console.dry_run = bool(getattr(self.cfg.serial, "dry_run", False))
+        self.demo_console.dry_run_notice()
+
+    def _demo_next_state(self) -> str:
+        return str(os.getenv("ORCH_DEMO_NEXT_STATE", "IDLE_HOT") or "IDLE_HOT").strip().upper()
+
+    def _demo_preview_text(self) -> str:
+        return str(os.getenv("ORCH_DEMO_PREVIEW_TEXT", "kept alive") or "kept alive").strip()
+
+    def _demo_reason(self, reason: str, *, failed: bool = False) -> str:
+        text = " ".join(str(reason or "").strip().split())
+        lowered = text.lower()
+        if "edge_distance_out_of_tolerance_after_retries" in lowered:
+            return "edge_distance_out_of_tolerance_after_retries"
+        if "已在桌边锁定" in text:
+            return "target_locked"
+        if "已返回起点" in text:
+            return "returned_home"
+        if "当前桌边未找到目标" in text or "target_not_found" in lowered:
+            return "target_not_found"
+        if "搜索桌边超时" in text or "table_not_found" in lowered:
+            return "table_not_found"
+        if "timeout" in lowered or "超时" in text:
+            return "timeout"
+        if not text:
+            return "failed" if failed else "task_done"
+        return text
+
+    def _emit_demo_task_finished(self, *, success: bool, reason: str) -> None:
+        self._emit_demo_dry_run_notice("task_end")
+        target = getattr(self.core.ctx, "active_target", "") or "n/a"
+        if success:
+            self.demo_console.success_banner(
+                target=target,
+                next_state=self._demo_next_state(),
+                preview=self._demo_preview_text(),
+            )
+        else:
+            self.demo_console.failed_banner(
+                target=target,
+                reason=self._demo_reason(reason, failed=True),
+                next_state=self._demo_next_state(),
+            )
+
+    def _emit_demo_idle_hot(self) -> None:
+        self.demo_console.idle_hot(next_state=self._demo_next_state(), preview=self._demo_preview_text())
+
     def _endpoint_for_channel(self, channel: str) -> Optional[SocketEndpoint]:
         return {
             "task_cmd_in": self.cfg.task_cmd_in,
@@ -258,10 +313,49 @@ class OrchestratorService(BaseModule):
             "state",
             f"[ORCH] STATE {old_state} -> {new_state} reason={reason}",
         )
+        if self._demo_start_pending_target and new_state in {"SEARCH_TABLE", "RETURN_HOME"}:
+            self._demo_deferred_phases.append((old_state, new_state, reason))
+        else:
+            self._emit_demo_phase(old_state, new_state, reason)
         if new_state == "DONE":
             self.operator_console.emit_change("task_done", self._task_done_summary_line(reason))
+            self._emit_demo_task_finished(success=True, reason=reason)
+        if new_state == "ERROR_RECOVERY":
+            self._emit_demo_task_finished(success=False, reason=reason)
         if old_state == "DONE" and new_state == "IDLE":
             self.operator_console.emit_change("idle_after_done", "[ORCH][IDLE] task finished, waiting for next command")
+            self._emit_demo_idle_hot()
+        if old_state == "ERROR_RECOVERY" and new_state == "IDLE":
+            self._emit_demo_idle_hot()
+
+    def _emit_demo_phase(self, old_state: str, new_state: str, reason: str) -> None:
+        target = getattr(self.core.ctx, "active_target", "") or "target"
+        if new_state == "SEARCH_TABLE":
+            self.demo_console.table_phase("searching")
+        elif new_state == "COARSE_ALIGN":
+            self.demo_console.table_phase("aligning")
+        elif new_state == "CONTROLLED_APPROACH":
+            self.demo_console.table_phase("approaching")
+        elif new_state == "FINAL_LOCK":
+            self.demo_console.table_phase("final_locking")
+            if "edge_distance_out_of_tolerance" in str(reason or ""):
+                self.demo_console.recover("edge distance out of range, re-locking table edge")
+        elif new_state in {"AT_TABLE_EDGE", "SEARCH_TARGET_INIT"}:
+            self.demo_console.table_phase("locked")
+        elif new_state == "EDGE_SLIDE_SEARCH":
+            self.demo_console.target_phase("searching", target)
+        elif new_state == "TARGET_CONFIRM":
+            self.demo_console.target_phase("candidate", target)
+        elif new_state in {"TARGET_LOCKED", "FREEZE_BASE"}:
+            self.demo_console.target_phase("locked", target)
+        elif old_state == "EDGE_SLIDE_SEARCH" and new_state in {"LEAVE_EDGE", "NEXT_TABLE"}:
+            self.demo_console.target_phase("relocating", target)
+
+    def _flush_demo_deferred_phases(self) -> None:
+        pending = list(getattr(self, "_demo_deferred_phases", []) or [])
+        self._demo_deferred_phases = []
+        for old_state, new_state, reason in pending:
+            self._emit_demo_phase(old_state, new_state, reason)
 
     def _task_done_summary_line(self, reason: str) -> str:
         ctx = self.core.ctx
@@ -925,7 +1019,16 @@ class OrchestratorService(BaseModule):
                 )
                 self.run_logger.write_timeline("TASK_CMD_BAD", payload=safe_dump(payload), error=str(exc))
                 continue
+            if cmd.intent in {"FIND", "RETURN"}:
+                self._demo_start_pending_target = cmd.target or ("return_home" if cmd.intent == "RETURN" else "n/a")
             accepted, reason = self.core.handle_task_cmd(cmd)
+            if accepted and cmd.intent in {"FIND", "RETURN"}:
+                self.demo_console.dry_run = bool(getattr(self.cfg.serial, "dry_run", False))
+                self.demo_console.task_start(self._demo_start_pending_target)
+                self._flush_demo_deferred_phases()
+            else:
+                self._demo_deferred_phases = []
+            self._demo_start_pending_target = ""
             self.operator_console.emit_change(
                 f"task:{cmd.session_id}:{cmd.epoch}:{cmd.cmd_id}",
                 f"[ORCH] TASK cmd={cmd.intent.lower()} target={cmd.target or ''} session={cmd.session_id or ''} epoch={cmd.epoch}",
@@ -1016,6 +1119,7 @@ class OrchestratorService(BaseModule):
                 try:
                     if msg_type == "table_edge_obs":
                         parsed = TableEdgeObs.from_dict(payload)
+                        self._edge_obs_rate_ts.append(recv_ts)
                         if priority >= latest_table_priority:
                             latest_table = parsed
                             latest_table_priority = priority
@@ -1082,6 +1186,7 @@ class OrchestratorService(BaseModule):
                         )
                     elif msg_type == "target_obs":
                         parsed = TargetObs.from_dict(payload)
+                        self._target_obs_rate_ts.append(recv_ts)
                         if priority >= latest_target_priority:
                             latest_target = parsed
                             latest_target_priority = priority
@@ -1502,6 +1607,7 @@ class OrchestratorService(BaseModule):
     def _emit_operator_control(self, decision) -> None:
         summary = self._control_summary_with_context(decision)
         state = str(summary.get("state") or self.core.ctx.state.value)
+        self._emit_demo_health(summary)
         if state in {"IDLE", "DONE", "ERROR_RECOVERY"} and not self.operator_console.full:
             return
         line = self._operator_control_line(summary)
@@ -1511,6 +1617,63 @@ class OrchestratorService(BaseModule):
             period_s = max(0.1, float(getattr(self.cfg.control, "edge_follow_log_period_ms", 500) or 500) / 1000.0)
         self.operator_console.emit_rate_limited(key, line, period_s)
         self._emit_target_obs_missing_warning()
+
+    def _rate_hz(self, samples, window_s: float = 5.0) -> float:
+        now = time.time()
+        cutoff = now - max(1.0, float(window_s))
+        recent = [float(ts) for ts in list(samples) if float(ts) >= cutoff]
+        return float(len(recent)) / max(1.0, float(window_s))
+
+    def _emit_demo_health(self, summary: Dict[str, Any]) -> None:
+        if str(getattr(self.demo_console, "level", "normal")) == "demo":
+            return
+        state = str(summary.get("state") or self.core.ctx.state.value)
+        if state == "IDLE":
+            self.demo_console.emit_change("idle_waiting", "[DEMO][IDLE] waiting for command")
+            self.demo_console.health(
+                {
+                    "state": "IDLE",
+                    "target": "n/a",
+                    "edge": "OFF",
+                    "yolo": "OFF",
+                    "preview": os.getenv("ORCH_DEMO_PREVIEW_STATUS", "n/a") or "n/a",
+                    "dry_run": bool(self.cfg.serial.dry_run),
+                    "interval_s": 10.0,
+                }
+            )
+            return
+        edge_ok = bool(summary.get("edge_found") or summary.get("edge_valid"))
+        if bool(summary.get("edge_obs_is_stale")):
+            edge = "STALE"
+        else:
+            edge = "OK" if edge_ok else "MISS"
+        self.demo_console.health(
+            {
+                "state": state,
+                "target": self.core.ctx.active_target or "n/a",
+                "edge": edge,
+                "edge_hz": self._rate_hz(self._edge_obs_rate_ts),
+                "yolo_hz": self._rate_hz(self._target_obs_rate_ts),
+                "preview": os.getenv("ORCH_DEMO_PREVIEW_STATUS", "n/a") or "n/a",
+                "dry_run": bool(self.cfg.serial.dry_run),
+            }
+        )
+        if state == "EDGE_SLIDE_SEARCH":
+            cmd = dict(summary.get("cmd") or {})
+            if summary.get("stop_reason") == "edge_distance_out_of_tolerance":
+                dist = summary.get("dist_err_m")
+                tol = summary.get("dist_tolerance_m", self.cfg.control.edge_slide_dist_tolerance_m)
+                try:
+                    dist_text = f"{float(dist):+.3f}m"
+                except Exception:
+                    dist_text = "n/a"
+                try:
+                    tol_text = f"{float(tol):.3f}m"
+                except Exception:
+                    tol_text = "n/a"
+                self.demo_console.warning(f"edge distance out of tolerance: dist={dist_text} tol={tol_text}, re-locking edge")
+            if any(abs(float(cmd.get(k, 0.0) or 0.0)) > 1e-6 for k in ("vx", "vy", "wz")):
+                self.demo_console.slide_intent(cmd.get("vx"), cmd.get("vy"), cmd.get("wz"))
 
     def _emit_motion(self, decision):
         if getattr(decision, "arm_cmd", None) is not None:
