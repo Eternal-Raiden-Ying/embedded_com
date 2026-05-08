@@ -22,6 +22,9 @@ edge_slide_search:
   strong_edge_conf_track_local: 0.35
   weak_edge_conf_track_local: 0.15
   keep_dist_tolerance_m: 0.05
+  dist_out_of_range_hold_ms: 800
+  max_relock_attempts: 3
+  relock_failure_is_fatal: true
   pause_hold_ms: 800
   recover_timeout_ms: 2500
   edge_lost_hold_ms: 1200

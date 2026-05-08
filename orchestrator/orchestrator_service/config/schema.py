@@ -112,6 +112,9 @@ class ControlThresholds:
     edge_slide_dist_tolerance_m: float = 0.05
     edge_slide_fallback_state: str = "FINAL_LOCK"
     edge_slide_pause_hold_s: float = 0.80
+    edge_slide_dist_out_of_range_hold_s: float = 0.80
+    edge_slide_max_relock_attempts: int = 3
+    edge_slide_relock_failure_is_fatal: bool = True
     edge_slide_recover_timeout_s: float = 2.50
     edge_slide_direct_fallback_to_controlled_approach: bool = False
     table_edge_obs_max_age_ms: int = 500

@@ -103,6 +103,7 @@ class RuntimeContext:
     avoid_clear_frames: int = 0
     avoid_retry_count: int = 0
     dock_retry_count: int = 0
+    edge_slide_relock_attempts: int = 0
 
     table_loss_since_mono: float = 0.0
     target_loss_since_mono: float = 0.0
@@ -209,6 +210,7 @@ class RuntimeContext:
         self.table_cycle_count = 0
         self.avoid_retry_count = 0
         self.dock_retry_count = 0
+        self.edge_slide_relock_attempts = 0
         self.vision_req_fail_streak = 0
         self.task_slide_entries_count = 0
         self.task_target_confirm_count = 0
