@@ -86,6 +86,13 @@ class ControlThresholds:
     final_lock_yaw_tol_rad: float = 0.04
     final_lock_dist_tol_m: float = 0.03
     final_lock_lateral_tol_m: float = 0.03
+    table_target_dist_m: float = 0.015
+    table_dist_tol_m: float = 0.03
+    table_yaw_tol_rad: float = 0.04
+    table_stop_margin_m: float = 0.05
+    table_settle_s: float = 0.30
+    table_stable_frames: int = 3
+    table_max_micro_adjust: int = 4
     edge_settle_s: float = 0.80
     dock_retry_limit: int = 2
     dock_retry_backoff_s: float = 0.60

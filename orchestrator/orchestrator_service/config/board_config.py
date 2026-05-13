@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any, Dict
@@ -133,6 +134,13 @@ def _apply_stage_params(data: Dict[str, Any]) -> None:
 
     CONFIG.control.final_lock_yaw_tol_rad = float(final_lock.get("yaw_abs_th", CONFIG.control.final_lock_yaw_tol_rad))
     CONFIG.control.final_lock_dist_tol_m = float(final_lock.get("dist_abs_th_m", CONFIG.control.final_lock_dist_tol_m))
+    CONFIG.control.table_yaw_tol_rad = float(final_lock.get("yaw_abs_th", CONFIG.control.table_yaw_tol_rad))
+    CONFIG.control.table_dist_tol_m = float(final_lock.get("dist_abs_th_m", CONFIG.control.table_dist_tol_m))
+    CONFIG.control.table_target_dist_m = float(final_lock.get("target_dist_m", CONFIG.control.table_target_dist_m))
+    CONFIG.control.table_stop_margin_m = float(final_lock.get("stop_margin_m", CONFIG.control.table_stop_margin_m))
+    CONFIG.control.table_settle_s = _ms_to_s(final_lock.get("settle_ms"), CONFIG.control.table_settle_s)
+    CONFIG.control.table_stable_frames = int(final_lock.get("stable_frames", CONFIG.control.table_stable_frames))
+    CONFIG.control.table_max_micro_adjust = int(final_lock.get("max_micro_adjust", CONFIG.control.table_max_micro_adjust))
     CONFIG.docking.min_confidence = float(final_lock.get("edge_conf_th", CONFIG.docking.min_confidence))
     CONFIG.control.final_lock_frames_to_arrive = _ms_to_frames(
         final_lock.get("stable_ms"),
@@ -307,6 +315,13 @@ CONFIG.control.final_lock_frames_to_arrive = _env_int("ORCH_FINAL_LOCK_FRAMES", 
 CONFIG.control.final_lock_yaw_tol_rad = _env_float("ORCH_FINAL_LOCK_YAW_TOL", CONFIG.control.final_lock_yaw_tol_rad)
 CONFIG.control.final_lock_dist_tol_m = _env_float("ORCH_FINAL_LOCK_DIST_TOL", CONFIG.control.final_lock_dist_tol_m)
 CONFIG.control.final_lock_lateral_tol_m = _env_float("ORCH_FINAL_LOCK_LAT_TOL", CONFIG.control.final_lock_lateral_tol_m)
+CONFIG.control.table_target_dist_m = _env_float("ORCH_TABLE_TARGET_DIST_CM", CONFIG.control.table_target_dist_m * 100.0) / 100.0
+CONFIG.control.table_dist_tol_m = _env_float("ORCH_TABLE_DIST_TOL_CM", CONFIG.control.table_dist_tol_m * 100.0) / 100.0
+CONFIG.control.table_yaw_tol_rad = math.radians(_env_float("ORCH_TABLE_YAW_TOL_DEG", math.degrees(CONFIG.control.table_yaw_tol_rad)))
+CONFIG.control.table_stop_margin_m = _env_float("ORCH_TABLE_STOP_MARGIN_CM", CONFIG.control.table_stop_margin_m * 100.0) / 100.0
+CONFIG.control.table_settle_s = _env_float("ORCH_TABLE_SETTLE_MS", CONFIG.control.table_settle_s * 1000.0) / 1000.0
+CONFIG.control.table_stable_frames = _env_int("ORCH_TABLE_STABLE_FRAMES", CONFIG.control.table_stable_frames)
+CONFIG.control.table_max_micro_adjust = _env_int("ORCH_TABLE_MAX_MICRO_ADJUST", CONFIG.control.table_max_micro_adjust)
 CONFIG.control.edge_settle_s = _env_float("ORCH_EDGE_SETTLE_S", CONFIG.control.edge_settle_s)
 CONFIG.control.dock_retry_limit = _env_int("ORCH_DOCK_RETRY_LIMIT", CONFIG.control.dock_retry_limit)
 CONFIG.control.dock_retry_backoff_s = _env_float("ORCH_DOCK_RETRY_BACKOFF_S", CONFIG.control.dock_retry_backoff_s)

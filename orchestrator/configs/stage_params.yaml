@@ -4,6 +4,11 @@ final_lock:
   edge_conf_th: 0.55
   stable_ms: 300
   timeout_ms: 14000
+  target_dist_m: 0.015
+  stop_margin_m: 0.05
+  settle_ms: 300
+  stable_frames: 3
+  max_micro_adjust: 4
 
 controlled_approach:
   target_dist_m: 0.015

@@ -280,6 +280,8 @@ class OrchestratorCore:
             "table_found_frames": self.ctx.table_found_frames,
             "table_lost_frames": self.ctx.table_lost_frames,
             "table_lock_frames": self.ctx.table_lock_frames,
+            "table_dock_phase": str(self.ctx.table_dock_phase or ""),
+            "table_micro_adjust_count": int(self.ctx.table_micro_adjust_count),
             "approach_aligned_frames": self.ctx.approach_aligned_frames,
             "target_found_frames": self.ctx.target_found_frames,
             "target_lost_frames": self.ctx.target_lost_frames,
@@ -525,6 +527,10 @@ class OrchestratorCore:
             "locked_lost_hold_ms": int(round(float(self.cfg.target_lock_lost_hold_s) * 1000.0)),
             "freeze_after_locked_ms": int(round(float(self.cfg.target_locked_freeze_after_s) * 1000.0)),
             "edge_settle_ms": int(round(float(self.cfg.edge_settle_s) * 1000.0)),
+            "table_stable_frames": int(getattr(self.cfg, "table_stable_frames", self.cfg.final_lock_frames_to_arrive)),
+            "table_settle_ms": int(round(float(getattr(self.cfg, "table_settle_s", 0.3)) * 1000.0)),
+            "table_stop_margin_m": float(getattr(self.cfg, "table_stop_margin_m", 0.05)),
+            "table_max_micro_adjust": int(getattr(self.cfg, "table_max_micro_adjust", 4)),
             "search_target_init_hold_ms": int(round(float(self.cfg.search_target_init_hold_s) * 1000.0)),
             "target_lock_settle_ms": int(round(float(self.cfg.target_lock_settle_s) * 1000.0)),
             "freeze_settle_ms": int(round(float(self.cfg.freeze_settle_s) * 1000.0)),
@@ -974,24 +980,58 @@ class OrchestratorCore:
             self._log_final_lock_summary(obs, lock_ready=False, reason=reason, stable_count=self.ctx.table_lock_frames)
             return self._handle_table_loss("最终锁边时桌边丢失，回到搜索", State.SEARCH_TABLE, "FINAL_LOCK_HOLD")
         self._reset_table_loss()
-        lock_status = self._final_lock_status(obs, stable_count=self.ctx.table_lock_frames)
-        if bool(lock_status["lock_ready"]):
-            self.ctx.table_lock_frames += 1
-            if self.ctx.table_lock_frames >= int(self.cfg.final_lock_frames_to_arrive):
-                self.ctx.dock_retry_count = 0
-                self._log_final_lock_summary(obs, lock_ready=True, reason="lock_ready", stable_count=self.ctx.table_lock_frames)
-                self._capture_locked_edge(obs)
-                self._transition(State.AT_TABLE_EDGE, "lock_ready")
-                self._queue_tts("已完成桌边停靠")
-                return self.controller.stop_cmd("AT_TABLE_EDGE")
-        else:
+
+        phase = str(self.ctx.table_dock_phase or "APPROACH").upper()
+        if phase == "APPROACH":
+            if self._table_dock_should_stop(obs):
+                self.ctx.table_stop_sent = True
+                self._enter_table_dock_phase("STOP_AND_SETTLE", "[TABLE_DOCK][STOP] dist reached stop window")
+                self._log("info", "[TABLE_DOCK][SETTLE] begin after STOP")
+                return self.controller.stop_cmd("FINAL_LOCK")
+            if self._state_elapsed() >= float(self.cfg.approach_timeout_s):
+                status = self._final_lock_status(obs, stable_count=self.ctx.table_lock_frames)
+                self._log_final_lock_summary(obs, lock_ready=False, reason=str(status["reason"]), stable_count=self.ctx.table_lock_frames)
+                return self._enter_dock_retry_or_next(f"最终锁边超时:{status['reason']}")
+            self._maybe_resend_req(self._active_req_payload())
+            return self.controller.final_lock_cmd(obs)
+
+        if phase == "STOP_AND_SETTLE":
+            settle_s = max(0.0, float(getattr(self.cfg, "table_settle_s", 0.30)))
+            if monotonic_ts() - float(self.ctx.table_dock_phase_since_mono or 0.0) < settle_s:
+                return self.controller.stop_cmd("FINAL_LOCK")
+            lock_status = self._final_lock_status(obs, stable_count=self.ctx.table_lock_frames)
+            if bool(lock_status["lock_ready"]):
+                self.ctx.table_lock_frames += 1
+                self._log(
+                    "info",
+                    "[TABLE_DOCK][STABLE] "
+                    f"frames={self.ctx.table_lock_frames}/{max(1, int(self.cfg.table_stable_frames))} "
+                    f"dist_err={obs.dist_err_m} yaw_err={obs.yaw_err_rad}",
+                )
+                if self.ctx.table_lock_frames >= max(1, int(self.cfg.table_stable_frames)):
+                    self.ctx.dock_retry_count = 0
+                    self._log_final_lock_summary(obs, lock_ready=True, reason="lock_ready", stable_count=self.ctx.table_lock_frames)
+                    self._capture_locked_edge(obs)
+                    self._log("info", "[TABLE_DOCK][DONE] stable final lock confirmed")
+                    self._transition(State.AT_TABLE_EDGE, "lock_ready")
+                    self._queue_tts("已完成桌边停靠")
+                    return self.controller.stop_cmd("AT_TABLE_EDGE")
+                return self.controller.stop_cmd("FINAL_LOCK")
+
             self.ctx.table_lock_frames = 0
+            self._enter_table_dock_phase("MICRO_ADJUST", f"[TABLE_DOCK][SETTLE] done reason={lock_status['reason']}")
+
+        if str(self.ctx.table_dock_phase or "").upper() == "MICRO_ADJUST":
+            decision = self._table_dock_micro_adjust(obs)
+            if decision is not None:
+                return decision
+
         if self._state_elapsed() >= float(self.cfg.approach_timeout_s):
-            reason = "stable_count_not_enough" if bool(lock_status["lock_ready"]) else str(lock_status["reason"])
-            self._log_final_lock_summary(obs, lock_ready=False, reason=reason, stable_count=self.ctx.table_lock_frames)
-            return self._enter_dock_retry_or_next(f"最终锁边超时:{reason}")
+            status = self._final_lock_status(obs, stable_count=self.ctx.table_lock_frames)
+            self._log_final_lock_summary(obs, lock_ready=False, reason=str(status["reason"]), stable_count=self.ctx.table_lock_frames)
+            return self._enter_dock_retry_or_next(f"最终锁边超时:{status['reason']}")
         self._maybe_resend_req(self._active_req_payload())
-        return self.controller.final_lock_cmd(obs)
+        return self.controller.stop_cmd("FINAL_LOCK")
 
     def _tick_dock_retry(self) -> MotionDecision:
         if self._state_elapsed() < float(self.cfg.dock_retry_backoff_s):
@@ -2091,6 +2131,90 @@ class OrchestratorCore:
             return abs(float(obs.dist_err_m)) <= float(self.cfg.final_lock_dist_tol_m) * 2.0
         return bool(obs.edge_found)
 
+    def _table_target_dist_m(self, obs: Optional[TableEdgeObs] = None) -> float:
+        target = getattr(self.cfg, "table_target_dist_m", 0.015)
+        if obs is not None and obs.target_dist_m is not None:
+            target = obs.target_dist_m
+        try:
+            return max(0.0, float(target))
+        except Exception:
+            return 0.015
+
+    def _table_measured_dist_m(self, obs: Optional[TableEdgeObs]) -> Optional[float]:
+        if obs is None or obs.dist_err_m is None:
+            return None
+        return self._table_target_dist_m(obs) + float(obs.dist_err_m)
+
+    def _table_dock_should_stop(self, obs: Optional[TableEdgeObs]) -> bool:
+        measured = self._table_measured_dist_m(obs)
+        if measured is None:
+            return False
+        target = max(0.0, float(getattr(self.cfg, "table_target_dist_m", self._table_target_dist_m(obs)) or 0.0))
+        margin = max(0.0, float(getattr(self.cfg, "table_stop_margin_m", 0.05)))
+        return float(measured) <= target + margin
+
+    def _enter_table_dock_phase(self, phase: str, log_line: str = "") -> None:
+        phase = str(phase or "").upper()
+        if self.ctx.table_dock_phase != phase:
+            self.ctx.table_dock_phase = phase
+            self.ctx.table_dock_phase_since_mono = monotonic_ts()
+        if log_line:
+            self._log("info", log_line)
+
+    def _table_dock_micro_adjust(self, obs: Optional[TableEdgeObs]) -> Optional[MotionDecision]:
+        max_adjust = max(0, int(getattr(self.cfg, "table_max_micro_adjust", 4)))
+        if self.ctx.table_micro_adjust_count >= max_adjust:
+            reason = f"[TABLE_DOCK][FAIL] max_micro_adjust={max_adjust}"
+            self.ctx.last_fail_reason = reason
+            self._log("error", reason)
+            self._enter_error_recovery("最终锁边微调次数超限", tts_text="桌边停靠失败，请检查", interrupt_tts=True)
+            return self.controller.stop_cmd("ERROR_RECOVERY", brake=True)
+
+        status = self._final_lock_status(obs, stable_count=self.ctx.table_lock_frames)
+        action = ""
+        tag = ""
+        dist_delta = None
+        if obs is not None and obs.dist_err_m is not None:
+            measured = self._table_measured_dist_m(obs)
+            target = float(getattr(self.cfg, "table_target_dist_m", self._table_target_dist_m(obs)) or 0.0)
+            dist_delta = (float(measured) - target) if measured is not None else float(obs.dist_err_m)
+        dist_tol = float(getattr(self.cfg, "table_dist_tol_m", self.cfg.final_lock_dist_tol_m))
+        yaw_tol = float(getattr(self.cfg, "table_yaw_tol_rad", self.cfg.final_lock_yaw_tol_rad))
+
+        if dist_delta is not None and dist_delta > dist_tol:
+            action = "forward"
+            tag = "[TABLE_DOCK][JOG_FORWARD]"
+        elif dist_delta is not None and dist_delta < -dist_tol:
+            action = "backward"
+            tag = "[TABLE_DOCK][JOG_BACKWARD]"
+        elif obs is not None and obs.yaw_err_rad is not None and abs(float(obs.yaw_err_rad)) > yaw_tol:
+            action = "turn_left" if float(obs.yaw_err_rad) > 0.0 else "turn_right"
+            tag = "[TABLE_DOCK][JOG_TURN]"
+        else:
+            action = "forward" if str(status["reason"]) == "distance_too_far" else ""
+            tag = "[TABLE_DOCK][JOG_FORWARD]" if action else ""
+
+        if not action:
+            self._log("info", f"[TABLE_DOCK][SETTLE] no jog action reason={status['reason']}")
+            self._enter_table_dock_phase("STOP_AND_SETTLE")
+            return self.controller.stop_cmd("FINAL_LOCK")
+
+        self.ctx.table_micro_adjust_count += 1
+        reason = (
+            f"{tag} action={action} count={self.ctx.table_micro_adjust_count}/{max_adjust} "
+            f"reason={status['reason']} dist_delta={dist_delta} yaw_err={obs.yaw_err_rad if obs is not None else None}"
+        )
+        self._log("info", reason)
+        self.ctx.table_lock_frames = 0
+        self._enter_table_dock_phase("STOP_AND_SETTLE")
+        self._log("info", "[TABLE_DOCK][SETTLE] begin after JOG")
+        decision = self.controller.stop_cmd("FINAL_LOCK")
+        decision.jog_action = action
+        decision.jog_reason = reason
+        if decision.control_summary is not None:
+            decision.control_summary.update({"table_dock_phase": "MICRO_ADJUST", "jog_action": action, "reason": reason})
+        return decision
+
     def _final_lock_ready(self, obs: Optional[TableEdgeObs]) -> bool:
         return bool(self._final_lock_status(obs, stable_count=self.ctx.table_lock_frames)["lock_ready"])
 
@@ -2123,6 +2247,24 @@ class OrchestratorCore:
                 "lat_locked": False,
                 "stable_count": int(stable_count),
             }
+        if not self._edge_valid_for_follow(obs):
+            return {
+                "lock_ready": False,
+                "reason": "edge_invalid",
+                "yaw_locked": False,
+                "dist_locked": False,
+                "lat_locked": False,
+                "stable_count": int(stable_count),
+            }
+        if self._edge_obs_is_stale(obs):
+            return {
+                "lock_ready": False,
+                "reason": "vision_stale",
+                "yaw_locked": False,
+                "dist_locked": False,
+                "lat_locked": False,
+                "stable_count": int(stable_count),
+            }
         if float(obs.confidence or 0.0) < float(getattr(self.controller.docking.cfg, "min_confidence", 0.0)):
             return {
                 "lock_ready": False,
@@ -2141,16 +2283,21 @@ class OrchestratorCore:
                 "lat_locked": False,
                 "stable_count": int(stable_count),
             }
-        yaw_ok = obs.yaw_err_rad is not None and abs(float(obs.yaw_err_rad)) <= float(self.cfg.final_lock_yaw_tol_rad)
-        dist_ok = obs.dist_err_m is not None and abs(float(obs.dist_err_m)) <= float(self.cfg.final_lock_dist_tol_m)
+        yaw_tol = float(getattr(self.cfg, "table_yaw_tol_rad", self.cfg.final_lock_yaw_tol_rad))
+        dist_tol = float(getattr(self.cfg, "table_dist_tol_m", self.cfg.final_lock_dist_tol_m))
+        yaw_ok = obs.yaw_err_rad is not None and abs(float(obs.yaw_err_rad)) <= yaw_tol
+        measured_dist = self._table_measured_dist_m(obs)
+        target_dist = float(getattr(self.cfg, "table_target_dist_m", self._table_target_dist_m(obs)) or 0.0)
+        dist_delta = (float(measured_dist) - target_dist) if measured_dist is not None else None
+        dist_ok = dist_delta is not None and abs(float(dist_delta)) <= dist_tol
         lat_ok = obs.lateral_err_m is None or abs(float(obs.lateral_err_m)) <= float(self.cfg.final_lock_lateral_tol_m)
         reason = "stable_count_not_enough"
         if not yaw_ok:
             reason = "yaw_not_aligned"
-        elif obs.dist_err_m is None:
+        elif dist_delta is None:
             reason = "vision_stale"
         elif not dist_ok:
-            reason = "distance_too_far" if float(obs.dist_err_m) > 0 else "distance_too_close"
+            reason = "distance_too_far" if float(dist_delta) > 0 else "distance_too_close"
         elif not lat_ok:
             reason = "yaw_not_aligned"
         return {

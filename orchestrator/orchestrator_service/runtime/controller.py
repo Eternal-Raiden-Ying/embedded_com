@@ -17,6 +17,8 @@ class MotionDecision:
     distance_ratio: float = 0.0
     control_summary: Optional[Dict[str, Any]] = None
     arm_cmd: Optional[ArmCommand] = None
+    jog_action: str = ""
+    jog_reason: str = ""
 
 
 class MotionController:

@@ -94,6 +94,10 @@ class RuntimeContext:
     table_found_frames: int = 0
     table_lost_frames: int = 0
     table_lock_frames: int = 0
+    table_dock_phase: str = ""
+    table_dock_phase_since_mono: float = 0.0
+    table_micro_adjust_count: int = 0
+    table_stop_sent: bool = False
     approach_aligned_frames: int = 0
     target_found_frames: int = 0
     target_lost_frames: int = 0
@@ -134,6 +138,10 @@ class RuntimeContext:
         self.table_found_frames = 0
         self.table_lost_frames = 0
         self.table_lock_frames = 0
+        self.table_dock_phase = ""
+        self.table_dock_phase_since_mono = 0.0
+        self.table_micro_adjust_count = 0
+        self.table_stop_sent = False
         self.approach_aligned_frames = 0
         self.target_found_frames = 0
         self.target_lost_frames = 0

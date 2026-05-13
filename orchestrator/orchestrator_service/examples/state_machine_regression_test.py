@@ -48,7 +48,7 @@ def make_find_cmd(target: str = "apple") -> TaskCmd:
     )
 
 
-def make_table_obs(*, yaw=0.0, dist=0.20, edge_ready=False, table_cx=0.0, table_size=0.30, session_id="sess_test_find") -> TableEdgeObs:
+def make_table_obs(*, yaw=0.0, dist=0.20, edge_ready=False, table_cx=0.0, table_size=0.30, source_mode=None, session_id="sess_test_find") -> TableEdgeObs:
     return TableEdgeObs(
         ts=time.time(),
         table_found=True,
@@ -60,6 +60,7 @@ def make_table_obs(*, yaw=0.0, dist=0.20, edge_ready=False, table_cx=0.0, table_
         table_cx_norm=table_cx,
         table_size_norm=table_size,
         edge_ready=edge_ready,
+        source_mode=source_mode,
         session_id=session_id,
         epoch=1,
     )
@@ -117,8 +118,13 @@ def main():
     cfg.table_found_frames_to_approach = 2
     cfg.coarse_align_frames_to_advance = 2
     cfg.final_lock_frames_to_arrive = 2
+    cfg.table_settle_s = 0.0
+    cfg.table_stable_frames = 2
     cfg.edge_settle_s = 0.1
     cfg.search_target_init_hold_s = 0.05
+    cfg.edge_handoff_min_s = 0.01
+    cfg.edge_handoff_max_s = 0.01
+    cfg.edge_handoff_samples = 1
     cfg.target_found_frames_to_confirm = 2
     cfg.target_confirm_min_s = 0.0
     cfg.target_confirm_timeout_s = 1.0
@@ -165,12 +171,13 @@ def main():
     core.tick()
     assert_state(core, State.FINAL_LOCK, "edge ready should enter FINAL_LOCK")
 
-    for _ in range(2):
+    for _ in range(3):
         core.handle_table_obs(make_table_obs(yaw=0.01, dist=0.01, edge_ready=True, table_cx=0.0, table_size=0.60))
         core.tick()
     assert_state(core, State.AT_TABLE_EDGE, "final lock should reach AT_TABLE_EDGE")
 
     core.ctx.state_enter_mono = monotonic_ts() - 0.2
+    core.handle_table_obs(make_table_obs(yaw=0.01, dist=0.01, edge_ready=True, table_cx=0.0, table_size=0.60, source_mode="TRACK_LOCAL"))
     core.tick()
     assert_state(core, State.SEARCH_TARGET_INIT, "after settle should enter SEARCH_TARGET_INIT")
     assert_vision_req(

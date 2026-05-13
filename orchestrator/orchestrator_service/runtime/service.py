@@ -1896,6 +1896,10 @@ class OrchestratorService(BaseModule):
             self.uart.send_arm_command(arm_line)
             self.run_logger.write_jsonl("arm_cmd", arm.to_dict())
             return
+        jog_action = str(getattr(decision, "jog_action", "") or "").strip().lower()
+        if jog_action:
+            self._emit_jog_motion(decision, jog_action)
+            return
         cmd = decision.cmd
         self.run_logger.write_jsonl("cmd_vel", cmd.to_dict())
         self._emit_edge_slide_trace(decision)
@@ -1929,6 +1933,35 @@ class OrchestratorService(BaseModule):
         }
         car_record.update({k: v for k, v in tx_meta.items() if v not in (None, "")})
         self.run_logger.write_jsonl("car_cmd", car_record)
+
+    def _emit_jog_motion(self, decision, jog_action: str) -> None:
+        cmd = decision.cmd
+        self.run_logger.write_jsonl("cmd_vel", cmd.to_dict())
+        summary = dict(getattr(decision, "control_summary", None) or {})
+        self.run_logger.write_jsonl("control_summary", summary)
+        reason = str(getattr(decision, "jog_reason", "") or summary.get("reason") or jog_action)
+        if jog_action == "forward":
+            seq = self.motion_adapter.jog_forward_small(reason=reason)
+        elif jog_action == "backward":
+            seq = self.motion_adapter.jog_backward_small(reason=reason)
+        elif jog_action == "turn_left":
+            seq = self.motion_adapter.jog_turn_left_small(reason=reason)
+        elif jog_action == "turn_right":
+            seq = self.motion_adapter.jog_turn_right_small(reason=reason)
+        else:
+            self.log("warn", "runtime.service", f"unknown jog_action={jog_action}")
+            return
+        self.motion_status["last_seq"] = seq
+        self.motion_status["jog_running"] = True
+        self.run_logger.write_jsonl("car_cmd", {
+            "ts": time.time(),
+            "mode": str(getattr(cmd, "mode", "FINAL_LOCK") or "FINAL_LOCK"),
+            "kind": "stm32_jog",
+            "jog_action": jog_action,
+            "stm32_seq": seq,
+            "duration_ms": int(self.cfg.car.jog_duration_ms),
+            "reason": reason,
+        })
 
     def _emit_edge_slide_trace(self, decision) -> None:
         if str(getattr(self.core.ctx.state, "value", self.core.ctx.state) or "") != "EDGE_SLIDE_SEARCH":
