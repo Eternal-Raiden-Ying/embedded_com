@@ -164,7 +164,7 @@ class OpenCVPreviewSink(PreviewSink):
         status = dict(metadata.get("runtime_status") or {})
         mode = str(status.get("mode") or "").upper()
         target_name = str(target_obs.get("target") or metadata.get("target") or status.get("target") or "").strip()
-        panel, scale, offset = self._fit_with_transform(self._to_bgr(image, prefer_rgb=True), size)
+        panel, scale, offset = self._fit_with_transform(self._to_bgr(image, prefer_rgb=False), size)
         self._title(panel, "RGB")
         if mode == "TRACK_LOCAL":
             self._draw_detection_boxes(panel, local, scale, offset, target_name)
@@ -198,7 +198,7 @@ class OpenCVPreviewSink(PreviewSink):
     def _make_minimal_rgb_panel(self, image: Any, metadata: Dict[str, Any], size: Tuple[int, int], title: str = "RGB MINIMAL") -> np.ndarray:
         if not isinstance(image, np.ndarray) or image.size == 0:
             return self._blank(size, title, "rgb stale/null")
-        panel, _scale, _offset = self._fit_with_transform(self._to_bgr(image, prefer_rgb=True), size)
+        panel, _scale, _offset = self._fit_with_transform(self._to_bgr(image, prefer_rgb=False), size)
         self._title(panel, title)
         status = dict(metadata.get("runtime_status") or {})
         lines = [
