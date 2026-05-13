@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import queue
+import re
 import signal
 import time
 import os
@@ -83,6 +84,16 @@ class OrchestratorService(BaseModule):
         self._uart_lowfreq_last_emit_ts = 0.0
         self._uart_lowfreq_repeat_count = 0
         self._uart_lowfreq_last_payload: Optional[Dict[str, Any]] = None
+        self._motion_seq = 0
+        self._last_stm32_status_poll_ts = 0.0
+        self.motion_status: Dict[str, Any] = {
+            "last_seq": None,
+            "last_ack_seq": None,
+            "last_done_seq": None,
+            "jog_running": False,
+            "stm32_timeout_seen": False,
+            "last_rx_time": None,
+        }
         self._stopped = False
         self.uart = UartBridge(
             cfg.serial.port,
@@ -482,6 +493,8 @@ class OrchestratorService(BaseModule):
                 "dry_run_echo_summary_period_s": self.cfg.serial.dry_run_echo_summary_period_s,
                 "dry_run_quiet_idle_stop": self.cfg.serial.dry_run_quiet_idle_stop,
                 "uart_lowfreq_period_s": self.cfg.serial.uart_lowfreq_period_s,
+                "stm32_status_enabled": self.cfg.serial.stm32_status_enabled,
+                "stm32_status_period_s": self.cfg.serial.stm32_status_period_s,
             },
             "control": {
                 "search_table_timeout_s": self.cfg.control.search_table_timeout_s,
@@ -674,6 +687,29 @@ class OrchestratorService(BaseModule):
             return f"[ORCH] CAR_STOP mode={payload.get('mode') or 'STOP'}"
         if uart_kind == "brake":
             return f"[ORCH] CAR_BRAKE mode={payload.get('mode') or 'BRAKE'}"
+        if uart_kind == "stm32_vel":
+            return (
+                f"[ORCH] STM32_VEL "
+                f"s006={int(payload.get('s006', 0) or 0)} "
+                f"s007={int(payload.get('s007', 0) or 0)} "
+                f"s008={int(payload.get('s008', 0) or 0)} "
+                f"s009={int(payload.get('s009', 0) or 0)} "
+                f"seq={payload.get('seq', 'n/a')}"
+            )
+        if uart_kind == "stm32_jog":
+            return (
+                f"[ORCH] STM32_JOG "
+                f"s006={int(payload.get('s006', 0) or 0)} "
+                f"s007={int(payload.get('s007', 0) or 0)} "
+                f"s008={int(payload.get('s008', 0) or 0)} "
+                f"s009={int(payload.get('s009', 0) or 0)} "
+                f"duration={int(payload.get('duration_ms', 0) or 0)}ms "
+                f"seq={payload.get('seq', 'n/a')}"
+            )
+        if uart_kind == "stm32_status":
+            return "[ORCH] STM32_STATUS"
+        if uart_kind == "stm32_stop":
+            return f"[ORCH] STM32_STOP seq={payload.get('seq', 'n/a')}"
         mode = str(payload.get("mode") or payload.get("state") or "").strip() or "UNKNOWN"
         kind = str(payload.get("kind") or "").strip()
         if kind == "stop" or str(payload.get("raw", "")).strip().upper().endswith("STOP"):
@@ -762,6 +798,16 @@ class OrchestratorService(BaseModule):
             if upper == "MODE" and len(parts) >= 2:
                 item["uart_kind"] = "mode"
                 item["car_mode"] = parts[1].upper()
+            elif upper == "VEL" and len(parts) >= 6:
+                item["uart_kind"] = "stm32_vel"
+                try:
+                    item["s006"] = int(float(parts[1]))
+                    item["s007"] = int(float(parts[2]))
+                    item["s008"] = int(float(parts[3]))
+                    item["s009"] = int(float(parts[4]))
+                    item["seq"] = int(float(parts[5]))
+                except Exception:
+                    pass
             elif upper == "VEL" and len(parts) >= 5:
                 item["uart_kind"] = "vel"
                 try:
@@ -771,8 +817,26 @@ class OrchestratorService(BaseModule):
                     item["actual_hold_ms"] = int(float(parts[4]))
                 except Exception:
                     pass
+            elif upper == "JOG" and len(parts) >= 7:
+                item["uart_kind"] = "stm32_jog"
+                try:
+                    item["s006"] = int(float(parts[1]))
+                    item["s007"] = int(float(parts[2]))
+                    item["s008"] = int(float(parts[3]))
+                    item["s009"] = int(float(parts[4]))
+                    item["duration_ms"] = int(float(parts[5]))
+                    item["seq"] = int(float(parts[6]))
+                except Exception:
+                    pass
+            elif upper == "STATUS":
+                item["uart_kind"] = "stm32_status"
             elif upper == "STOP":
-                item["uart_kind"] = "stop"
+                item["uart_kind"] = "stm32_stop" if len(parts) >= 2 else "stop"
+                if len(parts) >= 2:
+                    try:
+                        item["seq"] = int(float(parts[1]))
+                    except Exception:
+                        pass
             elif upper == "BRAKE":
                 item["uart_kind"] = "brake"
             else:
@@ -893,6 +957,7 @@ class OrchestratorService(BaseModule):
                 decision = self.core.tick()
                 self._flush_pending_msgs()
                 self._emit_motion(decision)
+                self._poll_stm32_status_if_needed()
                 self._emit_state_block_if_needed()
                 self._emit_heartbeat_if_needed()
                 elapsed = time.time() - loop_start
@@ -962,8 +1027,10 @@ class OrchestratorService(BaseModule):
         for raw in self.uart.drain_rx_lines():
             state = parse_car_state_line(raw)
             if state is not None:
+                self._update_stm32_motion_status(state)
                 self.core.handle_car_state(state)
                 self.run_logger.write_jsonl("car_state", state.to_dict())
+                self.run_logger.write_jsonl("motion_status", dict(self.motion_status))
                 self.run_logger.write_timeline("CAR_STATE", state=state.state, message=state.message, estop=state.estop, timeout=state.timeout, fault=state.fault)
                 continue
             arm_resp = parse_arm_response(raw)
@@ -971,6 +1038,103 @@ class OrchestratorService(BaseModule):
                 self.core.handle_arm_response(arm_resp)
                 self.run_logger.write_timeline("ARM_RESPONSE", ok=arm_resp.ok, message=arm_resp.message)
                 continue
+
+    def _parse_motion_seq(self, text: Any) -> Optional[int]:
+        match = re.search(r"\bseq\s*=\s*(-?\d+)\b", str(text or ""), re.IGNORECASE)
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except (TypeError, ValueError):
+            return None
+
+    def _next_motion_seq(self) -> int:
+        self._motion_seq = (int(self._motion_seq) % 999999) + 1
+        return self._motion_seq
+
+    def _record_motion_tx(self, seq: Optional[int], kind: str) -> None:
+        if seq is not None:
+            self.motion_status["last_seq"] = int(seq)
+        self.run_logger.write_jsonl("motion_tx", {
+            "ts": time.time(),
+            "kind": kind,
+            "seq": seq,
+            "motion_status": dict(self.motion_status),
+        })
+
+    def send_stm32_vel(self, s006, s007, s008, s009, seq: Optional[int] = None) -> bool:
+        tx_seq = self._next_motion_seq() if seq is None else int(seq)
+        self._record_motion_tx(tx_seq, "vel")
+        return self.uart.send_stm32_vel(s006, s007, s008, s009, tx_seq, tx_meta={
+            "kind": "stm32_vel",
+            "motion_protocol": "stm32",
+            "seq": tx_seq,
+        })
+
+    def send_stm32_stop(self, seq: Optional[int] = None) -> bool:
+        tx_seq = self._next_motion_seq() if seq is None else int(seq)
+        self.motion_status["jog_running"] = False
+        self._record_motion_tx(tx_seq, "stop")
+        return self.uart.send_stm32_stop(tx_seq, tx_meta={
+            "kind": "stm32_stop",
+            "motion_protocol": "stm32",
+            "seq": tx_seq,
+        })
+
+    def send_stm32_jog(self, s006, s007, s008, s009, duration_ms, seq: Optional[int] = None) -> bool:
+        tx_seq = self._next_motion_seq() if seq is None else int(seq)
+        self.motion_status["jog_running"] = True
+        self._record_motion_tx(tx_seq, "jog")
+        return self.uart.send_stm32_jog(s006, s007, s008, s009, duration_ms, tx_seq, tx_meta={
+            "kind": "stm32_jog",
+            "motion_protocol": "stm32",
+            "seq": tx_seq,
+        })
+
+    def send_stm32_status(self) -> bool:
+        return self.uart.send_stm32_status(tx_meta={
+            "kind": "stm32_status",
+            "motion_protocol": "stm32",
+        })
+
+    def _poll_stm32_status_if_needed(self) -> None:
+        if not bool(getattr(self.cfg.serial, "stm32_status_enabled", False)):
+            return
+        now = time.time()
+        period_s = max(0.1, float(getattr(self.cfg.serial, "stm32_status_period_s", 1.0) or 1.0))
+        if (now - self._last_stm32_status_poll_ts) < period_s:
+            return
+        self._last_stm32_status_poll_ts = now
+        self.send_stm32_status()
+
+    def _update_stm32_motion_status(self, state) -> None:
+        raw = str(getattr(state, "raw", "") or "")
+        message = str(getattr(state, "message", "") or "")
+        seq = self._parse_motion_seq(raw) if raw else None
+        if seq is None:
+            seq = self._parse_motion_seq(message)
+        now = time.time()
+        state_name = str(getattr(state, "state", "") or "").upper()
+        raw_upper = raw.upper()
+
+        self.motion_status["last_rx_time"] = now
+        if state_name == "ACK_START" or "[JOG_START]" in raw_upper:
+            if seq is not None:
+                self.motion_status["last_ack_seq"] = seq
+            if "[JOG_START]" in raw_upper:
+                self.motion_status["jog_running"] = True
+            self.motion_status["stm32_timeout_seen"] = False
+        elif state_name == "DONE" or "[JOG_DONE]" in raw_upper:
+            if seq is not None:
+                self.motion_status["last_done_seq"] = seq
+            self.motion_status["jog_running"] = False
+            self.motion_status["stm32_timeout_seen"] = False
+        elif state_name == "BUSY" or "[JOG_BUSY]" in raw_upper:
+            if "[JOG_BUSY]" in raw_upper:
+                self.motion_status["jog_running"] = True
+        elif state_name == "TIMEOUT" or "[TIMEOUT]" in raw_upper:
+            self.motion_status["jog_running"] = False
+            self.motion_status["stm32_timeout_seen"] = True
 
     def _send_task_ack(self, cmd: TaskCmd, accepted: bool, reason: str):
         ack = make_task_ack(cmd, accepted=accepted, reason=reason, state=self.core.ctx.state.value)
@@ -1995,6 +2159,7 @@ class OrchestratorService(BaseModule):
                 "tts_event_out": tts_snap,
             },
             "uart": uart_snap,
+            "motion_status": dict(self.motion_status),
             "ready": {
                 "task_cmd_in_listening": bool(task_snap.get("listening")),
                 "vision_obs_in_listening": bool(vision_snap.get("listening")),

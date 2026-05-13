@@ -38,6 +38,8 @@ class SerialConfig:
     dry_run_echo_summary_period_s: float = 5.0
     dry_run_quiet_idle_stop: bool = True
     uart_lowfreq_period_s: float = 5.0
+    stm32_status_enabled: bool = False
+    stm32_status_period_s: float = 1.0
 
 
 @dataclass

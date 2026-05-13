@@ -284,6 +284,8 @@ CONFIG.serial.dry_run_echo_on_change_only = _env_bool("ORCH_DRY_RUN_ECHO_ON_CHAN
 CONFIG.serial.dry_run_echo_summary_period_s = _env_float("ORCH_DRY_RUN_ECHO_SUMMARY_PERIOD_S", CONFIG.serial.dry_run_echo_summary_period_s)
 CONFIG.serial.dry_run_quiet_idle_stop = _env_bool("ORCH_DRY_RUN_QUIET_IDLE_STOP", CONFIG.serial.dry_run_quiet_idle_stop)
 CONFIG.serial.uart_lowfreq_period_s = _env_float("ORCH_UART_LOWFREQ_PERIOD_S", CONFIG.serial.uart_lowfreq_period_s)
+CONFIG.serial.stm32_status_enabled = _env_bool("ORCH_STM32_STATUS_ENABLED", CONFIG.serial.stm32_status_enabled)
+CONFIG.serial.stm32_status_period_s = _env_float("ORCH_STM32_STATUS_PERIOD_S", CONFIG.serial.stm32_status_period_s)
 
 CONFIG.control.cmd_confidence_th = _env_float("ORCH_CMD_CONFIDENCE_TH", CONFIG.control.cmd_confidence_th)
 CONFIG.control.target_obs_max_age_s = _env_float("ORCH_TARGET_OBS_MAX_AGE_S", CONFIG.control.target_obs_max_age_s)

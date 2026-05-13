@@ -2,15 +2,32 @@
 # -*- coding: utf-8 -*-
 
 """
-统一串口文本协议（当前调试版）:
+统一串口文本协议:
 
 - 主控 -> STM32
+    新版 SC171/STM32:
+    VEL <s006> <s007> <s008> <s009> <seq>\n
+    STOP <seq>\n
+    JOG <s006> <s007> <s008> <s009> <duration_ms> <seq>\n
+    STATUS\n
+
+    旧版调试协议:
     MODE <STATE_NAME>\n
     VEL <vx> <vy> <wz> <hold_ms>\n
     STOP\n
     BRAKE\n
 
 - STM32 -> 主控
+    ACK_START seq=12\n
+    ACK_DONE seq=12\n
+    BUSY seq=12\n
+    STATUS target=... applied=... jog=...\n
+    [CAR][JOG_START] seq=12\n
+    [CAR][JOG_DONE] seq=12\n
+    [CAR][JOG_BUSY] seq=12\n
+    [CAR][TIMEOUT] auto stop\n
+
+    旧版调试协议:
     STATE <status> <vx> <vy> <wz> <fault_code>\n
     ESTOP <0|1>\n
 
@@ -24,6 +41,45 @@ from typing import Optional
 
 from ..config.schema import CarMotionConfig
 from ..ipc.protocol import CarState, CmdVel, now_ts
+
+
+def _clamp_int(v, lo: int, hi: int) -> int:
+    try:
+        value = int(round(float(v)))
+    except Exception:
+        value = 0
+    return max(lo, min(hi, value))
+
+
+def _format_seq(seq) -> str:
+    try:
+        return str(int(seq))
+    except Exception:
+        return "0"
+
+
+def _format_speed(v) -> str:
+    return str(_clamp_int(v, -100, 100))
+
+
+def encode_vel(s006, s007, s008, s009, seq) -> str:
+    return f"VEL {_format_speed(s006)} {_format_speed(s007)} {_format_speed(s008)} {_format_speed(s009)} {_format_seq(seq)}"
+
+
+def encode_stop(seq) -> str:
+    return f"STOP {_format_seq(seq)}"
+
+
+def encode_jog(s006, s007, s008, s009, duration_ms, seq) -> str:
+    duration = _clamp_int(duration_ms, 20, 1000)
+    return (
+        f"JOG {_format_speed(s006)} {_format_speed(s007)} "
+        f"{_format_speed(s008)} {_format_speed(s009)} {duration} {_format_seq(seq)}"
+    )
+
+
+def encode_status() -> str:
+    return "STATUS"
 
 
 @dataclass
@@ -118,6 +174,10 @@ def parse_car_state_line(line: str) -> Optional[CarState]:
 
     upper = raw.upper()
 
+    stm32 = _parse_stm32_feedback(raw, upper)
+    if stm32 is not None:
+        return stm32
+
     if upper.startswith("MODE "):
         parts = upper.split(None, 1)
         mode = parts[1].strip() if len(parts) > 1 else None
@@ -208,5 +268,66 @@ def parse_car_state_line(line: str) -> Optional[CarState]:
         vy=vy,
         wz=wz,
         fault_code=fault_code,
+        source="uart",
+    )
+
+
+def _parse_stm32_feedback(raw: str, upper: str) -> Optional[CarState]:
+    state = None
+    ok = False
+    timeout = False
+    fault = False
+    message = None
+
+    ack_match = re.match(r"^(ACK_START|ACK_DONE)\b(?:\s+(.*))?$", raw, re.IGNORECASE)
+    if ack_match:
+        token = ack_match.group(1).upper()
+        state = "ACK_START" if token == "ACK_START" else "DONE"
+        ok = True
+        message = (ack_match.group(2) or "").strip() or None
+
+    busy_match = re.match(r"^BUSY\b(?:\s+(.*))?$", raw, re.IGNORECASE)
+    if state is None and busy_match:
+        state = "BUSY"
+        ok = True
+        message = (busy_match.group(1) or "").strip() or None
+
+    status_match = re.match(r"^STATUS\b(?:\s+(.*))?$", raw, re.IGNORECASE)
+    if state is None and status_match:
+        state = "STATUS"
+        ok = True
+        message = (status_match.group(1) or "").strip() or None
+
+    jog_match = re.match(r"^\[CAR\]\[(JOG_START|JOG_DONE|JOG_BUSY|TIMEOUT)\](?:\s+(.*))?$", raw, re.IGNORECASE)
+    if state is None and jog_match:
+        token = jog_match.group(1).upper()
+        message = (jog_match.group(2) or "").strip() or None
+        if token == "JOG_START":
+            state = "ACK_START"
+            ok = True
+        elif token == "JOG_DONE":
+            state = "DONE"
+            ok = True
+        elif token == "JOG_BUSY":
+            state = "BUSY"
+            ok = True
+        elif token == "TIMEOUT":
+            state = "TIMEOUT"
+            timeout = True
+
+    if state is None:
+        return None
+
+    if state in {"FAULT", "ERROR"}:
+        fault = True
+
+    return CarState(
+        ts=now_ts(),
+        state=state,
+        ok=ok,
+        timeout=timeout,
+        fault=fault,
+        message=message,
+        raw=raw,
         source="uart",
     )
