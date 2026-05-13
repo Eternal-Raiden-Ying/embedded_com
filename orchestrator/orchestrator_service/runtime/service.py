@@ -16,6 +16,7 @@ from common.runtime_logging import OperatorConsole
 from ..bridge.simple_car_protocol import SimpleCarMapper, parse_car_state_line
 from ..bridge.uart_bridge import UartBridge
 from ..config.schema import OrchestratorConfig, SocketEndpoint
+from ..control.motion_adapter import Stm32MotionAdapter
 from ..ipc.protocol import (
     HomeTagObs,
     TableEdgeObs,
@@ -104,6 +105,18 @@ class OrchestratorService(BaseModule):
             dry_run_echo_stdout=cfg.serial.dry_run_echo_stdout,
             tx_callback=self._on_uart_tx,
             logger=self.log,
+        )
+        self.motion_adapter = Stm32MotionAdapter(
+            self.uart,
+            logger=self._operator_emit,
+            tx_meta_factory=self._build_stm32_motion_tx_meta,
+            wheel_speed_limit=cfg.car.stm32_wheel_speed_limit,
+            vx_scale=cfg.car.stm32_vx_scale,
+            vy_scale=cfg.car.stm32_vy_scale,
+            wz_scale=cfg.car.stm32_wz_scale,
+            jog_forward_speed=cfg.car.jog_forward_speed,
+            jog_turn_speed=cfg.car.jog_turn_speed,
+            jog_duration_ms=cfg.car.jog_duration_ms,
         )
         self.task_server = self._build_server(cfg.task_cmd_in, "task_cmd_in")
         self.vision_server = self._build_server(cfg.vision_obs_in, "vision_obs_in")
@@ -522,6 +535,13 @@ class OrchestratorService(BaseModule):
                 "max_vx_norm": self.cfg.car.max_vx_norm,
                 "max_vy_norm": self.cfg.car.max_vy_norm,
                 "max_wz_norm": self.cfg.car.max_wz_norm,
+                "stm32_wheel_speed_limit": self.cfg.car.stm32_wheel_speed_limit,
+                "stm32_vx_scale": self.cfg.car.stm32_vx_scale,
+                "stm32_vy_scale": self.cfg.car.stm32_vy_scale,
+                "stm32_wz_scale": self.cfg.car.stm32_wz_scale,
+                "jog_forward_speed": self.cfg.car.jog_forward_speed,
+                "jog_turn_speed": self.cfg.car.jog_turn_speed,
+                "jog_duration_ms": self.cfg.car.jog_duration_ms,
                 "stop_on_state_enter": self.cfg.car.stop_on_state_enter,
             },
             "docking": {
@@ -612,6 +632,20 @@ class OrchestratorService(BaseModule):
             meta["stop_class"] = ""
             meta["stop_reason"] = ""
         return meta
+
+    def _build_stm32_motion_tx_meta(self, kind: str, seq: int, reason: str) -> Dict[str, Any]:
+        return {
+            "mode": str(self.core.ctx.state.value),
+            "state": self.core.ctx.state.value,
+            "task_intent": self.core.ctx.task_intent or "",
+            "active_target": self.core.ctx.active_target or "",
+            "session_id": self.core.ctx.active_session_id or "",
+            "epoch": self.core.ctx.active_epoch,
+            "req_id": self.core.ctx.active_req_id or "",
+            "stm32_kind": str(kind or ""),
+            "seq": int(seq),
+            "reason": str(reason or ""),
+        }
 
     def _render_uart_line(self, payload: Dict[str, Any]) -> str:
         raw = str(payload.get("raw", "")).strip("\n")
@@ -1063,6 +1097,10 @@ class OrchestratorService(BaseModule):
         })
 
     def send_stm32_vel(self, s006, s007, s008, s009, seq: Optional[int] = None) -> bool:
+        if seq is None:
+            adapter_seq = self.motion_adapter.set_velocity_wheels(s006, s007, s008, s009, reason="service_api")
+            self.motion_status["last_seq"] = adapter_seq
+            return True
         tx_seq = self._next_motion_seq() if seq is None else int(seq)
         self._record_motion_tx(tx_seq, "vel")
         return self.uart.send_stm32_vel(s006, s007, s008, s009, tx_seq, tx_meta={
@@ -1072,6 +1110,11 @@ class OrchestratorService(BaseModule):
         })
 
     def send_stm32_stop(self, seq: Optional[int] = None) -> bool:
+        if seq is None:
+            adapter_seq = self.motion_adapter.stop(reason="service_api")
+            self.motion_status["last_seq"] = adapter_seq
+            self.motion_status["jog_running"] = False
+            return True
         tx_seq = self._next_motion_seq() if seq is None else int(seq)
         self.motion_status["jog_running"] = False
         self._record_motion_tx(tx_seq, "stop")
@@ -1082,6 +1125,11 @@ class OrchestratorService(BaseModule):
         })
 
     def send_stm32_jog(self, s006, s007, s008, s009, duration_ms, seq: Optional[int] = None) -> bool:
+        if seq is None:
+            adapter_seq = self.motion_adapter.jog_wheels(s006, s007, s008, s009, duration_ms, reason="service_api")
+            self.motion_status["last_seq"] = adapter_seq
+            self.motion_status["jog_running"] = True
+            return True
         tx_seq = self._next_motion_seq() if seq is None else int(seq)
         self.motion_status["jog_running"] = True
         self._record_motion_tx(tx_seq, "jog")
@@ -1092,10 +1140,8 @@ class OrchestratorService(BaseModule):
         })
 
     def send_stm32_status(self) -> bool:
-        return self.uart.send_stm32_status(tx_meta={
-            "kind": "stm32_status",
-            "motion_protocol": "stm32",
-        })
+        self.motion_adapter.query_status()
+        return True
 
     def _poll_stm32_status_if_needed(self) -> None:
         if not bool(getattr(self.cfg.serial, "stm32_status_enabled", False)):
@@ -1857,6 +1903,11 @@ class OrchestratorService(BaseModule):
         self._flush_state_traces(decision)
         car_cmd = self.mapper.from_cmd_vel(cmd, cx_norm_abs=decision.cx_norm_abs, distance_ratio=decision.distance_ratio)
         tx_meta = self._build_uart_tx_meta(car_cmd)
+        reason = str(tx_meta.get("reason") or car_cmd.kind or "").strip()
+        wheels = self.motion_adapter.cmd_vel_to_wheels(cmd)
+        seq = self.motion_adapter.send_cmd_vel(cmd, reason=reason)
+        self.motion_status["last_seq"] = seq
+        self.motion_status["jog_running"] = False
         car_record = {
             "ts": time.time(),
             "mode": car_cmd.mode,
@@ -1866,11 +1917,18 @@ class OrchestratorService(BaseModule):
             "wz_norm": car_cmd.wz_norm,
             "hold_ms": car_cmd.hold_ms,
             "brake": car_cmd.brake,
-            "raw": car_cmd.raw_line.rstrip("\n"),
+            "stm32_seq": seq,
+            "stm32_wheels": {
+                "s006": wheels[0],
+                "s007": wheels[1],
+                "s008": wheels[2],
+                "s009": wheels[3],
+            },
+            "raw": f"STOP {seq}" if car_cmd.kind in {"stop", "brake"} else f"VEL {wheels[0]} {wheels[1]} {wheels[2]} {wheels[3]} {seq}",
+            "legacy_raw": car_cmd.raw_line.rstrip("\n"),
         }
         car_record.update({k: v for k, v in tx_meta.items() if v not in (None, "")})
         self.run_logger.write_jsonl("car_cmd", car_record)
-        self.uart.send_car_command(car_cmd, tx_meta=tx_meta)
 
     def _emit_edge_slide_trace(self, decision) -> None:
         if str(getattr(self.core.ctx.state, "value", self.core.ctx.state) or "") != "EDGE_SLIDE_SEARCH":

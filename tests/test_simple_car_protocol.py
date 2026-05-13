@@ -24,6 +24,8 @@ from orchestrator_service.bridge.simple_car_protocol import (  # noqa: E402
     parse_car_state_line,
 )
 from orchestrator_service.bridge.uart_bridge import UartBridge  # noqa: E402
+from orchestrator_service.control.motion_adapter import Stm32MotionAdapter  # noqa: E402
+from orchestrator_service.ipc.protocol import CmdVel  # noqa: E402
 from orchestrator_service.runtime.service import OrchestratorService  # noqa: E402
 
 
@@ -123,6 +125,112 @@ class SimpleCarProtocolTest(unittest.TestCase):
         service._update_stm32_motion_status(timeout)
         self.assertTrue(service.motion_status["stm32_timeout_seen"])
         self.assertFalse(service.motion_status["jog_running"])
+
+    def test_stm32_motion_adapter_clamps_logs_and_sends(self) -> None:
+        class FakeUart:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def send_stm32_vel(self, *args, **kwargs):
+                self.calls.append(("vel", args, kwargs))
+                return True
+
+            def send_stm32_stop(self, *args, **kwargs):
+                self.calls.append(("stop", args, kwargs))
+                return True
+
+            def send_stm32_jog(self, *args, **kwargs):
+                self.calls.append(("jog", args, kwargs))
+                return True
+
+            def send_stm32_status(self, *args, **kwargs):
+                self.calls.append(("status", args, kwargs))
+                return True
+
+        logs = []
+        uart = FakeUart()
+        adapter = Stm32MotionAdapter(uart, logger=logs.append)
+
+        self.assertEqual(adapter.set_velocity_wheels(200, -200, 1.2, 0, reason="track"), 1)
+        self.assertEqual(adapter.stop(reason="halt"), 2)
+        self.assertEqual(adapter.jog_wheels(1, 2, 3, 4, 5, reason="nudge"), 3)
+        adapter.query_status()
+
+        self.assertEqual(uart.calls[0][0], "vel")
+        self.assertEqual(uart.calls[0][1][:5], (100, -100, 1, 0, 1))
+        self.assertEqual(uart.calls[1][0], "stop")
+        self.assertEqual(uart.calls[1][1][0], 2)
+        self.assertEqual(uart.calls[2][0], "jog")
+        self.assertEqual(uart.calls[2][1][:6], (1, 2, 3, 4, 20, 3))
+        self.assertEqual(uart.calls[3][0], "status")
+
+        self.assertEqual(logs[0], "[MOTION][VEL] seq=1 wheels=(100, -100, 1, 0) reason=track")
+        self.assertEqual(logs[1], "[MOTION][STOP] seq=2 reason=halt")
+        self.assertEqual(logs[2], "[MOTION][JOG] seq=3 wheels=(1, 2, 3, 4) duration_ms=20 reason=nudge")
+        self.assertEqual(logs[3], "[MOTION][STATUS]")
+
+    def test_stm32_motion_adapter_maps_cmd_vel_to_wheels(self) -> None:
+        class FakeUart:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def send_stm32_vel(self, *args, **kwargs):
+                self.calls.append(("vel", args, kwargs))
+                return True
+
+            def send_stm32_stop(self, *args, **kwargs):
+                self.calls.append(("stop", args, kwargs))
+                return True
+
+        uart = FakeUart()
+        adapter = Stm32MotionAdapter(uart, logger=lambda _line: None, vx_scale=100, vy_scale=100, wz_scale=100)
+        cmd = CmdVel(ts=0.0, mode="TRACK", vx_norm=0.20, vy_norm=0.10, wz_norm=0.05)
+
+        self.assertEqual(adapter.cmd_vel_to_wheels(cmd), (5, -25, 25, -5))
+        self.assertEqual(adapter.send_cmd_vel(cmd, reason="track"), 1)
+        self.assertEqual(uart.calls[-1][0], "vel")
+        self.assertEqual(uart.calls[-1][1][:5], (5, -25, 25, -5, 1))
+
+        stop_cmd = CmdVel(ts=0.0, mode="STOP", vx_norm=0.0, vy_norm=0.0, wz_norm=0.0)
+        self.assertEqual(adapter.send_cmd_vel(stop_cmd, reason="stop"), 2)
+        self.assertEqual(uart.calls[-1][0], "stop")
+        self.assertEqual(uart.calls[-1][1][0], 2)
+
+        limited = Stm32MotionAdapter(uart, logger=lambda _line: None, wheel_speed_limit=40, vx_scale=100, vy_scale=100, wz_scale=100)
+        fast_cmd = CmdVel(ts=0.0, mode="TRACK", vx_norm=1.0, vy_norm=1.0, wz_norm=1.0)
+        self.assertEqual(limited.cmd_vel_to_wheels(fast_cmd), (-40, -40, 40, 40))
+
+    def test_stm32_motion_adapter_small_jogs(self) -> None:
+        class FakeUart:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def send_stm32_jog(self, *args, **kwargs):
+                self.calls.append(("jog", args, kwargs))
+                return True
+
+        logs = []
+        uart = FakeUart()
+        adapter = Stm32MotionAdapter(
+            uart,
+            logger=logs.append,
+            jog_forward_speed=30,
+            jog_turn_speed=20,
+            jog_duration_ms=100,
+        )
+
+        self.assertEqual(adapter.jog_forward_small(reason="final_forward"), 1)
+        self.assertEqual(uart.calls[-1][1][:6], (30, -30, 30, -30, 100, 1))
+        self.assertEqual(logs[-1], "[MOTION][JOG] seq=1 wheels=(30, -30, 30, -30) duration_ms=100 reason=final_forward")
+
+        self.assertEqual(adapter.jog_backward_small(reason="final_back"), 2)
+        self.assertEqual(uart.calls[-1][1][:6], (-30, 30, -30, 30, 100, 2))
+
+        self.assertEqual(adapter.jog_turn_left_small(reason="align_left"), 3)
+        self.assertEqual(uart.calls[-1][1][:6], (-20, 20, -20, 20, 100, 3))
+
+        self.assertEqual(adapter.jog_turn_right_small(reason="align_right"), 4)
+        self.assertEqual(uart.calls[-1][1][:6], (20, -20, 20, -20, 100, 4))
 
 
 if __name__ == "__main__":

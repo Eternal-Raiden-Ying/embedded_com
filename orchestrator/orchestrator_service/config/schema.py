@@ -199,6 +199,13 @@ class CarMotionConfig:
     max_vx_norm: float = 1.0
     max_vy_norm: float = 1.0
     max_wz_norm: float = 1.0
+    stm32_wheel_speed_limit: int = 100
+    stm32_vx_scale: float = 100.0
+    stm32_vy_scale: float = 100.0
+    stm32_wz_scale: float = 100.0
+    jog_forward_speed: int = 25
+    jog_turn_speed: int = 25
+    jog_duration_ms: int = 100
     stop_on_state_enter: bool = False
     mode_line_on_change: bool = True
     mode_line_every_cmd: bool = False
