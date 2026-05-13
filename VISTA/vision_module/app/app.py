@@ -82,16 +82,10 @@ class VistaApp(BaseModule):
                 "RETURN": ReturnStagePlan(),
             }
         )
-        self.current_stage = "IDLE"
-        self.current_mode = "IDLE"
-        self.target_name = None
-        self.current_session_id = None
-        self.current_req_id = None
-        self.current_epoch = 0
-        self.active_interaction_id = None
         self.last_send_ts = 0.0
         self.last_req_receive_ts = 0.0
         self.hot_until_ts = 0.0
+        self._prev_synced = {}
         self.active_task_key = None
         self._running = False
         self._stopped = False
@@ -110,6 +104,9 @@ class VistaApp(BaseModule):
         self._last_rate_target_key = None
         self._last_rate_edge_key = None
         self._last_request_trace_ts = 0.0
+
+    def _ctx(self):
+        return self.stage_controller.context()
 
     def _config_dump(self):
         return {
@@ -146,13 +143,14 @@ class VistaApp(BaseModule):
         }
 
     def _current_event_context(self):
+        ctx = self._ctx()
         return {
-            "stage": self.current_stage,
-            "mode": self.current_mode,
-            "session_id": self.current_session_id,
-            "req_id": self.current_req_id,
-            "epoch": self.current_epoch,
-            "interaction_id": self.active_interaction_id,
+            "stage": self._safe_stage_text(ctx.current_stage),
+            "mode": self._safe_mode_text(ctx.current_mode),
+            "session_id": ctx.session_id,
+            "req_id": ctx.req_id,
+            "epoch": int(getattr(ctx, "epoch", 0) or 0),
+            "interaction_id": ctx.interaction_id,
         }
 
     def _record_event(self, event: str, level: str = "info", trigger: str = "", data=None, **fields):
@@ -198,12 +196,12 @@ class VistaApp(BaseModule):
         level = str(payload.pop("level", "info")).strip().lower() or "info"
         data = dict(payload or {})
 
-        stage_override = self.current_stage
-        mode_override = self.current_mode
-        session_override = self.current_session_id
-        req_override = self.current_req_id
-        epoch_override = self.current_epoch
-        interaction_override = self.active_interaction_id
+        stage_override = self._safe_stage_text(self._ctx().current_stage)
+        mode_override = self._safe_mode_text(self._ctx().current_mode)
+        session_override = self._ctx().session_id
+        req_override = self._ctx().req_id
+        epoch_override = (int(self._ctx().epoch or 0))
+        interaction_override = self._ctx().interaction_id
 
         try:
             ctx = self.stage_controller.context()
@@ -464,7 +462,7 @@ class VistaApp(BaseModule):
                 pass
 
     def _emit_rate_summary_if_needed(self, force: bool = False) -> None:
-        if self.current_mode != "TRACK_LOCAL":
+        if self._safe_mode_text(self._ctx().current_mode) != "TRACK_LOCAL":
             return
         now = time.time()
         period_s = max(0.5, float(CONFIG.runtime.operator_summary_interval_s))
@@ -483,7 +481,7 @@ class VistaApp(BaseModule):
         mode_request_hz = self._hz_for_samples(self._rate_mode_request_ts, now)
         target_update_hz = self._hz_for_samples(self._rate_target_update_ts, now)
         record = {
-            "mode": self.current_mode,
+            "mode": self._safe_mode_text(self._ctx().current_mode),
             "request_rate_hz": float(request_hz),
             "mode_request_rate_hz": float(mode_request_hz),
             "target_update_rate_hz": float(target_update_hz),
@@ -531,7 +529,7 @@ class VistaApp(BaseModule):
             "target": trace.get("target", req.target),
             "requested_mode": trace.get("requested_mode", req.mode_hint),
             "current_mode_before": trace.get("current_mode_before"),
-            "current_mode_after": trace.get("current_mode_after", self.current_mode),
+            "current_mode_after": trace.get("current_mode_after", self._safe_mode_text(self._ctx().current_mode)),
             "changed_mode": bool(trace.get("changed_mode", False)),
             "idempotent": bool(trace.get("idempotent", False)),
             "reason": trace.get("reason", ""),
@@ -551,6 +549,7 @@ class VistaApp(BaseModule):
     def _enter_hot_standby(self, current_mode: str, target_name, epoch: int):
         self.stage_controller.set_runtime_mode("IDLE_HOT", reason="enter_hot_standby", force=True)
         new_until = time.time() + float(CONFIG.runtime.hot_standby_s)
+        self.hot_until_ts = new_until
         self.log_info(
             "runtime",
             "enter hot standby",
@@ -566,13 +565,11 @@ class VistaApp(BaseModule):
             },
             epoch=int(epoch),
         )
-        return "IDLE_HOT", None, new_until, None, None, None, int(epoch)
 
     def _enter_cold_idle(self, epoch: int):
         self.log_info("runtime", "enter cold idle")
         self._record_event("ENTER_IDLE", trigger="idle_transition", epoch=int(epoch))
         self.stage_controller.set_runtime_mode("IDLE", reason="enter_cold_idle", force=True)
-        return "IDLE", None, 0.0, None, None, None, int(epoch)
 
     def _emit_heartbeat_if_needed(self, force: bool = False):
         if not CONFIG.runtime.heartbeat_enabled:
@@ -589,11 +586,11 @@ class VistaApp(BaseModule):
         last_req_age_s = (now - self.last_req_receive_ts) if self.last_req_receive_ts else None
         last_obs_send_age_s = (now - self.last_send_ts) if self.last_send_ts else None
         self.run_logger.write_heartbeat_record(
-            stage=self.current_stage,
-            mode=self.current_mode,
-            session_id=self.current_session_id,
-            req_id=self.current_req_id,
-            epoch=self.current_epoch,
+            stage=self._safe_stage_text(self._ctx().current_stage),
+            mode=self._safe_mode_text(self._ctx().current_mode),
+            session_id=self._ctx().session_id,
+            req_id=self._ctx().req_id,
+            epoch=(int(self._ctx().epoch or 0)),
             last_req_age_s=last_req_age_s,
             last_obs_send_age_s=last_obs_send_age_s,
             ready={
@@ -601,7 +598,7 @@ class VistaApp(BaseModule):
                 "obs_out_link_state": obs_snapshot.get("link_state"),
             },
             data={
-                "target": self.target_name,
+                "target": self._ctx().target_name,
                 "hot_until_ts": self.hot_until_ts,
                 "req_in": req_snapshot,
                 "obs_out": obs_snapshot,
@@ -616,60 +613,50 @@ class VistaApp(BaseModule):
         if self._heartbeat_console_enabled():
             self.operator_console.emit_rate_limited(
                 "heartbeat",
-                f"[VISTA] HEARTBEAT stage={self.current_stage} mode={self.current_mode} "
-                f"req={self.current_req_id or ''} epoch={self.current_epoch}",
+                f"[VISTA] HEARTBEAT stage={self._safe_stage_text(self._ctx().current_stage)} mode={self._safe_mode_text(self._ctx().current_mode)} "
+                f"req={self._ctx().req_id or ''} epoch={(int(self._ctx().epoch or 0))}",
                 interval_s=interval_s,
             )
 
     def _send_interval_s(self) -> float:
         send_hz = float(CONFIG.runtime.send_hz)
-        if self.current_mode == "TRACK_LOCAL":
+        if self._safe_mode_text(self._ctx().current_mode) == "TRACK_LOCAL":
             send_hz = max(send_hz, float(getattr(CONFIG.runtime, "track_local_send_hz", send_hz) or send_hz))
         return 1.0 / max(0.5, send_hz)
 
-    def _sync_runtime_request_context(self, req: VisionReq):
-        if req.session_id:
-            self.current_session_id = req.session_id
-        if req.req_id:
-            self.current_req_id = req.req_id
-        self.current_epoch = int(req.epoch)
-
     def _sync_runtime_from_stage_context(self, reason: str = ""):
-        ctx = self.stage_controller.context()
-        prev_stage = self.current_stage
-        prev_mode = self.current_mode
-        self.current_stage = self._safe_stage_text(ctx.current_stage)
-        self.current_mode = self._safe_mode_text(ctx.current_mode)
-        self.target_name = ctx.target_name
-        self.current_session_id = ctx.session_id
-        self.current_req_id = ctx.req_id
-        self.current_epoch = int(ctx.epoch)
-        self.active_interaction_id = ctx.interaction_id
-        if prev_stage != self.current_stage or prev_mode != self.current_mode:
+        ctx = self._ctx()
+        stage = self._safe_stage_text(ctx.current_stage)
+        mode = self._safe_mode_text(ctx.current_mode)
+        prev = self._prev_synced or {}
+        prev_stage = prev.get("stage", "")
+        prev_mode = prev.get("mode", "")
+        if prev_stage != stage or prev_mode != mode:
+            self._prev_synced = {"stage": stage, "mode": mode}
             payload = {
                 "reason": reason,
                 "prev_stage": prev_stage,
-                "stage": self.current_stage,
+                "stage": stage,
                 "prev_mode": prev_mode,
-                "mode": self.current_mode,
-                "session_id": self.current_session_id,
-                "req_id": self.current_req_id,
-                "epoch": self.current_epoch,
+                "mode": mode,
+                "session_id": ctx.session_id,
+                "req_id": ctx.req_id,
+                "epoch": int(getattr(ctx, "epoch", 0) or 0),
             }
-            if prev_stage != self.current_stage:
+            if prev_stage != stage:
                 self.operator_console.emit_change(
                     "stage",
-                    f"[VISTA] STAGE {prev_stage} -> {self.current_stage} reason={reason}",
+                    f"[VISTA] STAGE {prev_stage} -> {stage} reason={reason}",
                 )
-            if prev_mode != self.current_mode:
+            if prev_mode != mode:
                 self.operator_console.emit_change(
                     "mode",
-                    f"[VISTA] MODE {prev_mode} -> {self.current_mode} reason={reason}",
+                    f"[VISTA] MODE {prev_mode} -> {mode} reason={reason}",
                 )
-                if self.current_mode == "TRACK_LOCAL" and reason == "target_search":
+                if mode == "TRACK_LOCAL" and reason == "target_search":
                     self.operator_console.emit_change(
                         "target_view",
-                        f"[VISTA] TARGET_VIEW enter target={self.target_name or 'target'}",
+                        f"[VISTA] TARGET_VIEW enter target={ctx.target_name or 'target'}",
                     )
             if self._console_is_full():
                 self.log_info("runtime", "stage/mode changed", payload)
@@ -707,36 +694,15 @@ class VistaApp(BaseModule):
     def _handle_stop_request(self, stage: str, stop_state=None):
         self._record_event("VISION_STOP", trigger="request:STOP", stage=stage)
         state = dict(stop_state or {})
-        prev_mode = str(state.get("mode") or self.current_mode or "IDLE").strip().upper()
-        prev_target = state.get("target_name", self.target_name)
-        stop_epoch = int(state.get("epoch", self.current_epoch))
+        ctx = self._ctx()
+        prev_mode = str(state.get("mode") or self._safe_mode_text(ctx.current_mode) or "IDLE").strip().upper()
+        prev_target = state.get("target_name", ctx.target_name)
+        stop_epoch = int(state.get("epoch", int(getattr(ctx, "epoch", 0) or 0)))
         if CONFIG.runtime.keep_preview_after_stop and float(CONFIG.runtime.hot_standby_s) > 0.0:
-            (
-                self.current_mode,
-                self.target_name,
-                self.hot_until_ts,
-                self.active_task_key,
-                self.current_session_id,
-                self.current_req_id,
-                self.current_epoch,
-            ) = self._enter_hot_standby(
-                prev_mode,
-                prev_target,
-                stop_epoch,
-            )
+            self._enter_hot_standby(prev_mode, prev_target, stop_epoch)
         else:
             self.log_info("runtime", "enter idle", {"reason": stage})
-            (
-                self.current_mode,
-                self.target_name,
-                self.hot_until_ts,
-                self.active_task_key,
-                self.current_session_id,
-                self.current_req_id,
-                self.current_epoch,
-            ) = self._enter_cold_idle(stop_epoch)
-        self.current_stage = "IDLE"
-        self.active_interaction_id = None
+            self._enter_cold_idle(stop_epoch)
 
     def _handle_request_payload(self, payload):
         typ = str(payload.get("type", "vision_req")).strip()
@@ -745,7 +711,6 @@ class VistaApp(BaseModule):
 
         req = VisionReq.from_dict(payload)
         request_stage = self._safe_stage_text(req.stage)
-        self._sync_runtime_request_context(req)
         req_kind = self._request_kind(req, request_stage)
         self.operator_console.emit(
             f"[VISTA] REQ stage={request_stage} kind={req_kind} target={req.target or ''} "
@@ -761,10 +726,10 @@ class VistaApp(BaseModule):
 
         if req.is_stop():
             stop_state = {
-                "stage": self.current_stage,
-                "mode": self.current_mode,
-                "target_name": self.target_name,
-                "epoch": self.current_epoch,
+                "stage": self._safe_stage_text(self._ctx().current_stage),
+                "mode": self._safe_mode_text(self._ctx().current_mode),
+                "target_name": self._ctx().target_name,
+                "epoch": (int(self._ctx().epoch or 0)),
             }
             stage_output = self.stage_controller.handle_request(req)
             self._sync_runtime_from_stage_context(reason=f"request:{req.op}")
@@ -772,7 +737,7 @@ class VistaApp(BaseModule):
             self._record_event(
                 "VISION_REQ",
                 trigger="req_in",
-                stage=self.current_stage,
+                stage=self._safe_stage_text(self._ctx().current_stage),
                 interaction_id=req.interaction_id,
                 data=req_event_data,
             )
@@ -781,8 +746,8 @@ class VistaApp(BaseModule):
                     "runtime",
                     "skip stop flow due to mode_apply_failed",
                     {
-                        "stage": self.current_stage,
-                        "mode": self.current_mode,
+                        "stage": self._safe_stage_text(self._ctx().current_stage),
+                        "mode": self._safe_mode_text(self._ctx().current_mode),
                         "req_id": req.req_id,
                     },
                 )
@@ -796,15 +761,15 @@ class VistaApp(BaseModule):
         sync_reason = self._request_sync_reason(req, request_stage, req_kind)
         self._sync_runtime_from_stage_context(reason=sync_reason)
         self._record_request_trace(req)
-        if request_stage == "SEARCH" and req_kind == "TARGET" and self.current_mode == "TRACK_LOCAL":
+        if request_stage == "SEARCH" and req_kind == "TARGET" and self._safe_mode_text(self._ctx().current_mode) == "TRACK_LOCAL":
             self.operator_console.emit_change(
                 "target_view",
-                f"[VISTA] TARGET_VIEW enter target={self.target_name or req.target or 'target'}",
+                f"[VISTA] TARGET_VIEW enter target={self._ctx().target_name or req.target or 'target'}",
             )
         self._record_event(
             "VISION_REQ",
             trigger="req_in",
-            stage=self.current_stage,
+            stage=self._safe_stage_text(self._ctx().current_stage),
             interaction_id=req.interaction_id,
             data=req_event_data,
         )
@@ -815,11 +780,11 @@ class VistaApp(BaseModule):
     def _tick_stage(self, now: float):
         tick_input = self.runtime.collect_tick_input(ts=now)
         tick_input.snapshot["app"] = {
-            "stage": self.current_stage,
-            "mode": self.current_mode,
-            "session_id": self.current_session_id,
-            "req_id": self.current_req_id,
-            "epoch": self.current_epoch,
+            "stage": self._safe_stage_text(self._ctx().current_stage),
+            "mode": self._safe_mode_text(self._ctx().current_mode),
+            "session_id": self._ctx().session_id,
+            "req_id": self._ctx().req_id,
+            "epoch": (int(self._ctx().epoch or 0)),
             "hot_until_ts": self.hot_until_ts,
         }
         stage_output = self.stage_controller.tick(tick_input)
@@ -827,18 +792,9 @@ class VistaApp(BaseModule):
         self._apply_stage_output(stage_output, now=now)
 
     def _expire_hot_standby(self, now: float):
-        if self.current_mode != "IDLE_HOT" or self.hot_until_ts <= 0 or now < self.hot_until_ts:
+        if self._safe_mode_text(self._ctx().current_mode) != "IDLE_HOT" or self.hot_until_ts <= 0 or now < self.hot_until_ts:
             return
-        (
-            self.current_mode,
-            self.target_name,
-            self.hot_until_ts,
-            self.active_task_key,
-            self.current_session_id,
-            self.current_req_id,
-            self.current_epoch,
-        ) = self._enter_cold_idle(self.current_epoch)
-        self.current_stage = "IDLE"
+        self._enter_cold_idle(int(getattr(self._ctx(), "epoch", 0) or 0))
 
     def start(self):
         cfg_dump = self._config_dump()
@@ -864,7 +820,7 @@ class VistaApp(BaseModule):
         self._sync_runtime_from_stage_context(reason="service_start")
         self._running = True
         self._record_event("SERVICE_READY", trigger="start")
-        self.operator_console.emit(f"[VISTA] READY mode={self.current_mode} run={self.run_logger.stack_run_id}")
+        self.operator_console.emit(f"[VISTA] READY mode={self._safe_mode_text(self._ctx().current_mode)} run={self.run_logger.stack_run_id}")
         if self._console_is_full():
             self.log_info(
                 "runtime",
