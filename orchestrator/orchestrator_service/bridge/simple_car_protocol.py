@@ -66,8 +66,16 @@ def encode_vel(s006, s007, s008, s009, seq) -> str:
     return f"VEL {_format_speed(s006)} {_format_speed(s007)} {_format_speed(s008)} {_format_speed(s009)} {_format_seq(seq)}"
 
 
+def encode_stm32_vel(s006, s007, s008, s009, seq) -> str:
+    return encode_vel(s006, s007, s008, s009, seq)
+
+
 def encode_stop(seq) -> str:
     return f"STOP {_format_seq(seq)}"
+
+
+def encode_stm32_stop(seq) -> str:
+    return encode_stop(seq)
 
 
 def encode_jog(s006, s007, s008, s009, duration_ms, seq) -> str:
@@ -78,8 +86,16 @@ def encode_jog(s006, s007, s008, s009, duration_ms, seq) -> str:
     )
 
 
+def encode_stm32_jog(s006, s007, s008, s009, duration_ms, seq) -> str:
+    return encode_jog(s006, s007, s008, s009, duration_ms, seq)
+
+
 def encode_status() -> str:
     return "STATUS"
+
+
+def encode_stm32_status() -> str:
+    return encode_status()
 
 
 @dataclass

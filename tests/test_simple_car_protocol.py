@@ -19,6 +19,10 @@ if str(ORCH_ROOT) not in sys.path:
 from orchestrator_service.bridge.simple_car_protocol import (  # noqa: E402
     encode_jog,
     encode_status,
+    encode_stm32_jog,
+    encode_stm32_status,
+    encode_stm32_stop,
+    encode_stm32_vel,
     encode_stop,
     encode_vel,
     parse_car_state_line,
@@ -36,6 +40,11 @@ class SimpleCarProtocolTest(unittest.TestCase):
         self.assertEqual(encode_jog(1, 2, 3, 4, 10, 14), "JOG 1 2 3 4 20 14")
         self.assertEqual(encode_jog(1, 2, 3, 4, 1200, 15), "JOG 1 2 3 4 1000 15")
         self.assertEqual(encode_status(), "STATUS")
+        self.assertEqual(encode_stm32_vel(101, -101, 50.4, 0, 12), "VEL 100 -100 50 0 12")
+        self.assertEqual(encode_stm32_stop(13), "STOP 13")
+        self.assertEqual(encode_stm32_jog(1, 2, 3, 4, 10, 14), "JOG 1 2 3 4 20 14")
+        self.assertEqual(encode_stm32_jog(1, 2, 3, 4, 1200, 15), "JOG 1 2 3 4 1000 15")
+        self.assertEqual(encode_stm32_status(), "STATUS")
 
     def test_stm32_feedback_parse(self) -> None:
         ack = parse_car_state_line("ACK_START seq=12")
@@ -60,10 +69,17 @@ class SimpleCarProtocolTest(unittest.TestCase):
         self.assertTrue(status.ok)
         self.assertEqual(status.message, "target=1 applied=0 jog=0")
 
+        jog_start = parse_car_state_line("[CAR][JOG_START] seq=12")
+        self.assertIsNotNone(jog_start)
+        self.assertEqual(jog_start.state, "ACK_START")
+        self.assertTrue(jog_start.ok)
+        self.assertEqual(jog_start.message, "seq=12")
+
         jog_done = parse_car_state_line("[CAR][JOG_DONE] seq=12")
         self.assertIsNotNone(jog_done)
         self.assertEqual(jog_done.state, "DONE")
         self.assertTrue(jog_done.ok)
+        self.assertEqual(jog_done.message, "seq=12")
 
         jog_busy = parse_car_state_line("[CAR][JOG_BUSY] seq=12")
         self.assertIsNotNone(jog_busy)
