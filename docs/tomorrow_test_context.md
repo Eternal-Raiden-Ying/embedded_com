@@ -39,6 +39,7 @@ STM32 returns:
 - Verify `STOP`, `STATUS`, and a short `JOG` from SC171 without starting orchestrator/VISTA/mobile gateway.
 - Record four-wheel direction mapping and low-speed values: stable forward/reverse start P, `dz_pos`, `dz_neg`, `max_offset`, continuous slow speed, JOG speed/duration.
 - Mount camera and check whether table edge is inside the debug ROI presets, especially `center_mid`, `center_lower`, and `full_width_lower`.
+- Switch ROI debug preset explicitly with `VISTA_TABLE_EDGE_ROI_PRESET=center_mid|center_lower|full_width_lower`; leave it unset for the normal ROI path.
 - Confirm whether YOLO/local perception provides a real table class/bbox; if not, use manual initial pose and table-edge ROI debug.
 - In table-edge-only mode, verify approach, stop at about 30 cm, settle, stable frames, yaw tolerance, and final STOP behavior.
 - Measure STOP overshoot and update `stop_margin_cm`.

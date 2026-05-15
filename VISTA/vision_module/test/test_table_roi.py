@@ -12,6 +12,7 @@ try:
         choose_depth_roi,
         choose_table_quadrant,
         normalize_table_bbox,
+        preset_to_roi,
         quadrant_to_depth_roi,
     )
     from VISTA.vision_module.diagnostics.summaries import (
@@ -32,6 +33,7 @@ except ImportError:
         choose_depth_roi,
         choose_table_quadrant,
         normalize_table_bbox,
+        preset_to_roi,
         quadrant_to_depth_roi,
     )
     from vision_module.diagnostics.summaries import (
@@ -71,6 +73,12 @@ class TableRoiTest(unittest.TestCase):
         self.assertEqual(quadrant_to_roi("LT", 640, 480), [0, 0, 320, 240])
         self.assertEqual(quadrant_to_roi("RB", 640, 480), [320, 240, 640, 480])
 
+    def test_center_roi_presets_are_explicit_and_shape_based(self):
+        self.assertEqual(preset_to_roi("center_mid", (480, 640)), [160, 168, 480, 312])
+        self.assertEqual(preset_to_roi("center_lower", (480, 640)), [160, 240, 480, 408])
+        self.assertEqual(preset_to_roi("full_width_lower", (480, 640)), [0, 240, 640, 456])
+        self.assertIsNone(preset_to_roi("", (480, 640)))
+
     def test_build_table_roi_and_fallback(self):
         roi = build_table_roi(
             {"mock_table_bbox": "100,120,420,360"},
@@ -104,6 +112,17 @@ class TableRoiTest(unittest.TestCase):
         self.assertEqual(roi["roi_reason"], "table_bbox_detected")
         self.assertEqual(roi["table_quadrant"], "RB")
         self.assertEqual(roi["depth_edge_roi"], [320, 240, 640, 480])
+
+        preset = choose_depth_roi(
+            {"rgb_shape": (640, 640, 3), "infer_boxes": [[400, 380, 620, 620, 0.9, 60]]},
+            depth_shape=(480, 640),
+            fallback_depth_roi=[10, 20, 110, 120],
+            roi_preset="center_lower",
+        )
+        self.assertEqual(preset["roi_source"], "preset:center_lower")
+        self.assertEqual(preset["roi_reason"], "debug_roi_preset")
+        self.assertEqual(preset["roi_preset"], "center_lower")
+        self.assertEqual(preset["depth_edge_roi"], [160, 240, 480, 408])
 
     def test_diagnostics_summary_formatters_are_short_lines(self):
         edge = format_table_edge_summary(

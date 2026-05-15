@@ -10,6 +10,13 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 from ..utils.table_roi import bbox_center_norm, bbox_to_quadrant, find_table_bbox, quadrant_to_roi
 
 
+ROI_PRESETS = {
+    "center_mid": (0.25, 0.35, 0.75, 0.65),
+    "center_lower": (0.25, 0.50, 0.75, 0.85),
+    "full_width_lower": (0.00, 0.50, 1.00, 0.95),
+}
+
+
 def _parse_shape(shape: Any) -> Optional[Tuple[int, int]]:
     if not isinstance(shape, (list, tuple)) or len(shape) < 2:
         return None
@@ -100,6 +107,20 @@ def quadrant_to_depth_roi(quadrant: Any, depth_shape: Any, fallback_depth_roi: A
     return normalize_table_bbox(fallback_depth_roi, depth_shape)
 
 
+def preset_to_roi(preset: Any, image_shape: Any) -> Optional[list[int]]:
+    name = str(preset or "").strip().lower()
+    ratios = ROI_PRESETS.get(name)
+    shape = _parse_shape(image_shape)
+    if ratios is None or shape is None:
+        return None
+    height, width = shape
+    x1 = int(round(float(ratios[0]) * width))
+    y1 = int(round(float(ratios[1]) * height))
+    x2 = int(round(float(ratios[2]) * width))
+    y2 = int(round(float(ratios[3]) * height))
+    return _clip_bbox([x1, y1, x2, y2], image_shape)
+
+
 def choose_depth_roi(
     local_perception: Any,
     rgb_shape: Any = None,
@@ -112,6 +133,7 @@ def choose_depth_roi(
     last_valid_age_s: Optional[float] = None,
     last_valid_ttl_s: float = 1.0,
     manual_static: bool = False,
+    roi_preset: Any = "",
 ) -> Dict[str, Any]:
     """Choose table-edge ROI from current detection, recent history, or static fallback."""
     local = dict(local_perception or {}) if isinstance(local_perception, dict) else {}
@@ -124,8 +146,14 @@ def choose_depth_roi(
     depth_edge_roi = None
     roi_source = "static_fallback"
     roi_reason = "table_bbox_unavailable"
+    preset_name = str(roi_preset or "").strip().lower()
+    preset_roi = preset_to_roi(preset_name, depth_shape)
 
-    if manual_static:
+    if preset_roi is not None:
+        depth_edge_roi = preset_roi
+        roi_source = f"preset:{preset_name}"
+        roi_reason = "debug_roi_preset"
+    elif manual_static:
         depth_edge_roi = fallback_roi
         roi_source = "manual_static"
         roi_reason = "manual_static_roi_enabled"
@@ -159,5 +187,6 @@ def choose_depth_roi(
         "edge_roi": depth_edge_roi,
         "roi_source": roi_source,
         "roi_reason": roi_reason,
+        "roi_preset": preset_name if preset_roi is not None else None,
         "roi_format": "xyxy",
     }

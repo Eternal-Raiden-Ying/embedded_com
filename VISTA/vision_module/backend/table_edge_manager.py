@@ -48,6 +48,7 @@ class TableEdgeManager:
         self._last_depth_frame_fetch_ms = 0.0
         self._last_process_ms = 0.0
         self._last_update_interval_ms = None
+        self._last_edge_dbg_ts = 0.0
         self._frame_id = 0
         self._detector = None
         self._detector_cfg = None
@@ -262,6 +263,10 @@ class TableEdgeManager:
         raw = os.getenv("VISTA_TABLE_EDGE_STATIC_ROI", os.getenv("VISTA_FORCE_STATIC_EDGE_ROI", "0"))
         return str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
 
+    @staticmethod
+    def _debug_roi_preset() -> str:
+        return str(os.getenv("VISTA_TABLE_EDGE_ROI_PRESET", "") or "").strip().lower()
+
     def _local_perception(self) -> Dict[str, Any]:
         scheduler = self._scheduler
         if scheduler is None:
@@ -329,6 +334,7 @@ class TableEdgeManager:
             return locked_meta
         local = self._local_perception()
         manual_static = self._manual_static_roi_enabled()
+        roi_preset = self._debug_roi_preset()
         last_age_s = None
         if self._last_valid_quadrant_ts:
             last_age_s = time.time() - float(self._last_valid_quadrant_ts or 0.0)
@@ -343,6 +349,7 @@ class TableEdgeManager:
             last_valid_age_s=last_age_s,
             last_valid_ttl_s=self._last_valid_quadrant_ttl_s,
             manual_static=manual_static,
+            roi_preset=roi_preset,
         )
         quadrant = roi_meta.get("table_quadrant")
         table_bbox = roi_meta.get("table_bbox")
@@ -369,6 +376,7 @@ class TableEdgeManager:
             "edge_roi": roi,
             "roi_source": meta.get("roi_source") or "static_fallback",
             "roi_reason": meta.get("roi_reason") or "",
+            "roi_preset": meta.get("roi_preset"),
             "roi_format": "xyxy",
         }
         for key in (
@@ -635,9 +643,27 @@ class TableEdgeManager:
             else:
                 payload = self._process_depth(depth, seq)
             self._last_process_ms = max(0.0, (time.time() - loop_start) * 1000.0)
-            self._publish_result("table_edge_obs", self._with_freshness(payload))
+            payload = self._with_freshness(payload)
+            self._emit_edge_debug(payload)
+            self._publish_result("table_edge_obs", payload)
             elapsed_s = max(0.0, time.time() - loop_start)
             self._worker_stop.wait(timeout=max(0.0, interval_s - elapsed_s))
+
+    def _emit_edge_debug(self, payload: Dict[str, Any]) -> None:
+        now = time.time()
+        period_s = float(os.getenv("VISTA_EDGE_DBG_PERIOD_S", "1.0") or 1.0)
+        if now - float(self._last_edge_dbg_ts or 0.0) < max(0.1, period_s):
+            return
+        self._last_edge_dbg_ts = now
+        valid = bool(payload.get("edge_valid", payload.get("edge_found", False)))
+        self.log.info(
+            "[EDGE_DBG] valid=%s dist=%s yaw=%s age_ms=%s roi=%s",
+            int(valid),
+            payload.get("dist_err_m"),
+            payload.get("yaw_err_rad"),
+            payload.get("age_ms"),
+            payload.get("roi_preset") or payload.get("roi_source") or payload.get("edge_roi"),
+        )
 
     def release_all(self) -> None:
         self.stop_runtime()
