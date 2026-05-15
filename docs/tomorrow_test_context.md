@@ -41,6 +41,7 @@ STM32 returns:
 - Mount camera and check whether table edge is inside the debug ROI presets, especially `center_mid`, `center_lower`, and `full_width_lower`.
 - Switch ROI debug preset explicitly with `VISTA_TABLE_EDGE_ROI_PRESET=center_mid|center_lower|full_width_lower`; leave it unset for the normal ROI path.
 - Confirm whether YOLO/local perception provides a real table class/bbox; if not, use manual initial pose and table-edge ROI debug.
+- Enable table detection debug with `ORCH_TABLE_DET_ENABLED=1`; tune `ORCH_TABLE_DET_MIN_CONF` and `ORCH_TABLE_DET_CENTER_TOL` only for logging/direction hints.
 - In table-edge-only mode, verify approach, stop at about 30 cm, settle, stable frames, yaw tolerance, and final STOP behavior.
 - Measure STOP overshoot and update `stop_margin_cm`.
 

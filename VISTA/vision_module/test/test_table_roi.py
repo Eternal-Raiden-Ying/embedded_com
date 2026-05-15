@@ -26,6 +26,8 @@ try:
         build_table_roi,
         find_table_bbox,
         quadrant_to_roi,
+        table_class_available,
+        table_detection_debug,
     )
 except ImportError:
     from vision_module.backend.table_edge_manager import TableEdgeManager
@@ -47,6 +49,8 @@ except ImportError:
         build_table_roi,
         find_table_bbox,
         quadrant_to_roi,
+        table_class_available,
+        table_detection_debug,
     )
 
 
@@ -64,6 +68,31 @@ class TableRoiTest(unittest.TestCase):
             find_table_bbox({"infer_boxes": [[100, 120, 420, 360, 0.7, "bad", "desk"]]}),
             [100, 120, 420, 360],
         )
+        self.assertEqual(
+            find_table_bbox({"class_names": ["person", "dining table"], "infer_boxes": [[100, 120, 420, 360, 0.7, 1]]}),
+            [100, 120, 420, 360],
+        )
+
+    def test_table_detection_debug_reports_direction_or_missing_class(self):
+        det = table_detection_debug(
+            {
+                "rgb_shape": (480, 640, 3),
+                "class_names": ["person", "dining table"],
+                "infer_boxes": [[20, 80, 220, 260, 0.82, 1]],
+            },
+            min_conf=0.30,
+            center_tol=0.10,
+        )
+        self.assertTrue(det["found"])
+        self.assertEqual(det["bbox"], [20, 80, 220, 260])
+        self.assertEqual(det["direction"], "left")
+        self.assertAlmostEqual(det["cx"], 0.1875)
+
+        self.assertFalse(table_class_available({"class_names": ["apple", "bottle"]}))
+        missing = table_detection_debug({"class_names": ["apple", "bottle"], "infer_boxes": []})
+        self.assertFalse(missing["found"])
+        self.assertTrue(missing["no_table_class"])
+        self.assertEqual(missing["reason"], "no_table_class")
 
     def test_bbox_center_to_quadrant_and_roi(self):
         self.assertEqual(bbox_to_quadrant([100, 120, 420, 360], (640, 640, 3)), "LT")

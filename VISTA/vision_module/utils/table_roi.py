@@ -6,7 +6,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional, Sequence, Tuple
 
 
-TABLE_CLASS_NAMES = {"table", "desk", "diningtable"}
+TABLE_CLASS_NAMES = {"table", "desk", "diningtable", "dining table"}
 TABLE_CLASS_IDS = {60}
 
 
@@ -39,6 +39,56 @@ def _parse_bbox(value: Any) -> Optional[list[int]]:
     if x2 <= x1 or y2 <= y1:
         return None
     return [x1, y1, x2, y2]
+
+
+def _normalize_class_name(value: Any) -> str:
+    return str(value or "").strip().lower().replace("_", " ")
+
+
+def table_class_available(local_perception: Any) -> bool:
+    local = dict(local_perception or {}) if isinstance(local_perception, dict) else {}
+    names = local.get("class_names")
+    if isinstance(names, (list, tuple)):
+        normalized = {_normalize_class_name(name) for name in names}
+        if normalized & TABLE_CLASS_NAMES:
+            return True
+    return not isinstance(names, (list, tuple)) or len(names) > max(TABLE_CLASS_IDS)
+
+
+def _row_conf(row: Any) -> float:
+    try:
+        if isinstance(row, dict):
+            return float(row.get("score", row.get("conf", row.get("confidence", 0.0))) or 0.0)
+        if isinstance(row, (list, tuple)) and len(row) >= 5:
+            return float(row[4] or 0.0)
+    except Exception:
+        return 0.0
+    return 0.0
+
+
+def _row_class(row: Any, class_names: Any = None) -> tuple[Optional[int], str]:
+    class_id = None
+    class_name = ""
+    if isinstance(row, dict):
+        raw = row.get("cls_id", row.get("class_id", row.get("cls", row.get("class"))))
+        class_name = _normalize_class_name(row.get("class_name", row.get("name", row.get("label", ""))))
+    elif isinstance(row, (list, tuple)):
+        raw = row[5] if len(row) > 5 else None
+        class_name = _normalize_class_name(row[6]) if len(row) > 6 else ""
+    else:
+        raw = None
+    try:
+        class_id = int(float(raw))
+    except (TypeError, ValueError):
+        class_id = None
+    if not class_name and class_id is not None and isinstance(class_names, (list, tuple)) and 0 <= class_id < len(class_names):
+        class_name = _normalize_class_name(class_names[class_id])
+    return class_id, class_name
+
+
+def _is_table_row(row: Any, class_names: Any = None) -> bool:
+    class_id, class_name = _row_class(row, class_names=class_names)
+    return class_name in TABLE_CLASS_NAMES or class_id in TABLE_CLASS_IDS
 
 
 def bbox_center_norm(bbox: Any, image_shape: Any) -> Optional[list[float]]:
@@ -92,32 +142,53 @@ def find_table_bbox(local_perception: Any) -> Optional[list[int]]:
     boxes = local.get("infer_boxes")
     if not isinstance(boxes, list):
         return None
+    class_names = local.get("class_names")
     for row in boxes:
-        if isinstance(row, dict):
-            class_id_raw = row.get("cls_id", row.get("class_id", row.get("cls", row.get("class"))))
-            class_name = str(row.get("class_name", row.get("name", row.get("label", ""))) or "").strip().lower()
-            is_table = False
-            try:
-                is_table = int(float(class_id_raw)) in TABLE_CLASS_IDS
-            except (TypeError, ValueError):
-                pass
-            if class_name in TABLE_CLASS_NAMES or is_table:
-                return _parse_bbox(row)
-            continue
-        if not isinstance(row, (list, tuple)) or len(row) < 4:
-            continue
-        class_id = None
-        class_name = ""
-        if len(row) > 5:
-            try:
-                class_id = int(float(row[5]))
-            except (TypeError, ValueError):
-                class_id = None
-        if len(row) > 6:
-            class_name = str(row[6]).strip().lower()
-        if class_name in TABLE_CLASS_NAMES or class_id in TABLE_CLASS_IDS:
+        if _is_table_row(row, class_names=class_names):
             return _parse_bbox(row)
     return None
+
+
+def table_detection_debug(local_perception: Any, image_shape: Any = None, min_conf: float = 0.25, center_tol: float = 0.12) -> Dict[str, Any]:
+    local = dict(local_perception or {}) if isinstance(local_perception, dict) else {}
+    shape = image_shape or local.get("rgb_shape")
+    boxes = local.get("infer_boxes")
+    class_names = local.get("class_names")
+    table_class_ok = table_class_available(local)
+    if not table_class_ok:
+        return {"found": False, "no_table_class": True, "reason": "no_table_class"}
+    best = None
+    best_conf = -1.0
+    for row in boxes if isinstance(boxes, list) else []:
+        if not _is_table_row(row, class_names=class_names):
+            continue
+        conf = _row_conf(row)
+        if conf > best_conf:
+            best = row
+            best_conf = conf
+    bbox = _parse_bbox(best)
+    center = bbox_center_norm(bbox, shape) if bbox is not None else None
+    found = bool(bbox is not None and best_conf >= float(min_conf))
+    direction = "unknown"
+    if center is not None:
+        dx = float(center[0]) - 0.5
+        tol = max(0.0, float(center_tol))
+        if dx < -tol:
+            direction = "left"
+        elif dx > tol:
+            direction = "right"
+        else:
+            direction = "center"
+    return {
+        "found": found,
+        "no_table_class": False,
+        "bbox": bbox,
+        "cx": center[0] if center is not None else None,
+        "cy": center[1] if center is not None else None,
+        "conf": best_conf if best_conf >= 0.0 else None,
+        "direction": direction,
+        "reason": "ok" if found else "not_found_or_low_conf",
+    }
 
 
 def table_bbox_meta(local_perception: Any, image_shape: Any) -> Dict[str, Any]:

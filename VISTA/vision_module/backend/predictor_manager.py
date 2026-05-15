@@ -19,7 +19,7 @@ from .predictor import (
 from .predictor.base import IPredictor
 from ..config.data import COCO80_CLASSES, normalize_class_names
 from ..config.schema import VisionServiceConfig
-from ..utils.table_roi import build_table_roi, find_table_bbox
+from ..utils.table_roi import build_table_roi, find_table_bbox, table_detection_debug
 
 
 CapabilitySink = Optional[Callable[[str, str, Dict[str, Any]], None]]
@@ -107,6 +107,7 @@ class PredictorManager:
         self._last_contract_ok = True
         self._last_contract_error = ""
         self._last_contract_warning_count = 0
+        self._last_table_det_ts = 0.0
 
     @staticmethod
     def _env_bool(name: str, default: bool = False) -> bool:
@@ -378,8 +379,10 @@ class PredictorManager:
                     "table_quadrant": roi_meta.get("table_quadrant"),
                     "rgb_search_roi": roi_meta.get("rgb_search_roi"),
                     "table_roi_source": table_source,
+                    "table_direction_hint": table_detection_debug(payload, rgb_shape).get("direction"),
                 }
             )
+            self._log_table_detection_debug(payload)
             self._publish_result("local_perception", payload)
             self._worker_stop.wait(timeout=self._worker_interval_s)
 
@@ -420,6 +423,35 @@ class PredictorManager:
             table_quadrant,
             rgb_search_roi,
             table_source,
+        )
+
+    def _log_table_detection_debug(self, payload: Dict[str, Any]) -> None:
+        if not self._env_bool("ORCH_TABLE_DET_ENABLED", False):
+            return
+        now = time.time()
+        if now - float(self._last_table_det_ts or 0.0) < 1.0:
+            return
+        self._last_table_det_ts = now
+        try:
+            min_conf = float(os.getenv("ORCH_TABLE_DET_MIN_CONF", "0.25") or 0.25)
+        except Exception:
+            min_conf = 0.25
+        try:
+            center_tol = float(os.getenv("ORCH_TABLE_DET_CENTER_TOL", "0.12") or 0.12)
+        except Exception:
+            center_tol = 0.12
+        det = table_detection_debug(payload, payload.get("rgb_shape"), min_conf=min_conf, center_tol=center_tol)
+        if det.get("no_table_class"):
+            self.log.info("[TABLE_DET][NO_TABLE_CLASS] model=%s classes=%s", self.active_model_name, payload.get("class_names_source"))
+            return
+        self.log.info(
+            "[TABLE_DET] found=%s bbox=%s cx=%s cy=%s conf=%s direction=%s",
+            int(bool(det.get("found"))),
+            det.get("bbox"),
+            det.get("cx"),
+            det.get("cy"),
+            det.get("conf"),
+            det.get("direction"),
         )
 
     def is_ready(self) -> bool:
