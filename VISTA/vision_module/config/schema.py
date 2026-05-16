@@ -130,6 +130,21 @@ class DebugConfig:
     preview: bool = False
     draw_boxes: bool = True
     draw_masks: bool = False
+    edge_debug_enabled: bool = False
+    edge_debug_period_s: float = 1.0
+    table_det_enabled: bool = False
+    table_det_min_conf: float = 0.25
+    table_det_center_tol: float = 0.12
+
+
+@dataclass
+class TableEdgeConfig:
+    roi_preset: str = ""
+    static_roi_enabled: bool = False
+    update_hz: float = 10.0
+    track_local_update_hz: float = 5.0
+    track_local_light_edge: bool = True
+    track_local_edge_stride: int = 4
 
 
 @dataclass
@@ -155,6 +170,7 @@ class VisionServiceConfig:
     camera: CameraConfig = field(default_factory=CameraConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     debug: DebugConfig = field(default_factory=DebugConfig)
+    table_edge: TableEdgeConfig = field(default_factory=TableEdgeConfig)
     preview: PreviewConfig = field(default_factory=PreviewConfig)
     req_in: IPCConfig = field(default_factory=IPCConfig)
     obs_out: IPCConfig = field(default_factory=IPCConfig)

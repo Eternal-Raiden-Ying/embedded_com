@@ -15,6 +15,7 @@ try:
         preset_to_roi,
         quadrant_to_depth_roi,
     )
+    from VISTA.vision_module.config.schema import VisionServiceConfig
     from VISTA.vision_module.diagnostics.summaries import (
         format_runtime_summary,
         format_table_edge_summary,
@@ -38,6 +39,7 @@ except ImportError:
         preset_to_roi,
         quadrant_to_depth_roi,
     )
+    from vision_module.config.schema import VisionServiceConfig
     from vision_module.diagnostics.summaries import (
         format_runtime_summary,
         format_table_edge_summary,
@@ -232,6 +234,18 @@ class TableEdgeManagerDynamicRoiTest(unittest.TestCase):
         self.assertEqual(roi["depth_edge_roi"], [10, 20, 110, 120])
         self.assertEqual(roi["roi_source"], "static_fallback")
         self.assertEqual(roi["roi_reason"], "table_bbox_unavailable")
+
+    def test_file_config_roi_preset_overrides_dynamic_roi_selection(self):
+        cfg = VisionServiceConfig()
+        cfg.table_edge.roi_preset = "center_lower"
+        manager = TableEdgeManager(cfg=cfg)
+        manager._detector_cfg = SimpleNamespace(roi_x0=10, roi_y0=20, roi_x1=110, roi_y1=120)
+        manager.bind_runtime(self.scheduler, lambda: 1)
+        self.scheduler.local = {"rgb_shape": (640, 640, 3), "infer_boxes": []}
+        roi = manager._select_roi(self.depth)
+        self.assertEqual(roi["roi_source"], "preset:center_lower")
+        self.assertEqual(roi["roi_preset"], "center_lower")
+        self.assertEqual(roi["depth_edge_roi"], [160, 240, 480, 408])
 
 
 if __name__ == "__main__":

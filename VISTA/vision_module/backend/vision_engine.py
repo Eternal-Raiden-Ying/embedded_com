@@ -51,6 +51,7 @@ class VisionEngine:
             capability_sink=self._on_simple_capability_change,
         )
         self.table_edge_manager = TableEdgeManager(
+            cfg=self.cfg,
             logger=self.log,
             capability_sink=self._on_simple_capability_change,
         )

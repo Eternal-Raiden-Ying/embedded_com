@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import logging
 import math
-import os
 import threading
 import time
 from pathlib import Path
@@ -14,6 +13,7 @@ from typing import Any, Callable, Dict, Optional
 import numpy as np
 
 from .table_edge_roi import choose_depth_roi
+from ..config.schema import VisionServiceConfig
 
 
 CapabilitySink = Optional[Callable[[str, Dict[str, Any]], None]]
@@ -24,9 +24,11 @@ class TableEdgeManager:
 
     def __init__(
         self,
+        cfg: Optional[VisionServiceConfig] = None,
         logger: Optional[logging.Logger] = None,
         capability_sink: CapabilitySink = None,
     ):
+        self.cfg = cfg or VisionServiceConfig()
         self.log = logger or logging.getLogger("vision.table_edge_manager")
         self._capability_sink = capability_sink
         self._scheduler = None
@@ -34,12 +36,13 @@ class TableEdgeManager:
         self._runtime_running = False
         self._worker_thread: Optional[threading.Thread] = None
         self._worker_stop = threading.Event()
-        edge_hz = float(os.getenv("VISTA_TABLE_EDGE_HZ", "10") or 10.0)
+        table_edge_cfg = getattr(self.cfg, "table_edge", None)
+        edge_hz = float(getattr(table_edge_cfg, "update_hz", 10.0) or 10.0)
         self._worker_interval_s = 1.0 / max(1.0, edge_hz)
-        track_edge_hz = float(os.getenv("VISTA_TRACK_LOCAL_EDGE_UPDATE_HZ", os.getenv("VISTA_EDGE_FOLLOW_TRACK_LOCAL_EDGE_UPDATE_HZ", "5")) or 5.0)
+        track_edge_hz = float(getattr(table_edge_cfg, "track_local_update_hz", 5.0) or 5.0)
         self._track_local_interval_s = 1.0 / max(5.0, track_edge_hz)
-        self._track_local_lightweight = str(os.getenv("VISTA_TRACK_LOCAL_LIGHT_EDGE", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
-        self._light_stride = max(1, int(float(os.getenv("VISTA_TRACK_LOCAL_EDGE_STRIDE", "4") or 4)))
+        self._track_local_lightweight = bool(getattr(table_edge_cfg, "track_local_light_edge", True))
+        self._light_stride = max(1, int(float(getattr(table_edge_cfg, "track_local_edge_stride", 4) or 4)))
         self._default_interval_s = self._worker_interval_s
         self._last_camera_generation = 0
         self._last_camera_seq = 0
@@ -258,14 +261,11 @@ class TableEdgeManager:
             int(getattr(cfg, "roi_y1", 0) or 0),
         ]
 
-    @staticmethod
-    def _manual_static_roi_enabled() -> bool:
-        raw = os.getenv("VISTA_TABLE_EDGE_STATIC_ROI", os.getenv("VISTA_FORCE_STATIC_EDGE_ROI", "0"))
-        return str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
+    def _manual_static_roi_enabled(self) -> bool:
+        return bool(getattr(getattr(self.cfg, "table_edge", None), "static_roi_enabled", False))
 
-    @staticmethod
-    def _debug_roi_preset() -> str:
-        return str(os.getenv("VISTA_TABLE_EDGE_ROI_PRESET", "") or "").strip().lower()
+    def _debug_roi_preset(self) -> str:
+        return str(getattr(getattr(self.cfg, "table_edge", None), "roi_preset", "") or "").strip().lower()
 
     def _local_perception(self) -> Dict[str, Any]:
         scheduler = self._scheduler
@@ -650,8 +650,11 @@ class TableEdgeManager:
             self._worker_stop.wait(timeout=max(0.0, interval_s - elapsed_s))
 
     def _emit_edge_debug(self, payload: Dict[str, Any]) -> None:
+        debug_cfg = getattr(self.cfg, "debug", None)
+        if not bool(getattr(debug_cfg, "edge_debug_enabled", False)):
+            return
         now = time.time()
-        period_s = float(os.getenv("VISTA_EDGE_DBG_PERIOD_S", "1.0") or 1.0)
+        period_s = float(getattr(debug_cfg, "edge_debug_period_s", 1.0) or 1.0)
         if now - float(self._last_edge_dbg_ts or 0.0) < max(0.1, period_s):
             return
         self._last_edge_dbg_ts = now

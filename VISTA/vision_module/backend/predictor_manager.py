@@ -426,18 +426,19 @@ class PredictorManager:
         )
 
     def _log_table_detection_debug(self, payload: Dict[str, Any]) -> None:
-        if not self._env_bool("ORCH_TABLE_DET_ENABLED", False):
+        debug_cfg = getattr(self.cfg, "debug", None)
+        if not bool(getattr(debug_cfg, "table_det_enabled", False)):
             return
         now = time.time()
         if now - float(self._last_table_det_ts or 0.0) < 1.0:
             return
         self._last_table_det_ts = now
         try:
-            min_conf = float(os.getenv("ORCH_TABLE_DET_MIN_CONF", "0.25") or 0.25)
+            min_conf = float(getattr(debug_cfg, "table_det_min_conf", 0.25) or 0.25)
         except Exception:
             min_conf = 0.25
         try:
-            center_tol = float(os.getenv("ORCH_TABLE_DET_CENTER_TOL", "0.12") or 0.12)
+            center_tol = float(getattr(debug_cfg, "table_det_center_tol", 0.12) or 0.12)
         except Exception:
             center_tol = 0.12
         det = table_detection_debug(payload, payload.get("rgb_shape"), min_conf=min_conf, center_tol=center_tol)

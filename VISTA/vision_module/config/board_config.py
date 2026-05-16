@@ -168,6 +168,57 @@ def _env_bool(name: str, default: bool) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return float(default)
+    try:
+        return float(raw)
+    except Exception:
+        return float(default)
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return int(default)
+    try:
+        return int(float(raw))
+    except Exception:
+        return int(default)
+
+
+# table-edge / table-detection debug config.
+# 现场持久调参优先改这里；环境变量只用于临时覆盖。
+CONFIG.debug.edge_debug_enabled = _env_bool(
+    "VISTA_EDGE_DBG_ENABLED",
+    _env_bool("VISTA_EDGE_DBG", CONFIG.debug.edge_debug_enabled),
+)
+CONFIG.debug.edge_debug_period_s = _env_float("VISTA_EDGE_DBG_PERIOD_S", CONFIG.debug.edge_debug_period_s)
+CONFIG.debug.table_det_enabled = _env_bool("ORCH_TABLE_DET_ENABLED", CONFIG.debug.table_det_enabled)
+CONFIG.debug.table_det_min_conf = _env_float("ORCH_TABLE_DET_MIN_CONF", CONFIG.debug.table_det_min_conf)
+CONFIG.debug.table_det_center_tol = _env_float("ORCH_TABLE_DET_CENTER_TOL", CONFIG.debug.table_det_center_tol)
+
+CONFIG.table_edge.roi_preset = os.getenv("VISTA_TABLE_EDGE_ROI_PRESET", CONFIG.table_edge.roi_preset).strip().lower()
+CONFIG.table_edge.static_roi_enabled = _env_bool(
+    "VISTA_TABLE_EDGE_STATIC_ROI",
+    _env_bool("VISTA_FORCE_STATIC_EDGE_ROI", CONFIG.table_edge.static_roi_enabled),
+)
+CONFIG.table_edge.update_hz = _env_float("VISTA_TABLE_EDGE_HZ", CONFIG.table_edge.update_hz)
+CONFIG.table_edge.track_local_update_hz = _env_float(
+    "VISTA_TRACK_LOCAL_EDGE_UPDATE_HZ",
+    _env_float("VISTA_EDGE_FOLLOW_TRACK_LOCAL_EDGE_UPDATE_HZ", CONFIG.table_edge.track_local_update_hz),
+)
+CONFIG.table_edge.track_local_light_edge = _env_bool(
+    "VISTA_TRACK_LOCAL_LIGHT_EDGE",
+    CONFIG.table_edge.track_local_light_edge,
+)
+CONFIG.table_edge.track_local_edge_stride = max(
+    1,
+    _env_int("VISTA_TRACK_LOCAL_EDGE_STRIDE", CONFIG.table_edge.track_local_edge_stride),
+)
+
+
 def _preview_mode_layouts(defaults: Dict[str, str]) -> Dict[str, str]:
     layouts = {str(k).upper(): str(v).strip() for k, v in dict(defaults or {}).items()}
     raw = os.getenv("VISION_PREVIEW_MODE_LAYOUTS", "").strip()
