@@ -133,6 +133,7 @@ class RuntimeContext:
     grasp_retry_count: int = 0
     arm_response: Optional[object] = None
     grasp_timeout_mono: float = 0.0
+    grasp_verify_reported: bool = False
 
     def clear_motion_counters(self):
         self.table_found_frames = 0
@@ -160,6 +161,7 @@ class RuntimeContext:
         self.target_last_transition_reason = ""
         self.grasp_retry_count = 0
         self.grasp_substate = ""
+        self.grasp_verify_reported = False
 
     def clear_perception_cache(self):
         self.last_table_obs = None
@@ -234,6 +236,7 @@ class RuntimeContext:
         self.grasp_retry_count = 0
         self.arm_response = None
         self.grasp_timeout_mono = 0.0
+        self.grasp_verify_reported = False
         self.reset_edge_plan()
         self.clear_perception_cache()
         self.clear_motion_counters()

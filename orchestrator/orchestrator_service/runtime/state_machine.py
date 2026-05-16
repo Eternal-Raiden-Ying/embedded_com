@@ -630,6 +630,7 @@ class OrchestratorCore:
             self.ctx.grasp_retry_count = 0
             self.ctx.arm_response = None
             self.ctx.grasp_timeout_mono = monotonic_ts() + _GRASP_RESPOND_TIMEOUT_S
+            self.ctx.grasp_verify_reported = False
         elif state == State.DONE:
             if self.ctx.last_fail_reason:
                 warning = str(self.ctx.last_fail_reason).strip()
@@ -1502,6 +1503,8 @@ class OrchestratorCore:
             return self._tick_grasp_repositioning(now_m)
         if substate == "AWAITING_ARM":
             return self._tick_grasp_awaiting_arm(now_m)
+        if substate == "GRASP_VERIFY":
+            return self._tick_grasp_verify(now_m)
         return self.controller.stop_cmd("GRASP")
 
     def _tick_grasp_awaiting_respond(self, now_m: float) -> MotionDecision:
@@ -1621,9 +1624,11 @@ class OrchestratorCore:
         resp = self.ctx.arm_response
         if resp is not None:
             if resp.ok:
-                self._transition(State.DONE, "grasp executed successfully")
-                self._queue_tts("抓取完成")
-                return self.controller.stop_cmd("DONE")
+                self.ctx.grasp_substate = "GRASP_VERIFY"
+                self.ctx.grasp_timeout_mono = now_m + 3.0
+                self.ctx.grasp_verify_reported = False
+                self.ctx.arm_response = None
+                return self.controller.stop_cmd("GRASP")
             self.ctx.grasp_retry_count += 1
             if self.ctx.grasp_retry_count > _GRASP_RETRY_LIMIT:
                 self._enter_error_recovery("arm IK exhausted")
@@ -1632,6 +1637,49 @@ class OrchestratorCore:
             self.ctx.grasp_timeout_mono = now_m + _GRASP_RESPOND_TIMEOUT_S
             self.ctx.arm_response = None
 
+        return self.controller.stop_cmd("GRASP")
+
+    def _tick_grasp_verify(self, now_m: float) -> MotionDecision:
+        status = str(self.ctx.grasp_status or "").strip().upper()
+        result = self.ctx.grasp_result if isinstance(self.ctx.grasp_result, dict) else {}
+        explicit_success = result.get("verify_success")
+        if explicit_success is None:
+            explicit_success = result.get("grasp_success")
+
+        if bool(getattr(self.cfg, "assume_grasp_success_for_test", False)):
+            self._log("info", "[GRASP][VERIFY_ASSUMED_SUCCESS] ORCH_ASSUME_GRASP_SUCCESS_FOR_TEST=1")
+            self._transition(State.RETURN_HOME, "grasp verify assumed success")
+            self._queue_tts("抓取完成，开始返航")
+            return self.controller.stop_cmd("RETURN_HOME")
+
+        if status in {"VERIFY_OK", "VERIFIED", "GRASP_VERIFIED", "SUCCESS"} or explicit_success is True:
+            self._transition(State.RETURN_HOME, "grasp verified successfully")
+            self._queue_tts("抓取完成，开始返航")
+            return self.controller.stop_cmd("RETURN_HOME")
+
+        if status in {"VERIFY_FAILED", "GRASP_VERIFY_FAILED"} or explicit_success is False:
+            return self._handle_grasp_verify_failed("grasp verify failed")
+
+        if not self.ctx.grasp_verify_reported:
+            self._log("warn", "[GRASP][VERIFY_UNAVAILABLE] no real grasp verification source; not assuming success")
+            self.ctx.grasp_verify_reported = True
+
+        if now_m > self.ctx.grasp_timeout_mono:
+            return self._handle_grasp_verify_failed("grasp verification unavailable")
+
+        return self.controller.stop_cmd("GRASP")
+
+    def _handle_grasp_verify_failed(self, reason: str) -> MotionDecision:
+        self.ctx.grasp_retry_count += 1
+        if self.ctx.grasp_retry_count > _GRASP_RETRY_LIMIT:
+            self._enter_error_recovery(reason)
+            return self.controller.stop_cmd("GRASP")
+        self.ctx.grasp_substate = "AWAITING_RESPOND"
+        self.ctx.grasp_timeout_mono = monotonic_ts() + _GRASP_RESPOND_TIMEOUT_S
+        self.ctx.grasp_status = ""
+        self.ctx.grasp_result = None
+        self.ctx.arm_response = None
+        self.ctx.grasp_verify_reported = False
         return self.controller.stop_cmd("GRASP")
 
     def _tick_leave_edge(self) -> MotionDecision:

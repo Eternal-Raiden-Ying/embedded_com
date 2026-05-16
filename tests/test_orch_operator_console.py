@@ -18,7 +18,7 @@ if str(ORCH_ROOT) not in sys.path:
 from common.console_presenter import DemoConsolePresenter  # noqa: E402
 from common.runtime_logging import OperatorConsole  # noqa: E402
 from orchestrator_service.config.schema import OrchestratorConfig  # noqa: E402
-from orchestrator_service.ipc.protocol import CmdVel, TableEdgeObs, now_ts  # noqa: E402
+from orchestrator_service.ipc.protocol import ArmResponse, CmdVel, TableEdgeObs, now_ts  # noqa: E402
 from orchestrator_service.runtime.controller import MotionDecision  # noqa: E402
 from orchestrator_service.runtime.common import monotonic_ts  # noqa: E402
 from orchestrator_service.runtime.context import State  # noqa: E402
@@ -1048,6 +1048,57 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         self.assertEqual(cfg.control.table_stable_frames, 5)
         self.assertEqual(cfg.control.table_max_micro_adjust, 3)
         self.assertAlmostEqual(cfg.control.table_yaw_tol_rad, 0.13962634015954636)
+
+    def test_grasp_arm_ok_enters_verify_without_assuming_success(self) -> None:
+        cfg = OrchestratorConfig()
+        logs = []
+        core = OrchestratorCore(cfg.control, cfg.car, cfg.docking, logger=lambda level, src, msg, extra=None: logs.append(msg))
+        core.ctx.state = State.GRASP
+        core.ctx.grasp_substate = "AWAITING_ARM"
+        core.ctx.grasp_timeout_mono = monotonic_ts() + 1.0
+        core.handle_arm_response(ArmResponse(ok=True, message="ok"))
+
+        decision = core.tick()
+        self.assertEqual(core.ctx.state, State.GRASP)
+        self.assertEqual(core.ctx.grasp_substate, "GRASP_VERIFY")
+        self.assertEqual(decision.cmd.mode, "GRASP")
+
+        decision = core.tick()
+        self.assertEqual(core.ctx.state, State.GRASP)
+        self.assertEqual(decision.cmd.mode, "GRASP")
+        self.assertTrue(any("[GRASP][VERIFY_UNAVAILABLE]" in line for line in logs))
+
+    def test_grasp_verify_assumed_success_for_test_returns_home(self) -> None:
+        cfg = OrchestratorConfig()
+        cfg.control.assume_grasp_success_for_test = True
+        core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
+        core.ctx.state = State.GRASP
+        core.ctx.grasp_substate = "GRASP_VERIFY"
+        core.ctx.grasp_timeout_mono = monotonic_ts() + 1.0
+
+        decision = core.tick()
+
+        self.assertEqual(core.ctx.state, State.RETURN_HOME)
+        self.assertEqual(decision.cmd.mode, "RETURN_HOME")
+
+    def test_grasp_verify_failure_uses_retry_then_error_recovery(self) -> None:
+        cfg = OrchestratorConfig()
+        core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
+        core.ctx.state = State.GRASP
+        core.ctx.grasp_substate = "GRASP_VERIFY"
+        core.ctx.grasp_status = "VERIFY_FAILED"
+
+        decision = core.tick()
+        self.assertEqual(core.ctx.state, State.GRASP)
+        self.assertEqual(core.ctx.grasp_substate, "AWAITING_RESPOND")
+        self.assertEqual(decision.cmd.mode, "GRASP")
+
+        core.ctx.grasp_substate = "GRASP_VERIFY"
+        core.ctx.grasp_status = "VERIFY_FAILED"
+        core.ctx.grasp_retry_count = 3
+        decision = core.tick()
+        self.assertEqual(core.ctx.state, State.ERROR_RECOVERY)
+        self.assertEqual(decision.cmd.mode, "GRASP")
 
 
 if __name__ == "__main__":

@@ -402,6 +402,7 @@ CONFIG.control.post_stop_ignore_s = _env_float("ORCH_POST_STOP_IGNORE_S", CONFIG
 CONFIG.control.vision_req_fail_to_stop = _env_bool("ORCH_VISION_REQ_FAIL_TO_STOP", CONFIG.control.vision_req_fail_to_stop)
 CONFIG.control.vision_req_fail_threshold = _env_int("ORCH_VISION_REQ_FAIL_THRESHOLD", CONFIG.control.vision_req_fail_threshold)
 CONFIG.control.enable_pick_pipeline = _env_bool("ORCH_ENABLE_PICK_PIPELINE", CONFIG.control.enable_pick_pipeline)
+CONFIG.control.assume_grasp_success_for_test = _env_bool("ORCH_ASSUME_GRASP_SUCCESS_FOR_TEST", CONFIG.control.assume_grasp_success_for_test)
 
 CONFIG.car.search_table_wz_norm = _env_float("ORCH_SEARCH_TABLE_WZ", CONFIG.car.search_table_wz_norm)
 CONFIG.car.fallback_align_turn_norm_min = _env_float("ORCH_FALLBACK_TURN_MIN", CONFIG.car.fallback_align_turn_norm_min)

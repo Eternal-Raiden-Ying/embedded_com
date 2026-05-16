@@ -173,6 +173,7 @@ class ControlThresholds:
     vision_req_fail_to_stop: bool = True
     vision_req_fail_threshold: int = 2
     enable_pick_pipeline: bool = False
+    assume_grasp_success_for_test: bool = False
 
 
 @dataclass
