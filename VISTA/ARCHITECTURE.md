@@ -221,7 +221,7 @@ Orchestrator --vision_req--> VistaApp
 - `vision_module/backend/predictor/*`
 - `vision_module/backend/remote/client.py`
 - `vision_module/backend/preview/*`
-- `vision_module/backend/Online_Edge_Detect/*`
+- `vision_module/backend/edge_detect/*`
 
 职责：
 

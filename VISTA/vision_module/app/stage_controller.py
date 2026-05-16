@@ -183,15 +183,6 @@ class StageController:
         if self._mode_controller is None:
             self._last_applied_mode = target_mode
             return True
-        if (
-            target_mode == "TABLE_EDGE_PERCEPTION"
-            and normalize_upper(self._ctx.current_stage, "IDLE") == "SEARCH"
-            and normalize_upper(self._ctx.stage_state.get("search_kind"), "") == "TABLE_EDGE"
-        ):
-            resolver = getattr(self._mode_controller, "resolve_profile", None)
-            if callable(resolver) and resolver(target_mode) is None and resolver("DEPTH_PERCEPTION") is not None:
-                target_mode = "DEPTH_PERCEPTION"
-                self._ctx.current_mode = target_mode
         try:
             profile = self._mode_controller.switch_mode(
                 target_mode,
@@ -359,6 +350,15 @@ class StageController:
             self._ctx.current_mode = plan.default_mode
         return plan
 
+    def _mode_available(self, name: str) -> bool:
+        """Check whether a mode profile is registered and available."""
+        if self._mode_controller is None:
+            return True
+        resolver = getattr(self._mode_controller, "resolve_profile", None)
+        if callable(resolver):
+            return resolver(normalize_upper(name, "IDLE")) is not None
+        return True
+
     def _ensure_output(self, plan: Optional[BaseStagePlan], output: Optional[StageOutput]) -> Optional[StageOutput]:
         if plan is None and output is None:
             return None
@@ -368,6 +368,7 @@ class StageController:
 
     def register_plan(self, plan: BaseStagePlan) -> None:
         """Register one stage plan instance by its declared stage name."""
+        plan.mode_available = self._mode_available
         self._plans[str(plan.stage_name).upper()] = plan
 
     def register_default_plans(self, plans: Dict[str, BaseStagePlan]) -> None:

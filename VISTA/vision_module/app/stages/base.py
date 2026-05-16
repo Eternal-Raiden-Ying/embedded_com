@@ -4,7 +4,7 @@
 from abc import ABC
 from dataclasses import dataclass, field
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ...ipc.protocol import VisionObs, VisionReq
 
@@ -119,6 +119,15 @@ class BaseStagePlan(ABC):
     stage_name: str = "IDLE"
     default_mode: str = "IDLE"
 
+    # Callback to check if a mode profile is registered (injected by StageController)
+    mode_available: Optional[Callable[[str], bool]] = None
+
+    # routes subscribed in ALL modes under this stage
+    common_routes: Tuple[str, ...] = ("frame_meta", "runtime_status")
+
+    # additional routes per specific mode; key=mode_name, value=tuple of route names
+    optional_routes: Dict[str, Tuple[str, ...]] = {}
+
     def on_enter(self, req: VisionReq, ctx: StageContext) -> None:
         """Initialize stage-owned state when the stage becomes active."""
         _ = req
@@ -145,6 +154,11 @@ class BaseStagePlan(ABC):
     def on_exit(self, ctx: StageContext) -> None:
         """Release stage-local state before another stage takes control."""
         ctx.stage_state.clear()
+
+    def subscribed_routes(self, mode: str) -> Tuple[str, ...]:
+        """Return the union of common and optional routes for the given mode."""
+        optional = self.optional_routes.get(mode, ())
+        return self.common_routes + optional
 
     def build_obs(
         self,

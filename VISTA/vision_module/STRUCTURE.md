@@ -11,7 +11,7 @@ for diagnostics, ROI helpers, and future manual tools.
 - `backend/predictor/`: QNN and mock predictors plus YOLO post-processing.
 - `backend/preview/`: OpenCV and null preview sinks.
 - `backend/remote/`: remote grasp interface.
-- `backend/Online_Edge_Detect/`: table edge detector implementation (`OnlineTableEdgeDetector`, board config, calibration).
+- `backend/edge_detect/`: table edge detector capability driver (`OnlineTableEdgeDetector`, board config, calibration).
 - `config/`: `board_config`, schema definitions, and mode defaults.
 - `ipc/`: `vision_req` / `vision_obs` protocol objects and JSONL transport.
 - `diagnostics/`: operator console rate limiting, field summaries, and future debug dump helpers.

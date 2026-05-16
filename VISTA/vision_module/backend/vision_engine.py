@@ -188,8 +188,8 @@ class VisionEngine:
         self._sync_aliases()
         return True
 
-    def collect_tick_input(self, ts: float):
-        return self.scheduler.collect_tick_input(ts=ts)
+    def collect_tick_input(self, ts: float, route_filter: set = None):
+        return self.scheduler.collect_tick_input(ts=ts, route_filter=route_filter)
 
     def push_stage_signals(self, signals: Dict[str, object]) -> None:
         self.scheduler.push_stage_signals(dict(signals or {}))

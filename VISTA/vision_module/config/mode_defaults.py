@@ -14,16 +14,6 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def build_default_stage_entry_modes() -> Dict[str, str]:
-    """Return the recommended initial mode for each business stage."""
-    return {
-        "IDLE": "IDLE",
-        "SEARCH": "TRACK_LOCAL",
-        "GRASP": "MICRO_ADJUST",
-        "RETURN": "TRACK_LOCAL",
-    }
-
-
 def _camera_override_from_config(cfg, camera_name: str) -> Dict[str, Any]:
     camera_cfg = getattr(getattr(cfg, "camera", None), "streams", {}).get(camera_name)
     if camera_cfg is None:

@@ -7,6 +7,16 @@ import sys
 import time
 from typing import Tuple
 
+import numpy as np
+
+try:
+    import aidcv as cv2
+except ImportError:
+    try:
+        import cv2
+    except ImportError:
+        cv2 = None
+
 from test_support import (
     EXIT_FAIL,
     EXIT_INTERRUPT,
@@ -39,6 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_backend_args(parser)
     add_camera_args(parser)
     add_model_args(parser)
+    parser.add_argument("--debug-window", action="store_true", help="Show CV debug window with detection boxes")
     return parser
 
 
@@ -143,6 +154,35 @@ def build_runtime_stack(engine_module, cfg):
     return runtime, mode_controller, stage_controller
 
 
+def draw_debug_frame(rgb: np.ndarray, perception: dict) -> np.ndarray:
+    """Draw YOLO detection boxes on a BGR frame for debug display."""
+    display = np.ascontiguousarray(rgb.copy())
+    boxes = perception.get("infer_boxes") if isinstance(perception, dict) else None
+    if not boxes:
+        return display
+    h, w = display.shape[:2]
+    for row in boxes:
+        if isinstance(row, dict):
+            x1 = float(row.get("x1", 0))
+            y1 = float(row.get("y1", 0))
+            x2 = float(row.get("x2", 0))
+            y2 = float(row.get("y2", 0))
+            cls_id = row.get("class_id", row.get("cls", 0))
+            conf = row.get("confidence", row.get("conf", 0.0))
+        elif isinstance(row, (list, tuple)) and len(row) >= 6:
+            x1, y1, x2, y2, conf, cls_id = row[:6]
+        else:
+            continue
+        pt1 = (int(x1 * w), int(y1 * h))
+        pt2 = (int(x2 * w), int(y2 * h))
+        cv2.rectangle(display, pt1, pt2, (0, 255, 0), 2)
+        label = f"#{int(cls_id)} {float(conf):.2f}"
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        cv2.rectangle(display, (pt1[0], pt1[1] - th - 4), (pt1[0] + tw + 4, pt1[1]), (0, 255, 0), -1)
+        cv2.putText(display, label, (pt1[0] + 2, pt1[1] - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+    return display
+
+
 def phase_camera_only(engine_module, cfg, camera_kwargs: dict) -> Tuple[bool, str]:
     runtime, _, _ = build_runtime_stack(engine_module, cfg)
     try:
@@ -173,11 +213,15 @@ def phase_predictor_only(engine_module, cfg) -> Tuple[bool, str]:
         runtime.stop()
 
 
-def phase_combined(engine_module, cfg, camera_kwargs: dict, iterations: int) -> Tuple[bool, str]:
+def phase_combined(engine_module, cfg, camera_kwargs: dict, iterations: int,
+                   debug_window: bool = False) -> Tuple[bool, str]:
     runtime, _, stage_controller = build_runtime_stack(engine_module, cfg)
     frames_seen = 0
     infer_seen = 0
     last_seq = 0
+    debug_window_active = bool(debug_window and cv2 is not None)
+    if debug_window and cv2 is None:
+        emit_line("WARNING: --debug-window ignored, cv2 not available")
     try:
         runtime.init()
         runtime.start()
@@ -190,18 +234,39 @@ def phase_combined(engine_module, cfg, camera_kwargs: dict, iterations: int) -> 
                     frames_seen += 1
                     last_seq = frame_seq
 
-            # Keep a backend-slot fallback for compatibility with older route contracts.
+            # Try camera_frames slot first, then frame_meta result.
             frame_slot = runtime.scheduler.read_slot("camera_frames")
-            if frames_seen <= 0 and isinstance(frame_slot, dict):
-                seq = int(frame_slot.get("seq", 0) or 0)
-                frames = frame_slot.get("payload")
-                if seq > last_seq and isinstance(frames, dict):
-                    frames_seen += 1
-                    last_seq = seq
+            frame_data = None
+            frame_seq = 0
+            if isinstance(frame_slot, dict):
+                frame_seq = int(frame_slot.get("seq", 0) or 0)
+                frame_data = frame_slot.get("payload") if isinstance(frame_slot.get("payload"), dict) else None
+            if not isinstance(frame_data, dict) or frame_seq <= last_seq:
+                # Fallback: some camera backends populate frame_meta instead.
+                if isinstance(frame_meta, dict):
+                    alt_seq = int(frame_meta.get("frame_seq", 0) or 0)
+                    alt_frames = frame_meta.get("frames") if isinstance(frame_meta.get("frames"), dict) else None
+                    if alt_seq > last_seq and isinstance(alt_frames, dict):
+                        frame_seq = alt_seq
+                        frame_data = alt_frames
+            if frame_seq > last_seq and isinstance(frame_data, dict):
+                frames_seen += 1
+                last_seq = frame_seq
 
             local = runtime.scheduler.read_result("local_perception", default={}) or {}
             if isinstance(local, dict) and bool(local.get("has_infer")):
                 infer_seen += 1
+
+            if debug_window_active and frame_data is not None:
+                rgb = frame_data.get("rgb")
+                if rgb is not None and isinstance(rgb, np.ndarray):
+                    display = draw_debug_frame(rgb, local)
+                    cv2.imshow("pipeline debug (ESC to exit)", display)
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == 27:
+                        debug_window_active = False
+                        cv2.destroyWindow("pipeline debug (ESC to exit)")
+
             time.sleep(0.05)
         if frames_seen <= 0:
             snapshot = runtime.runtime_snapshot()
@@ -217,10 +282,14 @@ def phase_combined(engine_module, cfg, camera_kwargs: dict, iterations: int) -> 
             )
         if infer_seen <= 0:
             return False, "no inference observed in combined phase"
+        if debug_window_active and cv2 is not None:
+            cv2.destroyAllWindows()
         return True, f"frames_seen={frames_seen} infer_seen={infer_seen}"
     finally:
         runtime.stop()
         runtime.stop()
+        if cv2 is not None:
+            cv2.destroyAllWindows()
 
 
 def main() -> int:
@@ -272,7 +341,10 @@ def main() -> int:
         print_step("predictor_only", "FAIL", "predictor backend unavailable")
 
     if camera_backend_cls is not None and predictor_backend_cls is not None:
-        ok, detail = phase_combined(engine_module, cfg, camera_kwargs, args.iterations)
+        # Use longer window for combined to allow camera frames to flow.
+        combined_iterations = max(args.iterations, 50)
+        ok, detail = phase_combined(engine_module, cfg, camera_kwargs, combined_iterations,
+                                    debug_window=args.debug_window)
         phase_results.append(("combined", ok, detail))
         print_step("combined", "PASS" if ok else "FAIL", detail)
     else:

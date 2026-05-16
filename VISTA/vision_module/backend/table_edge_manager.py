@@ -71,38 +71,38 @@ class TableEdgeManager:
             pass
 
     def _load_detector(self) -> None:
-        candidates = [
-            ("vision_module.backend.Online_Edge_Detect.board_config", "vision_module.backend.Online_Edge_Detect.detector"),
-            ("VISTA.vision_module.backend.Online_Edge_Detect.board_config", "VISTA.vision_module.backend.Online_Edge_Detect.detector"),
-        ]
-        last_error = ""
-        for cfg_mod_name, det_mod_name in candidates:
+        try:
+            from .edge_detect.board_config import CONFIG as edge_cfg
+            from .edge_detect.detector import OnlineTableEdgeDetector, load_calib
+        except ImportError:
             try:
-                cfg_mod = __import__(cfg_mod_name, fromlist=["CONFIG"])
-                det_mod = __import__(det_mod_name, fromlist=["OnlineTableEdgeDetector", "load_calib"])
-                edge_cfg = getattr(cfg_mod, "CONFIG")
-                load_calib = getattr(det_mod, "load_calib")
-                detector_cls = getattr(det_mod, "OnlineTableEdgeDetector")
-                calib_path = Path(str(edge_cfg.detector.calib_json)).expanduser()
-                calib, target_dist = load_calib(calib_path)
-                if float(edge_cfg.detector.target_dist_m_override) > 0:
-                    target_dist = float(edge_cfg.detector.target_dist_m_override)
-                self._detector = detector_cls(calib, edge_cfg.detector, target_dist)
-                self._detector_cfg = edge_cfg.detector
-                self._target_dist_m = float(target_dist)
-                self._detector_error = ""
-                self._emit(
-                    "loaded",
-                    calib_json=str(calib_path),
-                    target_dist_m=float(self._target_dist_m),
-                )
+                from vision_module.backend.edge_detect.board_config import CONFIG as edge_cfg  # type: ignore[assignment]
+                from vision_module.backend.edge_detect.detector import OnlineTableEdgeDetector, load_calib  # type: ignore[assignment]
+            except ImportError as exc2:
+                self._detector = None
+                self._detector_cfg = None
+                self._detector_error = str(exc2 or "detector_unavailable")
+                self._emit("load_failed", error=self._detector_error)
                 return
-            except Exception as exc:
-                last_error = str(exc)
-        self._detector = None
-        self._detector_cfg = None
-        self._detector_error = str(last_error or "detector_unavailable")
-        self._emit("load_failed", error=self._detector_error)
+        try:
+            calib_path = Path(str(edge_cfg.detector.calib_json)).expanduser()
+            calib, target_dist = load_calib(calib_path)
+            if float(edge_cfg.detector.target_dist_m_override) > 0:
+                target_dist = float(edge_cfg.detector.target_dist_m_override)
+            self._detector = OnlineTableEdgeDetector(calib, edge_cfg.detector, target_dist)
+            self._detector_cfg = edge_cfg.detector
+            self._target_dist_m = float(target_dist)
+            self._detector_error = ""
+            self._emit(
+                "loaded",
+                calib_json=str(calib_path),
+                target_dist_m=float(self._target_dist_m),
+            )
+        except Exception as exc:
+            self._detector = None
+            self._detector_cfg = None
+            self._detector_error = str(exc or "detector_unavailable")
+            self._emit("load_failed", error=self._detector_error)
 
     def bind_runtime(self, scheduler, generation_getter=None) -> None:
         self._scheduler = scheduler

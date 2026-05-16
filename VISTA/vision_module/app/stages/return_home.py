@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 from ...ipc.protocol import VisionReq
 from ...utils.detect import compute_target_obs
@@ -85,6 +85,10 @@ class ReturnStagePlan(BaseStagePlan):
 
     stage_name = "RETURN"
     default_mode = "TRACK_LOCAL"
+    common_routes = ("frame_meta", "runtime_status")
+    optional_routes = {
+        "TRACK_LOCAL": ("local_perception",),
+    }
 
     def on_enter(self, req: VisionReq, ctx: StageContext) -> None:
         """Initialize return-home state and choose the initial return mode."""

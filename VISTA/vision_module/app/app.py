@@ -778,7 +778,10 @@ class VistaApp(BaseModule):
             self.last_send_ts = 0.0
 
     def _tick_stage(self, now: float):
-        tick_input = self.runtime.collect_tick_input(ts=now)
+        plan = self.stage_controller.current_plan()
+        mode = self._safe_mode_text(self._ctx().current_mode)
+        route_filter = set(plan.subscribed_routes(mode)) if plan else None
+        tick_input = self.runtime.collect_tick_input(ts=now, route_filter=route_filter)
         tick_input.snapshot["app"] = {
             "stage": self._safe_stage_text(self._ctx().current_stage),
             "mode": self._safe_mode_text(self._ctx().current_mode),

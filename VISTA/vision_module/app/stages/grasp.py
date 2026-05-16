@@ -3,7 +3,7 @@
 
 from copy import deepcopy
 import time
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 from ...ipc.protocol import VisionReq
 from ...utils.detect import compute_target_obs
@@ -192,6 +192,11 @@ class GraspStagePlan(BaseStagePlan):
 
     stage_name = "GRASP"
     default_mode = "MICRO_ADJUST"
+    common_routes = ("frame_meta", "runtime_status")
+    optional_routes = {
+        "MICRO_ADJUST": ("local_perception",),
+        "GRASP_REMOTE": ("remote_result", "remote_ack"),
+    }
 
     def on_enter(self, req: VisionReq, ctx: StageContext) -> None:
         super().on_enter(req, ctx)
@@ -545,7 +550,8 @@ class GraspStagePlan(BaseStagePlan):
         if not ctx.interaction_id:
             ctx.interaction_id = next_interaction_id()
             stage_state["adjust_round"] = int(stage_state.get("adjust_round", 0) or 0) + 1
-        ctx.current_mode = "MICRO_ADJUST"
+        if normalize_upper(ctx.current_mode, "") not in ("MICRO_ADJUST",):
+            ctx.current_mode = "MICRO_ADJUST"
         return StageOutput(
             vision_obs=self.build_obs(
                 ctx,
