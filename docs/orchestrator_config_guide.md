@@ -122,34 +122,40 @@ VISTA 启动入口 `VISTA/vision_module/app/app.py` 最终使用的是：
 VISTA/vision_module/config/board_config.py 生成的 CONFIG
 ```
 
-VISTA 目前没有单独的 YAML。你要做持久调参时，改 `board_config.py` 里对应字段；环境变量只是临时覆盖。
+但现场不要直接改 `VISTA/vision_module/config/board_config.py`。现在 VISTA 也和 orchestrator 一样，持久调参改 YAML：
+
+```text
+VISTA/configs/vision_params.yaml
+```
+
+`board_config.py` / `schema.py` 只负责默认值、结构和装配。环境变量仍然可以临时覆盖 YAML，但你明天不需要记环境变量名。
 
 ### VISTA 摄像头、模型、预览、IPC
 
 改：
 
 ```text
-VISTA/vision_module/config/board_config.py
+VISTA/configs/vision_params.yaml
 ```
 
-常见位置：
+对应位置：
 
-- `CONFIG.camera.streams["rgb"]`：RGB 摄像头编号、输入分辨率、裁剪区域、格式、FPS。
-- `CONFIG.camera.streams["depth"]`：深度摄像头编号、分辨率、FPS。
-- `CONFIG.model.active_model`：默认模型。
-- `CONFIG.model.profiles[...]`：模型路径、输入尺寸、置信度、IOU、类别数。
-- `CONFIG.debug.preview`、`draw_boxes`、`draw_masks`：预览和绘制开关。
-- `CONFIG.req_in` / `CONFIG.obs_out`：VISTA 和 orchestrator 之间的 IPC 地址与端口。
+- `camera.rgb`：RGB 摄像头编号、输入分辨率、裁剪区域、格式、FPS。
+- `camera.depth`：深度摄像头编号、分辨率、FPS。
+- `model.active_model`：默认模型。
+- `model.profiles.*`：模型路径、输入尺寸、置信度、IOU、类别数。
+- `debug.preview`、`debug.draw_boxes`、`debug.draw_masks`：预览和绘制开关。
+- `ipc.req_in` / `ipc.obs_out`：VISTA 和 orchestrator 之间的 IPC 地址与端口。
 
 ### VISTA 不同模式下用哪些相机和 crop
 
 改：
 
 ```text
-VISTA/vision_module/config/mode_defaults.py
+VISTA/configs/vision_params.yaml
 ```
 
-这里决定每个模式的运行计划：
+看 `mode_profiles` 段。这里决定每个模式的运行计划：
 
 - `TRACK_LOCAL`：本地 YOLO 跟踪时用的 RGB/depth、crop、预览布局。
 - `TABLE_EDGE_PERCEPTION`：桌边深度检测时启用哪些相机和 table-edge capability。
@@ -157,29 +163,29 @@ VISTA/vision_module/config/mode_defaults.py
 - `GRASP_REMOTE`：抓取阶段 RGB/depth、远程抓取配置。
 - `DEPTH_PERCEPTION`：深度感知模式，是否附带 RGB/table bbox。
 
-如果明天发现桌子总是在画面偏左、偏右、偏下，优先改这里的 per-mode RGB crop；如果只是改相机设备号，改 `board_config.py`。
+如果明天发现桌子总是在画面偏左、偏右、偏下，优先改 `mode_profiles.modes.TRACK_LOCAL.rgb` 或 `mode_profiles.modes.TABLE_EDGE_PERCEPTION.rgb` 里的 `crop_x/crop_y/crop_w/crop_h`；如果只是改相机设备号，改 `camera.rgb.source` 或 `camera.depth.source`。
 
 ### 桌边 ROI、EDGE_DBG、TABLE_DET
 
-现在这些也已经接到 VISTA 文件配置里。持久调试改：
+持久调试改：
 
 ```text
-VISTA/vision_module/config/board_config.py
+VISTA/configs/vision_params.yaml
 ```
 
 字段：
 
-- `CONFIG.table_edge.roi_preset`：桌边 ROI preset，可填 `""`、`center_mid`、`center_lower`、`full_width_lower`。
-- `CONFIG.table_edge.static_roi_enabled`：是否强制使用 detector 静态 ROI。
-- `CONFIG.table_edge.update_hz`：桌边检测主循环频率。
-- `CONFIG.table_edge.track_local_update_hz`：TRACK_LOCAL 下的桌边更新频率。
-- `CONFIG.table_edge.track_local_light_edge`：TRACK_LOCAL 下是否用轻量处理。
-- `CONFIG.table_edge.track_local_edge_stride`：轻量处理 stride。
-- `CONFIG.debug.edge_debug_enabled`：是否输出 `[EDGE_DBG]`。
-- `CONFIG.debug.edge_debug_period_s`：`[EDGE_DBG]` 输出间隔。
-- `CONFIG.debug.table_det_enabled`：是否输出 `[TABLE_DET]`。
-- `CONFIG.debug.table_det_min_conf`：table detection debug 最低置信度。
-- `CONFIG.debug.table_det_center_tol`：center/left/right 判定容差。
+- `table_edge.roi_preset`：桌边 ROI preset，可填 `""`、`center_mid`、`center_lower`、`full_width_lower`。
+- `table_edge.static_roi_enabled`：是否强制使用 detector 静态 ROI。
+- `table_edge.update_hz`：桌边检测主循环频率。
+- `table_edge.track_local_update_hz`：TRACK_LOCAL 下的桌边更新频率。
+- `table_edge.track_local_light_edge`：TRACK_LOCAL 下是否用轻量处理。
+- `table_edge.track_local_edge_stride`：轻量处理 stride。
+- `debug.edge_debug_enabled`：是否输出 `[EDGE_DBG]`。
+- `debug.edge_debug_period_s`：`[EDGE_DBG]` 输出间隔。
+- `debug.table_det_enabled`：是否输出 `[TABLE_DET]`。
+- `debug.table_det_min_conf`：table detection debug 最低置信度。
+- `debug.table_det_center_tol`：center/left/right 判定容差。
 
 ROI preset 的具体矩形定义在：
 
@@ -187,11 +193,13 @@ ROI preset 的具体矩形定义在：
 VISTA/vision_module/backend/table_edge_roi.py
 ```
 
-如果你只是想切换 preset，改 `board_config.py`；只有要新增一种 preset 或调整 preset 的几何范围，才改 `table_edge_roi.py`。
+如果你只是想切换 preset，改 `VISTA/configs/vision_params.yaml`；只有要新增一种 preset 或调整 preset 的几何范围，才改 `table_edge_roi.py`。
 
 ### 不建议现场直接改的 VISTA 文件
 
 - `VISTA/vision_module/config/schema.py`：只定义配置结构和兜底默认值，不做现场调参。
+- `VISTA/vision_module/config/board_config.py`：只做配置装配，不做现场调参。
+- `VISTA/vision_module/config/mode_defaults.py`：只做模式默认生成和 YAML 覆盖逻辑，不做现场调参。
 - `VISTA/vision_module/config/data.py`：类别名和 COCO 映射，不是运行参数。
 - `VISTA/vision_module/model/...`：模型文件和模型工程，不是现场模式配置。
 
@@ -208,7 +216,7 @@ VISTA/vision_module/backend/table_edge_roi.py
 ## 当前建议
 
 - 明天 A1 现场调桌边停靠：优先改 `orchestrator/configs/stage_params.yaml`。
-- 明天 A1 现场调 VISTA 视觉：优先改 `VISTA/vision_module/config/board_config.py` 和 `VISTA/vision_module/config/mode_defaults.py`。
+- 明天 A1 现场调 VISTA 视觉：优先改 `VISTA/configs/vision_params.yaml`。
 - 临时试不同模式：可以用环境变量；如果你不想记变量名，就把常用值写进上面的文件。
 - 不要直接改 `orchestrator/orchestrator_service/config/board_config.py`，除非是在新增配置项或修配置加载逻辑。
 - 不要直接改 `orchestrator/orchestrator_service/config/schema.py` 做现场调参；它只是兜底默认值和结构定义。

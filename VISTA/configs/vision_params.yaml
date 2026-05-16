@@ -1,9 +1,37 @@
-# Reference defaults for VISTA perception tuning.
-# This file documents the high-impact knobs currently configured in
-# VISTA/vision_module/config/board_config.py. It is not loaded by runtime yet.
+# VISTA 现场调参入口。
+# board_config.py / schema.py 只保留默认值和装配逻辑；明天现场优先改这个 YAML。
+# 如果终端里设置了对应环境变量，环境变量仍会临时覆盖这里的值。
+
+runtime:
+  # 主循环和观测发送频率。
+  loop_hz: 8.0
+  send_hz: 5.0
+  track_local_send_hz: 8.0
+
+  # 请求过期和热待机。
+  stale_req_s: 3.0
+  hot_standby_s: 30.0
+  keep_preview_after_stop: true
+  keep_model_hot_in_standby: true
+  enable_infer_during_hot_standby: false
+
+  # 日志和控制台。
+  log_mode: concise
+  log_enabled: true
+  debug: false
+  heartbeat_enabled: true
+  heartbeat_interval_s: 2.0
+  heartbeat_console: false
+  console_mode: operator
+  operator_summary_interval_s: 1.0
+  ipc_console: false
+
 camera:
+  # 全局相机 FPS 上限。
   max_fps: 30
+
   rgb:
+    # RGB 摄像头设备号。A1 上常见是 "6"，必要时按 /dev/video* 调整。
     source: "6"
     in_w: 1280
     in_h: 720
@@ -12,18 +40,24 @@ camera:
     in_format: YUY2
     format: BGR
     fps: 30
+
+    # 默认 RGB crop。桌子在画面偏左/偏右/偏下时，优先先调 mode_profiles 里的模式 crop。
     crop_x: 280
     crop_y: 0
     crop_w: 720
     crop_h: 720
+
     auto_exposure: true
     exposure: null
     brightness: null
+
   depth:
+    # 深度摄像头设备号。A1 上常见是 "2"。
     source: "2"
     width: 424
     height: 240
     fps: 15
+
   grey:
     source: "4"
     in_w: 640
@@ -33,45 +67,175 @@ camera:
     in_format: GRAY8
     format: BGR
     fps: 30
+    crop_x: 0
+    crop_y: 0
+    crop_w: 0
+    crop_h: 0
 
 model:
+  # 可选：yolov7_detect、yolov8s_seg、yolo26s_seg、yolo26s_seg_qnn216。
   active_model: yolov7_detect
-  yolov7_detect:
-    width: 640
-    height: 640
-    conf_thres: 0.25
-    iou_thres: 0.45
-    backend: qnn
-  yolov8s_seg:
-    width: 640
-    height: 640
-    conf_thres: 0.45
-    iou_thres: 0.45
-    backend: qnn
-  yolo26s_seg:
-    width: 640
-    height: 640
-    conf_thres: 0.25
-    iou_thres: 0.15
-    backend: qnn
 
-target_detection:
-  target_min_conf: 0.25
-  min_bbox_area: 0.001
-  use_roi_filter: false
-  prefer_center_region: false
-  class_alias_file: configs/target_aliases.json
+  profiles:
+    yolov7_detect:
+      # target_model 留空或删除表示使用 board_config.py 默认模型路径。
+      target_model: null
+      width: 640
+      height: 640
+      conf_thres: 0.25
+      iou_thres: 0.45
+      class_num: 80
+      predictor_type: detect
+      model_backend: qnn
 
-preview:
-  enabled_default_on_board: true
+    yolov8s_seg:
+      target_model: null
+      width: 640
+      height: 640
+      conf_thres: 0.45
+      iou_thres: 0.45
+      class_num: 80
+      predictor_type: segment
+      model_backend: qnn
+
+    yolo26s_seg:
+      target_model: null
+      width: 640
+      height: 640
+      conf_thres: 0.25
+      iou_thres: 0.15
+      class_num: 20
+      predictor_type: segment
+      model_backend: qnn
+
+debug:
+  preview: true
   draw_boxes: true
   draw_masks: false
+
+  # 桌边深度调试日志。打开后低频输出 [EDGE_DBG]。
+  edge_debug_enabled: false
+  edge_debug_period_s: 1.0
+
+  # YOLO table detection 调试日志。打开后低频输出 [TABLE_DET]。
+  table_det_enabled: false
+  table_det_min_conf: 0.25
+  table_det_center_tol: 0.12
+
+table_edge:
+  # 可选：""、center_mid、center_lower、full_width_lower。
+  # 正常动态 ROI 留空；现场只想固定看某块区域时再填 preset。
+  roi_preset: ""
+  static_roi_enabled: false
+
+  # 桌边检测频率。
+  update_hz: 10.0
+  track_local_update_hz: 5.0
+  track_local_light_edge: true
+  track_local_edge_stride: 4
+
+preview:
+  # 可选 layout 见 preview/manager 和 opencv_sink 支持项。
   mode_layouts:
-    IDLE: "rgb_minimal"
-    TABLE_EDGE_PERCEPTION: "rgb_depth_edge"
-    TRACK_LOCAL: "rgb_yolo_edge_overlay"
-    IDLE_HOT: "rgb_hot_preview"
+    IDLE: rgb_minimal
+    DEPTH_PERCEPTION: rgb_depth_edge
+    TABLE_EDGE_PERCEPTION: rgb_depth_edge
+    TRACK_LOCAL: rgb_yolo_edge_overlay
+    MICRO_ADJUST: rgb_minimal
+    GRASP_REMOTE: rgb_depth_edge
+    IDLE_HOT: rgb_hot_preview
+
   debug_four_panel_in_track_local: false
   show_edge_overlay_in_track_local: true
   show_age_ms: true
   clear_overlay_on_mode_switch: true
+
+mode_profiles:
+  # DEPTH_PERCEPTION 是否也打开 RGB + YOLO table bbox。
+  table_bbox:
+    enabled: false
+    model: yolov7_detect
+
+  modes:
+    TRACK_LOCAL:
+      # 可选相机写法：rgb,depth 或 [rgb, depth]。
+      enabled_cameras: [rgb, depth]
+      predictor_enabled: true
+      predictor_model: yolov7_detect
+      preview_enabled: true
+      preview_layout: rgb_yolo_edge_overlay
+      release_cooldown_s: 2.0
+      rgb:
+        fps: 24
+        crop_x: 280
+        crop_y: 0
+        crop_w: 720
+        crop_h: 720
+
+    TABLE_EDGE_PERCEPTION:
+      enabled_cameras: [rgb, depth]
+      predictor_enabled: true
+      predictor_model: yolov7_detect
+      preview_enabled: true
+      preview_layout: rgb_depth_edge
+      release_cooldown_s: 2.0
+      rgb:
+        fps: 24
+        crop_x: 280
+        crop_y: 0
+        crop_w: 720
+        crop_h: 720
+
+    MICRO_ADJUST:
+      enabled_cameras: [rgb]
+      predictor_enabled: true
+      predictor_model: yolov7_detect
+      preview_enabled: true
+      preview_layout: rgb_minimal
+      release_cooldown_s: 2.0
+      rgb:
+        fps: 30
+        crop_x: 320
+        crop_y: 40
+        crop_w: 640
+        crop_h: 640
+
+    GRASP_REMOTE:
+      enabled_cameras: [rgb, depth]
+      predictor_enabled: false
+      predictor_model: null
+      preview_enabled: true
+      preview_layout: rgb_depth_edge
+      release_cooldown_s: 3.0
+      rgb:
+        fps: 15
+        crop_x: 280
+        crop_y: 0
+        crop_w: 720
+        crop_h: 720
+
+    IDLE_HOT:
+      enabled_cameras: [rgb]
+      predictor_enabled: false
+      predictor_model: null
+      preview_enabled: true
+      preview_layout: rgb_hot_preview
+      release_cooldown_s: 5.0
+      rgb:
+        fps: 10
+        crop_x: 280
+        crop_y: 0
+        crop_w: 720
+        crop_h: 720
+
+ipc:
+  req_in:
+    transport: tcp
+    host: 127.0.0.1
+    port: 9003
+    uds_path: /tmp/robot_stack/vision_req.sock
+  obs_out:
+    transport: tcp
+    host: 127.0.0.1
+    port: 9002
+    uds_path: /tmp/robot_stack/vision_obs.sock

@@ -32,20 +32,33 @@ python3 orchestrator/stm32_motion_probe.py --port /dev/ttyHS1 --baudrate 115200 
 
 ## 2. ROI 调试
 
-只使用显式 preset；默认 ROI 行为保持不变。
+只使用显式 preset；默认 ROI 行为保持不变。先改 `VISTA/configs/vision_params.yaml`：
+
+```yaml
+table_edge:
+  roi_preset: center_mid
+debug:
+  edge_debug_enabled: true
+```
+
+然后启动：
 
 ```bash
-ORCH_SERIAL_DRY_RUN=1 \
-VISTA_TABLE_EDGE_ROI_PRESET=center_mid \
-VISTA_EDGE_DBG=1 \
 python3 -m VISTA.vision_module.app.app
 ```
 
 如果桌边不在预览叠加框内，再尝试 `center_lower` 和 `full_width_lower`：
 
-```bash
-VISTA_TABLE_EDGE_ROI_PRESET=center_lower VISTA_EDGE_DBG=1 python3 -m VISTA.vision_module.app.app
-VISTA_TABLE_EDGE_ROI_PRESET=full_width_lower VISTA_EDGE_DBG=1 python3 -m VISTA.vision_module.app.app
+```yaml
+table_edge:
+  roi_preset: center_lower
+```
+
+或：
+
+```yaml
+table_edge:
+  roi_preset: full_width_lower
 ```
 
 通过标准：
@@ -56,12 +69,18 @@ VISTA_TABLE_EDGE_ROI_PRESET=full_width_lower VISTA_EDGE_DBG=1 python3 -m VISTA.v
 
 ## 3. YOLO 桌子检测调试
 
-打开检测调试，但不伪造 table 检测：
+打开检测调试，但不伪造 table 检测。先改 `VISTA/configs/vision_params.yaml`：
+
+```yaml
+debug:
+  table_det_enabled: true
+  table_det_min_conf: 0.30
+  table_det_center_tol: 0.12
+```
+
+然后启动：
 
 ```bash
-ORCH_TABLE_DET_ENABLED=1 \
-ORCH_TABLE_DET_MIN_CONF=0.30 \
-ORCH_TABLE_DET_CENTER_TOL=0.12 \
 python3 -m VISTA.vision_module.app.app
 ```
 

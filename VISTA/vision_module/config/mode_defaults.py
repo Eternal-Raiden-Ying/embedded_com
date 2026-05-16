@@ -14,6 +14,16 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _as_camera_tuple(value: Any, default) -> tuple:
+    if value is None:
+        return tuple(default or ())
+    if isinstance(value, str):
+        return tuple(item.strip() for item in value.replace(";", ",").split(",") if item.strip())
+    if isinstance(value, (list, tuple)):
+        return tuple(str(item).strip() for item in value if str(item).strip())
+    return tuple(default or ())
+
+
 def build_default_stage_entry_modes() -> Dict[str, str]:
     """Return the recommended initial mode for each business stage."""
     return {
@@ -101,9 +111,11 @@ def _default_remote_profile(*, enabled: bool, require_depth: bool = False) -> Re
 
 def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) -> Dict[str, ModeProfile]:
     """Build the initial mode profile set for VISTA."""
-    table_bbox_enabled = _env_bool("VISTA_TABLE_BBOX_ENABLE", False)
+    mode_cfg = dict(getattr(cfg, "mode_profiles", {}) or {})
+    table_bbox_cfg = dict(mode_cfg.get("table_bbox") or {})
+    table_bbox_enabled = bool(table_bbox_cfg.get("enabled", _env_bool("VISTA_TABLE_BBOX_ENABLE", False)))
     depth_cameras = ("rgb", "depth") if table_bbox_enabled else ("depth",)
-    table_model = str(os.getenv("VISTA_TABLE_MODEL", "yolov7_detect") or "yolov7_detect").strip()
+    table_model = str(table_bbox_cfg.get("model", os.getenv("VISTA_TABLE_MODEL", "yolov7_detect")) or "yolov7_detect").strip()
 
     track_local_rgb = _camera_override_with_updates(
         cfg,
@@ -203,7 +215,7 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             },
         )
 
-    return {
+    profiles = {
         "IDLE": ModeProfile(
             name="IDLE",
             enabled_cameras=(),
@@ -311,3 +323,41 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             metadata={"contract": {"stage": "IDLE_HOT"}},
         ),
     }
+
+    for mode_name, section_raw in dict(mode_cfg.get("modes") or {}).items():
+        mode_key = str(mode_name or "").strip().upper()
+        profile = profiles.get(mode_key)
+        if profile is None or not isinstance(section_raw, dict):
+            continue
+        section = dict(section_raw)
+        if "enabled_cameras" in section:
+            profile.enabled_cameras = _as_camera_tuple(section.get("enabled_cameras"), profile.enabled_cameras)
+        if "predictor_enabled" in section:
+            profile.predictor_enabled = bool(section.get("predictor_enabled"))
+        if "predictor_model" in section:
+            predictor_model = section.get("predictor_model")
+            profile.predictor_model = str(predictor_model).strip() if predictor_model else None
+        if "release_cooldown_s" in section and section.get("release_cooldown_s") is not None:
+            profile.release_cooldown_s = float(section.get("release_cooldown_s"))
+        if "loop_hz" in section and section.get("loop_hz") is not None:
+            profile.loop_hz = float(section.get("loop_hz"))
+        if "send_hz" in section and section.get("send_hz") is not None:
+            profile.send_hz = float(section.get("send_hz"))
+        if "preview_enabled" in section:
+            profile.preview.enabled = bool(section.get("preview_enabled"))
+        if "preview_layout" in section and section.get("preview_layout"):
+            profile.preview.metadata["layout"] = str(section.get("preview_layout")).strip()
+
+        camera_overrides = dict(section.get("camera_overrides") or {})
+        for camera_name in ("rgb", "depth", "grey"):
+            camera_section = section.get(camera_name)
+            if isinstance(camera_section, dict):
+                camera_overrides.setdefault(camera_name, {}).update(camera_section)
+        for camera_name, updates in camera_overrides.items():
+            if not isinstance(updates, dict):
+                continue
+            current = dict(profile.camera_overrides.get(str(camera_name), {}))
+            current.update({str(k): v for k, v in updates.items() if v is not None})
+            profile.camera_overrides[str(camera_name)] = current
+
+    return profiles

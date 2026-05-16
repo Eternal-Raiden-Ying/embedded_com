@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import json
 import os
 import platform
-from typing import Dict
+from typing import Any, Dict
 from pathlib import Path
 
 from .schema import VisionServiceConfig, SingleModelConfig
 from .data import coco80, grasping_coco20
-
-CONFIG = VisionServiceConfig()
 
 _HERE = Path(__file__).resolve()
 _DEFAULT_PROJECT_ROOT = str(_HERE.parents[2])
@@ -27,12 +26,224 @@ _DEFAULT_SEG_MODEL_QNN216 = (
     / "yolo26s-seg-grasp_split_w8a8.qnn216.ctx.bin"
 )
 
+
+def _parse_simple_yaml(text: str) -> Dict[str, Any]:
+    root: Dict[str, Any] = {}
+    stack = [(-1, root)]
+
+    def _scalar(raw: str) -> Any:
+        value = str(raw).strip()
+        if value == "":
+            return ""
+        if value in {'""', "''"}:
+            return ""
+        if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+            return value[1:-1]
+        lowered = value.lower()
+        if lowered in {"true", "false"}:
+            return lowered == "true"
+        if lowered in {"null", "none", "~"}:
+            return None
+        if value.startswith("[") and value.endswith("]"):
+            inner = value[1:-1].strip()
+            if not inner:
+                return []
+            return [_scalar(part.strip()) for part in inner.split(",")]
+        try:
+            if "." in value:
+                return float(value)
+            return int(value)
+        except Exception:
+            return value
+
+    for raw_line in text.splitlines():
+        line = raw_line.split("#", 1)[0].rstrip()
+        if not line.strip() or ":" not in line:
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        key, value = line.strip().split(":", 1)
+        while stack and indent <= stack[-1][0]:
+            stack.pop()
+        current = stack[-1][1]
+        if value.strip() == "":
+            child: Dict[str, Any] = {}
+            current[key.strip()] = child
+            stack.append((indent, child))
+        else:
+            current[key.strip()] = _scalar(value)
+    return root
+
+
+def _load_config_dict(path: str) -> Dict[str, Any]:
+    file_path = str(path or "").strip()
+    if not file_path or not Path(file_path).is_file():
+        return {}
+    if file_path.lower().endswith(".json"):
+        with open(file_path, "r", encoding="utf-8") as fp:
+            return dict(json.load(fp) or {})
+    if file_path.lower().endswith((".yaml", ".yml")):
+        try:
+            import yaml  # type: ignore
+        except ImportError:
+            return _parse_simple_yaml(Path(file_path).read_text(encoding="utf-8"))
+        with open(file_path, "r", encoding="utf-8") as fp:
+            return dict(yaml.safe_load(fp) or {})
+    return {}
+
+
+def _loaded(path: str) -> None:
+    path = str(path or "").strip()
+    if path and Path(path).is_file() and path not in CONFIG.runtime.loaded_config_files:
+        CONFIG.runtime.loaded_config_files.append(path)
+
+
+def _assign_attrs(obj: Any, values: Dict[str, Any], keys) -> None:
+    for key in tuple(keys or ()):
+        if key in values and values.get(key) is not None:
+            setattr(obj, key, values.get(key))
+
+
+def _apply_vision_params(data: Dict[str, Any]) -> None:
+    if not data:
+        return
+    runtime = dict(data.get("runtime") or {})
+    camera = dict(data.get("camera") or {})
+    model = dict(data.get("model") or {})
+    debug = dict(data.get("debug") or {})
+    table_edge = dict(data.get("table_edge") or {})
+    preview = dict(data.get("preview") or {})
+    ipc = dict(data.get("ipc") or {})
+    mode_profiles = dict(data.get("mode_profiles") or {})
+
+    _assign_attrs(
+        CONFIG.runtime,
+        runtime,
+        (
+            "loop_hz",
+            "send_hz",
+            "track_local_send_hz",
+            "stale_req_s",
+            "hot_standby_s",
+            "keep_preview_after_stop",
+            "keep_model_hot_in_standby",
+            "enable_infer_during_hot_standby",
+            "log_mode",
+            "log_enabled",
+            "debug",
+            "heartbeat_enabled",
+            "heartbeat_interval_s",
+            "heartbeat_console",
+            "console_mode",
+            "operator_summary_interval_s",
+            "ipc_console",
+        ),
+    )
+    if "max_fps" in camera and camera.get("max_fps") is not None:
+        CONFIG.camera.max_fps = int(camera.get("max_fps"))
+    camera_keys = (
+        "source",
+        "in_w",
+        "in_h",
+        "out_w",
+        "out_h",
+        "width",
+        "height",
+        "in_format",
+        "format",
+        "fps",
+        "crop_x",
+        "crop_y",
+        "crop_w",
+        "crop_h",
+        "enable",
+        "auto_exposure",
+        "exposure",
+        "brightness",
+    )
+    for name in ("rgb", "depth", "grey"):
+        section = dict(camera.get(name) or {})
+        stream = CONFIG.camera.streams.get(name)
+        if stream is not None:
+            _assign_attrs(stream, section, camera_keys)
+
+    if model.get("active_model") is not None:
+        CONFIG.model.active_model = str(model.get("active_model")).strip() or CONFIG.model.active_model
+    profiles = dict(model.get("profiles") or {})
+    for name, values in profiles.items():
+        profile = CONFIG.model.profiles.get(str(name))
+        if profile is None or not isinstance(values, dict):
+            continue
+        _assign_attrs(
+            profile,
+            values,
+            ("width", "height", "conf_thres", "iou_thres", "class_num", "predictor_type", "model_backend", "anchors", "strides"),
+        )
+        target_model = values.get("target_model")
+        if target_model:
+            profile.target_model = str(target_model)
+
+    _assign_attrs(
+        CONFIG.debug,
+        debug,
+        (
+            "preview",
+            "draw_boxes",
+            "draw_masks",
+            "edge_debug_enabled",
+            "edge_debug_period_s",
+            "table_det_enabled",
+            "table_det_min_conf",
+            "table_det_center_tol",
+        ),
+    )
+    _assign_attrs(
+        CONFIG.table_edge,
+        table_edge,
+        (
+            "roi_preset",
+            "static_roi_enabled",
+            "update_hz",
+            "track_local_update_hz",
+            "track_local_light_edge",
+            "track_local_edge_stride",
+        ),
+    )
+    if getattr(CONFIG.table_edge, "roi_preset", ""):
+        CONFIG.table_edge.roi_preset = str(CONFIG.table_edge.roi_preset).strip().lower()
+
+    layouts = preview.get("mode_layouts")
+    if isinstance(layouts, dict):
+        CONFIG.preview.mode_layouts.update({str(k).upper(): str(v).strip() for k, v in layouts.items() if v is not None})
+    _assign_attrs(
+        CONFIG.preview,
+        preview,
+        (
+            "debug_four_panel_in_track_local",
+            "show_edge_overlay_in_track_local",
+            "show_age_ms",
+            "clear_overlay_on_mode_switch",
+        ),
+    )
+
+    req_in = dict(ipc.get("req_in") or {})
+    obs_out = dict(ipc.get("obs_out") or {})
+    _assign_attrs(CONFIG.req_in, req_in, ("transport", "host", "port", "uds_path"))
+    _assign_attrs(CONFIG.obs_out, obs_out, ("transport", "host", "port", "uds_path"))
+    CONFIG.mode_profiles = mode_profiles
+
+
+CONFIG = VisionServiceConfig()
+
 CONFIG.runtime.project_root = os.getenv("VISION_PROJECT_ROOT", _DEFAULT_PROJECT_ROOT)
 CONFIG.runtime.log_dir = os.getenv("VISION_LOG_DIR", f"{CONFIG.runtime.project_root}/logs")
 CONFIG.runtime.log_file = os.getenv("VISION_LOG_FILE", f"{CONFIG.runtime.log_dir}/vision.log")
 CONFIG.runtime.runs_dir = os.getenv("VISION_RUNS_DIR", f"{CONFIG.runtime.project_root}/runs")
 CONFIG.runtime.pid_dir = os.getenv("VISION_PID_DIR", f"{CONFIG.runtime.project_root}/pids")
 CONFIG.runtime.pid_file = os.getenv("VISION_PID_FILE", f"{CONFIG.runtime.pid_dir}/vision.pid")
+CONFIG.runtime.vision_params_file = os.getenv(
+    "VISION_PARAMS_FILE",
+    str(Path(CONFIG.runtime.project_root) / "configs" / "vision_params.yaml"),
+)
 CONFIG.runtime.stack_run_id = os.getenv("STACK_RUN_ID", "")
 CONFIG.runtime.loop_hz = 8.0
 CONFIG.runtime.send_hz = 5.0
@@ -156,9 +367,9 @@ CONFIG.model.profiles["yolo26s_seg_qnn216"] = SingleModelConfig(
 
 # debug config
 _preview_default = "0" if platform.system().lower().startswith("win") else "1"
-CONFIG.debug.preview = os.getenv("VISION_PREVIEW", _preview_default).strip().lower() in {"1", "true", "yes"}
-CONFIG.debug.draw_boxes = os.getenv("VISION_DRAW_BOXES", "1").strip().lower() in {"1", "true", "yes"}
-CONFIG.debug.draw_masks = os.getenv("VISION_DRAW_MASKS", "0").strip().lower() in {"1", "true", "yes"}
+CONFIG.debug.preview = str(_preview_default).strip().lower() in {"1", "true", "yes"}
+CONFIG.debug.draw_boxes = True
+CONFIG.debug.draw_masks = False
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -188,8 +399,52 @@ def _env_int(name: str, default: int) -> int:
         return int(default)
 
 
+def _env_str(name: str, default: str) -> str:
+    raw = os.getenv(name)
+    return str(raw).strip() if raw is not None else str(default)
+
+
+_apply_vision_params(_load_config_dict(CONFIG.runtime.vision_params_file))
+_loaded(CONFIG.runtime.vision_params_file)
+
+# Environment variables stay available for one-off tests and override YAML.
+CONFIG.runtime.track_local_send_hz = _env_float("VISION_TRACK_LOCAL_SEND_HZ", CONFIG.runtime.track_local_send_hz)
+CONFIG.runtime.log_mode = _env_str("VISION_LOG_MODE", CONFIG.runtime.log_mode)
+CONFIG.runtime.log_enabled = _env_bool("VISION_LOG_ENABLED", CONFIG.runtime.log_enabled)
+CONFIG.runtime.debug = _env_bool("VISION_DEBUG", CONFIG.runtime.debug)
+CONFIG.runtime.heartbeat_enabled = _env_bool("VISION_HEARTBEAT_ENABLED", CONFIG.runtime.heartbeat_enabled)
+CONFIG.runtime.heartbeat_interval_s = _env_float("VISION_HEARTBEAT_INTERVAL_S", CONFIG.runtime.heartbeat_interval_s)
+CONFIG.runtime.console_mode = _env_str("VISION_CONSOLE_MODE", CONFIG.runtime.console_mode).lower() or CONFIG.runtime.console_mode
+CONFIG.runtime.operator_summary_interval_s = _env_float(
+    "VISION_OPERATOR_SUMMARY_INTERVAL_S",
+    CONFIG.runtime.operator_summary_interval_s,
+)
+CONFIG.runtime.ipc_console = _env_bool("VISION_IPC_CONSOLE", CONFIG.runtime.ipc_console)
+CONFIG.runtime.heartbeat_console = _env_bool("VISION_HEARTBEAT_CONSOLE", CONFIG.runtime.heartbeat_console)
+
+CONFIG.model.active_model = _env_str("VISION_ACTIVE_MODEL", CONFIG.model.active_model)
+CONFIG.model.profiles["yolov7_detect"].target_model = _env_str(
+    "VISION_DETECT_MODEL_PATH",
+    CONFIG.model.profiles["yolov7_detect"].target_model,
+)
+CONFIG.model.profiles["yolov7_detect"].model_backend = _env_str(
+    "VISION_DETECT_MODEL_BACKEND",
+    CONFIG.model.profiles["yolov7_detect"].model_backend,
+)
+CONFIG.model.profiles["yolo26s_seg"].target_model = _env_str(
+    "VISION_SEG_MODEL_PATH",
+    CONFIG.model.profiles["yolo26s_seg"].target_model,
+)
+CONFIG.model.profiles["yolo26s_seg_qnn216"].target_model = _env_str(
+    "VISION_SEG_MODEL_QNN216_PATH",
+    CONFIG.model.profiles["yolo26s_seg_qnn216"].target_model,
+)
+
+CONFIG.debug.preview = _env_bool("VISION_PREVIEW", CONFIG.debug.preview)
+CONFIG.debug.draw_boxes = _env_bool("VISION_DRAW_BOXES", CONFIG.debug.draw_boxes)
+CONFIG.debug.draw_masks = _env_bool("VISION_DRAW_MASKS", CONFIG.debug.draw_masks)
+
 # table-edge / table-detection debug config.
-# 现场持久调参优先改这里；环境变量只用于临时覆盖。
 CONFIG.debug.edge_debug_enabled = _env_bool(
     "VISTA_EDGE_DBG_ENABLED",
     _env_bool("VISTA_EDGE_DBG", CONFIG.debug.edge_debug_enabled),

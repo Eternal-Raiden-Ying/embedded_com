@@ -40,10 +40,10 @@
 - `ORCH_TABLE_YAW_TOL_DEG=8`：默认 yaw 容差。
 - `ORCH_TABLE_MAX_MICRO_ADJUST=3`：默认有限微调次数。
 - `ORCH_ASSUME_GRASP_SUCCESS_FOR_TEST=0`：默认关闭。打开后，`GRASP_VERIFY` 可在没有真实验证源时进入 `RETURN_HOME`。
-- `VISTA_TABLE_EDGE_ROI_PRESET`：显式 ROI preset，预期值包括 `center_mid`、`center_lower`、`full_width_lower`。
-- `VISTA_EDGE_DBG=1`：输出低频 edge debug。
-- `ORCH_TABLE_DET_ENABLED=1`：打开 table detection debug。
-- `ORCH_TABLE_DET_MIN_CONF`、`ORCH_TABLE_DET_CENTER_TOL`：table detection debug 阈值。
+- `VISTA/configs/vision_params.yaml` 中的 `table_edge.roi_preset`：显式 ROI preset，预期值包括 `center_mid`、`center_lower`、`full_width_lower`。
+- `VISTA/configs/vision_params.yaml` 中的 `debug.edge_debug_enabled`：输出低频 edge debug。
+- `VISTA/configs/vision_params.yaml` 中的 `debug.table_det_enabled`：打开 table detection debug。
+- `VISTA/configs/vision_params.yaml` 中的 `debug.table_det_min_conf`、`debug.table_det_center_tol`：table detection debug 阈值。
 
 ## 离线验证
 
@@ -96,7 +96,7 @@ python3 -m py_compile orchestrator/stm32_motion_probe.py orchestrator/orchestrat
 2. 先跑 STM32 probe dry-run，再在机器人架起或轮子安全的条件下跑真实串口 sequence。
 3. 确认前进、后退、转向、停止的轮向映射。
 4. 选择能明显覆盖真实桌边的 ROI preset。
-5. 运行 `ORCH_TABLE_DET_ENABLED=1`，确认模型是否包含 COCO table 类 `60`。
+5. 在 `VISTA/configs/vision_params.yaml` 打开 `debug.table_det_enabled: true`，确认模型是否包含 COCO table 类 `60`。
 6. 使用 SC171 默认参数跑 table edge-only dry-run。
 7. 只有在 dry-run STOP 行为稳定后，才跑 table edge-only 真实串口。
 8. 实测物理停车裕量，并在启用目标搜索或抓取前调整 `ORCH_TABLE_STOP_MARGIN_CM`。

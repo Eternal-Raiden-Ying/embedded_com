@@ -21,6 +21,8 @@ class RuntimeConfig:
     runs_dir: str = field(default_factory=lambda: str(_DEFAULT_RUNS_DIR))
     pid_dir: str = field(default_factory=lambda: str(_DEFAULT_PID_DIR))
     pid_file: str = field(default_factory=lambda: str(_DEFAULT_PID_DIR / "vision.pid"))
+    vision_params_file: str = ""
+    loaded_config_files: list = field(default_factory=list)
     stack_run_id: str = ""
     loop_hz: float = 8.0
     send_hz: float = 5.0
@@ -172,5 +174,6 @@ class VisionServiceConfig:
     debug: DebugConfig = field(default_factory=DebugConfig)
     table_edge: TableEdgeConfig = field(default_factory=TableEdgeConfig)
     preview: PreviewConfig = field(default_factory=PreviewConfig)
+    mode_profiles: Dict[str, Dict] = field(default_factory=dict)
     req_in: IPCConfig = field(default_factory=IPCConfig)
     obs_out: IPCConfig = field(default_factory=IPCConfig)
