@@ -1013,6 +1013,11 @@ class OrchestratorCore:
                     self._log_final_lock_summary(obs, lock_ready=True, reason="lock_ready", stable_count=self.ctx.table_lock_frames)
                     self._capture_locked_edge(obs)
                     self._log("info", "[TABLE_DOCK][DONE] stable final lock confirmed")
+                    if self._table_edge_only_test_enabled():
+                        self._log("info", "[TABLE_EDGE_ONLY][DONE] table edge reached; stopping before target search")
+                        self._transition(State.DONE, "table_edge_only_done")
+                        self._queue_tts("桌边停靠测试完成")
+                        return self.controller.stop_cmd("DONE")
                     self._transition(State.AT_TABLE_EDGE, "lock_ready")
                     self._queue_tts("已完成桌边停靠")
                     return self.controller.stop_cmd("AT_TABLE_EDGE")
@@ -1040,6 +1045,13 @@ class OrchestratorCore:
         return self.controller.search_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
 
     def _tick_at_table_edge(self) -> MotionDecision:
+        if self._table_edge_only_test_enabled():
+            if self._state_elapsed() < float(self.cfg.edge_settle_s):
+                return self.controller.stop_cmd("AT_TABLE_EDGE")
+            self._log("info", "[TABLE_EDGE_ONLY][DONE] table edge reached; stopping before target search")
+            self._transition(State.DONE, "table_edge_only_done")
+            self._queue_tts("桌边停靠测试完成")
+            return self.controller.stop_cmd("DONE")
         if self._state_elapsed() < float(self.cfg.edge_settle_s):
             return self.controller.stop_cmd("AT_TABLE_EDGE")
         self._transition(State.SEARCH_TARGET_INIT, "桌边姿态稳定，初始化沿边搜索")
@@ -1712,6 +1724,9 @@ class OrchestratorCore:
             self._queue_vision_req(make_vision_idle(session_id=self.ctx.active_session_id, epoch=self.ctx.active_epoch), force=True)
             self._transition(State.IDLE, "任务完成，回到空闲")
         return self.controller.stop_cmd("DONE")
+
+    def _table_edge_only_test_enabled(self) -> bool:
+        return bool(getattr(self.cfg, "table_edge_only_test", False))
 
     def _active_req_payload(self) -> Optional[Dict]:
         binding = self._vision_binding_for_state(self.ctx.state)

@@ -315,6 +315,7 @@ CONFIG.control.final_lock_frames_to_arrive = _env_int("ORCH_FINAL_LOCK_FRAMES", 
 CONFIG.control.final_lock_yaw_tol_rad = _env_float("ORCH_FINAL_LOCK_YAW_TOL", CONFIG.control.final_lock_yaw_tol_rad)
 CONFIG.control.final_lock_dist_tol_m = _env_float("ORCH_FINAL_LOCK_DIST_TOL", CONFIG.control.final_lock_dist_tol_m)
 CONFIG.control.final_lock_lateral_tol_m = _env_float("ORCH_FINAL_LOCK_LAT_TOL", CONFIG.control.final_lock_lateral_tol_m)
+CONFIG.control.table_edge_only_test = _env_bool("ORCH_TABLE_EDGE_ONLY_TEST", CONFIG.control.table_edge_only_test)
 CONFIG.control.table_target_dist_m = _env_float("ORCH_TABLE_TARGET_DIST_CM", CONFIG.control.table_target_dist_m * 100.0) / 100.0
 CONFIG.control.table_dist_tol_m = _env_float("ORCH_TABLE_DIST_TOL_CM", CONFIG.control.table_dist_tol_m * 100.0) / 100.0
 CONFIG.control.table_yaw_tol_rad = math.radians(_env_float("ORCH_TABLE_YAW_TOL_DEG", math.degrees(CONFIG.control.table_yaw_tol_rad)))

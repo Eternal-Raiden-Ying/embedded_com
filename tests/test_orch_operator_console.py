@@ -995,6 +995,60 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         self.assertEqual(decision.cmd.mode, "FINAL_LOCK")
         self.assertEqual(decision.cmd.vx_norm, 0.0)
 
+    def test_table_edge_only_final_lock_stops_done_before_target_search(self) -> None:
+        cfg = OrchestratorConfig()
+        cfg.control.table_edge_only_test = True
+        cfg.control.table_settle_s = 0.0
+        cfg.control.table_stable_frames = 1
+        logs = []
+        core = OrchestratorCore(cfg.control, cfg.car, cfg.docking, logger=lambda level, src, msg, extra=None: logs.append(msg))
+        core.ctx.state = State.FINAL_LOCK
+        core.ctx.table_dock_phase = "STOP_AND_SETTLE"
+        core.ctx.table_dock_phase_since_mono = monotonic_ts() - 1.0
+        core.handle_table_obs(
+            TableEdgeObs(
+                ts=now_ts(),
+                obs_ts=now_ts(),
+                table_found=True,
+                edge_found=True,
+                edge_valid=True,
+                confidence=0.9,
+                yaw_err_rad=0.01,
+                dist_err_m=0.0,
+            )
+        )
+
+        decision = core.tick()
+
+        self.assertEqual(core.ctx.state, State.DONE)
+        self.assertEqual(decision.cmd.mode, "DONE")
+        self.assertTrue(any("[TABLE_EDGE_ONLY][DONE]" in line for line in logs))
+        self.assertNotEqual(core.ctx.state, State.SEARCH_TARGET_INIT)
+
+    def test_table_edge_only_at_table_edge_does_not_enter_grasp_flow(self) -> None:
+        cfg = OrchestratorConfig()
+        cfg.control.table_edge_only_test = True
+        cfg.control.edge_settle_s = 0.0
+        core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
+        core.ctx.state = State.AT_TABLE_EDGE
+        core.ctx.state_enter_mono = monotonic_ts() - 1.0
+
+        decision = core.tick()
+
+        self.assertEqual(core.ctx.state, State.DONE)
+        self.assertEqual(decision.cmd.mode, "DONE")
+
+    def test_table_edge_test_defaults_match_sc171_prep_values(self) -> None:
+        cfg = OrchestratorConfig()
+        self.assertFalse(cfg.control.table_edge_only_test)
+        self.assertAlmostEqual(cfg.control.table_target_dist_m, 0.30)
+        self.assertAlmostEqual(cfg.control.table_dist_tol_m, 0.05)
+        self.assertAlmostEqual(cfg.control.table_stop_margin_m, 0.05)
+        self.assertAlmostEqual(cfg.control.table_settle_s, 0.50)
+        self.assertEqual(cfg.control.table_stable_frames, 5)
+        self.assertEqual(cfg.control.table_max_micro_adjust, 3)
+        self.assertAlmostEqual(cfg.control.table_yaw_tol_rad, 0.13962634015954636)
+
 
 if __name__ == "__main__":
     unittest.main()
