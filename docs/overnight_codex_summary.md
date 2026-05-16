@@ -1,10 +1,10 @@
-# SC171 Overnight Codex Summary
+# SC171 Overnight Codex 汇总
 
-Date: 2026-05-16
-Branch: `sc171-table-docking-test-prep`
-Base: `a22b551 Add STM32 motion protocol probe`
+日期：2026-05-16
+分支：`sc171-table-docking-test-prep`
+基线：`a22b551 Add STM32 motion protocol probe`
 
-## Commits
+## 提交列表
 
 - `814ba62 docs: record table docking test context`
 - `4b7d849 test: verify STM32 motion probe`
@@ -15,53 +15,53 @@ Base: `a22b551 Add STM32 motion protocol probe`
 - `6607ae7 orchestrator: add grasp verification gate`
 - `be15f02 docs: add table docking field test plan`
 
-## Modified Areas
+## 修改范围
 
-- `orchestrator/stm32_motion_probe.py`: verified dry-run sequence path from previous STM32 protocol work.
-- `orchestrator/orchestrator_service/bridge/simple_car_protocol.py`: STM32-compatible encoder aliases and feedback parsing compatibility.
-- `VISTA/vision_module/utils/table_roi.py`: explicit ROI presets for table-edge test setup.
-- `VISTA/vision_module/backend/table_edge_roi.py`: ROI debug and preset support.
-- `VISTA/vision_module/backend/table_edge_manager.py`: edge debug output wiring.
-- `VISTA/vision_module/backend/predictor_manager.py`: table detection debug and coarse direction hint.
-- `orchestrator/orchestrator_service/runtime/state_machine.py`: table edge-only stop path and grasp verification gate.
-- `orchestrator/orchestrator_service/config/schema.py`: SC171 table docking defaults and test switches.
-- `orchestrator/orchestrator_service/config/board_config.py`: environment variable wiring.
-- `tests/test_simple_car_protocol.py`, `tests/test_orch_operator_console.py`, `VISTA/vision_module/test/test_table_roi.py`: focused regression coverage.
-- `docs/tomorrow_test_context.md`, `docs/tomorrow_field_test_plan.md`: test context and copyable field commands.
+- `orchestrator/stm32_motion_probe.py`：确认上一轮 STM32 协议探针的 dry-run sequence 路径。
+- `orchestrator/orchestrator_service/bridge/simple_car_protocol.py`：补充 STM32 兼容编码别名和反馈解析兼容。
+- `VISTA/vision_module/utils/table_roi.py`：为桌边测试增加显式 ROI preset。
+- `VISTA/vision_module/backend/table_edge_roi.py`：接入 ROI debug 和 preset 支持。
+- `VISTA/vision_module/backend/table_edge_manager.py`：接入 edge debug 输出。
+- `VISTA/vision_module/backend/predictor_manager.py`：增加 table detection debug 和粗方向提示。
+- `orchestrator/orchestrator_service/runtime/state_machine.py`：增加 table edge-only 停车结束路径和抓取验证 gate。
+- `orchestrator/orchestrator_service/config/schema.py`：增加 SC171 桌边停靠默认值和测试开关。
+- `orchestrator/orchestrator_service/config/board_config.py`：接入环境变量配置。
+- `tests/test_simple_car_protocol.py`、`tests/test_orch_operator_console.py`、`VISTA/vision_module/test/test_table_roi.py`：补充聚焦回归测试。
+- `docs/tomorrow_test_context.md`、`docs/tomorrow_field_test_plan.md`：记录测试上下文和可复制现场命令。
 
-## New Configuration
+## 新增配置
 
-- `ORCH_TABLE_EDGE_ONLY_TEST=0`: default off. When enabled, final table-edge lock stops and ends before target search/grasp.
-- `ORCH_TABLE_TARGET_DIST_CM=30`: default target measured table distance.
-- `ORCH_TABLE_DIST_TOL_CM=5`: default distance tolerance.
-- `ORCH_TABLE_STOP_MARGIN_CM=5`: default stop margin before final settle.
-- `ORCH_TABLE_SETTLE_MS=500`: default stop settle time.
-- `ORCH_TABLE_STABLE_FRAMES=5`: default stable frames before dock done.
-- `ORCH_TABLE_YAW_TOL_DEG=8`: default yaw tolerance.
-- `ORCH_TABLE_MAX_MICRO_ADJUST=3`: default bounded micro-adjust count.
-- `ORCH_ASSUME_GRASP_SUCCESS_FOR_TEST=0`: default off. When enabled, `GRASP_VERIFY` can enter `RETURN_HOME` without a real verification source.
-- `VISTA_TABLE_EDGE_ROI_PRESET`: explicit ROI preset, expected values include `center_mid`, `center_lower`, and `full_width_lower`.
-- `VISTA_EDGE_DBG=1`: emits low-rate edge debug.
-- `ORCH_TABLE_DET_ENABLED=1`: enables table detection debug.
-- `ORCH_TABLE_DET_MIN_CONF`, `ORCH_TABLE_DET_CENTER_TOL`: table detection debug thresholds.
+- `ORCH_TABLE_EDGE_ONLY_TEST=0`：默认关闭。打开后，最终桌边锁定完成即停车结束，不进入目标搜索/抓取。
+- `ORCH_TABLE_TARGET_DIST_CM=30`：默认桌边目标测距。
+- `ORCH_TABLE_DIST_TOL_CM=5`：默认距离容差。
+- `ORCH_TABLE_STOP_MARGIN_CM=5`：默认最终 settle 前的停车裕量。
+- `ORCH_TABLE_SETTLE_MS=500`：默认 STOP 后 settle 时间。
+- `ORCH_TABLE_STABLE_FRAMES=5`：默认 dock done 前需要的稳定帧数。
+- `ORCH_TABLE_YAW_TOL_DEG=8`：默认 yaw 容差。
+- `ORCH_TABLE_MAX_MICRO_ADJUST=3`：默认有限微调次数。
+- `ORCH_ASSUME_GRASP_SUCCESS_FOR_TEST=0`：默认关闭。打开后，`GRASP_VERIFY` 可在没有真实验证源时进入 `RETURN_HOME`。
+- `VISTA_TABLE_EDGE_ROI_PRESET`：显式 ROI preset，预期值包括 `center_mid`、`center_lower`、`full_width_lower`。
+- `VISTA_EDGE_DBG=1`：输出低频 edge debug。
+- `ORCH_TABLE_DET_ENABLED=1`：打开 table detection debug。
+- `ORCH_TABLE_DET_MIN_CONF`、`ORCH_TABLE_DET_CENTER_TOL`：table detection debug 阈值。
 
-## Offline Verification
+## 离线验证
 
-Passed:
+已通过：
 
 ```bash
 python3 -m unittest tests.test_simple_car_protocol tests.test_orch_operator_console
 ```
 
-Result: 57 tests passed.
+结果：57 个测试通过。
 
-Passed:
+已通过：
 
 ```bash
 python3 orchestrator/stm32_motion_probe.py --dry-run --cmd sequence
 ```
 
-Observed dry-run TX lines:
+观察到的 dry-run TX 行：
 
 ```text
 [PROBE][TX] STOP 1
@@ -71,46 +71,46 @@ Observed dry-run TX lines:
 [PROBE][TX] STATUS
 ```
 
-Passed:
+已通过：
 
 ```bash
 /usr/bin/python3 -m unittest VISTA.vision_module.test.test_table_roi VISTA.vision_module.test.test_preview_table_bbox
 ```
 
-Result: 19 tests passed.
+结果：19 个测试通过。
 
-Passed:
+已通过：
 
 ```bash
 python3 -m py_compile orchestrator/stm32_motion_probe.py orchestrator/orchestrator_service/bridge/simple_car_protocol.py orchestrator/orchestrator_service/config/schema.py orchestrator/orchestrator_service/config/board_config.py orchestrator/orchestrator_service/runtime/context.py orchestrator/orchestrator_service/runtime/state_machine.py VISTA/vision_module/utils/table_roi.py VISTA/vision_module/backend/preview/opencv_sink.py VISTA/vision_module/backend/table_edge_manager.py
 ```
 
-Environment note:
+环境说明：
 
-- `python3 -m unittest VISTA.vision_module.test.test_table_roi VISTA.vision_module.test.test_preview_table_bbox` failed in the active conda Python because `numpy` is not installed there.
-- The same VISTA tests passed under `/usr/bin/python3`, which has the needed dependencies.
+- 在当前 conda Python 下运行 `python3 -m unittest VISTA.vision_module.test.test_table_roi VISTA.vision_module.test.test_preview_table_bbox` 会失败，因为该环境没有安装 `numpy`。
+- 同一组 VISTA 测试在 `/usr/bin/python3` 下通过，该环境具备所需依赖。
 
-## Tomorrow Priority Steps
+## 明天优先步骤
 
-1. Confirm `/dev/ttyHS1` or the actual STM32 serial device.
-2. Run STM32 probe dry-run, then real serial sequence with the robot raised or wheels safe.
-3. Confirm wheel direction mapping for forward, backward, turn, and stop.
-4. Pick the ROI preset that visibly covers the physical table edge.
-5. Run `ORCH_TABLE_DET_ENABLED=1` and confirm whether the model has COCO table class `60`.
-6. Run table edge-only dry-run with the SC171 defaults.
-7. Run table edge-only real serial only after dry-run STOP behavior is stable.
-8. Measure the physical stop margin and adjust `ORCH_TABLE_STOP_MARGIN_CM` before enabling target search or grasp.
-9. Keep `ORCH_ASSUME_GRASP_SUCCESS_FOR_TEST=0` unless explicitly testing return-home skeleton behavior.
+1. 确认 `/dev/ttyHS1` 或实际 STM32 串口设备。
+2. 先跑 STM32 probe dry-run，再在机器人架起或轮子安全的条件下跑真实串口 sequence。
+3. 确认前进、后退、转向、停止的轮向映射。
+4. 选择能明显覆盖真实桌边的 ROI preset。
+5. 运行 `ORCH_TABLE_DET_ENABLED=1`，确认模型是否包含 COCO table 类 `60`。
+6. 使用 SC171 默认参数跑 table edge-only dry-run。
+7. 只有在 dry-run STOP 行为稳定后，才跑 table edge-only 真实串口。
+8. 实测物理停车裕量，并在启用目标搜索或抓取前调整 `ORCH_TABLE_STOP_MARGIN_CM`。
+9. 除非明确测试返航骨架，否则保持 `ORCH_ASSUME_GRASP_SUCCESS_FOR_TEST=0`。
 
-## Manual Confirmation Points
+## 人工确认点
 
-- Actual serial device path and baudrate.
-- Four-wheel direction and scale mapping.
-- STM32 feedback text for ACK, BUSY, STATUS, TIMEOUT, and JOG events.
-- Camera mount angle and table-edge ROI preset.
-- Whether table detection debug reports real table class detections or `[TABLE_DET][NO_TABLE_CLASS]`.
-- Safe final `ORCH_TABLE_TARGET_DIST_CM` and `ORCH_TABLE_STOP_MARGIN_CM` values.
+- 实际串口设备路径和波特率。
+- 四轮方向和速度比例映射。
+- STM32 对 ACK、BUSY、STATUS、TIMEOUT、JOG 事件的反馈文本。
+- 相机安装角度和 table-edge ROI preset。
+- table detection debug 输出真实 table 类检测，还是 `[TABLE_DET][NO_TABLE_CLASS]`。
+- 最终安全的 `ORCH_TABLE_TARGET_DIST_CM` 和 `ORCH_TABLE_STOP_MARGIN_CM`。
 
-## Working Tree Note
+## 工作区说明
 
-- `ROBOT_MOTION_CONTRACT.md` remains untracked and was intentionally not committed.
+- `ROBOT_MOTION_CONTRACT.md` 仍是未跟踪文件，本轮按计划没有提交。
