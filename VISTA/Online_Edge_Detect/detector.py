@@ -61,6 +61,41 @@ class EdgeDetectResult:
     plane_b: Optional[float] = None
     image_line_k: Optional[float] = None
     image_line_b: Optional[float] = None
+    upper_line_found: bool = False
+    upper_line_confidence: float = 0.0
+    upper_line_candidate_count: int = 0
+    upper_line_inlier_count: int = 0
+    upper_line_residual_mean: float = 0.0
+    upper_line_x_span_m: float = 0.0
+    upper_line_y_norm_mean: float = 0.0
+    upper_line_k: Optional[float] = None
+    upper_line_b: Optional[float] = None
+    upper_line_yaw_err_rad: Optional[float] = None
+    upper_line_dist_err_m: Optional[float] = None
+    lower_line_found: bool = False
+    lower_line_confidence: float = 0.0
+    lower_line_candidate_count: int = 0
+    lower_line_inlier_count: int = 0
+    lower_line_residual_mean: float = 0.0
+    lower_line_x_span_m: float = 0.0
+    lower_line_y_norm_mean: float = 0.0
+    lower_line_k: Optional[float] = None
+    lower_line_b: Optional[float] = None
+    lower_line_yaw_err_rad: Optional[float] = None
+    lower_line_dist_err_m: Optional[float] = None
+    selected_line_type: str = "none"
+    table_geometry_score: float = 0.0
+    front_plane_score: float = 0.0
+    line_score: float = 0.0
+    plane_line_consistency_score: float = 0.0
+    roi_boundary_score: float = 0.0
+    temporal_score: float = 0.0
+    geometry_reject_reason: str = ""
+    usable_for_approach: bool = False
+    usable_for_alignment: bool = False
+    usable_for_stop: bool = False
+    control_level: str = "none"
+    control_reject_reason: str = ""
 
 
 def load_calib(json_path: Path) -> Tuple[CameraCalib, float]:
@@ -84,6 +119,8 @@ class OnlineTableEdgeDetector:
         self._rng = np.random.default_rng(int(cfg.random_seed))
         self._stable_count = 0
         self._last_pose: Optional[Tuple[float, float]] = None
+        self._last_selected_line_type = "none"
+        self._last_pose_source = "none"
 
     def _cfg_roi(self) -> Tuple[int, int, int, int]:
         return (
@@ -404,7 +441,152 @@ class OnlineTableEdgeDetector:
             "pixels": self._sample_pixels(all_xs, all_ys),
         }
 
-    def _estimate_crease_line(self, depth_m: np.ndarray, valid_mask: np.ndarray, roi_box) -> Dict[str, Any]:
+    def _empty_line_hypothesis(self, line_type: str) -> Dict[str, Any]:
+        return {
+            "type": line_type,
+            "found": False,
+            "selected": False,
+            "candidate_count": 0,
+            "inlier_count": 0,
+            "yaw": 0.0,
+            "dist": 0.0,
+            "confidence": 0.0,
+            "selection_score": 0.0,
+            "residual_mean": float("inf"),
+            "x_span": 0.0,
+            "y_norm_mean": 0.0,
+            "k": None,
+            "b": None,
+            "points": np.empty((0, 3), dtype=np.float32),
+            "pixels": [],
+            "inlier_pixels": [],
+            "image_line_k": None,
+            "image_line_b": None,
+            "boundary_touch_ratio": 0.0,
+            "reject_reason": "no_candidates",
+        }
+
+    def _line_boundary_touch_ratio(self, pixels: List[List[int]], roi_box) -> float:
+        if not pixels:
+            return 0.0
+        x0, y0, x1, y1 = [int(v) for v in roi_box]
+        margin = max(0, int(self.cfg.roi_boundary_margin_px))
+        touched = 0
+        for px, py in pixels:
+            if px <= x0 + margin or px >= x1 - 1 - margin or py <= y0 + margin or py >= y1 - 1 - margin:
+                touched += 1
+        return float(touched) / float(max(1, len(pixels)))
+
+    def _fit_line_hypothesis(
+        self,
+        line_type: str,
+        points: np.ndarray,
+        pixels: List[List[int]],
+        y_norms: np.ndarray,
+        plane: Dict[str, Any],
+        roi_box,
+    ) -> Dict[str, Any]:
+        out = self._empty_line_hypothesis(line_type)
+        candidate_count = int(points.shape[0]) if isinstance(points, np.ndarray) else 0
+        out["candidate_count"] = candidate_count
+        out["pixels"] = pixels[:1600]
+        out["points"] = points if isinstance(points, np.ndarray) else np.empty((0, 3), dtype=np.float32)
+        out["y_norm_mean"] = float(np.mean(y_norms)) if candidate_count > 0 else 0.0
+        out["boundary_touch_ratio"] = self._line_boundary_touch_ratio(pixels, roi_box)
+        if candidate_count < int(self.cfg.trend_min_candidate_count):
+            out["reject_reason"] = "too_few_candidates"
+            return out
+        fit = self._fit_ransac_xz(points, threshold_m=float(self.cfg.line_select_max_residual_m))
+        if not bool(fit.get("found")):
+            out["reject_reason"] = "ransac_failed"
+            return out
+        inlier_mask = fit.get("inlier_mask")
+        inlier_pixels: List[List[int]] = []
+        inlier_y_norms = y_norms
+        if isinstance(inlier_mask, np.ndarray) and len(inlier_mask) == len(pixels):
+            inlier_pixels = [pixels[i] for i, keep in enumerate(inlier_mask.tolist()) if keep]
+            inlier_y_norms = y_norms[inlier_mask] if len(y_norms) == len(inlier_mask) else y_norms
+        image_line_k = None
+        image_line_b = None
+        if len(inlier_pixels) >= 2:
+            px = np.array([p[0] for p in inlier_pixels], dtype=np.float64)
+            py = np.array([p[1] for p in inlier_pixels], dtype=np.float64)
+            if float(px.max() - px.min()) > 1.0:
+                coeff = np.polyfit(px, py, 1)
+                image_line_k = float(coeff[0])
+                image_line_b = float(coeff[1])
+        residual = float(fit.get("residual_mean", float("inf")))
+        x_span = float(fit.get("x_span", 0.0) or 0.0)
+        residual_score = max(0.0, 1.0 - residual / max(1e-6, float(self.cfg.line_select_max_residual_m))) if math.isfinite(residual) else 0.0
+        span_score = min(1.0, x_span / max(1e-6, float(self.cfg.line_select_min_x_span_m)))
+        count_score = min(1.0, candidate_count / max(1.0, float(self.cfg.trend_min_candidate_count) * 2.0))
+        inlier_score = min(1.0, float(fit.get("inlier_count", 0) or 0) / float(max(1, candidate_count)))
+        boundary_touch_ratio = self._line_boundary_touch_ratio(inlier_pixels or pixels, roi_box)
+        boundary_score = max(0.0, 1.0 - boundary_touch_ratio / max(1e-6, float(self.cfg.roi_boundary_max_touch_ratio)))
+        plane_consistency = 1.0
+        if bool(plane.get("found")):
+            yaw_diff = abs(float(fit.get("yaw", 0.0) or 0.0) - float(plane.get("yaw", 0.0) or 0.0))
+            plane_consistency = max(0.0, 1.0 - yaw_diff / max(1e-6, float(self.cfg.line_select_max_plane_yaw_diff_rad)))
+        temporal_bonus = 0.05 if line_type == self._last_selected_line_type else 0.0
+        confidence = float(
+            np.clip(
+                0.30 * residual_score
+                + 0.25 * span_score
+                + 0.20 * count_score
+                + 0.15 * inlier_score
+                + 0.10 * boundary_score,
+                0.0,
+                1.0,
+            )
+        )
+        selection_score = float(
+            np.clip(
+                0.55 * confidence
+                + 0.20 * span_score
+                + 0.15 * residual_score
+                + 0.10 * plane_consistency
+                + temporal_bonus,
+                0.0,
+                1.0,
+            )
+        )
+        found = (
+            confidence >= float(self.cfg.line_select_min_confidence)
+            and x_span >= float(self.cfg.line_select_min_x_span_m)
+            and residual <= float(self.cfg.line_select_max_residual_m)
+        )
+        reject_reason = ""
+        if not found:
+            if x_span < float(self.cfg.line_select_min_x_span_m):
+                reject_reason = "line_too_short"
+            elif residual > float(self.cfg.line_select_max_residual_m):
+                reject_reason = "line_residual_high"
+            elif confidence < float(self.cfg.line_select_min_confidence):
+                reject_reason = "line_confidence_low"
+        out.update(
+            {
+                "found": bool(found),
+                "candidate_count": candidate_count,
+                "inlier_count": int(fit.get("inlier_count", 0) or 0) if found else 0,
+                "yaw": float(fit.get("yaw", 0.0) or 0.0) if found else 0.0,
+                "dist": float(fit.get("dist", 0.0) or 0.0) if found else 0.0,
+                "confidence": confidence if found else 0.0,
+                "selection_score": selection_score if found else 0.0,
+                "residual_mean": residual if found else float("inf"),
+                "x_span": x_span if found else 0.0,
+                "y_norm_mean": float(np.mean(inlier_y_norms)) if len(inlier_y_norms) else out["y_norm_mean"],
+                "k": fit.get("k") if found else None,
+                "b": fit.get("b") if found else None,
+                "inlier_pixels": inlier_pixels[:1600],
+                "image_line_k": image_line_k if found else None,
+                "image_line_b": image_line_b if found else None,
+                "boundary_touch_ratio": boundary_touch_ratio,
+                "reject_reason": reject_reason,
+            }
+        )
+        return out
+
+    def _estimate_crease_line(self, depth_m: np.ndarray, valid_mask: np.ndarray, roi_box, plane: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         x0, y0, _x1, _y1 = roi_box
         h, w = depth_m.shape[:2]
         candidates: List[Tuple[int, int, float]] = []
@@ -413,30 +595,17 @@ class OnlineTableEdgeDetector:
         min_ratio = float(self.cfg.trend_min_valid_ratio)
         min_valid = max(3, int(math.ceil(win * min_ratio)))
         min_delta = float(self.cfg.trend_min_slope_delta)
+        topk = max(1, int(self.cfg.trend_topk_per_col))
+        plane = dict(plane or {})
         if h < win * 2 + 1 or w <= 0:
-            return {
-                "found": False,
-                "candidate_count": 0,
-                "inlier_count": 0,
-                "yaw": 0.0,
-                "dist": 0.0,
-                "confidence": 0.0,
-                "residual_mean": float("inf"),
-                "x_span": 0.0,
-                "k": None,
-                "b": None,
-                "points": np.empty((0, 3), dtype=np.float32),
-                "pixels": [],
-                "inlier_pixels": [],
-                "image_line_k": None,
-                "image_line_b": None,
-            }
+            upper = self._empty_line_hypothesis("upper_crease")
+            lower = self._empty_line_hypothesis("lower_contact")
+            return {"found": False, "selected_line_type": "none", "upper": upper, "lower": lower, **self._empty_line_hypothesis("selected")}
         rows = np.arange(h, dtype=np.float64)
         for col in range(0, w, step):
             z_col = depth_m[:, col].astype(np.float64)
             valid_col = valid_mask[:, col] & np.isfinite(z_col)
-            best_y = None
-            best_score = 0.0
+            scored: List[Tuple[float, int]] = []
             for yy in range(win, h - win):
                 above_mask = valid_col[yy - win : yy]
                 below_mask = valid_col[yy + 1 : yy + 1 + win]
@@ -451,33 +620,44 @@ class OnlineTableEdgeDetector:
                 slope_above = float(np.polyfit(ya, za, 1)[0])
                 slope_below = float(np.polyfit(yb, zb, 1)[0])
                 score = abs(slope_below - slope_above)
-                if score > best_score:
-                    best_score = score
-                    best_y = yy
-            if best_y is None or best_score < min_delta:
+                if score >= min_delta:
+                    scored.append((score, yy))
+            if not scored:
                 continue
-            y_start = max(0, best_y - 2)
-            y_end = min(h, best_y + 3)
-            local_valid = valid_mask[y_start:y_end, col]
-            local_depth = depth_m[y_start:y_end, col]
-            if np.any(local_valid):
-                z_value = float(np.median(local_depth[local_valid]))
-                depth_m[best_y, col] = z_value
-            elif not valid_mask[best_y, col]:
-                continue
-            candidates.append((col, best_y, float(best_score)))
+            selected_rows: List[int] = []
+            for score, yy in sorted(scored, key=lambda item: item[0], reverse=True):
+                if len(selected_rows) >= topk:
+                    break
+                if any(abs(yy - prev) < max(4, win // 2) for prev in selected_rows):
+                    continue
+                y_start = max(0, yy - 2)
+                y_end = min(h, yy + 3)
+                local_valid = valid_mask[y_start:y_end, col]
+                local_depth = depth_m[y_start:y_end, col]
+                if not np.any(local_valid) and not valid_mask[yy, col]:
+                    continue
+                selected_rows.append(yy)
+                candidates.append((col, yy, float(score)))
         candidate_count = int(len(candidates))
         if candidate_count <= 0:
             points = np.empty((0, 3), dtype=np.float32)
             pixels: List[List[int]] = []
+            y_norms = np.empty((0,), dtype=np.float32)
         else:
             cols = np.array([c[0] for c in candidates], dtype=np.int64)
             ys = np.array([c[1] for c in candidates], dtype=np.int64)
-            z = depth_m[ys, cols].astype(np.float64)
+            z = np.zeros((len(candidates),), dtype=np.float64)
+            for idx, (col, yy, _score) in enumerate(candidates):
+                y_start = max(0, yy - 2)
+                y_end = min(h, yy + 3)
+                local_valid = valid_mask[y_start:y_end, col]
+                local_depth = depth_m[y_start:y_end, col]
+                z[idx] = float(np.median(local_depth[local_valid])) if np.any(local_valid) else float(depth_m[yy, col])
             good = np.isfinite(z) & (z > float(self.cfg.z_min)) & (z < float(self.cfg.z_max))
             cols = cols[good]
             ys = ys[good]
             z = z[good]
+            y_norms = ys.astype(np.float32) / float(max(1, h - 1))
             u = cols.astype(np.float64) + float(x0)
             v = ys.astype(np.float64) + float(y0)
             x = (u - float(self.calib.cx)) * z / float(self.calib.fx)
@@ -485,45 +665,44 @@ class OnlineTableEdgeDetector:
             points = np.vstack((x, y, z)).T.astype(np.float32)
             pixels = [[int(cx + x0), int(cy + y0)] for cx, cy in zip(cols.tolist(), ys.tolist())]
             candidate_count = int(points.shape[0])
-        fit = self._fit_ransac_xz(points, threshold_m=float(self.cfg.line_max_residual_m))
-        found = bool(fit.get("found")) and candidate_count >= int(self.cfg.trend_min_candidate_count)
-        inlier_pixels: List[List[int]] = []
-        image_line_k = None
-        image_line_b = None
-        if found:
-            inlier_mask = fit.get("inlier_mask")
-            if isinstance(inlier_mask, np.ndarray) and len(inlier_mask) == len(pixels):
-                inlier_pixels = [pixels[i] for i, keep in enumerate(inlier_mask.tolist()) if keep]
-            if len(inlier_pixels) >= 2:
-                px = np.array([p[0] for p in inlier_pixels], dtype=np.float64)
-                py = np.array([p[1] for p in inlier_pixels], dtype=np.float64)
-                if float(px.max() - px.min()) > 1.0:
-                    coeff = np.polyfit(px, py, 1)
-                    image_line_k = float(coeff[0])
-                    image_line_b = float(coeff[1])
-        residual = float(fit.get("residual_mean", float("inf")))
-        x_span = float(fit.get("x_span", 0.0) or 0.0)
-        residual_score = max(0.0, 1.0 - residual / max(1e-6, float(self.cfg.line_max_residual_m))) if math.isfinite(residual) else 0.0
-        span_score = min(1.0, x_span / max(1e-6, float(self.cfg.line_min_x_span_m)))
-        count_score = min(1.0, candidate_count / max(1.0, float(self.cfg.trend_min_candidate_count) * 2.0))
-        inlier_score = float(fit.get("confidence", 0.0) or 0.0)
-        conf = float(np.clip(0.30 * residual_score + 0.25 * span_score + 0.25 * count_score + 0.20 * inlier_score, 0.0, 1.0))
+        upper_mask = (y_norms >= float(self.cfg.upper_line_y_norm_min)) & (y_norms <= float(self.cfg.upper_line_y_norm_max))
+        lower_mask = (y_norms >= float(self.cfg.lower_line_y_norm_min)) & (y_norms <= float(self.cfg.lower_line_y_norm_max))
+        upper_pixels = [pixels[i] for i, keep in enumerate(upper_mask.tolist()) if keep] if len(pixels) == len(upper_mask) else []
+        lower_pixels = [pixels[i] for i, keep in enumerate(lower_mask.tolist()) if keep] if len(pixels) == len(lower_mask) else []
+        upper = self._fit_line_hypothesis("upper_crease", points[upper_mask], upper_pixels, y_norms[upper_mask], plane, roi_box)
+        lower = self._fit_line_hypothesis("lower_contact", points[lower_mask], lower_pixels, y_norms[lower_mask], plane, roi_box)
+        selected = self._empty_line_hypothesis("selected")
+        reliable = [item for item in (upper, lower) if bool(item.get("found"))]
+        if reliable:
+            selected = max(reliable, key=lambda item: float(item.get("selection_score", 0.0) or 0.0))
+            selected = dict(selected)
+            selected["selected"] = True
+            selected_line_type = "upper_crease" if selected.get("type") == "upper_crease" else "lower_contact"
+        else:
+            selected_line_type = "none"
         return {
-            "found": bool(found),
-            "candidate_count": candidate_count,
-            "inlier_count": int(fit.get("inlier_count", 0) or 0) if found else 0,
-            "yaw": float(fit.get("yaw", 0.0) or 0.0) if found else 0.0,
-            "dist": float(fit.get("dist", 0.0) or 0.0) if found else 0.0,
-            "confidence": conf if found else 0.0,
-            "residual_mean": residual if found else float("inf"),
-            "x_span": x_span if found else 0.0,
-            "k": fit.get("k") if found else None,
-            "b": fit.get("b") if found else None,
-            "points": points,
+            "found": bool(selected_line_type != "none"),
+            "selected_line_type": selected_line_type,
+            "candidate_count": int(selected.get("candidate_count", 0) or 0),
+            "inlier_count": int(selected.get("inlier_count", 0) or 0),
+            "yaw": float(selected.get("yaw", 0.0) or 0.0),
+            "dist": float(selected.get("dist", 0.0) or 0.0),
+            "confidence": float(selected.get("confidence", 0.0) or 0.0),
+            "residual_mean": selected.get("residual_mean", float("inf")),
+            "x_span": float(selected.get("x_span", 0.0) or 0.0),
+            "y_norm_mean": float(selected.get("y_norm_mean", 0.0) or 0.0),
+            "k": selected.get("k"),
+            "b": selected.get("b"),
+            "points": selected.get("points", np.empty((0, 3), dtype=np.float32)),
             "pixels": pixels[:1600],
-            "inlier_pixels": inlier_pixels[:1600],
-            "image_line_k": image_line_k,
-            "image_line_b": image_line_b,
+            "inlier_pixels": selected.get("inlier_pixels", [])[:1600],
+            "image_line_k": selected.get("image_line_k"),
+            "image_line_b": selected.get("image_line_b"),
+            "boundary_touch_ratio": float(selected.get("boundary_touch_ratio", 0.0) or 0.0),
+            "upper": upper,
+            "lower": lower,
+            "upper_pixels": upper.get("pixels", [])[:1600],
+            "lower_pixels": lower.get("pixels", [])[:1600],
         }
 
     def _fuse_front_pose(self, plane: Dict[str, Any], line: Dict[str, Any]) -> Dict[str, Any]:
@@ -536,8 +715,9 @@ class OnlineTableEdgeDetector:
         line_reliable = (
             bool(line.get("found"))
             and int(line.get("candidate_count", 0) or 0) >= int(self.cfg.trend_min_candidate_count)
-            and float(line.get("residual_mean", float("inf")) or float("inf")) <= float(self.cfg.line_max_residual_m)
-            and float(line.get("x_span", 0.0) or 0.0) >= float(self.cfg.line_min_x_span_m)
+            and float(line.get("residual_mean", float("inf")) or float("inf")) <= float(self.cfg.line_select_max_residual_m)
+            and float(line.get("x_span", 0.0) or 0.0) >= float(self.cfg.line_select_min_x_span_m)
+            and float(line.get("confidence", 0.0) or 0.0) >= float(self.cfg.line_select_min_confidence)
         )
         raw_found = bool(plane.get("found")) or bool(line.get("found"))
         if plane_reliable and line_reliable:
@@ -615,7 +795,131 @@ class OnlineTableEdgeDetector:
             "reject_reason": "no_reliable_pose" if raw_found else "no_raw_geometry",
         }
 
-    def _validate_pose_for_control(self, fused: Dict[str, Any]) -> Dict[str, Any]:
+    def _score_table_geometry(self, plane: Dict[str, Any], line: Dict[str, Any], fused: Dict[str, Any]) -> Dict[str, Any]:
+        plane_residual = float(plane.get("residual_mean", float("inf")) or float("inf"))
+        plane_span = float(plane.get("x_span", 0.0) or 0.0)
+        area_ratio = float(plane.get("area_ratio", 0.0) or 0.0)
+        if bool(plane.get("found")):
+            plane_residual_score = max(0.0, 1.0 - plane_residual / max(1e-6, float(self.cfg.plane_max_residual_m))) if math.isfinite(plane_residual) else 0.0
+            plane_span_score = min(1.0, plane_span / max(1e-6, float(self.cfg.plane_min_x_span_m)))
+            plane_area_score = min(1.0, area_ratio / max(1e-6, float(self.cfg.front_face_min_area_ratio)))
+            front_plane_score = float(
+                np.clip(
+                    0.35 * float(plane.get("confidence", 0.0) or 0.0)
+                    + 0.25 * plane_area_score
+                    + 0.20 * plane_residual_score
+                    + 0.20 * plane_span_score,
+                    0.0,
+                    1.0,
+                )
+            )
+        else:
+            front_plane_score = 0.0
+
+        line_residual = float(line.get("residual_mean", float("inf")) or float("inf"))
+        line_span = float(line.get("x_span", 0.0) or 0.0)
+        if bool(line.get("found")):
+            line_residual_score = max(0.0, 1.0 - line_residual / max(1e-6, float(self.cfg.line_select_max_residual_m))) if math.isfinite(line_residual) else 0.0
+            line_span_score = min(1.0, line_span / max(1e-6, float(self.cfg.line_select_min_x_span_m)))
+            line_count_score = min(1.0, int(line.get("candidate_count", 0) or 0) / max(1.0, float(self.cfg.trend_min_candidate_count) * 2.0))
+            line_score = float(
+                np.clip(
+                    0.40 * float(line.get("confidence", 0.0) or 0.0)
+                    + 0.25 * line_residual_score
+                    + 0.20 * line_span_score
+                    + 0.15 * line_count_score,
+                    0.0,
+                    1.0,
+                )
+            )
+        else:
+            line_score = 0.0
+
+        if bool(plane.get("found")) and bool(line.get("found")):
+            yaw_diff = abs(float(plane.get("yaw", 0.0) or 0.0) - float(line.get("yaw", 0.0) or 0.0))
+            dist_diff = abs(float(plane.get("dist", 0.0) or 0.0) - float(line.get("dist", 0.0) or 0.0))
+            yaw_score = max(0.0, 1.0 - yaw_diff / max(1e-6, float(self.cfg.fusion_yaw_consistency_rad)))
+            dist_score = max(0.0, 1.0 - dist_diff / max(1e-6, float(self.cfg.control_max_dist_jump_m)))
+            plane_line_consistency_score = float(np.clip(0.70 * yaw_score + 0.30 * dist_score, 0.0, 1.0))
+        elif bool(plane.get("found")) or bool(line.get("found")):
+            plane_line_consistency_score = 0.55
+        else:
+            plane_line_consistency_score = 0.0
+
+        boundary_touch = float(line.get("boundary_touch_ratio", 0.0) or 0.0) if bool(line.get("found")) else 0.0
+        roi_boundary_score = max(0.0, 1.0 - boundary_touch / max(1e-6, float(self.cfg.roi_boundary_max_touch_ratio)))
+        if not bool(line.get("found")) and bool(plane.get("found")):
+            roi_boundary_score = 0.70
+
+        pose_found = bool(fused.get("pose_found"))
+        yaw = float(fused.get("yaw", 0.0) or 0.0)
+        dist = float(fused.get("dist", 0.0) or 0.0)
+        temporal_jump = False
+        if not pose_found:
+            temporal_score = 0.0
+        elif self._last_pose is None:
+            temporal_score = 0.60
+        else:
+            yaw_jump = abs(yaw - float(self._last_pose[0]))
+            dist_jump = abs(dist - float(self._last_pose[1]))
+            yaw_score = max(0.0, 1.0 - yaw_jump / max(1e-6, float(self.cfg.control_max_yaw_jump_rad)))
+            dist_score = max(0.0, 1.0 - dist_jump / max(1e-6, float(self.cfg.control_max_dist_jump_m)))
+            temporal_score = float(np.clip(0.55 * yaw_score + 0.45 * dist_score, 0.0, 1.0))
+            temporal_jump = yaw_jump > float(self.cfg.control_max_yaw_jump_rad) or dist_jump > float(self.cfg.control_max_dist_jump_m)
+
+        weights = {
+            "front": max(0.0, float(self.cfg.front_plane_score_weight)),
+            "line": max(0.0, float(self.cfg.line_score_weight)),
+            "consistency": max(0.0, float(self.cfg.plane_line_consistency_weight)),
+            "boundary": max(0.0, float(self.cfg.roi_boundary_score_weight)),
+            "temporal": max(0.0, float(self.cfg.temporal_score_weight)),
+        }
+        weight_sum = max(1e-6, sum(weights.values()))
+        table_geometry_score = float(
+            np.clip(
+                (
+                    weights["front"] * front_plane_score
+                    + weights["line"] * line_score
+                    + weights["consistency"] * plane_line_consistency_score
+                    + weights["boundary"] * roi_boundary_score
+                    + weights["temporal"] * temporal_score
+                )
+                / weight_sum,
+                0.0,
+                1.0,
+            )
+        )
+
+        reasons: List[Tuple[float, str]] = []
+        if not bool(plane.get("found")):
+            reasons.append((front_plane_score, "no_reliable_plane"))
+        elif area_ratio < float(self.cfg.front_face_min_area_ratio):
+            reasons.append((front_plane_score, "low_front_face_area"))
+        if not bool(line.get("found")):
+            reasons.append((line_score, "no_reliable_line"))
+        elif line_span < float(self.cfg.line_select_min_x_span_m):
+            reasons.append((line_score, "line_too_short"))
+        elif line_residual > float(self.cfg.line_select_max_residual_m):
+            reasons.append((line_score, "line_residual_high"))
+        if plane_line_consistency_score < 0.35 and bool(plane.get("found")) and bool(line.get("found")):
+            reasons.append((plane_line_consistency_score, "plane_line_yaw_conflict"))
+        if roi_boundary_score < 0.35:
+            reasons.append((roi_boundary_score, "touching_roi_boundary"))
+        if temporal_jump:
+            reasons.append((temporal_score, "temporal_jump"))
+        geometry_reject_reason = min(reasons, key=lambda item: item[0])[1] if reasons else ""
+        return {
+            "table_geometry_score": table_geometry_score,
+            "front_plane_score": front_plane_score,
+            "line_score": line_score,
+            "plane_line_consistency_score": plane_line_consistency_score,
+            "roi_boundary_score": roi_boundary_score,
+            "temporal_score": temporal_score,
+            "geometry_reject_reason": geometry_reject_reason,
+            "temporal_jump": temporal_jump,
+        }
+
+    def _validate_pose_for_control(self, fused: Dict[str, Any], geometry: Dict[str, Any]) -> Dict[str, Any]:
         pose_found = bool(fused.get("pose_found"))
         reason = str(fused.get("reject_reason") or "")
         valid_base = pose_found and fused.get("pose_source") != "conflict"
@@ -624,6 +928,8 @@ class OnlineTableEdgeDetector:
         conf = float(fused.get("confidence", 0.0) or 0.0)
         x_span = float(fused.get("x_span", 0.0) or 0.0)
         residual = float(fused.get("residual_mean", float("inf")) or float("inf"))
+        geometry_score = float(geometry.get("table_geometry_score", 0.0) or 0.0)
+        temporal_jump = bool(geometry.get("temporal_jump", False))
         if not valid_base and not reason:
             reason = "pose_not_found"
         if valid_base and conf < float(self.cfg.control_min_confidence):
@@ -640,24 +946,68 @@ class OnlineTableEdgeDetector:
         if valid_base and abs(yaw) > float(self.cfg.control_max_yaw_rad):
             valid_base = False
             reason = "yaw_out_of_range"
-        if valid_base and self._last_pose is not None:
-            last_yaw, last_dist = self._last_pose
-            if abs(yaw - last_yaw) > float(self.cfg.control_max_yaw_jump_rad):
-                valid_base = False
-                reason = "yaw_jump"
-            elif abs(dist - last_dist) > float(self.cfg.control_max_dist_jump_m):
-                valid_base = False
-                reason = "dist_jump"
+        if valid_base and temporal_jump:
+            valid_base = False
+            reason = "temporal_jump"
         if valid_base:
             self._stable_count += 1
         else:
             self._stable_count = 0
-        valid_for_control = bool(valid_base and self._stable_count >= int(self.cfg.control_min_stable_frames))
-        if valid_base and not valid_for_control:
+        approach_base = (
+            pose_found
+            and geometry_score >= float(self.cfg.table_geometry_approach_score)
+            and abs(dist) <= max(float(self.target_dist_m), float(self.cfg.z_max))
+            and fused.get("pose_source") != "conflict"
+        )
+        usable_for_approach = bool(approach_base and self._stable_count >= int(self.cfg.control_approach_min_stable_frames))
+        usable_for_alignment = bool(
+            valid_base
+            and geometry_score >= float(self.cfg.table_geometry_alignment_score)
+            and self._stable_count >= int(self.cfg.control_alignment_min_stable_frames)
+        )
+        usable_for_stop = bool(
+            valid_base
+            and geometry_score >= float(self.cfg.table_geometry_stop_score)
+            and abs(dist) <= float(self.cfg.control_stop_dist_abs_max_m)
+            and self._stable_count >= int(self.cfg.control_stop_min_stable_frames)
+        )
+        valid_for_control = bool(usable_for_alignment or usable_for_stop)
+        if usable_for_stop:
+            control_level = "stop"
+        elif usable_for_alignment:
+            control_level = "alignment"
+        elif usable_for_approach:
+            control_level = "approach"
+        else:
+            control_level = "none"
+        if control_level == "none":
+            if not pose_found:
+                control_reason = reason or "pose_not_found"
+            elif geometry_score < float(self.cfg.table_geometry_approach_score):
+                control_reason = geometry.get("geometry_reject_reason") or "geometry_score_low"
+            elif not valid_base:
+                control_reason = reason or "control_gate_rejected"
+            else:
+                control_reason = "stabilizing"
+        elif control_level == "approach" and not valid_for_control:
+            control_reason = "approach_only"
+        else:
+            control_reason = ""
+        if valid_base and control_level == "none" and not reason:
             reason = "stabilizing"
         if pose_found:
             self._last_pose = (yaw, dist)
-        return {"valid_for_control": valid_for_control, "stable_count": int(self._stable_count), "reject_reason": reason}
+            self._last_pose_source = str(fused.get("pose_source") or "none")
+        return {
+            "valid_for_control": valid_for_control,
+            "stable_count": int(self._stable_count),
+            "reject_reason": reason,
+            "usable_for_approach": usable_for_approach,
+            "usable_for_alignment": usable_for_alignment,
+            "usable_for_stop": usable_for_stop,
+            "control_level": control_level,
+            "control_reject_reason": control_reason,
+        }
 
     @staticmethod
     def _finite_or_zero(value: Any) -> float:
@@ -678,6 +1028,10 @@ class OnlineTableEdgeDetector:
             "front_plane_candidate_pixels": [],
             "crease_candidate_pixels": [],
             "crease_inlier_pixels": [],
+            "upper_line_candidate_pixels": [],
+            "upper_line_inlier_pixels": [],
+            "lower_line_candidate_pixels": [],
+            "lower_line_inlier_pixels": [],
         }
         if len(pc_cam) < int(self.cfg.min_all_points):
             self._stable_count = 0
@@ -689,6 +1043,8 @@ class OnlineTableEdgeDetector:
                 point_count=len(pc_cam),
                 table_point_count=0,
                 reject_reason="roi_empty",
+                control_reject_reason="roi_empty",
+                geometry_reject_reason="no_raw_geometry",
             )
             base_debug.update({"reject_reason": result.reject_reason})
             return result, base_debug
@@ -696,11 +1052,15 @@ class OnlineTableEdgeDetector:
         table_mask = self._find_table_plane(pc_cam)
         table_pc = pc_cam[table_mask]
         plane = self._estimate_front_plane(depth_meters, valid_mask, roi_box)
-        line = self._estimate_crease_line(depth_meters.copy(), valid_mask, roi_box)
+        line = self._estimate_crease_line(depth_meters.copy(), valid_mask, roi_box, plane)
         fused = self._fuse_front_pose(plane, line)
-        control = self._validate_pose_for_control(fused)
+        geometry = self._score_table_geometry(plane, line, fused)
+        control = self._validate_pose_for_control(fused, geometry)
         edge_found = bool(fused.get("pose_found"))
         reject_reason = str(control.get("reject_reason") or fused.get("reject_reason") or "")
+        selected_line_type = str(line.get("selected_line_type") or "none")
+        upper = dict(line.get("upper") or {})
+        lower = dict(line.get("lower") or {})
         result = EdgeDetectResult(
             edge_found,
             float(fused.get("yaw", 0.0) or 0.0),
@@ -735,17 +1095,58 @@ class OnlineTableEdgeDetector:
             plane_b=plane.get("b"),
             image_line_k=line.get("image_line_k"),
             image_line_b=line.get("image_line_b"),
+            upper_line_found=bool(upper.get("found")),
+            upper_line_confidence=float(upper.get("confidence", 0.0) or 0.0),
+            upper_line_candidate_count=int(upper.get("candidate_count", 0) or 0),
+            upper_line_inlier_count=int(upper.get("inlier_count", 0) or 0),
+            upper_line_residual_mean=self._finite_or_zero(upper.get("residual_mean")),
+            upper_line_x_span_m=float(upper.get("x_span", 0.0) or 0.0),
+            upper_line_y_norm_mean=float(upper.get("y_norm_mean", 0.0) or 0.0),
+            upper_line_k=upper.get("k"),
+            upper_line_b=upper.get("b"),
+            upper_line_yaw_err_rad=float(upper.get("yaw")) if upper.get("found") else None,
+            upper_line_dist_err_m=float(upper.get("dist")) if upper.get("found") else None,
+            lower_line_found=bool(lower.get("found")),
+            lower_line_confidence=float(lower.get("confidence", 0.0) or 0.0),
+            lower_line_candidate_count=int(lower.get("candidate_count", 0) or 0),
+            lower_line_inlier_count=int(lower.get("inlier_count", 0) or 0),
+            lower_line_residual_mean=self._finite_or_zero(lower.get("residual_mean")),
+            lower_line_x_span_m=float(lower.get("x_span", 0.0) or 0.0),
+            lower_line_y_norm_mean=float(lower.get("y_norm_mean", 0.0) or 0.0),
+            lower_line_k=lower.get("k"),
+            lower_line_b=lower.get("b"),
+            lower_line_yaw_err_rad=float(lower.get("yaw")) if lower.get("found") else None,
+            lower_line_dist_err_m=float(lower.get("dist")) if lower.get("found") else None,
+            selected_line_type=selected_line_type,
+            table_geometry_score=float(geometry.get("table_geometry_score", 0.0) or 0.0),
+            front_plane_score=float(geometry.get("front_plane_score", 0.0) or 0.0),
+            line_score=float(geometry.get("line_score", 0.0) or 0.0),
+            plane_line_consistency_score=float(geometry.get("plane_line_consistency_score", 0.0) or 0.0),
+            roi_boundary_score=float(geometry.get("roi_boundary_score", 0.0) or 0.0),
+            temporal_score=float(geometry.get("temporal_score", 0.0) or 0.0),
+            geometry_reject_reason=str(geometry.get("geometry_reject_reason") or ""),
+            usable_for_approach=bool(control.get("usable_for_approach")),
+            usable_for_alignment=bool(control.get("usable_for_alignment")),
+            usable_for_stop=bool(control.get("usable_for_stop")),
+            control_level=str(control.get("control_level") or "none"),
+            control_reject_reason=str(control.get("control_reject_reason") or ""),
         )
+        self._last_selected_line_type = selected_line_type
         base_debug.update(
             {
                 "pc_table": table_pc,
                 "front_plane": plane,
                 "crease_line": line,
                 "fused_pose": fused,
+                "table_geometry": geometry,
                 "control_gate": control,
                 "front_plane_candidate_pixels": plane.get("pixels", []),
                 "crease_candidate_pixels": line.get("pixels", []),
                 "crease_inlier_pixels": line.get("inlier_pixels", []),
+                "upper_line_candidate_pixels": upper.get("pixels", []),
+                "upper_line_inlier_pixels": upper.get("inlier_pixels", []),
+                "lower_line_candidate_pixels": lower.get("pixels", []),
+                "lower_line_inlier_pixels": lower.get("inlier_pixels", []),
                 "reject_reason": reject_reason,
             }
         )

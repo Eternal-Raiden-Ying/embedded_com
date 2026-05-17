@@ -304,12 +304,51 @@ def _table_edge_payload(
         "line_dist_err_m",
         "plane_k",
         "plane_b",
+        "upper_line_found",
+        "upper_line_confidence",
+        "upper_line_candidate_count",
+        "upper_line_inlier_count",
+        "upper_line_residual_mean",
+        "upper_line_x_span_m",
+        "upper_line_y_norm_mean",
+        "upper_line_k",
+        "upper_line_b",
+        "upper_line_yaw_err_rad",
+        "upper_line_dist_err_m",
+        "lower_line_found",
+        "lower_line_confidence",
+        "lower_line_candidate_count",
+        "lower_line_inlier_count",
+        "lower_line_residual_mean",
+        "lower_line_x_span_m",
+        "lower_line_y_norm_mean",
+        "lower_line_k",
+        "lower_line_b",
+        "lower_line_yaw_err_rad",
+        "lower_line_dist_err_m",
+        "selected_line_type",
+        "table_geometry_score",
+        "front_plane_score",
+        "line_score",
+        "plane_line_consistency_score",
+        "roi_boundary_score",
+        "temporal_score",
+        "geometry_reject_reason",
+        "usable_for_approach",
+        "usable_for_alignment",
+        "usable_for_stop",
+        "control_level",
+        "control_reject_reason",
     ):
         payload[key] = getattr(result, key, None)
     if isinstance(debug, dict):
         payload["front_plane_candidate_pixels"] = debug.get("front_plane_candidate_pixels") or []
         payload["crease_candidate_pixels"] = debug.get("crease_candidate_pixels") or []
         payload["crease_inlier_pixels"] = debug.get("crease_inlier_pixels") or []
+        payload["upper_line_candidate_pixels"] = debug.get("upper_line_candidate_pixels") or []
+        payload["upper_line_inlier_pixels"] = debug.get("upper_line_inlier_pixels") or []
+        payload["lower_line_candidate_pixels"] = debug.get("lower_line_candidate_pixels") or []
+        payload["lower_line_inlier_pixels"] = debug.get("lower_line_inlier_pixels") or []
     payload.update(dict(roi_meta or {}))
     payload["roi_source"] = getattr(result, "roi_source", "") or payload.get("roi_source")
     payload.update({"depth_edge_roi": roi, "table_edge_roi": roi, "edge_roi": roi, "roi_format": "xyxy"})
@@ -344,6 +383,41 @@ CSV_FIELDS = [
     "edge_k",
     "edge_b",
     "target_dist_m",
+    "selected_line_type",
+    "upper_line_found",
+    "upper_line_confidence",
+    "upper_line_candidate_count",
+    "upper_line_inlier_count",
+    "upper_line_residual_mean",
+    "upper_line_x_span_m",
+    "upper_line_y_norm_mean",
+    "upper_line_k",
+    "upper_line_b",
+    "upper_line_yaw_err_rad",
+    "upper_line_dist_err_m",
+    "lower_line_found",
+    "lower_line_confidence",
+    "lower_line_candidate_count",
+    "lower_line_inlier_count",
+    "lower_line_residual_mean",
+    "lower_line_x_span_m",
+    "lower_line_y_norm_mean",
+    "lower_line_k",
+    "lower_line_b",
+    "lower_line_yaw_err_rad",
+    "lower_line_dist_err_m",
+    "table_geometry_score",
+    "front_plane_score",
+    "line_score",
+    "plane_line_consistency_score",
+    "roi_boundary_score",
+    "temporal_score",
+    "geometry_reject_reason",
+    "usable_for_approach",
+    "usable_for_alignment",
+    "usable_for_stop",
+    "control_level",
+    "control_reject_reason",
 ]
 
 
@@ -377,6 +451,41 @@ def _csv_row(table_edge: Dict[str, Any], frame_id: int, ts_ms: float, roi_preset
         "edge_k": table_edge.get("edge_k"),
         "edge_b": table_edge.get("edge_b"),
         "target_dist_m": float(target_dist_m),
+        "selected_line_type": table_edge.get("selected_line_type"),
+        "upper_line_found": int(bool(table_edge.get("upper_line_found"))),
+        "upper_line_confidence": table_edge.get("upper_line_confidence"),
+        "upper_line_candidate_count": table_edge.get("upper_line_candidate_count"),
+        "upper_line_inlier_count": table_edge.get("upper_line_inlier_count"),
+        "upper_line_residual_mean": table_edge.get("upper_line_residual_mean"),
+        "upper_line_x_span_m": table_edge.get("upper_line_x_span_m"),
+        "upper_line_y_norm_mean": table_edge.get("upper_line_y_norm_mean"),
+        "upper_line_k": table_edge.get("upper_line_k"),
+        "upper_line_b": table_edge.get("upper_line_b"),
+        "upper_line_yaw_err_rad": table_edge.get("upper_line_yaw_err_rad"),
+        "upper_line_dist_err_m": table_edge.get("upper_line_dist_err_m"),
+        "lower_line_found": int(bool(table_edge.get("lower_line_found"))),
+        "lower_line_confidence": table_edge.get("lower_line_confidence"),
+        "lower_line_candidate_count": table_edge.get("lower_line_candidate_count"),
+        "lower_line_inlier_count": table_edge.get("lower_line_inlier_count"),
+        "lower_line_residual_mean": table_edge.get("lower_line_residual_mean"),
+        "lower_line_x_span_m": table_edge.get("lower_line_x_span_m"),
+        "lower_line_y_norm_mean": table_edge.get("lower_line_y_norm_mean"),
+        "lower_line_k": table_edge.get("lower_line_k"),
+        "lower_line_b": table_edge.get("lower_line_b"),
+        "lower_line_yaw_err_rad": table_edge.get("lower_line_yaw_err_rad"),
+        "lower_line_dist_err_m": table_edge.get("lower_line_dist_err_m"),
+        "table_geometry_score": table_edge.get("table_geometry_score"),
+        "front_plane_score": table_edge.get("front_plane_score"),
+        "line_score": table_edge.get("line_score"),
+        "plane_line_consistency_score": table_edge.get("plane_line_consistency_score"),
+        "roi_boundary_score": table_edge.get("roi_boundary_score"),
+        "temporal_score": table_edge.get("temporal_score"),
+        "geometry_reject_reason": table_edge.get("geometry_reject_reason"),
+        "usable_for_approach": int(bool(table_edge.get("usable_for_approach"))),
+        "usable_for_alignment": int(bool(table_edge.get("usable_for_alignment"))),
+        "usable_for_stop": int(bool(table_edge.get("usable_for_stop"))),
+        "control_level": table_edge.get("control_level"),
+        "control_reject_reason": table_edge.get("control_reject_reason"),
     }
 
 
@@ -512,6 +621,8 @@ def main() -> None:
                 "[BAG_EDGE] "
                 f"frame={frame_id} valid={int(bool(table_edge.get('edge_valid')))} "
                 f"dist={table_edge.get('dist_err_m')} yaw={table_edge.get('yaw_err_rad')} "
+                f"geom={table_edge.get('table_geometry_score')} level={table_edge.get('control_level')} "
+                f"line={table_edge.get('selected_line_type')} "
                 f"roi={table_edge.get('depth_edge_roi')} preset={args.roi_preset} "
                 f"yolo_boxes={int(local_perception.get('box_count', 0) or 0)} age_ms={age_ms:.1f}"
             )

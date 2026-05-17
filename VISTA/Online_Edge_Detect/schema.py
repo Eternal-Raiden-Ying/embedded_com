@@ -76,8 +76,17 @@ class DetectorConfig:
     trend_min_valid_ratio: float = 0.70
     trend_min_slope_delta: float = 0.0025
     trend_min_candidate_count: int = 35
+    trend_topk_per_col: int = 3
+    upper_line_y_norm_min: float = 0.12
+    upper_line_y_norm_max: float = 0.62
+    lower_line_y_norm_min: float = 0.42
+    lower_line_y_norm_max: float = 0.92
     line_min_x_span_m: float = 0.18
     line_max_residual_m: float = 0.035
+    line_select_min_confidence: float = 0.35
+    line_select_min_x_span_m: float = 0.16
+    line_select_max_residual_m: float = 0.040
+    line_select_max_plane_yaw_diff_rad: float = 0.22
     plane_min_inliers: int = 220
     plane_min_x_span_m: float = 0.20
     plane_max_residual_m: float = 0.035
@@ -85,11 +94,25 @@ class DetectorConfig:
     plane_min_abs_normal_z: float = 0.25
     front_face_min_area_ratio: float = 0.03
     fusion_yaw_consistency_rad: float = 0.18
+    table_geometry_approach_score: float = 0.35
+    table_geometry_alignment_score: float = 0.55
+    table_geometry_stop_score: float = 0.70
+    front_plane_score_weight: float = 0.35
+    line_score_weight: float = 0.25
+    plane_line_consistency_weight: float = 0.15
+    roi_boundary_score_weight: float = 0.10
+    temporal_score_weight: float = 0.15
+    roi_boundary_margin_px: int = 8
+    roi_boundary_max_touch_ratio: float = 0.25
     control_min_confidence: float = 0.45
     control_min_stable_frames: int = 3
     control_max_yaw_jump_rad: float = 0.18
     control_max_dist_jump_m: float = 0.12
     control_max_yaw_rad: float = 0.70
+    control_approach_min_stable_frames: int = 1
+    control_alignment_min_stable_frames: int = 3
+    control_stop_min_stable_frames: int = 5
+    control_stop_dist_abs_max_m: float = 0.08
 
 
 @dataclass

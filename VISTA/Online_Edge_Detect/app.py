@@ -70,7 +70,7 @@ class OnlineEdgeApp(BaseModule):
         }
 
     def _build_obs(self, result) -> dict:
-        return TableEdgeObsMsg(
+        payload = TableEdgeObsMsg(
             ts=now_ts(),
             table_found=bool(result.table_point_count > 0),
             edge_found=bool(result.edge_found),
@@ -102,6 +102,47 @@ class OnlineEdgeApp(BaseModule):
             table_point_count=int(result.table_point_count),
             frame_id=int(self._frame_id),
         ).to_dict()
+        for key in (
+            "selected_line_type",
+            "upper_line_found",
+            "upper_line_confidence",
+            "upper_line_candidate_count",
+            "upper_line_inlier_count",
+            "upper_line_residual_mean",
+            "upper_line_x_span_m",
+            "upper_line_y_norm_mean",
+            "upper_line_k",
+            "upper_line_b",
+            "upper_line_yaw_err_rad",
+            "upper_line_dist_err_m",
+            "lower_line_found",
+            "lower_line_confidence",
+            "lower_line_candidate_count",
+            "lower_line_inlier_count",
+            "lower_line_residual_mean",
+            "lower_line_x_span_m",
+            "lower_line_y_norm_mean",
+            "lower_line_k",
+            "lower_line_b",
+            "lower_line_yaw_err_rad",
+            "lower_line_dist_err_m",
+            "table_geometry_score",
+            "front_plane_score",
+            "line_score",
+            "plane_line_consistency_score",
+            "roi_boundary_score",
+            "temporal_score",
+            "geometry_reject_reason",
+            "usable_for_approach",
+            "usable_for_alignment",
+            "usable_for_stop",
+            "control_level",
+            "control_reject_reason",
+        ):
+            value = getattr(result, key, None)
+            if value is not None:
+                payload[key] = value
+        return payload
 
     def _send_obs_if_needed(self, payload: dict, now: float):
         if CONFIG.output.transport == "disabled":

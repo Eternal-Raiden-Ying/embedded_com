@@ -266,16 +266,21 @@ class OpenCVPreviewSink(PreviewSink):
         reason = table_edge.get("reject_reason") or table_edge.get("reason") or "ok"
         lines = [
             f"raw={self._boolish(table_edge.get('raw_found'))} pose={self._boolish(table_edge.get('pose_found', edge_found))} control={valid_for_control}",
-            f"source={table_edge.get('pose_source') or 'n/a'} conf={conf} stable={table_edge.get('stable_count', 'n/a')}",
+            f"source={table_edge.get('pose_source') or 'n/a'} line={table_edge.get('selected_line_type') or 'none'} conf={conf}",
+            f"geom={self._fmt(table_edge.get('table_geometry_score'))} level={table_edge.get('control_level') or 'none'} stable={table_edge.get('stable_count', 'n/a')}",
             f"plane={self._boolish(table_edge.get('plane_found'))} pc={self._fmt(table_edge.get('plane_confidence'))} res={self._fmt(table_edge.get('plane_residual_mean'))}",
+            f"upper={self._boolish(table_edge.get('upper_line_found'))}/{self._fmt(table_edge.get('upper_line_confidence'))} lower={self._boolish(table_edge.get('lower_line_found'))}/{self._fmt(table_edge.get('lower_line_confidence'))}",
             f"line={self._boolish(table_edge.get('line_found'))} lc={self._fmt(table_edge.get('line_confidence'))} res={self._fmt(table_edge.get('line_residual_mean'))}",
+            f"use A/Y/S={int(self._boolish(table_edge.get('usable_for_approach')))}{int(self._boolish(table_edge.get('usable_for_alignment')))}{int(self._boolish(table_edge.get('usable_for_stop')))}",
             f"candidates={table_edge.get('candidate_count', 'n/a')} inliers={table_edge.get('inlier_count', table_edge.get('edge_inlier_count', 'n/a'))}",
             f"roi_source={table_edge.get('roi_source') or 'n/a'} q={table_edge.get('table_quadrant') or 'n/a'}",
             f"edge_roi={table_edge.get('edge_roi') or table_edge.get('table_edge_roi') or table_edge.get('depth_edge_roi') or 'n/a'}",
-            f"reason={reason}",
+            f"geom_reason={table_edge.get('geometry_reject_reason') or 'ok'}",
+            f"control_reason={table_edge.get('control_reject_reason') or reason}",
+            "legend plane=green upper=purple lower=orange selected=yellow target=cyan",
         ]
         self._corner_note(panel, " | ".join(lines[:4]), fg=(210, 255, 210) if valid_for_control else (80, 180, 255))
-        self._text_block(panel, lines[4:], (16, panel.shape[0] - 72), fg=(230, 230, 230))
+        self._text_block(panel, lines[4:], (16, panel.shape[0] - 112), fg=(230, 230, 230))
         return panel
 
     def _make_info_panel(
@@ -406,11 +411,19 @@ class OpenCVPreviewSink(PreviewSink):
             roi_mask[y1:y2, x1:x2] = True
             valid &= roi_mask
         fallback_mask = valid
-        has_geometry = bool(table_edge.get("front_plane_candidate_pixels") or table_edge.get("crease_candidate_pixels") or table_edge.get("crease_inlier_pixels"))
+        has_geometry = bool(
+            table_edge.get("front_plane_candidate_pixels")
+            or table_edge.get("crease_candidate_pixels")
+            or table_edge.get("crease_inlier_pixels")
+            or table_edge.get("upper_line_candidate_pixels")
+            or table_edge.get("lower_line_candidate_pixels")
+        )
         if not has_geometry:
             panel[fallback_mask] = (95, 95, 95)
         self._draw_pixel_points(panel, table_edge.get("front_plane_candidate_pixels"), (80, 210, 80), radius=1)
-        self._draw_pixel_points(panel, table_edge.get("crease_candidate_pixels"), (255, 80, 255), radius=1)
+        self._draw_pixel_points(panel, table_edge.get("upper_line_candidate_pixels"), (255, 80, 255), radius=1)
+        self._draw_pixel_points(panel, table_edge.get("lower_line_candidate_pixels"), (80, 160, 255), radius=1)
+        self._draw_pixel_points(panel, table_edge.get("crease_candidate_pixels"), (120, 120, 120), radius=1)
         self._draw_pixel_points(panel, table_edge.get("crease_inlier_pixels"), (40, 255, 255), radius=2)
         image_k = self._as_float(table_edge.get("image_line_k"))
         image_b = self._as_float(table_edge.get("image_line_b"))
@@ -640,10 +653,13 @@ class OpenCVPreviewSink(PreviewSink):
             ]),
             ("TABLE", [
                 f"table_found={self._boolish(table_edge.get('table_found', table_edge.get('found')))} edge_found={self._boolish(table_edge.get('edge_found'))} control={self._boolish(table_edge.get('valid_for_control', table_edge.get('edge_valid')))}",
-                f"source={table_edge.get('pose_source', 'n/a')} conf={self._fmt(table_edge.get('confidence'))}",
+                f"level={table_edge.get('control_level', 'none')} geom={self._fmt(table_edge.get('table_geometry_score'))}",
+                f"use approach={self._boolish(table_edge.get('usable_for_approach'))} align={self._boolish(table_edge.get('usable_for_alignment'))} stop={self._boolish(table_edge.get('usable_for_stop'))}",
+                f"source={table_edge.get('pose_source', 'n/a')} line={table_edge.get('selected_line_type', 'none')} conf={self._fmt(table_edge.get('confidence'))}",
                 f"yaw={self._fmt(table_edge.get('yaw_err_rad'))} dist={self._fmt(table_edge.get('dist_err_m'))} stable={table_edge.get('stable_count', 'n/a')}",
                 f"plane={self._boolish(table_edge.get('plane_found'))}/{self._fmt(table_edge.get('plane_confidence'))} line={self._boolish(table_edge.get('line_found'))}/{self._fmt(table_edge.get('line_confidence'))}",
-                f"reject={table_edge.get('reject_reason') or table_edge.get('reason') or ''}",
+                f"upper={self._boolish(table_edge.get('upper_line_found'))}/{self._fmt(table_edge.get('upper_line_confidence'))} lower={self._boolish(table_edge.get('lower_line_found'))}/{self._fmt(table_edge.get('lower_line_confidence'))}",
+                f"reject={table_edge.get('geometry_reject_reason') or table_edge.get('control_reject_reason') or table_edge.get('reject_reason') or table_edge.get('reason') or ''}",
                 f"age_ms={table_edge.get('age_ms', table_edge.get('edge_obs_age_ms', table_edge.get('frame_age_ms', 'stale/null')))}",
                 f"lock_ready={table_edge.get('lock_ready', 'n/a')}",
             ]),
@@ -776,6 +792,12 @@ class OpenCVPreviewSink(PreviewSink):
         plane_k = self._as_float(table_edge.get("plane_k"))
         plane_b = self._as_float(table_edge.get("plane_b"))
         draw_xz_line(plane_k, plane_b, (255, 160, 80), 1)
+        upper_k = self._as_float(table_edge.get("upper_line_k"))
+        upper_b = self._as_float(table_edge.get("upper_line_b"))
+        lower_k = self._as_float(table_edge.get("lower_line_k"))
+        lower_b = self._as_float(table_edge.get("lower_line_b"))
+        draw_xz_line(upper_k, upper_b, (255, 80, 255), 1)
+        draw_xz_line(lower_k, lower_b, (80, 160, 255), 1)
         draw_xz_line(k, b, (50, 255, 80), 2)
         dist_err = self._as_float(table_edge.get("dist_err_m"))
         if dist_err is not None:
