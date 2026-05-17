@@ -1511,8 +1511,8 @@ class GenerationAwareFrameConsumptionTest(unittest.TestCase):
         manager = PredictorManager(cfg=cfg, logger=PrintLogger("predictor_generation"))
         manager.bind_runtime(scheduler, lambda: generation["value"])
         manager_module = importlib.import_module("vision_module.backend.predictor_manager")
-        original_cls = manager_module.QNN_YOLO_Dectec_Predictor
-        manager_module.QNN_YOLO_Dectec_Predictor = self._DummyPredictor
+        original_cls = manager_module.QNN_YOLO_Detect_Predictor
+        manager_module.QNN_YOLO_Detect_Predictor = self._DummyPredictor
         try:
             self.assertTrue(manager.ensure_model("test_model"))
             manager.set_inference_enabled(True)
@@ -1541,7 +1541,7 @@ class GenerationAwareFrameConsumptionTest(unittest.TestCase):
             self.assertEqual(payload["box_count"], 1)
             self.assertEqual(manager.snapshot()["last_camera_generation"], 2)
         finally:
-            manager_module.QNN_YOLO_Dectec_Predictor = original_cls
+            manager_module.QNN_YOLO_Detect_Predictor = original_cls
             manager.release_all()
             scheduler.stop_runtime()
 

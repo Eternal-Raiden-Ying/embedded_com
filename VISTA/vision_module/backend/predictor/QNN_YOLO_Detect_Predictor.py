@@ -22,7 +22,7 @@ from .yolov7_head import Detect
 logger = logging.getLogger("vision.inference")
 
 
-class QNN_YOLO_Dectec_Predictor(IPredictor):
+class QNN_YOLO_Detect_Predictor(IPredictor):
     """QNN YOLO detector predictor adapted from the local tmp benchmark code.
 
     Runtime contract:
@@ -136,4 +136,3 @@ class QNN_YOLO_Dectec_Predictor(IPredictor):
         return detections, []
 
 
-QNN_YOLO_Detect_Predictor = QNN_YOLO_Dectec_Predictor

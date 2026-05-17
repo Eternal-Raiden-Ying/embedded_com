@@ -235,8 +235,8 @@ class PredictorManagerContractTest(unittest.TestCase):
         manager = PredictorManager(cfg=cfg, logger=PrintLogger("detect_contract"))
         manager.bind_runtime(scheduler, lambda: 1)
         manager_module = importlib.import_module("vision_module.backend.predictor_manager")
-        original_cls = manager_module.QNN_YOLO_Dectec_Predictor
-        manager_module.QNN_YOLO_Dectec_Predictor = self._DummyPredictor
+        original_cls = manager_module.QNN_YOLO_Detect_Predictor
+        manager_module.QNN_YOLO_Detect_Predictor = self._DummyPredictor
         try:
             self.assertTrue(manager.ensure_model("test_model"))
             manager.set_inference_enabled(True)
@@ -265,7 +265,7 @@ class PredictorManagerContractTest(unittest.TestCase):
             self.assertEqual(int(payload["infer_boxes"][0][5]), 1)
             self.assertIsInstance(payload["infer_masks"], list)
         finally:
-            manager_module.QNN_YOLO_Dectec_Predictor = original_cls
+            manager_module.QNN_YOLO_Detect_Predictor = original_cls
             manager.release_all()
             scheduler.stop_runtime()
 
@@ -316,8 +316,8 @@ class PredictorManagerContractTest(unittest.TestCase):
         manager = PredictorManager(cfg=cfg, logger=PrintLogger("detect_bad_contract"))
         manager.bind_runtime(scheduler, lambda: 1)
         manager_module = importlib.import_module("vision_module.backend.predictor_manager")
-        original_cls = manager_module.QNN_YOLO_Dectec_Predictor
-        manager_module.QNN_YOLO_Dectec_Predictor = self._BadDetectPredictor
+        original_cls = manager_module.QNN_YOLO_Detect_Predictor
+        manager_module.QNN_YOLO_Detect_Predictor = self._BadDetectPredictor
         try:
             self.assertTrue(manager.ensure_model("test_model"))
             manager.set_inference_enabled(True)
@@ -347,7 +347,7 @@ class PredictorManagerContractTest(unittest.TestCase):
             self.assertFalse(target_obs["found"])
             self.assertIn("contract_error", target_obs)
         finally:
-            manager_module.QNN_YOLO_Dectec_Predictor = original_cls
+            manager_module.QNN_YOLO_Detect_Predictor = original_cls
             manager.release_all()
             scheduler.stop_runtime()
 
@@ -398,13 +398,13 @@ class PredictorBackendSelectionContractTest(unittest.TestCase):
         profile.predictor_type = "detect"
 
         manager_module = importlib.import_module("vision_module.backend.predictor_manager")
-        original_cls = manager_module.QNN_YOLO_Dectec_Predictor
-        manager_module.QNN_YOLO_Dectec_Predictor = self._SentinelPredictor
+        original_cls = manager_module.QNN_YOLO_Detect_Predictor
+        manager_module.QNN_YOLO_Detect_Predictor = self._SentinelPredictor
         try:
             manager = PredictorManager(cfg=cfg, logger=PrintLogger("backend_contract"))
             self.assertIs(manager._predictor_class_for_profile(profile), self._SentinelPredictor)
         finally:
-            manager_module.QNN_YOLO_Dectec_Predictor = original_cls
+            manager_module.QNN_YOLO_Detect_Predictor = original_cls
 
 
 class PredictorBackendStatusTest(unittest.TestCase):
