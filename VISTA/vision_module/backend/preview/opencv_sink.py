@@ -280,7 +280,19 @@ class OpenCVPreviewSink(PreviewSink):
             "legend plane=green upper=purple lower=orange selected=yellow target=cyan",
         ]
         self._corner_note(panel, " | ".join(lines[:4]), fg=(210, 255, 210) if valid_for_control else (80, 180, 255))
-        self._text_block(panel, lines[4:], (16, panel.shape[0] - 112), fg=(230, 230, 230))
+        detail_lines = [
+            lines[4],
+            lines[5],
+            lines[6],
+            lines[7],
+            f"roi={table_edge.get('roi_source') or 'n/a'}",
+            f"geom={table_edge.get('geometry_reject_reason') or 'ok'}",
+            f"ctrl={table_edge.get('control_reject_reason') or reason}",
+        ]
+        detail_w = min(max(280, panel.shape[1] // 3), max(220, panel.shape[1] - 32))
+        detail_x = max(16, panel.shape[1] - detail_w - 16)
+        detail_y = max(78, panel.shape[0] - 112)
+        self._text_block(panel, detail_lines, (detail_x, detail_y), fg=(230, 230, 230), max_width=detail_w)
         return panel
 
     def _make_info_panel(
@@ -710,15 +722,21 @@ class OpenCVPreviewSink(PreviewSink):
         fg: Tuple[int, int, int] = (230, 230, 230),
         bg: Tuple[int, int, int] = (0, 0, 0),
         title_first: bool = False,
+        max_width: Optional[int] = None,
     ) -> None:
         clean = [str(line) for line in lines if line is not None]
         if not clean:
             return
         x, y = origin
         line_h = 24
-        width = min(panel.shape[1] - x - 10, max(220, max(len(line) for line in clean) * 10 + 24))
+        available_w = max(1, panel.shape[1] - x - 10)
+        wanted_w = max(220, max(len(line) for line in clean) * 10 + 24)
+        if max_width is not None:
+            wanted_w = min(wanted_w, max(80, int(max_width)))
+        width = min(available_w, wanted_w)
         height = min(panel.shape[0] - y - 8, len(clean) * line_h + 18)
         self._rect(panel, (x - 8, y - 22), (x - 8 + width, y - 22 + height), bg, 0.72)
+        max_chars = max(8, int((width - 18) / 9))
         for idx, line in enumerate(clean):
             color = (80, 255, 160) if title_first and idx == 0 else fg
             scale = 0.68 if title_first and idx == 0 else 0.55
@@ -726,7 +744,7 @@ class OpenCVPreviewSink(PreviewSink):
             yy = y + idx * line_h
             if yy > panel.shape[0] - 12:
                 break
-            cv2.putText(panel, line[:90], (x, yy), cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness)
+            cv2.putText(panel, line[:max_chars], (x, yy), cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness)
 
     def _rect(
         self,
