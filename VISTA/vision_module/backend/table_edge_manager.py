@@ -531,6 +531,12 @@ class TableEdgeManager:
             "usable_for_stop",
             "control_level",
             "control_reject_reason",
+            "selected_line_plane_boundary_dist",
+            "selected_line_plane_consistency",
+            "line_reject_reason",
+            "line_drift_rejected",
+            "object_like_line_score",
+            "final_pose_source",
         ):
             payload[key] = getattr(result, key, None)
         profile["total_edge_process_ms"] = self._ms_since(total_start)

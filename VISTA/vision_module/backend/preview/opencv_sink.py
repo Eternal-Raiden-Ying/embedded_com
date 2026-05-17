@@ -259,40 +259,29 @@ class OpenCVPreviewSink(PreviewSink):
             roi = table_edge.get(name)
             if roi:
                 self._draw_roi(panel, roi, scale, offset, name, color, dashed=(name == "table_edge_roi"))
-        found = self._boolish(table_edge.get("found", table_edge.get("table_found")))
-        edge_found = self._boolish(table_edge.get("edge_found"))
         valid_for_control = self._boolish(table_edge.get("valid_for_control", table_edge.get("edge_valid")))
-        conf = self._fmt(table_edge.get("confidence"))
-        reason = table_edge.get("reject_reason") or table_edge.get("reason") or "ok"
-        lines = [
-            f"raw={self._boolish(table_edge.get('raw_found'))} pose={self._boolish(table_edge.get('pose_found', edge_found))} control={valid_for_control}",
-            f"source={table_edge.get('pose_source') or 'n/a'} line={table_edge.get('selected_line_type') or 'none'} conf={conf}",
-            f"geom={self._fmt(table_edge.get('table_geometry_score'))} level={table_edge.get('control_level') or 'none'} stable={table_edge.get('stable_count', 'n/a')}",
-            f"plane={self._boolish(table_edge.get('plane_found'))} pc={self._fmt(table_edge.get('plane_confidence'))} res={self._fmt(table_edge.get('plane_residual_mean'))}",
-            f"upper={self._boolish(table_edge.get('upper_line_found'))}/{self._fmt(table_edge.get('upper_line_confidence'))} lower={self._boolish(table_edge.get('lower_line_found'))}/{self._fmt(table_edge.get('lower_line_confidence'))}",
-            f"line={self._boolish(table_edge.get('line_found'))} lc={self._fmt(table_edge.get('line_confidence'))} res={self._fmt(table_edge.get('line_residual_mean'))}",
-            f"use A/Y/S={int(self._boolish(table_edge.get('usable_for_approach')))}{int(self._boolish(table_edge.get('usable_for_alignment')))}{int(self._boolish(table_edge.get('usable_for_stop')))}",
-            f"candidates={table_edge.get('candidate_count', 'n/a')} inliers={table_edge.get('inlier_count', table_edge.get('edge_inlier_count', 'n/a'))}",
-            f"roi_source={table_edge.get('roi_source') or 'n/a'} q={table_edge.get('table_quadrant') or 'n/a'}",
-            f"edge_roi={table_edge.get('edge_roi') or table_edge.get('table_edge_roi') or table_edge.get('depth_edge_roi') or 'n/a'}",
-            f"geom_reason={table_edge.get('geometry_reject_reason') or 'ok'}",
-            f"control_reason={table_edge.get('control_reject_reason') or reason}",
-            "legend plane=green upper=purple lower=orange selected=yellow target=cyan",
+        source = table_edge.get("final_pose_source") or table_edge.get("pose_source") or "none"
+        selected_line = table_edge.get("selected_line_type") or "none"
+        plane_k = self._fmt(table_edge.get("plane_k"))
+        final_k = self._fmt(table_edge.get("edge_k"))
+        geometry_lines = [
+            f"use={source}/{selected_line}",
+            f"upper: k={self._fmt(table_edge.get('upper_line_k'))} dist={self._fmt(table_edge.get('upper_line_dist_err_m'))}",
+            f"lower: k={self._fmt(table_edge.get('lower_line_k'))} dist={self._fmt(table_edge.get('lower_line_dist_err_m'))}",
+            f"plane: k={plane_k} dist={self._fmt(table_edge.get('plane_dist_err_m'))}",
+            f"final: k={final_k} yaw={self._fmt(table_edge.get('yaw_err_rad'))} dist={self._fmt(table_edge.get('dist_err_m'))}",
         ]
-        self._corner_note(panel, " | ".join(lines[:4]), fg=(210, 255, 210) if valid_for_control else (80, 180, 255))
-        detail_lines = [
-            lines[4],
-            lines[5],
-            lines[6],
-            lines[7],
-            f"roi={table_edge.get('roi_source') or 'n/a'}",
-            f"geom={table_edge.get('geometry_reject_reason') or 'ok'}",
-            f"ctrl={table_edge.get('control_reject_reason') or reason}",
+        left_y = max(76, panel.shape[0] - 120)
+        self._text_block(panel, geometry_lines, (16, left_y), fg=(210, 255, 210) if valid_for_control else (210, 230, 255), max_width=min(330, panel.shape[1] - 32))
+        legend_lines = [
+            "front plane=green",
+            "upper=purple lower=orange",
+            "selected/final=yellow target=cyan",
         ]
-        detail_w = min(max(280, panel.shape[1] // 3), max(220, panel.shape[1] - 32))
+        detail_w = min(max(220, panel.shape[1] // 3), max(180, panel.shape[1] - 32))
         detail_x = max(16, panel.shape[1] - detail_w - 16)
-        detail_y = max(78, panel.shape[0] - 112)
-        self._text_block(panel, detail_lines, (detail_x, detail_y), fg=(230, 230, 230), max_width=detail_w)
+        detail_y = max(78, panel.shape[0] - 82)
+        self._text_block(panel, legend_lines, (detail_x, detail_y), fg=(230, 230, 230), max_width=detail_w)
         return panel
 
     def _make_info_panel(
@@ -433,9 +422,9 @@ class OpenCVPreviewSink(PreviewSink):
         if not has_geometry:
             panel[fallback_mask] = (95, 95, 95)
         self._draw_pixel_points(panel, table_edge.get("front_plane_candidate_pixels"), (80, 210, 80), radius=1)
-        self._draw_pixel_points(panel, table_edge.get("upper_line_candidate_pixels"), (255, 80, 255), radius=1)
-        self._draw_pixel_points(panel, table_edge.get("lower_line_candidate_pixels"), (80, 160, 255), radius=1)
-        self._draw_pixel_points(panel, table_edge.get("crease_candidate_pixels"), (120, 120, 120), radius=1)
+        self._draw_pixel_points(panel, table_edge.get("crease_candidate_pixels"), (95, 95, 95), radius=1)
+        self._draw_pixel_points(panel, table_edge.get("upper_line_candidate_pixels"), (160, 70, 160), radius=1)
+        self._draw_pixel_points(panel, table_edge.get("lower_line_candidate_pixels"), (70, 135, 220), radius=1)
         self._draw_pixel_points(panel, table_edge.get("crease_inlier_pixels"), (40, 255, 255), radius=2)
         image_k = self._as_float(table_edge.get("image_line_k"))
         image_b = self._as_float(table_edge.get("image_line_b"))
@@ -654,26 +643,14 @@ class OpenCVPreviewSink(PreviewSink):
         table_bbox_status = "available" if self._find_table_bbox(local) is not None else "unavailable"
         table_quadrant = self._table_quadrant(local, {}) or table_edge.get("table_quadrant") or "n/a"
         sections = [
-            ("TASK", [
-                f"stage={status.get('stage', 'IDLE')}",
-                f"mode={status.get('mode', 'IDLE')}",
-                f"preview_layout={metadata.get('preview_layout') or self.layout or 'rgb_minimal'}",
-                f"window_id={metadata.get('window_id') or self.window_id}",
-                f"session={status.get('session_id') or ''}",
-                f"epoch={status.get('epoch', 0)}",
-                f"req={status.get('req_id') or ''}",
-            ]),
             ("TABLE", [
-                f"table_found={self._boolish(table_edge.get('table_found', table_edge.get('found')))} edge_found={self._boolish(table_edge.get('edge_found'))} control={self._boolish(table_edge.get('valid_for_control', table_edge.get('edge_valid')))}",
-                f"level={table_edge.get('control_level', 'none')} geom={self._fmt(table_edge.get('table_geometry_score'))}",
-                f"use approach={self._boolish(table_edge.get('usable_for_approach'))} align={self._boolish(table_edge.get('usable_for_alignment'))} stop={self._boolish(table_edge.get('usable_for_stop'))}",
-                f"source={table_edge.get('pose_source', 'n/a')} line={table_edge.get('selected_line_type', 'none')} conf={self._fmt(table_edge.get('confidence'))}",
-                f"yaw={self._fmt(table_edge.get('yaw_err_rad'))} dist={self._fmt(table_edge.get('dist_err_m'))} stable={table_edge.get('stable_count', 'n/a')}",
-                f"plane={self._boolish(table_edge.get('plane_found'))}/{self._fmt(table_edge.get('plane_confidence'))} line={self._boolish(table_edge.get('line_found'))}/{self._fmt(table_edge.get('line_confidence'))}",
-                f"upper={self._boolish(table_edge.get('upper_line_found'))}/{self._fmt(table_edge.get('upper_line_confidence'))} lower={self._boolish(table_edge.get('lower_line_found'))}/{self._fmt(table_edge.get('lower_line_confidence'))}",
-                f"reject={table_edge.get('geometry_reject_reason') or table_edge.get('control_reject_reason') or table_edge.get('reject_reason') or table_edge.get('reason') or ''}",
-                f"age_ms={table_edge.get('age_ms', table_edge.get('edge_obs_age_ms', table_edge.get('frame_age_ms', 'stale/null')))}",
-                f"lock_ready={table_edge.get('lock_ready', 'n/a')}",
+                f"found={self._boolish(table_edge.get('edge_found'))} control={self._boolish(table_edge.get('valid_for_control', table_edge.get('edge_valid')))} source={table_edge.get('final_pose_source') or table_edge.get('pose_source', 'n/a')}",
+                f"level={table_edge.get('control_level', 'none')} geom={self._fmt(table_edge.get('table_geometry_score'))} use={int(self._boolish(table_edge.get('usable_for_approach')))}{int(self._boolish(table_edge.get('usable_for_alignment')))}{int(self._boolish(table_edge.get('usable_for_stop')))} stable={table_edge.get('stable_count', 'n/a')}",
+                f"yaw={self._fmt(table_edge.get('yaw_err_rad'))} dist={self._fmt(table_edge.get('dist_err_m'))} line={table_edge.get('selected_line_type', 'none')}",
+                f"cand={table_edge.get('candidate_count', 'n/a')} inliers={table_edge.get('inlier_count', table_edge.get('edge_inlier_count', 'n/a'))} fp={self._fmt(table_edge.get('front_plane_score'))}",
+                f"scores fp={self._fmt(table_edge.get('front_plane_score'))} ln={self._fmt(table_edge.get('line_score'))} cons={self._fmt(table_edge.get('plane_line_consistency_score'))}",
+                f"boundary={self._fmt(table_edge.get('selected_line_plane_consistency'))} obj={self._fmt(table_edge.get('object_like_line_score'))} line_reason={table_edge.get('line_reject_reason') or 'ok'}",
+                f"reject geom={table_edge.get('geometry_reject_reason') or 'ok'} ctrl={table_edge.get('control_reject_reason') or table_edge.get('reject_reason') or table_edge.get('reason') or 'ok'}",
             ]),
             ("ROI", [
                 f"rgb_roi={local.get('rgb_search_roi') or local.get('search_roi') or 'n/a'}",
@@ -681,6 +658,12 @@ class OpenCVPreviewSink(PreviewSink):
                 f"edge_roi={table_edge.get('edge_roi') or table_edge.get('table_edge_roi') or 'n/a'}",
                 f"table_bbox={table_bbox_status} table_quadrant={table_quadrant}",
                 f"roi_source={table_edge.get('roi_source') or 'n/a'}",
+            ]),
+            ("TASK", [
+                f"stage={status.get('stage', 'IDLE')}",
+                f"mode={status.get('mode', 'IDLE')}",
+                f"preview_layout={metadata.get('preview_layout') or self.layout or 'rgb_minimal'}",
+                f"epoch={status.get('epoch', 0)} req={status.get('req_id') or ''}",
             ]),
             ("TARGET", [
                 f"target={target_name}",
@@ -809,14 +792,14 @@ class OpenCVPreviewSink(PreviewSink):
 
         plane_k = self._as_float(table_edge.get("plane_k"))
         plane_b = self._as_float(table_edge.get("plane_b"))
-        draw_xz_line(plane_k, plane_b, (255, 160, 80), 1)
+        draw_xz_line(plane_k, plane_b, (80, 210, 80), 1)
         upper_k = self._as_float(table_edge.get("upper_line_k"))
         upper_b = self._as_float(table_edge.get("upper_line_b"))
         lower_k = self._as_float(table_edge.get("lower_line_k"))
         lower_b = self._as_float(table_edge.get("lower_line_b"))
-        draw_xz_line(upper_k, upper_b, (255, 80, 255), 1)
-        draw_xz_line(lower_k, lower_b, (80, 160, 255), 1)
-        draw_xz_line(k, b, (50, 255, 80), 2)
+        draw_xz_line(upper_k, upper_b, (160, 70, 160), 1)
+        draw_xz_line(lower_k, lower_b, (70, 135, 220), 1)
+        draw_xz_line(k, b, (40, 255, 255), 2)
         dist_err = self._as_float(table_edge.get("dist_err_m"))
         if dist_err is not None:
             base_z = target_dist if target_dist is not None else 0.5
@@ -827,7 +810,7 @@ class OpenCVPreviewSink(PreviewSink):
             color = (80, 255, 255) if abs(dist_err) <= 0.03 else (80, 120, 255)
             cv2.arrowedLine(panel, start, end, color, 2, tipLength=0.35)
             cv2.putText(panel, f"dist_err={dist_err:+.3f}", (x1 + 8, y2 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.40, color, 1)
-        cv2.putText(panel, f"top-view {table_edge.get('pose_source') or 'edge'}", (x1 + 8, y1 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (230, 230, 230), 1)
+        cv2.putText(panel, f"top-view {table_edge.get('final_pose_source') or table_edge.get('pose_source') or 'edge'}", (x1 + 8, y1 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (230, 230, 230), 1)
 
     def _dashed_line(
         self,

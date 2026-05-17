@@ -339,6 +339,12 @@ def _table_edge_payload(
         "usable_for_stop",
         "control_level",
         "control_reject_reason",
+        "selected_line_plane_boundary_dist",
+        "selected_line_plane_consistency",
+        "line_reject_reason",
+        "line_drift_rejected",
+        "object_like_line_score",
+        "final_pose_source",
     ):
         payload[key] = getattr(result, key, None)
     if isinstance(debug, dict):
@@ -418,6 +424,12 @@ CSV_FIELDS = [
     "usable_for_stop",
     "control_level",
     "control_reject_reason",
+    "selected_line_plane_boundary_dist",
+    "selected_line_plane_consistency",
+    "line_reject_reason",
+    "line_drift_rejected",
+    "object_like_line_score",
+    "final_pose_source",
 ]
 
 
@@ -486,6 +498,12 @@ def _csv_row(table_edge: Dict[str, Any], frame_id: int, ts_ms: float, roi_preset
         "usable_for_stop": int(bool(table_edge.get("usable_for_stop"))),
         "control_level": table_edge.get("control_level"),
         "control_reject_reason": table_edge.get("control_reject_reason"),
+        "selected_line_plane_boundary_dist": table_edge.get("selected_line_plane_boundary_dist"),
+        "selected_line_plane_consistency": table_edge.get("selected_line_plane_consistency"),
+        "line_reject_reason": table_edge.get("line_reject_reason"),
+        "line_drift_rejected": int(bool(table_edge.get("line_drift_rejected"))),
+        "object_like_line_score": table_edge.get("object_like_line_score"),
+        "final_pose_source": table_edge.get("final_pose_source"),
     }
 
 

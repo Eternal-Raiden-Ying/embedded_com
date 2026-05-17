@@ -87,6 +87,12 @@ class TableEdgeObsMsg:
     usable_for_stop: bool = False
     control_level: str = "none"
     control_reject_reason: str = ""
+    selected_line_plane_boundary_dist: float = 0.0
+    selected_line_plane_consistency: float = 0.0
+    line_reject_reason: str = ""
+    line_drift_rejected: bool = False
+    object_like_line_score: float = 0.0
+    final_pose_source: str = "none"
     depth_valid: bool = True
     point_count: int = 0
     table_point_count: int = 0

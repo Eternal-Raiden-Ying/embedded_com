@@ -96,6 +96,12 @@ class EdgeDetectResult:
     usable_for_stop: bool = False
     control_level: str = "none"
     control_reject_reason: str = ""
+    selected_line_plane_boundary_dist: float = 0.0
+    selected_line_plane_consistency: float = 0.0
+    line_reject_reason: str = ""
+    line_drift_rejected: bool = False
+    object_like_line_score: float = 0.0
+    final_pose_source: str = "none"
 
 
 def load_calib(json_path: Path) -> Tuple[CameraCalib, float]:
@@ -325,6 +331,11 @@ class OnlineTableEdgeDetector:
             "normal": None,
             "plane": None,
             "pixels": [],
+            "image_y_min": None,
+            "image_y_max": None,
+            "image_y_mean": None,
+            "image_x_min": None,
+            "image_x_max": None,
         }
         if h < 3 or w < 3 or int(valid_mask.sum()) < int(self.cfg.min_all_points):
             return empty
@@ -423,6 +434,8 @@ class OnlineTableEdgeDetector:
         conf = float(np.clip(0.30 * residual_score + 0.25 * span_score + 0.25 * area_score + 0.20 * inlier_score, 0.0, 1.0))
         all_xs = xs + int(roi_box[0])
         all_ys = ys + int(roi_box[1])
+        inlier_xs = all_xs[inlier_mask]
+        inlier_ys = all_ys[inlier_mask]
         return {
             "found": True,
             "candidate_mask": candidate_mask,
@@ -438,7 +451,12 @@ class OnlineTableEdgeDetector:
             "b": float(b),
             "normal": [float(v) for v in normal.tolist()],
             "plane": [float(normal[0]), float(normal[1]), float(normal[2]), float(d)],
-            "pixels": self._sample_pixels(all_xs, all_ys),
+            "pixels": self._sample_pixels(inlier_xs, inlier_ys),
+            "image_y_min": int(inlier_ys.min()) if inlier_ys.size else None,
+            "image_y_max": int(inlier_ys.max()) if inlier_ys.size else None,
+            "image_y_mean": float(inlier_ys.mean()) if inlier_ys.size else None,
+            "image_x_min": int(inlier_xs.min()) if inlier_xs.size else None,
+            "image_x_max": int(inlier_xs.max()) if inlier_xs.size else None,
         }
 
     def _empty_line_hypothesis(self, line_type: str) -> Dict[str, Any]:
@@ -463,6 +481,10 @@ class OnlineTableEdgeDetector:
             "image_line_k": None,
             "image_line_b": None,
             "boundary_touch_ratio": 0.0,
+            "plane_boundary_dist_px": float("inf"),
+            "plane_boundary_consistency": 0.0,
+            "object_like_score": 0.0,
+            "drift_rejected": False,
             "reject_reason": "no_candidates",
         }
 
@@ -476,6 +498,50 @@ class OnlineTableEdgeDetector:
             if px <= x0 + margin or px >= x1 - 1 - margin or py <= y0 + margin or py >= y1 - 1 - margin:
                 touched += 1
         return float(touched) / float(max(1, len(pixels)))
+
+    def _line_plane_boundary_score(
+        self,
+        line_type: str,
+        pixels: List[List[int]],
+        plane: Dict[str, Any],
+    ) -> Tuple[float, float]:
+        if not bool(plane.get("found")) or not pixels:
+            return float("inf"), 1.0
+        boundary_key = "image_y_min" if line_type == "upper_crease" else "image_y_max"
+        boundary_y = plane.get(boundary_key)
+        if boundary_y is None:
+            return float("inf"), 1.0
+        try:
+            line_y = float(np.mean([float(p[1]) for p in pixels if isinstance(p, (list, tuple)) and len(p) >= 2]))
+            boundary = float(boundary_y)
+        except Exception:
+            return float("inf"), 0.0
+        if not math.isfinite(line_y) or not math.isfinite(boundary):
+            return float("inf"), 0.0
+        dist_px = abs(line_y - boundary)
+        soft = max(0.0, float(self.cfg.line_plane_boundary_soft_dist_px))
+        hard = max(soft + 1.0, float(self.cfg.line_plane_boundary_max_dist_px))
+        consistency = 1.0 if dist_px <= soft else max(0.0, 1.0 - (dist_px - soft) / (hard - soft))
+        return float(dist_px), float(consistency)
+
+    def _object_like_line_score(
+        self,
+        candidate_count: int,
+        inlier_count: int,
+        x_span: float,
+        boundary_consistency: float,
+        boundary_touch_ratio: float,
+    ) -> float:
+        span_ref = max(1e-6, float(self.cfg.line_select_min_x_span_m) * 1.5)
+        span_short = max(0.0, 1.0 - float(x_span) / span_ref)
+        count_ref = max(1.0, float(self.cfg.trend_min_candidate_count) * 2.0)
+        sparse = max(0.0, 1.0 - float(candidate_count) / count_ref)
+        inlier_ratio = float(inlier_count) / float(max(1, candidate_count))
+        isolated = max(0.0, 1.0 - inlier_ratio)
+        boundary_far = max(0.0, 1.0 - float(boundary_consistency))
+        roi_touch = min(1.0, float(boundary_touch_ratio) / max(1e-6, float(self.cfg.roi_boundary_max_touch_ratio)))
+        score = 0.35 * span_short + 0.20 * sparse + 0.15 * isolated + 0.25 * boundary_far + 0.05 * roi_touch
+        return float(np.clip(score, 0.0, 1.0))
 
     def _fit_line_hypothesis(
         self,
@@ -521,14 +587,23 @@ class OnlineTableEdgeDetector:
         span_score = min(1.0, x_span / max(1e-6, float(self.cfg.line_select_min_x_span_m)))
         count_score = min(1.0, candidate_count / max(1.0, float(self.cfg.trend_min_candidate_count) * 2.0))
         inlier_score = min(1.0, float(fit.get("inlier_count", 0) or 0) / float(max(1, candidate_count)))
-        boundary_touch_ratio = self._line_boundary_touch_ratio(inlier_pixels or pixels, roi_box)
+        effective_pixels = inlier_pixels or pixels
+        boundary_touch_ratio = self._line_boundary_touch_ratio(effective_pixels, roi_box)
         boundary_score = max(0.0, 1.0 - boundary_touch_ratio / max(1e-6, float(self.cfg.roi_boundary_max_touch_ratio)))
-        plane_consistency = 1.0
+        plane_yaw_consistency = 1.0
         if bool(plane.get("found")):
             yaw_diff = abs(float(fit.get("yaw", 0.0) or 0.0) - float(plane.get("yaw", 0.0) or 0.0))
-            plane_consistency = max(0.0, 1.0 - yaw_diff / max(1e-6, float(self.cfg.line_select_max_plane_yaw_diff_rad)))
+            plane_yaw_consistency = max(0.0, 1.0 - yaw_diff / max(1e-6, float(self.cfg.line_select_max_plane_yaw_diff_rad)))
+        plane_boundary_dist, plane_boundary_consistency = self._line_plane_boundary_score(line_type, effective_pixels, plane)
+        object_like_score = self._object_like_line_score(
+            candidate_count,
+            int(fit.get("inlier_count", 0) or 0),
+            x_span,
+            plane_boundary_consistency,
+            boundary_touch_ratio,
+        )
         temporal_bonus = 0.05 if line_type == self._last_selected_line_type else 0.0
-        confidence = float(
+        raw_confidence = float(
             np.clip(
                 0.30 * residual_score
                 + 0.25 * span_score
@@ -539,25 +614,47 @@ class OnlineTableEdgeDetector:
                 1.0,
             )
         )
+        confidence = float(
+            np.clip(
+                raw_confidence
+                * (1.0 - float(self.cfg.line_object_like_penalty_weight) * object_like_score)
+                * (1.0 - float(self.cfg.line_plane_boundary_weight) * (1.0 - plane_boundary_consistency)),
+                0.0,
+                1.0,
+            )
+        )
         selection_score = float(
             np.clip(
-                0.55 * confidence
+                0.45 * confidence
                 + 0.20 * span_score
                 + 0.15 * residual_score
-                + 0.10 * plane_consistency
+                + 0.10 * plane_yaw_consistency
+                + 0.10 * plane_boundary_consistency
                 + temporal_bonus,
                 0.0,
                 1.0,
+            )
+        )
+        drift_rejected = bool(
+            bool(plane.get("found"))
+            and (
+                plane_boundary_consistency < float(self.cfg.fusion_line_min_boundary_consistency)
+                or object_like_score > float(self.cfg.line_object_like_max_score)
             )
         )
         found = (
             confidence >= float(self.cfg.line_select_min_confidence)
             and x_span >= float(self.cfg.line_select_min_x_span_m)
             and residual <= float(self.cfg.line_select_max_residual_m)
+            and not drift_rejected
         )
         reject_reason = ""
         if not found:
-            if x_span < float(self.cfg.line_select_min_x_span_m):
+            if drift_rejected and plane_boundary_consistency < float(self.cfg.fusion_line_min_boundary_consistency):
+                reject_reason = "line_plane_boundary_mismatch"
+            elif drift_rejected and object_like_score > float(self.cfg.line_object_like_max_score):
+                reject_reason = "object_like_line"
+            elif x_span < float(self.cfg.line_select_min_x_span_m):
                 reject_reason = "line_too_short"
             elif residual > float(self.cfg.line_select_max_residual_m):
                 reject_reason = "line_residual_high"
@@ -581,6 +678,10 @@ class OnlineTableEdgeDetector:
                 "image_line_k": image_line_k if found else None,
                 "image_line_b": image_line_b if found else None,
                 "boundary_touch_ratio": boundary_touch_ratio,
+                "plane_boundary_dist_px": plane_boundary_dist,
+                "plane_boundary_consistency": plane_boundary_consistency,
+                "object_like_score": object_like_score,
+                "drift_rejected": drift_rejected,
                 "reject_reason": reject_reason,
             }
         )
@@ -678,8 +779,11 @@ class OnlineTableEdgeDetector:
             selected = dict(selected)
             selected["selected"] = True
             selected_line_type = "upper_crease" if selected.get("type") == "upper_crease" else "lower_contact"
+            line_reject_reason = str(selected.get("reject_reason") or "")
         else:
             selected_line_type = "none"
+            rejected = max((upper, lower), key=lambda item: int(item.get("candidate_count", 0) or 0))
+            line_reject_reason = str(rejected.get("reject_reason") or "no_reliable_line")
         return {
             "found": bool(selected_line_type != "none"),
             "selected_line_type": selected_line_type,
@@ -699,6 +803,11 @@ class OnlineTableEdgeDetector:
             "image_line_k": selected.get("image_line_k"),
             "image_line_b": selected.get("image_line_b"),
             "boundary_touch_ratio": float(selected.get("boundary_touch_ratio", 0.0) or 0.0),
+            "plane_boundary_dist_px": float(selected.get("plane_boundary_dist_px", float("inf")) or float("inf")),
+            "plane_boundary_consistency": float(selected.get("plane_boundary_consistency", 0.0) or 0.0),
+            "object_like_score": float(selected.get("object_like_score", 0.0) or 0.0),
+            "drift_rejected": bool(selected.get("drift_rejected", False)) if selected_line_type != "none" else bool(upper.get("drift_rejected") or lower.get("drift_rejected")),
+            "reject_reason": line_reject_reason,
             "upper": upper,
             "lower": lower,
             "upper_pixels": upper.get("pixels", [])[:1600],
@@ -718,18 +827,26 @@ class OnlineTableEdgeDetector:
             and float(line.get("residual_mean", float("inf")) or float("inf")) <= float(self.cfg.line_select_max_residual_m)
             and float(line.get("x_span", 0.0) or 0.0) >= float(self.cfg.line_select_min_x_span_m)
             and float(line.get("confidence", 0.0) or 0.0) >= float(self.cfg.line_select_min_confidence)
+            and not bool(line.get("drift_rejected", False))
         )
+        boundary_consistency = float(line.get("plane_boundary_consistency", 1.0) or 0.0)
+        if plane_reliable and line_reliable and boundary_consistency < float(self.cfg.fusion_line_min_boundary_consistency):
+            line_reliable = False
         raw_found = bool(plane.get("found")) or bool(line.get("found"))
         if plane_reliable and line_reliable:
             yaw_delta = abs(float(plane["yaw"]) - float(line["yaw"]))
             if yaw_delta <= float(self.cfg.fusion_yaw_consistency_rad):
                 wp = max(1e-6, float(plane.get("confidence", 0.0) or 0.0))
                 wl = max(1e-6, float(line.get("confidence", 0.0) or 0.0))
+                if boundary_consistency < float(self.cfg.fusion_plane_prefer_boundary_consistency):
+                    wl *= max(0.20, boundary_consistency)
+                    wp *= 1.25
                 wsum = wp + wl
                 return {
                     "raw_found": raw_found,
                     "pose_found": True,
                     "pose_source": "fused",
+                    "final_pose_source": "fused",
                     "yaw": float((wp * float(plane["yaw"]) + wl * float(line["yaw"])) / wsum),
                     "dist": float((wp * float(plane["dist"]) + wl * float(line["dist"])) / wsum),
                     "confidence": float(np.clip(0.5 * (wp + wl), 0.0, 1.0)),
@@ -744,6 +861,7 @@ class OnlineTableEdgeDetector:
                 "raw_found": raw_found,
                 "pose_found": True,
                 "pose_source": "conflict",
+                "final_pose_source": "conflict",
                 "yaw": float(chosen.get("yaw", 0.0) or 0.0),
                 "dist": float(chosen.get("dist", 0.0) or 0.0),
                 "confidence": min(float(plane.get("confidence", 0.0) or 0.0), float(line.get("confidence", 0.0) or 0.0)),
@@ -758,6 +876,7 @@ class OnlineTableEdgeDetector:
                 "raw_found": raw_found,
                 "pose_found": True,
                 "pose_source": "front_plane",
+                "final_pose_source": "front_plane",
                 "yaw": float(plane.get("yaw", 0.0) or 0.0),
                 "dist": float(plane.get("dist", 0.0) or 0.0),
                 "confidence": float(plane.get("confidence", 0.0) or 0.0),
@@ -765,13 +884,14 @@ class OnlineTableEdgeDetector:
                 "line_b": plane.get("b"),
                 "x_span": float(plane.get("x_span", 0.0) or 0.0),
                 "residual_mean": float(plane.get("residual_mean", float("inf"))),
-                "reject_reason": "",
+                "reject_reason": str(line.get("reject_reason") or "") if bool(line.get("drift_rejected", False)) else "",
             }
         if line_reliable:
             return {
                 "raw_found": raw_found,
                 "pose_found": True,
                 "pose_source": "crease_line",
+                "final_pose_source": "crease_line",
                 "yaw": float(line.get("yaw", 0.0) or 0.0),
                 "dist": float(line.get("dist", 0.0) or 0.0),
                 "confidence": float(line.get("confidence", 0.0) or 0.0),
@@ -785,6 +905,7 @@ class OnlineTableEdgeDetector:
             "raw_found": raw_found,
             "pose_found": False,
             "pose_source": "none",
+            "final_pose_source": "none",
             "yaw": 0.0,
             "dist": 0.0,
             "confidence": 0.0,
@@ -818,6 +939,8 @@ class OnlineTableEdgeDetector:
 
         line_residual = float(line.get("residual_mean", float("inf")) or float("inf"))
         line_span = float(line.get("x_span", 0.0) or 0.0)
+        boundary_consistency = float(line.get("plane_boundary_consistency", 1.0) or 0.0)
+        object_like_score = float(line.get("object_like_score", 0.0) or 0.0)
         if bool(line.get("found")):
             line_residual_score = max(0.0, 1.0 - line_residual / max(1e-6, float(self.cfg.line_select_max_residual_m))) if math.isfinite(line_residual) else 0.0
             line_span_score = min(1.0, line_span / max(1e-6, float(self.cfg.line_select_min_x_span_m)))
@@ -832,6 +955,7 @@ class OnlineTableEdgeDetector:
                     1.0,
                 )
             )
+            line_score = float(np.clip(line_score * max(0.0, boundary_consistency) * max(0.0, 1.0 - 0.35 * object_like_score), 0.0, 1.0))
         else:
             line_score = 0.0
 
@@ -840,7 +964,7 @@ class OnlineTableEdgeDetector:
             dist_diff = abs(float(plane.get("dist", 0.0) or 0.0) - float(line.get("dist", 0.0) or 0.0))
             yaw_score = max(0.0, 1.0 - yaw_diff / max(1e-6, float(self.cfg.fusion_yaw_consistency_rad)))
             dist_score = max(0.0, 1.0 - dist_diff / max(1e-6, float(self.cfg.control_max_dist_jump_m)))
-            plane_line_consistency_score = float(np.clip(0.70 * yaw_score + 0.30 * dist_score, 0.0, 1.0))
+            plane_line_consistency_score = float(np.clip(0.55 * yaw_score + 0.25 * dist_score + 0.20 * boundary_consistency, 0.0, 1.0))
         elif bool(plane.get("found")) or bool(line.get("found")):
             plane_line_consistency_score = 0.55
         else:
@@ -896,11 +1020,15 @@ class OnlineTableEdgeDetector:
         elif area_ratio < float(self.cfg.front_face_min_area_ratio):
             reasons.append((front_plane_score, "low_front_face_area"))
         if not bool(line.get("found")):
-            reasons.append((line_score, "no_reliable_line"))
+            reasons.append((line_score, str(line.get("reject_reason") or "no_reliable_line")))
         elif line_span < float(self.cfg.line_select_min_x_span_m):
             reasons.append((line_score, "line_too_short"))
         elif line_residual > float(self.cfg.line_select_max_residual_m):
             reasons.append((line_score, "line_residual_high"))
+        elif boundary_consistency < float(self.cfg.fusion_line_min_boundary_consistency):
+            reasons.append((boundary_consistency, "line_plane_boundary_mismatch"))
+        elif object_like_score > float(self.cfg.line_object_like_max_score):
+            reasons.append((1.0 - object_like_score, "object_like_line"))
         if plane_line_consistency_score < 0.35 and bool(plane.get("found")) and bool(line.get("found")):
             reasons.append((plane_line_consistency_score, "plane_line_yaw_conflict"))
         if roi_boundary_score < 0.35:
@@ -960,8 +1088,10 @@ class OnlineTableEdgeDetector:
             and fused.get("pose_source") != "conflict"
         )
         usable_for_approach = bool(approach_base and self._stable_count >= int(self.cfg.control_approach_min_stable_frames))
+        alignment_source_ok = str(fused.get("pose_source") or "") in {"fused", "crease_line"}
         usable_for_alignment = bool(
             valid_base
+            and alignment_source_ok
             and geometry_score >= float(self.cfg.table_geometry_alignment_score)
             and self._stable_count >= int(self.cfg.control_alignment_min_stable_frames)
         )
@@ -1016,6 +1146,14 @@ class OnlineTableEdgeDetector:
         except (TypeError, ValueError):
             return 0.0
         return out if math.isfinite(out) else 0.0
+
+    @staticmethod
+    def _finite_or_default(value: Any, default: float) -> float:
+        try:
+            out = float(value)
+        except (TypeError, ValueError):
+            return float(default)
+        return out if math.isfinite(out) else float(default)
 
     def process_depth(self, depth_image_16bit: np.ndarray, roi_override=None):
         valid_mask, depth_meters, roi_box = self._preprocess_depth(depth_image_16bit, roi_override=roi_override)
@@ -1130,6 +1268,12 @@ class OnlineTableEdgeDetector:
             usable_for_stop=bool(control.get("usable_for_stop")),
             control_level=str(control.get("control_level") or "none"),
             control_reject_reason=str(control.get("control_reject_reason") or ""),
+            selected_line_plane_boundary_dist=self._finite_or_default(line.get("plane_boundary_dist_px"), -1.0),
+            selected_line_plane_consistency=float(line.get("plane_boundary_consistency", 0.0) or 0.0),
+            line_reject_reason=str(line.get("reject_reason") or ""),
+            line_drift_rejected=bool(line.get("drift_rejected", False)),
+            object_like_line_score=float(line.get("object_like_score", 0.0) or 0.0),
+            final_pose_source=str(fused.get("final_pose_source") or fused.get("pose_source") or "none"),
         )
         self._last_selected_line_type = selected_line_type
         base_debug.update(

@@ -87,6 +87,11 @@ class DetectorConfig:
     line_select_min_x_span_m: float = 0.16
     line_select_max_residual_m: float = 0.040
     line_select_max_plane_yaw_diff_rad: float = 0.22
+    line_plane_boundary_soft_dist_px: float = 14.0
+    line_plane_boundary_max_dist_px: float = 32.0
+    line_plane_boundary_weight: float = 0.20
+    line_object_like_max_score: float = 0.68
+    line_object_like_penalty_weight: float = 0.25
     plane_min_inliers: int = 220
     plane_min_x_span_m: float = 0.20
     plane_max_residual_m: float = 0.035
@@ -104,6 +109,8 @@ class DetectorConfig:
     temporal_score_weight: float = 0.15
     roi_boundary_margin_px: int = 8
     roi_boundary_max_touch_ratio: float = 0.25
+    fusion_line_min_boundary_consistency: float = 0.45
+    fusion_plane_prefer_boundary_consistency: float = 0.65
     control_min_confidence: float = 0.45
     control_min_stable_frames: int = 3
     control_max_yaw_jump_rad: float = 0.18
