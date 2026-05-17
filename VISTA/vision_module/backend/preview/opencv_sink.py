@@ -248,7 +248,7 @@ class OpenCVPreviewSink(PreviewSink):
         else:
             panel = self._blank(size, "EDGE / TOP VIEW", "depth stale/null")
             scale, offset = 1.0, (0, 0)
-        self._title(panel, "GEOMETRY / CANDIDATES")
+        self._title(panel, "GEOMETRY / PLANE")
         if not table_edge:
             self._corner_note(panel, "table_edge_obs unavailable", fg=(40, 220, 255))
             return panel
@@ -261,27 +261,15 @@ class OpenCVPreviewSink(PreviewSink):
                 self._draw_roi(panel, roi, scale, offset, name, color, dashed=(name == "table_edge_roi"))
         valid_for_control = self._boolish(table_edge.get("valid_for_control", table_edge.get("edge_valid")))
         source = table_edge.get("final_pose_source") or table_edge.get("pose_source") or "none"
-        selected_line = table_edge.get("selected_line_type") or "none"
-        plane_k = self._fmt(table_edge.get("plane_k"))
-        final_k = self._fmt(table_edge.get("edge_k"))
         geometry_lines = [
-            f"use={source}/{selected_line}",
-            f"upper: k={self._fmt(table_edge.get('upper_line_k'))} dist={self._fmt(table_edge.get('upper_line_dist_err_m'))}",
-            f"lower: k={self._fmt(table_edge.get('lower_line_k'))} dist={self._fmt(table_edge.get('lower_line_dist_err_m'))}",
-            f"plane: k={plane_k} dist={self._fmt(table_edge.get('plane_dist_err_m'))}",
-            f"final: k={final_k} yaw={self._fmt(table_edge.get('yaw_err_rad'))} dist={self._fmt(table_edge.get('dist_err_m'))}",
+            f"use={source}",
+            f"plane yaw={self._fmt(table_edge.get('yaw_err_rad'))}",
+            f"dist={self._fmt(table_edge.get('dist_err_m'))}",
+            f"score={self._fmt(table_edge.get('front_plane_score', table_edge.get('table_geometry_score')))}",
+            f"control={table_edge.get('control_level') or 'none'}",
         ]
-        left_y = max(76, panel.shape[0] - 120)
-        self._text_block(panel, geometry_lines, (16, left_y), fg=(210, 255, 210) if valid_for_control else (210, 230, 255), max_width=min(330, panel.shape[1] - 32))
-        legend_lines = [
-            "front plane=green",
-            "upper=purple lower=orange",
-            "selected/final=yellow target=cyan",
-        ]
-        detail_w = min(max(220, panel.shape[1] // 3), max(180, panel.shape[1] - 32))
-        detail_x = max(16, panel.shape[1] - detail_w - 16)
-        detail_y = max(78, panel.shape[0] - 82)
-        self._text_block(panel, legend_lines, (detail_x, detail_y), fg=(230, 230, 230), max_width=detail_w)
+        left_y = max(76, panel.shape[0] - 116)
+        self._text_block(panel, geometry_lines, (16, left_y), fg=(210, 255, 210) if valid_for_control else (210, 230, 255), max_width=min(260, panel.shape[1] - 32), font_scale=0.46, line_h=19)
         return panel
 
     def _make_info_panel(
@@ -414,27 +402,10 @@ class OpenCVPreviewSink(PreviewSink):
         fallback_mask = valid
         has_geometry = bool(
             table_edge.get("front_plane_candidate_pixels")
-            or table_edge.get("crease_candidate_pixels")
-            or table_edge.get("crease_inlier_pixels")
-            or table_edge.get("upper_line_candidate_pixels")
-            or table_edge.get("lower_line_candidate_pixels")
         )
         if not has_geometry:
             panel[fallback_mask] = (95, 95, 95)
         self._draw_pixel_points(panel, table_edge.get("front_plane_candidate_pixels"), (80, 210, 80), radius=1)
-        self._draw_pixel_points(panel, table_edge.get("crease_candidate_pixels"), (95, 95, 95), radius=1)
-        self._draw_pixel_points(panel, table_edge.get("upper_line_candidate_pixels"), (160, 70, 160), radius=1)
-        self._draw_pixel_points(panel, table_edge.get("lower_line_candidate_pixels"), (70, 135, 220), radius=1)
-        self._draw_pixel_points(panel, table_edge.get("crease_inlier_pixels"), (40, 255, 255), radius=2)
-        image_k = self._as_float(table_edge.get("image_line_k"))
-        image_b = self._as_float(table_edge.get("image_line_b"))
-        if image_k is not None and image_b is not None:
-            x_min, x_max = (0, arr.shape[1] - 1)
-            if roi is not None:
-                x_min, _y_min, x_max, _y_max = self._clip_roi(roi, arr.shape[1], arr.shape[0])
-            y_a = int(round(image_k * x_min + image_b))
-            y_b = int(round(image_k * x_max + image_b))
-            cv2.line(panel, (int(x_min), y_a), (int(x_max), y_b), (0, 255, 255), 2)
         return panel
 
     def _draw_pixel_points(self, panel: np.ndarray, points: Any, color: Tuple[int, int, int], radius: int = 1) -> None:
@@ -645,11 +616,11 @@ class OpenCVPreviewSink(PreviewSink):
         sections = [
             ("TABLE", [
                 f"found={self._boolish(table_edge.get('edge_found'))} control={self._boolish(table_edge.get('valid_for_control', table_edge.get('edge_valid')))} source={table_edge.get('final_pose_source') or table_edge.get('pose_source', 'n/a')}",
-                f"level={table_edge.get('control_level', 'none')} geom={self._fmt(table_edge.get('table_geometry_score'))} use={int(self._boolish(table_edge.get('usable_for_approach')))}{int(self._boolish(table_edge.get('usable_for_alignment')))}{int(self._boolish(table_edge.get('usable_for_stop')))} stable={table_edge.get('stable_count', 'n/a')}",
-                f"yaw={self._fmt(table_edge.get('yaw_err_rad'))} dist={self._fmt(table_edge.get('dist_err_m'))} line={table_edge.get('selected_line_type', 'none')}",
-                f"cand={table_edge.get('candidate_count', 'n/a')} inliers={table_edge.get('inlier_count', table_edge.get('edge_inlier_count', 'n/a'))} fp={self._fmt(table_edge.get('front_plane_score'))}",
-                f"scores fp={self._fmt(table_edge.get('front_plane_score'))} ln={self._fmt(table_edge.get('line_score'))} cons={self._fmt(table_edge.get('plane_line_consistency_score'))}",
-                f"boundary={self._fmt(table_edge.get('selected_line_plane_consistency'))} obj={self._fmt(table_edge.get('object_like_line_score'))} line_reason={table_edge.get('line_reject_reason') or 'ok'}",
+                f"level={table_edge.get('control_level', 'none')} geom={self._fmt(table_edge.get('table_geometry_score'))} stable={table_edge.get('stable_count', 'n/a')}",
+                f"usable approach={int(self._boolish(table_edge.get('usable_for_approach')))} align={int(self._boolish(table_edge.get('usable_for_alignment')))} stop={int(self._boolish(table_edge.get('usable_for_stop')))}",
+                f"yaw={self._fmt(table_edge.get('yaw_err_rad'))} dist={self._fmt(table_edge.get('dist_err_m'))} target={self._fmt(table_edge.get('target_dist_m'))}",
+                f"front_score={self._fmt(table_edge.get('front_plane_score'))} conf={self._fmt(table_edge.get('plane_confidence'))} area={self._fmt(table_edge.get('front_face_area_ratio'))}",
+                f"span={self._fmt(table_edge.get('plane_x_span_m'))} residual={self._fmt(table_edge.get('plane_residual_mean'))} inliers={table_edge.get('inlier_count', table_edge.get('edge_inlier_count', 'n/a'))}",
                 f"reject geom={table_edge.get('geometry_reject_reason') or 'ok'} ctrl={table_edge.get('control_reject_reason') or table_edge.get('reject_reason') or table_edge.get('reason') or 'ok'}",
             ]),
             ("ROI", [
@@ -706,12 +677,13 @@ class OpenCVPreviewSink(PreviewSink):
         bg: Tuple[int, int, int] = (0, 0, 0),
         title_first: bool = False,
         max_width: Optional[int] = None,
+        font_scale: float = 0.55,
+        line_h: int = 24,
     ) -> None:
         clean = [str(line) for line in lines if line is not None]
         if not clean:
             return
         x, y = origin
-        line_h = 24
         available_w = max(1, panel.shape[1] - x - 10)
         wanted_w = max(220, max(len(line) for line in clean) * 10 + 24)
         if max_width is not None:
@@ -722,7 +694,7 @@ class OpenCVPreviewSink(PreviewSink):
         max_chars = max(8, int((width - 18) / 9))
         for idx, line in enumerate(clean):
             color = (80, 255, 160) if title_first and idx == 0 else fg
-            scale = 0.68 if title_first and idx == 0 else 0.55
+            scale = 0.68 if title_first and idx == 0 else float(font_scale)
             thickness = 2 if title_first and idx == 0 else 1
             yy = y + idx * line_h
             if yy > panel.shape[0] - 12:
@@ -753,6 +725,9 @@ class OpenCVPreviewSink(PreviewSink):
     ) -> None:
         k = self._as_float(table_edge.get("edge_k"))
         b = self._as_float(table_edge.get("edge_b"))
+        if k is None or b is None:
+            k = self._as_float(table_edge.get("plane_k"))
+            b = self._as_float(table_edge.get("plane_b"))
         if graph is None:
             graph = (panel.shape[1] - 220, panel.shape[0] - 150, panel.shape[1] - 18, panel.shape[0] - 18)
         x1, y1, x2, y2 = graph
@@ -790,15 +765,6 @@ class OpenCVPreviewSink(PreviewSink):
                 mid = pts[len(pts) // 2]
                 cv2.arrowedLine(panel, mid, (mid[0], max(y1 + 10, mid[1] - 38)), color, thickness, tipLength=0.35)
 
-        plane_k = self._as_float(table_edge.get("plane_k"))
-        plane_b = self._as_float(table_edge.get("plane_b"))
-        draw_xz_line(plane_k, plane_b, (80, 210, 80), 1)
-        upper_k = self._as_float(table_edge.get("upper_line_k"))
-        upper_b = self._as_float(table_edge.get("upper_line_b"))
-        lower_k = self._as_float(table_edge.get("lower_line_k"))
-        lower_b = self._as_float(table_edge.get("lower_line_b"))
-        draw_xz_line(upper_k, upper_b, (160, 70, 160), 1)
-        draw_xz_line(lower_k, lower_b, (70, 135, 220), 1)
         draw_xz_line(k, b, (40, 255, 255), 2)
         dist_err = self._as_float(table_edge.get("dist_err_m"))
         if dist_err is not None:

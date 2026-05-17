@@ -427,9 +427,9 @@ class OnlineTableEdgeDetector:
         b = -float(d) / float(normal[2])
         yaw = float(math.atan(k))
         dist = float(b - float(self.target_dist_m))
-        residual_score = max(0.0, 1.0 - residual_mean / max(1e-6, float(self.cfg.plane_max_residual_m)))
-        span_score = min(1.0, x_span / max(1e-6, float(self.cfg.plane_min_x_span_m)))
-        area_score = min(1.0, area_ratio / max(1e-6, float(self.cfg.front_face_min_area_ratio)))
+        residual_score = max(0.0, 1.0 - residual_mean / max(1e-6, float(self.cfg.front_plane_max_residual_m)))
+        span_score = min(1.0, x_span / max(1e-6, float(self.cfg.front_plane_min_x_span_m)))
+        area_score = min(1.0, area_ratio / max(1e-6, float(self.cfg.front_plane_min_area_ratio)))
         inlier_score = min(1.0, inlier_count / max(1.0, float(self.cfg.plane_min_inliers) * 2.0))
         conf = float(np.clip(0.30 * residual_score + 0.25 * span_score + 0.25 * area_score + 0.20 * inlier_score, 0.0, 1.0))
         all_xs = xs + int(roi_box[0])
@@ -486,6 +486,42 @@ class OnlineTableEdgeDetector:
             "object_like_score": 0.0,
             "drift_rejected": False,
             "reject_reason": "no_candidates",
+        }
+
+    def _disabled_line_result(self) -> Dict[str, Any]:
+        upper = self._empty_line_hypothesis("upper_crease")
+        lower = self._empty_line_hypothesis("lower_contact")
+        selected = self._empty_line_hypothesis("selected")
+        for item in (upper, lower, selected):
+            item["reject_reason"] = "disabled_plane_only"
+        return {
+            "found": False,
+            "selected_line_type": "none",
+            "candidate_count": 0,
+            "inlier_count": 0,
+            "yaw": 0.0,
+            "dist": 0.0,
+            "confidence": 0.0,
+            "residual_mean": float("inf"),
+            "x_span": 0.0,
+            "y_norm_mean": 0.0,
+            "k": None,
+            "b": None,
+            "points": np.empty((0, 3), dtype=np.float32),
+            "pixels": [],
+            "inlier_pixels": [],
+            "image_line_k": None,
+            "image_line_b": None,
+            "boundary_touch_ratio": 0.0,
+            "plane_boundary_dist_px": float("inf"),
+            "plane_boundary_consistency": 0.0,
+            "object_like_score": 0.0,
+            "drift_rejected": False,
+            "reject_reason": "disabled_plane_only",
+            "upper": upper,
+            "lower": lower,
+            "upper_pixels": [],
+            "lower_pixels": [],
         }
 
     def _line_boundary_touch_ratio(self, pixels: List[List[int]], roi_box) -> float:
@@ -814,7 +850,57 @@ class OnlineTableEdgeDetector:
             "lower_pixels": lower.get("pixels", [])[:1600],
         }
 
+    def _plane_reject_reason(self, plane: Dict[str, Any]) -> str:
+        if not bool(plane.get("found")):
+            return "no_reliable_plane"
+        area_ratio = float(plane.get("area_ratio", 0.0) or 0.0)
+        residual = float(plane.get("residual_mean", float("inf")) or float("inf"))
+        x_span = float(plane.get("x_span", 0.0) or 0.0)
+        if area_ratio < float(self.cfg.front_plane_min_area_ratio):
+            return "low_front_face_area"
+        if not math.isfinite(residual) or residual > float(self.cfg.front_plane_max_residual_m):
+            return "plane_residual_high"
+        if x_span < float(self.cfg.front_plane_min_x_span_m):
+            return "plane_x_span_short"
+        if float(plane.get("confidence", 0.0) or 0.0) < float(self.cfg.front_plane_min_score):
+            return "front_plane_score_low"
+        return ""
+
+    def _front_plane_pose(self, plane: Dict[str, Any], raw_found: bool) -> Dict[str, Any]:
+        reject_reason = self._plane_reject_reason(plane)
+        if reject_reason:
+            return {
+                "raw_found": raw_found,
+                "pose_found": False,
+                "pose_source": "none",
+                "final_pose_source": "none",
+                "yaw": 0.0,
+                "dist": 0.0,
+                "confidence": 0.0,
+                "line_k": None,
+                "line_b": None,
+                "x_span": 0.0,
+                "residual_mean": float("inf"),
+                "reject_reason": reject_reason,
+            }
+        return {
+            "raw_found": raw_found,
+            "pose_found": True,
+            "pose_source": "front_plane",
+            "final_pose_source": "front_plane",
+            "yaw": float(plane.get("yaw", 0.0) or 0.0),
+            "dist": float(plane.get("dist", 0.0) or 0.0),
+            "confidence": float(plane.get("confidence", 0.0) or 0.0),
+            "line_k": plane.get("k"),
+            "line_b": plane.get("b"),
+            "x_span": float(plane.get("x_span", 0.0) or 0.0),
+            "residual_mean": float(plane.get("residual_mean", float("inf"))),
+            "reject_reason": "",
+        }
+
     def _fuse_front_pose(self, plane: Dict[str, Any], line: Dict[str, Any]) -> Dict[str, Any]:
+        if bool(getattr(self.cfg, "plane_only_mode", False)) or not bool(getattr(self.cfg, "enable_crease_line", True)):
+            return self._front_plane_pose(plane, raw_found=bool(plane.get("found")))
         plane_reliable = (
             bool(plane.get("found"))
             and float(plane.get("area_ratio", 0.0) or 0.0) >= float(self.cfg.front_face_min_area_ratio)
@@ -921,9 +1007,9 @@ class OnlineTableEdgeDetector:
         plane_span = float(plane.get("x_span", 0.0) or 0.0)
         area_ratio = float(plane.get("area_ratio", 0.0) or 0.0)
         if bool(plane.get("found")):
-            plane_residual_score = max(0.0, 1.0 - plane_residual / max(1e-6, float(self.cfg.plane_max_residual_m))) if math.isfinite(plane_residual) else 0.0
-            plane_span_score = min(1.0, plane_span / max(1e-6, float(self.cfg.plane_min_x_span_m)))
-            plane_area_score = min(1.0, area_ratio / max(1e-6, float(self.cfg.front_face_min_area_ratio)))
+            plane_residual_score = max(0.0, 1.0 - plane_residual / max(1e-6, float(self.cfg.front_plane_max_residual_m))) if math.isfinite(plane_residual) else 0.0
+            plane_span_score = min(1.0, plane_span / max(1e-6, float(self.cfg.front_plane_min_x_span_m)))
+            plane_area_score = min(1.0, area_ratio / max(1e-6, float(self.cfg.front_plane_min_area_ratio)))
             front_plane_score = float(
                 np.clip(
                     0.35 * float(plane.get("confidence", 0.0) or 0.0)
@@ -990,6 +1076,25 @@ class OnlineTableEdgeDetector:
             dist_score = max(0.0, 1.0 - dist_jump / max(1e-6, float(self.cfg.control_max_dist_jump_m)))
             temporal_score = float(np.clip(0.55 * yaw_score + 0.45 * dist_score, 0.0, 1.0))
             temporal_jump = yaw_jump > float(self.cfg.control_max_yaw_jump_rad) or dist_jump > float(self.cfg.control_max_dist_jump_m)
+
+        if bool(getattr(self.cfg, "plane_only_mode", False)) or not bool(getattr(self.cfg, "enable_crease_line", True)):
+            plane_line_consistency_score = 1.0 if bool(plane.get("found")) else 0.0
+            roi_boundary_score = 1.0 if bool(plane.get("found")) else 0.0
+            line_score = 0.0
+            table_geometry_score = float(np.clip(0.80 * front_plane_score + 0.20 * temporal_score, 0.0, 1.0))
+            reason = self._plane_reject_reason(plane)
+            if not reason and temporal_jump:
+                reason = "temporal_jump"
+            return {
+                "table_geometry_score": table_geometry_score,
+                "front_plane_score": front_plane_score,
+                "line_score": line_score,
+                "plane_line_consistency_score": plane_line_consistency_score,
+                "roi_boundary_score": roi_boundary_score,
+                "temporal_score": temporal_score,
+                "geometry_reject_reason": reason,
+                "temporal_jump": temporal_jump,
+            }
 
         weights = {
             "front": max(0.0, float(self.cfg.front_plane_score_weight)),
@@ -1058,6 +1163,85 @@ class OnlineTableEdgeDetector:
         residual = float(fused.get("residual_mean", float("inf")) or float("inf"))
         geometry_score = float(geometry.get("table_geometry_score", 0.0) or 0.0)
         temporal_jump = bool(geometry.get("temporal_jump", False))
+        if bool(getattr(self.cfg, "plane_only_mode", False)) or not bool(getattr(self.cfg, "enable_crease_line", True)):
+            front_plane_score = float(geometry.get("front_plane_score", 0.0) or 0.0)
+            valid_base = pose_found and str(fused.get("pose_source") or "") == "front_plane"
+            if not valid_base and not reason:
+                reason = "pose_not_found"
+            if valid_base and conf < float(self.cfg.control_min_confidence):
+                valid_base = False
+                reason = "low_confidence"
+            if valid_base and x_span < float(self.cfg.front_plane_min_x_span_m):
+                valid_base = False
+                reason = "plane_x_span_short"
+            if valid_base and (not math.isfinite(residual) or residual > float(self.cfg.front_plane_max_residual_m)):
+                valid_base = False
+                reason = "plane_residual_high"
+            if valid_base and abs(yaw) > float(self.cfg.control_max_yaw_rad):
+                valid_base = False
+                reason = "yaw_out_of_range"
+            if valid_base and temporal_jump:
+                valid_base = False
+                reason = "temporal_jump"
+            if valid_base:
+                self._stable_count += 1
+            else:
+                self._stable_count = 0
+            dist_valid = pose_found and math.isfinite(dist) and abs(dist) <= max(float(self.target_dist_m), float(self.cfg.z_max))
+            usable_for_approach = bool(
+                pose_found
+                and dist_valid
+                and front_plane_score >= float(self.cfg.control_approach_min_score)
+                and self._stable_count >= int(self.cfg.control_approach_min_stable_frames)
+            )
+            usable_for_alignment = bool(
+                valid_base
+                and front_plane_score >= float(self.cfg.control_alignment_min_score)
+                and self._stable_count >= int(self.cfg.control_alignment_min_stable_frames)
+            )
+            usable_for_stop = bool(
+                valid_base
+                and front_plane_score >= float(self.cfg.control_stop_min_score)
+                and abs(dist) <= float(self.cfg.control_stop_dist_abs_max_m)
+                and self._stable_count >= int(self.cfg.control_stop_min_stable_frames)
+            )
+            valid_for_control = bool(usable_for_alignment or usable_for_stop)
+            if usable_for_stop:
+                control_level = "stop"
+            elif usable_for_alignment:
+                control_level = "alignment"
+            elif usable_for_approach:
+                control_level = "approach"
+            else:
+                control_level = "none"
+            if control_level == "none":
+                if not pose_found:
+                    control_reason = reason or "pose_not_found"
+                elif front_plane_score < float(self.cfg.control_approach_min_score):
+                    control_reason = geometry.get("geometry_reject_reason") or "front_plane_score_low"
+                elif not valid_base:
+                    control_reason = reason or "control_gate_rejected"
+                else:
+                    control_reason = "stabilizing"
+            elif control_level == "approach" and not valid_for_control:
+                control_reason = "approach_only"
+            else:
+                control_reason = ""
+            if valid_base and control_level == "none" and not reason:
+                reason = "stabilizing"
+            if pose_found:
+                self._last_pose = (yaw, dist)
+                self._last_pose_source = "front_plane"
+            return {
+                "valid_for_control": valid_for_control,
+                "stable_count": int(self._stable_count),
+                "reject_reason": reason,
+                "usable_for_approach": usable_for_approach,
+                "usable_for_alignment": usable_for_alignment,
+                "usable_for_stop": usable_for_stop,
+                "control_level": control_level,
+                "control_reject_reason": control_reason,
+            }
         if not valid_base and not reason:
             reason = "pose_not_found"
         if valid_base and conf < float(self.cfg.control_min_confidence):
@@ -1190,7 +1374,10 @@ class OnlineTableEdgeDetector:
         table_mask = self._find_table_plane(pc_cam)
         table_pc = pc_cam[table_mask]
         plane = self._estimate_front_plane(depth_meters, valid_mask, roi_box)
-        line = self._estimate_crease_line(depth_meters.copy(), valid_mask, roi_box, plane)
+        if bool(getattr(self.cfg, "plane_only_mode", False)) or not bool(getattr(self.cfg, "enable_crease_line", True)):
+            line = self._disabled_line_result()
+        else:
+            line = self._estimate_crease_line(depth_meters.copy(), valid_mask, roi_box, plane)
         fused = self._fuse_front_pose(plane, line)
         geometry = self._score_table_geometry(plane, line, fused)
         control = self._validate_pose_for_control(fused, geometry)
@@ -1221,7 +1408,7 @@ class OnlineTableEdgeDetector:
             plane_x_span_m=float(plane.get("x_span", 0.0) or 0.0),
             line_x_span_m=float(line.get("x_span", 0.0) or 0.0),
             candidate_count=int(line.get("candidate_count", 0) or 0),
-            inlier_count=int(max(int(plane.get("inlier_count", 0) or 0), int(line.get("inlier_count", 0) or 0))),
+            inlier_count=int(plane.get("inlier_count", 0) or 0) if bool(getattr(self.cfg, "plane_only_mode", False)) or not bool(getattr(self.cfg, "enable_crease_line", True)) else int(max(int(plane.get("inlier_count", 0) or 0), int(line.get("inlier_count", 0) or 0))),
             stable_count=int(control.get("stable_count", 0) or 0),
             front_face_area_ratio=float(plane.get("area_ratio", 0.0) or 0.0),
             reject_reason=reject_reason,
@@ -1231,8 +1418,8 @@ class OnlineTableEdgeDetector:
             line_dist_err_m=float(line.get("dist")) if line.get("found") else None,
             plane_k=plane.get("k"),
             plane_b=plane.get("b"),
-            image_line_k=line.get("image_line_k"),
-            image_line_b=line.get("image_line_b"),
+            image_line_k=None if bool(getattr(self.cfg, "plane_only_mode", False)) or not bool(getattr(self.cfg, "enable_crease_line", True)) else line.get("image_line_k"),
+            image_line_b=None if bool(getattr(self.cfg, "plane_only_mode", False)) or not bool(getattr(self.cfg, "enable_crease_line", True)) else line.get("image_line_b"),
             upper_line_found=bool(upper.get("found")),
             upper_line_confidence=float(upper.get("confidence", 0.0) or 0.0),
             upper_line_candidate_count=int(upper.get("candidate_count", 0) or 0),
