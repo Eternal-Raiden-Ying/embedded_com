@@ -81,15 +81,15 @@ class ControlThresholds:
     approach_min_dwell_s: float = 0.80
 
     coarse_align_frames_to_advance: int = 2
-    coarse_align_done_rad: float = 0.10
+    coarse_align_done_rad: float = 0.25
     final_lock_frames_to_arrive: int = 3
-    final_lock_yaw_tol_rad: float = 0.04
+    final_lock_yaw_tol_rad: float = 0.25
     final_lock_dist_tol_m: float = 0.03
     final_lock_lateral_tol_m: float = 0.03
     table_edge_only_test: bool = False
-    table_target_dist_m: float = 0.30
+    table_target_dist_m: float = 0.50
     table_dist_tol_m: float = 0.05
-    table_yaw_tol_rad: float = 0.13962634015954636
+    table_yaw_tol_rad: float = 0.25
     table_stop_margin_m: float = 0.05
     table_settle_s: float = 0.50
     table_stable_frames: int = 5

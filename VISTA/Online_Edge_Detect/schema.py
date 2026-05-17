@@ -56,7 +56,7 @@ class RealSenseConfig:
 @dataclass
 class DetectorConfig:
     calib_json: str = field(default_factory=lambda: str(_DEFAULT_CALIB_JSON))
-    target_dist_m_override: float = -1.0
+    target_dist_m_override: float = 0.50
     roi_y0: int = 100
     roi_y1: int = 380
     roi_x0: int = 100

@@ -472,6 +472,11 @@ CONFIG.table_edge.track_local_edge_stride = max(
     1,
     _env_int("VISTA_TRACK_LOCAL_EDGE_STRIDE", CONFIG.table_edge.track_local_edge_stride),
 )
+CONFIG.table_edge.require_yolo_table_confirm = _env_bool(
+    "VISTA_TABLE_EDGE_REQUIRE_YOLO",
+    CONFIG.table_edge.require_yolo_table_confirm,
+)
+CONFIG.table_edge.yolo_table_min_conf = _env_float("VISTA_TABLE_EDGE_YOLO_MIN_CONF", CONFIG.table_edge.yolo_table_min_conf)
 
 
 def _preview_mode_layouts(defaults: Dict[str, str]) -> Dict[str, str]:

@@ -14,6 +14,7 @@ import numpy as np
 
 from .table_edge_roi import choose_depth_roi
 from ..config.schema import VisionServiceConfig
+from ..utils.table_roi import table_detection_debug
 
 
 CapabilitySink = Optional[Callable[[str, Dict[str, Any]], None]]
@@ -94,6 +95,8 @@ class TableEdgeManager:
                 self._detector = detector_cls(calib, edge_cfg.detector, target_dist)
                 self._detector_cfg = edge_cfg.detector
                 self._target_dist_m = float(target_dist)
+                if bool(getattr(edge_cfg.detector, "plane_only_mode", False)):
+                    self._track_local_lightweight = False
                 self._detector_error = ""
                 self._emit(
                     "loaded",
@@ -246,8 +249,43 @@ class TableEdgeManager:
             "source": "vision_table_edge_manager",
             "reason": str(reason or ""),
             "target_dist_m": float(self._target_dist_m),
+            "plane_only_mode": bool(getattr(self._detector_cfg, "plane_only_mode", False)),
+            "enable_crease_line": bool(getattr(self._detector_cfg, "enable_crease_line", True)),
+            "table_confirmed_by_yolo": False,
+            "yolo_table_conf": None,
+            "yolo_gate_reason": str(reason or ""),
+            "valid_for_control": False,
+            "usable_for_approach": False,
+            "usable_for_alignment": False,
+            "usable_for_stop": False,
+            "control_level": "none",
+            "control_reject_reason": str(reason or ""),
             **roi,
             "type": "table_edge_obs",
+        }
+
+    def _yolo_table_confirmation(self, local: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        table_edge_cfg = getattr(self.cfg, "table_edge", None)
+        require_yolo = bool(getattr(table_edge_cfg, "require_yolo_table_confirm", True))
+        if not require_yolo:
+            return {
+                "table_confirmed_by_yolo": True,
+                "yolo_table_conf": None,
+                "yolo_gate_reason": "not_required",
+            }
+        local_payload = dict(local if local is not None else self._local_perception())
+        min_conf = float(getattr(table_edge_cfg, "yolo_table_min_conf", 0.25) or 0.25)
+        det = table_detection_debug(local_payload, local_payload.get("rgb_shape"), min_conf=min_conf)
+        source = str(local_payload.get("table_roi_source") or "").strip()
+        confirmed = bool(det.get("found")) and source == "yolo_table_bbox"
+        reason = "yolo_table_confirmed" if confirmed else str(det.get("reason") or "waiting_yolo_table_confirm")
+        if source and source != "yolo_table_bbox":
+            reason = f"table_source_{source}"
+        return {
+            "table_confirmed_by_yolo": confirmed,
+            "yolo_table_conf": det.get("conf"),
+            "yolo_gate_reason": reason,
+            "yolo_table_bbox": det.get("bbox"),
         }
 
     def _static_roi(self) -> Optional[list[int]]:
@@ -402,12 +440,27 @@ class TableEdgeManager:
         return payload
 
     def _process_depth(self, depth_frame: np.ndarray, frame_seq: int) -> Dict[str, Any]:
-        if self._active_mode() == "TRACK_LOCAL" and self._track_local_lightweight:
+        if (
+            self._active_mode() == "TRACK_LOCAL"
+            and self._track_local_lightweight
+            and not bool(getattr(self._detector_cfg, "plane_only_mode", False))
+        ):
             return self._process_depth_lightweight(depth_frame, frame_seq)
         total_start = time.perf_counter()
         profile = self._profile_template()
         profile["depth_frame_fetch_ms"] = float(self._last_depth_frame_fetch_ms)
         roi_meta = self._select_roi(depth_frame)
+        yolo_gate = self._yolo_table_confirmation()
+        if not bool(yolo_gate.get("table_confirmed_by_yolo", False)):
+            payload = self._default_result(
+                depth_valid=True,
+                reason="waiting_yolo_table_confirm",
+                frame_seq=frame_seq,
+                roi_meta=roi_meta,
+            )
+            payload.update(yolo_gate)
+            profile["total_edge_process_ms"] = self._ms_since(total_start)
+            return self._attach_profile(payload, profile, path="yolo_gate_wait")
         roi_override = roi_meta.get("depth_edge_roi") if roi_meta.get("roi_source") != "static_fallback" else None
         if self._detector is None:
             payload = self._default_result(
@@ -471,6 +524,9 @@ class TableEdgeManager:
             "reason": reject_reason,
             "reject_reason": reject_reason,
             "target_dist_m": float(self._target_dist_m),
+            "plane_only_mode": bool(getattr(self._detector_cfg, "plane_only_mode", False)),
+            "enable_crease_line": bool(getattr(self._detector_cfg, "enable_crease_line", True)),
+            **yolo_gate,
             **roi_payload,
             "type": "table_edge_obs",
         }

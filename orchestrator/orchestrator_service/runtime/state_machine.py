@@ -310,6 +310,11 @@ class OrchestratorCore:
             "table_found": bool(table_obs.table_found) if table_obs is not None else False,
             "edge_found": bool(table_obs.edge_found) if table_obs is not None else False,
             "edge_valid": bool(getattr(table_obs, "edge_valid", table_obs.edge_found)) if table_obs is not None else False,
+            "control_level": getattr(table_obs, "control_level", "none") if table_obs is not None else "none",
+            "usable_for_approach": bool(getattr(table_obs, "usable_for_approach", False)) if table_obs is not None else False,
+            "usable_for_alignment": bool(getattr(table_obs, "usable_for_alignment", False)) if table_obs is not None else False,
+            "usable_for_stop": bool(getattr(table_obs, "usable_for_stop", False)) if table_obs is not None else False,
+            "table_confirmed_by_yolo": bool(getattr(table_obs, "table_confirmed_by_yolo", False)) if table_obs is not None else False,
             "confidence": table_obs.confidence if table_obs is not None else None,
             "edge_conf": getattr(table_obs, "edge_conf", table_obs.confidence) if table_obs is not None else None,
             "yaw_err_rad": table_obs.yaw_err_rad if table_obs is not None else None,
@@ -928,9 +933,16 @@ class OrchestratorCore:
     def _tick_search_table(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
         obs = self._fresh_table_obs()
-        if self._table_visible(obs):
+        level = self._control_level(obs)
+        if self._table_visible(obs) and level != "none":
             self.ctx.table_found_frames += 1
             if self.ctx.table_found_frames >= int(self.cfg.table_found_frames_to_approach):
+                if level == "approach":
+                    self._transition(State.CONTROLLED_APPROACH, "YOLO确认桌子，plane-only低速靠近")
+                    return self.controller.plane_approach_cmd(obs)
+                if level == "stop":
+                    self._transition(State.FINAL_LOCK, "plane-only stop 可用，进入最终停车")
+                    return self.controller.stop_cmd("FINAL_LOCK")
                 self._transition(State.COARSE_ALIGN, "稳定发现桌边")
                 return self.controller.coarse_align_cmd(obs)
         else:
@@ -946,6 +958,15 @@ class OrchestratorCore:
         if not self._table_visible(obs):
             return self._handle_table_loss("桌边丢失，回到搜索", State.SEARCH_TABLE, "COARSE_ALIGN_HOLD")
         self._reset_table_loss()
+        level = self._control_level(obs)
+        if level == "none":
+            return self.controller.stop_cmd("COARSE_ALIGN")
+        if level == "approach":
+            self._transition(State.CONTROLLED_APPROACH, "plane-only approach 可用，低速靠近")
+            return self.controller.plane_approach_cmd(obs)
+        if level == "stop":
+            self._transition(State.FINAL_LOCK, "plane-only stop 可用，进入停车确认")
+            return self.controller.stop_cmd("FINAL_LOCK")
         if self._coarse_aligned(obs):
             self.ctx.approach_aligned_frames += 1
             if self.ctx.approach_aligned_frames >= int(self.cfg.coarse_align_frames_to_advance):
@@ -963,6 +984,14 @@ class OrchestratorCore:
         if not self._table_visible(obs):
             return self._handle_table_loss("接近时桌边丢失，回到搜索", State.SEARCH_TABLE, "CONTROLLED_APPROACH_HOLD")
         self._reset_table_loss()
+        level = self._control_level(obs)
+        if level == "none":
+            return self.controller.stop_cmd("CONTROLLED_APPROACH")
+        if level == "approach":
+            return self.controller.plane_approach_cmd(obs)
+        if level == "stop":
+            self._transition(State.FINAL_LOCK, "plane-only stop 可用，进入最终停车")
+            return self.controller.stop_cmd("FINAL_LOCK")
         if self._edge_ready(obs):
             self._transition(State.FINAL_LOCK, "进入最终锁边")
             return self.controller.final_lock_cmd(obs)
@@ -994,6 +1023,11 @@ class OrchestratorCore:
                 self._log_final_lock_summary(obs, lock_ready=False, reason=str(status["reason"]), stable_count=self.ctx.table_lock_frames)
                 return self._enter_dock_retry_or_next(f"最终锁边超时:{status['reason']}")
             self._maybe_resend_req(self._active_req_payload())
+            level = self._control_level(obs)
+            if level == "none":
+                return self.controller.stop_cmd("FINAL_LOCK")
+            if level == "approach":
+                return self.controller.plane_approach_cmd(obs, mode="FINAL_LOCK", reason="plane_final_approach")
             return self.controller.final_lock_cmd(obs)
 
         if phase == "STOP_AND_SETTLE":
@@ -2092,6 +2126,11 @@ class OrchestratorCore:
     def _edge_valid_for_follow(self, obs: Optional[TableEdgeObs]) -> bool:
         if obs is None:
             return False
+        level = self._control_level(obs)
+        if level in {"alignment", "stop"}:
+            return True
+        if level == "approach":
+            return False
         edge_valid = getattr(obs, "edge_valid", None)
         if edge_valid is not None:
             return bool(edge_valid)
@@ -2176,9 +2215,18 @@ class OrchestratorCore:
             "fallback_suppressed_reason": "fresh_geometry_stable" if mode in {"weak", "strong"} else "",
         }
 
+    @staticmethod
+    def _control_level(obs: Optional[TableEdgeObs]) -> str:
+        if obs is None:
+            return "none"
+        level = str(getattr(obs, "control_level", "none") or "none").strip().lower()
+        return level if level in {"approach", "alignment", "stop"} else "none"
+
     def _coarse_aligned(self, obs: Optional[TableEdgeObs]) -> bool:
         if obs is None:
             return False
+        if self._control_level(obs) == "stop":
+            return True
         if obs.yaw_err_rad is not None:
             return abs(float(obs.yaw_err_rad)) <= float(self.cfg.coarse_align_done_rad)
         if obs.table_cx_norm is not None:
@@ -2188,6 +2236,8 @@ class OrchestratorCore:
     def _edge_ready(self, obs: Optional[TableEdgeObs]) -> bool:
         if obs is None:
             return False
+        if self._control_level(obs) == "stop" or bool(getattr(obs, "usable_for_stop", False)):
+            return True
         if obs.edge_ready is not None:
             return bool(obs.edge_ready)
         if obs.dist_err_m is not None:
@@ -2209,10 +2259,12 @@ class OrchestratorCore:
         return self._table_target_dist_m(obs) + float(obs.dist_err_m)
 
     def _table_dock_should_stop(self, obs: Optional[TableEdgeObs]) -> bool:
+        if self._control_level(obs) != "stop" and not bool(getattr(obs, "usable_for_stop", False)):
+            return False
         measured = self._table_measured_dist_m(obs)
         if measured is None:
             return False
-        target = max(0.0, float(getattr(self.cfg, "table_target_dist_m", self._table_target_dist_m(obs)) or 0.0))
+        target = self._table_target_dist_m(obs)
         margin = max(0.0, float(getattr(self.cfg, "table_stop_margin_m", 0.05)))
         return float(measured) <= target + margin
 
@@ -2239,7 +2291,7 @@ class OrchestratorCore:
         dist_delta = None
         if obs is not None and obs.dist_err_m is not None:
             measured = self._table_measured_dist_m(obs)
-            target = float(getattr(self.cfg, "table_target_dist_m", self._table_target_dist_m(obs)) or 0.0)
+            target = self._table_target_dist_m(obs)
             dist_delta = (float(measured) - target) if measured is not None else float(obs.dist_err_m)
         dist_tol = float(getattr(self.cfg, "table_dist_tol_m", self.cfg.final_lock_dist_tol_m))
         yaw_tol = float(getattr(self.cfg, "table_yaw_tol_rad", self.cfg.final_lock_yaw_tol_rad))
@@ -2350,7 +2402,7 @@ class OrchestratorCore:
         dist_tol = float(getattr(self.cfg, "table_dist_tol_m", self.cfg.final_lock_dist_tol_m))
         yaw_ok = obs.yaw_err_rad is not None and abs(float(obs.yaw_err_rad)) <= yaw_tol
         measured_dist = self._table_measured_dist_m(obs)
-        target_dist = float(getattr(self.cfg, "table_target_dist_m", self._table_target_dist_m(obs)) or 0.0)
+        target_dist = self._table_target_dist_m(obs)
         dist_delta = (float(measured_dist) - target_dist) if measured_dist is not None else None
         dist_ok = dist_delta is not None and abs(float(dist_delta)) <= dist_tol
         lat_ok = obs.lateral_err_m is None or abs(float(obs.lateral_err_m)) <= float(self.cfg.final_lock_lateral_tol_m)

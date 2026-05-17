@@ -81,6 +81,10 @@ class MotionController:
             "dist_err_m": (float(obs.dist_err_m) if obs is not None and obs.dist_err_m is not None else None),
             "target_dist_m": target_distance,
             "measured_distance_m": measured_distance,
+            "control_level": (str(getattr(obs, "control_level", "none") or "none") if obs is not None else "none"),
+            "usable_for_approach": bool(getattr(obs, "usable_for_approach", False)) if obs is not None else False,
+            "usable_for_alignment": bool(getattr(obs, "usable_for_alignment", False)) if obs is not None else False,
+            "usable_for_stop": bool(getattr(obs, "usable_for_stop", False)) if obs is not None else False,
             "lock_ready": lock_ready,
             "lock_reason": lock_reason or reason,
             "reason": reason or lock_reason,
@@ -330,6 +334,20 @@ class MotionController:
 
     def final_lock_cmd(self, obs: Optional[TableEdgeObs]) -> MotionDecision:
         return self._from_docking_cmd("FINAL_LOCK", obs, fallback_forward=True)
+
+    def plane_approach_cmd(self, obs: Optional[TableEdgeObs], mode: str = "CONTROLLED_APPROACH", reason: str = "plane_approach") -> MotionDecision:
+        self.docking.reset()
+        dist_err = float(obs.dist_err_m) if obs is not None and obs.dist_err_m is not None else 0.0
+        if dist_err <= float(self.cfg.final_lock_dist_tol_m):
+            vx = 0.0
+        else:
+            vx = self._clamp(dist_err * 0.12, float(self.car_cfg.fallback_forward_vx_norm_min), 0.10)
+        cmd = self._cmd(mode, vx=vx)
+        return MotionDecision(
+            cmd=cmd,
+            distance_ratio=max(0.0, min(1.0, dist_err)),
+            control_summary=self._summary(mode, cmd, obs, reason=reason),
+        )
 
     def target_track_cmd(self, obs: Optional[TargetObs]) -> MotionDecision:
         if obs is None:

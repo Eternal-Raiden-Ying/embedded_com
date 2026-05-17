@@ -1,11 +1,11 @@
 final_lock:
   # SC171 table docking defaults. Override per run with ORCH_TABLE_* env vars.
-  yaw_abs_th: 0.13962634015954636
+  yaw_abs_th: 0.25
   dist_abs_th_m: 0.05
   edge_conf_th: 0.55
   stable_ms: 500
   timeout_ms: 14000
-  target_dist_m: 0.30
+  target_dist_m: 0.50
   stop_margin_m: 0.05
   settle_ms: 500
   stable_frames: 5
