@@ -14,6 +14,7 @@ ROI_PRESETS = {
     "center_mid": (0.25, 0.35, 0.75, 0.65),
     "center_lower": (0.25, 0.50, 0.75, 0.85),
     "full_width_lower": (0.00, 0.50, 1.00, 0.95),
+    "right_lower": (0.50, 0.50, 1.00, 0.95),
 }
 
 

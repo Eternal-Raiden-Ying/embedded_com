@@ -108,6 +108,7 @@ class TableRoiTest(unittest.TestCase):
         self.assertEqual(preset_to_roi("center_mid", (480, 640)), [160, 168, 480, 312])
         self.assertEqual(preset_to_roi("center_lower", (480, 640)), [160, 240, 480, 408])
         self.assertEqual(preset_to_roi("full_width_lower", (480, 640)), [0, 240, 640, 456])
+        self.assertEqual(preset_to_roi("right_lower", (480, 640)), [320, 240, 640, 456])
         self.assertIsNone(preset_to_roi("", (480, 640)))
 
     def test_build_table_roi_and_fallback(self):
