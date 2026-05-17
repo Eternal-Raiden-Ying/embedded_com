@@ -105,6 +105,7 @@ class TableRoiTest(unittest.TestCase):
         self.assertEqual(quadrant_to_roi("RB", 640, 480), [320, 240, 640, 480])
 
     def test_center_roi_presets_are_explicit_and_shape_based(self):
+        self.assertEqual(preset_to_roi("full_frame", (480, 640)), [0, 0, 640, 480])
         self.assertEqual(preset_to_roi("center_mid", (480, 640)), [160, 168, 480, 312])
         self.assertEqual(preset_to_roi("center_lower", (480, 640)), [160, 240, 480, 408])
         self.assertEqual(preset_to_roi("full_width_lower", (480, 640)), [0, 240, 640, 456])

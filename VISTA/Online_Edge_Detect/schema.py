@@ -71,6 +71,25 @@ class DetectorConfig:
     residual_threshold_m: float = 0.05
     random_seed: int = 42
     depth_median_ksize: int = 5
+    trend_window_px: int = 12
+    trend_col_step_px: int = 6
+    trend_min_valid_ratio: float = 0.70
+    trend_min_slope_delta: float = 0.0025
+    trend_min_candidate_count: int = 35
+    line_min_x_span_m: float = 0.18
+    line_max_residual_m: float = 0.035
+    plane_min_inliers: int = 220
+    plane_min_x_span_m: float = 0.20
+    plane_max_residual_m: float = 0.035
+    plane_max_abs_normal_y: float = 0.70
+    plane_min_abs_normal_z: float = 0.25
+    front_face_min_area_ratio: float = 0.03
+    fusion_yaw_consistency_rad: float = 0.18
+    control_min_confidence: float = 0.45
+    control_min_stable_frames: int = 3
+    control_max_yaw_jump_rad: float = 0.18
+    control_max_dist_jump_m: float = 0.12
+    control_max_yaw_rad: float = 0.70
 
 
 @dataclass

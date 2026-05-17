@@ -166,7 +166,7 @@ class OpenCVPreviewSink(PreviewSink):
         target_name = str(target_obs.get("target") or metadata.get("target") or status.get("target") or "").strip()
         panel, scale, offset = self._fit_with_transform(self._to_bgr(image, prefer_rgb=False), size)
         self._title(panel, "RGB")
-        if mode == "TRACK_LOCAL":
+        if mode == "TRACK_LOCAL" or bool(metadata.get("show_yolo_boxes", False)):
             self._draw_detection_boxes(panel, local, scale, offset, target_name)
         else:
             table_bbox = self._find_table_bbox(local, getattr(image, "shape", None))
@@ -248,7 +248,7 @@ class OpenCVPreviewSink(PreviewSink):
         else:
             panel = self._blank(size, "EDGE / TOP VIEW", "depth stale/null")
             scale, offset = 1.0, (0, 0)
-        self._title(panel, "BINARY EDGE DEBUG")
+        self._title(panel, "GEOMETRY / CANDIDATES")
         if not table_edge:
             self._corner_note(panel, "table_edge_obs unavailable", fg=(40, 220, 255))
             return panel
@@ -261,20 +261,21 @@ class OpenCVPreviewSink(PreviewSink):
                 self._draw_roi(panel, roi, scale, offset, name, color, dashed=(name == "table_edge_roi"))
         found = self._boolish(table_edge.get("found", table_edge.get("table_found")))
         edge_found = self._boolish(table_edge.get("edge_found"))
+        valid_for_control = self._boolish(table_edge.get("valid_for_control", table_edge.get("edge_valid")))
         conf = self._fmt(table_edge.get("confidence"))
-        reason = table_edge.get("reason") or "ok"
+        reason = table_edge.get("reject_reason") or table_edge.get("reason") or "ok"
         lines = [
-            f"table_found={found} edge_found={edge_found}",
-            f"conf={conf}",
-            f"edge_points={table_edge.get('valid_edge_points') or table_edge.get('point_count')}",
-            f"inliers={table_edge.get('edge_inlier_count') or table_edge.get('table_point_count')}",
+            f"raw={self._boolish(table_edge.get('raw_found'))} pose={self._boolish(table_edge.get('pose_found', edge_found))} control={valid_for_control}",
+            f"source={table_edge.get('pose_source') or 'n/a'} conf={conf} stable={table_edge.get('stable_count', 'n/a')}",
+            f"plane={self._boolish(table_edge.get('plane_found'))} pc={self._fmt(table_edge.get('plane_confidence'))} res={self._fmt(table_edge.get('plane_residual_mean'))}",
+            f"line={self._boolish(table_edge.get('line_found'))} lc={self._fmt(table_edge.get('line_confidence'))} res={self._fmt(table_edge.get('line_residual_mean'))}",
+            f"candidates={table_edge.get('candidate_count', 'n/a')} inliers={table_edge.get('inlier_count', table_edge.get('edge_inlier_count', 'n/a'))}",
             f"roi_source={table_edge.get('roi_source') or 'n/a'} q={table_edge.get('table_quadrant') or 'n/a'}",
             f"edge_roi={table_edge.get('edge_roi') or table_edge.get('table_edge_roi') or table_edge.get('depth_edge_roi') or 'n/a'}",
-            f"near_edge={self._boolish(table_edge.get('near_edge'))} selected={self._boolish(table_edge.get('selected_edge'))}",
             f"reason={reason}",
         ]
-        self._corner_note(panel, " | ".join(lines[:5]), fg=(210, 255, 210) if edge_found else (80, 180, 255))
-        self._text_block(panel, lines[5:], (16, panel.shape[0] - 54), fg=(230, 230, 230))
+        self._corner_note(panel, " | ".join(lines[:4]), fg=(210, 255, 210) if valid_for_control else (80, 180, 255))
+        self._text_block(panel, lines[4:], (16, panel.shape[0] - 72), fg=(230, 230, 230))
         return panel
 
     def _make_info_panel(
@@ -387,7 +388,8 @@ class OpenCVPreviewSink(PreviewSink):
         arr = np.asarray(depth)
         if arr.ndim == 3:
             arr = arr[:, :, 0]
-        gray = np.zeros(arr.shape[:2], dtype=np.uint8)
+        base = self._depth_colormap(arr)
+        panel = cv2.addWeighted(base, 0.35, np.zeros_like(base), 0.65, 0)
         roi = self._parse_roi(table_edge.get("edge_roi") or table_edge.get("table_edge_roi") or table_edge.get("depth_edge_roi"))
         z_min = self._as_float(table_edge.get("depth_z_min_m"))
         z_max = self._as_float(table_edge.get("depth_z_max_m"))
@@ -403,10 +405,38 @@ class OpenCVPreviewSink(PreviewSink):
             roi_mask = np.zeros_like(valid, dtype=bool)
             roi_mask[y1:y2, x1:x2] = True
             valid &= roi_mask
-        gray[valid] = 255
-        if self._boolish(table_edge.get("edge_found")):
-            gray = cv2.GaussianBlur(gray, (3, 3), 0)
-        return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+        fallback_mask = valid
+        has_geometry = bool(table_edge.get("front_plane_candidate_pixels") or table_edge.get("crease_candidate_pixels") or table_edge.get("crease_inlier_pixels"))
+        if not has_geometry:
+            panel[fallback_mask] = (95, 95, 95)
+        self._draw_pixel_points(panel, table_edge.get("front_plane_candidate_pixels"), (80, 210, 80), radius=1)
+        self._draw_pixel_points(panel, table_edge.get("crease_candidate_pixels"), (255, 80, 255), radius=1)
+        self._draw_pixel_points(panel, table_edge.get("crease_inlier_pixels"), (40, 255, 255), radius=2)
+        image_k = self._as_float(table_edge.get("image_line_k"))
+        image_b = self._as_float(table_edge.get("image_line_b"))
+        if image_k is not None and image_b is not None:
+            x_min, x_max = (0, arr.shape[1] - 1)
+            if roi is not None:
+                x_min, _y_min, x_max, _y_max = self._clip_roi(roi, arr.shape[1], arr.shape[0])
+            y_a = int(round(image_k * x_min + image_b))
+            y_b = int(round(image_k * x_max + image_b))
+            cv2.line(panel, (int(x_min), y_a), (int(x_max), y_b), (0, 255, 255), 2)
+        return panel
+
+    def _draw_pixel_points(self, panel: np.ndarray, points: Any, color: Tuple[int, int, int], radius: int = 1) -> None:
+        if not isinstance(points, (list, tuple)):
+            return
+        h, w = panel.shape[:2]
+        for item in points[:2000]:
+            if not isinstance(item, (list, tuple)) or len(item) < 2:
+                continue
+            try:
+                x = int(round(float(item[0])))
+                y = int(round(float(item[1])))
+            except Exception:
+                continue
+            if 0 <= x < w and 0 <= y < h:
+                cv2.circle(panel, (x, y), int(radius), color, -1)
 
     def _find_table_bbox(self, local: Dict[str, Any], rgb_shape: Any = None) -> Optional[List[int]]:
         if not self._env_bool("VISTA_TABLE_BBOX_ENABLE", True):
@@ -609,9 +639,11 @@ class OpenCVPreviewSink(PreviewSink):
                 f"req={status.get('req_id') or ''}",
             ]),
             ("TABLE", [
-                f"table_found={self._boolish(table_edge.get('table_found', table_edge.get('found')))} edge_found={self._boolish(table_edge.get('edge_found'))}",
-                f"conf={self._fmt(table_edge.get('confidence'))} yaw={self._fmt(table_edge.get('yaw_err_rad'))}",
-                f"dist={self._fmt(table_edge.get('dist_err_m'))} stable={table_edge.get('stable_count', 'n/a')}",
+                f"table_found={self._boolish(table_edge.get('table_found', table_edge.get('found')))} edge_found={self._boolish(table_edge.get('edge_found'))} control={self._boolish(table_edge.get('valid_for_control', table_edge.get('edge_valid')))}",
+                f"source={table_edge.get('pose_source', 'n/a')} conf={self._fmt(table_edge.get('confidence'))}",
+                f"yaw={self._fmt(table_edge.get('yaw_err_rad'))} dist={self._fmt(table_edge.get('dist_err_m'))} stable={table_edge.get('stable_count', 'n/a')}",
+                f"plane={self._boolish(table_edge.get('plane_found'))}/{self._fmt(table_edge.get('plane_confidence'))} line={self._boolish(table_edge.get('line_found'))}/{self._fmt(table_edge.get('line_confidence'))}",
+                f"reject={table_edge.get('reject_reason') or table_edge.get('reason') or ''}",
                 f"age_ms={table_edge.get('age_ms', table_edge.get('edge_obs_age_ms', table_edge.get('frame_age_ms', 'stale/null')))}",
                 f"lock_ready={table_edge.get('lock_ready', 'n/a')}",
             ]),
@@ -727,17 +759,24 @@ class OpenCVPreviewSink(PreviewSink):
         safe_dist = self._as_float(table_edge.get("safe_dist_m") or table_edge.get("safety_dist_m"))
         if safe_dist is not None and zmin <= safe_dist <= zmax:
             self._dashed_line(panel, project(xmin, safe_dist), project(xmax, safe_dist), (70, 120, 255), 1)
-        if k is not None and b is not None:
+        def draw_xz_line(line_k: Optional[float], line_b: Optional[float], color: Tuple[int, int, int], thickness: int) -> None:
+            if line_k is None or line_b is None:
+                return
             pts: List[Tuple[int, int]] = []
             for x in np.linspace(xmin, xmax, 30):
-                z = k * float(x) + b
+                z = line_k * float(x) + line_b
                 if zmin <= z <= zmax:
                     pts.append(project(float(x), float(z)))
             if len(pts) >= 2:
                 for a, c in zip(pts[:-1], pts[1:]):
-                    cv2.line(panel, a, c, (50, 255, 80), 2)
+                    cv2.line(panel, a, c, color, thickness)
                 mid = pts[len(pts) // 2]
-                cv2.arrowedLine(panel, mid, (mid[0], max(y1 + 10, mid[1] - 38)), (80, 220, 255), 2, tipLength=0.35)
+                cv2.arrowedLine(panel, mid, (mid[0], max(y1 + 10, mid[1] - 38)), color, thickness, tipLength=0.35)
+
+        plane_k = self._as_float(table_edge.get("plane_k"))
+        plane_b = self._as_float(table_edge.get("plane_b"))
+        draw_xz_line(plane_k, plane_b, (255, 160, 80), 1)
+        draw_xz_line(k, b, (50, 255, 80), 2)
         dist_err = self._as_float(table_edge.get("dist_err_m"))
         if dist_err is not None:
             base_z = target_dist if target_dist is not None else 0.5
@@ -748,7 +787,7 @@ class OpenCVPreviewSink(PreviewSink):
             color = (80, 255, 255) if abs(dist_err) <= 0.03 else (80, 120, 255)
             cv2.arrowedLine(panel, start, end, color, 2, tipLength=0.35)
             cv2.putText(panel, f"dist_err={dist_err:+.3f}", (x1 + 8, y2 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.40, color, 1)
-        cv2.putText(panel, "top-view edge", (x1 + 8, y1 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (230, 230, 230), 1)
+        cv2.putText(panel, f"top-view {table_edge.get('pose_source') or 'edge'}", (x1 + 8, y1 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (230, 230, 230), 1)
 
     def _dashed_line(
         self,

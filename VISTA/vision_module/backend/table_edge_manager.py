@@ -437,13 +437,16 @@ class TableEdgeManager:
         reason = ""
         if not edge_found:
             reason = "roi_empty" if all_points <= 0 and table_points <= 0 else "no_valid_edge"
+        valid_for_control = bool(getattr(result, "valid_for_control", edge_found))
+        reject_reason = getattr(result, "reject_reason", "") or reason
         yaw_err = float(getattr(result, "yaw_err_rad", 0.0)) if edge_found else None
         dist_err = float(getattr(result, "dist_err_m", 0.0)) if edge_found else None
         edge_conf = float(getattr(result, "edge_confidence", 0.0) or 0.0)
         payload = {
             "table_found": bool(table_points > 0),
             "edge_found": edge_found,
-            "edge_valid": edge_found,
+            "edge_valid": valid_for_control,
+            "valid_for_control": valid_for_control,
             "confidence": edge_conf,
             "edge_conf": edge_conf,
             "yaw_err_rad": yaw_err,
@@ -452,22 +455,49 @@ class TableEdgeManager:
             "dist_err": dist_err,
             "edge_k": getattr(result, "line_k", None),
             "edge_b": getattr(result, "line_b", None),
+            "image_line_k": getattr(result, "image_line_k", None),
+            "image_line_b": getattr(result, "image_line_b", None),
             "depth_valid": True,
             "edge_obs_unavailable": False,
             "point_count": all_points,
             "valid_edge_points": all_points,
             "table_point_count": table_points,
-            "edge_inlier_count": table_points,
+            "edge_inlier_count": int(getattr(result, "inlier_count", 0) or 0),
             "selected_edge": edge_found,
-            "near_edge": edge_found,
+            "near_edge": valid_for_control,
             "frame_id": int(self._frame_id),
             "frame_seq": int(frame_seq),
             "source": "vision_table_edge_manager",
-            "reason": reason,
+            "reason": reject_reason,
+            "reject_reason": reject_reason,
             "target_dist_m": float(self._target_dist_m),
             **roi_payload,
             "type": "table_edge_obs",
         }
+        for key in (
+            "raw_found",
+            "pose_found",
+            "pose_source",
+            "plane_found",
+            "line_found",
+            "plane_confidence",
+            "line_confidence",
+            "plane_residual_mean",
+            "line_residual_mean",
+            "plane_x_span_m",
+            "line_x_span_m",
+            "candidate_count",
+            "inlier_count",
+            "stable_count",
+            "front_face_area_ratio",
+            "plane_yaw_err_rad",
+            "plane_dist_err_m",
+            "line_yaw_err_rad",
+            "line_dist_err_m",
+            "plane_k",
+            "plane_b",
+        ):
+            payload[key] = getattr(result, key, None)
         profile["total_edge_process_ms"] = self._ms_since(total_start)
         return self._attach_profile(payload, profile, path="full")
 

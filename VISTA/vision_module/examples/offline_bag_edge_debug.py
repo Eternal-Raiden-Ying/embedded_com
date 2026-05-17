@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, Iterator, Optional
 
 
@@ -32,6 +34,21 @@ OpenCVPreviewSink = None
 
 DEFAULT_BAG = VISTA_ROOT / "20260516_161436.bag"
 DEFAULT_CALIB = VISTA_ROOT / "Offline_Edge_Test" / "calib.json"
+DEFAULT_YOLO_MODEL = (
+    VISTA_ROOT
+    / "vision_module"
+    / "model"
+    / "qnn216"
+    / "model_farm_yolov7_qcs6490_qnn2.16_int8_aidlite"
+    / "models"
+    / "cutoff_yolov7_w8a8.qnn216.ctx.bin"
+)
+DEFAULT_YOLO_ANCHORS = (
+    (12, 16, 19, 36, 40, 28),
+    (36, 75, 76, 55, 72, 146),
+    (142, 110, 192, 243, 459, 401),
+)
+DEFAULT_YOLO_STRIDES = (8, 16, 32)
 
 
 def _load_runtime_deps() -> None:
@@ -76,7 +93,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--show", action="store_true", help="Show the reused OpenCV preview overlay.")
     parser.add_argument("--save-dir", type=Path, default=None, help="Optional directory for sampled preview PNGs.")
+    parser.add_argument("--save-csv", type=Path, default=None, help="Optional CSV path for per-frame geometry diagnostics.")
     parser.add_argument("--calib-json", type=Path, default=DEFAULT_CALIB, help="Camera calibration JSON.")
+    parser.add_argument("--yolo", action="store_true", help="Run YOLO on sampled RGB frames and draw detection boxes only.")
+    parser.add_argument("--yolo-model", type=Path, default=DEFAULT_YOLO_MODEL, help="QNN YOLO detect model path for --yolo.")
+    parser.add_argument("--yolo-conf", type=float, default=0.25, help="YOLO confidence threshold for --yolo.")
+    parser.add_argument("--yolo-iou", type=float, default=0.45, help="YOLO NMS IoU threshold for --yolo.")
     return parser
 
 
@@ -147,6 +169,66 @@ def _fallback_roi(cfg: DetectorConfig) -> list[int]:
     return [int(cfg.roi_x0), int(cfg.roi_y0), int(cfg.roi_x1), int(cfg.roi_y1)]
 
 
+def _load_yolo_predictor(args: argparse.Namespace):
+    from VISTA.vision_module.backend.predictor.QNN_YOLO_Detect_Predictor import QNN_YOLO_Detect_Predictor
+
+    model_path = args.yolo_model.expanduser().resolve()
+    if not model_path.exists():
+        raise FileNotFoundError(f"YOLO model not found: {model_path}")
+    profile = SimpleNamespace(
+        target_model=str(model_path),
+        conf_thres=float(args.yolo_conf),
+        iou_thres=float(args.yolo_iou),
+        width=640,
+        height=640,
+        class_num=80,
+        model_backend="qnn",
+        anchors=DEFAULT_YOLO_ANCHORS,
+        strides=DEFAULT_YOLO_STRIDES,
+    )
+    predictor = QNN_YOLO_Detect_Predictor(profile)
+    if not predictor.is_ready():
+        raise RuntimeError("YOLO predictor is not ready after initialization")
+    print(f"[BAG_EDGE] yolo=enabled model={model_path}")
+    return predictor
+
+
+def _rgb_to_bgr(rgb: Any) -> Any:
+    if not isinstance(rgb, np.ndarray) or rgb.ndim != 3 or rgb.shape[2] < 3:
+        return rgb
+    return cv2.cvtColor(rgb[:, :, :3], cv2.COLOR_RGB2BGR)
+
+
+def _yolo_local_perception(predictor: Any, rgb: Any) -> Dict[str, Any]:
+    from VISTA.vision_module.config.data import COCO80_CLASSES
+
+    if predictor is None or not isinstance(rgb, np.ndarray) or rgb.size <= 0:
+        return {"has_infer": False, "box_count": 0, "infer_boxes": [], "class_names": list(COCO80_CLASSES), "rgb_shape": getattr(rgb, "shape", None)}
+    boxes, _masks = predictor.predict_frame(_rgb_to_bgr(rgb))
+    rows = []
+    box_rows = boxes.tolist() if hasattr(boxes, "tolist") else (list(boxes) if boxes is not None else [])
+    for row in box_rows:
+        try:
+            values = row.tolist() if hasattr(row, "tolist") else list(row)
+            if len(values) < 6:
+                continue
+            x1, y1, x2, y2 = [float(v) for v in values[:4]]
+            score = float(values[4])
+            class_id = int(float(values[5]))
+            class_name = COCO80_CLASSES[class_id] if 0 <= class_id < len(COCO80_CLASSES) else str(class_id)
+            rows.append([x1, y1, x2, y2, score, class_id, class_name])
+        except Exception:
+            continue
+    return {
+        "has_infer": True,
+        "box_count": int(len(rows)),
+        "infer_boxes": rows,
+        "class_names": list(COCO80_CLASSES),
+        "rgb_shape": getattr(rgb, "shape", None),
+        "table_roi_source": "yolo_preview_only",
+    }
+
+
 def _table_edge_payload(
     result: Any,
     debug: Dict[str, Any],
@@ -159,6 +241,7 @@ def _table_edge_payload(
     roi_box = debug.get("roi_box") if isinstance(debug, dict) else None
     roi = [int(v) for v in roi_box] if roi_box is not None else roi_meta.get("depth_edge_roi")
     edge_found = bool(getattr(result, "edge_found", False))
+    valid_for_control = bool(getattr(result, "valid_for_control", False))
     yaw = float(getattr(result, "yaw_err_rad", 0.0)) if edge_found else None
     dist = float(getattr(result, "dist_err_m", 0.0)) if edge_found else None
     table_points = int(getattr(result, "table_point_count", 0) or 0)
@@ -166,8 +249,8 @@ def _table_edge_payload(
     payload = {
         "table_found": bool(table_points > 0),
         "edge_found": edge_found,
-        "edge_valid": edge_found,
-        "valid": edge_found,
+        "edge_valid": valid_for_control,
+        "valid": valid_for_control,
         "confidence": float(getattr(result, "edge_confidence", 0.0) or 0.0),
         "edge_conf": float(getattr(result, "edge_confidence", 0.0) or 0.0),
         "yaw_err_rad": yaw,
@@ -176,17 +259,20 @@ def _table_edge_payload(
         "dist_err": dist,
         "edge_k": getattr(result, "line_k", None),
         "edge_b": getattr(result, "line_b", None),
+        "image_line_k": getattr(result, "image_line_k", None),
+        "image_line_b": getattr(result, "image_line_b", None),
         "depth_valid": True,
         "point_count": all_points,
         "valid_edge_points": all_points,
         "table_point_count": table_points,
-        "edge_inlier_count": table_points,
+        "edge_inlier_count": int(getattr(result, "inlier_count", 0) or 0),
         "selected_edge": edge_found,
-        "near_edge": edge_found,
+        "near_edge": valid_for_control,
         "frame_id": int(frame_id),
         "frame_seq": int(frame_id),
         "source": "offline_bag_edge_debug",
-        "reason": "" if edge_found else ("roi_empty" if all_points <= 0 and table_points <= 0 else "no_valid_edge"),
+        "reason": getattr(result, "reject_reason", "") or ("" if edge_found else ("roi_empty" if all_points <= 0 and table_points <= 0 else "no_valid_edge")),
+        "reject_reason": getattr(result, "reject_reason", "") or "",
         "target_dist_m": float(target_dist_m),
         "age_ms": float(age_ms),
         "depth_z_min_m": float(cfg.z_min),
@@ -195,24 +281,126 @@ def _table_edge_payload(
         "table_y_max_m": float(cfg.table_y_max),
         "type": "table_edge_obs",
     }
+    for key in (
+        "raw_found",
+        "pose_found",
+        "valid_for_control",
+        "pose_source",
+        "plane_found",
+        "line_found",
+        "plane_confidence",
+        "line_confidence",
+        "plane_residual_mean",
+        "line_residual_mean",
+        "plane_x_span_m",
+        "line_x_span_m",
+        "candidate_count",
+        "inlier_count",
+        "stable_count",
+        "front_face_area_ratio",
+        "plane_yaw_err_rad",
+        "plane_dist_err_m",
+        "line_yaw_err_rad",
+        "line_dist_err_m",
+        "plane_k",
+        "plane_b",
+    ):
+        payload[key] = getattr(result, key, None)
+    if isinstance(debug, dict):
+        payload["front_plane_candidate_pixels"] = debug.get("front_plane_candidate_pixels") or []
+        payload["crease_candidate_pixels"] = debug.get("crease_candidate_pixels") or []
+        payload["crease_inlier_pixels"] = debug.get("crease_inlier_pixels") or []
     payload.update(dict(roi_meta or {}))
+    payload["roi_source"] = getattr(result, "roi_source", "") or payload.get("roi_source")
     payload.update({"depth_edge_roi": roi, "table_edge_roi": roi, "edge_roi": roi, "roi_format": "xyxy"})
     return payload
 
 
-def _make_preview_canvas(sink: OpenCVPreviewSink, rgb: Any, depth: np.ndarray, table_edge: Dict[str, Any], frame_id: int) -> np.ndarray:
+CSV_FIELDS = [
+    "frame_id",
+    "ts_ms",
+    "roi_preset",
+    "roi_box",
+    "pose_source",
+    "raw_found",
+    "pose_found",
+    "valid_for_control",
+    "stable_count",
+    "reject_reason",
+    "yaw_err_rad",
+    "dist_err_m",
+    "edge_confidence",
+    "plane_found",
+    "line_found",
+    "plane_confidence",
+    "line_confidence",
+    "plane_residual_mean",
+    "line_residual_mean",
+    "plane_x_span_m",
+    "line_x_span_m",
+    "front_face_area_ratio",
+    "candidate_count",
+    "inlier_count",
+    "edge_k",
+    "edge_b",
+    "target_dist_m",
+]
+
+
+def _csv_row(table_edge: Dict[str, Any], frame_id: int, ts_ms: float, roi_preset: str, target_dist_m: float) -> Dict[str, Any]:
+    roi = table_edge.get("depth_edge_roi") or table_edge.get("edge_roi") or ""
+    return {
+        "frame_id": int(frame_id),
+        "ts_ms": float(ts_ms),
+        "roi_preset": roi_preset,
+        "roi_box": ",".join(str(int(v)) for v in roi) if isinstance(roi, (list, tuple)) else str(roi),
+        "pose_source": table_edge.get("pose_source"),
+        "raw_found": int(bool(table_edge.get("raw_found"))),
+        "pose_found": int(bool(table_edge.get("pose_found"))),
+        "valid_for_control": int(bool(table_edge.get("valid_for_control"))),
+        "stable_count": int(table_edge.get("stable_count") or 0),
+        "reject_reason": table_edge.get("reject_reason") or table_edge.get("reason") or "",
+        "yaw_err_rad": table_edge.get("yaw_err_rad"),
+        "dist_err_m": table_edge.get("dist_err_m"),
+        "edge_confidence": table_edge.get("confidence"),
+        "plane_found": int(bool(table_edge.get("plane_found"))),
+        "line_found": int(bool(table_edge.get("line_found"))),
+        "plane_confidence": table_edge.get("plane_confidence"),
+        "line_confidence": table_edge.get("line_confidence"),
+        "plane_residual_mean": table_edge.get("plane_residual_mean"),
+        "line_residual_mean": table_edge.get("line_residual_mean"),
+        "plane_x_span_m": table_edge.get("plane_x_span_m"),
+        "line_x_span_m": table_edge.get("line_x_span_m"),
+        "front_face_area_ratio": table_edge.get("front_face_area_ratio"),
+        "candidate_count": table_edge.get("candidate_count"),
+        "inlier_count": table_edge.get("inlier_count"),
+        "edge_k": table_edge.get("edge_k"),
+        "edge_b": table_edge.get("edge_b"),
+        "target_dist_m": float(target_dist_m),
+    }
+
+
+def _make_preview_canvas(
+    sink: OpenCVPreviewSink,
+    rgb: Any,
+    depth: np.ndarray,
+    table_edge: Dict[str, Any],
+    frame_id: int,
+    local_perception: Optional[Dict[str, Any]] = None,
+) -> np.ndarray:
     panel_w = max(320, sink.canvas_w // 2)
     panel_h = max(220, sink.canvas_h // 2)
     panel_size = (panel_w, panel_h)
     metadata = {
         "preview_layout": "rgb_depth_edge",
         "runtime_status": {"stage": "OFFLINE_BAG", "mode": "TABLE_EDGE_PERCEPTION", "epoch": 0},
-        "local_perception": {"rgb_shape": getattr(rgb, "shape", None), "box_count": 0},
+        "local_perception": local_perception or {"rgb_shape": getattr(rgb, "shape", None), "box_count": 0},
         "table_edge_obs": table_edge,
         "target_obs": {},
         "source_cameras": ["rgb", "depth"] if isinstance(rgb, np.ndarray) else ["depth"],
         "window_id": sink.window_id,
         "show_age_ms": True,
+        "show_yolo_boxes": bool((local_perception or {}).get("has_infer", False)),
         "frame_age_s": 0.0,
     }
     frame = PreviewFrame(
@@ -233,15 +421,22 @@ def _make_preview_canvas(sink: OpenCVPreviewSink, rgb: Any, depth: np.ndarray, t
     return canvas
 
 
-def _preview_frame(rgb: Any, depth: np.ndarray, table_edge: Dict[str, Any], frame_id: int) -> PreviewFrame:
+def _preview_frame(
+    rgb: Any,
+    depth: np.ndarray,
+    table_edge: Dict[str, Any],
+    frame_id: int,
+    local_perception: Optional[Dict[str, Any]] = None,
+) -> PreviewFrame:
     metadata = {
         "preview_layout": "rgb_depth_edge",
         "runtime_status": {"stage": "OFFLINE_BAG", "mode": "TABLE_EDGE_PERCEPTION", "epoch": 0},
-        "local_perception": {"rgb_shape": getattr(rgb, "shape", None), "box_count": 0},
+        "local_perception": local_perception or {"rgb_shape": getattr(rgb, "shape", None), "box_count": 0},
         "table_edge_obs": table_edge,
         "target_obs": {},
         "source_cameras": ["rgb", "depth"] if isinstance(rgb, np.ndarray) else ["depth"],
         "show_age_ms": True,
+        "show_yolo_boxes": bool((local_perception or {}).get("has_infer", False)),
         "frame_age_s": 0.0,
     }
     lines = [
@@ -265,12 +460,20 @@ def main() -> None:
     save_dir: Optional[Path] = args.save_dir
     if save_dir is not None:
         save_dir.mkdir(parents=True, exist_ok=True)
+    csv_file = None
+    csv_writer = None
+    if args.save_csv is not None:
+        args.save_csv.expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
+        csv_file = args.save_csv.expanduser().open("w", newline="", encoding="utf-8")
+        csv_writer = csv.DictWriter(csv_file, fieldnames=CSV_FIELDS)
+        csv_writer.writeheader()
 
     cfg = DetectorConfig()
     calib, target_dist = load_calib(args.calib_json.expanduser().resolve())
     if float(cfg.target_dist_m_override) > 0:
         target_dist = float(cfg.target_dist_m_override)
     detector = OnlineTableEdgeDetector(calib, cfg, target_dist)
+    yolo_predictor = _load_yolo_predictor(args) if args.yolo else None
     sink = OpenCVPreviewSink("Offline Bag Edge Debug")
     if args.show:
         sink.open()
@@ -293,27 +496,43 @@ def main() -> None:
                 roi_preset=args.roi_preset,
             )
             result, debug = detector.process_depth(depth, roi_override=roi_meta.get("depth_edge_roi"))
+            local_perception = _yolo_local_perception(yolo_predictor, rgb) if args.yolo else {
+                "has_infer": False,
+                "box_count": 0,
+                "infer_boxes": [],
+                "rgb_shape": getattr(rgb, "shape", None),
+            }
             age_ms = (time.perf_counter() - t0) * 1000.0
             table_edge = _table_edge_payload(result, debug, roi_meta, frame_id, age_ms, target_dist, cfg)
+            if csv_writer is not None:
+                csv_writer.writerow(_csv_row(table_edge, frame_id, float(pack.get("ts_ms", 0.0) or 0.0), args.roi_preset, target_dist))
             processed += 1
 
             print(
                 "[BAG_EDGE] "
                 f"frame={frame_id} valid={int(bool(table_edge.get('edge_valid')))} "
                 f"dist={table_edge.get('dist_err_m')} yaw={table_edge.get('yaw_err_rad')} "
-                f"roi={table_edge.get('depth_edge_roi')} preset={args.roi_preset} age_ms={age_ms:.1f}"
+                f"roi={table_edge.get('depth_edge_roi')} preset={args.roi_preset} "
+                f"yolo_boxes={int(local_perception.get('box_count', 0) or 0)} age_ms={age_ms:.1f}"
             )
 
             if save_dir is not None:
-                canvas = _make_preview_canvas(sink, rgb, depth, table_edge, frame_id)
+                canvas = _make_preview_canvas(sink, rgb, depth, table_edge, frame_id, local_perception)
                 cv2.imwrite(str(save_dir / f"bag_edge_{frame_id:06d}_{args.roi_preset}.png"), canvas)
 
             if args.show:
-                keep_running = sink.render(_preview_frame(rgb, depth, table_edge, frame_id))
+                keep_running = sink.render(_preview_frame(rgb, depth, table_edge, frame_id, local_perception))
                 key = cv2.waitKey(1) & 0xFF
                 if not keep_running or key in (ord("q"), ord("Q")):
                     break
     finally:
+        if csv_file is not None:
+            csv_file.close()
+        if yolo_predictor is not None:
+            try:
+                yolo_predictor.release()
+            except Exception:
+                pass
         if args.show:
             sink.close()
     print(f"[BAG_EDGE] processed={processed} stride={stride} start_frame={start_frame} max_frames={max_frames}")

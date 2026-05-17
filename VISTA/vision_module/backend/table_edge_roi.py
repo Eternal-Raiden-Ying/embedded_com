@@ -11,6 +11,7 @@ from ..utils.table_roi import bbox_center_norm, bbox_to_quadrant, find_table_bbo
 
 
 ROI_PRESETS = {
+    "full_frame": (0.00, 0.00, 1.00, 1.00),
     "center_mid": (0.25, 0.35, 0.75, 0.65),
     "center_lower": (0.25, 0.50, 0.75, 0.85),
     "full_width_lower": (0.00, 0.50, 1.00, 0.95),
