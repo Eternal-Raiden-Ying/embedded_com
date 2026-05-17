@@ -5,8 +5,18 @@
 Standalone SC171 -> STM32 motion protocol probe.
 
 This script intentionally does not import or start the orchestrator state
-machine, VISTA, or mobile gateway. Protocol fields follow
-ROBOT_MOTION_CONTRACT.md:
+machine, VISTA, or mobile gateway. Do not run it at the same time as the
+full orchestrator on the same serial port.
+
+Current mature STM32 protocol:
+
+    MODE SEARCH
+    MODE RETURN
+    V <vx_mps> <vy_mps> <wz_radps>
+    STOP
+
+The old seq-based commands are kept for compatibility but are no longer the
+default:
 
     VEL <s006> <s007> <s008> <s009> <seq>
     STOP <seq>
@@ -29,6 +39,9 @@ WHEEL_MIN = -100
 WHEEL_MAX = 100
 DURATION_MIN_MS = 20
 DURATION_MAX_MS = 1000
+DEFAULT_PERIOD_MS = 100
+SWEEP_VX_MPS = (0.005, 0.010, 0.015, 0.020, 0.030, 0.050)
+SWEEP_DURATION_MS = 1000
 
 JOG_DONE_MARKER = "[CAR][JOG_DONE]"
 JOG_BUSY_MARKER = "[CAR][JOG_BUSY]"
@@ -74,6 +87,22 @@ def encode_status() -> str:
     return "STATUS"
 
 
+def encode_mode_search() -> str:
+    return "MODE SEARCH"
+
+
+def encode_mode_return() -> str:
+    return "MODE RETURN"
+
+
+def encode_v(vx_mps: float, vy_mps: float, wz_radps: float) -> str:
+    return f"V {float(vx_mps):.6g} {float(vy_mps):.6g} {float(wz_radps):.6g}"
+
+
+def encode_bare_stop() -> str:
+    return "STOP"
+
+
 class MotionProbe:
     def __init__(self, ser, dry_run: bool):
         self.ser = ser
@@ -102,6 +131,8 @@ class MotionProbe:
             if not text:
                 continue
             print(f"[PROBE][RX] {text}", flush=True)
+            if text.startswith("FB "):
+                print(f"[PROBE][FB] echo={text[3:].strip()}", flush=True)
             lines.append(text)
         return lines
 
@@ -135,16 +166,63 @@ def wait_for_jog_done(probe: MotionProbe, timeout_s: float, poll_s: float) -> bo
     return False
 
 
+def send_v_for(probe: MotionProbe, vx_mps: float, vy_mps: float, wz_radps: float, duration_ms: int, period_ms: int) -> None:
+    duration_s = max(0.0, float(duration_ms) / 1000.0)
+    period_s = max(0.001, float(period_ms) / 1000.0)
+    deadline = time.monotonic() + duration_s
+    line = encode_v(vx_mps, vy_mps, wz_radps)
+
+    while True:
+        now = time.monotonic()
+        if now >= deadline:
+            return
+        probe.send(line)
+        wait_s = min(period_s, max(0.0, deadline - time.monotonic()))
+        if probe.dry_run:
+            time.sleep(wait_s)
+        else:
+            probe.read_for(wait_s)
+
+
 def run_command(args, probe: MotionProbe) -> int:
     seq = int(args.seq_start)
     wheels = tuple(args.wheels)
     rx_window_s = float(args.rx_window)
 
+    if args.cmd == "mode-search":
+        probe.send_and_read(encode_mode_search(), rx_window_s)
+        return 0
+
+    if args.cmd == "mode-return":
+        probe.send_and_read(encode_mode_return(), rx_window_s)
+        return 0
+
+    if args.cmd == "stop":
+        probe.send_and_read(encode_bare_stop(), rx_window_s)
+        return 0
+
+    if args.cmd == "v":
+        probe.send_and_read(encode_v(args.vx, args.vy, args.wz), rx_window_s)
+        return 0
+
+    if args.cmd == "pulse":
+        probe.send_and_read(encode_mode_search(), rx_window_s)
+        send_v_for(probe, args.vx, args.vy, args.wz, args.duration_ms, args.period_ms)
+        probe.send_and_read(encode_bare_stop(), rx_window_s)
+        return 0
+
+    if args.cmd == "sweep":
+        probe.send_and_read(encode_mode_search(), rx_window_s)
+        for vx_mps in SWEEP_VX_MPS:
+            send_v_for(probe, vx_mps, args.vy, args.wz, SWEEP_DURATION_MS, args.period_ms)
+            probe.send_and_read(encode_bare_stop(), rx_window_s)
+        return 0
+
     if args.cmd == "status":
         probe.send_and_read(encode_status(), rx_window_s)
         return 0
 
-    if args.cmd == "stop":
+    if args.cmd == "legacy-stop":
         probe.send_and_read(encode_stop(seq), rx_window_s)
         return 0
 
@@ -183,8 +261,20 @@ def parse_args(argv: Optional[Sequence[str]] = None):
     parser.add_argument("--dry-run", action="store_true", help="print TX lines without opening the serial port")
     parser.add_argument(
         "--cmd",
-        choices=("status", "stop", "vel", "jog", "sequence"),
-        default="sequence",
+        choices=(
+            "mode-search",
+            "mode-return",
+            "stop",
+            "v",
+            "pulse",
+            "sweep",
+            "status",
+            "legacy-stop",
+            "vel",
+            "jog",
+            "sequence",
+        ),
+        default="stop",
         help="probe command to run",
     )
     parser.add_argument("--seq-start", type=int, default=1, help="first sequence number for seq commands")
@@ -196,7 +286,11 @@ def parse_args(argv: Optional[Sequence[str]] = None):
         default=(30, 30, 30, 30),
         help="wheel low-speed values, clamped to -100..100",
     )
-    parser.add_argument("--duration-ms", type=int, default=100, help="JOG duration, clamped to 20..1000 ms")
+    parser.add_argument("--duration-ms", type=int, default=100, help="JOG/pulse duration in ms; JOG is clamped to 20..1000 ms")
+    parser.add_argument("--period-ms", type=int, default=DEFAULT_PERIOD_MS, help="V resend period for pulse/sweep")
+    parser.add_argument("--vx", type=float, default=0.010, help="forward velocity in m/s for V/pulse")
+    parser.add_argument("--vy", type=float, default=0.0, help="lateral velocity in m/s for V/pulse/sweep")
+    parser.add_argument("--wz", type=float, default=0.0, help="yaw velocity in rad/s for V/pulse/sweep")
     parser.add_argument("--rx-window", type=float, default=0.25, help="short RX drain window after each TX")
     parser.add_argument("--jog-timeout", type=float, default=2.0, help="maximum wait for [CAR][JOG_DONE]")
     return parser.parse_args(argv)
@@ -205,9 +299,11 @@ def parse_args(argv: Optional[Sequence[str]] = None):
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     args.wheels = normalize_wheels(args.wheels)
-    args.duration_ms = clamp_int(args.duration_ms, DURATION_MIN_MS, DURATION_MAX_MS)
+    args.duration_ms = max(0, int(args.duration_ms))
+    args.period_ms = max(1, int(args.period_ms))
     args.rx_window = max(0.01, float(args.rx_window))
     args.jog_timeout = max(args.rx_window, float(args.jog_timeout))
+    print("[PROBE][WARN] do not run this probe and the full orchestrator on the same serial port at the same time", flush=True)
 
     ser = None
     if not args.dry_run:
