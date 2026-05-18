@@ -318,6 +318,7 @@ class OnlineTableEdgeDetector:
         empty = {
             "found": False,
             "candidate_mask": np.zeros((h, w), dtype=bool),
+            "inlier_mask": np.zeros((h, w), dtype=bool),
             "candidate_count": 0,
             "inlier_count": 0,
             "yaw": 0.0,
@@ -436,9 +437,12 @@ class OnlineTableEdgeDetector:
         all_ys = ys + int(roi_box[1])
         inlier_xs = all_xs[inlier_mask]
         inlier_ys = all_ys[inlier_mask]
+        plane_inlier_mask = np.zeros((h, w), dtype=bool)
+        plane_inlier_mask[ys[inlier_mask], xs[inlier_mask]] = True
         return {
             "found": True,
             "candidate_mask": candidate_mask,
+            "inlier_mask": plane_inlier_mask,
             "candidate_count": candidate_count,
             "inlier_count": inlier_count,
             "yaw": yaw,

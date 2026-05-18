@@ -354,6 +354,57 @@ class TableEdgeManager:
             "total_edge_process_ms": 0.0,
         }
 
+    @staticmethod
+    def _mask_rle_payload(mask: Any, roi_box: Any) -> Optional[Dict[str, Any]]:
+        try:
+            arr = np.asarray(mask).astype(bool)
+        except Exception:
+            return None
+        if arr.ndim != 2 or arr.size <= 0 or int(arr.sum()) <= 0:
+            return None
+        roi = None
+        try:
+            if isinstance(roi_box, (list, tuple)) and len(roi_box) >= 4:
+                roi = [int(round(float(v))) for v in roi_box[:4]]
+        except Exception:
+            roi = None
+        flat = np.ascontiguousarray(arr.reshape(-1).astype(np.uint8))
+        padded = np.concatenate(([0], flat, [0]))
+        changes = np.flatnonzero(padded[1:] != padded[:-1])
+        counts = []
+        for start, end in zip(changes[0::2], changes[1::2]):
+            counts.extend([int(start), int(end - start)])
+        return {
+            "encoding": "rle",
+            "coord": "roi" if roi is not None else "full",
+            "shape": [int(arr.shape[0]), int(arr.shape[1])],
+            "roi": roi,
+            "counts": counts,
+            "sum": int(arr.sum()),
+        }
+
+    def _plane_debug_payload(self, debug: Any, roi_box: Any) -> Dict[str, Any]:
+        if not isinstance(debug, dict):
+            return {"plane_mask_status": "missing"}
+        front_plane = debug.get("front_plane") if isinstance(debug.get("front_plane"), dict) else {}
+        out: Dict[str, Any] = {
+            "front_plane_candidate_pixels": debug.get("front_plane_candidate_pixels") or [],
+            "crease_candidate_pixels": debug.get("crease_candidate_pixels") or [],
+            "crease_inlier_pixels": debug.get("crease_inlier_pixels") or [],
+            "upper_line_candidate_pixels": debug.get("upper_line_candidate_pixels") or [],
+            "upper_line_inlier_pixels": debug.get("upper_line_inlier_pixels") or [],
+            "lower_line_candidate_pixels": debug.get("lower_line_candidate_pixels") or [],
+            "lower_line_inlier_pixels": debug.get("lower_line_inlier_pixels") or [],
+        }
+        candidate = self._mask_rle_payload(front_plane.get("candidate_mask"), roi_box)
+        inlier = self._mask_rle_payload(front_plane.get("inlier_mask"), roi_box)
+        if candidate is not None:
+            out["front_plane_candidate_mask"] = candidate
+        if inlier is not None:
+            out["front_plane_inlier_mask"] = inlier
+        out["plane_mask_status"] = "present" if inlier is not None or candidate is not None or bool(out["front_plane_candidate_pixels"]) else "missing"
+        return out
+
     def _attach_profile(self, payload: Dict[str, Any], profile: Dict[str, Any], *, path: str) -> Dict[str, Any]:
         out = dict(payload or {})
         prof = self._profile_template()
@@ -744,6 +795,7 @@ class TableEdgeManager:
             "enable_crease_line": bool(getattr(self._detector_cfg, "enable_crease_line", True)),
             **yolo_gate,
             **roi_payload,
+            **self._plane_debug_payload(_debug, roi_payload.get("edge_roi") or roi_box),
             "type": "table_edge_obs",
         }
         for key in (

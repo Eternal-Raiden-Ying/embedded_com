@@ -252,13 +252,12 @@ class OpenCVPreviewSink(PreviewSink):
         if not table_edge:
             self._corner_note(panel, "table_edge_obs unavailable", fg=(40, 220, 255))
             return panel
-        for name, color in (
-            ("edge_roi", (255, 255, 255)),
-            ("table_edge_roi", (80, 220, 255)),
-        ):
-            roi = table_edge.get(name)
-            if roi:
-                self._draw_roi(panel, roi, scale, offset, name, color, dashed=(name == "table_edge_roi"))
+        roi = table_edge.get("edge_roi") or table_edge.get("table_edge_roi") or table_edge.get("depth_edge_roi")
+        if roi:
+            self._draw_roi(panel, roi, scale, offset, "ROI", (80, 220, 255), dashed=True)
+        plane_mask_missing = not bool(table_edge.get("plane_mask_status") == "present" or table_edge.get("front_plane_inlier_mask") or table_edge.get("front_plane_candidate_mask") or table_edge.get("front_plane_candidate_pixels"))
+        if plane_mask_missing:
+            self._corner_note(panel, "plane_mask=missing", fg=(40, 220, 255))
         valid_for_control = self._boolish(table_edge.get("valid_for_control", table_edge.get("edge_valid")))
         source = table_edge.get("final_pose_source") or table_edge.get("pose_source") or "none"
         geometry_lines = [
@@ -399,19 +398,99 @@ class OpenCVPreviewSink(PreviewSink):
             roi_mask = np.zeros_like(valid, dtype=bool)
             roi_mask[y1:y2, x1:x2] = True
             valid &= roi_mask
-        fallback_mask = valid
-        has_geometry = bool(
-            table_edge.get("front_plane_candidate_pixels")
-        )
-        if not has_geometry:
-            panel[fallback_mask] = (95, 95, 95)
-        self._draw_pixel_points(panel, table_edge.get("front_plane_candidate_pixels"), (80, 210, 80), radius=1)
+        plane_mask = self._plane_mask_to_frame(table_edge, arr.shape[:2])
+        if plane_mask is not None:
+            self._overlay_mask(panel, plane_mask, (40, 220, 70), alpha=0.42)
+        else:
+            self._draw_pixel_points(panel, table_edge.get("front_plane_candidate_pixels"), (40, 220, 70), radius=2, alpha=0.55)
         return panel
 
-    def _draw_pixel_points(self, panel: np.ndarray, points: Any, color: Tuple[int, int, int], radius: int = 1) -> None:
+    def _plane_mask_to_frame(self, table_edge: Dict[str, Any], frame_shape: Tuple[int, int]) -> Optional[np.ndarray]:
+        for key in ("front_plane_inlier_mask", "front_plane_mask", "plane_mask", "front_plane_candidate_mask", "plane_candidate_mask"):
+            mask = self._decode_mask_payload(table_edge.get(key), frame_shape)
+            if mask is not None and bool(mask.any()):
+                return mask
+        return None
+
+    def _decode_mask_payload(self, payload: Any, frame_shape: Tuple[int, int]) -> Optional[np.ndarray]:
+        try:
+            frame_h, frame_w = int(frame_shape[0]), int(frame_shape[1])
+        except Exception:
+            return None
+        if frame_h <= 0 or frame_w <= 0:
+            return None
+        if isinstance(payload, dict):
+            shape_raw = payload.get("shape")
+            if not isinstance(shape_raw, (list, tuple)) or len(shape_raw) < 2:
+                return None
+            try:
+                mh, mw = int(shape_raw[0]), int(shape_raw[1])
+            except Exception:
+                return None
+            if mh <= 0 or mw <= 0:
+                return None
+            mask = np.zeros((mh * mw,), dtype=bool)
+            if str(payload.get("encoding") or "").lower() == "rle":
+                counts = payload.get("counts")
+                if not isinstance(counts, (list, tuple)):
+                    return None
+                for i in range(0, len(counts) - 1, 2):
+                    try:
+                        start = max(0, int(counts[i]))
+                        length = max(0, int(counts[i + 1]))
+                    except Exception:
+                        continue
+                    end = min(mask.size, start + length)
+                    if start < end:
+                        mask[start:end] = True
+            else:
+                data = payload.get("data")
+                if data is None:
+                    return None
+                try:
+                    mask = np.asarray(data).reshape((mh * mw,)).astype(bool)
+                except Exception:
+                    return None
+            mask_2d = mask.reshape((mh, mw))
+            roi = self._parse_roi(payload.get("roi"))
+            coord = str(payload.get("coord") or ("roi" if roi is not None else "full")).lower()
+            if coord == "full" or (mh == frame_h and mw == frame_w and roi is None):
+                return mask_2d if mask_2d.shape == (frame_h, frame_w) else None
+            if roi is None:
+                return None
+            x1, y1, x2, y2 = self._clip_roi(roi, frame_w, frame_h)
+            if x2 <= x1 or y2 <= y1:
+                return None
+            local_h, local_w = y2 - y1, x2 - x1
+            local = mask_2d
+            if local.shape != (local_h, local_w):
+                local = cv2.resize(local.astype(np.uint8), (local_w, local_h), interpolation=cv2.INTER_NEAREST).astype(bool)
+            out = np.zeros((frame_h, frame_w), dtype=bool)
+            out[y1:y2, x1:x2] = local[:local_h, :local_w]
+            return out
+        try:
+            arr = np.asarray(payload)
+        except Exception:
+            return None
+        if arr.ndim != 2:
+            return None
+        mask = arr.astype(bool)
+        if mask.shape == (frame_h, frame_w):
+            return mask
+        return None
+
+    def _overlay_mask(self, panel: np.ndarray, mask: np.ndarray, color: Tuple[int, int, int], alpha: float = 0.4) -> None:
+        if mask is None or mask.shape[:2] != panel.shape[:2] or not bool(mask.any()):
+            return
+        overlay = np.empty_like(panel)
+        overlay[:] = color
+        panel[mask] = cv2.addWeighted(panel, 1.0 - float(alpha), overlay, float(alpha), 0)[mask]
+
+    def _draw_pixel_points(self, panel: np.ndarray, points: Any, color: Tuple[int, int, int], radius: int = 1, alpha: float = 1.0) -> None:
         if not isinstance(points, (list, tuple)):
             return
         h, w = panel.shape[:2]
+        target = panel if alpha >= 1.0 else panel.copy()
         for item in points[:2000]:
             if not isinstance(item, (list, tuple)) or len(item) < 2:
                 continue
@@ -421,7 +500,9 @@ class OpenCVPreviewSink(PreviewSink):
             except Exception:
                 continue
             if 0 <= x < w and 0 <= y < h:
-                cv2.circle(panel, (x, y), int(radius), color, -1)
+                cv2.circle(target, (x, y), int(radius), color, -1)
+        if alpha < 1.0:
+            cv2.addWeighted(target, float(alpha), panel, 1.0 - float(alpha), 0, dst=panel)
 
     def _find_table_bbox(self, local: Dict[str, Any], rgb_shape: Any = None) -> Optional[List[int]]:
         if not self._env_bool("VISTA_TABLE_BBOX_ENABLE", True):

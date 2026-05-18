@@ -56,6 +56,7 @@ MOVING_STATES = {
 
 
 TABLE_VISION_STATES = {
+    State.TABLE_APPROACH_WARMUP,
     State.SEARCH_TABLE,
     State.COARSE_ALIGN,
     State.CONTROLLED_APPROACH,
@@ -74,6 +75,7 @@ TARGET_VISION_STATES = {
 
 
 TABLE_APPROACH_STATES = {
+    State.TABLE_APPROACH_WARMUP,
     State.SEARCH_TABLE,
     State.COARSE_ALIGN,
     State.CONTROLLED_APPROACH,
@@ -229,6 +231,7 @@ class OrchestratorCore:
             return safety_override
         dispatch = {
             State.IDLE: self._tick_idle,
+            State.TABLE_APPROACH_WARMUP: self._tick_table_approach_warmup,
             State.SEARCH_TABLE: self._tick_search_table,
             State.COARSE_ALIGN: self._tick_coarse_align,
             State.CONTROLLED_APPROACH: self._tick_controlled_approach,
@@ -280,6 +283,11 @@ class OrchestratorCore:
             "table_found_frames": self.ctx.table_found_frames,
             "table_lost_frames": self.ctx.table_lost_frames,
             "table_lock_frames": self.ctx.table_lock_frames,
+            "table_approach_warmup_active": self.ctx.state == State.TABLE_APPROACH_WARMUP,
+            "warmup_elapsed_s": self._state_elapsed() if self.ctx.state == State.TABLE_APPROACH_WARMUP else 0.0,
+            "warmup_plane_seen_count": int(self.ctx.table_approach_warmup_plane_seen_count),
+            "warmup_fresh_obs_count": int(self.ctx.table_approach_warmup_fresh_obs_count),
+            "warmup_reason": "waiting_for_initial_vision" if self.ctx.state == State.TABLE_APPROACH_WARMUP else "",
             "table_dock_phase": str(self.ctx.table_dock_phase or ""),
             "table_micro_adjust_count": int(self.ctx.table_micro_adjust_count),
             "approach_aligned_frames": self.ctx.approach_aligned_frames,
@@ -592,6 +600,11 @@ class OrchestratorCore:
             "edge_identity_basis": edge_quality.get("edge_identity_basis"),
             "stable_ms": self._transition_stable_ms(old_state),
             "lost_ms": self._transition_lost_ms(old_state),
+            "table_approach_warmup_active": old_state == State.TABLE_APPROACH_WARMUP,
+            "warmup_elapsed_s": self._state_elapsed() if old_state == State.TABLE_APPROACH_WARMUP else 0.0,
+            "warmup_plane_seen_count": int(self.ctx.table_approach_warmup_plane_seen_count),
+            "warmup_fresh_obs_count": int(self.ctx.table_approach_warmup_fresh_obs_count),
+            "warmup_reason": "waiting_for_initial_vision" if old_state == State.TABLE_APPROACH_WARMUP else "",
             "target_found": bool(target_obs.found) if target_obs is not None else None,
             "target_conf": self._float_or_none(target_obs.confidence if target_obs is not None else None),
             "target_cls": (target_obs.matched_cls or target_obs.target if target_obs is not None else None),
@@ -636,6 +649,11 @@ class OrchestratorCore:
             return
         if state == State.SEARCH_TARGET_INIT:
             self._reset_slide_ref_handoff()
+        if state == State.TABLE_APPROACH_WARMUP:
+            self.ctx.table_approach_warmup_fresh_obs_count = 0
+            self.ctx.table_approach_warmup_plane_seen_count = 0
+            self.ctx.table_approach_warmup_last_obs_key = ""
+            self.ctx.table_found_frames = 0
         if state == State.SEARCH_TABLE:
             self.reset_edge_tracking("enter_search_table")
             self.reset_target_tracking("enter_search_table")
@@ -933,7 +951,7 @@ class OrchestratorCore:
         self.ctx.active_session_id = cmd.session_id
         self.ctx.active_epoch = cmd.epoch
         self.ctx.task_start_wall_ts = time.time()
-        self._transition(State.SEARCH_TABLE, f"开始桌边任务，目标 {target}")
+        self._transition(State.TABLE_APPROACH_WARMUP, f"开始桌边任务，视觉warmup，目标 {target}")
         self._queue_tts(f"开始寻找 {target}")
 
     def _start_return_task(self, cmd: TaskCmd):
@@ -948,6 +966,42 @@ class OrchestratorCore:
 
     def _tick_idle(self) -> MotionDecision:
         return self.controller.stop_cmd("IDLE")
+
+    def _tick_table_approach_warmup(self) -> MotionDecision:
+        self._maybe_resend_req(self._active_req_payload())
+        obs = self._fresh_table_obs()
+        obs_key = self._table_obs_key(obs)
+        if obs is not None and obs_key and obs_key != self.ctx.table_approach_warmup_last_obs_key:
+            self.ctx.table_approach_warmup_last_obs_key = obs_key
+            self.ctx.table_approach_warmup_fresh_obs_count += 1
+            if self._table_visible(obs) and (self._control_level(obs) != "none" or self._table_plane_stable(obs)):
+                self.ctx.table_approach_warmup_plane_seen_count += 1
+
+        elapsed_s = self._state_elapsed()
+        warmup_s = max(0.0, float(getattr(self.cfg, "table_approach_warmup_s", 2.0) or 0.0))
+        min_fresh = max(0, int(getattr(self.cfg, "table_approach_warmup_min_fresh_obs", 1) or 0))
+        if elapsed_s < warmup_s:
+            return self.controller.stop_cmd("TABLE_APPROACH_WARMUP")
+
+        has_min_fresh = self.ctx.table_approach_warmup_fresh_obs_count >= min_fresh
+        level = self._control_level(obs)
+        plane_ready = bool(has_min_fresh and self._table_visible(obs) and (level != "none" or self._table_plane_stable(obs)))
+        if plane_ready:
+            self.ctx.table_found_frames = max(int(self.ctx.table_found_frames), int(self.cfg.table_found_frames_to_approach))
+            if level == "approach":
+                self._transition(State.CONTROLLED_APPROACH, "warmup已有fresh plane obs，进入plane-only approach")
+                return self.controller.fov_table_approach_cmd(obs, phase="PLANE_APPROACH")
+            if level == "stop":
+                self._transition(State.FINAL_LOCK, "warmup已有fresh stop obs，进入最终停车")
+                if self._table_dock_should_stop(obs):
+                    return self.controller.stop_cmd("FINAL_LOCK")
+                return self.controller.fov_table_approach_cmd(obs, phase="PLANE_STOP", mode="FINAL_LOCK")
+            self._transition(State.COARSE_ALIGN, "warmup已有fresh plane obs，进入plane yaw/dist对齐")
+            return self.controller.fov_table_approach_cmd(obs, phase="PLANE_FINAL_LOCK", mode="COARSE_ALIGN")
+
+        self.ctx.table_found_frames = 0
+        self._transition(State.SEARCH_TABLE, "warmup未获得稳定plane obs，进入搜索")
+        return self.controller.stop_cmd("TABLE_APPROACH_WARMUP")
 
     def _tick_search_table(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
@@ -1958,6 +2012,15 @@ class OrchestratorCore:
         if obs.session_id and self.ctx.active_session_id and obs.session_id != self.ctx.active_session_id:
             return None
         return obs
+
+    @staticmethod
+    def _table_obs_key(obs: Optional[TableEdgeObs]) -> str:
+        if obs is None:
+            return ""
+        seq = getattr(obs, "seq", None)
+        frame_id = getattr(obs, "frame_id", None)
+        obs_ts = getattr(obs, "obs_ts", None) or getattr(obs, "ts", None)
+        return f"{seq}:{frame_id}:{obs_ts}"
 
     def _table_obs_age_ms(self, obs: Optional[TableEdgeObs]) -> Optional[float]:
         if obs is None:

@@ -79,6 +79,8 @@ class ControlThresholds:
     table_lost_frames_to_reacquire: int = 4
     table_loss_hold_s: float = 1.20
     approach_min_dwell_s: float = 0.80
+    table_approach_warmup_s: float = 2.0
+    table_approach_warmup_min_fresh_obs: int = 1
 
     coarse_align_frames_to_advance: int = 2
     coarse_align_done_rad: float = 0.25
