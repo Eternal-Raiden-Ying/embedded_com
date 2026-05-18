@@ -464,7 +464,8 @@ class MotionController:
         now_s = time.time()
         last_ts = getattr(self.docking, "_last_ts", 0.0) or now_s
         dt = max(0.05, min(0.25, now_s - float(last_ts)))
-        vx = self._clamp(vx, -abs(float(getattr(self.car_cfg, "table_stage_c_vx_max_norm", 0.05))), abs(float(getattr(self.car_cfg, "table_stage_c_vx_max_norm", 0.05))))
+        vx_max = abs(float(getattr(self.car_cfg, "table_vx_norm_max", getattr(self.car_cfg, "table_stage_c_vx_max_norm", 0.05)) or 0.05))
+        vx = self._clamp(vx, -vx_max, vx_max)
         vy = self._clamp(vy, -abs(float(getattr(self.car_cfg, "table_vy_max_norm", 0.02))), abs(float(getattr(self.car_cfg, "table_vy_max_norm", 0.02))))
         wz_max = max(
             abs(float(getattr(self.car_cfg, "table_wz_view_max_norm", 0.10))),
@@ -497,6 +498,8 @@ class MotionController:
         phase_name = self._table_approach_phase(obs, phase)
         soft_th = abs(float(getattr(self.car_cfg, "table_fov_soft_th", 0.25) or 0.25))
         hard_th = abs(float(getattr(self.car_cfg, "table_fov_hard_th", 0.40) or 0.40))
+        control_level = str(getattr(obs, "control_level", "none") or "none").strip().lower() if obs is not None else "none"
+        pose_found = bool(getattr(obs, "pose_found", False)) if obs is not None else False
         plane_touch_left = bool(getattr(obs, "plane_touch_left", False)) if obs is not None else False
         plane_touch_right = bool(getattr(obs, "plane_touch_right", False)) if obs is not None else False
         obs_stale = stale_level != "fresh"
@@ -518,19 +521,38 @@ class MotionController:
         dist_err = float(obs.dist_err_m) if obs is not None and obs.dist_err_m is not None else 0.0
         yaw_err = float(obs.yaw_err_rad) if obs is not None and obs.yaw_err_rad is not None else 0.0
         vx_from_dist = 0.0
-        if base_vx is not None:
-            vx_from_dist = float(base_vx)
-        elif phase_name not in {"PLANE_ACQUIRE", "PLANE_STOP"} and dist_err > float(self.cfg.final_lock_dist_tol_m):
-            vx_from_dist = dist_err * float(getattr(self.car_cfg, "table_dist_kp_norm_per_m", 0.12))
-            max_vx = float(
-                getattr(
-                    self.car_cfg,
-                    "table_stage_b_vx_max_norm" if phase_name == "PLANE_APPROACH" else "table_stage_c_vx_max_norm",
-                    0.05,
-                )
-            )
-            min_vx = min(abs(max_vx), abs(float(getattr(self.car_cfg, "table_stage_c_vx_min_norm", 0.04) or 0.04)))
-            vx_from_dist = self._clamp(vx_from_dist, min_vx, abs(max_vx))
+        min_forward_dist = max(0.0, float(getattr(self.car_cfg, "table_min_forward_dist_err_m", 0.07) or 0.07))
+        vx_min = abs(float(getattr(self.car_cfg, "table_vx_norm_min", 0.018) or 0.018))
+        vx_max = abs(float(getattr(self.car_cfg, "table_vx_norm_max", 0.045) or 0.045))
+        vx_min = min(vx_min, vx_max)
+        vx_kp = max(0.0, float(getattr(self.car_cfg, "table_vx_kp_norm_per_m", 0.10) or 0.10))
+        near_dist_err_th = max(min_forward_dist, float(getattr(self.car_cfg, "table_near_dist_err_th_m", 0.10) or 0.10))
+        forward_allowed = bool(
+            pose_found
+            and view_valid_for_forward
+            and not hard_guard
+            and not obs_stale
+            and dist_err > min_forward_dist
+            and control_level in {"approach", "alignment"}
+            and phase_name not in {"PLANE_ACQUIRE", "PLANE_STOP"}
+        )
+        forward_block_reason = ""
+        if not pose_found:
+            forward_block_reason = "pose_missing"
+        elif not view_valid_for_forward:
+            forward_block_reason = "view_unreliable"
+        elif hard_guard:
+            forward_block_reason = fov_guard_reason or "fov_guard"
+        elif obs_stale:
+            forward_block_reason = stale_level
+        elif dist_err <= min_forward_dist:
+            forward_block_reason = "dist_below_min_forward"
+        elif control_level not in {"approach", "alignment"}:
+            forward_block_reason = f"control_level_{control_level or 'none'}"
+        elif phase_name in {"PLANE_ACQUIRE", "PLANE_STOP"}:
+            forward_block_reason = f"phase_{phase_name.lower()}"
+        if forward_allowed:
+            vx_from_dist = self._clamp(dist_err * vx_kp, vx_min, vx_max)
 
         wz_from_plane = 0.0
         if base_wz is not None:
@@ -562,21 +584,25 @@ class MotionController:
                 abs(float(getattr(self.car_cfg, "table_vy_max_norm", 0.02))),
             )
 
-        yaw_gate = max(0.0, 1.0 - min(1.0, abs(yaw_err) / 0.45))
-        if phase_name == "PLANE_APPROACH":
-            yaw_gate = max(0.35, yaw_gate)
+        yaw_abs = abs(yaw_err)
+        yaw_slow_th = abs(float(getattr(self.car_cfg, "table_yaw_slow_th_rad", 0.12) or 0.12))
+        yaw_stop_th = max(yaw_slow_th + 1e-6, abs(float(getattr(self.car_cfg, "table_yaw_stop_th_rad", 0.45) or 0.45)))
+        yaw_gate = 1.0
+        if yaw_abs > yaw_slow_th:
+            yaw_gate = self._clamp(1.0 - ((yaw_abs - yaw_slow_th) / max(1e-6, yaw_stop_th - yaw_slow_th)), 0.0, 1.0)
         fov_gate = 0.0 if hard_guard else 1.0
         if view_valid_for_forward and abs(view_err) > soft_th and hard_th > soft_th:
             fov_gate = min(fov_gate, max(0.0, 1.0 - ((abs(view_err) - soft_th) / (hard_th - soft_th))))
         if not view_valid_for_forward:
             fov_gate = 0.0
         near_gate = 1.0
-        if dist_err <= float(self.cfg.final_lock_dist_tol_m):
+        final_lock_dist_tol = max(0.0, float(self.cfg.final_lock_dist_tol_m))
+        if dist_err <= final_lock_dist_tol:
             near_gate = 0.0
-        elif dist_err < float(self.cfg.final_lock_dist_tol_m) * 3.0:
-            near_gate = max(0.25, dist_err / max(1e-6, float(self.cfg.final_lock_dist_tol_m) * 3.0))
+        elif dist_err < near_dist_err_th:
+            near_gate = self._clamp((dist_err - final_lock_dist_tol) / max(1e-6, near_dist_err_th - final_lock_dist_tol), 0.0, 1.0)
 
-        vx = 0.0 if phase_name in {"PLANE_ACQUIRE", "PLANE_STOP"} else vx_from_dist * yaw_gate * fov_gate * near_gate
+        vx = vx_from_dist * yaw_gate * fov_gate * near_gate if forward_allowed else 0.0
         vy = float(base_vy or 0.0) + vy_from_view
         wz = wz_from_plane + wz_from_view
         if phase_name in {"PLANE_ACQUIRE", "PLANE_STOP"}:
@@ -655,6 +681,17 @@ class MotionController:
                 "stale_level": stale_level,
                 "stale_guard_active": bool(obs_stale),
                 "stale_guard_reason": str(guard.get("stale_guard_reason") or ""),
+                "pose_found": bool(pose_found),
+                "control_level": control_level,
+                "forward_allowed": bool(forward_allowed),
+                "forward_block_reason": forward_block_reason,
+                "min_forward_dist_err_m": float(min_forward_dist),
+                "vx_norm_min": float(vx_min),
+                "vx_norm_max": float(vx_max),
+                "vx_kp_norm_per_m": float(vx_kp),
+                "near_dist_err_th_m": float(near_dist_err_th),
+                "yaw_slow_th_rad": float(yaw_slow_th),
+                "yaw_stop_th_rad": float(yaw_stop_th),
                 "vx_from_dist": float(vx_from_dist),
                 "vy_from_view": float(vy_from_view),
                 "wz_from_plane": float(wz_from_plane),

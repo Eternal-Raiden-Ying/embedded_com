@@ -184,7 +184,7 @@ class ControlThresholds:
 
 @dataclass
 class CarMotionConfig:
-    search_table_wz_norm: float = 0.22
+    search_table_wz_norm: float = 0.10
     fallback_align_turn_norm_min: float = 0.10
     fallback_align_turn_norm_max: float = 0.45
     fallback_forward_vx_norm_min: float = 0.06
@@ -200,6 +200,13 @@ class CarMotionConfig:
     table_stage_b_vx_max_norm: float = 0.03
     table_stage_c_vx_max_norm: float = 0.03
     table_stage_c_vx_min_norm: float = 0.0
+    table_min_forward_dist_err_m: float = 0.07
+    table_vx_norm_min: float = 0.018
+    table_vx_norm_max: float = 0.045
+    table_vx_kp_norm_per_m: float = 0.10
+    table_yaw_slow_th_rad: float = 0.12
+    table_yaw_stop_th_rad: float = 0.45
+    table_near_dist_err_th_m: float = 0.10
     table_vy_max_norm: float = 0.01
     table_wz_view_max_norm: float = 0.05
     table_wz_plane_max_norm: float = 0.06

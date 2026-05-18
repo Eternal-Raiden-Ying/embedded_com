@@ -41,6 +41,7 @@ def _obs(**kwargs) -> TableEdgeObs:
         "dist_err_m": 0.12,
         "target_dist_m": 0.50,
         "control_level": "alignment",
+        "pose_found": True,
         "usable_for_approach": True,
         "usable_for_alignment": True,
         "view_reliable": True,
@@ -138,7 +139,56 @@ class FovTableApproachTest(unittest.TestCase):
         obs = _obs(frame_capture_ts=now_ts() - 0.05)
         decision = controller.fov_table_approach_cmd(obs)
         self.assertEqual(decision.control_summary["stale_level"], "fresh")
-        self.assertGreaterEqual(decision.cmd.vx_norm, 0.0)
+        self.assertGreater(decision.cmd.vx_norm, 0.0)
+        self.assertTrue(decision.control_summary["forward_allowed"])
+
+    def test_forward_release_requires_pose_found(self) -> None:
+        controller = _controller()
+        obs = _obs(pose_found=False, dist_err_m=0.30, control_level="approach")
+        decision = controller.fov_table_approach_cmd(obs)
+        self.assertEqual(decision.cmd.vx_norm, 0.0)
+        self.assertFalse(decision.control_summary["forward_allowed"])
+        self.assertEqual(decision.control_summary["forward_block_reason"], "pose_missing")
+
+    def test_forward_release_uses_low_speed_clamp(self) -> None:
+        controller = _controller()
+        obs = _obs(dist_err_m=0.30, control_level="approach", yaw_err_rad=0.0, view_err_norm=0.0, plane_cx_norm=0.0)
+        decision = controller.fov_table_approach_cmd(obs)
+        self.assertTrue(decision.control_summary["forward_allowed"])
+        self.assertAlmostEqual(decision.cmd.vx_norm, 0.03, places=6)
+        self.assertLessEqual(decision.cmd.vx_norm, controller.car_cfg.table_vx_norm_max)
+
+    def test_forward_release_respects_min_distance(self) -> None:
+        controller = _controller()
+        obs = _obs(dist_err_m=0.05, control_level="approach")
+        decision = controller.fov_table_approach_cmd(obs)
+        self.assertEqual(decision.cmd.vx_norm, 0.0)
+        self.assertEqual(decision.control_summary["forward_block_reason"], "dist_below_min_forward")
+
+    def test_forward_release_slows_for_yaw_and_fov_soft_gate(self) -> None:
+        controller = _controller()
+        yaw_obs = _obs(dist_err_m=0.30, yaw_err_rad=0.30, control_level="approach", view_err_norm=0.0, plane_cx_norm=0.0)
+        yaw_decision = controller.fov_table_approach_cmd(yaw_obs)
+        self.assertTrue(0.0 < yaw_decision.control_summary["yaw_gate"] < 1.0)
+        self.assertLess(yaw_decision.cmd.vx_norm, yaw_decision.control_summary["vx_from_dist"])
+
+        controller = _controller()
+        fov_obs = _obs(dist_err_m=0.30, yaw_err_rad=0.0, control_level="approach", view_err_norm=0.30, plane_cx_norm=0.30)
+        fov_decision = controller.fov_table_approach_cmd(fov_obs)
+        self.assertTrue(0.0 < fov_decision.control_summary["fov_gate"] < 1.0)
+        self.assertLess(fov_decision.cmd.vx_norm, fov_decision.control_summary["vx_from_dist"])
+
+    def test_stop_level_does_not_release_forward(self) -> None:
+        controller = _controller()
+        obs = _obs(control_level="stop", usable_for_stop=True, dist_err_m=0.30)
+        decision = controller.fov_table_approach_cmd(obs)
+        self.assertEqual(decision.cmd.vx_norm, 0.0)
+        self.assertFalse(decision.control_summary["forward_allowed"])
+
+    def test_search_table_default_turn_is_conservative(self) -> None:
+        controller = _controller()
+        decision = controller.search_table_cmd()
+        self.assertLessEqual(abs(decision.cmd.wz_norm), 0.12)
 
     def test_soft_stale_blocks_forward_only(self) -> None:
         controller = _controller()

@@ -314,6 +314,7 @@ class OrchestratorCore:
             "usable_for_approach": bool(getattr(table_obs, "usable_for_approach", False)) if table_obs is not None else False,
             "usable_for_alignment": bool(getattr(table_obs, "usable_for_alignment", False)) if table_obs is not None else False,
             "usable_for_stop": bool(getattr(table_obs, "usable_for_stop", False)) if table_obs is not None else False,
+            "pose_found": bool(getattr(table_obs, "pose_found", False)) if table_obs is not None else False,
             "table_confirmed_by_yolo": bool(getattr(table_obs, "table_confirmed_by_yolo", False)) if table_obs is not None else False,
             "yolo_gate_open": bool(getattr(table_obs, "yolo_gate_open", False)) if table_obs is not None else False,
             "table_approach_phase": self._table_approach_phase(table_obs),

@@ -355,6 +355,7 @@ class TableEdgeObs:
     edge_inlier_count: Optional[int] = None
     target_dist_m: Optional[float] = None
     valid_for_control: Optional[bool] = None
+    pose_found: bool = False
     pose_source: Optional[str] = None
     final_pose_source: Optional[str] = None
     table_geometry_score: Optional[float] = None
@@ -450,6 +451,7 @@ class TableEdgeObs:
             edge_inlier_count=_pick_optional_int(payload, "edge_inlier_count", "inlier_count"),
             target_dist_m=_pick_optional_float(payload, "target_dist_m", "target_distance_m"),
             valid_for_control=_pick_optional_bool(payload, "valid_for_control"),
+            pose_found=bool(payload.get("pose_found", False)),
             pose_source=_pick_optional_str(payload, "pose_source"),
             final_pose_source=_pick_optional_str(payload, "final_pose_source"),
             table_geometry_score=_pick_optional_float(payload, "table_geometry_score"),
