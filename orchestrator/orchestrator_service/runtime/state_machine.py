@@ -315,6 +315,16 @@ class OrchestratorCore:
             "usable_for_alignment": bool(getattr(table_obs, "usable_for_alignment", False)) if table_obs is not None else False,
             "usable_for_stop": bool(getattr(table_obs, "usable_for_stop", False)) if table_obs is not None else False,
             "table_confirmed_by_yolo": bool(getattr(table_obs, "table_confirmed_by_yolo", False)) if table_obs is not None else False,
+            "table_approach_phase": self._table_approach_phase(table_obs),
+            "view_source": getattr(table_obs, "view_source", None) if table_obs is not None else None,
+            "view_err_norm": getattr(table_obs, "view_err_norm", None) if table_obs is not None else None,
+            "view_reliable": bool(getattr(table_obs, "view_reliable", False)) if table_obs is not None else False,
+            "fov_guard_active": bool(getattr(table_obs, "fov_guard_active", False)) if table_obs is not None else False,
+            "yolo_reliable": bool(getattr(table_obs, "yolo_reliable", False)) if table_obs is not None else False,
+            "plane_cx_norm": getattr(table_obs, "plane_cx_norm", None) if table_obs is not None else None,
+            "plane_width_norm": getattr(table_obs, "plane_width_norm", None) if table_obs is not None else None,
+            "plane_touch_left": bool(getattr(table_obs, "plane_touch_left", False)) if table_obs is not None else False,
+            "plane_touch_right": bool(getattr(table_obs, "plane_touch_right", False)) if table_obs is not None else False,
             "confidence": table_obs.confidence if table_obs is not None else None,
             "edge_conf": getattr(table_obs, "edge_conf", table_obs.confidence) if table_obs is not None else None,
             "yaw_err_rad": table_obs.yaw_err_rad if table_obs is not None else None,
@@ -934,15 +944,20 @@ class OrchestratorCore:
         self._maybe_resend_req(self._active_req_payload())
         obs = self._fresh_table_obs()
         level = self._control_level(obs)
-        if self._table_visible(obs) and level != "none":
+        if self._table_visible(obs) and (level != "none" or self._table_yolo_reliable(obs)):
             self.ctx.table_found_frames += 1
             if self.ctx.table_found_frames >= int(self.cfg.table_found_frames_to_approach):
+                if level == "none" and self._table_yolo_reliable(obs):
+                    self._transition(State.CONTROLLED_APPROACH, "YOLO连续确认桌子，进入Stage A视野居中")
+                    return self.controller.fov_table_approach_cmd(obs, phase="STAGE_A")
                 if level == "approach":
-                    self._transition(State.CONTROLLED_APPROACH, "YOLO确认桌子，plane-only低速靠近")
-                    return self.controller.plane_approach_cmd(obs)
+                    self._transition(State.CONTROLLED_APPROACH, "YOLO确认桌子，FOV-aware低速靠近")
+                    return self.controller.fov_table_approach_cmd(obs)
                 if level == "stop":
                     self._transition(State.FINAL_LOCK, "plane-only stop 可用，进入最终停车")
-                    return self.controller.stop_cmd("FINAL_LOCK")
+                    if self._table_dock_should_stop(obs):
+                        return self.controller.stop_cmd("FINAL_LOCK")
+                    return self.controller.final_lock_cmd(obs)
                 self._transition(State.COARSE_ALIGN, "稳定发现桌边")
                 return self.controller.coarse_align_cmd(obs)
         else:
@@ -960,13 +975,18 @@ class OrchestratorCore:
         self._reset_table_loss()
         level = self._control_level(obs)
         if level == "none":
+            if self._table_yolo_reliable(obs):
+                self._transition(State.CONTROLLED_APPROACH, "plane未稳定，Stage A继续YOLO视野居中")
+                return self.controller.fov_table_approach_cmd(obs, phase="STAGE_A")
             return self.controller.stop_cmd("COARSE_ALIGN")
         if level == "approach":
             self._transition(State.CONTROLLED_APPROACH, "plane-only approach 可用，低速靠近")
-            return self.controller.plane_approach_cmd(obs)
+            return self.controller.fov_table_approach_cmd(obs)
         if level == "stop":
             self._transition(State.FINAL_LOCK, "plane-only stop 可用，进入停车确认")
-            return self.controller.stop_cmd("FINAL_LOCK")
+            if self._table_dock_should_stop(obs):
+                return self.controller.stop_cmd("FINAL_LOCK")
+            return self.controller.final_lock_cmd(obs)
         if self._coarse_aligned(obs):
             self.ctx.approach_aligned_frames += 1
             if self.ctx.approach_aligned_frames >= int(self.cfg.coarse_align_frames_to_advance):
@@ -986,12 +1006,16 @@ class OrchestratorCore:
         self._reset_table_loss()
         level = self._control_level(obs)
         if level == "none":
+            if self._table_yolo_reliable(obs):
+                return self.controller.fov_table_approach_cmd(obs, phase="STAGE_A")
             return self.controller.stop_cmd("CONTROLLED_APPROACH")
         if level == "approach":
-            return self.controller.plane_approach_cmd(obs)
+            return self.controller.fov_table_approach_cmd(obs)
         if level == "stop":
             self._transition(State.FINAL_LOCK, "plane-only stop 可用，进入最终停车")
-            return self.controller.stop_cmd("FINAL_LOCK")
+            if self._table_dock_should_stop(obs):
+                return self.controller.stop_cmd("FINAL_LOCK")
+            return self.controller.final_lock_cmd(obs)
         if self._edge_ready(obs):
             self._transition(State.FINAL_LOCK, "进入最终锁边")
             return self.controller.final_lock_cmd(obs)
@@ -1997,7 +2021,7 @@ class OrchestratorCore:
         self.ctx.table_loss_since_mono = 0.0
 
     def _table_visible(self, obs: Optional[TableEdgeObs]) -> bool:
-        return bool(obs is not None and obs.table_found)
+        return bool(obs is not None and (obs.table_found or self._table_yolo_reliable(obs)))
 
     @staticmethod
     def _median(values: List[float]) -> Optional[float]:
@@ -2221,6 +2245,32 @@ class OrchestratorCore:
             return "none"
         level = str(getattr(obs, "control_level", "none") or "none").strip().lower()
         return level if level in {"approach", "alignment", "stop"} else "none"
+
+    def _table_yolo_reliable(self, obs: Optional[TableEdgeObs]) -> bool:
+        if obs is None:
+            return False
+        if hasattr(obs, "yolo_reliable"):
+            return bool(getattr(obs, "yolo_reliable", False))
+        return bool(getattr(obs, "table_confirmed_by_yolo", False)) and getattr(obs, "table_cx_norm", None) is not None
+
+    def _table_plane_stable(self, obs: Optional[TableEdgeObs]) -> bool:
+        if obs is None or obs.yaw_err_rad is None or obs.dist_err_m is None:
+            return False
+        if bool(getattr(obs, "usable_for_alignment", False)) or bool(getattr(obs, "usable_for_stop", False)):
+            return True
+        level = self._control_level(obs)
+        return level in {"alignment", "stop"} or (level == "approach" and bool(getattr(obs, "edge_found", False)))
+
+    def _table_approach_phase(self, obs: Optional[TableEdgeObs]) -> str:
+        yolo = self._table_yolo_reliable(obs)
+        plane = self._table_plane_stable(obs)
+        if yolo and not plane:
+            return "STAGE_A"
+        if yolo and plane:
+            return "STAGE_B"
+        if plane:
+            return "STAGE_C"
+        return "HOLD"
 
     def _coarse_aligned(self, obs: Optional[TableEdgeObs]) -> bool:
         if obs is None:

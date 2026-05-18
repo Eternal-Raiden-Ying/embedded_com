@@ -190,6 +190,98 @@ class TableEdgeManager:
         return max(0.0, (time.perf_counter() - float(start_ts)) * 1000.0)
 
     @staticmethod
+    def _shape_hw(shape: Any) -> Optional[tuple[int, int]]:
+        if not isinstance(shape, (list, tuple)) or len(shape) < 2:
+            return None
+        try:
+            h = int(shape[0])
+            w = int(shape[1])
+        except Exception:
+            return None
+        if w <= 0 or h <= 0:
+            return None
+        return h, w
+
+    @classmethod
+    def _bbox_view_metrics(
+        cls,
+        bbox: Any,
+        shape: Any,
+        *,
+        edge_margin_norm: float = 0.03,
+        max_reliable_area: float = 0.65,
+    ) -> Dict[str, Any]:
+        hw = cls._shape_hw(shape)
+        if not isinstance(bbox, (list, tuple)) or len(bbox) < 4 or hw is None:
+            return {
+                "cx_norm": None,
+                "area_norm": None,
+                "touch_left": False,
+                "touch_right": False,
+                "touch_top": False,
+                "touch_bottom": False,
+                "touch_boundary": False,
+                "reliable": False,
+            }
+        h, w = hw
+        try:
+            x0, y0, x1, y1 = [float(v) for v in bbox[:4]]
+        except Exception:
+            return {
+                "cx_norm": None,
+                "area_norm": None,
+                "touch_left": False,
+                "touch_right": False,
+                "touch_top": False,
+                "touch_bottom": False,
+                "touch_boundary": False,
+                "reliable": False,
+            }
+        x0, x1 = sorted((max(0.0, min(float(w), x0)), max(0.0, min(float(w), x1))))
+        y0, y1 = sorted((max(0.0, min(float(h), y0)), max(0.0, min(float(h), y1))))
+        bw = max(0.0, x1 - x0)
+        bh = max(0.0, y1 - y0)
+        area = (bw * bh) / max(1.0, float(w * h))
+        margin_x = max(1.0, float(w) * float(edge_margin_norm))
+        margin_y = max(1.0, float(h) * float(edge_margin_norm))
+        touch_left = x0 <= margin_x
+        touch_right = x1 >= float(w) - margin_x
+        touch_top = y0 <= margin_y
+        touch_bottom = y1 >= float(h) - margin_y
+        cx_norm = (((x0 + x1) * 0.5) / max(1.0, float(w)) - 0.5) * 2.0
+        touch_boundary = bool(touch_left or touch_right or touch_top or touch_bottom)
+        return {
+            "cx_norm": max(-1.0, min(1.0, float(cx_norm))),
+            "area_norm": max(0.0, min(1.0, float(area))),
+            "touch_left": bool(touch_left),
+            "touch_right": bool(touch_right),
+            "touch_top": bool(touch_top),
+            "touch_bottom": bool(touch_bottom),
+            "touch_boundary": touch_boundary,
+            "reliable": bool(area > 0.0 and area <= float(max_reliable_area) and not touch_boundary),
+        }
+
+    @classmethod
+    def _plane_view_from_bbox(cls, bbox: Any, shape: Any, *, area_ratio: Optional[float] = None) -> Dict[str, Any]:
+        metrics = cls._bbox_view_metrics(bbox, shape, max_reliable_area=1.0)
+        width_norm = None
+        hw = cls._shape_hw(shape)
+        if hw is not None and isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+            try:
+                width_norm = abs(float(bbox[2]) - float(bbox[0])) / max(1.0, float(hw[1]))
+            except Exception:
+                width_norm = None
+        return {
+            "plane_cx_norm": metrics["cx_norm"],
+            "plane_width_norm": width_norm,
+            "plane_area_ratio": area_ratio,
+            "plane_touch_left": bool(metrics["touch_left"]),
+            "plane_touch_right": bool(metrics["touch_right"]),
+            "plane_touch_top": bool(metrics["touch_top"]),
+            "plane_touch_bottom": bool(metrics["touch_bottom"]),
+        }
+
+    @staticmethod
     def _profile_template() -> Dict[str, float]:
         return {
             "depth_frame_fetch_ms": 0.0,
@@ -254,6 +346,22 @@ class TableEdgeManager:
             "table_confirmed_by_yolo": False,
             "yolo_table_conf": None,
             "yolo_gate_reason": str(reason or ""),
+            "yolo_reliable": False,
+            "yolo_bbox_area_norm": None,
+            "yolo_bbox_touch_left": False,
+            "yolo_bbox_touch_right": False,
+            "yolo_bbox_touch_boundary": False,
+            "plane_cx_norm": None,
+            "plane_width_norm": None,
+            "plane_area_ratio": None,
+            "plane_touch_left": False,
+            "plane_touch_right": False,
+            "plane_touch_top": False,
+            "plane_touch_bottom": False,
+            "view_err_norm": None,
+            "view_source": "none",
+            "view_reliable": False,
+            "fov_guard_active": False,
             "valid_for_control": False,
             "usable_for_approach": False,
             "usable_for_alignment": False,
@@ -281,11 +389,26 @@ class TableEdgeManager:
         reason = "yolo_table_confirmed" if confirmed else str(det.get("reason") or "waiting_yolo_table_confirm")
         if source and source != "yolo_table_bbox":
             reason = f"table_source_{source}"
+        bbox_metrics = self._bbox_view_metrics(det.get("bbox"), local_payload.get("rgb_shape"))
+        bbox_conf = det.get("conf")
+        yolo_reliable = bool(
+            confirmed
+            and bbox_metrics.get("reliable", False)
+            and bbox_conf is not None
+            and float(bbox_conf) >= min_conf
+        )
         return {
             "table_confirmed_by_yolo": confirmed,
             "yolo_table_conf": det.get("conf"),
             "yolo_gate_reason": reason,
             "yolo_table_bbox": det.get("bbox"),
+            "yolo_reliable": yolo_reliable,
+            "yolo_bbox_area_norm": bbox_metrics.get("area_norm"),
+            "yolo_bbox_touch_left": bool(bbox_metrics.get("touch_left", False)),
+            "yolo_bbox_touch_right": bool(bbox_metrics.get("touch_right", False)),
+            "yolo_bbox_touch_boundary": bool(bbox_metrics.get("touch_boundary", False)),
+            "table_cx_norm": bbox_metrics.get("cx_norm"),
+            "table_size_norm": bbox_metrics.get("area_norm"),
         }
 
     def _static_roi(self) -> Optional[list[int]]:
@@ -481,9 +604,27 @@ class TableEdgeManager:
             profile["total_edge_process_ms"] = self._ms_since(total_start)
             return self._attach_profile(payload, profile, path="full_detect_failed")
         roi_box = None
+        front_plane = None
         if isinstance(_debug, dict):
             roi_box = _debug.get("roi_box")
+            front_plane = _debug.get("front_plane") if isinstance(_debug.get("front_plane"), dict) else None
         roi_payload = self._roi_payload(roi_box, roi_meta)
+        plane_bbox = None
+        if isinstance(front_plane, dict) and bool(front_plane.get("found", False)):
+            try:
+                ix0 = front_plane.get("image_x_min")
+                ix1 = front_plane.get("image_x_max")
+                iy0 = front_plane.get("image_y_min")
+                iy1 = front_plane.get("image_y_max")
+                if ix0 is not None and ix1 is not None and iy0 is not None and iy1 is not None:
+                    plane_bbox = [int(ix0), int(iy0), int(ix1) + 1, int(iy1) + 1]
+            except Exception:
+                plane_bbox = None
+        plane_view = self._plane_view_from_bbox(
+            plane_bbox,
+            getattr(depth_frame, "shape", None),
+            area_ratio=front_plane.get("area_ratio") if isinstance(front_plane, dict) else None,
+        )
         table_points = int(getattr(result, "table_point_count", 0) or 0)
         all_points = int(getattr(result, "point_count", 0) or 0)
         edge_found = bool(getattr(result, "edge_found", False))
@@ -518,6 +659,14 @@ class TableEdgeManager:
             "edge_inlier_count": int(getattr(result, "inlier_count", 0) or 0),
             "selected_edge": edge_found,
             "near_edge": valid_for_control,
+            **plane_view,
+            "view_err_norm": plane_view.get("plane_cx_norm") if edge_found else yolo_gate.get("table_cx_norm"),
+            "view_source": "plane" if edge_found else ("yolo" if yolo_gate.get("yolo_reliable") else "none"),
+            "view_reliable": bool(
+                (edge_found and plane_view.get("plane_cx_norm") is not None)
+                or yolo_gate.get("yolo_reliable", False)
+            ),
+            "fov_guard_active": False,
             "frame_id": int(self._frame_id),
             "frame_seq": int(frame_seq),
             "source": "vision_table_edge_manager",
@@ -604,6 +753,7 @@ class TableEdgeManager:
         profile["depth_frame_fetch_ms"] = float(self._last_depth_frame_fetch_ms)
         roi_select_start = time.perf_counter()
         roi_meta = self._select_roi(depth_frame)
+        yolo_gate = self._yolo_table_confirmation()
         roi_box = roi_meta.get("depth_edge_roi") if roi_meta.get("roi_source") != "static_fallback" else self._static_roi()
         if roi_box is None:
             roi_box = self._static_roi()
@@ -684,6 +834,12 @@ class TableEdgeManager:
             dist_err = float(b) - float(self._target_dist_m)
             edge_conf = float(inlier_count) / float(max(1, table_count))
             edge_found = bool(inlier_count >= min_table)
+            if edge_found and inlier_count >= min_table:
+                yy_plane = yy[table_mask][inlier]
+                xx_plane = xx[table_mask][inlier]
+            else:
+                yy_plane = yy[table_mask]
+                xx_plane = xx[table_mask]
         except Exception as exc:
             payload = self._default_result(depth_valid=True, reason=f"light_fit_failed:{exc}", frame_seq=frame_seq, roi_meta=roi_meta)
             payload.update(roi_payload)
@@ -693,6 +849,19 @@ class TableEdgeManager:
             profile["total_edge_process_ms"] = self._ms_since(total_start)
             return self._attach_profile(payload, profile, path="light_fit_failed")
         profile["plane_or_edge_fit_ms"] = self._ms_since(fit_start)
+        plane_bbox = None
+        if edge_found and len(xx_plane) > 0 and len(yy_plane) > 0:
+            px0 = x0 + int(np.min(xx_plane)) * stride
+            px1 = x0 + int(np.max(xx_plane)) * stride
+            py0 = y0 + int(np.min(yy_plane)) * stride
+            py1 = y0 + int(np.max(yy_plane)) * stride
+            plane_bbox = [px0, py0, px1 + stride, py1 + stride]
+        roi_area = max(1.0, float(max(1, x1 - x0) * max(1, y1 - y0)) / float(max(1, stride * stride)))
+        plane_view = self._plane_view_from_bbox(
+            plane_bbox or roi_box,
+            getattr(depth_frame, "shape", None),
+            area_ratio=float(inlier_count) / roi_area if edge_found else None,
+        )
 
         payload = {
             "table_found": bool(table_count > 0),
@@ -714,6 +883,11 @@ class TableEdgeManager:
             "edge_inlier_count": int(inlier_count),
             "selected_edge": edge_found,
             "near_edge": edge_found,
+            **plane_view,
+            "view_err_norm": plane_view.get("plane_cx_norm") if edge_found else None,
+            "view_source": "plane" if edge_found else "none",
+            "view_reliable": bool(edge_found),
+            "fov_guard_active": False,
             "frame_id": int(self._frame_id),
             "frame_seq": int(frame_seq),
             "source": "vision_table_edge_manager",
@@ -721,6 +895,7 @@ class TableEdgeManager:
             "target_dist_m": float(self._target_dist_m),
             "lightweight": True,
             "sample_stride": int(stride),
+            **yolo_gate,
             **roi_payload,
             "type": "table_edge_obs",
         }

@@ -111,9 +111,9 @@ class OrchestratorService(BaseModule):
             logger=self._operator_emit,
             tx_meta_factory=self._build_stm32_motion_tx_meta,
             wheel_speed_limit=cfg.car.stm32_wheel_speed_limit,
-            vx_scale=cfg.car.stm32_vx_scale,
-            vy_scale=cfg.car.stm32_vy_scale,
-            wz_scale=cfg.car.stm32_wz_scale,
+            vx_scale=cfg.car.vx_mps_per_norm,
+            vy_scale=cfg.car.vy_mps_per_norm,
+            wz_scale=cfg.car.wz_radps_per_norm,
             jog_forward_speed=cfg.car.jog_forward_speed,
             jog_turn_speed=cfg.car.jog_turn_speed,
             jog_duration_ms=cfg.car.jog_duration_ms,
@@ -539,6 +539,9 @@ class OrchestratorService(BaseModule):
                 "stm32_vx_scale": self.cfg.car.stm32_vx_scale,
                 "stm32_vy_scale": self.cfg.car.stm32_vy_scale,
                 "stm32_wz_scale": self.cfg.car.stm32_wz_scale,
+                "vx_mps_per_norm": self.cfg.car.vx_mps_per_norm,
+                "vy_mps_per_norm": self.cfg.car.vy_mps_per_norm,
+                "wz_radps_per_norm": self.cfg.car.wz_radps_per_norm,
                 "jog_forward_speed": self.cfg.car.jog_forward_speed,
                 "jog_turn_speed": self.cfg.car.jog_turn_speed,
                 "jog_duration_ms": self.cfg.car.jog_duration_ms,
@@ -710,24 +713,26 @@ class OrchestratorService(BaseModule):
         if uart_kind == "mode":
             return f"[ORCH] CAR_MODE mode={payload.get('car_mode') or payload.get('mode') or 'UNKNOWN'}"
         if uart_kind == "vel":
-            return (
+            base = (
                 f"[ORCH] CAR_VEL "
                 f"vx={self._fmt_float(payload.get('actual_vx_norm', payload.get('vx_norm', 0.0)))} "
                 f"vy={self._fmt_float(payload.get('actual_vy_norm', payload.get('vy_norm', 0.0)))} "
-                f"wz={self._fmt_float(payload.get('actual_wz_norm', payload.get('wz_norm', 0.0)))} "
-                f"hold={int(payload.get('actual_hold_ms', payload.get('hold_ms', 0)) or 0)}ms"
+                f"wz={self._fmt_float(payload.get('actual_wz_norm', payload.get('wz_norm', 0.0)))}"
             )
+            if "actual_hold_ms" in payload or "hold_ms" in payload:
+                base += f" hold={int(payload.get('actual_hold_ms', payload.get('hold_ms', 0)) or 0)}ms"
+            return base
         if uart_kind == "stop":
             return f"[ORCH] CAR_STOP mode={payload.get('mode') or 'STOP'}"
         if uart_kind == "brake":
             return f"[ORCH] CAR_BRAKE mode={payload.get('mode') or 'BRAKE'}"
         if uart_kind == "stm32_vel":
             return (
-                f"[ORCH] STM32_VEL "
-                f"s006={int(payload.get('s006', 0) or 0)} "
-                f"s007={int(payload.get('s007', 0) or 0)} "
-                f"s008={int(payload.get('s008', 0) or 0)} "
-                f"s009={int(payload.get('s009', 0) or 0)} "
+                f"[ORCH] STM32_V "
+                f"mode={payload.get('wire_mode', payload.get('mode', 'SEARCH'))} "
+                f"vx={self._fmt_float(payload.get('vx_mps', payload.get('actual_vx_norm', 0.0)))} "
+                f"vy={self._fmt_float(payload.get('vy_mps', payload.get('actual_vy_norm', 0.0)))} "
+                f"wz={self._fmt_float(payload.get('wz_radps', payload.get('actual_wz_norm', 0.0)))} "
                 f"seq={payload.get('seq', 'n/a')}"
             )
         if uart_kind == "stm32_jog":
@@ -842,6 +847,17 @@ class OrchestratorService(BaseModule):
                     item["seq"] = int(float(parts[5]))
                 except Exception:
                     pass
+            elif upper == "V" and len(parts) >= 4:
+                item["uart_kind"] = "vel"
+                try:
+                    item["actual_vx_norm"] = float(parts[1])
+                    item["actual_vy_norm"] = float(parts[2])
+                    item["actual_wz_norm"] = float(parts[3])
+                    item["vx_mps"] = float(parts[1])
+                    item["vy_mps"] = float(parts[2])
+                    item["wz_radps"] = float(parts[3])
+                except Exception:
+                    pass
             elif upper == "VEL" and len(parts) >= 5:
                 item["uart_kind"] = "vel"
                 try:
@@ -934,6 +950,7 @@ class OrchestratorService(BaseModule):
         self._operator_emit(
             "[ORCH] PARAMS "
             f"tick_hz={float(self.cfg.runtime.tick_hz):.2f} send_period_ms={int(self.cfg.car.send_period_ms)} "
+            f"protocol=MODE/V/STOP "
             f"final_lock yaw={self.cfg.control.final_lock_yaw_tol_rad:.3f} "
             f"dist={self.cfg.control.final_lock_dist_tol_m:.3f} "
             f"stable_frames={int(self.cfg.control.final_lock_frames_to_arrive)} "
@@ -945,8 +962,9 @@ class OrchestratorService(BaseModule):
         self.vision_server.start()
         self._running = True
         self.run_logger.write_service_event("SERVICE_READY", run_dir=str(self.run_logger.run_dir))
-        uart_mode = "fake" if self.cfg.serial.dry_run else str(self.cfg.serial.port)
-        self._operator_emit(f"[ORCH] READY state={self.core.ctx.state.value} dry_run={int(bool(self.cfg.serial.dry_run))} uart={uart_mode}")
+        effective_dry_run = bool(getattr(self.uart, "dry_run", self.cfg.serial.dry_run))
+        uart_mode = "fake" if effective_dry_run else str(self.cfg.serial.port)
+        self._operator_emit(f"[ORCH] READY state={self.core.ctx.state.value} dry_run={int(effective_dry_run)} uart={uart_mode}")
         self.log_info("runtime", "SERVICE_READY", {"run_dir": str(self.run_logger.run_dir)})
         self._emit_heartbeat_if_needed(force=True)
 
@@ -1908,7 +1926,7 @@ class OrchestratorService(BaseModule):
         car_cmd = self.mapper.from_cmd_vel(cmd, cx_norm_abs=decision.cx_norm_abs, distance_ratio=decision.distance_ratio)
         tx_meta = self._build_uart_tx_meta(car_cmd)
         reason = str(tx_meta.get("reason") or car_cmd.kind or "").strip()
-        wheels = self.motion_adapter.cmd_vel_to_wheels(cmd)
+        velocity = self.motion_adapter.cmd_vel_to_velocity(cmd)
         seq = self.motion_adapter.send_cmd_vel(cmd, reason=reason)
         self.motion_status["last_seq"] = seq
         self.motion_status["jog_running"] = False
@@ -1922,13 +1940,12 @@ class OrchestratorService(BaseModule):
             "hold_ms": car_cmd.hold_ms,
             "brake": car_cmd.brake,
             "stm32_seq": seq,
-            "stm32_wheels": {
-                "s006": wheels[0],
-                "s007": wheels[1],
-                "s008": wheels[2],
-                "s009": wheels[3],
+            "stm32_velocity": {
+                "vx_mps": velocity[0],
+                "vy_mps": velocity[1],
+                "wz_radps": velocity[2],
             },
-            "raw": f"STOP {seq}" if car_cmd.kind in {"stop", "brake"} else f"VEL {wheels[0]} {wheels[1]} {wheels[2]} {wheels[3]} {seq}",
+            "raw": "STOP" if car_cmd.kind in {"stop", "brake"} else f"V {velocity[0]:.3f} {velocity[1]:.3f} {velocity[2]:.3f}",
             "legacy_raw": car_cmd.raw_line.rstrip("\n"),
         }
         car_record.update({k: v for k, v in tx_meta.items() if v not in (None, "")})

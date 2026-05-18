@@ -37,7 +37,7 @@ def maybe_read(ser, dry_run: bool, wait_s: float = 0.25):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="直接验证底盘 TXT 串口协议是否接受 MODE/VEL/STOP/BRAKE")
+    ap = argparse.ArgumentParser(description="直接验证底盘 TXT 串口协议是否接受 MODE/V/STOP")
     ap.add_argument("--port", default="/dev/ttyHS1")
     ap.add_argument("--baud", type=int, default=115200)
     ap.add_argument("--timeout", type=float, default=0.1)
@@ -55,17 +55,16 @@ def main():
         print(f"[INFO] opened {args.port} @ {args.baud}")
 
     seq = [
-        ("PING\n", 0.2),
-        ("MODE SEARCH_TABLE\n", 0.05),
-        ("VEL 0.000 0.000 0.220 150\n", args.sleep),
-        ("MODE COARSE_ALIGN\n", 0.05),
-        ("VEL 0.000 0.000 -0.180 150\n", args.sleep),
-        ("MODE CONTROLLED_APPROACH\n", 0.05),
-        ("VEL 0.120 0.040 -0.080 150\n", args.sleep),
-        ("MODE EDGE_SLIDE_SEARCH\n", 0.05),
-        ("VEL 0.000 0.140 0.000 150\n", args.sleep),
+        ("MODE SEARCH\n", 0.05),
+        ("V 0.000 0.000 0.220\n", args.sleep),
+        ("V 0.000 0.000 -0.180\n", args.sleep),
+        ("V 0.120 0.040 -0.080\n", args.sleep),
+        ("V 0.000 0.140 0.000\n", args.sleep),
+        ("MODE RETURN\n", 0.05),
+        ("V 0.100 0.000 0.000\n", args.sleep),
+        ("MODE AUTOSEARCH\n", 0.2),
+        ("MODE AUTOEXPLORE\n", 0.2),
         ("STOP\n", 0.4),
-        ("BRAKE\n", 0.4),
     ]
 
     try:

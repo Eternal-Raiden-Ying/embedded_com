@@ -228,13 +228,13 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         lines = []
         svc = _service(lines, mode="operator")
         svc._on_uart_tx(
-            "MODE SEARCH_TABLE\nVEL 0.000 0.000 0.220 150\n",
+            "MODE SEARCH\nV 0.000 0.000 0.220\n",
             True,
             {"mode": "SEARCH_TABLE", "kind": "cmd_vel", "vx_norm": 0.0, "vy_norm": 0.0, "wz_norm": 0.22, "hold_ms": 150, "state": "SEARCH_TABLE"},
         )
         joined = "\n".join(lines)
-        self.assertIn("[ORCH] CAR_MODE mode=SEARCH_TABLE", joined)
-        self.assertIn("[ORCH] CAR_VEL vx=+0.000 vy=+0.000 wz=+0.220 hold=150ms", joined)
+        self.assertIn("[ORCH] CAR_MODE mode=SEARCH", joined)
+        self.assertIn("[ORCH] CAR_VEL vx=+0.000 vy=+0.000 wz=+0.220", joined)
         self.assertNotIn("[ORCH] CAR mode=", joined)
 
     def test_ctrl_nonzero_without_vel_warns_no_vel_sent(self) -> None:

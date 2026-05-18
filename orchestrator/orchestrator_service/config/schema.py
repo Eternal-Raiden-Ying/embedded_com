@@ -187,6 +187,27 @@ class CarMotionConfig:
     fallback_spin_only_x_th: float = 0.82
     fallback_forward_align_exp: float = 2.0
 
+    table_fov_soft_th: float = 0.25
+    table_fov_hard_th: float = 0.40
+    table_view_memory_ttl_s: float = 0.80
+    table_stage_a_wz_norm: float = 0.04
+    table_stage_b_vx_max_norm: float = 0.03
+    table_stage_c_vx_max_norm: float = 0.03
+    table_stage_c_vx_min_norm: float = 0.0
+    table_vy_max_norm: float = 0.01
+    table_wz_view_max_norm: float = 0.05
+    table_wz_plane_max_norm: float = 0.06
+    table_dist_kp_norm_per_m: float = 0.12
+    table_view_wz_kp: float = 0.18
+    table_view_vy_kp: float = 0.04
+    table_plane_yaw_kp_norm_per_rad: float = 0.60
+    table_view_wz_sign: float = -1.0
+    table_view_vy_sign: float = -1.0
+    table_plane_yaw_sign: float = 1.0
+    table_vx_slew_per_s: float = 0.12
+    table_vy_slew_per_s: float = 0.06
+    table_wz_slew_per_s: float = 0.18
+
     return_turn_norm_min: float = 0.20
     return_turn_norm_max: float = 0.75
     return_vx_norm_min: float = 0.10
@@ -212,8 +233,11 @@ class CarMotionConfig:
     stm32_vx_scale: float = 100.0
     stm32_vy_scale: float = 100.0
     stm32_wz_scale: float = 100.0
-    jog_forward_speed: int = 25
-    jog_turn_speed: int = 25
+    vx_mps_per_norm: float = 1.0
+    vy_mps_per_norm: float = 1.0
+    wz_radps_per_norm: float = 1.0
+    jog_forward_speed: float = 0.02
+    jog_turn_speed: float = 0.05
     jog_duration_ms: int = 100
     stop_on_state_enter: bool = False
     mode_line_on_change: bool = True

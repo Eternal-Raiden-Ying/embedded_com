@@ -5,31 +5,15 @@
 统一串口文本协议:
 
 - 主控 -> STM32
-    新版 SC171/STM32:
-    VEL <s006> <s007> <s008> <s009> <seq>\n
-    STOP <seq>\n
-    JOG <s006> <s007> <s008> <s009> <duration_ms> <seq>\n
-    STATUS\n
-
-    旧版调试协议:
-    MODE <STATE_NAME>\n
-    VEL <vx> <vy> <wz> <hold_ms>\n
+    MODE SEARCH\n
+    MODE RETURN\n
+    MODE AUTOSEARCH\n
+    MODE AUTOEXPLORE\n
+    V <vx_mps> <vy_mps> <wz_radps>\n
     STOP\n
-    BRAKE\n
 
 - STM32 -> 主控
-    ACK_START seq=12\n
-    ACK_DONE seq=12\n
-    BUSY seq=12\n
-    STATUS target=... applied=... jog=...\n
-    [CAR][JOG_START] seq=12\n
-    [CAR][JOG_DONE] seq=12\n
-    [CAR][JOG_BUSY] seq=12\n
-    [CAR][TIMEOUT] auto stop\n
-
-    旧版调试协议:
-    STATE <status> <vx> <vy> <wz> <fault_code>\n
-    ESTOP <0|1>\n
+    FB <原始命令>\n
 
 同时兼容旧版 key=value / JSON 风格回传。
 """
@@ -51,47 +35,63 @@ def _clamp_int(v, lo: int, hi: int) -> int:
     return max(lo, min(hi, value))
 
 
-def _format_seq(seq) -> str:
+WIRE_MOTION_MODES = {"SEARCH", "RETURN"}
+WIRE_PASSIVE_MODES = {"AUTOSEARCH", "AUTOEXPLORE"}
+WIRE_MODES = WIRE_MOTION_MODES | WIRE_PASSIVE_MODES
+
+
+def _format_float(v, digits: int = 3) -> str:
     try:
-        return str(int(seq))
+        return f"{float(v):.{max(0, int(digits))}f}"
     except Exception:
-        return "0"
+        return f"{0.0:.{max(0, int(digits))}f}"
 
 
-def _format_speed(v) -> str:
-    return str(_clamp_int(v, -100, 100))
+def normalize_wire_mode(mode: str) -> str:
+    mode = str(mode or "").strip().upper()
+    if mode in WIRE_MODES:
+        return mode
+    if mode in {"STOP", "IDLE", "DONE", "ERROR", "ERROR_RECOVERY"}:
+        return "STOP"
+    if "RETURN" in mode or "HOME" in mode:
+        return "RETURN"
+    return "SEARCH"
 
 
-def encode_vel(s006, s007, s008, s009, seq) -> str:
-    return f"VEL {_format_speed(s006)} {_format_speed(s007)} {_format_speed(s008)} {_format_speed(s009)} {_format_seq(seq)}"
+def encode_mode(mode: str) -> str:
+    wire_mode = normalize_wire_mode(mode)
+    if wire_mode == "STOP":
+        return "STOP"
+    return f"MODE {wire_mode}"
 
 
-def encode_stm32_vel(s006, s007, s008, s009, seq) -> str:
-    return encode_vel(s006, s007, s008, s009, seq)
+def encode_vel(vx_mps, vy_mps, wz_radps, *_, digits: int = 3) -> str:
+    return f"V {_format_float(vx_mps, digits)} {_format_float(vy_mps, digits)} {_format_float(wz_radps, digits)}"
 
 
-def encode_stop(seq) -> str:
-    return f"STOP {_format_seq(seq)}"
+def encode_stm32_vel(vx_mps, vy_mps, wz_radps, *args, **kwargs) -> str:
+    return encode_vel(vx_mps, vy_mps, wz_radps, *args, **kwargs)
 
 
-def encode_stm32_stop(seq) -> str:
-    return encode_stop(seq)
+def encode_stop(*_) -> str:
+    return "STOP"
 
 
-def encode_jog(s006, s007, s008, s009, duration_ms, seq) -> str:
-    duration = _clamp_int(duration_ms, 20, 1000)
-    return (
-        f"JOG {_format_speed(s006)} {_format_speed(s007)} "
-        f"{_format_speed(s008)} {_format_speed(s009)} {duration} {_format_seq(seq)}"
-    )
+def encode_stm32_stop(*_) -> str:
+    return encode_stop()
 
 
-def encode_stm32_jog(s006, s007, s008, s009, duration_ms, seq) -> str:
-    return encode_jog(s006, s007, s008, s009, duration_ms, seq)
+def encode_jog(vx_mps, vy_mps, wz_radps, duration_ms=None, *_, digits: int = 3) -> str:
+    del duration_ms
+    return encode_vel(vx_mps, vy_mps, wz_radps, digits=digits)
+
+
+def encode_stm32_jog(vx_mps, vy_mps, wz_radps, duration_ms=None, *args, **kwargs) -> str:
+    return encode_jog(vx_mps, vy_mps, wz_radps, duration_ms, *args, **kwargs)
 
 
 def encode_status() -> str:
-    return "STATUS"
+    return ""
 
 
 def encode_stm32_status() -> str:
@@ -127,7 +127,9 @@ class SimpleCarMapper:
         return max(-limit, min(limit, float(v)))
 
     def _mode_prefix(self, mode: str) -> str:
-        mode = mode.upper().strip() or "IDLE"
+        mode = normalize_wire_mode(mode)
+        if mode == "STOP":
+            return ""
         send_mode = bool(self.cfg.mode_line_every_cmd) or (
             bool(self.cfg.mode_line_on_change) and mode != self._last_mode_sent
         )
@@ -138,7 +140,7 @@ class SimpleCarMapper:
 
     def from_cmd_vel(self, cmd: CmdVel, cx_norm_abs: Optional[float] = None, distance_ratio: Optional[float] = None) -> SimpleCarCommand:
         del cx_norm_abs, distance_ratio
-        mode = (cmd.mode or "IDLE").upper().strip() or "IDLE"
+        mode = normalize_wire_mode(cmd.mode or "IDLE")
         vx = self._clamp_abs(float(cmd.vx_norm), getattr(self.cfg, "max_vx_norm", 1.0))
         vy = self._clamp_abs(float(cmd.vy_norm), getattr(self.cfg, "max_vy_norm", 1.0))
         wz = self._clamp_abs(float(cmd.wz_norm), getattr(self.cfg, "max_wz_norm", 1.0))
@@ -148,21 +150,22 @@ class SimpleCarMapper:
 
         if brake:
             return SimpleCarCommand(
-                raw_line=prefix + "BRAKE\n",
-                kind="brake",
+                raw_line="STOP\n",
+                kind="stop",
                 mode=mode,
                 hold_ms=hold_ms,
                 brake=True,
             )
 
-        if mode in {"STOP", "IDLE", "DONE"} and abs(vx) < 1e-6 and abs(vy) < 1e-6 and abs(wz) < 1e-6:
-            line = prefix + "STOP\n"
-            if not line.strip():
-                line = "STOP\n"
+        if mode == "STOP":
+            line = "STOP\n"
             return SimpleCarCommand(raw_line=line, kind="stop", mode=mode, hold_ms=hold_ms)
 
+        if mode not in WIRE_MOTION_MODES:
+            return SimpleCarCommand(raw_line=prefix, kind="mode", mode=mode, hold_ms=hold_ms)
+
         return SimpleCarCommand(
-            raw_line=prefix + f"VEL {self._fmt(vx)} {self._fmt(vy)} {self._fmt(wz)} {hold_ms}\n",
+            raw_line=prefix + f"V {self._fmt(vx)} {self._fmt(vy)} {self._fmt(wz)}\n",
             kind="cmd_vel",
             mode=mode,
             vx_norm=vx,
@@ -294,9 +297,38 @@ def _parse_stm32_feedback(raw: str, upper: str) -> Optional[CarState]:
     timeout = False
     fault = False
     message = None
+    mode = None
+    vx = None
+    vy = None
+    wz = None
+
+    fb_match = re.match(r"^FB\s+(.+)$", raw, re.IGNORECASE)
+    if fb_match:
+        echoed = (fb_match.group(1) or "").strip()
+        state = "FB"
+        ok = True
+        message = echoed
+        echoed_upper = echoed.upper()
+        mode_match = re.match(r"^MODE\s+([A-Z_]+)$", echoed_upper)
+        if mode_match:
+            mode = mode_match.group(1)
+        v_match = re.match(
+            r"^V\s+([-+]?\d*\.?\d+)\s+([-+]?\d*\.?\d+)\s+([-+]?\d*\.?\d+)$",
+            echoed,
+            re.IGNORECASE,
+        )
+        if v_match:
+            try:
+                vx = float(v_match.group(1))
+                vy = float(v_match.group(2))
+                wz = float(v_match.group(3))
+            except Exception:
+                vx = vy = wz = None
+        if echoed_upper == "STOP":
+            mode = "STOP"
 
     ack_match = re.match(r"^(ACK_START|ACK_DONE)\b(?:\s+(.*))?$", raw, re.IGNORECASE)
-    if ack_match:
+    if state is None and ack_match:
         token = ack_match.group(1).upper()
         state = "ACK_START" if token == "ACK_START" else "DONE"
         ok = True
@@ -343,7 +375,11 @@ def _parse_stm32_feedback(raw: str, upper: str) -> Optional[CarState]:
         ok=ok,
         timeout=timeout,
         fault=fault,
+        mode=mode,
         message=message,
         raw=raw,
+        vx=vx,
+        vy=vy,
+        wz=wz,
         source="uart",
     )

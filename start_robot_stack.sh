@@ -31,7 +31,7 @@ VISTA_MOCK_TABLE_BBOX="${VISTA_MOCK_TABLE_BBOX:-}"
 # dryrun：不连接小车，只打印将要发送到 UART 的实际控制信号。
 # full：连接小车串口，真实下发控制。
 # STACK_PROFILE="full"
-STACK_PROFILE="${STACK_PROFILE:-dryrun}"
+STACK_PROFILE="${STACK_PROFILE:-full}"
 
 # orchestrator 是否使用 sudo：auto / 0 / 1
 # full 模式通常需要 sudo 访问串口；dryrun 一般不需要。
@@ -483,6 +483,9 @@ export ORCH_LOG_DIR="$ORCH_LOG_DIR"
 export ORCH_RUNS_DIR="$STACK_RUNS_ROOT"
 unset FORCE_COLOR
 export ORCH_SERIAL_DRY_RUN="$ORCH_SERIAL_DRY_RUN"
+if [[ "$ORCH_SERIAL_DRY_RUN" == "0" ]]; then
+  unset ENV
+fi
 export ROBOT_CONSOLE_LEVEL="$ROBOT_CONSOLE_LEVEL"
 export ORCH_SERIAL_PORT="$UART_DEV"
 export ORCH_SERIAL_BAUDRATE="$UART_BAUDRATE"

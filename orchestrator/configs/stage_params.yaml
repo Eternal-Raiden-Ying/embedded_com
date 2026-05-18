@@ -17,6 +17,14 @@ controlled_approach:
   max_wz_norm: 0.32
   dist_kp: 1.4
   yaw_kp: 1.8
+  fov_soft_th: 0.25
+  fov_hard_th: 0.40
+  stage_a_wz_norm: 0.04
+  stage_b_vx_max_norm: 0.03
+  stage_c_vx_max_norm: 0.03
+  view_vy_max_norm: 0.01
+  view_wz_max_norm: 0.05
+  plane_wz_max_norm: 0.06
 
 edge_slide_search:
   slide_vy_norm: 0.14

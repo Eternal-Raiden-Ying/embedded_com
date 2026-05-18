@@ -32,10 +32,12 @@ def main():
     cmd = CmdVel(ts=0.0, mode="CONTROLLED_APPROACH", vx_norm=0.12, vy_norm=-0.05, wz_norm=0.18, hold_ms=150)
     car_cmd = mapper.from_cmd_vel(cmd)
     raw = car_cmd.raw_line.strip().splitlines()
-    if not any(line.startswith("VEL ") for line in raw):
-        raise AssertionError(f"expected VEL line, got: {raw}")
+    if "MODE SEARCH" not in raw:
+        raise AssertionError(f"expected MODE SEARCH line, got: {raw}")
+    if not any(line.startswith("V ") for line in raw):
+        raise AssertionError(f"expected V line, got: {raw}")
     if "0.12" not in car_cmd.raw_line or "-0.05" not in car_cmd.raw_line or "0.18" not in car_cmd.raw_line:
-        raise AssertionError(f"unexpected VEL payload: {car_cmd.raw_line!r}")
+        raise AssertionError(f"unexpected V payload: {car_cmd.raw_line!r}")
 
     state = parse_car_state_line("STATE busy 0.10 -0.04 0.20 0")
     if state is None or state.state != "BUSY" or state.vx != 0.10 or state.vy != -0.04 or state.wz != 0.20:
@@ -46,7 +48,7 @@ def main():
         raise AssertionError(f"failed to parse ESTOP line: {estop}")
 
     print("PASS: control_module_smoke_test")
-    print("  - mapper emits VEL vx vy wz hold_ms")
+    print("  - mapper emits MODE SEARCH + V vx vy wz")
     print("  - parser accepts STATE vx vy wz fault_code")
     print("  - parser accepts ESTOP feedback")
 

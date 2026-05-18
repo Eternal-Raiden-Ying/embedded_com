@@ -9,8 +9,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from .simple_car_protocol import (
     SimpleCarCommand,
-    encode_jog,
-    encode_status,
+    encode_mode,
     encode_stop,
     encode_vel,
 )
@@ -36,7 +35,10 @@ class UartBridge:
         self.port = port
         self.baudrate = int(baudrate)
         self.timeout_s = float(timeout_s)
-        self.dry_run = bool(dry_run) or serial is None or os.environ.get("ENV", "").lower() == "mock"
+        self.dry_run = bool(dry_run)
+        self._dry_run_requested = bool(dry_run)
+        self._serial_import_error = serial is None
+        self._env_mock = os.environ.get("ENV", "").lower() == "mock"
         self.readback_enabled = bool(readback_enabled)
         self.dry_run_echo_stdout = bool(dry_run_echo_stdout)
         self.tx_callback = tx_callback
@@ -68,6 +70,10 @@ class UartBridge:
         if self.dry_run:
             self._log("warn", "UART running in dry-run mode; serial port will not be opened")
         else:
+            if self._env_mock:
+                raise RuntimeError("UART full mode refused because ENV=mock is set")
+            if self._serial_import_error:
+                raise RuntimeError("UART full mode requires pyserial, but import serial failed")
             self._ser = serial.Serial(
                 self.port,
                 self.baudrate,
@@ -120,19 +126,29 @@ class UartBridge:
         return True
 
     def send_stm32_vel(self, s006, s007, s008, s009, seq, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
-        return self.send_motion_line(encode_vel(s006, s007, s008, s009, seq), tx_meta=tx_meta)
+        del s009, seq
+        return self.send_motion_line(encode_vel(s006, s007, s008), tx_meta=tx_meta)
 
     def send_stm32_stop(self, seq, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
-        return self.send_motion_line(encode_stop(seq), tx_meta=tx_meta)
+        del seq
+        return self.send_motion_line(encode_stop(), tx_meta=tx_meta)
 
     def send_stm32_jog(self, s006, s007, s008, s009, duration_ms, seq, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
-        return self.send_motion_line(encode_jog(s006, s007, s008, s009, duration_ms, seq), tx_meta=tx_meta)
+        del s009, duration_ms, seq
+        return self.send_motion_line(encode_vel(s006, s007, s008), tx_meta=tx_meta)
 
     def send_stm32_status(self, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
-        return self.send_motion_line(encode_status(), tx_meta=tx_meta, latest_override=False)
+        del tx_meta
+        return False
 
     def send_stop(self, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
-        return self._publish_latest("MODE STOP\nSTOP\n", tx_meta=tx_meta)
+        return self._publish_latest("STOP\n", tx_meta=tx_meta)
+
+    def send_mode(self, mode: str, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
+        return self.send_motion_line(encode_mode(mode), tx_meta=tx_meta)
+
+    def send_velocity(self, vx_mps, vy_mps, wz_radps, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
+        return self.send_motion_line(encode_vel(vx_mps, vy_mps, wz_radps), tx_meta=tx_meta)
 
     def send_arm_command(self, command_line: str, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
         """Send an arm command directly, bypassing the latest-command-override.

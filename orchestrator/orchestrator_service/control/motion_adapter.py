@@ -1,34 +1,43 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from typing import Any, Callable, Dict, Optional
+import time
+from typing import Any, Callable, Dict, Optional, Tuple
 
 
 class Stm32MotionAdapter:
+    """SC171 -> STM32 text protocol adapter.
+
+    The current STM32 firmware owns mecanum wheel solving.  SC171 sends only
+    high-level mode and body velocity:
+    MODE SEARCH/RETURN, V vx_mps vy_mps wz_radps, STOP.
+    """
+
     def __init__(
         self,
         uart: Any,
         logger: Optional[Callable[[str], None]] = None,
         tx_meta_factory: Optional[Callable[[str, int, str], Dict[str, Any]]] = None,
         wheel_speed_limit: int = 100,
-        vx_scale: float = 100.0,
-        vy_scale: float = 100.0,
-        wz_scale: float = 100.0,
-        jog_forward_speed: int = 25,
-        jog_turn_speed: int = 25,
+        vx_scale: float = 1.0,
+        vy_scale: float = 1.0,
+        wz_scale: float = 1.0,
+        jog_forward_speed: float = 0.02,
+        jog_turn_speed: float = 0.05,
         jog_duration_ms: int = 100,
     ):
+        del wheel_speed_limit
         self.uart = uart
         self.logger = logger
         self.tx_meta_factory = tx_meta_factory
-        self.wheel_speed_limit = min(100, max(0, abs(int(wheel_speed_limit or 0))))
         self.vx_scale = float(vx_scale)
         self.vy_scale = float(vy_scale)
         self.wz_scale = float(wz_scale)
-        self.jog_forward_speed = self._clamp_int(jog_forward_speed, 20, 40)
-        self.jog_turn_speed = self._clamp_int(jog_turn_speed, 20, 40)
-        self.jog_duration_ms = self._clamp_int(jog_duration_ms, 60, 150)
+        self.jog_forward_speed = self._coerce_micro_speed(jog_forward_speed, 0.02)
+        self.jog_turn_speed = self._coerce_micro_speed(jog_turn_speed, 0.05)
+        self.jog_duration_ms = self._clamp_int(jog_duration_ms, 60, 500)
         self._seq = 0
+        self._last_wire_mode = ""
 
     @staticmethod
     def _clamp_int(value: Any, lo: int, hi: int) -> int:
@@ -38,22 +47,36 @@ class Stm32MotionAdapter:
             number = 0
         return max(lo, min(hi, number))
 
+    @staticmethod
+    def _coerce_micro_speed(value: Any, default: float) -> float:
+        try:
+            number = abs(float(value))
+        except Exception:
+            return float(default)
+        if number <= 0.0:
+            return float(default)
+        # Backward compatibility for previous wheel-unit defaults like 25.
+        if number > 1.0:
+            number = number / 1000.0
+        return number
+
     def _next_seq(self) -> int:
         self._seq = (int(self._seq) % 999999) + 1
         return self._seq
 
-    def _meta(self, kind: str, seq: int, reason: str) -> Dict[str, Any]:
+    def _meta(self, kind: str, seq: int, reason: str, **extra: Any) -> Dict[str, Any]:
         meta: Dict[str, Any] = {
             "kind": f"stm32_{kind}",
-            "motion_protocol": "stm32",
+            "motion_protocol": "mode_v",
             "seq": int(seq),
             "reason": str(reason or ""),
         }
+        meta.update({k: v for k, v in extra.items() if v is not None})
         if self.tx_meta_factory is not None:
             try:
-                extra = self.tx_meta_factory(kind, seq, reason)
-                if isinstance(extra, dict):
-                    meta.update({k: v for k, v in extra.items() if v is not None})
+                supplied = self.tx_meta_factory(kind, seq, reason)
+                if isinstance(supplied, dict):
+                    meta.update({k: v for k, v in supplied.items() if v is not None})
             except Exception:
                 pass
         return meta
@@ -67,25 +90,16 @@ class Stm32MotionAdapter:
                 pass
         print(line, flush=True)
 
-    def _wheels(self, s006: Any, s007: Any, s008: Any, s009: Any) -> tuple:
-        limit = self.wheel_speed_limit
-        return (
-            self._clamp_int(s006, -limit, limit),
-            self._clamp_int(s007, -limit, limit),
-            self._clamp_int(s008, -limit, limit),
-            self._clamp_int(s009, -limit, limit),
-        )
-
-    def cmd_vel_to_wheels(self, cmd: Any) -> tuple:
-        vx = float(getattr(cmd, "vx_norm", 0.0) or 0.0) * self.vx_scale
-        vy = float(getattr(cmd, "vy_norm", 0.0) or 0.0) * self.vy_scale
-        wz = float(getattr(cmd, "wz_norm", 0.0) or 0.0) * self.wz_scale
-        return self._wheels(
-            +vx - vy - wz,
-            -vx - vy + wz,
-            +vx + vy - wz,
-            -vx + vy + wz,
-        )
+    @staticmethod
+    def wire_mode_for_mode(mode: str) -> str:
+        token = str(mode or "").strip().upper()
+        if token in {"SEARCH", "RETURN", "AUTOSEARCH", "AUTOEXPLORE"}:
+            return token
+        if token in {"STOP", "IDLE", "DONE", "ERROR", "ERROR_RECOVERY"}:
+            return "STOP"
+        if "RETURN" in token or "HOME" in token:
+            return "RETURN"
+        return "SEARCH"
 
     @staticmethod
     def _cmd_is_stop(cmd: Any) -> bool:
@@ -94,60 +108,108 @@ class Stm32MotionAdapter:
         vx = abs(float(getattr(cmd, "vx_norm", 0.0) or 0.0))
         vy = abs(float(getattr(cmd, "vy_norm", 0.0) or 0.0))
         wz = abs(float(getattr(cmd, "wz_norm", 0.0) or 0.0))
-        return brake or (mode in {"STOP", "IDLE", "DONE"} and vx < 1e-6 and vy < 1e-6 and wz < 1e-6)
+        return brake or (mode in {"STOP", "IDLE", "DONE", "ERROR_RECOVERY"} and vx < 1e-6 and vy < 1e-6 and wz < 1e-6)
 
-    def set_velocity_wheels(self, s006, s007, s008, s009, reason: str = "") -> int:
+    def cmd_vel_to_velocity(self, cmd: Any) -> Tuple[float, float, float]:
+        vx = float(getattr(cmd, "vx_norm", 0.0) or 0.0) * self.vx_scale
+        vy = float(getattr(cmd, "vy_norm", 0.0) or 0.0) * self.vy_scale
+        wz = float(getattr(cmd, "wz_norm", 0.0) or 0.0) * self.wz_scale
+        return vx, vy, wz
+
+    def cmd_vel_to_wheels(self, cmd: Any) -> tuple:
+        return self.cmd_vel_to_velocity(cmd)
+
+    def _mode_prefix(self, wire_mode: str) -> str:
+        wire_mode = self.wire_mode_for_mode(wire_mode)
+        if wire_mode == "STOP":
+            return ""
+        if wire_mode == self._last_wire_mode:
+            return ""
+        self._last_wire_mode = wire_mode
+        return f"MODE {wire_mode}\n"
+
+    def set_velocity(self, vx_mps: Any, vy_mps: Any, wz_radps: Any, mode: str = "SEARCH", reason: str = "") -> int:
         seq = self._next_seq()
-        wheels = self._wheels(s006, s007, s008, s009)
-        self._log(f"[MOTION][VEL] seq={seq} wheels={wheels} reason={reason}")
-        self.uart.send_stm32_vel(*wheels, seq, tx_meta=self._meta("vel", seq, reason))
+        wire_mode = self.wire_mode_for_mode(mode)
+        vx = float(vx_mps or 0.0)
+        vy = float(vy_mps or 0.0)
+        wz = float(wz_radps or 0.0)
+        if wire_mode not in {"SEARCH", "RETURN"}:
+            self._log(f"[MOTION][MODE] seq={seq} mode={wire_mode} reason={reason}")
+            self.uart.send_mode(wire_mode, tx_meta=self._meta("mode", seq, reason, wire_mode=wire_mode))
+            return seq
+        self._log(f"[MOTION][V] seq={seq} mode={wire_mode} vx={vx:.3f} vy={vy:.3f} wz={wz:.3f} reason={reason}")
+        line = self._mode_prefix(wire_mode) + f"V {vx:.3f} {vy:.3f} {wz:.3f}"
+        self.uart.send_motion_line(
+            line,
+            tx_meta=self._meta("vel", seq, reason, wire_mode=wire_mode, vx_mps=vx, vy_mps=vy, wz_radps=wz),
+        )
         return seq
+
+    def set_velocity_wheels(self, s006, s007, s008, s009=None, reason: str = "") -> int:
+        del s009
+        return self.set_velocity(s006, s007, s008, mode="SEARCH", reason=reason)
 
     def send_cmd_vel(self, cmd: Any, reason: str = "") -> int:
         if self._cmd_is_stop(cmd):
             return self.stop(reason=reason)
-        wheels = self.cmd_vel_to_wheels(cmd)
-        return self.set_velocity_wheels(*wheels, reason=reason)
+        vx, vy, wz = self.cmd_vel_to_velocity(cmd)
+        return self.set_velocity(vx, vy, wz, mode=str(getattr(cmd, "mode", "SEARCH") or "SEARCH"), reason=reason)
 
     def stop(self, reason: str = "") -> int:
         seq = self._next_seq()
+        self._last_wire_mode = "STOP"
         self._log(f"[MOTION][STOP] seq={seq} reason={reason}")
-        self.uart.send_stm32_stop(seq, tx_meta=self._meta("stop", seq, reason))
+        self.uart.send_stm32_stop(seq, tx_meta=self._meta("stop", seq, reason, wire_mode="STOP"))
+        return seq
+
+    def jog_velocity(self, vx_mps: float = 0.0, vy_mps: float = 0.0, wz_radps: float = 0.0, reason: str = "") -> int:
+        seq = self._next_seq()
+        duration = self.jog_duration_ms
+        self._last_wire_mode = "SEARCH"
+        self._log(
+            f"[MOTION][PULSE] seq={seq} mode=SEARCH vx={vx_mps:.3f} "
+            f"vy={vy_mps:.3f} wz={wz_radps:.3f} duration_ms={duration} reason={reason}"
+        )
+        meta = self._meta(
+            "pulse",
+            seq,
+            reason,
+            wire_mode="SEARCH",
+            vx_mps=float(vx_mps),
+            vy_mps=float(vy_mps),
+            wz_radps=float(wz_radps),
+            duration_ms=int(duration),
+        )
+        self.uart.send_motion_line(
+            f"MODE SEARCH\nV {float(vx_mps):.3f} {float(vy_mps):.3f} {float(wz_radps):.3f}",
+            tx_meta=meta,
+            latest_override=False,
+        )
+        time.sleep(float(duration) / 1000.0)
+        self.uart.send_motion_line("STOP", tx_meta=dict(meta, kind="stm32_stop", pulse_stop=True), latest_override=False)
         return seq
 
     def jog_wheels(self, s006, s007, s008, s009, duration_ms, reason: str = "") -> int:
-        seq = self._next_seq()
-        wheels = self._wheels(s006, s007, s008, s009)
-        duration = self._clamp_int(duration_ms, 20, 1000)
-        self._log(f"[MOTION][JOG] seq={seq} wheels={wheels} duration_ms={duration} reason={reason}")
-        self.uart.send_stm32_jog(*wheels, duration, seq, tx_meta=self._meta("jog", seq, reason))
-        return seq
-
-    def _jog_from_axes(self, vx: float = 0.0, vy: float = 0.0, wz: float = 0.0, reason: str = "") -> int:
-        return self.jog_wheels(
-            +vx - vy - wz,
-            -vx - vy + wz,
-            +vx + vy - wz,
-            -vx + vy + wz,
-            self.jog_duration_ms,
-            reason=reason,
-        )
+        del s009
+        old_duration = self.jog_duration_ms
+        self.jog_duration_ms = self._clamp_int(duration_ms, 60, 500)
+        try:
+            return self.jog_velocity(float(s006 or 0.0), float(s007 or 0.0), float(s008 or 0.0), reason=reason)
+        finally:
+            self.jog_duration_ms = old_duration
 
     def jog_forward_small(self, reason: str = "") -> int:
-        return self._jog_from_axes(vx=float(self.jog_forward_speed), reason=reason)
+        return self.jog_velocity(vx_mps=float(self.jog_forward_speed), reason=reason)
 
     def jog_backward_small(self, reason: str = "") -> int:
-        return self._jog_from_axes(vx=-float(self.jog_forward_speed), reason=reason)
+        return self.jog_velocity(vx_mps=-float(self.jog_forward_speed), reason=reason)
 
     def jog_turn_left_small(self, reason: str = "") -> int:
-        return self._jog_from_axes(wz=float(self.jog_turn_speed), reason=reason)
+        return self.jog_velocity(wz_radps=float(self.jog_turn_speed), reason=reason)
 
     def jog_turn_right_small(self, reason: str = "") -> int:
-        return self._jog_from_axes(wz=-float(self.jog_turn_speed), reason=reason)
+        return self.jog_velocity(wz_radps=-float(self.jog_turn_speed), reason=reason)
 
     def query_status(self) -> None:
-        self._log("[MOTION][STATUS]")
-        self.uart.send_stm32_status(tx_meta={
-            "kind": "stm32_status",
-            "motion_protocol": "stm32",
-        })
+        self._log("[MOTION][STATUS] skipped: current STM32 protocol uses FB echoes only")

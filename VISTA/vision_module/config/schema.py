@@ -147,7 +147,7 @@ class TableEdgeConfig:
     track_local_update_hz: float = 5.0
     track_local_light_edge: bool = False
     track_local_edge_stride: int = 4
-    require_yolo_table_confirm: bool = True
+    require_yolo_table_confirm: bool = False
     yolo_table_min_conf: float = 0.25
 
 
