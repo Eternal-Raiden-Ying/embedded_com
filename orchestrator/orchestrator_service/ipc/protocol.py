@@ -324,11 +324,13 @@ class TableEdgeObs:
     view_source: Optional[str] = None
     view_reliable: bool = False
     fov_guard_active: bool = False
+    fov_guard_reason: Optional[str] = None
     yolo_reliable: bool = False
     yolo_bbox_area_norm: Optional[float] = None
     yolo_bbox_touch_left: bool = False
     yolo_bbox_touch_right: bool = False
     yolo_bbox_touch_boundary: bool = False
+    yolo_gate_open: bool = False
     edge_ready: Optional[bool] = None
     best_turn_dir: Optional[str] = None
     obstacle_flag: bool = False
@@ -403,11 +405,13 @@ class TableEdgeObs:
             view_source=_pick_optional_str(payload, "view_source"),
             view_reliable=bool(payload.get("view_reliable", False)),
             fov_guard_active=bool(payload.get("fov_guard_active", False)),
+            fov_guard_reason=_pick_optional_str(payload, "fov_guard_reason"),
             yolo_reliable=bool(payload.get("yolo_reliable", False)),
             yolo_bbox_area_norm=_pick_optional_float(payload, "yolo_bbox_area_norm", "table_bbox_area_norm"),
             yolo_bbox_touch_left=bool(payload.get("yolo_bbox_touch_left", False)),
             yolo_bbox_touch_right=bool(payload.get("yolo_bbox_touch_right", False)),
             yolo_bbox_touch_boundary=bool(payload.get("yolo_bbox_touch_boundary", False)),
+            yolo_gate_open=bool(payload.get("yolo_gate_open", False)),
             edge_ready=_pick_optional_bool(payload, "edge_ready", "table_edge_ready"),
             best_turn_dir=_pick_optional_str(payload, "best_turn_dir", "avoid_dir"),
             obstacle_flag=bool(payload.get("obstacle_flag", payload.get("obstacle", False))),

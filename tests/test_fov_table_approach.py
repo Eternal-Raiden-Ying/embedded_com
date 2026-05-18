@@ -63,7 +63,7 @@ class FovTableApproachTest(unittest.TestCase):
         self.assertFalse(obs.fov_guard_active)
         self.assertIsNone(obs.plane_cx_norm)
 
-    def test_stage_a_yolo_only_turns_without_forward(self) -> None:
+    def test_plane_acquire_holds_when_plane_missing(self) -> None:
         controller = _controller()
         obs = _obs(
             table_found=False,
@@ -77,18 +77,20 @@ class FovTableApproachTest(unittest.TestCase):
             table_cx_norm=0.50,
             view_reliable=True,
             view_source="yolo",
-            view_err_norm=0.50,
+            view_err_norm=0.10,
         )
-        decision = controller.fov_table_approach_cmd(obs, phase="STAGE_A")
-        self.assertEqual(decision.control_summary["table_approach_phase"], "STAGE_A")
+        decision = controller.fov_table_approach_cmd(obs, phase="PLANE_ACQUIRE")
+        self.assertEqual(decision.control_summary["table_approach_phase"], "PLANE_ACQUIRE")
         self.assertEqual(decision.cmd.vx_norm, 0.0)
-        self.assertNotEqual(decision.cmd.wz_norm, 0.0)
+        self.assertEqual(decision.cmd.wz_norm, 0.0)
 
-    def test_stage_c_plane_only_servo_when_yolo_unreliable(self) -> None:
+    def test_plane_final_lock_servo_when_yolo_unreliable(self) -> None:
         controller = _controller()
         obs = _obs(table_confirmed_by_yolo=False, yolo_reliable=False, view_source="plane")
         decision = controller.fov_table_approach_cmd(obs)
-        self.assertEqual(decision.control_summary["table_approach_phase"], "STAGE_C")
+        self.assertEqual(decision.control_summary["table_approach_phase"], "PLANE_FINAL_LOCK")
+        self.assertEqual(decision.control_summary["table_approach_reason"], "plane_confirmed_table_front")
+        self.assertEqual(decision.control_summary["approach_source"], "plane_only")
         self.assertGreaterEqual(decision.cmd.vx_norm, 0.0)
         self.assertNotEqual(decision.cmd.wz_norm, 0.0)
 
@@ -98,13 +100,37 @@ class FovTableApproachTest(unittest.TestCase):
         decision = controller.fov_table_approach_cmd(obs)
         self.assertEqual(decision.cmd.vx_norm, 0.0)
         self.assertTrue(decision.control_summary["fov_guard_active"])
+        self.assertEqual(decision.control_summary["fov_guard_reason"], "view_err_hard")
 
-    def test_plane_touch_boundary_forces_vx_zero(self) -> None:
+    def test_plane_touch_left_forces_vx_zero_with_reason(self) -> None:
         controller = _controller()
         obs = _obs(plane_touch_left=True, view_err_norm=0.10)
         decision = controller.fov_table_approach_cmd(obs)
         self.assertEqual(decision.cmd.vx_norm, 0.0)
         self.assertTrue(decision.control_summary["fov_guard_active"])
+        self.assertEqual(decision.control_summary["fov_guard_reason"], "plane_touch_left")
+        self.assertTrue(abs(decision.cmd.vy_norm) > 0.0 or abs(decision.cmd.wz_norm) > 0.0)
+
+    def test_plane_touch_right_forces_vx_zero_with_reason(self) -> None:
+        controller = _controller()
+        obs = _obs(plane_touch_right=True, view_err_norm=0.10)
+        decision = controller.fov_table_approach_cmd(obs)
+        self.assertEqual(decision.cmd.vx_norm, 0.0)
+        self.assertTrue(decision.control_summary["fov_guard_active"])
+        self.assertEqual(decision.control_summary["fov_guard_reason"], "plane_touch_right")
+        self.assertTrue(abs(decision.cmd.vy_norm) > 0.0 or abs(decision.cmd.wz_norm) > 0.0)
+
+    def test_unreliable_or_stale_view_does_not_advance(self) -> None:
+        controller = _controller()
+        unreliable = _obs(view_reliable=False)
+        unreliable_decision = controller.fov_table_approach_cmd(unreliable)
+        self.assertEqual(unreliable_decision.cmd.vx_norm, 0.0)
+
+        stale = _obs(is_stale=True, plane_touch_right=True)
+        stale_decision = controller.fov_table_approach_cmd(stale)
+        self.assertEqual(stale_decision.cmd.vx_norm, 0.0)
+        self.assertEqual(stale_decision.cmd.vy_norm, 0.0)
+        self.assertEqual(stale_decision.cmd.wz_norm, 0.0)
 
     def test_approach_level_outputs_view_correction(self) -> None:
         controller = _controller()

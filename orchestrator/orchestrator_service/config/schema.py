@@ -200,6 +200,8 @@ class CarMotionConfig:
     table_dist_kp_norm_per_m: float = 0.12
     table_view_wz_kp: float = 0.18
     table_view_vy_kp: float = 0.04
+    table_view_recover_vy_norm: float = 0.008
+    table_view_recover_wz_norm: float = 0.04
     table_plane_yaw_kp_norm_per_rad: float = 0.60
     table_view_wz_sign: float = -1.0
     table_view_vy_sign: float = -1.0

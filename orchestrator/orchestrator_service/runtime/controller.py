@@ -96,6 +96,7 @@ class MotionController:
             "view_err_norm": (float(getattr(obs, "view_err_norm")) if obs is not None and getattr(obs, "view_err_norm", None) is not None else None),
             "view_reliable": bool(getattr(obs, "view_reliable", False)) if obs is not None else False,
             "fov_guard_active": bool(getattr(obs, "fov_guard_active", False)) if obs is not None else False,
+            "fov_guard_reason": str(getattr(obs, "fov_guard_reason", "") or "") if obs is not None else "",
             "table_confirmed_by_yolo": bool(getattr(obs, "table_confirmed_by_yolo", False)) if obs is not None else False,
             "yolo_reliable": bool(getattr(obs, "yolo_reliable", False)) if obs is not None else False,
             "plane_cx_norm": (float(getattr(obs, "plane_cx_norm")) if obs is not None and getattr(obs, "plane_cx_norm", None) is not None else None),
@@ -321,10 +322,12 @@ class MotionController:
     def _plane_stable(self, obs: Optional[TableEdgeObs]) -> bool:
         if obs is None or obs.yaw_err_rad is None or obs.dist_err_m is None:
             return False
+        if bool(getattr(obs, "usable_for_approach", False)):
+            return True
         if bool(getattr(obs, "usable_for_alignment", False)) or bool(getattr(obs, "usable_for_stop", False)):
             return True
         level = str(getattr(obs, "control_level", "") or "").strip().lower()
-        if level in {"alignment", "stop"}:
+        if level in {"approach", "alignment", "stop"}:
             return True
         return bool(getattr(obs, "edge_found", False)) and bool(getattr(obs, "edge_valid", True))
 
@@ -337,17 +340,19 @@ class MotionController:
 
     def _table_approach_phase(self, obs: Optional[TableEdgeObs], requested: str = "") -> str:
         req = str(requested or "").strip().upper()
-        if req in {"STAGE_A", "STAGE_B", "STAGE_C"}:
+        if req in {"PLANE_ACQUIRE", "PLANE_APPROACH", "PLANE_FINAL_LOCK", "PLANE_STOP"}:
             return req
+        level = str(getattr(obs, "control_level", "none") or "none").strip().lower() if obs is not None else "none"
+        if level == "stop":
+            return "PLANE_STOP"
+        if level == "alignment":
+            return "PLANE_FINAL_LOCK"
+        if level == "approach":
+            return "PLANE_APPROACH"
         plane = self._plane_stable(obs)
-        yolo = self._yolo_reliable(obs)
-        if yolo and not plane:
-            return "STAGE_A"
-        if yolo and plane:
-            return "STAGE_B"
         if plane:
-            return "STAGE_C"
-        return "HOLD"
+            return "PLANE_FINAL_LOCK"
+        return "PLANE_ACQUIRE"
 
     def _get_view_error(self, obs: Optional[TableEdgeObs]) -> Tuple[float, str, bool]:
         if obs is None:
@@ -414,23 +419,40 @@ class MotionController:
         reason: str = "fov_table_approach",
     ) -> MotionDecision:
         view_err, view_source, view_reliable = self._get_view_error(obs)
+        obs_view_reliable = bool(getattr(obs, "view_reliable", False)) if obs is not None else False
+        view_valid_for_forward = bool(view_reliable and obs_view_reliable)
         phase_name = self._table_approach_phase(obs, phase)
         soft_th = abs(float(getattr(self.car_cfg, "table_fov_soft_th", 0.25) or 0.25))
         hard_th = abs(float(getattr(self.car_cfg, "table_fov_hard_th", 0.40) or 0.40))
-        plane_touch = bool(getattr(obs, "plane_touch_left", False) or getattr(obs, "plane_touch_right", False)) if obs is not None else False
-        hard_guard = bool((view_reliable and abs(view_err) >= hard_th) or plane_touch)
+        plane_touch_left = bool(getattr(obs, "plane_touch_left", False)) if obs is not None else False
+        plane_touch_right = bool(getattr(obs, "plane_touch_right", False)) if obs is not None else False
+        obs_stale = bool(getattr(obs, "is_stale", False)) if obs is not None else False
+        guard_view_err = view_err
+        if obs is not None and getattr(obs, "view_err_norm", None) is not None:
+            try:
+                guard_view_err = self._clamp(float(getattr(obs, "view_err_norm")), -1.0, 1.0)
+            except Exception:
+                guard_view_err = view_err
+        fov_guard_reason = ""
+        if plane_touch_right:
+            fov_guard_reason = "plane_touch_right"
+        elif plane_touch_left:
+            fov_guard_reason = "plane_touch_left"
+        elif abs(float(guard_view_err)) > hard_th:
+            fov_guard_reason = "view_err_hard"
+        hard_guard = bool(fov_guard_reason)
 
         dist_err = float(obs.dist_err_m) if obs is not None and obs.dist_err_m is not None else 0.0
         yaw_err = float(obs.yaw_err_rad) if obs is not None and obs.yaw_err_rad is not None else 0.0
         vx_from_dist = 0.0
         if base_vx is not None:
             vx_from_dist = float(base_vx)
-        elif phase_name != "STAGE_A" and dist_err > float(self.cfg.final_lock_dist_tol_m):
+        elif phase_name not in {"PLANE_ACQUIRE", "PLANE_STOP"} and dist_err > float(self.cfg.final_lock_dist_tol_m):
             vx_from_dist = dist_err * float(getattr(self.car_cfg, "table_dist_kp_norm_per_m", 0.12))
             max_vx = float(
                 getattr(
                     self.car_cfg,
-                    "table_stage_b_vx_max_norm" if phase_name == "STAGE_B" else "table_stage_c_vx_max_norm",
+                    "table_stage_b_vx_max_norm" if phase_name == "PLANE_APPROACH" else "table_stage_c_vx_max_norm",
                     0.05,
                 )
             )
@@ -440,7 +462,7 @@ class MotionController:
         wz_from_plane = 0.0
         if base_wz is not None:
             wz_from_plane = float(base_wz)
-        elif phase_name != "STAGE_A" and obs is not None and obs.yaw_err_rad is not None:
+        elif phase_name not in {"PLANE_ACQUIRE", "PLANE_STOP"} and obs is not None and obs.yaw_err_rad is not None:
             wz_from_plane = yaw_err * float(getattr(self.car_cfg, "table_plane_yaw_kp_norm_per_rad", 0.60))
             wz_from_plane *= float(getattr(self.car_cfg, "table_plane_yaw_sign", 1.0))
             wz_from_plane = self._clamp(
@@ -451,37 +473,29 @@ class MotionController:
 
         wz_from_view = 0.0
         vy_from_view = 0.0
-        if view_reliable:
-            if phase_name == "STAGE_A":
-                mag = min(
-                    abs(float(getattr(self.car_cfg, "table_stage_a_wz_norm", 0.08))),
-                    abs(view_err) * float(getattr(self.car_cfg, "table_view_wz_kp", 0.18)) + 0.02,
-                )
-                wz_from_view = mag * (1.0 if view_err >= 0.0 else -1.0)
-                wz_from_view *= float(getattr(self.car_cfg, "table_view_wz_sign", -1.0))
-            else:
-                wz_from_view = view_err * float(getattr(self.car_cfg, "table_view_wz_kp", 0.18))
-                wz_from_view *= float(getattr(self.car_cfg, "table_view_wz_sign", -1.0))
-                wz_from_view = self._clamp(
-                    wz_from_view,
-                    -abs(float(getattr(self.car_cfg, "table_wz_view_max_norm", 0.10))),
-                    abs(float(getattr(self.car_cfg, "table_wz_view_max_norm", 0.10))),
-                )
-                vy_from_view = view_err * float(getattr(self.car_cfg, "table_view_vy_kp", 0.04))
-                vy_from_view *= float(getattr(self.car_cfg, "table_view_vy_sign", -1.0))
-                vy_from_view = self._clamp(
-                    vy_from_view,
-                    -abs(float(getattr(self.car_cfg, "table_vy_max_norm", 0.02))),
-                    abs(float(getattr(self.car_cfg, "table_vy_max_norm", 0.02))),
-                )
+        if view_valid_for_forward and phase_name not in {"PLANE_ACQUIRE", "PLANE_STOP"}:
+            wz_from_view = view_err * float(getattr(self.car_cfg, "table_view_wz_kp", 0.18))
+            wz_from_view *= float(getattr(self.car_cfg, "table_view_wz_sign", -1.0))
+            wz_from_view = self._clamp(
+                wz_from_view,
+                -abs(float(getattr(self.car_cfg, "table_wz_view_max_norm", 0.10))),
+                abs(float(getattr(self.car_cfg, "table_wz_view_max_norm", 0.10))),
+            )
+            vy_from_view = view_err * float(getattr(self.car_cfg, "table_view_vy_kp", 0.04))
+            vy_from_view *= float(getattr(self.car_cfg, "table_view_vy_sign", -1.0))
+            vy_from_view = self._clamp(
+                vy_from_view,
+                -abs(float(getattr(self.car_cfg, "table_vy_max_norm", 0.02))),
+                abs(float(getattr(self.car_cfg, "table_vy_max_norm", 0.02))),
+            )
 
         yaw_gate = max(0.0, 1.0 - min(1.0, abs(yaw_err) / 0.45))
-        if phase_name == "STAGE_B":
+        if phase_name == "PLANE_APPROACH":
             yaw_gate = max(0.35, yaw_gate)
         fov_gate = 0.0 if hard_guard else 1.0
-        if view_reliable and abs(view_err) > soft_th and hard_th > soft_th:
+        if view_valid_for_forward and abs(view_err) > soft_th and hard_th > soft_th:
             fov_gate = min(fov_gate, max(0.0, 1.0 - ((abs(view_err) - soft_th) / (hard_th - soft_th))))
-        if not view_reliable:
+        if not view_valid_for_forward:
             fov_gate = 0.0
         near_gate = 1.0
         if dist_err <= float(self.cfg.final_lock_dist_tol_m):
@@ -489,19 +503,41 @@ class MotionController:
         elif dist_err < float(self.cfg.final_lock_dist_tol_m) * 3.0:
             near_gate = max(0.25, dist_err / max(1e-6, float(self.cfg.final_lock_dist_tol_m) * 3.0))
 
-        vx = 0.0 if phase_name == "STAGE_A" else vx_from_dist * yaw_gate * fov_gate * near_gate
+        vx = 0.0 if phase_name in {"PLANE_ACQUIRE", "PLANE_STOP"} else vx_from_dist * yaw_gate * fov_gate * near_gate
         vy = float(base_vy or 0.0) + vy_from_view
         wz = wz_from_plane + wz_from_view
-        if hard_guard:
-            vx = 0.0
-        if not view_reliable and phase_name != "HOLD":
-            vx = 0.0
+        if phase_name in {"PLANE_ACQUIRE", "PLANE_STOP"}:
             vy = 0.0
             wz = 0.0
+        if hard_guard:
+            vx = 0.0
+            recover_err = float(guard_view_err)
+            if plane_touch_right and recover_err <= 0.0:
+                recover_err = 1.0
+            elif plane_touch_left and recover_err >= 0.0:
+                recover_err = -1.0
+            recover_vy = abs(float(getattr(self.car_cfg, "table_view_recover_vy_norm", 0.008) or 0.008))
+            recover_wz = abs(float(getattr(self.car_cfg, "table_view_recover_wz_norm", 0.04) or 0.04))
+            recover_vy = min(recover_vy, abs(float(getattr(self.car_cfg, "table_vy_max_norm", 0.02) or 0.02)))
+            recover_wz = min(recover_wz, abs(float(getattr(self.car_cfg, "table_wz_view_max_norm", 0.08) or 0.08)))
+            direction = 1.0 if recover_err >= 0.0 else -1.0
+            vy = direction * recover_vy * float(getattr(self.car_cfg, "table_view_vy_sign", -1.0))
+            wz = direction * recover_wz * float(getattr(self.car_cfg, "table_view_wz_sign", -1.0))
+        if (not view_valid_for_forward and phase_name not in {"PLANE_ACQUIRE"}) or obs_stale:
+            vx = 0.0
+            if obs_stale:
+                vy = 0.0
+                wz = 0.0
         vx, vy, wz = self._limit_table_cmd(vx, vy, wz)
-        if hard_guard or (not view_reliable and phase_name != "HOLD"):
+        if hard_guard or (not view_valid_for_forward and phase_name not in {"PLANE_ACQUIRE"}) or obs_stale:
             vx = 0.0
             self._last_table_vx = 0.0
+            if obs_stale:
+                vy = 0.0
+                wz = 0.0
+            elif hard_guard:
+                vy = direction * recover_vy * float(getattr(self.car_cfg, "table_view_vy_sign", -1.0))
+                wz = direction * recover_wz * float(getattr(self.car_cfg, "table_view_wz_sign", -1.0))
         if abs(vx) < 0.005:
             vx = 0.0
         if abs(vy) < 0.005:
@@ -514,10 +550,16 @@ class MotionController:
         summary.update(
             {
                 "table_approach_phase": phase_name,
+                "table_approach_reason": "plane_confirmed_table_front" if self._plane_stable(obs) else "plane_waiting",
+                "approach_source": "plane_only",
                 "view_source": view_source,
                 "view_err_norm": float(view_err),
-                "view_reliable": bool(view_reliable),
+                "view_reliable": bool(obs_view_reliable),
+                "view_inferred_reliable": bool(view_reliable),
                 "fov_guard_active": bool(hard_guard),
+                "fov_guard_reason": fov_guard_reason,
+                "fov_guard_view_err_norm": float(guard_view_err),
+                "obs_stale": bool(obs_stale),
                 "vx_from_dist": float(vx_from_dist),
                 "vy_from_view": float(vy_from_view),
                 "wz_from_plane": float(wz_from_plane),
@@ -530,6 +572,7 @@ class MotionController:
                 "final_wz": float(wz),
                 "table_confirmed_by_yolo": bool(getattr(obs, "table_confirmed_by_yolo", False)) if obs is not None else False,
                 "yolo_reliable": bool(getattr(obs, "yolo_reliable", False)) if obs is not None else False,
+                "yolo_gate_open": bool(getattr(obs, "yolo_gate_open", False)) if obs is not None else False,
                 "plane_cx_norm": getattr(obs, "plane_cx_norm", None) if obs is not None else None,
                 "plane_width_norm": getattr(obs, "plane_width_norm", None) if obs is not None else None,
                 "plane_touch_left": bool(getattr(obs, "plane_touch_left", False)) if obs is not None else False,

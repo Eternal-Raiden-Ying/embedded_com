@@ -347,6 +347,7 @@ class TableEdgeManager:
             "yolo_table_conf": None,
             "yolo_gate_reason": str(reason or ""),
             "yolo_reliable": False,
+            "yolo_gate_open": False,
             "yolo_bbox_area_norm": None,
             "yolo_bbox_touch_left": False,
             "yolo_bbox_touch_right": False,
@@ -377,9 +378,11 @@ class TableEdgeManager:
         require_yolo = bool(getattr(table_edge_cfg, "require_yolo_table_confirm", True))
         if not require_yolo:
             return {
-                "table_confirmed_by_yolo": True,
+                "table_confirmed_by_yolo": False,
                 "yolo_table_conf": None,
-                "yolo_gate_reason": "not_required",
+                "yolo_gate_reason": "not_required_plane_only",
+                "yolo_reliable": False,
+                "yolo_gate_open": True,
             }
         local_payload = dict(local if local is not None else self._local_perception())
         min_conf = float(getattr(table_edge_cfg, "yolo_table_min_conf", 0.25) or 0.25)
@@ -403,6 +406,7 @@ class TableEdgeManager:
             "yolo_gate_reason": reason,
             "yolo_table_bbox": det.get("bbox"),
             "yolo_reliable": yolo_reliable,
+            "yolo_gate_open": bool(confirmed),
             "yolo_bbox_area_norm": bbox_metrics.get("area_norm"),
             "yolo_bbox_touch_left": bool(bbox_metrics.get("touch_left", False)),
             "yolo_bbox_touch_right": bool(bbox_metrics.get("touch_right", False)),
@@ -574,7 +578,7 @@ class TableEdgeManager:
         profile["depth_frame_fetch_ms"] = float(self._last_depth_frame_fetch_ms)
         roi_meta = self._select_roi(depth_frame)
         yolo_gate = self._yolo_table_confirmation()
-        if not bool(yolo_gate.get("table_confirmed_by_yolo", False)):
+        if not bool(yolo_gate.get("yolo_gate_open", yolo_gate.get("table_confirmed_by_yolo", False))):
             payload = self._default_result(
                 depth_valid=True,
                 reason="waiting_yolo_table_confirm",
