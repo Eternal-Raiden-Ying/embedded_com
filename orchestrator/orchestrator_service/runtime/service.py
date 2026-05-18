@@ -1335,6 +1335,12 @@ class OrchestratorService(BaseModule):
                 try:
                     if msg_type == "table_edge_obs":
                         parsed = TableEdgeObs.from_dict(payload)
+                        parsed.obs_recv_ts = recv_ts
+                        if parsed.obs_publish_ts is not None:
+                            try:
+                                parsed.publish_delay_ms = max(0.0, (recv_ts - float(parsed.obs_publish_ts)) * 1000.0)
+                            except Exception:
+                                pass
                         self._edge_obs_rate_ts.append(recv_ts)
                         if priority >= latest_table_priority:
                             latest_table = parsed
@@ -1349,6 +1355,9 @@ class OrchestratorService(BaseModule):
                             "depth_valid": parsed.depth_valid,
                             "obs_ts": parsed.obs_ts,
                             "age_ms": parsed.age_ms,
+                            "obs_total_age_ms": parsed.obs_total_age_ms,
+                            "vision_process_ms": parsed.vision_process_ms,
+                            "edge_update_interval_ms": parsed.edge_update_interval_ms,
                             "frame_id": parsed.frame_id,
                             "seq": parsed.seq,
                             "source_mode": parsed.source_mode,
@@ -1370,6 +1379,9 @@ class OrchestratorService(BaseModule):
                             depth_valid=parsed.depth_valid,
                             obs_ts=parsed.obs_ts,
                             age_ms=parsed.age_ms,
+                            obs_total_age_ms=parsed.obs_total_age_ms,
+                            vision_process_ms=parsed.vision_process_ms,
+                            edge_update_interval_ms=parsed.edge_update_interval_ms,
                             frame_id=parsed.frame_id,
                             seq=parsed.seq,
                             source_mode=parsed.source_mode,
@@ -1621,6 +1633,13 @@ class OrchestratorService(BaseModule):
             "dist_err_m",
             "target_dist_m",
             "table_edge_obs_age_ms",
+            "obs_total_age_ms",
+            "vision_process_ms",
+            "control_loop_age_ms",
+            "edge_update_interval_ms",
+            "stale_level",
+            "stale_guard_active",
+            "stale_guard_reason",
             "edge_obs_is_stale",
             "edge_follow_stale",
             "lock_ready",
@@ -1713,6 +1732,10 @@ class OrchestratorService(BaseModule):
             f"conf={self._fmt_float(summary.get('confidence'), 2, signed=False)} "
             f"yaw={self._fmt_float(summary.get('yaw_err_rad'))} "
             f"dist={self._fmt_float(summary.get('dist_err_m'))} "
+            f"age={self._fmt_float(summary.get('obs_total_age_ms', summary.get('table_edge_obs_age_ms')), 0, signed=False)}ms "
+            f"proc={self._fmt_float(summary.get('vision_process_ms'), 0, signed=False)}ms "
+            f"dt={self._fmt_float(summary.get('edge_update_interval_ms'), 0, signed=False)}ms "
+            f"stale={summary.get('stale_level') or 'n/a'} "
             f"lock={int(bool(summary.get('lock_ready')))} reason={reason} "
             f"cmd vx={self._fmt_float(cmd.get('vx'))} vy={self._fmt_float(cmd.get('vy'))} wz={self._fmt_float(cmd.get('wz'))}"
         )
@@ -1724,6 +1747,10 @@ class OrchestratorService(BaseModule):
                 f"conf={self._fmt_float(summary.get('confidence'), 2, signed=False)} "
                 f"yaw={self._fmt_float(summary.get('yaw_err_rad'))} "
                 f"dist={self._fmt_float(summary.get('dist_err_m'))} stable={stable}/{needed} "
+                f"age={self._fmt_float(summary.get('obs_total_age_ms', summary.get('table_edge_obs_age_ms')), 0, signed=False)}ms "
+                f"proc={self._fmt_float(summary.get('vision_process_ms'), 0, signed=False)}ms "
+                f"dt={self._fmt_float(summary.get('edge_update_interval_ms'), 0, signed=False)}ms "
+                f"stale={summary.get('stale_level') or 'n/a'} "
                 f"ready={int(bool(summary.get('lock_ready')))} reason={reason} "
                 f"cmd vx={self._fmt_float(cmd.get('vx'))} vy={self._fmt_float(cmd.get('vy'))} wz={self._fmt_float(cmd.get('wz'))}"
             )

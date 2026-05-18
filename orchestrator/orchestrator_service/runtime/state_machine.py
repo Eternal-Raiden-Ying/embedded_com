@@ -334,6 +334,12 @@ class OrchestratorCore:
             "target_dist_m": table_obs.target_dist_m if table_obs is not None else None,
             "table_edge_obs_ts": table_obs.obs_ts if table_obs is not None else None,
             "table_edge_obs_age_ms": self._table_obs_age_ms(table_obs),
+            "obs_total_age_ms": self._table_obs_age_ms(table_obs),
+            "vision_process_ms": getattr(table_obs, "vision_process_ms", getattr(table_obs, "edge_process_ms", None)) if table_obs is not None else None,
+            "control_loop_age_ms": self._table_control_loop_age_ms(table_obs),
+            "stale_level": self._table_obs_stale_level(table_obs),
+            "stale_guard_active": self._table_obs_stale_level(table_obs) != "fresh",
+            "stale_guard_reason": self._table_obs_stale_reason(table_obs),
             "table_edge_obs_frame_id": table_obs.frame_id if table_obs is not None else None,
             "table_edge_obs_seq": table_obs.seq if table_obs is not None else None,
             "edge_update_interval_ms": table_obs.edge_update_interval_ms if table_obs is not None else None,
@@ -1956,17 +1962,54 @@ class OrchestratorCore:
         if obs is None:
             return None
         age_ms: Optional[float] = None
-        obs_ts = obs.obs_ts if obs.obs_ts is not None else obs.ts
+        obs_ts = getattr(obs, "frame_capture_ts", None)
+        if obs_ts is None:
+            obs_ts = obs.obs_ts if obs.obs_ts is not None else obs.ts
         try:
             age_ms = max(0.0, (time.time() - float(obs_ts)) * 1000.0)
         except Exception:
             age_ms = None
-        if obs.age_ms is not None:
+        for candidate in (getattr(obs, "obs_total_age_ms", None), obs.age_ms):
+            if candidate is None:
+                continue
             try:
-                age_ms = max(float(age_ms or 0.0), float(obs.age_ms))
+                age_ms = max(float(age_ms or 0.0), float(candidate))
             except Exception:
                 pass
         return age_ms
+
+    def _table_control_loop_age_ms(self, obs: Optional[TableEdgeObs]) -> Optional[float]:
+        if obs is None or getattr(obs, "obs_recv_ts", None) is None:
+            return None
+        try:
+            return max(0.0, (time.time() - float(obs.obs_recv_ts)) * 1000.0)
+        except Exception:
+            return None
+
+    def _table_obs_stale_level(self, obs: Optional[TableEdgeObs]) -> str:
+        if obs is None:
+            return "dead"
+        age_ms = self._table_obs_age_ms(obs)
+        if age_ms is None or bool(getattr(obs, "is_stale", False)) or obs.depth_valid is False:
+            return "hard_stale"
+        soft = float(getattr(self.cfg, "table_obs_stale_soft_ms", 300) or 300)
+        stop = float(getattr(self.cfg, "table_obs_stale_stop_ms", 500) or 500)
+        hard = float(getattr(self.cfg, "table_obs_stale_hard_ms", 800) or 800)
+        if float(age_ms) <= soft:
+            return "fresh"
+        if float(age_ms) <= stop:
+            return "soft_stale"
+        if float(age_ms) <= hard:
+            return "hard_stale"
+        return "dead"
+
+    def _table_obs_stale_reason(self, obs: Optional[TableEdgeObs]) -> str:
+        level = self._table_obs_stale_level(obs)
+        if level == "fresh":
+            return ""
+        age_ms = self._table_obs_age_ms(obs)
+        age_text = "unknown" if age_ms is None else f"{float(age_ms):.0f}"
+        return f"{level}:obs_total_age_ms={age_text}"
 
     def _edge_obs_is_stale(self, obs: Optional[TableEdgeObs]) -> bool:
         if obs is None:
@@ -1978,7 +2021,7 @@ class OrchestratorCore:
         age_ms = self._table_obs_age_ms(obs)
         if age_ms is None:
             return True
-        return float(age_ms) > float(getattr(self.cfg, "table_edge_obs_max_age_ms", 500) or 500)
+        return self._table_obs_stale_level(obs) != "fresh"
 
     def _fresh_target_obs(self) -> Optional[TargetObs]:
         obs = self.ctx.last_target_obs
@@ -2274,6 +2317,8 @@ class OrchestratorCore:
     def _coarse_aligned(self, obs: Optional[TableEdgeObs]) -> bool:
         if obs is None:
             return False
+        if self._edge_obs_is_stale(obs):
+            return False
         if self._control_level(obs) == "stop":
             return True
         if obs.yaw_err_rad is not None:
@@ -2284,6 +2329,8 @@ class OrchestratorCore:
 
     def _edge_ready(self, obs: Optional[TableEdgeObs]) -> bool:
         if obs is None:
+            return False
+        if self._edge_obs_is_stale(obs):
             return False
         if self._control_level(obs) == "stop" or bool(getattr(obs, "usable_for_stop", False)):
             return True
@@ -2308,6 +2355,8 @@ class OrchestratorCore:
         return self._table_target_dist_m(obs) + float(obs.dist_err_m)
 
     def _table_dock_should_stop(self, obs: Optional[TableEdgeObs]) -> bool:
+        if obs is None or self._edge_obs_is_stale(obs):
+            return False
         if self._control_level(obs) != "stop" and not bool(getattr(obs, "usable_for_stop", False)):
             return False
         measured = self._table_measured_dist_m(obs)

@@ -128,6 +128,12 @@ class ControlThresholds:
     edge_slide_recover_timeout_s: float = 2.50
     edge_slide_direct_fallback_to_controlled_approach: bool = False
     table_edge_obs_max_age_ms: int = 500
+    table_obs_stale_soft_ms: int = 300
+    table_obs_stale_stop_ms: int = 500
+    table_obs_stale_hard_ms: int = 800
+    table_step_mode_enable: bool = False
+    table_step_burst_ms: int = 150
+    table_step_hold_until_new_obs: bool = True
     edge_follow_log_period_ms: int = 500
     edge_follow_min_edge_conf: float = 0.60
     edge_follow_min_edge_conf_table_edge_perception: float = 0.60

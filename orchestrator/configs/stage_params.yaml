@@ -48,6 +48,12 @@ edge_slide_search:
 
 edge_follow:
   table_edge_obs_max_age_ms: 500
+  table_obs_stale_soft_ms: 300
+  table_obs_stale_stop_ms: 500
+  table_obs_stale_hard_ms: 800
+  table_step_mode_enable: false
+  table_step_burst_ms: 150
+  table_step_hold_until_new_obs: true
   min_edge_conf: 0.60
   min_edge_conf_table_edge_perception: 0.60
   min_edge_conf_track_local: 0.20

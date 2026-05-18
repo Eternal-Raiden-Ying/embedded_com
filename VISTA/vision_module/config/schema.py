@@ -143,12 +143,17 @@ class DebugConfig:
 class TableEdgeConfig:
     roi_preset: str = ""
     static_roi_enabled: bool = False
+    target_hz: float = 10.0
     update_hz: float = 10.0
+    preview_hz: float = 2.0
     track_local_update_hz: float = 5.0
     track_local_light_edge: bool = False
     track_local_edge_stride: int = 4
     require_yolo_table_confirm: bool = False
+    enable_yolo_in_plane_only: bool = False
     yolo_table_min_conf: float = 0.25
+    save_debug_frames: bool = False
+    profile_log_interval_s: float = 2.0
 
 
 @dataclass

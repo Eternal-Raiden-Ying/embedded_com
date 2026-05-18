@@ -202,12 +202,20 @@ def _apply_vision_params(data: Dict[str, Any]) -> None:
         (
             "roi_preset",
             "static_roi_enabled",
+            "target_hz",
             "update_hz",
+            "preview_hz",
             "track_local_update_hz",
             "track_local_light_edge",
             "track_local_edge_stride",
+            "require_yolo_table_confirm",
+            "enable_yolo_in_plane_only",
+            "save_debug_frames",
+            "profile_log_interval_s",
         ),
     )
+    if float(getattr(CONFIG.table_edge, "target_hz", 0.0) or 0.0) > 0:
+        CONFIG.table_edge.update_hz = float(CONFIG.table_edge.target_hz)
     if getattr(CONFIG.table_edge, "roi_preset", ""):
         CONFIG.table_edge.roi_preset = str(CONFIG.table_edge.roi_preset).strip().lower()
 
@@ -459,7 +467,12 @@ CONFIG.table_edge.static_roi_enabled = _env_bool(
     "VISTA_TABLE_EDGE_STATIC_ROI",
     _env_bool("VISTA_FORCE_STATIC_EDGE_ROI", CONFIG.table_edge.static_roi_enabled),
 )
+_target_hz_env = os.getenv("VISTA_TABLE_EDGE_TARGET_HZ")
+if _target_hz_env is not None:
+    CONFIG.table_edge.target_hz = _env_float("VISTA_TABLE_EDGE_TARGET_HZ", CONFIG.table_edge.target_hz)
+    CONFIG.table_edge.update_hz = float(CONFIG.table_edge.target_hz)
 CONFIG.table_edge.update_hz = _env_float("VISTA_TABLE_EDGE_HZ", CONFIG.table_edge.update_hz)
+CONFIG.table_edge.preview_hz = _env_float("VISTA_TABLE_EDGE_PREVIEW_HZ", CONFIG.table_edge.preview_hz)
 CONFIG.table_edge.track_local_update_hz = _env_float(
     "VISTA_TRACK_LOCAL_EDGE_UPDATE_HZ",
     _env_float("VISTA_EDGE_FOLLOW_TRACK_LOCAL_EDGE_UPDATE_HZ", CONFIG.table_edge.track_local_update_hz),
@@ -476,7 +489,16 @@ CONFIG.table_edge.require_yolo_table_confirm = _env_bool(
     "VISTA_TABLE_EDGE_REQUIRE_YOLO",
     CONFIG.table_edge.require_yolo_table_confirm,
 )
+CONFIG.table_edge.enable_yolo_in_plane_only = _env_bool(
+    "VISTA_TABLE_EDGE_ENABLE_YOLO_IN_PLANE_ONLY",
+    CONFIG.table_edge.enable_yolo_in_plane_only,
+)
 CONFIG.table_edge.yolo_table_min_conf = _env_float("VISTA_TABLE_EDGE_YOLO_MIN_CONF", CONFIG.table_edge.yolo_table_min_conf)
+CONFIG.table_edge.save_debug_frames = _env_bool("VISTA_TABLE_EDGE_SAVE_DEBUG_FRAMES", CONFIG.table_edge.save_debug_frames)
+CONFIG.table_edge.profile_log_interval_s = _env_float(
+    "VISTA_TABLE_EDGE_PROFILE_LOG_INTERVAL_S",
+    CONFIG.table_edge.profile_log_interval_s,
+)
 
 
 def _preview_mode_layouts(defaults: Dict[str, str]) -> Dict[str, str]:

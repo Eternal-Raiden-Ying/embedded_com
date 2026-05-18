@@ -53,7 +53,11 @@ class TableEdgeManager:
         self._last_process_ms = 0.0
         self._last_update_interval_ms = None
         self._last_edge_dbg_ts = 0.0
+        self._last_profile_log_ts = 0.0
         self._frame_id = 0
+        self._dropped_frame_count = 0
+        self._processed_frame_count = 0
+        self._processing_busy = False
         self._detector = None
         self._detector_cfg = None
         self._detector_error = ""
@@ -141,6 +145,10 @@ class TableEdgeManager:
         except Exception:
             generation = 0
         try:
+            if isinstance(payload, dict):
+                payload["obs_publish_ts"] = float(time.time())
+                done_ts = float(payload.get("vision_done_ts") or payload["obs_publish_ts"])
+                payload["publish_delay_ms"] = max(0.0, (payload["obs_publish_ts"] - done_ts) * 1000.0)
             scheduler.publish_result(route, payload, generation=generation)
             self._last_publish_ts = time.time()
         except Exception:
@@ -160,20 +168,54 @@ class TableEdgeManager:
             return min(float(self._default_interval_s), float(self._track_local_interval_s))
         return float(self._default_interval_s)
 
-    def _with_freshness(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    @staticmethod
+    def _pick_frame_capture_ts(frame_slot: Dict[str, Any], frames: Dict[str, Any]) -> float:
+        for source in (frames, frame_slot):
+            for key in ("frame_capture_ts", "capture_ts", "frame_ts", "ts"):
+                value = source.get(key) if isinstance(source, dict) else None
+                if value is None:
+                    continue
+                try:
+                    ts = float(value)
+                    if ts > 0.0:
+                        if ts > 1e12:
+                            return ts / 1000.0
+                        return ts
+                except Exception:
+                    continue
+        return time.time()
+
+    def _with_freshness(
+        self,
+        payload: Dict[str, Any],
+        *,
+        frame_capture_ts: float,
+        vision_start_ts: float,
+        vision_done_ts: float,
+        latest_frame_lag_ms: float,
+    ) -> Dict[str, Any]:
         out = dict(payload or {})
-        obs_ts = time.time()
+        obs_ts = float(vision_done_ts or time.time())
         previous_obs_ts = float(self._last_obs_ts or 0.0)
         update_interval_ms = ((obs_ts - previous_obs_ts) * 1000.0) if previous_obs_ts > 0.0 else None
         self._last_obs_ts = float(obs_ts)
         self._last_update_interval_ms = update_interval_ms
         out["ts"] = float(obs_ts)
         out["obs_ts"] = float(obs_ts)
-        out["age_ms"] = 0.0
+        out["frame_capture_ts"] = float(frame_capture_ts)
+        out["vision_start_ts"] = float(vision_start_ts)
+        out["vision_done_ts"] = float(vision_done_ts)
+        out["frame_age_ms"] = max(0.0, (float(vision_start_ts) - float(frame_capture_ts)) * 1000.0)
+        out["vision_process_ms"] = max(0.0, (float(vision_done_ts) - float(vision_start_ts)) * 1000.0)
+        out["obs_total_age_ms"] = max(0.0, (float(obs_ts) - float(frame_capture_ts)) * 1000.0)
+        out["age_ms"] = float(out["obs_total_age_ms"])
         out["edge_update_interval_ms"] = update_interval_ms
-        out["edge_process_ms"] = float(self._last_process_ms)
-        out["total_edge_process_ms"] = float(self._last_process_ms)
+        out["edge_process_ms"] = float(out["vision_process_ms"])
+        out["total_edge_process_ms"] = float(out["vision_process_ms"])
         out.setdefault("depth_frame_fetch_ms", float(self._last_depth_frame_fetch_ms))
+        out["dropped_frame_count"] = int(self._dropped_frame_count)
+        out["processed_frame_count"] = int(self._processed_frame_count)
+        out["latest_frame_lag_ms"] = float(latest_frame_lag_ms)
         unavailable = bool(out.get("edge_obs_unavailable", False))
         out["is_stale"] = bool(out.get("is_stale", False) or unavailable)
         out["source_mode"] = self._active_mode()
@@ -184,6 +226,24 @@ class TableEdgeManager:
         out.setdefault("yaw_err", out.get("yaw_err_rad"))
         out.setdefault("dist_err", out.get("dist_err_m"))
         return out
+
+    def _log_profile_if_due(self, payload: Dict[str, Any]) -> None:
+        interval_s = float(getattr(getattr(self.cfg, "table_edge", None), "profile_log_interval_s", 2.0) or 2.0)
+        if interval_s <= 0.0:
+            return
+        now = time.time()
+        if now - float(self._last_profile_log_ts or 0.0) < interval_s:
+            return
+        self._last_profile_log_ts = now
+        self.log.info(
+            "[TABLE_EDGE_PROFILE] obs_total_age_ms=%.1f vision_process_ms=%.1f edge_update_interval_ms=%s dropped=%d processed=%d latest_frame_lag_ms=%.1f",
+            float(payload.get("obs_total_age_ms") or 0.0),
+            float(payload.get("vision_process_ms") or 0.0),
+            "None" if payload.get("edge_update_interval_ms") is None else f"{float(payload.get('edge_update_interval_ms')):.1f}",
+            int(payload.get("dropped_frame_count") or 0),
+            int(payload.get("processed_frame_count") or 0),
+            float(payload.get("latest_frame_lag_ms") or 0.0),
+        )
 
     @staticmethod
     def _ms_since(start_ts: float) -> float:
@@ -376,6 +436,9 @@ class TableEdgeManager:
     def _yolo_table_confirmation(self, local: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         table_edge_cfg = getattr(self.cfg, "table_edge", None)
         require_yolo = bool(getattr(table_edge_cfg, "require_yolo_table_confirm", True))
+        plane_only = bool(getattr(self._detector_cfg, "plane_only_mode", False))
+        if plane_only and not bool(getattr(table_edge_cfg, "enable_yolo_in_plane_only", False)):
+            require_yolo = False
         if not require_yolo:
             return {
                 "table_confirmed_by_yolo": False,
@@ -929,28 +992,46 @@ class TableEdgeManager:
             if seq <= self._last_camera_seq or not isinstance(frames, dict):
                 self._worker_stop.wait(timeout=interval_s)
                 continue
+            if seq > self._last_camera_seq + 1 and self._last_camera_seq > 0:
+                self._dropped_frame_count += int(seq - self._last_camera_seq - 1)
             self._last_camera_seq = seq
             self._frame_id += 1
+            frame_capture_ts = self._pick_frame_capture_ts(frame_slot, frames)
+            latest_frame_lag_ms = max(0.0, (time.time() - float(frame_capture_ts)) * 1000.0)
+            vision_start_ts = time.time()
+            self._processing_busy = True
             depth = frames.get("depth")
-            if not isinstance(depth, np.ndarray) or depth.size <= 0:
-                payload = self._default_result(
-                    depth_valid=False,
-                    reason="depth_unavailable",
-                    frame_seq=seq,
-                    roi_meta=self._select_roi(None),
-                )
-            elif depth.ndim != 2:
-                payload = self._default_result(
-                    depth_valid=False,
-                    reason="depth_frame_not_2d",
-                    frame_seq=seq,
-                    roi_meta=self._select_roi(depth),
-                )
-            else:
-                payload = self._process_depth(depth, seq)
-            self._last_process_ms = max(0.0, (time.time() - loop_start) * 1000.0)
-            payload = self._with_freshness(payload)
+            try:
+                if not isinstance(depth, np.ndarray) or depth.size <= 0:
+                    payload = self._default_result(
+                        depth_valid=False,
+                        reason="depth_unavailable",
+                        frame_seq=seq,
+                        roi_meta=self._select_roi(None),
+                    )
+                elif depth.ndim != 2:
+                    payload = self._default_result(
+                        depth_valid=False,
+                        reason="depth_frame_not_2d",
+                        frame_seq=seq,
+                        roi_meta=self._select_roi(depth),
+                    )
+                else:
+                    payload = self._process_depth(depth, seq)
+            finally:
+                self._processing_busy = False
+            vision_done_ts = time.time()
+            self._processed_frame_count += 1
+            self._last_process_ms = max(0.0, (vision_done_ts - vision_start_ts) * 1000.0)
+            payload = self._with_freshness(
+                payload,
+                frame_capture_ts=frame_capture_ts,
+                vision_start_ts=vision_start_ts,
+                vision_done_ts=vision_done_ts,
+                latest_frame_lag_ms=latest_frame_lag_ms,
+            )
             self._emit_edge_debug(payload)
+            self._log_profile_if_due(payload)
             self._publish_result("table_edge_obs", payload)
             elapsed_s = max(0.0, time.time() - loop_start)
             self._worker_stop.wait(timeout=max(0.0, interval_s - elapsed_s))
@@ -989,6 +1070,9 @@ class TableEdgeManager:
             "last_process_ms": float(self._last_process_ms),
             "last_update_interval_ms": self._last_update_interval_ms,
             "frame_id": int(self._frame_id),
+            "dropped_frame_count": int(self._dropped_frame_count),
+            "processed_frame_count": int(self._processed_frame_count),
+            "processing_busy": bool(self._processing_busy),
             "target_dist_m": float(self._target_dist_m),
             "last_valid_quadrant": self._last_valid_quadrant,
             "default_update_hz": 1.0 / max(1e-6, float(self._default_interval_s)),

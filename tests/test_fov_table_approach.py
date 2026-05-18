@@ -18,6 +18,7 @@ from orchestrator_service.config.schema import CarMotionConfig, ControlThreshold
 from orchestrator_service.control.motion_adapter import Stm32MotionAdapter  # noqa: E402
 from orchestrator_service.ipc.protocol import CmdVel, TableEdgeObs, now_ts  # noqa: E402
 from orchestrator_service.runtime.controller import MotionController  # noqa: E402
+from orchestrator_service.runtime.state_machine import OrchestratorCore  # noqa: E402
 
 
 def _controller() -> MotionController:
@@ -131,6 +132,50 @@ class FovTableApproachTest(unittest.TestCase):
         self.assertEqual(stale_decision.cmd.vx_norm, 0.0)
         self.assertEqual(stale_decision.cmd.vy_norm, 0.0)
         self.assertEqual(stale_decision.cmd.wz_norm, 0.0)
+
+    def test_fresh_obs_under_soft_threshold_allows_normal_control(self) -> None:
+        controller = _controller()
+        obs = _obs(frame_capture_ts=now_ts() - 0.05)
+        decision = controller.fov_table_approach_cmd(obs)
+        self.assertEqual(decision.control_summary["stale_level"], "fresh")
+        self.assertGreaterEqual(decision.cmd.vx_norm, 0.0)
+
+    def test_soft_stale_blocks_forward_only(self) -> None:
+        controller = _controller()
+        obs = _obs(frame_capture_ts=now_ts() - 0.35)
+        decision = controller.fov_table_approach_cmd(obs)
+        self.assertEqual(decision.control_summary["stale_level"], "soft_stale")
+        self.assertEqual(decision.cmd.vx_norm, 0.0)
+
+    def test_hard_stale_outputs_hold(self) -> None:
+        controller = _controller()
+        obs = _obs(frame_capture_ts=now_ts() - 0.60)
+        decision = controller.fov_table_approach_cmd(obs)
+        self.assertEqual(decision.control_summary["stale_level"], "hard_stale")
+        self.assertEqual((decision.cmd.vx_norm, decision.cmd.vy_norm, decision.cmd.wz_norm), (0.0, 0.0, 0.0))
+
+    def test_dead_stale_outputs_hold(self) -> None:
+        controller = _controller()
+        obs = _obs(frame_capture_ts=now_ts() - 1.20)
+        decision = controller.fov_table_approach_cmd(obs)
+        self.assertEqual(decision.control_summary["stale_level"], "dead")
+        self.assertEqual((decision.cmd.vx_norm, decision.cmd.vy_norm, decision.cmd.wz_norm), (0.0, 0.0, 0.0))
+
+    def test_stale_obs_cannot_trigger_final_stop_success(self) -> None:
+        cfg = ControlThresholds()
+        cfg.table_obs_stale_soft_ms = 300
+        core = OrchestratorCore(cfg, CarMotionConfig())
+        obs = _obs(frame_capture_ts=now_ts() - 0.35, dist_err_m=0.0, yaw_err_rad=0.0, usable_for_stop=True)
+        status = core._final_lock_status(obs, stable_count=10)
+        self.assertFalse(status["lock_ready"])
+        self.assertEqual(status["reason"], "vision_stale")
+
+    def test_missing_frame_capture_ts_falls_back_safely(self) -> None:
+        controller = _controller()
+        obs = _obs(ts=now_ts(), frame_capture_ts=None)
+        decision = controller.fov_table_approach_cmd(obs)
+        self.assertIn(decision.control_summary["stale_level"], {"fresh", "soft_stale", "hard_stale", "dead"})
+        self.assertIn("obs_total_age_ms", decision.control_summary)
 
     def test_approach_level_outputs_view_correction(self) -> None:
         controller = _controller()

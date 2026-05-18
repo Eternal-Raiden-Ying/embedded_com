@@ -129,10 +129,15 @@ table_edge:
   static_roi_enabled: false
 
   # 桌边检测频率。
+  target_hz: 10.0
   update_hz: 10.0
+  preview_hz: 2.0
   track_local_update_hz: 5.0
   track_local_light_edge: true
   track_local_edge_stride: 4
+  enable_yolo_in_plane_only: false
+  save_debug_frames: false
+  profile_log_interval_s: 2.0
 
 preview:
   # 可选 layout 见 preview/manager 和 opencv_sink 支持项。

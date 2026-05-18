@@ -1592,6 +1592,66 @@ class GenerationAwareFrameConsumptionTest(unittest.TestCase):
             manager.release_all()
             scheduler.stop_runtime()
 
+    def test_table_edge_latest_frame_slot_drops_old_frames(self):
+        scheduler = Scheduler()
+        scheduler.start_runtime()
+        plan = {
+            "mode": "TABLE_EDGE_PERCEPTION",
+            "routes": {
+                "camera_frames": {"policy": "slot", "scope": "backend"},
+                "table_edge_obs": {"policy": "slot", "scope": "stage"},
+                "runtime_status": {"policy": "slot", "scope": "backend"},
+                "local_perception": {"policy": "slot", "scope": "stage"},
+            },
+        }
+        scheduler.configure(plan, generation=1)
+        manager = TableEdgeManager(logger=PrintLogger("table_edge_latest"))
+        manager._worker_interval_s = 0.10
+        manager._default_interval_s = 0.10
+        manager.bind_runtime(scheduler, lambda: 1)
+        try:
+            manager.start_runtime()
+            scheduler.publish_result("camera_frames", {"depth": np.zeros((16, 16), dtype=np.uint16)}, generation=1)
+            deadline = time.time() + 1.0
+            while time.time() < deadline and manager.snapshot()["processed_frame_count"] < 1:
+                time.sleep(0.02)
+            for _ in range(5):
+                scheduler.publish_result("camera_frames", {"depth": np.zeros((16, 16), dtype=np.uint16)}, generation=1)
+            deadline = time.time() + 1.0
+            while time.time() < deadline:
+                payload = scheduler.read_result("table_edge_obs", default=None)
+                if isinstance(payload, dict) and int(payload.get("dropped_frame_count", 0) or 0) >= 1:
+                    break
+                time.sleep(0.02)
+            snapshot = manager.snapshot()
+            self.assertGreaterEqual(snapshot["dropped_frame_count"], 1)
+            self.assertGreaterEqual(snapshot["processed_frame_count"], 2)
+        finally:
+            manager.release_all()
+            scheduler.stop_runtime()
+
+    def test_plane_only_yolo_gate_does_not_block_table_edge_obs(self):
+        from vision_module.config.schema import VisionServiceConfig
+
+        cfg = VisionServiceConfig()
+        cfg.table_edge.require_yolo_table_confirm = True
+        cfg.table_edge.enable_yolo_in_plane_only = False
+        manager = TableEdgeManager(cfg=cfg, logger=PrintLogger("table_edge_yolo_gate"))
+        try:
+            manager._detector_cfg = SimpleNamespace(plane_only_mode=True)
+            gate = manager._yolo_table_confirmation(local={"table_roi_source": "", "rgb_shape": (10, 10, 3)})
+            self.assertTrue(gate["yolo_gate_open"])
+            self.assertEqual(gate["yolo_gate_reason"], "not_required_plane_only")
+        finally:
+            manager.release_all()
+
+    def test_table_edge_preview_rate_config_is_low_frequency(self):
+        from vision_module.config.schema import VisionServiceConfig
+
+        cfg = VisionServiceConfig()
+        self.assertLessEqual(cfg.table_edge.preview_hz, 5.0)
+        self.assertLess(cfg.table_edge.preview_hz, cfg.table_edge.target_hz)
+
     def test_preview_resumes_after_generation_reset(self):
         scheduler = Scheduler()
         scheduler.start_runtime()

@@ -60,6 +60,75 @@ class MotionController:
             brake=bool(brake),
         )
 
+    def _obs_timing(self, obs: Optional[TableEdgeObs], control_ts: Optional[float] = None) -> Dict[str, Any]:
+        if obs is None:
+            return {
+                "control_ts": control_ts,
+                "obs_total_age_ms": None,
+                "control_loop_age_ms": None,
+                "vision_process_ms": None,
+                "edge_update_interval_ms": None,
+            }
+        control_ts = float(control_ts if control_ts is not None else time.time())
+        frame_capture_ts = getattr(obs, "frame_capture_ts", None)
+        obs_total_age_ms = getattr(obs, "obs_total_age_ms", None)
+        if frame_capture_ts is not None:
+            try:
+                obs_total_age_ms = max(0.0, (control_ts - float(frame_capture_ts)) * 1000.0)
+            except Exception:
+                pass
+        elif obs_total_age_ms is None:
+            base_ts = getattr(obs, "obs_ts", None) if getattr(obs, "obs_ts", None) is not None else getattr(obs, "ts", None)
+            try:
+                obs_total_age_ms = max(0.0, (control_ts - float(base_ts)) * 1000.0)
+            except Exception:
+                obs_total_age_ms = None
+        control_loop_age_ms = None
+        recv_ts = getattr(obs, "obs_recv_ts", None)
+        if recv_ts is not None:
+            try:
+                control_loop_age_ms = max(0.0, (control_ts - float(recv_ts)) * 1000.0)
+            except Exception:
+                control_loop_age_ms = None
+        return {
+            "frame_capture_ts": getattr(obs, "frame_capture_ts", None),
+            "vision_start_ts": getattr(obs, "vision_start_ts", None),
+            "vision_done_ts": getattr(obs, "vision_done_ts", None),
+            "obs_publish_ts": getattr(obs, "obs_publish_ts", None),
+            "obs_recv_ts": getattr(obs, "obs_recv_ts", None),
+            "control_ts": control_ts,
+            "frame_age_ms": getattr(obs, "frame_age_ms", None),
+            "vision_process_ms": getattr(obs, "vision_process_ms", getattr(obs, "edge_process_ms", None)),
+            "publish_delay_ms": getattr(obs, "publish_delay_ms", None),
+            "obs_total_age_ms": obs_total_age_ms,
+            "control_loop_age_ms": control_loop_age_ms,
+            "edge_update_interval_ms": getattr(obs, "edge_update_interval_ms", None),
+        }
+
+    def _stale_guard(self, obs: Optional[TableEdgeObs], control_ts: Optional[float] = None) -> Dict[str, Any]:
+        timing = self._obs_timing(obs, control_ts)
+        age_ms = timing.get("obs_total_age_ms")
+        soft = float(getattr(self.cfg, "table_obs_stale_soft_ms", 300) or 300)
+        stop = float(getattr(self.cfg, "table_obs_stale_stop_ms", 500) or 500)
+        hard = float(getattr(self.cfg, "table_obs_stale_hard_ms", 800) or 800)
+        if obs is None or age_ms is None or bool(getattr(obs, "is_stale", False)) or getattr(obs, "depth_valid", None) is False:
+            level = "dead" if obs is None or age_ms is None else "hard_stale"
+        elif float(age_ms) <= soft:
+            level = "fresh"
+        elif float(age_ms) <= stop:
+            level = "soft_stale"
+        elif float(age_ms) <= hard:
+            level = "hard_stale"
+        else:
+            level = "dead"
+        reason = "" if level == "fresh" else f"obs_total_age_ms={age_ms if age_ms is not None else 'unknown'}"
+        return {
+            **timing,
+            "stale_level": level,
+            "stale_guard_active": level != "fresh",
+            "stale_guard_reason": reason,
+        }
+
     def _summary(
         self,
         mode: str,
@@ -77,6 +146,7 @@ class MotionController:
             target_distance = obs.target_dist_m
             if obs.dist_err_m is not None and target_distance is not None:
                 measured_distance = float(target_distance) + float(obs.dist_err_m)
+        timing = self._stale_guard(obs, cmd.ts)
         return {
             "state": mode,
             "edge_found": bool(edge_found if edge_found is not None else (obs.edge_found if obs is not None else False)),
@@ -97,6 +167,7 @@ class MotionController:
             "view_reliable": bool(getattr(obs, "view_reliable", False)) if obs is not None else False,
             "fov_guard_active": bool(getattr(obs, "fov_guard_active", False)) if obs is not None else False,
             "fov_guard_reason": str(getattr(obs, "fov_guard_reason", "") or "") if obs is not None else "",
+            **timing,
             "table_confirmed_by_yolo": bool(getattr(obs, "table_confirmed_by_yolo", False)) if obs is not None else False,
             "yolo_reliable": bool(getattr(obs, "yolo_reliable", False)) if obs is not None else False,
             "plane_cx_norm": (float(getattr(obs, "plane_cx_norm")) if obs is not None and getattr(obs, "plane_cx_norm", None) is not None else None),
@@ -418,6 +489,8 @@ class MotionController:
         base_wz: Optional[float] = None,
         reason: str = "fov_table_approach",
     ) -> MotionDecision:
+        guard = self._stale_guard(obs)
+        stale_level = str(guard.get("stale_level") or "fresh")
         view_err, view_source, view_reliable = self._get_view_error(obs)
         obs_view_reliable = bool(getattr(obs, "view_reliable", False)) if obs is not None else False
         view_valid_for_forward = bool(view_reliable and obs_view_reliable)
@@ -426,7 +499,7 @@ class MotionController:
         hard_th = abs(float(getattr(self.car_cfg, "table_fov_hard_th", 0.40) or 0.40))
         plane_touch_left = bool(getattr(obs, "plane_touch_left", False)) if obs is not None else False
         plane_touch_right = bool(getattr(obs, "plane_touch_right", False)) if obs is not None else False
-        obs_stale = bool(getattr(obs, "is_stale", False)) if obs is not None else False
+        obs_stale = stale_level != "fresh"
         guard_view_err = view_err
         if obs is not None and getattr(obs, "view_err_norm", None) is not None:
             try:
@@ -523,18 +596,37 @@ class MotionController:
             direction = 1.0 if recover_err >= 0.0 else -1.0
             vy = direction * recover_vy * float(getattr(self.car_cfg, "table_view_vy_sign", -1.0))
             wz = direction * recover_wz * float(getattr(self.car_cfg, "table_view_wz_sign", -1.0))
+        if obs_stale:
+            vx = 0.0
+            vx_from_dist = 0.0
+            wz_from_plane = 0.0
+            if stale_level == "soft_stale":
+                recover_vy = abs(float(getattr(self.car_cfg, "table_view_recover_vy_norm", 0.008) or 0.008))
+                recover_wz = abs(float(getattr(self.car_cfg, "table_view_recover_wz_norm", 0.04) or 0.04))
+                vy = self._clamp(vy_from_view, -recover_vy, recover_vy)
+                wz = self._clamp(wz_from_view, -recover_wz, recover_wz)
+            else:
+                vy = 0.0
+                wz = 0.0
         if (not view_valid_for_forward and phase_name not in {"PLANE_ACQUIRE"}) or obs_stale:
             vx = 0.0
-            if obs_stale:
+            if obs_stale and stale_level != "soft_stale":
                 vy = 0.0
                 wz = 0.0
         vx, vy, wz = self._limit_table_cmd(vx, vy, wz)
         if hard_guard or (not view_valid_for_forward and phase_name not in {"PLANE_ACQUIRE"}) or obs_stale:
             vx = 0.0
             self._last_table_vx = 0.0
-            if obs_stale:
+            if obs_stale and stale_level != "soft_stale":
                 vy = 0.0
                 wz = 0.0
+                self._last_table_vy = 0.0
+                self._last_table_wz = 0.0
+            elif obs_stale:
+                recover_vy = abs(float(getattr(self.car_cfg, "table_view_recover_vy_norm", 0.008) or 0.008))
+                recover_wz = abs(float(getattr(self.car_cfg, "table_view_recover_wz_norm", 0.04) or 0.04))
+                vy = self._clamp(vy, -recover_vy, recover_vy)
+                wz = self._clamp(wz, -recover_wz, recover_wz)
             elif hard_guard:
                 vy = direction * recover_vy * float(getattr(self.car_cfg, "table_view_vy_sign", -1.0))
                 wz = direction * recover_wz * float(getattr(self.car_cfg, "table_view_wz_sign", -1.0))
@@ -560,6 +652,9 @@ class MotionController:
                 "fov_guard_reason": fov_guard_reason,
                 "fov_guard_view_err_norm": float(guard_view_err),
                 "obs_stale": bool(obs_stale),
+                "stale_level": stale_level,
+                "stale_guard_active": bool(obs_stale),
+                "stale_guard_reason": str(guard.get("stale_guard_reason") or ""),
                 "vx_from_dist": float(vx_from_dist),
                 "vy_from_view": float(vy_from_view),
                 "wz_from_plane": float(wz_from_plane),
