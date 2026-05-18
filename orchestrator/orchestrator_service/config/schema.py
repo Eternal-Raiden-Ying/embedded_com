@@ -233,8 +233,8 @@ class CarMotionConfig:
     stm32_vx_scale: float = 100.0
     stm32_vy_scale: float = 100.0
     stm32_wz_scale: float = 100.0
-    vx_mps_per_norm: float = 1.0
-    vy_mps_per_norm: float = 1.0
+    vx_mps_per_norm: float = 0.30
+    vy_mps_per_norm: float = 0.30
     wz_radps_per_norm: float = 1.0
     jog_forward_speed: float = 0.02
     jog_turn_speed: float = 0.05

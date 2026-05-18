@@ -38,7 +38,7 @@ class SimpleCarProtocolTest(unittest.TestCase):
     def test_stm32_command_encoding(self) -> None:
         self.assertEqual(encode_mode("SEARCH_TABLE"), "MODE SEARCH")
         self.assertEqual(encode_mode("RETURN_HOME"), "MODE RETURN")
-        self.assertEqual(encode_mode("AUTOSEARCH"), "MODE AUTOSEARCH")
+        self.assertEqual(encode_mode("AUTOSEARCH"), "MODE SEARCH")
         self.assertEqual(encode_vel(0.1, 0, 0.5), "V 0.100 0.000 0.500")
         self.assertEqual(encode_stop(13), "STOP")
         self.assertEqual(encode_jog(0.02, 0, 0), "V 0.020 0.000 0.000")
@@ -125,15 +125,15 @@ class SimpleCarProtocolTest(unittest.TestCase):
         out = StringIO()
         with redirect_stdout(out):
             bridge.start()
-            self.assertTrue(bridge.send_motion_line("MODE SEARCH\nV 0.100 0.000 0.500", tx_meta={"kind": "stm32_vel"}, latest_override=False))
-            self.assertTrue(bridge.send_motion_line("STOP", tx_meta={"kind": "stm32_stop"}, latest_override=False))
+            self.assertTrue(bridge.send_motion_line("MODE SEARCH\r\nV 0.100 0.000 0.500\r\n", tx_meta={"kind": "stm32_vel"}, latest_override=False))
+            self.assertTrue(bridge.send_motion_line("STOP\r\n", tx_meta={"kind": "stm32_stop"}, latest_override=False))
             deadline = time.time() + 1.0
             while len(captured) < 2 and time.time() < deadline:
                 time.sleep(0.01)
             bridge.close()
         self.assertGreaterEqual(len(captured), 2)
-        self.assertEqual(captured[0][0], "MODE SEARCH\nV 0.100 0.000 0.500\n")
-        self.assertEqual(captured[-1][0], "STOP\n")
+        self.assertEqual(captured[0][0], "MODE SEARCH\r\nV 0.100 0.000 0.500\r\n")
+        self.assertEqual(captured[-1][0], "STOP\r\n")
         self.assertTrue(captured[-1][1])
         self.assertIn("[MOTION][DRYRUN_TX] MODE SEARCH", out.getvalue())
         self.assertIn("[MOTION][DRYRUN_TX] V 0.100 0.000 0.500", out.getvalue())
@@ -204,19 +204,19 @@ class SimpleCarProtocolTest(unittest.TestCase):
         adapter.query_status()
 
         self.assertEqual(uart.calls[0][0], "line")
-        self.assertEqual(uart.calls[0][1][0], "MODE SEARCH\nV 0.100 -0.100 0.500")
+        self.assertEqual(uart.calls[0][1][0], "MODE SEARCH\r\nV 0.100 -0.100 0.500\r\n")
         self.assertEqual(uart.calls[1][0], "stop")
         self.assertEqual(uart.calls[2][0], "line")
-        self.assertEqual(uart.calls[2][1][0], "MODE SEARCH\nV 0.020 0.000 0.000")
+        self.assertEqual(uart.calls[2][1][0], "MODE SEARCH\r\nV 0.020 0.000 0.000\r\n")
         self.assertEqual(uart.calls[3][0], "line")
-        self.assertEqual(uart.calls[3][1][0], "STOP")
+        self.assertEqual(uart.calls[3][1][0], "STOP\r\n")
 
-        self.assertEqual(logs[0], "[MOTION][V] seq=1 mode=SEARCH vx=0.100 vy=-0.100 wz=0.500 reason=track")
+        self.assertEqual(logs[0], "[MOTION][V] seq=1 mode=SEARCH vx_mps=0.100 vy_mps=-0.100 wz_radps=0.500 reason=track")
         self.assertEqual(logs[1], "[MOTION][STOP] seq=2 reason=halt")
-        self.assertEqual(logs[2], "[MOTION][PULSE] seq=3 mode=SEARCH vx=0.020 vy=0.000 wz=0.000 duration_ms=100 reason=nudge")
+        self.assertEqual(logs[2], "[MOTION][PULSE] seq=3 mode=SEARCH vx_mps=0.020 vy_mps=0.000 wz_radps=0.000 duration_ms=100 reason=nudge")
         self.assertEqual(logs[3], "[MOTION][STATUS] skipped: current STM32 protocol uses FB echoes only")
 
-    def test_stm32_motion_adapter_maps_cmd_vel_to_wheels(self) -> None:
+    def test_stm32_motion_adapter_sends_body_velocity_not_wheels(self) -> None:
         class FakeUart:
             def __init__(self) -> None:
                 self.calls = []
@@ -237,10 +237,11 @@ class SimpleCarProtocolTest(unittest.TestCase):
         adapter = Stm32MotionAdapter(uart, logger=lambda _line: None, vx_scale=1, vy_scale=1, wz_scale=1)
         cmd = CmdVel(ts=0.0, mode="TRACK", vx_norm=0.20, vy_norm=0.10, wz_norm=0.05)
 
-        self.assertEqual(adapter.cmd_vel_to_wheels(cmd), (0.20, 0.10, 0.05))
+        self.assertEqual(adapter.cmd_vel_to_velocity(cmd), (0.20, 0.10, 0.05))
         self.assertEqual(adapter.send_cmd_vel(cmd, reason="track"), 1)
+        self.assertFalse(any(call[0] == "vel" for call in uart.calls))
         self.assertEqual(uart.calls[-1][0], "line")
-        self.assertEqual(uart.calls[-1][1][0], "MODE SEARCH\nV 0.200 0.100 0.050")
+        self.assertEqual(uart.calls[-1][1][0], "MODE SEARCH\r\nV 0.200 0.100 0.050\r\n")
 
         stop_cmd = CmdVel(ts=0.0, mode="STOP", vx_norm=0.0, vy_norm=0.0, wz_norm=0.0)
         self.assertEqual(adapter.send_cmd_vel(stop_cmd, reason="stop"), 2)
@@ -249,7 +250,11 @@ class SimpleCarProtocolTest(unittest.TestCase):
 
         limited = Stm32MotionAdapter(uart, logger=lambda _line: None, vx_scale=1, vy_scale=1, wz_scale=1)
         fast_cmd = CmdVel(ts=0.0, mode="TRACK", vx_norm=1.0, vy_norm=1.0, wz_norm=1.0)
-        self.assertEqual(limited.cmd_vel_to_wheels(fast_cmd), (1.0, 1.0, 1.0))
+        over_cmd = CmdVel(ts=0.0, mode="TRACK", vx_norm=2.0, vy_norm=-2.0, wz_norm=3.0)
+        self.assertEqual(limited.cmd_vel_to_velocity(over_cmd), (1.0, -1.0, 1.0))
+
+        safe = Stm32MotionAdapter(uart, logger=lambda _line: None, vx_scale=None, vy_scale=0, wz_scale="bad")
+        self.assertEqual(safe.cmd_vel_to_velocity(fast_cmd), (0.30, 0.30, 1.0))
 
     def test_stm32_motion_adapter_small_jogs(self) -> None:
         class FakeUart:
@@ -275,18 +280,18 @@ class SimpleCarProtocolTest(unittest.TestCase):
         )
 
         self.assertEqual(adapter.jog_forward_small(reason="final_forward"), 1)
-        self.assertEqual(uart.calls[-2][1][0], "MODE SEARCH\nV 0.030 0.000 0.000")
-        self.assertEqual(uart.calls[-1][1][0], "STOP")
-        self.assertEqual(logs[-1], "[MOTION][PULSE] seq=1 mode=SEARCH vx=0.030 vy=0.000 wz=0.000 duration_ms=100 reason=final_forward")
+        self.assertEqual(uart.calls[-2][1][0], "MODE SEARCH\r\nV 0.030 0.000 0.000\r\n")
+        self.assertEqual(uart.calls[-1][1][0], "STOP\r\n")
+        self.assertEqual(logs[-1], "[MOTION][PULSE] seq=1 mode=SEARCH vx_mps=0.030 vy_mps=0.000 wz_radps=0.000 duration_ms=100 reason=final_forward")
 
         self.assertEqual(adapter.jog_backward_small(reason="final_back"), 2)
-        self.assertEqual(uart.calls[-2][1][0], "MODE SEARCH\nV -0.030 0.000 0.000")
+        self.assertEqual(uart.calls[-2][1][0], "MODE SEARCH\r\nV -0.030 0.000 0.000\r\n")
 
         self.assertEqual(adapter.jog_turn_left_small(reason="align_left"), 3)
-        self.assertEqual(uart.calls[-2][1][0], "MODE SEARCH\nV 0.000 0.000 0.020")
+        self.assertEqual(uart.calls[-2][1][0], "MODE SEARCH\r\nV 0.000 0.000 0.020\r\n")
 
         self.assertEqual(adapter.jog_turn_right_small(reason="align_right"), 4)
-        self.assertEqual(uart.calls[-2][1][0], "MODE SEARCH\nV 0.000 0.000 -0.020")
+        self.assertEqual(uart.calls[-2][1][0], "MODE SEARCH\r\nV 0.000 0.000 -0.020\r\n")
 
 
 if __name__ == "__main__":

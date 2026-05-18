@@ -125,24 +125,24 @@ class UartBridge:
         self._tx_event.set()
         return True
 
-    def send_stm32_vel(self, s006, s007, s008, s009, seq, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
-        del s009, seq
-        return self.send_motion_line(encode_vel(s006, s007, s008), tx_meta=tx_meta)
+    def send_stm32_vel(self, vx_mps, vy_mps, wz_radps, _unused=None, seq=None, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
+        del _unused, seq
+        return self.send_motion_line(encode_vel(vx_mps, vy_mps, wz_radps), tx_meta=tx_meta)
 
     def send_stm32_stop(self, seq, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
         del seq
         return self.send_motion_line(encode_stop(), tx_meta=tx_meta)
 
-    def send_stm32_jog(self, s006, s007, s008, s009, duration_ms, seq, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
-        del s009, duration_ms, seq
-        return self.send_motion_line(encode_vel(s006, s007, s008), tx_meta=tx_meta)
+    def send_stm32_jog(self, vx_mps, vy_mps, wz_radps, _unused, duration_ms, seq, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
+        del _unused, duration_ms, seq
+        return self.send_motion_line(encode_vel(vx_mps, vy_mps, wz_radps), tx_meta=tx_meta)
 
     def send_stm32_status(self, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
         del tx_meta
         return False
 
     def send_stop(self, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
-        return self._publish_latest("STOP\n", tx_meta=tx_meta)
+        return self._publish_latest("STOP\r\n", tx_meta=tx_meta)
 
     def send_mode(self, mode: str, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
         return self.send_motion_line(encode_mode(mode), tx_meta=tx_meta)
@@ -271,8 +271,8 @@ class UartBridge:
     def _write_line(self, line: str, tx_meta: Optional[Dict[str, Any]] = None):
         if not line:
             return
-        raw_line = str(line).rstrip("\n")
-        wire_line = raw_line + "\n"
+        raw_line = str(line).rstrip("\r\n")
+        wire_line = raw_line.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r\n") + "\r\n"
         self._last_line = raw_line
         self.last_tx_ts = time.time()
         meta = dict(tx_meta or {})

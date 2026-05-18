@@ -126,10 +126,10 @@ class FovTableApproachTest(unittest.TestCase):
         decision = controller.final_lock_cmd(obs)
         self.assertEqual(decision.cmd.vx_norm, 0.0)
 
-    def test_motion_adapter_wheel_mapping_unchanged(self) -> None:
+    def test_motion_adapter_outputs_physical_velocity(self) -> None:
         adapter = Stm32MotionAdapter(uart=object(), logger=lambda _line: None, vx_scale=100, vy_scale=100, wz_scale=100)
         cmd = CmdVel(ts=time.time(), mode="TEST", vx_norm=0.10, vy_norm=0.02, wz_norm=0.03)
-        self.assertEqual(adapter.cmd_vel_to_wheels(cmd), (5, -9, 9, -5))
+        self.assertEqual(adapter.cmd_vel_to_velocity(cmd), (10.0, 2.0, 3.0))
 
 
 if __name__ == "__main__":

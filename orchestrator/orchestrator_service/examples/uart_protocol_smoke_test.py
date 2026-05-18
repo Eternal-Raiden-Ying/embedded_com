@@ -55,16 +55,14 @@ def main():
         print(f"[INFO] opened {args.port} @ {args.baud}")
 
     seq = [
-        ("MODE SEARCH\n", 0.05),
-        ("V 0.000 0.000 0.220\n", args.sleep),
-        ("V 0.000 0.000 -0.180\n", args.sleep),
-        ("V 0.120 0.040 -0.080\n", args.sleep),
-        ("V 0.000 0.140 0.000\n", args.sleep),
-        ("MODE RETURN\n", 0.05),
-        ("V 0.100 0.000 0.000\n", args.sleep),
-        ("MODE AUTOSEARCH\n", 0.2),
-        ("MODE AUTOEXPLORE\n", 0.2),
-        ("STOP\n", 0.4),
+        ("MODE SEARCH\r\n", 0.05),
+        ("V 0.000 0.000 0.220\r\n", args.sleep),
+        ("V 0.000 0.000 -0.180\r\n", args.sleep),
+        ("V 0.120 0.040 -0.080\r\n", args.sleep),
+        ("V 0.000 0.140 0.000\r\n", args.sleep),
+        ("MODE RETURN\r\n", 0.05),
+        ("V 0.100 0.000 0.000\r\n", args.sleep),
+        ("STOP\r\n", 0.4),
     ]
 
     try:

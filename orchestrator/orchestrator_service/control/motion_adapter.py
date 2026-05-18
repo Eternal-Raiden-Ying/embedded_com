@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import math
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
+
+
+SAFE_DEFAULT_VX_MPS_PER_NORM = 0.30
+SAFE_DEFAULT_VY_MPS_PER_NORM = 0.30
+SAFE_DEFAULT_WZ_RADPS_PER_NORM = 1.00
 
 
 class Stm32MotionAdapter:
@@ -19,9 +25,9 @@ class Stm32MotionAdapter:
         logger: Optional[Callable[[str], None]] = None,
         tx_meta_factory: Optional[Callable[[str, int, str], Dict[str, Any]]] = None,
         wheel_speed_limit: int = 100,
-        vx_scale: float = 1.0,
-        vy_scale: float = 1.0,
-        wz_scale: float = 1.0,
+        vx_scale: float = SAFE_DEFAULT_VX_MPS_PER_NORM,
+        vy_scale: float = SAFE_DEFAULT_VY_MPS_PER_NORM,
+        wz_scale: float = SAFE_DEFAULT_WZ_RADPS_PER_NORM,
         jog_forward_speed: float = 0.02,
         jog_turn_speed: float = 0.05,
         jog_duration_ms: int = 100,
@@ -30,9 +36,9 @@ class Stm32MotionAdapter:
         self.uart = uart
         self.logger = logger
         self.tx_meta_factory = tx_meta_factory
-        self.vx_scale = float(vx_scale)
-        self.vy_scale = float(vy_scale)
-        self.wz_scale = float(wz_scale)
+        self.vx_scale = self._coerce_axis_scale(vx_scale, SAFE_DEFAULT_VX_MPS_PER_NORM)
+        self.vy_scale = self._coerce_axis_scale(vy_scale, SAFE_DEFAULT_VY_MPS_PER_NORM)
+        self.wz_scale = self._coerce_axis_scale(wz_scale, SAFE_DEFAULT_WZ_RADPS_PER_NORM)
         self.jog_forward_speed = self._coerce_micro_speed(jog_forward_speed, 0.02)
         self.jog_turn_speed = self._coerce_micro_speed(jog_turn_speed, 0.05)
         self.jog_duration_ms = self._clamp_int(jog_duration_ms, 60, 500)
@@ -59,6 +65,26 @@ class Stm32MotionAdapter:
         if number > 1.0:
             number = number / 1000.0
         return number
+
+    @staticmethod
+    def _coerce_axis_scale(value: Any, default: float) -> float:
+        try:
+            number = abs(float(value))
+        except Exception:
+            return float(default)
+        if not math.isfinite(number) or number <= 0.0:
+            return float(default)
+        return number
+
+    @staticmethod
+    def _clamp_float(value: Any, lo: float, hi: float) -> float:
+        try:
+            number = float(value)
+        except Exception:
+            number = 0.0
+        if not math.isfinite(number):
+            number = 0.0
+        return max(float(lo), min(float(hi), number))
 
     def _next_seq(self) -> int:
         self._seq = (int(self._seq) % 999999) + 1
@@ -93,12 +119,12 @@ class Stm32MotionAdapter:
     @staticmethod
     def wire_mode_for_mode(mode: str) -> str:
         token = str(mode or "").strip().upper()
-        if token in {"SEARCH", "RETURN", "AUTOSEARCH", "AUTOEXPLORE"}:
-            return token
+        if token in {"RETURN"} or "RETURN" in token or "HOME" in token:
+            return "RETURN"
+        if token in {"SEARCH", "AUTOSEARCH", "AUTOEXPLORE"}:
+            return "SEARCH"
         if token in {"STOP", "IDLE", "DONE", "ERROR", "ERROR_RECOVERY"}:
             return "STOP"
-        if "RETURN" in token or "HOME" in token:
-            return "RETURN"
         return "SEARCH"
 
     @staticmethod
@@ -111,13 +137,13 @@ class Stm32MotionAdapter:
         return brake or (mode in {"STOP", "IDLE", "DONE", "ERROR_RECOVERY"} and vx < 1e-6 and vy < 1e-6 and wz < 1e-6)
 
     def cmd_vel_to_velocity(self, cmd: Any) -> Tuple[float, float, float]:
-        vx = float(getattr(cmd, "vx_norm", 0.0) or 0.0) * self.vx_scale
-        vy = float(getattr(cmd, "vy_norm", 0.0) or 0.0) * self.vy_scale
-        wz = float(getattr(cmd, "wz_norm", 0.0) or 0.0) * self.wz_scale
+        vx_norm = self._clamp_float(getattr(cmd, "vx_norm", 0.0), -1.0, 1.0)
+        vy_norm = self._clamp_float(getattr(cmd, "vy_norm", 0.0), -1.0, 1.0)
+        wz_norm = self._clamp_float(getattr(cmd, "wz_norm", 0.0), -1.0, 1.0)
+        vx = self._clamp_float(vx_norm * self.vx_scale, -self.vx_scale, self.vx_scale)
+        vy = self._clamp_float(vy_norm * self.vy_scale, -self.vy_scale, self.vy_scale)
+        wz = self._clamp_float(wz_norm * self.wz_scale, -self.wz_scale, self.wz_scale)
         return vx, vy, wz
-
-    def cmd_vel_to_wheels(self, cmd: Any) -> tuple:
-        return self.cmd_vel_to_velocity(cmd)
 
     def _mode_prefix(self, wire_mode: str) -> str:
         wire_mode = self.wire_mode_for_mode(wire_mode)
@@ -126,29 +152,28 @@ class Stm32MotionAdapter:
         if wire_mode == self._last_wire_mode:
             return ""
         self._last_wire_mode = wire_mode
-        return f"MODE {wire_mode}\n"
+        return f"MODE {wire_mode}\r\n"
 
     def set_velocity(self, vx_mps: Any, vy_mps: Any, wz_radps: Any, mode: str = "SEARCH", reason: str = "") -> int:
         seq = self._next_seq()
         wire_mode = self.wire_mode_for_mode(mode)
-        vx = float(vx_mps or 0.0)
-        vy = float(vy_mps or 0.0)
-        wz = float(wz_radps or 0.0)
+        vx = self._clamp_float(vx_mps, -self.vx_scale, self.vx_scale)
+        vy = self._clamp_float(vy_mps, -self.vy_scale, self.vy_scale)
+        wz = self._clamp_float(wz_radps, -self.wz_scale, self.wz_scale)
         if wire_mode not in {"SEARCH", "RETURN"}:
             self._log(f"[MOTION][MODE] seq={seq} mode={wire_mode} reason={reason}")
             self.uart.send_mode(wire_mode, tx_meta=self._meta("mode", seq, reason, wire_mode=wire_mode))
             return seq
-        self._log(f"[MOTION][V] seq={seq} mode={wire_mode} vx={vx:.3f} vy={vy:.3f} wz={wz:.3f} reason={reason}")
-        line = self._mode_prefix(wire_mode) + f"V {vx:.3f} {vy:.3f} {wz:.3f}"
+        self._log(
+            f"[MOTION][V] seq={seq} mode={wire_mode} "
+            f"vx_mps={vx:.3f} vy_mps={vy:.3f} wz_radps={wz:.3f} reason={reason}"
+        )
+        line = self._mode_prefix(wire_mode) + f"V {vx:.3f} {vy:.3f} {wz:.3f}\r\n"
         self.uart.send_motion_line(
             line,
             tx_meta=self._meta("vel", seq, reason, wire_mode=wire_mode, vx_mps=vx, vy_mps=vy, wz_radps=wz),
         )
         return seq
-
-    def set_velocity_wheels(self, s006, s007, s008, s009=None, reason: str = "") -> int:
-        del s009
-        return self.set_velocity(s006, s007, s008, mode="SEARCH", reason=reason)
 
     def send_cmd_vel(self, cmd: Any, reason: str = "") -> int:
         if self._cmd_is_stop(cmd):
@@ -168,8 +193,8 @@ class Stm32MotionAdapter:
         duration = self.jog_duration_ms
         self._last_wire_mode = "SEARCH"
         self._log(
-            f"[MOTION][PULSE] seq={seq} mode=SEARCH vx={vx_mps:.3f} "
-            f"vy={vy_mps:.3f} wz={wz_radps:.3f} duration_ms={duration} reason={reason}"
+            f"[MOTION][PULSE] seq={seq} mode=SEARCH vx_mps={vx_mps:.3f} "
+            f"vy_mps={vy_mps:.3f} wz_radps={wz_radps:.3f} duration_ms={duration} reason={reason}"
         )
         meta = self._meta(
             "pulse",
@@ -182,22 +207,13 @@ class Stm32MotionAdapter:
             duration_ms=int(duration),
         )
         self.uart.send_motion_line(
-            f"MODE SEARCH\nV {float(vx_mps):.3f} {float(vy_mps):.3f} {float(wz_radps):.3f}",
+            f"MODE SEARCH\r\nV {float(vx_mps):.3f} {float(vy_mps):.3f} {float(wz_radps):.3f}\r\n",
             tx_meta=meta,
             latest_override=False,
         )
         time.sleep(float(duration) / 1000.0)
-        self.uart.send_motion_line("STOP", tx_meta=dict(meta, kind="stm32_stop", pulse_stop=True), latest_override=False)
+        self.uart.send_motion_line("STOP\r\n", tx_meta=dict(meta, kind="stm32_stop", pulse_stop=True), latest_override=False)
         return seq
-
-    def jog_wheels(self, s006, s007, s008, s009, duration_ms, reason: str = "") -> int:
-        del s009
-        old_duration = self.jog_duration_ms
-        self.jog_duration_ms = self._clamp_int(duration_ms, 60, 500)
-        try:
-            return self.jog_velocity(float(s006 or 0.0), float(s007 or 0.0), float(s008 or 0.0), reason=reason)
-        finally:
-            self.jog_duration_ms = old_duration
 
     def jog_forward_small(self, reason: str = "") -> int:
         return self.jog_velocity(vx_mps=float(self.jog_forward_speed), reason=reason)

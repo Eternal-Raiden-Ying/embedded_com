@@ -5,12 +5,10 @@
 统一串口文本协议:
 
 - 主控 -> STM32
-    MODE SEARCH\n
-    MODE RETURN\n
-    MODE AUTOSEARCH\n
-    MODE AUTOEXPLORE\n
-    V <vx_mps> <vy_mps> <wz_radps>\n
-    STOP\n
+    MODE SEARCH\r\n
+    MODE RETURN\r\n
+    V <vx_mps> <vy_mps> <wz_radps>\r\n
+    STOP\r\n
 
 - STM32 -> 主控
     FB <原始命令>\n
@@ -36,8 +34,7 @@ def _clamp_int(v, lo: int, hi: int) -> int:
 
 
 WIRE_MOTION_MODES = {"SEARCH", "RETURN"}
-WIRE_PASSIVE_MODES = {"AUTOSEARCH", "AUTOEXPLORE"}
-WIRE_MODES = WIRE_MOTION_MODES | WIRE_PASSIVE_MODES
+WIRE_MODES = WIRE_MOTION_MODES
 
 
 def _format_float(v, digits: int = 3) -> str:
@@ -51,6 +48,8 @@ def normalize_wire_mode(mode: str) -> str:
     mode = str(mode or "").strip().upper()
     if mode in WIRE_MODES:
         return mode
+    if mode in {"AUTOSEARCH", "AUTOEXPLORE"}:
+        return "SEARCH"
     if mode in {"STOP", "IDLE", "DONE", "ERROR", "ERROR_RECOVERY"}:
         return "STOP"
     if "RETURN" in mode or "HOME" in mode:
@@ -136,7 +135,7 @@ class SimpleCarMapper:
         if not send_mode:
             return ""
         self._last_mode_sent = mode
-        return f"MODE {mode}\n"
+        return f"MODE {mode}\r\n"
 
     def from_cmd_vel(self, cmd: CmdVel, cx_norm_abs: Optional[float] = None, distance_ratio: Optional[float] = None) -> SimpleCarCommand:
         del cx_norm_abs, distance_ratio
@@ -150,7 +149,7 @@ class SimpleCarMapper:
 
         if brake:
             return SimpleCarCommand(
-                raw_line="STOP\n",
+                raw_line="STOP\r\n",
                 kind="stop",
                 mode=mode,
                 hold_ms=hold_ms,
@@ -158,14 +157,14 @@ class SimpleCarMapper:
             )
 
         if mode == "STOP":
-            line = "STOP\n"
+            line = "STOP\r\n"
             return SimpleCarCommand(raw_line=line, kind="stop", mode=mode, hold_ms=hold_ms)
 
         if mode not in WIRE_MOTION_MODES:
             return SimpleCarCommand(raw_line=prefix, kind="mode", mode=mode, hold_ms=hold_ms)
 
         return SimpleCarCommand(
-            raw_line=prefix + f"V {self._fmt(vx)} {self._fmt(vy)} {self._fmt(wz)}\n",
+            raw_line=prefix + f"V {self._fmt(vx)} {self._fmt(vy)} {self._fmt(wz)}\r\n",
             kind="cmd_vel",
             mode=mode,
             vx_norm=vx,

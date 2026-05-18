@@ -738,10 +738,9 @@ class OrchestratorService(BaseModule):
         if uart_kind == "stm32_jog":
             return (
                 f"[ORCH] STM32_JOG "
-                f"s006={int(payload.get('s006', 0) or 0)} "
-                f"s007={int(payload.get('s007', 0) or 0)} "
-                f"s008={int(payload.get('s008', 0) or 0)} "
-                f"s009={int(payload.get('s009', 0) or 0)} "
+                f"vx={self._fmt_float(payload.get('vx_mps', 0.0))} "
+                f"vy={self._fmt_float(payload.get('vy_mps', 0.0))} "
+                f"wz={self._fmt_float(payload.get('wz_radps', 0.0))} "
                 f"duration={int(payload.get('duration_ms', 0) or 0)}ms "
                 f"seq={payload.get('seq', 'n/a')}"
             )
@@ -837,16 +836,6 @@ class OrchestratorService(BaseModule):
             if upper == "MODE" and len(parts) >= 2:
                 item["uart_kind"] = "mode"
                 item["car_mode"] = parts[1].upper()
-            elif upper == "VEL" and len(parts) >= 6:
-                item["uart_kind"] = "stm32_vel"
-                try:
-                    item["s006"] = int(float(parts[1]))
-                    item["s007"] = int(float(parts[2]))
-                    item["s008"] = int(float(parts[3]))
-                    item["s009"] = int(float(parts[4]))
-                    item["seq"] = int(float(parts[5]))
-                except Exception:
-                    pass
             elif upper == "V" and len(parts) >= 4:
                 item["uart_kind"] = "vel"
                 try:
@@ -865,17 +854,6 @@ class OrchestratorService(BaseModule):
                     item["actual_vy_norm"] = float(parts[2])
                     item["actual_wz_norm"] = float(parts[3])
                     item["actual_hold_ms"] = int(float(parts[4]))
-                except Exception:
-                    pass
-            elif upper == "JOG" and len(parts) >= 7:
-                item["uart_kind"] = "stm32_jog"
-                try:
-                    item["s006"] = int(float(parts[1]))
-                    item["s007"] = int(float(parts[2]))
-                    item["s008"] = int(float(parts[3]))
-                    item["s009"] = int(float(parts[4]))
-                    item["duration_ms"] = int(float(parts[5]))
-                    item["seq"] = int(float(parts[6]))
                 except Exception:
                     pass
             elif upper == "STATUS":
@@ -1114,14 +1092,14 @@ class OrchestratorService(BaseModule):
             "motion_status": dict(self.motion_status),
         })
 
-    def send_stm32_vel(self, s006, s007, s008, s009, seq: Optional[int] = None) -> bool:
+    def send_stm32_vel(self, vx_mps, vy_mps, wz_radps, _unused=None, seq: Optional[int] = None) -> bool:
         if seq is None:
-            adapter_seq = self.motion_adapter.set_velocity_wheels(s006, s007, s008, s009, reason="service_api")
+            adapter_seq = self.motion_adapter.set_velocity(vx_mps, vy_mps, wz_radps, mode="SEARCH", reason="service_api")
             self.motion_status["last_seq"] = adapter_seq
             return True
         tx_seq = self._next_motion_seq() if seq is None else int(seq)
         self._record_motion_tx(tx_seq, "vel")
-        return self.uart.send_stm32_vel(s006, s007, s008, s009, tx_seq, tx_meta={
+        return self.uart.send_stm32_vel(vx_mps, vy_mps, wz_radps, _unused, tx_seq, tx_meta={
             "kind": "stm32_vel",
             "motion_protocol": "stm32",
             "seq": tx_seq,
@@ -1142,16 +1120,26 @@ class OrchestratorService(BaseModule):
             "seq": tx_seq,
         })
 
-    def send_stm32_jog(self, s006, s007, s008, s009, duration_ms, seq: Optional[int] = None) -> bool:
+    def send_stm32_jog(self, vx_mps, vy_mps, wz_radps, _unused, duration_ms, seq: Optional[int] = None) -> bool:
         if seq is None:
-            adapter_seq = self.motion_adapter.jog_wheels(s006, s007, s008, s009, duration_ms, reason="service_api")
+            old_duration = self.motion_adapter.jog_duration_ms
+            self.motion_adapter.jog_duration_ms = self.motion_adapter._clamp_int(duration_ms, 60, 500)
+            try:
+                adapter_seq = self.motion_adapter.jog_velocity(
+                    float(vx_mps or 0.0),
+                    float(vy_mps or 0.0),
+                    float(wz_radps or 0.0),
+                    reason="service_api",
+                )
+            finally:
+                self.motion_adapter.jog_duration_ms = old_duration
             self.motion_status["last_seq"] = adapter_seq
             self.motion_status["jog_running"] = True
             return True
         tx_seq = self._next_motion_seq() if seq is None else int(seq)
         self.motion_status["jog_running"] = True
         self._record_motion_tx(tx_seq, "jog")
-        return self.uart.send_stm32_jog(s006, s007, s008, s009, duration_ms, tx_seq, tx_meta={
+        return self.uart.send_stm32_jog(vx_mps, vy_mps, wz_radps, _unused, duration_ms, tx_seq, tx_meta={
             "kind": "stm32_jog",
             "motion_protocol": "stm32",
             "seq": tx_seq,
@@ -1946,7 +1934,7 @@ class OrchestratorService(BaseModule):
                 "wz_radps": velocity[2],
             },
             "raw": "STOP" if car_cmd.kind in {"stop", "brake"} else f"V {velocity[0]:.3f} {velocity[1]:.3f} {velocity[2]:.3f}",
-            "legacy_raw": car_cmd.raw_line.rstrip("\n"),
+            "legacy_raw": car_cmd.raw_line.rstrip("\r\n"),
         }
         car_record.update({k: v for k, v in tx_meta.items() if v not in (None, "")})
         self.run_logger.write_jsonl("car_cmd", car_record)

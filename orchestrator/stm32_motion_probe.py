@@ -12,8 +12,6 @@ STM32 quick-test protocol:
 
     MODE SEARCH
     MODE RETURN
-    MODE AUTOSEARCH
-    MODE AUTOEXPLORE
     STOP
     V <vx_mps> <vy_mps> <wz_radps>
 
@@ -47,14 +45,6 @@ def encode_mode_return() -> str:
     return "MODE RETURN"
 
 
-def encode_mode_autosearch() -> str:
-    return "MODE AUTOSEARCH"
-
-
-def encode_mode_autoexplore() -> str:
-    return "MODE AUTOEXPLORE"
-
-
 def encode_v(vx_mps: float, vy_mps: float, wz_radps: float) -> str:
     return f"V {float(vx_mps):.6g} {float(vy_mps):.6g} {float(wz_radps):.6g}"
 
@@ -73,7 +63,7 @@ class MotionProbe:
         print(f"[PROBE][TX] {line}", flush=True)
         if self.dry_run:
             return
-        payload = (line + "\n").encode("utf-8")
+        payload = (line + "\r\n").encode("utf-8")
         self.ser.write(payload)
         self.ser.flush()
 
@@ -130,14 +120,6 @@ def run_command(args, probe: MotionProbe) -> int:
         probe.send_and_read(encode_mode_return(), rx_window_s)
         return 0
 
-    if args.cmd == "mode-autosearch":
-        probe.send_and_read(encode_mode_autosearch(), rx_window_s)
-        return 0
-
-    if args.cmd == "mode-autoexplore":
-        probe.send_and_read(encode_mode_autoexplore(), rx_window_s)
-        return 0
-
     if args.cmd == "stop":
         probe.send_and_read(encode_bare_stop(), rx_window_s)
         return 0
@@ -191,8 +173,6 @@ def parse_args(argv: Optional[Sequence[str]] = None):
         choices=(
             "mode-search",
             "mode-return",
-            "mode-autosearch",
-            "mode-autoexplore",
             "stop",
             "v",
             "pulse",
