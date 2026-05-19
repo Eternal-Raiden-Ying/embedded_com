@@ -119,6 +119,109 @@ def _json_ready(value: Any) -> Any:
     return str(value)
 
 
+COMPACT_OBS_FIELDS = (
+    "type",
+    "source",
+    "source_mode",
+    "timestamp",
+    "ts",
+    "obs_ts",
+    "bag_timestamp_ms",
+    "frame_capture_ts",
+    "frame_seq",
+    "frame_id",
+    "seq",
+    "table_found",
+    "edge_found",
+    "edge_valid",
+    "valid",
+    "valid_for_control",
+    "confidence",
+    "edge_conf",
+    "yaw_err_rad",
+    "yaw_err",
+    "dist_err_m",
+    "dist_err",
+    "edge_k",
+    "edge_b",
+    "plane_found",
+    "plane_confidence",
+    "plane_cx_norm",
+    "plane_width_norm",
+    "plane_area_ratio",
+    "plane_touch_left",
+    "plane_touch_right",
+    "plane_touch_top",
+    "plane_touch_bottom",
+    "plane_yaw_err_rad",
+    "plane_dist_err_m",
+    "plane_x_span_m",
+    "plane_residual_mean",
+    "pose_source",
+    "final_pose_source",
+    "selected_line_type",
+    "control_level",
+    "control_reject_reason",
+    "usable_for_approach",
+    "usable_for_alignment",
+    "usable_for_stop",
+    "reason",
+    "reject_reason",
+    "depth_valid",
+    "edge_obs_unavailable",
+    "is_stale",
+    "roi_source",
+    "roi_reason",
+    "roi_preset",
+    "depth_edge_roi",
+    "plane_roi",
+    "table_edge_roi",
+    "edge_roi",
+    "roi_format",
+    "table_bbox",
+    "table_center_norm",
+    "table_quadrant",
+    "rgb_search_roi",
+    "process_ms",
+    "vision_process_ms",
+    "obs_total_age_ms",
+    "age_ms",
+    "update_interval_ms",
+    "edge_update_interval_ms",
+    "frame_age_ms",
+    "depth_frame_fetch_ms",
+    "latest_frame_lag_ms",
+    "point_count",
+    "table_point_count",
+    "inlier_count",
+    "edge_inlier_count",
+    "target_dist_m",
+    "plane_only_mode",
+    "enable_crease_line",
+    "table_geometry_score",
+    "front_plane_score",
+    "line_score",
+    "plane_line_consistency_score",
+    "depth_z_min_m",
+    "depth_z_max_m",
+    "table_y_min_m",
+    "table_y_max_m",
+)
+
+
+def _compact_obs(obs: Dict[str, Any]) -> Dict[str, Any]:
+    compact: Dict[str, Any] = {}
+    for key in COMPACT_OBS_FIELDS:
+        if key not in obs:
+            continue
+        value = _json_ready(obs.get(key))
+        if value is None or value == [] or value == {}:
+            continue
+        compact[key] = value
+    compact.setdefault("type", "table_edge_obs")
+    return compact
+
+
 def _finite_float(value: Any) -> Optional[float]:
     try:
         out = float(value)
@@ -304,7 +407,7 @@ def main() -> None:
                 )
                 obs["source"] = "offline_bag_table_plane_replay"
                 obs["bag_timestamp_ms"] = bag_ts_ms
-                clean_obs = _json_ready(obs)
+                clean_obs = _compact_obs(obs)
                 fp.write(json.dumps(clean_obs, ensure_ascii=False, sort_keys=True) + "\n")
                 observations.append(clean_obs)
                 print(
