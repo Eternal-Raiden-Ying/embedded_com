@@ -62,6 +62,9 @@ class TableEdgeManager:
         self._detector_cfg = None
         self._detector_error = ""
         self._target_dist_m = 0.5
+        self._source_mode_override: Optional[str] = None
+        self._local_perception_override: Optional[Dict[str, Any]] = None
+        self._runtime_status_override: Optional[Dict[str, Any]] = None
         self._last_valid_quadrant: Optional[str] = None
         self._last_valid_quadrant_ts = 0.0
         self._last_valid_quadrant_ttl_s = 1.0
@@ -155,6 +158,8 @@ class TableEdgeManager:
             pass
 
     def _active_mode(self) -> str:
+        if self._source_mode_override is not None:
+            return str(self._source_mode_override or "")
         scheduler = self._scheduler
         if scheduler is None:
             return ""
@@ -210,6 +215,8 @@ class TableEdgeManager:
         out["obs_total_age_ms"] = max(0.0, (float(obs_ts) - float(frame_capture_ts)) * 1000.0)
         out["age_ms"] = float(out["obs_total_age_ms"])
         out["edge_update_interval_ms"] = update_interval_ms
+        out["update_interval_ms"] = update_interval_ms
+        out["process_ms"] = float(out["vision_process_ms"])
         out["edge_process_ms"] = float(out["vision_process_ms"])
         out["total_edge_process_ms"] = float(out["vision_process_ms"])
         out.setdefault("depth_frame_fetch_ms", float(self._last_depth_frame_fetch_ms))
@@ -219,12 +226,17 @@ class TableEdgeManager:
         unavailable = bool(out.get("edge_obs_unavailable", False))
         out["is_stale"] = bool(out.get("is_stale", False) or unavailable)
         out["source_mode"] = self._active_mode()
+        out.setdefault("timestamp", float(obs_ts))
         out.setdefault("seq", out.get("frame_seq", out.get("frame_id")))
         out.setdefault("frame_id", out.get("frame_seq", out.get("seq")))
         out.setdefault("edge_conf", out.get("confidence"))
         out.setdefault("edge_valid", bool(out.get("edge_found", False)) and not unavailable)
         out.setdefault("yaw_err", out.get("yaw_err_rad"))
         out.setdefault("dist_err", out.get("dist_err_m"))
+        # Compatibility aliases retained for the state machine and legacy logs while
+        # table plane fields become the canonical semantics.
+        if out.get("plane_roi") is None and out.get("depth_edge_roi") is not None:
+            out["plane_roi"] = out.get("depth_edge_roi")
         return out
 
     def _log_profile_if_due(self, payload: Dict[str, Any]) -> None:
@@ -547,6 +559,8 @@ class TableEdgeManager:
         return str(getattr(getattr(self.cfg, "table_edge", None), "roi_preset", "") or "").strip().lower()
 
     def _local_perception(self) -> Dict[str, Any]:
+        if self._local_perception_override is not None:
+            return dict(self._local_perception_override)
         scheduler = self._scheduler
         if scheduler is None:
             return {}
@@ -557,6 +571,8 @@ class TableEdgeManager:
         return dict(value) if isinstance(value, dict) else {}
 
     def _runtime_status(self) -> Dict[str, Any]:
+        if self._runtime_status_override is not None:
+            return dict(self._runtime_status_override)
         scheduler = self._scheduler
         if scheduler is None:
             return {}
@@ -1021,6 +1037,83 @@ class TableEdgeManager:
         profile["total_edge_process_ms"] = self._ms_since(total_start)
         return self._attach_profile(payload, profile, path="light")
 
+    def process_camera_frame(
+        self,
+        frames: Dict[str, Any],
+        *,
+        frame_seq: int,
+        frame_slot: Optional[Dict[str, Any]] = None,
+        local_perception: Optional[Dict[str, Any]] = None,
+        runtime_status: Optional[Dict[str, Any]] = None,
+        source_mode: Optional[str] = None,
+        depth_frame_fetch_ms: float = 0.0,
+        count_dropped: bool = True,
+    ) -> Dict[str, Any]:
+        """Process one RGB/depth frame pack through the online table-plane path.
+
+        The emitted type and legacy field aliases stay `table_edge_obs` for current
+        state-machine compatibility; plane_* fields carry the unified semantics.
+        """
+        if not isinstance(frames, dict):
+            frames = {}
+        seq = int(frame_seq)
+        if count_dropped and seq > self._last_camera_seq + 1 and self._last_camera_seq > 0:
+            self._dropped_frame_count += int(seq - self._last_camera_seq - 1)
+        if count_dropped:
+            self._last_camera_seq = seq
+        self._frame_id += 1
+        slot = dict(frame_slot or {})
+        if "seq" not in slot:
+            slot["seq"] = seq
+        if "payload" not in slot:
+            slot["payload"] = frames
+        self._last_depth_frame_fetch_ms = float(depth_frame_fetch_ms or 0.0)
+        frame_capture_ts = self._pick_frame_capture_ts(slot, frames)
+        latest_frame_lag_ms = max(0.0, (time.time() - float(frame_capture_ts)) * 1000.0)
+        vision_start_ts = time.time()
+        prev_source_mode = self._source_mode_override
+        prev_local = self._local_perception_override
+        prev_runtime = self._runtime_status_override
+        self._source_mode_override = source_mode if source_mode is not None else prev_source_mode
+        self._local_perception_override = dict(local_perception) if local_perception is not None else prev_local
+        self._runtime_status_override = dict(runtime_status) if runtime_status is not None else prev_runtime
+        self._processing_busy = True
+        depth = frames.get("depth")
+        try:
+            if not isinstance(depth, np.ndarray) or depth.size <= 0:
+                payload = self._default_result(
+                    depth_valid=False,
+                    reason="depth_unavailable",
+                    frame_seq=seq,
+                    roi_meta=self._select_roi(None),
+                )
+            elif depth.ndim != 2:
+                payload = self._default_result(
+                    depth_valid=False,
+                    reason="depth_frame_not_2d",
+                    frame_seq=seq,
+                    roi_meta=self._select_roi(depth),
+                )
+            else:
+                payload = self._process_depth(depth, seq)
+        finally:
+            self._processing_busy = False
+        vision_done_ts = time.time()
+        self._processed_frame_count += 1
+        self._last_process_ms = max(0.0, (vision_done_ts - vision_start_ts) * 1000.0)
+        try:
+            return self._with_freshness(
+                payload,
+                frame_capture_ts=frame_capture_ts,
+                vision_start_ts=vision_start_ts,
+                vision_done_ts=vision_done_ts,
+                latest_frame_lag_ms=latest_frame_lag_ms,
+            )
+        finally:
+            self._source_mode_override = prev_source_mode
+            self._local_perception_override = prev_local
+            self._runtime_status_override = prev_runtime
+
     def _worker_loop(self) -> None:
         while self._runtime_running and not self._worker_stop.is_set():
             loop_start = time.time()
@@ -1047,40 +1140,12 @@ class TableEdgeManager:
             if seq > self._last_camera_seq + 1 and self._last_camera_seq > 0:
                 self._dropped_frame_count += int(seq - self._last_camera_seq - 1)
             self._last_camera_seq = seq
-            self._frame_id += 1
-            frame_capture_ts = self._pick_frame_capture_ts(frame_slot, frames)
-            latest_frame_lag_ms = max(0.0, (time.time() - float(frame_capture_ts)) * 1000.0)
-            vision_start_ts = time.time()
-            self._processing_busy = True
-            depth = frames.get("depth")
-            try:
-                if not isinstance(depth, np.ndarray) or depth.size <= 0:
-                    payload = self._default_result(
-                        depth_valid=False,
-                        reason="depth_unavailable",
-                        frame_seq=seq,
-                        roi_meta=self._select_roi(None),
-                    )
-                elif depth.ndim != 2:
-                    payload = self._default_result(
-                        depth_valid=False,
-                        reason="depth_frame_not_2d",
-                        frame_seq=seq,
-                        roi_meta=self._select_roi(depth),
-                    )
-                else:
-                    payload = self._process_depth(depth, seq)
-            finally:
-                self._processing_busy = False
-            vision_done_ts = time.time()
-            self._processed_frame_count += 1
-            self._last_process_ms = max(0.0, (vision_done_ts - vision_start_ts) * 1000.0)
-            payload = self._with_freshness(
-                payload,
-                frame_capture_ts=frame_capture_ts,
-                vision_start_ts=vision_start_ts,
-                vision_done_ts=vision_done_ts,
-                latest_frame_lag_ms=latest_frame_lag_ms,
+            payload = self.process_camera_frame(
+                frames,
+                frame_seq=seq,
+                frame_slot=frame_slot,
+                depth_frame_fetch_ms=self._last_depth_frame_fetch_ms,
+                count_dropped=False,
             )
             self._emit_edge_debug(payload)
             self._log_profile_if_due(payload)

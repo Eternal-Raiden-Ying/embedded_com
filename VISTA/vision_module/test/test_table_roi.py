@@ -249,6 +249,34 @@ class TableEdgeManagerDynamicRoiTest(unittest.TestCase):
         self.assertEqual(roi["roi_preset"], "center_lower")
         self.assertEqual(roi["depth_edge_roi"], [160, 240, 480, 408])
 
+    def test_process_camera_frame_emits_unified_timing_and_plane_aliases(self):
+        cfg = VisionServiceConfig()
+        cfg.table_edge.roi_preset = "center_lower"
+        manager = TableEdgeManager(cfg=cfg)
+        manager._detector_cfg = SimpleNamespace(
+            roi_x0=10,
+            roi_y0=20,
+            roi_x1=110,
+            roi_y1=120,
+            plane_only_mode=True,
+            enable_crease_line=False,
+        )
+        obs = manager.process_camera_frame(
+            {"depth": np.zeros((480, 640, 1), dtype=np.uint16), "frame_capture_ts": 1000.0},
+            frame_seq=7,
+            frame_slot={"seq": 7, "ts": 1000.0},
+            source_mode="OFFLINE_BAG",
+            count_dropped=False,
+        )
+        self.assertEqual(obs["type"], "table_edge_obs")
+        self.assertEqual(obs["source_mode"], "OFFLINE_BAG")
+        self.assertEqual(obs["frame_seq"], 7)
+        self.assertIn("process_ms", obs)
+        self.assertIn("obs_total_age_ms", obs)
+        self.assertIn("update_interval_ms", obs)
+        self.assertEqual(obs["plane_roi"], obs["depth_edge_roi"])
+        self.assertEqual(obs["roi_source"], "preset:center_lower")
+
 
 if __name__ == "__main__":
     unittest.main()
