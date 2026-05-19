@@ -28,13 +28,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, required=True, help="Output run directory.")
     parser.add_argument("--mode", choices=("benchmark", "fixed-hz", "realtime"), default="benchmark")
     parser.add_argument("--hz", type=float, default=5.0, help="Input cadence for fixed-hz/realtime modes.")
+    parser.add_argument("--sample-hz", type=float, default=5.0, help="Maximum bag frame sample rate before processing; 0 processes every selected frame.")
     parser.add_argument("--stride", type=int, default=1, help="Process one frame every N recorded frames.")
     parser.add_argument("--start-frame", type=int, default=0, help="Skip recorded frames before this 0-based index.")
     parser.add_argument("--max-frames", type=int, default=0, help="Maximum recorded frames to read, 0 means all.")
     parser.add_argument("--roi-preset", default="", help="Optional table plane ROI preset override.")
-    preview = parser.add_mutually_exclusive_group()
-    preview.add_argument("--preview", action="store_true", help="Show the same RGB/depth/plane preview layout.")
-    preview.add_argument("--no-preview", action="store_true", help="Disable preview.")
+    parser.add_argument("--save-preview-dir", type=Path, default=None, help="Directory for saved preview panel PNGs; default is OUTPUT/preview_frames.")
+    parser.add_argument("--save-preview-every", type=int, default=1, help="Save one preview PNG every N processed observations.")
+    parser.add_argument("--no-save-preview", action="store_true", help="Disable preview PNG export.")
     return parser
 
 
@@ -197,6 +198,35 @@ def _make_preview_frame(rgb: Any, depth: Any, obs: Dict[str, Any], frame_seq: in
     return PreviewFrame(time.time(), {"rgb": rgb, "depth": depth}, "OFFLINE_BAG", "TABLE_EDGE_PERCEPTION", PreviewOverlay("Bag Table Plane Replay", lines, metadata=metadata))
 
 
+def _make_preview_canvas(sink: Any, rgb: Any, depth: Any, obs: Dict[str, Any], frame_seq: int):
+    import numpy as np
+
+    frame = _make_preview_frame(rgb, depth, obs, frame_seq)
+    metadata = dict(frame.overlay.metadata or {})
+    panel_w = max(320, int(getattr(sink, "canvas_w", 1280)) // 2)
+    panel_h = max(220, int(getattr(sink, "canvas_h", 720)) // 2)
+    panel_size = (panel_w, panel_h)
+    rgb_panel = sink._make_rgb_panel(rgb, metadata, panel_size)
+    depth_panel = sink._make_depth_panel(depth, obs, panel_size)
+    plane_panel = sink._make_edge_panel(depth, obs, panel_size)
+    info_panel = sink._make_info_panel(frame, metadata, obs, {}, panel_size)
+    canvas = np.vstack([np.hstack([rgb_panel, depth_panel]), np.hstack([plane_panel, info_panel])])
+    if canvas.shape[:2] != (sink.canvas_h, sink.canvas_w):
+        try:
+            import cv2
+
+            canvas = cv2.resize(canvas, (sink.canvas_w, sink.canvas_h), interpolation=cv2.INTER_AREA)
+        except Exception:
+            pass
+    return canvas
+
+
+def _should_process_by_sample_hz(timestamp_ms: float, sample_hz: float, last_sample_ms: Optional[float]) -> bool:
+    if sample_hz <= 0.0 or last_sample_ms is None:
+        return True
+    return float(timestamp_ms) - float(last_sample_ms) >= (1000.0 / max(0.1, float(sample_hz))) - 1e-6
+
+
 def _sleep_for_mode(mode: str, hz: float, next_deadline: Optional[float]) -> Optional[float]:
     if mode == "benchmark":
         return None
@@ -227,17 +257,22 @@ def main() -> None:
 
     processor = TableEdgeManager(cfg=CONFIG)
     preview_sink = None
-    if args.preview and not args.no_preview:
+    preview_dir = None
+    if not args.no_save_preview:
         from VISTA.vision_module.backend.preview.opencv_sink import OpenCVPreviewSink
 
         preview_sink = OpenCVPreviewSink("Bag Table Plane Replay")
-        preview_sink.open()
+        preview_dir = (args.save_preview_dir.expanduser().resolve() if args.save_preview_dir is not None else output_dir / "preview_frames")
+        preview_dir.mkdir(parents=True, exist_ok=True)
 
     frames_total = 0
     observations: List[Dict[str, Any]] = []
     stride = max(1, int(args.stride))
+    sample_hz = max(0.0, float(args.sample_hz or 0.0))
+    save_preview_every = max(1, int(args.save_preview_every or 1))
     start_frame = max(0, int(args.start_frame))
     next_deadline: Optional[float] = None
+    last_sample_ms: Optional[float] = None
 
     try:
         with obs_path.open("w", encoding="utf-8") as fp:
@@ -246,6 +281,10 @@ def main() -> None:
                 frames_total += 1
                 if frame_seq < start_frame or ((frame_seq - start_frame) % stride) != 0:
                     continue
+                bag_ts_ms = float(pack.get("timestamp_ms", 0.0) or 0.0)
+                if not _should_process_by_sample_hz(bag_ts_ms, sample_hz, last_sample_ms):
+                    continue
+                last_sample_ms = bag_ts_ms
                 next_deadline = _sleep_for_mode(args.mode, args.hz, next_deadline)
                 capture_ts = time.time()
                 frames = {
@@ -264,7 +303,7 @@ def main() -> None:
                     count_dropped=False,
                 )
                 obs["source"] = "offline_bag_table_plane_replay"
-                obs["bag_timestamp_ms"] = float(pack.get("timestamp_ms", 0.0) or 0.0)
+                obs["bag_timestamp_ms"] = bag_ts_ms
                 clean_obs = _json_ready(obs)
                 fp.write(json.dumps(clean_obs, ensure_ascii=False, sort_keys=True) + "\n")
                 observations.append(clean_obs)
@@ -277,22 +316,23 @@ def main() -> None:
                     f"obs_total_age_ms={float(obs.get('obs_total_age_ms') or 0.0):.1f} "
                     f"update_interval_ms={obs.get('update_interval_ms')}"
                 )
-                if preview_sink is not None:
-                    keep_running = preview_sink.render(_make_preview_frame(pack.get("rgb"), pack.get("depth"), obs, frame_seq))
+                obs_index = len(observations)
+                if preview_sink is not None and preview_dir is not None and (obs_index % save_preview_every) == 0:
+                    canvas = _make_preview_canvas(preview_sink, pack.get("rgb"), pack.get("depth"), obs, frame_seq)
                     try:
                         import cv2
 
-                        key = cv2.waitKey(1) & 0xFF
-                    except Exception:
-                        key = 0
-                    if not keep_running or key in (ord("q"), ord("Q")):
-                        break
+                        cv2.imwrite(str(preview_dir / f"table_plane_preview_{frame_seq:06d}.png"), canvas)
+                    except Exception as exc:
+                        print(f"[BAG_TABLE_PLANE] preview_save_failed frame_seq={frame_seq} error={exc}")
     finally:
-        if preview_sink is not None:
-            preview_sink.close()
         processor.release_all()
 
     summary = _metrics_summary(frames_total, observations)
+    summary["sample_hz"] = float(sample_hz)
+    summary["mode"] = str(args.mode)
+    summary["hz"] = float(args.hz)
+    summary["preview_dir"] = str(preview_dir) if preview_dir is not None else None
     metrics_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(f"[BAG_TABLE_PLANE] wrote obs={obs_path} metrics={metrics_path}")
 
