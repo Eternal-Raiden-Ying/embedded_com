@@ -174,6 +174,7 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
         "TABLE_EDGE_PERCEPTION": "rgb_depth_edge",
         "TRACK_LOCAL": "rgb_yolo_edge_overlay",
         "MICRO_ADJUST": "rgb_minimal",
+        "GRASP_REMOTE_INIT": "rgb_minimal",
         "GRASP_REMOTE": "rgb_depth_edge",
         "IDLE_HOT": "rgb_hot_preview",
     }
@@ -281,6 +282,25 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             preview=preview_profile("MICRO_ADJUST", enabled=True),
             release_cooldown_s=2.0,
             metadata={"contract": {"interaction": "MOVE_HINT"}},
+        ),
+        "GRASP_REMOTE_INIT": ModeProfile(
+            name="GRASP_REMOTE_INIT",
+            enabled_cameras=(),
+            camera_overrides={},
+            predictor_enabled=False,
+            predictor_model=None,
+            remote=_default_remote_profile(enabled=True, require_depth=False,
+                                             kind="task", action="init", max_retries=3),
+            preview=preview_profile("GRASP_REMOTE_INIT", enabled=True),
+            release_cooldown_s=3.0,
+            metadata={
+                "contract": {
+                    "cameras": [],
+                    "predictor": "disabled",
+                    "remote": "required",
+                    "result": "remote_result",
+                }
+            },
         ),
         "GRASP_REMOTE": ModeProfile(
             name="GRASP_REMOTE",

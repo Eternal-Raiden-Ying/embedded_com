@@ -482,6 +482,17 @@ class StageController:
             if plan is None:
                 self._store_request_trace(req, ctx_before, req_type=req_type, idempotent=False, reason="respond_no_plan")
                 return None
+            # For GRASP RESPOND: read server_status from Scheduler directly for timeliness.
+            # The last tick's cache may be stale if INIT just completed between ticks.
+            if stage == "GRASP" and self._runtime_service is not None:
+                try:
+                    scheduler = getattr(self._runtime_service, "scheduler", None)
+                    if scheduler is not None:
+                        remote = scheduler.read_result("remote_result", default={})
+                        if isinstance(remote, dict):
+                            self._ctx.server_status = str(remote.get("service_init_state") or remote.get("server_status") or "unknown")
+                except Exception:
+                    pass
             output = plan.on_respond(req, self._ctx)
             requested_mode = normalize_upper(self._ctx.current_mode, "IDLE")
             if not self._apply_context_mode(reason="respond", force=False):
@@ -595,6 +606,10 @@ class StageController:
         plan = self.current_plan()
         if plan is None:
             return None
+        # Sync server_status from remote_result (tick-level cache, no need for ctx persistence)
+        remote = dict(getattr(tick_input, "results", {}) or {}).get("remote_result")
+        if isinstance(remote, dict):
+            self._ctx.server_status = str(remote.get("service_init_state") or remote.get("server_status") or "unknown")
         ctx_before = self._clone_context()
         output = plan.tick(tick_input, self._ctx)
         requested_mode = normalize_upper(self._ctx.current_mode, "IDLE")

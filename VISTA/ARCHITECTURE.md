@@ -66,6 +66,7 @@ Orchestrator --vision_req--> VistaApp
 - `DEPTH_PERCEPTION`
 - `TABLE_EDGE_PERCEPTION`
 - `MICRO_ADJUST`
+- `GRASP_REMOTE_INIT`
 - `GRASP_REMOTE`
 - `IDLE_HOT`
 

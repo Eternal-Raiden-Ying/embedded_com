@@ -20,6 +20,7 @@ class StageContext:
     epoch: int = 0
     target_name: Optional[str] = None
     interaction_id: Optional[str] = None
+    server_status: str = "unknown"  # "unknown" | "ready" | "error" — remote grasp server health
     stage_state: Dict[str, Any] = field(default_factory=dict)
 
 

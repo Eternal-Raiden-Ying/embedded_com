@@ -196,6 +196,7 @@ class GraspStagePlan(BaseStagePlan):
     optional_routes = {
         "MICRO_ADJUST": ("local_perception",),
         "GRASP_REMOTE": ("remote_result", "remote_ack"),
+        "GRASP_REMOTE_INIT": ("remote_result", "remote_ack"),
     }
 
     def on_enter(self, req: VisionReq, ctx: StageContext) -> None:
@@ -247,6 +248,18 @@ class GraspStagePlan(BaseStagePlan):
                     },
                 ),
                 signals={"response": "ERROR", "reason": "interaction_id_mismatch"},
+            )
+
+        # BUSY: if already in GRASP_REMOTE_INIT and INIT task is still in-flight
+        current_mode = normalize_upper(ctx.current_mode, self.default_mode)
+        if current_mode == "GRASP_REMOTE_INIT":
+            return StageOutput(
+                vision_obs=self.build_obs(
+                    ctx, status="FAILED",
+                    perception={"target_obs": target_obs},
+                    result={"reason": "busy", "current_mode": "GRASP_REMOTE_INIT"},
+                ),
+                signals={"response": "ERROR", "reason": "busy"},
             )
 
         decision = normalize_upper((req.response or {}).get("decision"), "REJECT")
@@ -304,7 +317,11 @@ class GraspStagePlan(BaseStagePlan):
         stage_state["remote_init_retry_count"] = 0
         stage_state["remote_init_retry_inflight"] = False
         stage_state["remote_init_retry_target_attempt"] = 0
-        ctx.current_mode = "GRASP_REMOTE"
+        # Route through GRASP_REMOTE_INIT if server not yet confirmed ready
+        if ctx.server_status != "ready":
+            ctx.current_mode = "GRASP_REMOTE_INIT"
+        else:
+            ctx.current_mode = "GRASP_REMOTE"
         ctx.interaction_id = None
         return StageOutput(signals={"response": "ACCEPT"})
 
@@ -329,6 +346,36 @@ class GraspStagePlan(BaseStagePlan):
             "generation": int(tick_input.generation),
             "result_keys": sorted(results.keys()),
         }
+
+        if normalize_upper(ctx.current_mode, self.default_mode) == "GRASP_REMOTE_INIT":
+            init_state = str(remote_result.get("service_init_state") or "")
+            if ctx.server_status == "ready":
+                ctx.current_mode = "GRASP_REMOTE"
+                return StageOutput(
+                    vision_obs=self.build_obs(
+                        ctx, status="RUNNING",
+                        perception={"target_obs": target_obs},
+                        result={"remote_state": "init_ok_switching_to_predict"},
+                    ),
+                    snapshot=output_snapshot,
+                )
+            if ctx.server_status == "error" or init_state == "init_exhausted":
+                return StageOutput(
+                    vision_obs=self.build_obs(
+                        ctx, status="FAILED",
+                        perception={"target_obs": target_obs},
+                        result={"reason": "init_failed", "remote_state": init_state or "failed"},
+                    ),
+                    snapshot=output_snapshot,
+                )
+            return StageOutput(
+                vision_obs=self.build_obs(
+                    ctx, status="RUNNING",
+                    perception={"target_obs": target_obs},
+                    result={"remote_state": "initializing", "server_status": ctx.server_status},
+                ),
+                snapshot=output_snapshot,
+            )
 
         if normalize_upper(ctx.current_mode, self.default_mode) == "GRASP_REMOTE":
             request_id = str(stage_state.get("remote_request_id") or "").strip()
@@ -550,7 +597,7 @@ class GraspStagePlan(BaseStagePlan):
         if not ctx.interaction_id:
             ctx.interaction_id = next_interaction_id()
             stage_state["adjust_round"] = int(stage_state.get("adjust_round", 0) or 0) + 1
-        if normalize_upper(ctx.current_mode, "") not in ("MICRO_ADJUST",):
+        if normalize_upper(ctx.current_mode, "") not in ("MICRO_ADJUST", "GRASP_REMOTE_INIT"):
             ctx.current_mode = "MICRO_ADJUST"
         return StageOutput(
             vision_obs=self.build_obs(
