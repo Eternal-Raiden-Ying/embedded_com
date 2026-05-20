@@ -36,11 +36,9 @@ class TableEdgeManager:
         self._worker_stop = threading.Event()
         edge_hz = float(os.getenv("VISTA_TABLE_EDGE_HZ", "10") or 10.0)
         self._worker_interval_s = 1.0 / max(1.0, edge_hz)
-        track_edge_hz = float(os.getenv("VISTA_TRACK_LOCAL_EDGE_UPDATE_HZ", os.getenv("VISTA_EDGE_FOLLOW_TRACK_LOCAL_EDGE_UPDATE_HZ", "5")) or 5.0)
-        self._track_local_interval_s = 1.0 / max(5.0, track_edge_hz)
-        self._track_local_lightweight = str(os.getenv("VISTA_TRACK_LOCAL_LIGHT_EDGE", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
-        self._light_stride = max(1, int(float(os.getenv("VISTA_TRACK_LOCAL_EDGE_STRIDE", "4") or 4)))
         self._default_interval_s = self._worker_interval_s
+        self._edge_path = "full"
+        self._edge_update_hz = edge_hz
         self._last_camera_generation = 0
         self._last_camera_seq = 0
         self._last_publish_ts = 0.0
@@ -139,19 +137,12 @@ class TableEdgeManager:
         except Exception:
             pass
 
-    def _active_mode(self) -> str:
-        scheduler = self._scheduler
-        if scheduler is None:
-            return ""
-        try:
-            return str((scheduler.snapshot().get("active_mode") or "")).strip().upper()
-        except Exception:
-            return ""
-
-    def _current_interval_s(self) -> float:
-        if self._active_mode() == "TRACK_LOCAL":
-            return min(float(self._default_interval_s), float(self._track_local_interval_s))
-        return float(self._default_interval_s)
+    def configure(self, payload: Dict[str, Any]) -> None:
+        path = str(payload.get("path") or "full").strip().lower()
+        self._edge_path = path if path in {"lightweight", "full"} else "full"
+        self._edge_update_hz = float(payload.get("update_hz", self._edge_update_hz) or self._edge_update_hz)
+        if self._edge_update_hz > 0:
+            self._worker_interval_s = 1.0 / max(1.0, self._edge_update_hz)
 
     def _with_freshness(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         out = dict(payload or {})
@@ -169,7 +160,7 @@ class TableEdgeManager:
         out.setdefault("depth_frame_fetch_ms", float(self._last_depth_frame_fetch_ms))
         unavailable = bool(out.get("edge_obs_unavailable", False))
         out["is_stale"] = bool(out.get("is_stale", False) or unavailable)
-        out["source_mode"] = self._active_mode()
+        out["source_mode"] = self._edge_path
         out.setdefault("seq", out.get("frame_seq", out.get("frame_id")))
         out.setdefault("frame_id", out.get("frame_seq", out.get("seq")))
         out.setdefault("edge_conf", out.get("confidence"))
@@ -394,7 +385,7 @@ class TableEdgeManager:
         return payload
 
     def _process_depth(self, depth_frame: np.ndarray, frame_seq: int) -> Dict[str, Any]:
-        if self._active_mode() == "TRACK_LOCAL" and self._track_local_lightweight:
+        if self._edge_path == "lightweight":
             return self._process_depth_lightweight(depth_frame, frame_seq)
         total_start = time.perf_counter()
         profile = self._profile_template()
@@ -477,7 +468,7 @@ class TableEdgeManager:
         except Exception:
             roi_box = tuple(int(v) for v in self._static_roi() or (0, 0, depth_frame.shape[1], depth_frame.shape[0]))
         x0, y0, x1, y1 = [int(v) for v in roi_box]
-        stride = max(1, int(self._light_stride))
+        stride = max(1, 4)
         depth_roi = depth_frame[y0:y1:stride, x0:x1:stride]
         profile["roi_crop_ms"] = self._ms_since(roi_select_start)
 
@@ -596,7 +587,7 @@ class TableEdgeManager:
         while self._runtime_running and not self._worker_stop.is_set():
             loop_start = time.time()
             scheduler = self._scheduler
-            interval_s = self._current_interval_s()
+            interval_s = self._worker_interval_s
             if scheduler is None:
                 self._worker_stop.wait(timeout=interval_s)
                 continue
@@ -657,5 +648,5 @@ class TableEdgeManager:
             "target_dist_m": float(self._target_dist_m),
             "last_valid_quadrant": self._last_valid_quadrant,
             "default_update_hz": 1.0 / max(1e-6, float(self._default_interval_s)),
-            "track_local_update_hz": 1.0 / max(1e-6, float(self._track_local_interval_s)),
+            "edge_update_hz": self._edge_update_hz,
         }

@@ -38,6 +38,9 @@ class RemoteManager:
         self._worker_interval_s = 0.05
         self._sequence = 0
         self._runtime_profile: Dict[str, Any] = {
+            "kind": "loop",
+            "action": "",
+            "max_retries": 1,
             "base_url": None,
             "command": "predict",
             "require_depth": False,
@@ -153,6 +156,9 @@ class RemoteManager:
         next_profile = dict(self._runtime_profile)
         next_profile.update(
             {
+                "kind": str(profile.get("kind") or "loop").strip().lower() or "loop",
+                "action": str(profile.get("action") or "").strip().lower(),
+                "max_retries": max(1, int(profile.get("max_retries", 1) or 1)),
                 "base_url": str(profile.get("base_url") or "").strip() or None,
                 "command": str(profile.get("command") or "predict").strip() or "predict",
                 "require_depth": bool(profile.get("require_depth", False)),
@@ -197,6 +203,8 @@ class RemoteManager:
         thread = self._worker_thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=1.0)
+            if thread.is_alive():
+                self._log("warn", "remote task worker still alive after 1s join, orphaning")
         self._worker_thread = None
 
     def _publish_result(self, route: str, payload: Any) -> None:
@@ -523,6 +531,18 @@ class RemoteManager:
         return ack
 
     def _worker_loop(self) -> None:
+        kind = str(self._runtime_profile.get("kind") or "loop").strip().lower()
+        action = str(self._runtime_profile.get("action") or "").strip().lower()
+        max_retries = max(1, int(self._runtime_profile.get("max_retries", 1) or 1))
+
+        if kind == "task" and action:
+            # ── task worker: execute action once, publish result, exit ──
+            self._run_task(action=action, max_retries=max_retries)
+            self._publish_result("remote_result", self.result_summary())
+            self._runtime_running = False
+            return
+
+        # ── loop worker: continuous event-driven ──
         while self._runtime_running and not self._worker_stop.is_set():
             if self._service_init_pending and not self._service_init_inflight:
                 timeout_s = float(self._runtime_profile.get("timeout_s", 10.0) or 10.0)
@@ -535,6 +555,55 @@ class RemoteManager:
                     self._publish_event("remote_ack", ack)
             self._publish_result("remote_result", self.result_summary())
             self._worker_stop.wait(timeout=self._worker_interval_s)
+
+    def _run_task(self, *, action: str, max_retries: int) -> None:
+        """Execute a finite task action (init / predict / release).
+
+        For ``init``: retry up to *max_retries* times.
+        For ``predict``: issue one /predict after init is confirmed.
+        For ``release``: issue one /release unconditionally.
+        """
+        action = str(action or "").strip().lower()
+        if action not in {"init", "predict", "release"}:
+            self._update_result(action=action, state="bad_action", ok=False, error=f"unknown task action: {action}")
+            return
+
+        timeout_s = float(self._runtime_profile.get("timeout_s", 10.0) or 10.0)
+
+        if action == "init":
+            for attempt in range(1, max_retries + 1):
+                if self._worker_stop.is_set():
+                    self._update_result(action="init", state="init_cancelled", ok=False, error="stopped")
+                    return
+                self._run_service_init(timeout_s=timeout_s, source="task_init")
+                if self._service_init_confirmed:
+                    return
+            self._update_result(action="init", state="init_exhausted", ok=False,
+                                error=f"init failed after {max_retries} retries")
+            return
+
+        if action == "predict":
+            if not self._service_init_confirmed:
+                self._update_result(action="predict", state="predict_failed", ok=False, error="init_not_confirmed")
+                return
+            if self._worker_stop.is_set():
+                return
+            frame_slot = (self._scheduler.read_slot("camera_frames") if self._scheduler else None)
+            frames = frame_slot.get("payload") if isinstance(frame_slot, dict) else {}
+            require_depth = bool(self._runtime_profile.get("require_depth", False))
+            cmd = {
+                "need_depth": require_depth,
+                "class_id": None,  # supplied via plan metadata if needed
+                **dict(self._runtime_profile.get("metadata") or {}),
+            }
+            request = self._build_predict_request(cmd)
+            if request is not None:
+                resp = self.predict(request)
+                self._record_response("predict", resp)
+            return
+
+        if action == "release":
+            self._release_service_if_ready(timeout_s=timeout_s)
 
     def _update_result(
         self,

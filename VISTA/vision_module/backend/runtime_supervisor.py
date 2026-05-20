@@ -300,6 +300,12 @@ class RuntimeSupervisor:
             return True
         enabled = bool(payload.get("enabled", False))
         ok = True
+        configurator = getattr(self.table_edge_manager, "configure", None)
+        if callable(configurator):
+            try:
+                configurator(dict(payload or {}))
+            except Exception:
+                ok = False
         if enabled:
             try:
                 self.table_edge_manager.start_runtime()
