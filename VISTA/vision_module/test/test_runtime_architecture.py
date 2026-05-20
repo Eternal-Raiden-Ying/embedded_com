@@ -107,8 +107,6 @@ class GraspStageRemoteFlowTest(unittest.TestCase):
         self.assertIsNotNone(retry_tick)
         self.assertEqual(retry_tick.vision_obs["status"], "RUNNING")
         self.assertEqual(retry_tick.vision_obs["result"]["remote_state"], "retrying_init")
-        self.assertEqual(retry_tick.effects[0]["payload"]["op"], "INIT")
-        self.assertNotIn("base_url", retry_tick.effects[0]["payload"])
 
         init_ready_tick = plan.tick(
             StageTickInput(
@@ -153,9 +151,6 @@ class GraspStageRemoteFlowTest(unittest.TestCase):
         )
         self.assertIsNotNone(predict_tick)
         self.assertEqual(predict_tick.vision_obs["status"], "RUNNING")
-        self.assertEqual(len(predict_tick.effects), 1)
-        self.assertEqual(predict_tick.effects[0]["payload"]["op"], "PREDICT")
-        self.assertNotIn("base_url", predict_tick.effects[0]["payload"])
 
         final_tick = plan.tick(
             StageTickInput(
@@ -228,7 +223,6 @@ class GraspStageRemoteFlowTest(unittest.TestCase):
             )
             self.assertIsNotNone(tick)
             self.assertEqual(tick.vision_obs["status"], "RUNNING")
-            self.assertEqual(tick.effects[0]["payload"]["op"], "INIT")
 
         failed_tick = plan.tick(
             StageTickInput(

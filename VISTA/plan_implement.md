@@ -1,11 +1,13 @@
 # VISTA 架构优化 — 实现需求
 
-日期：2026-05-13
+日期：2026-05-20（更新：ABCD 四个步骤已全部实现）
 来源：arch_optimize.md 讨论后的设计决策
 
 ---
 
-## 一、已完成的框架工作（不在本次范围）
+## 一、已完成的框架工作
+
+### 1.1 架构税务清理
 
 | 项 | 内容 |
 |----|------|
@@ -14,194 +16,90 @@
 | Tick 自主订阅 | BaseStagePlan 加 `common_routes`/`optional_routes`，Scheduler 按 filter 采集 |
 | Edge 标准化 | `Online_Edge_Detect/` → `edge_detect/`，standalone 文件移至 `old/`，动态 import 改为直接 import |
 
----
+### 1.2 Step A-D（已提交）
 
-## 二、Mode 能力静态配置扩展
-
-### 2.1 ModeProfile 的 table_edge 字段扩展
-
-当前 `_compile_plan()` 的 `table_edge` 只有 `enabled: bool`。扩展为：
-
-```
-capabilities.table_edge:
-  enabled: bool         # 是否启用 TableEdgeManager
-  path: str             # "lightweight" | "full" | "disabled"
-  update_hz: float      # worker loop 频率
-```
-
-**涉及的 ModeProfile 配置变更**（`config/mode_defaults.py`）：
-
-| Mode | table_edge.path | table_edge.update_hz |
-|------|----------------|---------------------|
-| TRACK_LOCAL | `"lightweight"` | 5.0 |
-| DEPTH_PERCEPTION | `"full"` | 10.0 |
-| TABLE_EDGE_PERCEPTION | `"full"` | 10.0 |
-| MICRO_ADJUST | — | disabled |
-| GRASP_REMOTE | — | disabled |
-| IDLE / IDLE_HOT | — | disabled |
-
-### 2.2 传递路径
-
-```
-ModeProfile.table_edge.{path, update_hz}
-  → _compile_plan() 写入 plan["capabilities"]["table_edge"]
-  → VisionEngine.apply_mode_plan()
-  → RuntimeSupervisor._configure_table_edge(plan)
-  → TableEdgeManager 接收配置（替代 _active_mode() 读取）
-```
-
-### 2.3 TableEdgeManager 去 mode 感知
-
-- 删除 `_active_mode()` 方法
-- 删除 `_current_interval_s()` 中的 mode 判断
-- `_process_depth()` 的路由条件从 `self._active_mode() == "TRACK_LOCAL"` 改为检查传入的 `path` 配置
-- 环境变量 `VISTA_TRACK_LOCAL_LIGHT_EDGE` / `VISTA_TRACK_LOCAL_EDGE_STRIDE` / `VISTA_TRACK_LOCAL_EDGE_UPDATE_HZ` 迁移为 ModeProfile 静态配置字段
+| Step | Commit | 内容 |
+|------|--------|------|
+| A | `f3cc925` | RemoteProfile 扩展 `kind: "loop"|"task"` / `action` / `max_retries`，ModeProfile 扩展 `table_edge_path` / `table_edge_update_hz`，`_compile_plan()` 透传，环境变量弃用警告 |
+| B | `31d7a3c` | RemoteManager task worker（`_run_task`，执行完自动退出线程），孤儿线程 kill（join 1s + daemon），TableEdgeManager 去 `_active_mode()`，`configure(path, update_hz)` 从 plan 接收配置 |
+| C | `5a39631` | GRASP_REMOTE_INIT ModeProfile（第 8 个 mode，`kind=task, action=init, max_retries=3`），StageContext 加 `server_status: str`，StageController.tick() 从 remote_result 同步，GraspStagePlan 完整 mode 链：`GRASP_REMOTE_INIT → GRASP_REMOTE`，on_respond BUSY 处理，MICRO_ADJUST allowlist 扩展 |
+| D | `acc6b1d` | 删除 `_remote_effect()` 及其两个调用点（INIT/PREDICT effects）。`remote_cmd` route、`_publish_effects()`、RemoteManager loop consumer 保留等待确认无其他使用者 |
 
 ---
 
-## 三、以 Mode 能力替代 effects 通道
+## 二、待实现
 
-### 3.1 核心思路
+### 2.1 VisionEngine 删除
 
-当前 `GraspStagePlan` 通过 effects (`remote_cmd` event) 向 `RemoteManager` 发 INIT/PREDICT/RELEASE 指令。改为：**mode 的能力配置定义动作，切 mode 即触发执行**。StagePlan 不再发指令，只读结果 + 切 mode。
+VisionEngine 当前是 Scheduler + RuntimeSupervisor + 5 Managers 的薄 facade。删除后的职责分流：
 
-### 3.2 两层 INIT 设计
+| 原 VisionEngine 功能 | 移往 | 说明 |
+|----------------------|------|------|
+| 构造函数（组装 Manager） | `VistaApp.__init__` | App 直接创建 Scheduler + Managers + RuntimeSupervisor |
+| `apply_mode_plan` | `ModeController.switch_mode()` | 内部直接 `scheduler.configure()` + `supervisor.reconcile()` |
+| `start` / `stop` | `ModeController` | runtime 生命周期跟随 mode controller |
+| `collect_tick_input` | `VistaApp._tick_stage` → `scheduler.collect_tick_input` | 直接调，不需要中间层 |
+| `push_stage_signals` | `StageController` → `scheduler.push_stage_signals` | 直接调 |
+| `publish_result("runtime_status")` | `StageController` → `scheduler.publish_result` | generation 从 `mode_controller.generation` 获取 |
+| `publish_event` | 删除（随 effects 移除） | 已无调用方 |
+| `runtime_snapshot` | `ModeController` | Manager 快照聚合，供心跳使用 |
+| `_active_runtime_generation` | 删除 | 冗余副本，直接用 `ModeController._generation` |
+| `_active_runtime_plan` | 删除 | 冗余副本 |
+| capability 事件回调 | **删除** | 日志/事件记录后面再优化，当前阶段不保留 |
 
-| Mode | 触发时机 | 职责 |
-|------|---------|------|
-| `INIT` | `VistaApp.start()` 阶段 | 全局初始化：camera、predictor、remote 健康检查（best-effort `/init`） |
-| `GRASP_REMOTE_INIT` | GRASP stage 收到 `RESPOND ACCEPT`，`server_status != ready` | 仅远程 `/init`，至多 3 次重试 |
-
-`VistaApp` 或 `StageController` 维护 `server_status` 字段，来源：
-
-```
-remote capability (GRASP_REMOTE_INIT mode)
-  → RemoteManager 执行 INIT，结果写入 Scheduler(remote_result)
-  → Scheduler → StageTickInput → StageController → server_status
-```
-
-`StageController.handle_request()` 处理 `stage=GRASP` 请求时，`server_status` 随 payload 传入，StagePlan 据此判断进入 `GRASP_REMOTE_INIT` 还是 `GRASP_REMOTE`。
-
-### 3.3 GRASP stage mode 转换
+### 2.2 删除后的层级关系
 
 ```
-收到 RESPOND ACCEPT:
-  ├─ server_status != ready → GRASP_REMOTE_INIT (至多 3 次 INIT，失败 → FAILED)
-  └─ server_status == ready → GRASP_REMOTE
-
-GRASP_REMOTE:
-  ├─ 动作：开 camera、等 fresh frame、发 PREDICT
-  ├─ success → RESULT_READY → Orchestrator 进入下游
-  ├─ failure → FAILED
-  └─ reposition_required → RUNNING + proposal → Orchestrator 再次 RESPOND
-
-GRASP_REMOTE_INIT:
-  ├─ 动作：仅发 /init（至多 3 次）
-  ├─ ready → 自动切 GRASP_REMOTE
-  └─ 3 次失败 → FAILED
+VistaApp
+  ├── Scheduler
+  ├── ModeController(scheduler, supervisor, managers)
+  │     ├── switch_mode() 内含 scheduler.configure → supervisor.reconcile
+  │     ├── runtime_snapshot()
+  │     └── start() / stop()
+  ├── StageController(scheduler, mode_controller)
+  │     ├── push_stage_signals → scheduler
+  │     ├── publish_result → scheduler
+  │     └── _apply_context_mode → mode_controller.switch_mode
+  └── RuntimeSupervisor(scheduler, managers, backend_event_sink)
 ```
 
-### 3.4 RemoteManager 能力动作配置
+### 2.3 INIT stage
 
-`capabilities.remote` 扩展 `action` 字段：
+全局 INIT stage 挂 `INIT` mode（与 GRASP_REMOTE_INIT 不同），在 `VistaApp.start()` 阶段触发：
 
-```
-capabilities.remote:
-  enabled: bool
-  action: str          # "init" | "predict" | "release" | "" (idle)
-  max_init_retries: int  # GRASP_REMOTE_INIT 模式专用
-  base_url: str
-  ...
-```
+- 负责全局初始化：camera、predictor、remote 健康检查
+- 进入 INIT stage → 执行完毕后自动转入 IDLE，等待 Orchestrator 发请求
+- INIT mode 的 plan 中包含所有启动时需要验证的 capability（camera check、predictor load、remote best-effort `/init`）
 
-`RemoteManager` worker loop 读 plan 中的 `action`，执行对应操作，结果写入 `remote_result` slot。
+### 2.4 effects 残留清理（原 Step D 收尾）
 
-### 3.5 effects 通道清理
-
-- `grasp.py` 中 `_remote_effect()` 函数删除
-- `BaseStagePlan` 暂不新增 `emit_event()` 方法（effects 概念消失）
-- `stage_controller.py` 中 `_publish_effects()` 保留（等待确认无其他使用者后删除）
-- `Scheduler` 中 `remote_cmd` route 保留（等待确认无其他使用者后删除）
+- `stage_controller.py` 中 `_publish_effects()` 确认无其他使用者后删除
+- `Scheduler` 中 `remote_cmd` route 确认无其他使用者后删除
+- `remote_ack` route 确认无消费者后一并删除
 
 ---
 
-## 四、后续工作（不在本次实现范围）
+## 三、后续工作（不在本次范围）
 
 | 项 | 说明 |
 |----|------|
-| edge_detect 配置迁移 | `backend/edge_detect/board_config.py` → 主 `config/schema.py` 的 `EdgeDetectConfig` dataclass |
-| Backend 目录分层 | `backend/` 按框架/管理器/驱动/能力包分层 |
-| 日志覆盖补全 | 数据面 route 操作记录、manager 状态快照 |
-| Mode 切换优化 | 避免频繁切 mode 调用同一 worker 的不必要启停开销 |
-| effects 残留清理 | 确认 `remote_cmd` route 和 `_publish_effects()` 无其他使用者后删除 |
+| edge_detect 配置迁移 | `backend/edge_detect/board_config.py` → 主 `config/schema.py` |
+| Backend 目录分层 | 框架/管理器/驱动/能力包 |
+| 日志/事件记录优化 | 数据面 route 记录、manager 状态快照、capability 事件恢复 |
+| Mode 切换优化 | 避免同 worker 反复启停 |
+| ARCHITECTURE.md 同步 | VisionEngine 删除后更新分层图和调用链 |
 
 ---
 
-## 五、设计决策细节（2026-05-13 grilling 确认）
+## 四、实施顺序
 
-### 5.1 GRASP_REMOTE_INIT 是新 ModeProfile
-
-独立 ModeProfile，与 GRASP_REMOTE 并列。ModeProfile 数量从 7 增到 8。GraspStagePlan 内编辑切换逻辑。
-
-### 5.2 server_status 放 StageContext
-
-- **写入**：`StageController.tick()` 从 `tick_input.results["remote_result"]` 提取 → 写 `ctx.server_status`
-- **读取**：StagePlan（GraspStagePlan._resolve_mode）读 `ctx.server_status` 决定切哪个 mode
-- **handle_request 路径**：`on_respond()` 中直接从 Scheduler 读 `remote_result` 获取 `server_status`（绕过 tick 缓存，保证时效性）。仅限 GRASP 请求，加注释说明时效性原因。
-
-### 5.3 有限 task vs 无限 loop
-
-ModeProfile 在 dataclass 中声明 `kind`：
-
-```python
-@dataclass
-class RemoteProfile:
-    enabled: bool = False
-    kind: str = "loop"       # "loop" | "task"
-    action: str = ""         # task only: "init" | "predict" | "release"
-    max_retries: int = 1     # task only
-```
-
-- **loop**：camera/predictor/preview — 无限 worker，mode 存活期间持续运行
-- **task**：INIT/PREDICT/RELEASE — mode 激活时触发一次，执行完自动退出线程，不空转
-
-`kind`/`action` 由 RemoteManager 的 worker loop 自己读 plan 决定行为。`RuntimeSupervisor._configure_remote()` 不特殊处理，只负责启停。
-
-### 5.4 Scheduler 不新增函数，复用现有接口
-
-- Task 状态 = result_slot（`remote_result`），只不过从持续更新的帧摘要变成"完成时写一次"
-- 不需要显式区分持续 vs 一次性语义
-- task_state 在 `tick_input` 中，不持久化到 `ctx`
-- handle_request 不访问底层 task 状态
-
-### 5.5 孤儿线程 kill 方案
-
-切 mode → `stop_runtime()` → `_worker_stop.set()` + `join(timeout=1.0)`。旧 worker 在 join 超时后成为孤儿线程：
-
-- Scheduler 已切换 generation，旧 gen 数据被过滤
-- `daemon=True`，主线程退出时强制回收
-- HTTP client 已有 10s timeout，至多 10s 后线程自己结束
-- 不阻塞主循环
-
-### 5.6 on_respond 重复请求处理
-
-- 当前 mode 已是 GRASP_REMOTE_INIT 且 task 未完成 → 返回 BUSY（status=FAILED, reason=busy），拒绝此次请求
-- 要求进入其他 mode → kill 孤儿线程（通过标准 stop_runtime + join(1s)）
-
-### 5.7 table_edge.path 替代环境变量
-
-- `"lightweight"` → `_process_depth_lightweight()`（纯 numpy 拟合）
-- `"full"` → `_process_depth()`（完整 RANSAC detector）
-- 环境变量 `VISTA_TRACK_LOCAL_LIGHT_EDGE` / `VISTA_TRACK_LOCAL_EDGE_STRIDE` / `VISTA_TRACK_LOCAL_EDGE_UPDATE_HZ` 值硬编码到 ModeProfile
-- App 层检测这些环境变量是否被赋值，如赋值则打印弃用警告
-
-### 5.8 实施顺序
-
-| Step | 内容 | 依赖 |
-|------|------|------|
-| A | ModeProfile 扩展（table_edge.path/update_hz + remote.kind/action/max_retries），`_compile_plan()` 透传，环境变量弃用警告 | 无 |
-| B | RemoteManager task worker + Scheduler task 语义 + 孤儿线程 kill + handle_request 切 mode 清理 | A |
-| C | Mode 新增 GRASP_REMOTE_INIT，GraspStagePlan mode 逻辑：server_status 读写、on_respond BUSY 返回、mode 链 GRASP_REMOTE_INIT→GRASP_REMOTE | B |
-| D | effects 通道清理：删 `_remote_effect()`、`_publish_effects()`（确认无其他使用者后）、`remote_cmd` route | C |
-
-每步独立验证，编译通过后提交。
+| Step | 内容 | 依赖 | 状态 |
+|------|------|------|------|
+| A | ModeProfile + RemoteProfile 扩展，TableEdgeManager 去 mode 感知，环境变量弃用 | 无 | done |
+| B | RemoteManager task worker + 孤儿线程 kill + TableEdgeManager path config | A | done |
+| C | GRASP_REMOTE_INIT mode + server_status + GraspStagePlan mode 链 | B | done |
+| D | effects producer 删除（`_remote_effect`） | C | done |
+| E | VisionEngine 删除 + capability 回调删除 + 层级重连 | D | **待做** |
+| F | INIT stage + INIT mode（全局初始化） | E | **待做** |
+| G | effects 残留清理（`_publish_effects`、`remote_cmd`、`remote_ack`） | D | **待做** |
+| H | ARCHITECTURE.md 同步 | E+F+G | **待做** |
