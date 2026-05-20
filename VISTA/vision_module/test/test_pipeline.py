@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""Camera + YOLO pipeline smoke test — direct camera and predictor, no engine.
+
+Mock backend support via --backend auto (default) or --backend mock.
+"""
+
 import argparse
-import importlib
 import sys
 import time
 from typing import Tuple
@@ -22,16 +26,13 @@ from test_support import (
     EXIT_INTERRUPT,
     EXIT_OK,
     EXIT_USAGE,
-    PrintLogger,
     add_camera_args,
     add_common_backend_args,
     add_model_args,
-    build_test_config,
     describe_frame,
     import_camera_classes,
     import_predictor_class,
     make_model_profile,
-    patch_engine_backends,
     print_header,
     print_step,
     print_summary,
@@ -39,38 +40,41 @@ from test_support import (
     try_with_backends,
 )
 
-from vision_module.app.stage_controller import StageController
-from vision_module.backend.mode_controller import ModeController
-from vision_module.config.mode_defaults import build_default_mode_profiles
-
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="VISTA pipeline backend smoke test")
     add_common_backend_args(parser)
     add_camera_args(parser)
     add_model_args(parser)
-    parser.add_argument("--debug-window", action="store_true", help="Show CV debug window with detection boxes")
+    parser.add_argument("--debug-window", action="store_true",
+                        help="Show CV debug window with YOLO detection boxes")
     return parser
 
 
-def build_engine_camera_cfg(args: argparse.Namespace) -> dict:
-    return {
-        "source": args.rgb_device,
-        "in_w": args.rgb_in_w,
-        "in_h": args.rgb_in_h,
-        "out_w": args.rgb_out_w,
-        "out_h": args.rgb_out_h,
-        "fps": args.rgb_fps,
-        "format": "BGR",
-        "in_format": "YUY2",
-        "crop_x": 0,
-        "crop_y": 0,
-        "crop_w": 0,
-        "crop_h": 0,
-    }
+COCO80_NAMES = [
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck",
+    "boat", "traffic light", "fire hydrant", "stop sign", "parking meter", "bench",
+    "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra",
+    "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
+    "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove",
+    "skateboard", "surfboard", "tennis racket", "bottle", "wine glass", "cup",
+    "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange",
+    "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
+    "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse",
+    "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink",
+    "refrigerator", "book", "clock", "vase", "scissors", "teddy bear",
+    "hair drier", "toothbrush",
+]
 
 
-def build_direct_camera_kwargs(args: argparse.Namespace) -> dict:
+def _class_name(cls_id: int) -> str:
+    idx = int(cls_id)
+    if 0 <= idx < len(COCO80_NAMES):
+        return COCO80_NAMES[idx]
+    return f"cls#{idx}"
+
+
+def camera_kwargs(args: argparse.Namespace) -> dict:
     return {
         "device": args.rgb_device,
         "in_w": args.rgb_in_w,
@@ -80,295 +84,205 @@ def build_direct_camera_kwargs(args: argparse.Namespace) -> dict:
         "fps": args.rgb_fps,
         "format": "BGR",
         "in_format": "YUY2",
+        "auto_exposure": True,
     }
 
 
-def resolve_camera_backend(requested: str, args: argparse.Namespace):
-    rgb_kwargs = build_direct_camera_kwargs(args)
+def draw_yolo_boxes(display: np.ndarray, boxes) -> np.ndarray:
+    """Draw raw YOLO detection boxes onto a BGR frame.
+
+    ``boxes`` are already in pixel coordinates — ``detect_postprocess()`` calls
+    ``scale_coords()`` which maps from model-input space back to the original
+    frame dimensions.  No further normalisation is needed here.
+    """
+    if boxes is None or (isinstance(boxes, np.ndarray) and boxes.size == 0):
+        return display
+    h, w = display.shape[:2]
+    for row in boxes:
+        if len(row) < 6:
+            continue
+        x1, y1, x2, y2, conf, cls_id = row[:6]
+        pt1 = (max(0, int(x1)), max(0, int(y1)))
+        pt2 = (min(w, int(x2)), min(h, int(y2)))
+        cv2.rectangle(display, pt1, pt2, (0, 255, 0), 2)
+
+        label = f"{_class_name(cls_id)} {float(conf):.2f}"
+        (tw, th), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        label_y = pt1[1] - th - baseline if pt1[1] - th - baseline > 0 else pt2[1]
+        cv2.rectangle(display, (pt1[0], label_y - 2),
+                      (pt1[0] + tw + 4, label_y + th + 2), (0, 255, 0), -1)
+        cv2.putText(display, label, (pt1[0] + 2, label_y + th),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+    return display
+
+
+# ── Backend resolution ─────────────────────────────────────────────────
+
+def resolve_camera(requested: str, args: argparse.Namespace):
+    """Return (class or None, AttemptResult) — camera is opened just to verify."""
+    kw = camera_kwargs(args)
 
     def real_factory():
         color_cls, _, _ = import_camera_classes("real")
-        camera = color_cls(**rgb_kwargs)
-        frame = camera.read_frame()
+        cam = color_cls(**kw)
+        frame = cam.read_frame()
         if frame is None or getattr(frame, "size", 0) == 0:
-            safe_release(camera)
+            safe_release(cam)
             raise RuntimeError("camera opened but returned empty frame")
-        safe_release(camera)
+        safe_release(cam)
         return color_cls
 
     def mock_factory():
         color_cls, _, _ = import_camera_classes("mock")
-        camera = color_cls(**rgb_kwargs)
-        frame = camera.read_frame()
-        if frame is None or getattr(frame, "size", 0) == 0:
-            safe_release(camera)
-            raise RuntimeError("mock camera returned empty frame")
-        safe_release(camera)
-        return color_cls
+        return color_cls  # mock camera always returns frames
 
     return try_with_backends(requested, real_factory, mock_factory)
 
 
-def resolve_predictor_backend(requested: str, args: argparse.Namespace):
+def resolve_predictor(requested: str, args: argparse.Namespace):
     profile = make_model_profile(args)
 
     def real_factory():
         if not args.model_path:
             raise RuntimeError("--model-path is required for real predictor")
         predictor_cls = import_predictor_class("real")
-        predictor = predictor_cls(profile)
-        if not predictor.is_ready():
-            safe_release(predictor)
+        inst = predictor_cls(profile)
+        if not inst.is_ready():
+            safe_release(inst)
             raise RuntimeError("predictor not ready")
-        safe_release(predictor)
+        safe_release(inst)
         return predictor_cls
 
     def mock_factory():
-        predictor_cls = import_predictor_class("mock")
-        predictor = predictor_cls(profile)
-        if not predictor.is_ready():
-            safe_release(predictor)
-            raise RuntimeError("mock predictor not ready")
-        safe_release(predictor)
-        return predictor_cls
+        return import_predictor_class("mock")
 
     return try_with_backends(requested, real_factory, mock_factory)
 
 
-def load_engine_module():
-    return importlib.import_module("vision_module.backend.vision_engine")
+# ── Unified test phase ─────────────────────────────────────────────────
 
+def run_pipeline(
+    camera_cls,
+    predictor_cls,
+    camera_backend: str,
+    predictor_backend: str,
+    args: argparse.Namespace,
+    debug_window: bool,
+) -> Tuple[bool, str]:
+    """Open camera + predictor directly, run inference loop.
 
-def build_runtime_stack(engine_module, cfg):
-    runtime = engine_module.VisionEngine(cfg, logger=PrintLogger("pipeline"))
-    mode_controller = ModeController(
-        logger=PrintLogger("pipeline.mode"),
-        preview_allowed=bool(cfg.debug.preview),
-    )
-    mode_controller.register_profiles(build_default_mode_profiles(cfg.model.active_model, cfg).values())
-    stage_controller = StageController(
-        logger=PrintLogger("pipeline.stage"),
-        mode_controller=mode_controller,
-        runtime_service=runtime,
-    )
-    return runtime, mode_controller, stage_controller
+    Predictor is initialised first to avoid static TLS conflicts between
+    QNN runtime and GL dispatch on ARM boards.
+    """
 
+    # 1. Predictor (before camera — TLS ordering).
+    print_step("predictor_init", "INFO", f"backend={predictor_backend}")
+    profile = make_model_profile(args)
+    predictor = predictor_cls(profile)
+    if not predictor.is_ready():
+        safe_release(predictor)
+        return False, "predictor not ready"
+    print_step("predictor_init", "PASS", type(predictor).__name__)
 
-def draw_debug_frame(rgb: np.ndarray, perception: dict) -> np.ndarray:
-    """Draw YOLO detection boxes on a BGR frame for debug display."""
-    display = np.ascontiguousarray(rgb.copy())
-    boxes = perception.get("infer_boxes") if isinstance(perception, dict) else None
-    if not boxes:
-        return display
-    h, w = display.shape[:2]
-    for row in boxes:
-        if isinstance(row, dict):
-            x1 = float(row.get("x1", 0))
-            y1 = float(row.get("y1", 0))
-            x2 = float(row.get("x2", 0))
-            y2 = float(row.get("y2", 0))
-            cls_id = row.get("class_id", row.get("cls", 0))
-            conf = row.get("confidence", row.get("conf", 0.0))
-        elif isinstance(row, (list, tuple)) and len(row) >= 6:
-            x1, y1, x2, y2, conf, cls_id = row[:6]
-        else:
-            continue
-        pt1 = (int(x1 * w), int(y1 * h))
-        pt2 = (int(x2 * w), int(y2 * h))
-        cv2.rectangle(display, pt1, pt2, (0, 255, 0), 2)
-        label = f"#{int(cls_id)} {float(conf):.2f}"
-        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-        cv2.rectangle(display, (pt1[0], pt1[1] - th - 4), (pt1[0] + tw + 4, pt1[1]), (0, 255, 0), -1)
-        cv2.putText(display, label, (pt1[0] + 2, pt1[1] - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
-    return display
+    # 2. Camera.
+    print_step("camera_init", "INFO", f"backend={camera_backend}")
+    kw = camera_kwargs(args)
+    camera = camera_cls(**kw)
+    frame = camera.read_frame()
+    if frame is None or getattr(frame, "size", 0) == 0:
+        safe_release(camera)
+        safe_release(predictor)
+        return False, "camera returned empty frame"
+    print_step("camera_init", "PASS", describe_frame(frame))
 
-
-def phase_camera_only(engine_module, cfg, camera_kwargs: dict) -> Tuple[bool, str]:
-    runtime, _, _ = build_runtime_stack(engine_module, cfg)
-    try:
-        runtime.camera_manager.ensure_camera("rgb", override=camera_kwargs)
-        if "rgb" not in runtime.camera_manager.cams:
-            return False, "engine.cams missing rgb"
-        frame = runtime.camera_manager.cams["rgb"].read_frame()
-        if frame is None or getattr(frame, "size", 0) == 0:
-            return False, "camera returned empty frame"
-        return True, describe_frame(frame)
-    finally:
-        runtime.stop()
-        runtime.stop()
-
-
-def phase_predictor_only(engine_module, cfg) -> Tuple[bool, str]:
-    runtime, _, _ = build_runtime_stack(engine_module, cfg)
-    try:
-        runtime.predictor_manager.ensure_model("test_model")
-        predictor = runtime.predictor_manager.predictor
-        if predictor is None:
-            return False, "engine.predictor is None"
-        if not predictor.is_ready():
-            return False, "predictor not ready"
-        return True, type(predictor).__name__
-    finally:
-        runtime.stop()
-        runtime.stop()
-
-
-def phase_combined(engine_module, cfg, camera_kwargs: dict, iterations: int,
-                   debug_window: bool = False) -> Tuple[bool, str]:
-    runtime, _, stage_controller = build_runtime_stack(engine_module, cfg)
-    frames_seen = 0
-    infer_seen = 0
-    last_seq = 0
-    debug_window_active = bool(debug_window and cv2 is not None)
+    # 3. Inference loop — infinite when debug window is active (stop with ESC / Ctrl+C).
+    show_window = bool(debug_window and cv2 is not None)
     if debug_window and cv2 is None:
-        emit_line("WARNING: --debug-window ignored, cv2 not available")
+        print_step("debug_window", "WARN", "cv2/aidcv not available")
+
+    if show_window:
+        cv2.namedWindow("pipeline debug (ESC to exit)")
+        print_step("debug_window", "INFO", "ESC to close window, Ctrl+C to exit")
+
+    t0 = time.time()
+    frame_count = 0
+    infer_count = 0
+    window_active = show_window
+    live_mode = show_window  # infinite loop for debug, limited for headless
     try:
-        runtime.init()
-        runtime.start()
-        stage_controller.set_runtime_mode("TRACK_LOCAL", reason="test_pipeline_combined", force=True)
-        for _ in range(iterations):
-            frame_meta = runtime.scheduler.read_result("frame_meta", default={}) or {}
-            if isinstance(frame_meta, dict):
-                frame_seq = int(frame_meta.get("frame_seq", 0) or 0)
-                if bool(frame_meta.get("has_frames")) and frame_seq > last_seq:
-                    frames_seen += 1
-                    last_seq = frame_seq
+        while live_mode or frame_count < max(args.iterations, 100):
+            frame = camera.read_frame()
+            if frame is None or frame.size == 0:
+                if window_active:
+                    cv2.waitKey(5)
+                continue
+            frame_count += 1
 
-            # Try camera_frames slot first, then frame_meta result.
-            frame_slot = runtime.scheduler.read_slot("camera_frames")
-            frame_data = None
-            frame_seq = 0
-            if isinstance(frame_slot, dict):
-                frame_seq = int(frame_slot.get("seq", 0) or 0)
-                frame_data = frame_slot.get("payload") if isinstance(frame_slot.get("payload"), dict) else None
-            if not isinstance(frame_data, dict) or frame_seq <= last_seq:
-                # Fallback: some camera backends populate frame_meta instead.
-                if isinstance(frame_meta, dict):
-                    alt_seq = int(frame_meta.get("frame_seq", 0) or 0)
-                    alt_frames = frame_meta.get("frames") if isinstance(frame_meta.get("frames"), dict) else None
-                    if alt_seq > last_seq and isinstance(alt_frames, dict):
-                        frame_seq = alt_seq
-                        frame_data = alt_frames
-            if frame_seq > last_seq and isinstance(frame_data, dict):
-                frames_seen += 1
-                last_seq = frame_seq
+            boxes, _masks = predictor.predict_frame(frame)
+            has_boxes = isinstance(boxes, np.ndarray) and boxes.size > 0
+            if has_boxes:
+                infer_count += 1
 
-            local = runtime.scheduler.read_result("local_perception", default={}) or {}
-            if isinstance(local, dict) and bool(local.get("has_infer")):
-                infer_seen += 1
+            if window_active:
+                display = draw_yolo_boxes(frame.copy(), boxes)
+                fps = frame_count / max(0.001, time.time() - t0)
+                cv2.putText(display, f"fps={fps:.1f} frames={frame_count} infer={infer_count}",
+                            (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                cv2.imshow("pipeline debug (ESC to exit)", display)
+                if cv2.waitKey(1) & 0xFF == 27:
+                    window_active = False
+                    live_mode = False
+                    cv2.destroyWindow("pipeline debug (ESC to exit)")
 
-            if debug_window_active and frame_data is not None:
-                rgb = frame_data.get("rgb")
-                if rgb is not None and isinstance(rgb, np.ndarray):
-                    display = draw_debug_frame(rgb, local)
-                    cv2.imshow("pipeline debug (ESC to exit)", display)
-                    key = cv2.waitKey(1) & 0xFF
-                    if key == 27:
-                        debug_window_active = False
-                        cv2.destroyWindow("pipeline debug (ESC to exit)")
-
-            time.sleep(0.05)
-        if frames_seen <= 0:
-            snapshot = runtime.runtime_snapshot()
-            camera_state = dict(snapshot.get("capabilities", {}).get("camera", {}) or {})
-            scheduler_state = dict(snapshot.get("scheduler", {}) or {})
-            return False, (
-                "no frames observed "
-                f"(camera_enabled={camera_state.get('enabled_cameras')} "
-                f"camera_running={camera_state.get('runtime_running')} "
-                f"camera_last_seq={camera_state.get('last_frame_seq')} "
-                f"routes={scheduler_state.get('route_keys')} "
-                f"results={scheduler_state.get('result_keys')})"
-            )
-        if infer_seen <= 0:
-            return False, "no inference observed in combined phase"
-        if debug_window_active and cv2 is not None:
-            cv2.destroyAllWindows()
-        return True, f"frames_seen={frames_seen} infer_seen={infer_seen}"
+        elapsed = time.time() - t0
+        fps = frame_count / max(0.001, elapsed)
+        ok = frame_count > 0
+        detail = f"frames={frame_count} infer={infer_count} time={elapsed:.1f}s fps={fps:.1f}"
+        return (True, detail) if ok else (False, detail)
+    except KeyboardInterrupt:
+        elapsed = time.time() - t0
+        fps = frame_count / max(0.001, elapsed)
+        print_step("pipeline", "STOP", f"Ctrl+C after frames={frame_count} infer={infer_count} time={elapsed:.1f}s fps={fps:.1f}")
+        return (True, f"frames={frame_count} infer={infer_count} time={elapsed:.1f}s fps={fps:.1f}")
     finally:
-        runtime.stop()
-        runtime.stop()
-        if cv2 is not None:
+        safe_release(camera)
+        safe_release(predictor)
+        if show_window:
             cv2.destroyAllWindows()
 
+
+# ── Main ───────────────────────────────────────────────────────────────
 
 def main() -> int:
     args = build_parser().parse_args()
     print_header("VISTA Pipeline Backend Test", args)
 
-    # Initialize predictor first to avoid static TLS conflicts on some boards when
-    # camera/CV libraries are loaded before the QNN runtime.
-    predictor_backend_cls, predictor_result = resolve_predictor_backend(args.backend, args)
-    camera_backend_cls, camera_result = resolve_camera_backend(args.backend, args)
+    # Resolve backends (predictor first for TLS ordering).
+    predictor_cls, predictor_result = resolve_predictor(args.backend, args)
+    camera_cls, camera_result = resolve_camera(args.backend, args)
 
-    if camera_backend_cls is None and predictor_backend_cls is None:
-        print_step("camera_backend", "FAIL", camera_result.detail)
-        print_step("predictor_backend", "FAIL", predictor_result.detail)
-        print_summary(
-            args.backend,
-            "none",
-            "FAIL",
-            [("camera", camera_result.detail), ("predictor", predictor_result.detail)],
-        )
-        return EXIT_USAGE if "--model-path is required for real predictor" in predictor_result.detail else EXIT_FAIL
+    camera_backend = camera_result.resolved
+    predictor_backend = predictor_result.resolved
 
-    print_step("camera_backend", "PASS" if camera_backend_cls else "FAIL", camera_result.detail)
-    print_step("predictor_backend", "PASS" if predictor_backend_cls else "FAIL", predictor_result.detail)
+    if camera_cls is None or predictor_cls is None:
+        print_step("camera_backend", "PASS" if camera_cls else "FAIL", camera_result.detail)
+        print_step("predictor_backend", "PASS" if predictor_cls else "FAIL", predictor_result.detail)
+        print_summary(args.backend, "none", "FAIL",
+                      [("camera", camera_result.detail), ("predictor", predictor_result.detail)])
+        return EXIT_USAGE if ("model-path" in predictor_result.detail) else EXIT_FAIL
 
-    cfg = build_test_config(args)
-    camera_kwargs = build_engine_camera_cfg(args)
-    engine_module = load_engine_module()
-    camera_backend = camera_result.resolved if camera_backend_cls else "mock"
-    predictor_backend = predictor_result.resolved if predictor_backend_cls else "mock"
-    patch_engine_backends(engine_module, camera_backend, predictor_backend)
+    print_step("camera_backend", "PASS", camera_result.detail)
+    print_step("predictor_backend", "PASS", predictor_result.detail)
 
-    phase_results = []
+    ok, detail = run_pipeline(camera_cls, predictor_cls,
+                              camera_backend, predictor_backend,
+                              args, debug_window=args.debug_window)
 
-    if camera_backend_cls is not None:
-        ok, detail = phase_camera_only(engine_module, cfg, camera_kwargs)
-        phase_results.append(("camera_only", ok, detail))
-        print_step("camera_only", "PASS" if ok else "FAIL", detail)
-    else:
-        phase_results.append(("camera_only", False, "camera backend unavailable"))
-        print_step("camera_only", "FAIL", "camera backend unavailable")
-
-    if predictor_backend_cls is not None:
-        ok, detail = phase_predictor_only(engine_module, cfg)
-        phase_results.append(("predictor_only", ok, detail))
-        print_step("predictor_only", "PASS" if ok else "FAIL", detail)
-    else:
-        phase_results.append(("predictor_only", False, "predictor backend unavailable"))
-        print_step("predictor_only", "FAIL", "predictor backend unavailable")
-
-    if camera_backend_cls is not None and predictor_backend_cls is not None:
-        # Use longer window for combined to allow camera frames to flow.
-        combined_iterations = max(args.iterations, 50)
-        ok, detail = phase_combined(engine_module, cfg, camera_kwargs, combined_iterations,
-                                    debug_window=args.debug_window)
-        phase_results.append(("combined", ok, detail))
-        print_step("combined", "PASS" if ok else "FAIL", detail)
-    else:
-        phase_results.append(("combined", False, "combined phase skipped"))
-        print_step("combined", "FAIL", "combined phase skipped")
-
-    pass_count = sum(1 for _, ok, _ in phase_results if ok)
-    if pass_count == len(phase_results):
-        overall = "PASS"
-        exit_code = EXIT_OK
-    elif pass_count > 0:
-        overall = "PARTIAL"
-        exit_code = EXIT_FAIL
-    else:
-        overall = "FAIL"
-        exit_code = EXIT_FAIL
-
-    print_summary(
-        args.backend,
-        f"camera={camera_backend} predictor={predictor_backend}",
-        overall,
-        [(name, detail) for name, _, detail in phase_results],
-    )
-    return exit_code
+    overall = "PASS" if ok else "FAIL"
+    print_summary(args.backend,
+                  f"camera={camera_backend} predictor={predictor_backend}",
+                  overall, [("pipeline", detail)])
+    return EXIT_OK if ok else EXIT_FAIL
 
 
 if __name__ == "__main__":
