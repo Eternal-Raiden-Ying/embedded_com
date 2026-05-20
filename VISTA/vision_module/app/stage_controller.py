@@ -16,13 +16,13 @@ class StageController:
     and handoff between stage logic and the mode/capability layer.
     """
 
-    def __init__(self, logger=None, event_sink=None, mode_controller=None, runtime_service=None):
+    def __init__(self, logger=None, event_sink=None, mode_controller=None, scheduler=None):
         self._plans: Dict[str, BaseStagePlan] = {}
         self._ctx = StageContext()
         self.logger = logger
         self._event_sink = event_sink
         self._mode_controller = mode_controller
-        self._runtime_service = runtime_service
+        self.scheduler = scheduler
         self._last_applied_mode = "IDLE"
         self._last_interaction_state_key = None
         self._last_request_signature = None
@@ -188,7 +188,6 @@ class StageController:
                 target_mode,
                 reason=reason,
                 force=force,
-                apply_mode_plan=(self._runtime_service.apply_mode_plan if self._runtime_service is not None else None),
             )
         except Exception:
             return False
@@ -265,32 +264,14 @@ class StageController:
 
     def _finalize_output(self, plan: Optional[BaseStagePlan], output: Optional[StageOutput]) -> Optional[StageOutput]:
         finalized = self._ensure_output(plan, output)
-        if finalized is not None and finalized.signals and self._runtime_service is not None:
+        if finalized is not None and finalized.signals and self.scheduler is not None:
             try:
-                self._runtime_service.push_stage_signals(dict(finalized.signals or {}))
+                self.scheduler.push_stage_signals(dict(finalized.signals or {}))
             except Exception:
                 pass
-        if finalized is not None and finalized.effects:
-            self._publish_effects(finalized.effects)
         self._publish_runtime_status()
         self._emit_output_events(finalized)
         return finalized
-
-    def _publish_effects(self, effects) -> None:
-        if self._runtime_service is None:
-            return
-        for effect in list(effects or ()):
-            if not isinstance(effect, dict):
-                continue
-            effect_type = normalize_upper(effect.get("type"), "")
-            route = str(effect.get("route") or "").strip()
-            payload = dict(effect.get("payload") or {})
-            if effect_type != "PUBLISH_EVENT" or not route:
-                continue
-            try:
-                self._runtime_service.publish_event(route, payload)
-            except Exception:
-                pass
 
     def _runtime_status_payload(self) -> Dict[str, Any]:
         payload = {
@@ -317,10 +298,11 @@ class StageController:
         return payload
 
     def _publish_runtime_status(self) -> None:
-        if self._runtime_service is None:
+        if self.scheduler is None:
             return
         try:
-            self._runtime_service.publish_result("runtime_status", self._runtime_status_payload())
+            generation = self._mode_controller.current_generation() if self._mode_controller is not None else 0
+            self.scheduler.publish_result("runtime_status", self._runtime_status_payload(), generation=generation)
         except Exception:
             pass
 
@@ -484,13 +466,11 @@ class StageController:
                 return None
             # For GRASP RESPOND: read server_status from Scheduler directly for timeliness.
             # The last tick's cache may be stale if INIT just completed between ticks.
-            if stage == "GRASP" and self._runtime_service is not None:
+            if stage == "GRASP" and self.scheduler is not None:
                 try:
-                    scheduler = getattr(self._runtime_service, "scheduler", None)
-                    if scheduler is not None:
-                        remote = scheduler.read_result("remote_result", default={})
-                        if isinstance(remote, dict):
-                            self._ctx.server_status = str(remote.get("service_init_state") or remote.get("server_status") or "unknown")
+                    remote = self.scheduler.read_result("remote_result", default={})
+                    if isinstance(remote, dict):
+                        self._ctx.server_status = str(remote.get("service_init_state") or remote.get("server_status") or "unknown")
                 except Exception:
                     pass
             output = plan.on_respond(req, self._ctx)

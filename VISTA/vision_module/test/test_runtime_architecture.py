@@ -21,8 +21,10 @@ from vision_module.app.stages.return_home import ReturnStagePlan
 from vision_module.app.stages.search import SearchStagePlan
 from vision_module.backend.camera_manager import CameraManager
 from vision_module.backend.mode_controller import ModeController
-from vision_module.backend.preview.base import PreviewFrame, PreviewSink
+from vision_module.backend.preview.base import NullPreviewSink, PreviewFrame, PreviewSink
 from vision_module.backend.preview.manager import PreviewManager
+from vision_module.backend.remote.client import RemoteGraspClient
+from vision_module.backend.remote.manager import RemoteManager
 from vision_module.backend.runtime_supervisor import RuntimeSupervisor
 from vision_module.backend.table_edge_manager import TableEdgeManager
 from vision_module.backend.predictor_manager import PredictorManager
@@ -36,8 +38,20 @@ except ImportError:
 
 
 def build_runtime_stack(engine_module, cfg, logger, event_sink=None):
-    runtime = engine_module.VisionEngine(cfg, logger=logger, event_sink=event_sink)
+    scheduler = Scheduler()
+    supervisor = RuntimeSupervisor(
+        scheduler=scheduler,
+        camera_manager=CameraManager(cfg=cfg, logger=logger),
+        predictor_manager=PredictorManager(cfg=cfg, logger=logger),
+        remote_manager=RemoteManager(client=RemoteGraspClient(logger=logger), logger=logger),
+        table_edge_manager=TableEdgeManager(logger=logger),
+        preview_manager=PreviewManager(sink=NullPreviewSink(), logger=logger),
+        logger=logger,
+        backend_event_sink=event_sink,
+    )
     mode_controller = ModeController(
+        scheduler=scheduler,
+        supervisor=supervisor,
         logger=logger,
         backend_event_sink=(lambda event, **fields: event_sink(event, fields)) if event_sink is not None else None,
         preview_allowed=bool(cfg.debug.preview),
@@ -46,9 +60,9 @@ def build_runtime_stack(engine_module, cfg, logger, event_sink=None):
     stage_controller = StageController(
         logger=logger,
         mode_controller=mode_controller,
-        runtime_service=runtime,
+        scheduler=scheduler,
     )
-    return runtime, mode_controller, stage_controller
+    return mode_controller, mode_controller, stage_controller
 
 
 class GraspStageRemoteFlowTest(unittest.TestCase):

@@ -37,7 +37,7 @@ old-path shims.
 
 The following shape is recommended, but it is not implemented in this cleanup:
 
-- `runtime/`: `vision_engine`, `scheduler`, `mode_controller`, and `runtime_supervisor`.
+- `runtime/`: `scheduler`, `mode_controller`, and `runtime_supervisor`.
 - `perception/`: predictor, table-edge, and remote perception modules.
 - `io/`: camera, IPC, and preview input/output modules.
 - `diagnostics/`: operator console, summaries, trace dumps, and debug snapshots.

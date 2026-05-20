@@ -15,8 +15,16 @@ if str(STACK_ROOT) not in sys.path:
 from common.base_module import BaseModule
 from common.runtime_logging import RunLogger, ensure_dir, env_flag
 
+from ..backend.camera_manager import CameraManager
 from ..backend.mode_controller import ModeController
-from ..backend.vision_engine import VisionEngine
+from ..backend.predictor_manager import PredictorManager
+from ..backend.preview.base import NullPreviewSink
+from ..backend.preview.manager import PreviewManager
+from ..backend.remote.client import RemoteGraspClient
+from ..backend.remote.manager import RemoteManager
+from ..backend.runtime_supervisor import RuntimeSupervisor
+from ..backend.scheduler import Scheduler
+from ..backend.table_edge_manager import TableEdgeManager
 from ..config.mode_defaults import build_default_mode_profiles
 from ..config.board_config import CONFIG
 from ..diagnostics.operator_console import OperatorConsole
@@ -43,17 +51,31 @@ class VistaApp(BaseModule):
             default_interval_s=CONFIG.runtime.operator_summary_interval_s,
         )
         self.log_paths = self.run_logger.structured_paths(heartbeat_enabled=CONFIG.runtime.heartbeat_enabled)
-        mode_controller = ModeController(
+        self.scheduler = Scheduler()
+        camera_manager = CameraManager(cfg=CONFIG, logger=self.child_logger("camera"))
+        predictor_manager = PredictorManager(cfg=CONFIG, logger=self.child_logger("predictor"))
+        remote_manager = RemoteManager(client=RemoteGraspClient(logger=self.child_logger("remote")),
+                                       logger=self.child_logger("remote"))
+        table_edge_manager = TableEdgeManager(logger=self.child_logger("table_edge"))
+        preview_manager = PreviewManager(sink=NullPreviewSink(), logger=self.child_logger("preview"))
+        self.supervisor = RuntimeSupervisor(
+            scheduler=self.scheduler,
+            camera_manager=camera_manager,
+            predictor_manager=predictor_manager,
+            remote_manager=remote_manager,
+            table_edge_manager=table_edge_manager,
+            preview_manager=preview_manager,
+            logger=self.child_logger("supervisor"),
+            backend_event_sink=self._record_backend_event,
+        )
+        self.mode_controller = ModeController(
+            scheduler=self.scheduler,
+            supervisor=self.supervisor,
             logger=self.child_logger("mode"),
             backend_event_sink=lambda event, **fields: self._record_backend_event(event, fields),
             preview_allowed=bool(CONFIG.debug.preview),
         )
-        mode_controller.register_profiles(build_default_mode_profiles(CONFIG.model.active_model, CONFIG).values())
-        self.runtime = VisionEngine(
-            CONFIG,
-            logger=self.child_logger("engine"),
-            event_sink=self._record_backend_event,
-        )
+        self.mode_controller.register_profiles(build_default_mode_profiles(CONFIG.model.active_model, CONFIG).values())
         self.req_server = JsonlInboundServer(
             mode=CONFIG.req_in.transport,
             tcp_host=CONFIG.req_in.host,
@@ -73,8 +95,8 @@ class VistaApp(BaseModule):
         self.stage_controller = StageController(
             logger=self.child_logger("stage"),
             event_sink=self._record_stage_event,
-            mode_controller=mode_controller,
-            runtime_service=self.runtime,
+            mode_controller=self.mode_controller,
+            scheduler=self.scheduler,
         )
         self.stage_controller.register_default_plans(
             {
@@ -415,7 +437,7 @@ class VistaApp(BaseModule):
 
     def _preview_fps_snapshot(self) -> Optional[float]:
         try:
-            preview = dict(self.runtime.runtime_snapshot().get("capabilities", {}).get("preview") or {})
+            preview = dict(self.mode_controller.runtime_snapshot().get("capabilities", {}).get("preview") or {})
             value = preview.get("preview_fps")
             return float(value) if value is not None else None
         except Exception:
@@ -593,7 +615,7 @@ class VistaApp(BaseModule):
         self._last_heartbeat_ts = now
         req_snapshot = self.req_server.snapshot()
         obs_snapshot = self.obs_sender.snapshot()
-        runtime_snapshot = self.runtime.runtime_snapshot()
+        runtime_snapshot = self.mode_controller.runtime_snapshot()
         mode_snapshot = dict((self.stage_controller.snapshot().get("mode_controller") or {}))
         last_req_age_s = (now - self.last_req_receive_ts) if self.last_req_receive_ts else None
         last_obs_send_age_s = (now - self.last_send_ts) if self.last_send_ts else None
@@ -793,7 +815,7 @@ class VistaApp(BaseModule):
         plan = self.stage_controller.current_plan()
         mode = self._safe_mode_text(self._ctx().current_mode)
         route_filter = set(plan.subscribed_routes(mode)) if plan else None
-        tick_input = self.runtime.collect_tick_input(ts=now, route_filter=route_filter)
+        tick_input = self.scheduler.collect_tick_input(ts=now, route_filter=route_filter)
         tick_input.snapshot["app"] = {
             "stage": self._safe_stage_text(self._ctx().current_stage),
             "mode": self._safe_mode_text(self._ctx().current_mode),
@@ -829,8 +851,7 @@ class VistaApp(BaseModule):
         if self._console_is_full():
             self.log_info("runtime", "structured logs ready", self.log_paths)
         self.req_server.start()
-        self.runtime.init()
-        self.runtime.start()
+        self.mode_controller.start_runtime()
         self.stage_controller.set_runtime_mode("IDLE", reason="service_start", force=True)
         self._sync_runtime_from_stage_context(reason="service_start")
         self._running = True
@@ -858,7 +879,7 @@ class VistaApp(BaseModule):
         self._record_event("SERVICE_STOPPING", trigger="stop")
         self.req_server.close()
         self.obs_sender.close()
-        self.runtime.stop()
+        self.mode_controller.stop_runtime()
         self._record_event("SERVICE_STOPPED", trigger="stop")
         self.operator_console.emit(f"[VISTA] SERVICE_STOPPED run={self.run_logger.stack_run_id}")
         if self._console_is_full():

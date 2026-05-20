@@ -8,14 +8,18 @@ from .mode_profiles import ModeProfile
 
 
 class ModeController:
-    """Pure control-plane owner for mode profiles and mode switch state."""
+    """Pure control-plane owner for mode profiles, scheduler, and runtime supervisor."""
 
     def __init__(
         self,
+        scheduler,
+        supervisor,
         logger=None,
         backend_event_sink=None,
         preview_allowed: bool = True,
     ):
+        self.scheduler = scheduler
+        self.supervisor = supervisor
         self.logger = logger
         self._backend_event_sink = backend_event_sink
         self._preview_allowed = bool(preview_allowed)
@@ -62,7 +66,6 @@ class ModeController:
         name: str,
         reason: str = "",
         force: bool = False,
-        apply_mode_plan=None,
     ) -> Optional[ModeProfile]:
         switch_state = self.prepare_switch(name=name, reason=reason, force=force)
         if switch_state is None:
@@ -72,14 +75,16 @@ class ModeController:
 
         plan = dict(switch_state.get("plan") or {})
         generation = int(switch_state.get("next_generation", self._generation + 1))
-        if callable(apply_mode_plan):
-            try:
-                ok = bool(apply_mode_plan(plan=plan, generation=generation))
-            except Exception:
-                ok = False
-            if not ok:
-                self.record_switch_failure(switch_state, reason="runtime_apply_failed")
-                return None
+
+        previous_plan = self._active_plan
+        previous_generation = self._generation
+        self.scheduler.configure(plan=plan, generation=generation)
+        ok = bool(self.supervisor.reconcile(plan=plan, generation=generation))
+        if not ok:
+            if previous_plan is not None:
+                self.scheduler.configure(plan=previous_plan, generation=previous_generation)
+            self.record_switch_failure(switch_state, reason="runtime_apply_failed")
+            return None
 
         return self.commit_switch(switch_state, reason=reason)
 
@@ -305,6 +310,26 @@ class ModeController:
             "active_mode": previous_mode,
             "generation": int(self._generation),
             "failed_generation": next_generation,
+        }
+
+    def start_runtime(self) -> None:
+        self.scheduler.start_runtime()
+        if self._active_plan is not None:
+            self.scheduler.configure(plan=self._active_plan, generation=self._generation)
+        self.supervisor.start_runtime()
+
+    def stop_runtime(self) -> None:
+        self.supervisor.stop_runtime()
+        self.scheduler.stop_runtime()
+
+    def runtime_snapshot(self) -> Dict[str, Any]:
+        return {
+            "runtime_running": True,
+            "active_runtime_generation": int(self._generation),
+            "active_runtime_plan": dict(self._active_plan or {}),
+            "active_runtime_mode": str((self._active_plan or {}).get("mode") or "IDLE").strip().upper() or "IDLE",
+            "scheduler": self.scheduler.snapshot(),
+            "runtime_supervisor": self.supervisor.snapshot(),
         }
 
     def snapshot(self) -> Dict[str, Any]:
