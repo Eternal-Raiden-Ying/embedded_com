@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import os
 import sys
 import time
 from collections import deque
@@ -104,6 +105,17 @@ class VistaApp(BaseModule):
         self._last_rate_target_key = None
         self._last_rate_edge_key = None
         self._last_request_trace_ts = 0.0
+        self._warn_deprecated_env()
+
+    def _warn_deprecated_env(self):
+        deprecated = {
+            "VISTA_TRACK_LOCAL_LIGHT_EDGE": "ModeProfile.metadata.table_edge_path",
+            "VISTA_TRACK_LOCAL_EDGE_STRIDE": "ModeProfile.metadata.table_edge_update_hz",
+            "VISTA_TRACK_LOCAL_EDGE_UPDATE_HZ": "ModeProfile.metadata.table_edge_update_hz",
+        }
+        for var, replacement in deprecated.items():
+            if os.environ.get(var):
+                self.log_warn("deprecation", f"env {var} is deprecated, use {replacement} in ModeProfile instead")
 
     def _ctx(self):
         return self.stage_controller.context()

@@ -77,9 +77,14 @@ def _camera_override_with_updates(cfg, camera_name: str, **updates: Any) -> Dict
     return payload
 
 
-def _default_remote_profile(*, enabled: bool, require_depth: bool = False) -> RemoteProfile:
+def _default_remote_profile(*, enabled: bool, require_depth: bool = False,
+                             kind: str = "loop", action: str = "",
+                             max_retries: int = 1) -> RemoteProfile:
     return RemoteProfile(
         enabled=bool(enabled),
+        kind=str(kind or "loop").strip().lower() or "loop",
+        action=str(action or "").strip().lower(),
+        max_retries=int(max_retries),
         base_url=str(os.getenv("VISION_REMOTE_BASE_URL", "")).strip() or None,
         require_depth=bool(require_depth),
         rgb_encoding=str(os.getenv("VISION_REMOTE_RGB_ENCODING", "jpeg")).strip().lower() or "jpeg",
@@ -220,7 +225,9 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
                     "table_edge": "required",
                     "remote": "disabled",
                     "perception": ["target_obs", "table_edge_obs"],
-                }
+                },
+                "table_edge_path": "lightweight",
+                "table_edge_update_hz": 5.0,
             },
         ),
         "DEPTH_PERCEPTION": ModeProfile(
@@ -238,7 +245,9 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
                     "predictor": "optional_table_bbox" if table_bbox_enabled else "disabled",
                     "remote": "disabled",
                     "perception": "table_edge_obs",
-                }
+                },
+                "table_edge_path": "full",
+                "table_edge_update_hz": 10.0,
             },
         ),
         "TABLE_EDGE_PERCEPTION": ModeProfile(
@@ -257,7 +266,9 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
                     "table_edge": "required",
                     "remote": "disabled",
                     "perception": ["local_perception", "table_edge_obs"],
-                }
+                },
+                "table_edge_path": "full",
+                "table_edge_update_hz": 10.0,
             },
         ),
         "MICRO_ADJUST": ModeProfile(
@@ -277,7 +288,8 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             camera_overrides=grasp_remote_cameras,
             predictor_enabled=False,
             predictor_model=None,
-            remote=_default_remote_profile(enabled=True, require_depth=True),
+            remote=_default_remote_profile(enabled=True, require_depth=True,
+                                             kind="task", action="predict", max_retries=1),
             preview=preview_profile("GRASP_REMOTE", enabled=True),
             release_cooldown_s=3.0,
             metadata={

@@ -13,6 +13,9 @@ class RemoteProfile:
     base_url: Optional[str] = None
     command: str = "predict"
     require_depth: bool = False
+    kind: str = "loop"       # "loop" | "task"
+    action: str = ""         # task only: "init" | "predict" | "release"
+    max_retries: int = 1     # task only
     timeout_s: float = 10.0
     rgb_encoding: str = "jpeg"
     depth_encoding: str = "png"

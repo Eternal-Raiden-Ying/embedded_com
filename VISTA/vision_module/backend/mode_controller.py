@@ -138,6 +138,9 @@ class ModeController:
                 },
                 "remote": {
                     "enabled": bool(remote_profile.enabled),
+                    "kind": str(remote_profile.kind or "loop").strip().lower() or "loop",
+                    "action": str(remote_profile.action or "").strip().lower(),
+                    "max_retries": int(remote_profile.max_retries),
                     "base_url": remote_profile.base_url,
                     "command": remote_profile.command,
                     "require_depth": bool(remote_profile.require_depth),
@@ -154,6 +157,8 @@ class ModeController:
                         or str(profile.name or "").strip().upper() == "DEPTH_PERCEPTION"
                         or str(profile.name or "").strip().upper() == "TABLE_EDGE_PERCEPTION"
                     ),
+                    "path": str((profile.metadata or {}).get("table_edge_path", "full")).strip().lower() or "full",
+                    "update_hz": float((profile.metadata or {}).get("table_edge_update_hz", 10.0)),
                 },
                 "preview": {
                     "enabled": preview_enabled,
