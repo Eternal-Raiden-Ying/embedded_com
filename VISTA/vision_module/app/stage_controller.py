@@ -599,7 +599,11 @@ class StageController:
                 self.current_plan(),
                 self._mode_apply_failed_output("TICK", self._ctx.current_stage, requested_mode, reason="tick_mode_apply_failed"),
             )
-        return self._finalize_output(plan, output)
+        finalized = self._finalize_output(plan, output)
+        # Auto-transition: StagePlan set next_stage → transition after current tick output
+        if finalized is not None and finalized.next_stage:
+            self._transition_to(finalized.next_stage)
+        return finalized
 
     def reset(self) -> None:
         """Reset stage runtime state to a clean idle context."""

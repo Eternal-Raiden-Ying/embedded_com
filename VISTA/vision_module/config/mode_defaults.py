@@ -169,6 +169,7 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
     if "rgb" in depth_cameras:
         depth_perception_cameras["rgb"] = track_local_rgb
     preview_layout_defaults = {
+        "INIT": "rgb_minimal",
         "IDLE": "rgb_minimal",
         "DEPTH_PERCEPTION": "rgb_depth_edge",
         "TABLE_EDGE_PERCEPTION": "rgb_depth_edge",
@@ -200,6 +201,18 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
         )
 
     return {
+        "INIT": ModeProfile(
+            name="INIT",
+            enabled_cameras=(),
+            camera_overrides={},
+            predictor_enabled=False,
+            predictor_model=None,
+            remote=_default_remote_profile(enabled=True, require_depth=False,
+                                             kind="task", action="init", max_retries=3),
+            preview=preview_profile("INIT", enabled=False, sink_name="null"),
+            release_cooldown_s=0.0,
+            metadata={"contract": {"stage": "INIT", "remote": "required"}},
+        ),
         "IDLE": ModeProfile(
             name="IDLE",
             enabled_cameras=(),

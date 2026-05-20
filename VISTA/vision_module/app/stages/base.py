@@ -54,6 +54,7 @@ class StageOutput:
     signals: Dict[str, Any] = field(default_factory=dict)
     effects: List[Dict[str, Any]] = field(default_factory=list)
     snapshot: Dict[str, Any] = field(default_factory=dict)
+    next_stage: Optional[str] = None  # set to auto-transition after tick (e.g. INIT → IDLE)
 
     def has_outbound(self) -> bool:
         return self.vision_obs is not None

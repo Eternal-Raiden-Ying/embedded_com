@@ -31,7 +31,7 @@ from ..diagnostics.operator_console import OperatorConsole
 from ..ipc.protocol import VisionReq
 from ..ipc.transport import JsonlClientSender, JsonlInboundServer
 from .stage_controller import StageController
-from .stages import GraspStagePlan, ReturnStagePlan, SearchStagePlan
+from .stages import GraspStagePlan, InitStagePlan, ReturnStagePlan, SearchStagePlan
 
 
 class VistaApp(BaseModule):
@@ -100,6 +100,7 @@ class VistaApp(BaseModule):
         )
         self.stage_controller.register_default_plans(
             {
+                "INIT": InitStagePlan(),
                 "SEARCH": SearchStagePlan(),
                 "GRASP": GraspStagePlan(),
                 "RETURN": ReturnStagePlan(),
@@ -852,11 +853,12 @@ class VistaApp(BaseModule):
             self.log_info("runtime", "structured logs ready", self.log_paths)
         self.req_server.start()
         self.mode_controller.start_runtime()
-        self.stage_controller.set_runtime_mode("IDLE", reason="service_start", force=True)
+        # Activate INIT stage — non-blocking, task worker starts via mode plan
+        self.stage_controller.activate_stage("INIT")
         self._sync_runtime_from_stage_context(reason="service_start")
         self._running = True
         self._record_event("SERVICE_READY", trigger="start")
-        self.operator_console.emit(f"[VISTA] READY mode={self._safe_mode_text(self._ctx().current_mode)} run={self.run_logger.stack_run_id}")
+        self.operator_console.emit(f"[VISTA] READY mode=INIT run={self.run_logger.stack_run_id}")
         if self._console_is_full():
             self.log_info(
                 "runtime",
