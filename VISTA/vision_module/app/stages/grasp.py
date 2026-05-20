@@ -143,16 +143,6 @@ def _target_obs_from_results(results: Dict[str, object], target: Optional[str]) 
     return payload
 
 
-def _remote_effect(op: str, payload: Dict[str, object]) -> Dict[str, object]:
-    return {
-        "type": "PUBLISH_EVENT",
-        "route": "remote_cmd",
-        "payload": {
-            "op": normalize_upper(op, "UNKNOWN"),
-            **dict(payload or {}),
-        },
-    }
-
 
 def _remote_command_payload(stage_state: Dict[str, object], target: Optional[str], request_id: str) -> Dict[str, object]:
     return {
@@ -421,7 +411,6 @@ class GraspStagePlan(BaseStagePlan):
                                 "remote_error": service_init_error,
                             },
                         ),
-                        effects=[_remote_effect("INIT", _remote_service_init_payload(stage_state))],
                         snapshot=output_snapshot,
                     )
                 if not retry_inflight and retry_count >= retry_limit:
@@ -468,9 +457,6 @@ class GraspStagePlan(BaseStagePlan):
                                 "available_cameras": list(frame_gate["available_cameras"]),
                             },
                         ),
-                        effects=[
-                            _remote_effect("PREDICT", _remote_command_payload(stage_state, ctx.target_name, request_id)),
-                        ],
                         snapshot=output_snapshot,
                     )
 
