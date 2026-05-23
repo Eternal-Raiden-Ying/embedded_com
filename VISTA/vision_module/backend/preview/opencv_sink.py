@@ -255,7 +255,14 @@ class OpenCVPreviewSink(PreviewSink):
         roi = table_edge.get("edge_roi") or table_edge.get("table_edge_roi") or table_edge.get("depth_edge_roi")
         if roi:
             self._draw_roi(panel, roi, scale, offset, "ROI", (80, 220, 255), dashed=True)
-        plane_mask_missing = not bool(table_edge.get("plane_mask_status") == "present" or table_edge.get("front_plane_inlier_mask") or table_edge.get("front_plane_candidate_mask") or table_edge.get("front_plane_candidate_pixels"))
+        fast_sparse = bool(table_edge.get("fast_candidate_pixels") or table_edge.get("fast_inlier_pixels"))
+        plane_mask_missing = not bool(
+            table_edge.get("plane_mask_status") in ("present", "fast_sparse")
+            or table_edge.get("front_plane_inlier_mask")
+            or table_edge.get("front_plane_candidate_mask")
+            or table_edge.get("front_plane_candidate_pixels")
+            or fast_sparse
+        )
         if plane_mask_missing:
             self._corner_note(panel, "plane_mask=missing", fg=(40, 220, 255))
         valid_for_control = self._boolish(table_edge.get("valid_for_control", table_edge.get("edge_valid")))
@@ -267,7 +274,15 @@ class OpenCVPreviewSink(PreviewSink):
             f"score={self._fmt(table_edge.get('front_plane_score', table_edge.get('table_geometry_score')))}",
             f"control={table_edge.get('control_level') or 'none'}",
         ]
-        left_y = max(76, panel.shape[0] - 116)
+        if fast_sparse:
+            geometry_lines.extend(
+                [
+                    "fast_sparse=on",
+                    f"sampled={table_edge.get('fast_raw_sampled_point_count', table_edge.get('sampled_point_count'))} cand={table_edge.get('fast_raw_candidate_count', table_edge.get('candidate_count'))} inliers={table_edge.get('fast_raw_inlier_count', table_edge.get('inlier_count'))}",
+                    f"conf={self._fmt(table_edge.get('fast_raw_confidence'))} reject={table_edge.get('fast_gate_reject_reason') or table_edge.get('reject_reason') or 'none'}",
+                ]
+            )
+        left_y = max(76, panel.shape[0] - (116 + (57 if fast_sparse else 0)))
         self._text_block(panel, geometry_lines, (16, left_y), fg=(210, 255, 210) if valid_for_control else (210, 230, 255), max_width=min(260, panel.shape[1] - 32), font_scale=0.46, line_h=19)
         return panel
 
@@ -402,6 +417,8 @@ class OpenCVPreviewSink(PreviewSink):
         if plane_mask is not None:
             self._overlay_mask(panel, plane_mask, (40, 220, 70), alpha=0.42)
         else:
+            self._draw_pixel_points(panel, table_edge.get("fast_candidate_pixels"), (40, 210, 255), radius=1, alpha=0.90)
+            self._draw_pixel_points(panel, table_edge.get("fast_inlier_pixels"), (40, 255, 80), radius=2, alpha=0.95)
             self._draw_pixel_points(panel, table_edge.get("front_plane_candidate_pixels"), (40, 220, 70), radius=2, alpha=0.55)
         return panel
 

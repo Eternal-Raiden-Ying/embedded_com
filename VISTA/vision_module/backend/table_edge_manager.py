@@ -393,6 +393,25 @@ class TableEdgeManager:
         }
 
     @staticmethod
+    def _sparse_pixel_sample(xs: Any, ys: Any, x0: int, y0: int, stride: int, *, cap: int = 1000) -> list:
+        try:
+            xs_arr = np.asarray(xs)
+            ys_arr = np.asarray(ys)
+            n = int(min(len(xs_arr), len(ys_arr)))
+        except Exception:
+            return []
+        if n <= 0:
+            return []
+        cap = max(1, int(cap))
+        step = max(1, int(math.ceil(float(n) / float(cap))))
+        out = []
+        for ix, iy in zip(xs_arr[:n:step], ys_arr[:n:step]):
+            out.append([int(x0 + int(ix) * int(stride)), int(y0 + int(iy) * int(stride))])
+            if len(out) >= cap:
+                break
+        return out
+
+    @staticmethod
     def _mask_rle_payload(mask: Any, roi_box: Any) -> Optional[Dict[str, Any]]:
         try:
             arr = np.asarray(mask).astype(bool)
@@ -941,6 +960,11 @@ class TableEdgeManager:
             )
             payload.update(yolo_gate)
             payload.update(self._detector_mode_payload())
+            payload.update({
+                "fast_fit_attempted": False,
+                "fast_gate_reject_reason": "waiting_yolo_table_confirm",
+                "fast_raw_reject_reason": "waiting_yolo_table_confirm",
+            })
             profile["total_edge_process_ms"] = self._ms_since(total_start)
             return self._attach_profile(payload, profile, path="fast_plane_only_yolo_gate_wait")
 
@@ -958,12 +982,28 @@ class TableEdgeManager:
         profile["roi_extract_ms"] = self._ms_since(roi_start)
         profile["roi_crop_ms"] = float(profile["roi_extract_ms"])
         roi_payload = self._roi_payload(roi_box, roi_meta)
+        fast_debug_base: Dict[str, Any] = {
+            "fast_fit_attempted": False,
+            "fast_raw_sampled_point_count": 0,
+            "fast_raw_candidate_count": 0,
+            "fast_raw_inlier_count": 0,
+            "fast_raw_confidence": 0.0,
+            "fast_score_inlier": 0.0,
+            "fast_score_residual": 0.0,
+            "fast_score_span": 0.0,
+            "fast_score_area": 0.0,
+            "fast_score_temporal": 0.0,
+            "fast_score_temporal_available": False,
+            "fast_score_final": 0.0,
+        }
 
         point_start = time.perf_counter()
         if depth_roi.size <= 0:
             payload = self._default_result(depth_valid=False, reason="roi_empty", frame_seq=frame_seq, roi_meta=roi_meta)
             payload.update(roi_payload)
             payload.update(self._detector_mode_payload())
+            payload.update(fast_debug_base)
+            payload.update({"fast_gate_reject_reason": "roi_empty", "fast_raw_reject_reason": "roi_empty"})
             profile["point_build_ms"] = self._ms_since(point_start)
             profile["total_edge_process_ms"] = self._ms_since(total_start)
             return self._attach_profile(payload, profile, path="fast_plane_only_roi_empty")
@@ -991,6 +1031,12 @@ class TableEdgeManager:
             payload.update(roi_payload)
             payload.update(self._detector_mode_payload())
             payload.update({"sampled_point_count": sampled_count, "point_count": point_count, "candidate_count": 0})
+            payload.update(fast_debug_base)
+            payload.update({
+                "fast_raw_sampled_point_count": sampled_count,
+                "fast_gate_reject_reason": payload.get("reason") or "not_enough_points",
+                "fast_raw_reject_reason": payload.get("reason") or "not_enough_points",
+            })
             profile["total_edge_process_ms"] = self._ms_since(total_start)
             return self._attach_profile(payload, profile, path="fast_plane_only_not_enough_points")
 
@@ -1009,6 +1055,14 @@ class TableEdgeManager:
             payload.update(roi_payload)
             payload.update(self._detector_mode_payload())
             payload.update({"sampled_point_count": sampled_count, "point_count": point_count, "candidate_count": candidate_count})
+            payload.update(fast_debug_base)
+            payload.update({
+                "fast_raw_sampled_point_count": sampled_count,
+                "fast_raw_candidate_count": candidate_count,
+                "fast_score_area": float(candidate_count) / float(max(1, sampled_count)),
+                "fast_gate_reject_reason": "not_enough_candidates",
+                "fast_raw_reject_reason": "not_enough_candidates",
+            })
             profile["total_edge_process_ms"] = self._ms_since(total_start)
             return self._attach_profile(payload, profile, path="fast_plane_only_not_enough_candidates")
 
@@ -1033,6 +1087,14 @@ class TableEdgeManager:
             payload.update(roi_payload)
             payload.update(self._detector_mode_payload())
             payload.update({"sampled_point_count": sampled_count, "point_count": point_count, "candidate_count": candidate_count})
+            payload.update(fast_debug_base)
+            payload.update({
+                "fast_fit_attempted": True,
+                "fast_raw_sampled_point_count": sampled_count,
+                "fast_raw_candidate_count": candidate_count,
+                "fast_gate_reject_reason": f"fast_fit_failed:{exc}",
+                "fast_raw_reject_reason": f"fast_fit_failed:{exc}",
+            })
             profile["plane_fit_ms"] = self._ms_since(fit_start)
             profile["total_edge_process_ms"] = self._ms_since(total_start)
             return self._attach_profile(payload, profile, path="fast_plane_only_fit_failed")
@@ -1049,7 +1111,9 @@ class TableEdgeManager:
         max_yaw = float(getattr(cfg, "control_max_yaw_rad", 0.70) if cfg is not None else 0.70)
         residual_score = max(0.0, 1.0 - residual_mean / max(1e-6, residual_threshold))
         span_score = min(1.0, x_span / max(1e-6, span_min * 1.8))
+        area_score = float(candidate_count) / float(max(1, sampled_count))
         confidence = max(0.0, min(1.0, 0.55 * inlier_ratio + 0.30 * residual_score + 0.15 * span_score))
+        residual_p90 = float(np.percentile(residual[inlier], 90)) if inlier_count > 0 else float(np.percentile(residual, 90))
         reject_reason = ""
         if inlier_count < min_table:
             reject_reason = "not_enough_inliers"
@@ -1066,21 +1130,32 @@ class TableEdgeManager:
 
         obs_start = time.perf_counter()
         plane_bbox = None
-        if edge_found and inlier_count > 0:
-            yy_t = yy[table_mask][inlier]
-            xx_t = xx[table_mask][inlier]
-            if len(xx_t) > 0 and len(yy_t) > 0:
-                px0 = x0 + int(np.min(xx_t)) * stride
-                px1 = x0 + int(np.max(xx_t)) * stride
-                py0 = y0 + int(np.min(yy_t)) * stride
-                py1 = y0 + int(np.max(yy_t)) * stride
-                plane_bbox = [px0, py0, px1 + stride, py1 + stride]
+        yy_candidates = yy[table_mask]
+        xx_candidates = xx[table_mask]
+        yy_inliers = yy_candidates[inlier] if inlier_count > 0 else np.asarray([], dtype=np.int64)
+        xx_inliers = xx_candidates[inlier] if inlier_count > 0 else np.asarray([], dtype=np.int64)
+        raw_bbox = None
+        if inlier_count > 0 and len(xx_inliers) > 0 and len(yy_inliers) > 0:
+            px0 = x0 + int(np.min(xx_inliers)) * stride
+            px1 = x0 + int(np.max(xx_inliers)) * stride
+            py0 = y0 + int(np.min(yy_inliers)) * stride
+            py1 = y0 + int(np.max(yy_inliers)) * stride
+            raw_bbox = [px0, py0, px1 + stride, py1 + stride]
+            if edge_found:
+                plane_bbox = raw_bbox
         roi_area = max(1.0, float(max(1, x1 - x0) * max(1, y1 - y0)) / float(max(1, stride * stride)))
         plane_view = self._plane_view_from_bbox(
             plane_bbox or roi_box,
             getattr(depth_frame, "shape", None),
             area_ratio=float(inlier_count) / roi_area if edge_found else None,
         )
+        raw_plane_view = self._plane_view_from_bbox(
+            raw_bbox or roi_box,
+            getattr(depth_frame, "shape", None),
+            area_ratio=float(inlier_count) / roi_area if inlier_count > 0 else None,
+        )
+        fast_candidate_pixels = self._sparse_pixel_sample(xx_candidates, yy_candidates, x0, y0, stride, cap=1000)
+        fast_inlier_pixels = self._sparse_pixel_sample(xx_inliers, yy_inliers, x0, y0, stride, cap=1000)
         valid_for_control = bool(edge_found)
         payload = {
             "table_found": bool(candidate_count > 0),
@@ -1114,6 +1189,32 @@ class TableEdgeManager:
             "plane_x_span_m": float(x_span),
             "plane_yaw_err_rad": float(yaw_err) if edge_found else None,
             "plane_dist_err_m": float(dist_err) if edge_found else None,
+            "plane_mask_status": "fast_sparse",
+            "fast_fit_attempted": True,
+            "fast_raw_yaw_err_rad": float(yaw_err),
+            "fast_raw_dist_err_m": float(dist_err),
+            "fast_raw_plane_cx_norm": raw_plane_view.get("plane_cx_norm"),
+            "fast_raw_plane_width_norm": raw_plane_view.get("plane_width_norm"),
+            "fast_raw_plane_x_span_m": float(x_span),
+            "fast_raw_residual_mean": float(residual_mean),
+            "fast_raw_residual_p90": float(residual_p90),
+            "fast_raw_confidence": float(confidence),
+            "fast_raw_inlier_count": int(inlier_count),
+            "fast_raw_candidate_count": int(candidate_count),
+            "fast_raw_sampled_point_count": int(sampled_count),
+            "fast_raw_reject_reason": reject_reason or "none",
+            "fast_gate_reject_reason": reject_reason or "none",
+            "fast_score_inlier": float(inlier_ratio),
+            "fast_score_residual": float(residual_score),
+            "fast_score_span": float(span_score),
+            "fast_score_area": float(area_score),
+            "fast_score_temporal": 0.0,
+            "fast_score_temporal_available": False,
+            "fast_score_final": float(confidence),
+            "fast_candidate_pixel_count": int(len(fast_candidate_pixels)),
+            "fast_inlier_pixel_count": int(len(fast_inlier_pixels)),
+            "fast_candidate_pixels": fast_candidate_pixels,
+            "fast_inlier_pixels": fast_inlier_pixels,
             "pose_source": "fast_plane_only" if edge_found else "none",
             "final_pose_source": "fast_plane_only" if edge_found else "none",
             "view_err_norm": plane_view.get("plane_cx_norm") if edge_found else None,

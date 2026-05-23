@@ -210,6 +210,32 @@ COMPACT_OBS_FIELDS = (
     "plane_x_span_m",
     "plane_residual_mean",
     "plane_residual_max",
+    "plane_mask_status",
+    "fast_fit_attempted",
+    "fast_raw_yaw_err_rad",
+    "fast_raw_dist_err_m",
+    "fast_raw_plane_cx_norm",
+    "fast_raw_plane_width_norm",
+    "fast_raw_plane_x_span_m",
+    "fast_raw_residual_mean",
+    "fast_raw_residual_p90",
+    "fast_raw_confidence",
+    "fast_raw_inlier_count",
+    "fast_raw_candidate_count",
+    "fast_raw_sampled_point_count",
+    "fast_raw_reject_reason",
+    "fast_gate_reject_reason",
+    "fast_score_inlier",
+    "fast_score_residual",
+    "fast_score_span",
+    "fast_score_area",
+    "fast_score_temporal",
+    "fast_score_temporal_available",
+    "fast_score_final",
+    "fast_candidate_pixel_count",
+    "fast_inlier_pixel_count",
+    "fast_candidate_pixels",
+    "fast_inlier_pixels",
     "pose_source",
     "final_pose_source",
     "selected_line_type",
@@ -313,6 +339,23 @@ def _percentiles(values: List[float], include_max: bool = True) -> Dict[str, Opt
     return out
 
 
+def _percentiles_p10_p50_p90(values: List[float]) -> Dict[str, Optional[float]]:
+    vals = sorted(v for v in (_finite_float(v) for v in values) if v is not None)
+    if not vals:
+        return {"p10": None, "p50": None, "p90": None}
+
+    def pick(q: float) -> float:
+        if len(vals) == 1:
+            return float(vals[0])
+        pos = q * float(len(vals) - 1)
+        lo = int(pos)
+        hi = min(len(vals) - 1, lo + 1)
+        frac = pos - float(lo)
+        return float(vals[lo] * (1.0 - frac) + vals[hi] * frac)
+
+    return {"p10": pick(0.10), "p50": pick(0.50), "p90": pick(0.90)}
+
+
 def _ratio(observations: List[Dict[str, Any]], key: str) -> float:
     total = len(observations)
     return float(sum(1 for obs in observations if bool(obs.get(key)))) / float(total) if total else 0.0
@@ -330,7 +373,16 @@ def _metrics_summary(
     roi_sources = Counter(str(obs.get("roi_source") or "unknown") for obs in observations)
     detector_modes = Counter(str(obs.get("detector_mode") or "unknown") for obs in observations)
     reject_reasons = Counter(str(obs.get("reject_reason") or obs.get("reason") or "none") for obs in observations)
+    fast_gate_reasons = Counter(str(obs.get("fast_gate_reject_reason") or obs.get("fast_raw_reject_reason") or "none") for obs in observations)
     timing = {field: _percentiles([obs.get(field) for obs in observations]) for field in TIMING_FIELDS}
+    fast_score_keys = (
+        "fast_score_inlier",
+        "fast_score_residual",
+        "fast_score_span",
+        "fast_score_area",
+        "fast_score_temporal",
+        "fast_score_final",
+    )
     return {
         "mode": str(preset.mode),
         "purpose": str(preset.purpose),
@@ -356,11 +408,22 @@ def _metrics_summary(
         "candidate_count": _percentiles([obs.get("candidate_count") for obs in observations]),
         "inlier_count": _percentiles([obs.get("inlier_count", obs.get("edge_inlier_count")) for obs in observations]),
         "plane_residual_mean": _percentiles([obs.get("plane_residual_mean") for obs in observations]),
+        "fast_raw_confidence": _percentiles_p10_p50_p90([obs.get("fast_raw_confidence") for obs in observations]),
+        "fast_raw_inlier_count": _percentiles_p10_p50_p90([obs.get("fast_raw_inlier_count") for obs in observations]),
+        "fast_raw_candidate_count": _percentiles_p10_p50_p90([obs.get("fast_raw_candidate_count") for obs in observations]),
+        "fast_raw_plane_width_norm": _percentiles_p10_p50_p90([obs.get("fast_raw_plane_width_norm") for obs in observations]),
+        "fast_raw_plane_x_span_m": _percentiles_p10_p50_p90([obs.get("fast_raw_plane_x_span_m") for obs in observations]),
+        "fast_raw_residual_mean": _percentiles([obs.get("fast_raw_residual_mean") for obs in observations], include_max=False),
+        "fast_score_components_p50": {
+            key: _percentiles([obs.get(key) for obs in observations], include_max=False).get("p50")
+            for key in fast_score_keys
+        },
         "obs_total_age_ms": _percentiles([obs.get("obs_total_age_ms") for obs in observations]),
         "update_interval_ms": _percentiles([obs.get("bag_update_interval_ms", obs.get("update_interval_ms")) for obs in observations], include_max=False),
         "roi_source": dict(sorted(roi_sources.items())),
         "detector_mode": dict(sorted(detector_modes.items())),
         "reject_reason": dict(sorted(reject_reasons.items())),
+        "fast_gate_reject_reason": dict(sorted(fast_gate_reasons.items())),
         "plane_found_ratio": _ratio(observations, "plane_found"),
         "usable_for_approach_ratio": _ratio(observations, "usable_for_approach"),
         "valid_for_control_ratio": float(
@@ -539,6 +602,73 @@ def _write_contact_sheet(image_paths: List[Path], output_path: Path, *, thumb_w:
         return False
 
 
+FAST_DEBUG_COLUMNS = (
+    "frame_seq",
+    "bag_timestamp_ms",
+    "table_found",
+    "edge_found",
+    "plane_found",
+    "valid_for_control",
+    "edge_valid",
+    "reject_reason",
+    "control_reject_reason",
+    "fast_fit_attempted",
+    "fast_raw_yaw_err_rad",
+    "fast_raw_dist_err_m",
+    "fast_raw_plane_cx_norm",
+    "fast_raw_plane_width_norm",
+    "fast_raw_plane_x_span_m",
+    "fast_raw_residual_mean",
+    "fast_raw_residual_p90",
+    "fast_raw_confidence",
+    "fast_raw_inlier_count",
+    "fast_raw_candidate_count",
+    "fast_raw_sampled_point_count",
+    "fast_raw_reject_reason",
+    "fast_gate_reject_reason",
+    "fast_score_inlier",
+    "fast_score_residual",
+    "fast_score_span",
+    "fast_score_area",
+    "fast_score_temporal",
+    "fast_score_temporal_available",
+    "fast_score_final",
+    "process_ms",
+    "plane_fit_ms",
+)
+
+
+def _write_csv_rows(path: Path, rows: List[Dict[str, Any]], columns: Tuple[str, ...]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as fp:
+        writer = csv.DictWriter(fp, fieldnames=columns)
+        writer.writeheader()
+        for obs in rows:
+            writer.writerow({key: _json_ready(obs.get(key)) for key in columns})
+
+
+def _write_fast_debug_csvs(observations: List[Dict[str, Any]], output_dir: Path) -> Dict[str, Optional[str]]:
+    fast_rows = [obs for obs in observations if "fast_fit_attempted" in obs or str(obs.get("detector_mode") or "") == "fast_plane_only"]
+    if not fast_rows:
+        return {"fast_debug_csv": None, "fast_key_frames_csv": None}
+    debug_path = output_dir / "fast_debug_frames.csv"
+    _write_csv_rows(debug_path, fast_rows, FAST_DEBUG_COLUMNS)
+    key_targets = (144, 294, 444, 594, 744)
+    key_rows = []
+    for obs in fast_rows:
+        try:
+            frame_seq = int(obs.get("frame_seq"))
+        except Exception:
+            continue
+        near_target = any(abs(frame_seq - target) <= 12 for target in key_targets)
+        in_problem_range = 504 <= frame_seq <= 624
+        if near_target or in_problem_range:
+            key_rows.append(obs)
+    key_path = output_dir / "fast_debug_around_294_444_744_594.csv"
+    _write_csv_rows(key_path, key_rows, FAST_DEBUG_COLUMNS)
+    return {"fast_debug_csv": str(debug_path), "fast_key_frames_csv": str(key_path)}
+
+
 def main() -> None:
     args = build_parser().parse_args()
     preset = MODE_PRESETS[str(args.mode)]
@@ -686,6 +816,7 @@ def main() -> None:
         preview_saved_count=preview_saved_count,
         system_monitor_path=monitor_path if monitor_path is not None and monitor_path.exists() else None,
     )
+    summary.update(_write_fast_debug_csvs(observations, output_dir))
     summary["preview_dir"] = str(preview_dir) if preview_dir is not None else None
     summary["contact_sheet"] = str(contact_sheet_path) if contact_sheet_path is not None else None
     metrics_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
