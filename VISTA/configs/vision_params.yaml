@@ -124,8 +124,8 @@ debug:
 
 table_edge:
   # 可选：""、center_mid、center_lower、full_width_lower。
-  # 正常动态 ROI 留空；现场只想固定看某块区域时再填 preset。
-  roi_preset: ""
+  # 默认固定使用画面中下区域；需要动态 ROI 时可临时改回 ""。
+  roi_preset: center_lower
   static_roi_enabled: false
 
   # 桌边检测频率。
