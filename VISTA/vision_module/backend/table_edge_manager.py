@@ -44,6 +44,8 @@ class TableEdgeManager:
         self._track_local_interval_s = 1.0 / max(5.0, track_edge_hz)
         self._track_local_lightweight = bool(getattr(table_edge_cfg, "track_local_light_edge", True))
         self._light_stride = max(1, int(float(getattr(table_edge_cfg, "track_local_edge_stride", 4) or 4)))
+        self._detector_mode = self._normalize_detector_mode(getattr(table_edge_cfg, "detector_mode", "full"))
+        self._fast_plane_stride = max(1, int(float(getattr(table_edge_cfg, "fast_plane_stride", 4) or 4)))
         self._default_interval_s = self._worker_interval_s
         self._last_camera_generation = 0
         self._last_camera_seq = 0
@@ -71,6 +73,11 @@ class TableEdgeManager:
         self._last_valid_table_bbox = None
         self._last_valid_table_center_norm = None
         self._load_detector()
+
+    @staticmethod
+    def _normalize_detector_mode(value: Any) -> str:
+        mode = str(value or "full").strip().lower().replace("-", "_")
+        return mode if mode in {"full", "fast_plane_only"} else "full"
 
     def _emit(self, action: str, **fields: Any) -> None:
         if self._capability_sink is None:
@@ -379,6 +386,12 @@ class TableEdgeManager:
             "payload_size_bytes": 0.0,
         }
 
+    def _detector_mode_payload(self) -> Dict[str, Any]:
+        return {
+            "detector_mode": str(self._detector_mode),
+            "fast_plane_stride": int(self._fast_plane_stride),
+        }
+
     @staticmethod
     def _mask_rle_payload(mask: Any, roi_box: Any) -> Optional[Dict[str, Any]]:
         try:
@@ -479,6 +492,7 @@ class TableEdgeManager:
             "target_dist_m": float(self._target_dist_m),
             "plane_only_mode": bool(getattr(self._detector_cfg, "plane_only_mode", False)),
             "enable_crease_line": bool(getattr(self._detector_cfg, "enable_crease_line", True)),
+            **self._detector_mode_payload(),
             "table_confirmed_by_yolo": False,
             "yolo_table_conf": None,
             "yolo_gate_reason": str(reason or ""),
@@ -710,6 +724,8 @@ class TableEdgeManager:
         return payload
 
     def _process_depth(self, depth_frame: np.ndarray, frame_seq: int) -> Dict[str, Any]:
+        if self._detector_mode == "fast_plane_only":
+            return self._process_depth_fast_plane_only(depth_frame, frame_seq)
         if (
             self._active_mode() == "TRACK_LOCAL"
             and self._track_local_lightweight
@@ -831,6 +847,7 @@ class TableEdgeManager:
             "target_dist_m": float(self._target_dist_m),
             "plane_only_mode": bool(getattr(self._detector_cfg, "plane_only_mode", False)),
             "enable_crease_line": bool(getattr(self._detector_cfg, "enable_crease_line", True)),
+            **self._detector_mode_payload(),
             **yolo_gate,
             **roi_payload,
             **self._plane_debug_payload(_debug, roi_payload.get("edge_roi") or roi_box),
@@ -904,6 +921,226 @@ class TableEdgeManager:
         profile["obs_build_ms"] = float(profile.get("obs_build_ms", 0.0) or 0.0) + self._ms_since(obs_build_start)
         profile["total_edge_process_ms"] = self._ms_since(total_start)
         return self._attach_profile(payload, profile, path="full")
+
+    def _process_depth_fast_plane_only(self, depth_frame: np.ndarray, frame_seq: int) -> Dict[str, Any]:
+        total_start = time.perf_counter()
+        profile = self._profile_template()
+        profile["depth_frame_fetch_ms"] = float(self._last_depth_frame_fetch_ms)
+        cfg = self._detector_cfg
+
+        frame_prepare_start = time.perf_counter()
+        roi_meta = self._select_roi(depth_frame)
+        yolo_gate = self._yolo_table_confirmation()
+        profile["frame_prepare_ms"] = self._ms_since(frame_prepare_start)
+        if not bool(yolo_gate.get("yolo_gate_open", yolo_gate.get("table_confirmed_by_yolo", False))):
+            payload = self._default_result(
+                depth_valid=True,
+                reason="waiting_yolo_table_confirm",
+                frame_seq=frame_seq,
+                roi_meta=roi_meta,
+            )
+            payload.update(yolo_gate)
+            payload.update(self._detector_mode_payload())
+            profile["total_edge_process_ms"] = self._ms_since(total_start)
+            return self._attach_profile(payload, profile, path="fast_plane_only_yolo_gate_wait")
+
+        roi_start = time.perf_counter()
+        roi_box = roi_meta.get("depth_edge_roi") if roi_meta.get("roi_source") != "static_fallback" else self._static_roi()
+        if roi_box is None:
+            roi_box = self._static_roi()
+        try:
+            roi_box = self._detector._resolve_roi(depth_frame, roi_override=roi_box) if self._detector is not None else tuple(int(v) for v in roi_box)
+        except Exception:
+            roi_box = tuple(int(v) for v in self._static_roi() or (0, 0, depth_frame.shape[1], depth_frame.shape[0]))
+        x0, y0, x1, y1 = [int(v) for v in roi_box]
+        stride = max(1, int(self._fast_plane_stride))
+        depth_roi = depth_frame[y0:y1:stride, x0:x1:stride]
+        profile["roi_extract_ms"] = self._ms_since(roi_start)
+        profile["roi_crop_ms"] = float(profile["roi_extract_ms"])
+        roi_payload = self._roi_payload(roi_box, roi_meta)
+
+        point_start = time.perf_counter()
+        if depth_roi.size <= 0:
+            payload = self._default_result(depth_valid=False, reason="roi_empty", frame_seq=frame_seq, roi_meta=roi_meta)
+            payload.update(roi_payload)
+            payload.update(self._detector_mode_payload())
+            profile["point_build_ms"] = self._ms_since(point_start)
+            profile["total_edge_process_ms"] = self._ms_since(total_start)
+            return self._attach_profile(payload, profile, path="fast_plane_only_roi_empty")
+        depth_m = depth_roi.astype(np.float32, copy=False)
+        if depth_roi.dtype != np.float32:
+            scale = float(getattr(self._detector.calib, "depth_scale", 0.001) if self._detector is not None else 0.001)
+            depth_m = depth_m * scale
+        z_min = float(getattr(cfg, "z_min", 0.2) if cfg is not None else 0.2)
+        z_max = float(getattr(cfg, "z_max", 2.0) if cfg is not None else 2.0)
+        valid_mask = (depth_m > z_min) & (depth_m < z_max)
+        yy, xx = np.nonzero(valid_mask)
+        sampled_count = int(depth_roi.size)
+        point_count = int(len(xx))
+        profile["point_build_ms"] = self._ms_since(point_start)
+
+        min_all = max(60, int(getattr(cfg, "min_all_points", 1000) if cfg is not None else 1000) // max(1, stride * stride))
+        min_table = max(45, int(getattr(cfg, "plane_min_inliers", 220) if cfg is not None else 220) // max(1, stride))
+        if self._detector is None or point_count < min_all:
+            payload = self._default_result(
+                depth_valid=True,
+                reason=self._detector_error or "not_enough_points",
+                frame_seq=frame_seq,
+                roi_meta=roi_meta,
+            )
+            payload.update(roi_payload)
+            payload.update(self._detector_mode_payload())
+            payload.update({"sampled_point_count": sampled_count, "point_count": point_count, "candidate_count": 0})
+            profile["total_edge_process_ms"] = self._ms_since(total_start)
+            return self._attach_profile(payload, profile, path="fast_plane_only_not_enough_points")
+
+        select_start = time.perf_counter()
+        z = depth_m[valid_mask]
+        calib = self._detector.calib
+        u = (float(x0) + xx.astype(np.float32) * float(stride))
+        v = (float(y0) + yy.astype(np.float32) * float(stride))
+        x_c = (u - float(calib.cx)) * z / float(calib.fx)
+        y_c = (v - float(calib.cy)) * z / float(calib.fy)
+        table_mask = (y_c > float(getattr(cfg, "table_y_min", -0.2))) & (y_c < float(getattr(cfg, "table_y_max", 0.2)))
+        candidate_count = int(table_mask.sum())
+        profile["candidate_select_ms"] = self._ms_since(select_start)
+        if candidate_count < min_table:
+            payload = self._default_result(depth_valid=True, reason="not_enough_candidates", frame_seq=frame_seq, roi_meta=roi_meta)
+            payload.update(roi_payload)
+            payload.update(self._detector_mode_payload())
+            payload.update({"sampled_point_count": sampled_count, "point_count": point_count, "candidate_count": candidate_count})
+            profile["total_edge_process_ms"] = self._ms_since(total_start)
+            return self._attach_profile(payload, profile, path="fast_plane_only_not_enough_candidates")
+
+        fit_start = time.perf_counter()
+        x_t = x_c[table_mask]
+        z_t = z[table_mask]
+        residual_threshold = float(getattr(cfg, "front_plane_max_residual_m", 0.035) if cfg is not None else 0.035)
+        try:
+            k, b = np.polyfit(x_t, z_t, 1)
+            residual = np.abs(z_t - (float(k) * x_t + float(b)))
+            inlier = residual <= residual_threshold
+            inlier_count = int(inlier.sum())
+            if inlier_count >= min_table:
+                k, b = np.polyfit(x_t[inlier], z_t[inlier], 1)
+                residual = np.abs(z_t - (float(k) * x_t + float(b)))
+                inlier = residual <= residual_threshold
+                inlier_count = int(inlier.sum())
+            residual_mean = float(np.mean(residual[inlier])) if inlier_count > 0 else float(np.mean(residual))
+            residual_max = float(np.max(residual[inlier])) if inlier_count > 0 else float(np.max(residual))
+        except Exception as exc:
+            payload = self._default_result(depth_valid=True, reason=f"fast_fit_failed:{exc}", frame_seq=frame_seq, roi_meta=roi_meta)
+            payload.update(roi_payload)
+            payload.update(self._detector_mode_payload())
+            payload.update({"sampled_point_count": sampled_count, "point_count": point_count, "candidate_count": candidate_count})
+            profile["plane_fit_ms"] = self._ms_since(fit_start)
+            profile["total_edge_process_ms"] = self._ms_since(total_start)
+            return self._attach_profile(payload, profile, path="fast_plane_only_fit_failed")
+        profile["plane_fit_ms"] = self._ms_since(fit_start)
+        profile["plane_or_edge_fit_ms"] = float(profile["plane_fit_ms"])
+
+        eval_start = time.perf_counter()
+        inlier_x = x_t[inlier] if inlier_count > 0 else np.asarray([], dtype=np.float32)
+        x_span = float(np.max(inlier_x) - np.min(inlier_x)) if inlier_x.size > 1 else 0.0
+        yaw_err = math.atan(float(k))
+        dist_err = float(b) - float(self._target_dist_m)
+        inlier_ratio = float(inlier_count) / float(max(1, candidate_count))
+        span_min = float(getattr(cfg, "front_plane_min_x_span_m", 0.20) if cfg is not None else 0.20)
+        max_yaw = float(getattr(cfg, "control_max_yaw_rad", 0.70) if cfg is not None else 0.70)
+        residual_score = max(0.0, 1.0 - residual_mean / max(1e-6, residual_threshold))
+        span_score = min(1.0, x_span / max(1e-6, span_min * 1.8))
+        confidence = max(0.0, min(1.0, 0.55 * inlier_ratio + 0.30 * residual_score + 0.15 * span_score))
+        reject_reason = ""
+        if inlier_count < min_table:
+            reject_reason = "not_enough_inliers"
+        elif x_span < span_min:
+            reject_reason = "x_span_too_small"
+        elif residual_mean > residual_threshold:
+            reject_reason = "residual_too_large"
+        elif abs(yaw_err) > max_yaw:
+            reject_reason = "yaw_out_of_range"
+        elif confidence < float(getattr(cfg, "control_min_confidence", 0.45) if cfg is not None else 0.45):
+            reject_reason = "confidence_too_low"
+        edge_found = reject_reason == ""
+        profile["residual_eval_ms"] = self._ms_since(eval_start)
+
+        obs_start = time.perf_counter()
+        plane_bbox = None
+        if edge_found and inlier_count > 0:
+            yy_t = yy[table_mask][inlier]
+            xx_t = xx[table_mask][inlier]
+            if len(xx_t) > 0 and len(yy_t) > 0:
+                px0 = x0 + int(np.min(xx_t)) * stride
+                px1 = x0 + int(np.max(xx_t)) * stride
+                py0 = y0 + int(np.min(yy_t)) * stride
+                py1 = y0 + int(np.max(yy_t)) * stride
+                plane_bbox = [px0, py0, px1 + stride, py1 + stride]
+        roi_area = max(1.0, float(max(1, x1 - x0) * max(1, y1 - y0)) / float(max(1, stride * stride)))
+        plane_view = self._plane_view_from_bbox(
+            plane_bbox or roi_box,
+            getattr(depth_frame, "shape", None),
+            area_ratio=float(inlier_count) / roi_area if edge_found else None,
+        )
+        valid_for_control = bool(edge_found)
+        payload = {
+            "table_found": bool(candidate_count > 0),
+            "edge_found": bool(edge_found),
+            "edge_valid": valid_for_control,
+            "valid_for_control": valid_for_control,
+            "confidence": float(confidence if edge_found else 0.0),
+            "edge_conf": float(confidence if edge_found else 0.0),
+            "yaw_err_rad": float(yaw_err) if edge_found else None,
+            "yaw_err": float(yaw_err) if edge_found else None,
+            "dist_err_m": float(dist_err) if edge_found else None,
+            "dist_err": float(dist_err) if edge_found else None,
+            "edge_k": float(k) if edge_found else None,
+            "edge_b": float(b) if edge_found else None,
+            "depth_valid": True,
+            "edge_obs_unavailable": False,
+            "point_count": int(point_count),
+            "sampled_point_count": int(sampled_count),
+            "candidate_count": int(candidate_count),
+            "table_point_count": int(candidate_count),
+            "inlier_count": int(inlier_count),
+            "edge_inlier_count": int(inlier_count),
+            "valid_edge_points": int(point_count),
+            "selected_edge": bool(edge_found),
+            "near_edge": valid_for_control,
+            **plane_view,
+            "plane_found": bool(edge_found),
+            "plane_confidence": float(confidence if edge_found else 0.0),
+            "plane_residual_mean": float(residual_mean),
+            "plane_residual_max": float(residual_max),
+            "plane_x_span_m": float(x_span),
+            "plane_yaw_err_rad": float(yaw_err) if edge_found else None,
+            "plane_dist_err_m": float(dist_err) if edge_found else None,
+            "pose_source": "fast_plane_only" if edge_found else "none",
+            "final_pose_source": "fast_plane_only" if edge_found else "none",
+            "view_err_norm": plane_view.get("plane_cx_norm") if edge_found else None,
+            "view_source": "plane" if edge_found else "none",
+            "view_reliable": bool(edge_found),
+            "fov_guard_active": False,
+            "frame_id": int(self._frame_id),
+            "frame_seq": int(frame_seq),
+            "source": "vision_table_edge_manager",
+            "reason": reject_reason,
+            "reject_reason": reject_reason,
+            "target_dist_m": float(self._target_dist_m),
+            "plane_only_mode": True,
+            "enable_crease_line": False,
+            "usable_for_approach": bool(valid_for_control),
+            "usable_for_alignment": False,
+            "usable_for_stop": False,
+            "control_level": "approach" if valid_for_control else "none",
+            "control_reject_reason": "" if valid_for_control else reject_reason,
+            **self._detector_mode_payload(),
+            **yolo_gate,
+            **roi_payload,
+            "type": "table_edge_obs",
+        }
+        profile["obs_build_ms"] = self._ms_since(obs_start)
+        profile["total_edge_process_ms"] = self._ms_since(total_start)
+        return self._attach_profile(payload, profile, path="fast_plane_only")
 
     def _process_depth_lightweight(self, depth_frame: np.ndarray, frame_seq: int) -> Dict[str, Any]:
         total_start = time.perf_counter()

@@ -202,6 +202,8 @@ def _apply_vision_params(data: Dict[str, Any]) -> None:
         (
             "roi_preset",
             "static_roi_enabled",
+            "detector_mode",
+            "fast_plane_stride",
             "target_hz",
             "update_hz",
             "preview_hz",
@@ -218,6 +220,8 @@ def _apply_vision_params(data: Dict[str, Any]) -> None:
         CONFIG.table_edge.update_hz = float(CONFIG.table_edge.target_hz)
     if getattr(CONFIG.table_edge, "roi_preset", ""):
         CONFIG.table_edge.roi_preset = str(CONFIG.table_edge.roi_preset).strip().lower()
+    CONFIG.table_edge.detector_mode = str(getattr(CONFIG.table_edge, "detector_mode", "full") or "full").strip().lower()
+    CONFIG.table_edge.fast_plane_stride = max(1, int(float(getattr(CONFIG.table_edge, "fast_plane_stride", 4) or 4)))
 
     layouts = preview.get("mode_layouts")
     if isinstance(layouts, dict):
@@ -463,6 +467,11 @@ CONFIG.debug.table_det_min_conf = _env_float("ORCH_TABLE_DET_MIN_CONF", CONFIG.d
 CONFIG.debug.table_det_center_tol = _env_float("ORCH_TABLE_DET_CENTER_TOL", CONFIG.debug.table_det_center_tol)
 
 CONFIG.table_edge.roi_preset = os.getenv("VISTA_TABLE_EDGE_ROI_PRESET", CONFIG.table_edge.roi_preset).strip().lower()
+CONFIG.table_edge.detector_mode = os.getenv("VISTA_TABLE_EDGE_DETECTOR_MODE", CONFIG.table_edge.detector_mode).strip().lower()
+CONFIG.table_edge.fast_plane_stride = max(
+    1,
+    _env_int("VISTA_TABLE_EDGE_FAST_PLANE_STRIDE", CONFIG.table_edge.fast_plane_stride),
+)
 CONFIG.table_edge.static_roi_enabled = _env_bool(
     "VISTA_TABLE_EDGE_STATIC_ROI",
     _env_bool("VISTA_FORCE_STATIC_EDGE_ROI", CONFIG.table_edge.static_roi_enabled),

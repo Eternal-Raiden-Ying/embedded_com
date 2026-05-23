@@ -68,6 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
     advanced = parser.add_argument_group("advanced")
     advanced.add_argument("--config", type=Path, default=VISTA_ROOT / "configs" / "vision_params.yaml", help="Advanced: vision params YAML.")
     advanced.add_argument("--roi-preset", default="", help="Advanced: optional table plane ROI preset override.")
+    advanced.add_argument("--detector-mode", choices=("full", "fast_plane_only"), default="", help="Advanced: override table plane detector mode.")
     advanced.add_argument("--no-system-monitor", action="store_true", help="Advanced: disable eval system_monitor.csv.")
     return parser
 
@@ -180,6 +181,8 @@ COMPACT_OBS_FIELDS = (
     "frame_seq",
     "frame_id",
     "seq",
+    "detector_mode",
+    "fast_plane_stride",
     "table_found",
     "edge_found",
     "edge_valid",
@@ -206,6 +209,7 @@ COMPACT_OBS_FIELDS = (
     "plane_dist_err_m",
     "plane_x_span_m",
     "plane_residual_mean",
+    "plane_residual_max",
     "pose_source",
     "final_pose_source",
     "selected_line_type",
@@ -244,6 +248,8 @@ COMPACT_OBS_FIELDS = (
     *TIMING_FIELDS,
     "payload_size_bytes",
     "point_count",
+    "sampled_point_count",
+    "candidate_count",
     "table_point_count",
     "inlier_count",
     "edge_inlier_count",
@@ -322,6 +328,7 @@ def _metrics_summary(
 ) -> Dict[str, Any]:
     obs_total = len(observations)
     roi_sources = Counter(str(obs.get("roi_source") or "unknown") for obs in observations)
+    detector_modes = Counter(str(obs.get("detector_mode") or "unknown") for obs in observations)
     reject_reasons = Counter(str(obs.get("reject_reason") or obs.get("reason") or "none") for obs in observations)
     timing = {field: _percentiles([obs.get(field) for obs in observations]) for field in TIMING_FIELDS}
     return {
@@ -345,9 +352,14 @@ def _metrics_summary(
             "json_write_ms": "compact obs serialization before writing jsonl",
         },
         "payload_size_bytes": _percentiles([obs.get("payload_size_bytes") for obs in observations]),
+        "sampled_point_count": _percentiles([obs.get("sampled_point_count") for obs in observations]),
+        "candidate_count": _percentiles([obs.get("candidate_count") for obs in observations]),
+        "inlier_count": _percentiles([obs.get("inlier_count", obs.get("edge_inlier_count")) for obs in observations]),
+        "plane_residual_mean": _percentiles([obs.get("plane_residual_mean") for obs in observations]),
         "obs_total_age_ms": _percentiles([obs.get("obs_total_age_ms") for obs in observations]),
         "update_interval_ms": _percentiles([obs.get("bag_update_interval_ms", obs.get("update_interval_ms")) for obs in observations], include_max=False),
         "roi_source": dict(sorted(roi_sources.items())),
+        "detector_mode": dict(sorted(detector_modes.items())),
         "reject_reason": dict(sorted(reject_reasons.items())),
         "plane_found_ratio": _ratio(observations, "plane_found"),
         "usable_for_approach_ratio": _ratio(observations, "usable_for_approach"),
@@ -537,6 +549,8 @@ def main() -> None:
 
     if args.roi_preset:
         CONFIG.table_edge.roi_preset = str(args.roi_preset).strip().lower()
+    if args.detector_mode:
+        CONFIG.table_edge.detector_mode = str(args.detector_mode).strip().lower()
 
     if args.output is None:
         run_id = time.strftime("%Y%m%d_%H%M%S")
@@ -566,6 +580,7 @@ def main() -> None:
     print(
         "[BAG_TABLE_PLANE] "
         f"mode={preset.mode} strategy={preset.selection_strategy} "
+        f"detector_mode={getattr(CONFIG.table_edge, 'detector_mode', 'full')} "
         f"frame_stride={preset.frame_stride} target_hz={preset.target_hz} "
         f"preview_every={preset.preview_every} preview_max={preset.preview_max}"
     )
@@ -650,6 +665,7 @@ def main() -> None:
                     f"mode={preset.mode} frame_seq={frame_seq} "
                     f"valid={int(bool(obs.get('valid_for_control') or obs.get('edge_valid')))} "
                     f"plane={int(bool(obs.get('plane_found')))} "
+                    f"detector_mode={obs.get('detector_mode')} "
                     f"roi_source={obs.get('roi_source')} roi={obs.get('plane_roi') or obs.get('depth_edge_roi')} "
                     f"process_ms={float(obs.get('process_ms') or 0.0):.1f} "
                     f"obs_total_age_ms={float(obs.get('obs_total_age_ms') or 0.0):.1f} "

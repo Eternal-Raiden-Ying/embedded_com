@@ -143,6 +143,8 @@ class DebugConfig:
 class TableEdgeConfig:
     roi_preset: str = ""
     static_roi_enabled: bool = False
+    detector_mode: str = "full"
+    fast_plane_stride: int = 4
     target_hz: float = 10.0
     update_hz: float = 10.0
     preview_hz: float = 2.0

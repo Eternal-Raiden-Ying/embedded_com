@@ -127,6 +127,9 @@ table_edge:
   # 默认固定使用画面中下区域；需要动态 ROI 时可临时改回 ""。
   roi_preset: center_lower
   static_roi_enabled: false
+  # 可选：full、fast_plane_only。默认保留 full 检测路径。
+  detector_mode: full
+  fast_plane_stride: 4
 
   # 桌边检测频率。
   target_hz: 10.0
