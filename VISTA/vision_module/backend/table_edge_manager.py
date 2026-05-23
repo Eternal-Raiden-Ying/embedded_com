@@ -364,6 +364,19 @@ class TableEdgeManager:
             "top_view_build_ms": 0.0,
             "preview_overlay_ms": 0.0,
             "total_edge_process_ms": 0.0,
+            "frame_prepare_ms": 0.0,
+            "roi_extract_ms": 0.0,
+            "point_build_ms": 0.0,
+            "candidate_select_ms": 0.0,
+            "plane_fit_ms": 0.0,
+            "residual_eval_ms": 0.0,
+            "mask_build_ms": 0.0,
+            "obs_build_ms": 0.0,
+            "json_write_ms": 0.0,
+            "preview_render_ms": 0.0,
+            "preview_save_ms": 0.0,
+            "loop_total_ms": 0.0,
+            "payload_size_bytes": 0.0,
         }
 
     @staticmethod
@@ -706,8 +719,10 @@ class TableEdgeManager:
         total_start = time.perf_counter()
         profile = self._profile_template()
         profile["depth_frame_fetch_ms"] = float(self._last_depth_frame_fetch_ms)
+        frame_prepare_start = time.perf_counter()
         roi_meta = self._select_roi(depth_frame)
         yolo_gate = self._yolo_table_confirmation()
+        profile["frame_prepare_ms"] = self._ms_since(frame_prepare_start)
         if not bool(yolo_gate.get("yolo_gate_open", yolo_gate.get("table_confirmed_by_yolo", False))):
             payload = self._default_result(
                 depth_valid=True,
@@ -732,11 +747,18 @@ class TableEdgeManager:
             detect_start = time.perf_counter()
             result, _debug = self._detector.process_depth(depth_frame, roi_override=roi_override)
             profile["plane_or_edge_fit_ms"] = self._ms_since(detect_start)
+            if isinstance(_debug, dict) and isinstance(_debug.get("timing"), dict):
+                for key, value in _debug.get("timing", {}).items():
+                    if key in profile and isinstance(value, (int, float)):
+                        profile[key] = float(value)
+                profile["roi_crop_ms"] = float(profile.get("roi_extract_ms", 0.0) or 0.0)
+                profile["depth_preprocess_ms"] = float(profile.get("roi_extract_ms", 0.0) or 0.0)
         except Exception as exc:
             self.log.debug("table edge detect failed | error=%s", exc)
             payload = self._default_result(depth_valid=True, reason=f"detect_failed:{exc}", frame_seq=frame_seq, roi_meta=roi_meta)
             profile["total_edge_process_ms"] = self._ms_since(total_start)
             return self._attach_profile(payload, profile, path="full_detect_failed")
+        obs_build_start = time.perf_counter()
         roi_box = None
         front_plane = None
         if isinstance(_debug, dict):
@@ -879,6 +901,7 @@ class TableEdgeManager:
             "final_pose_source",
         ):
             payload[key] = getattr(result, key, None)
+        profile["obs_build_ms"] = float(profile.get("obs_build_ms", 0.0) or 0.0) + self._ms_since(obs_build_start)
         profile["total_edge_process_ms"] = self._ms_since(total_start)
         return self._attach_profile(payload, profile, path="full")
 

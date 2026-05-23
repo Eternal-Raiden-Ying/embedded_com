@@ -3,6 +3,7 @@
 
 import json
 import math
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -1344,13 +1345,36 @@ class OnlineTableEdgeDetector:
         return out if math.isfinite(out) else float(default)
 
     def process_depth(self, depth_image_16bit: np.ndarray, roi_override=None):
+        timing: Dict[str, float] = {}
+
+        def _stage_ms(start: float) -> float:
+            return float((time.perf_counter() - start) * 1000.0)
+
+        def _finish_timing() -> None:
+            for key in (
+                "roi_extract_ms",
+                "point_build_ms",
+                "candidate_select_ms",
+                "plane_fit_ms",
+                "residual_eval_ms",
+                "mask_build_ms",
+                "obs_build_ms",
+            ):
+                timing.setdefault(key, 0.0)
+
+        stage_start = time.perf_counter()
         valid_mask, depth_meters, roi_box = self._preprocess_depth(depth_image_16bit, roi_override=roi_override)
+        timing["roi_extract_ms"] = _stage_ms(stage_start)
+
+        stage_start = time.perf_counter()
         pc_cam = self._depth_to_3d(depth_meters, valid_mask, roi_box)
+        timing["point_build_ms"] = _stage_ms(stage_start)
         base_debug = {
             "depth_meters": depth_meters,
             "pc_all": pc_cam,
             "pc_table": None,
             "roi_box": roi_box,
+            "timing": timing,
             "front_plane_candidate_pixels": [],
             "crease_candidate_pixels": [],
             "crease_inlier_pixels": [],
@@ -1361,6 +1385,7 @@ class OnlineTableEdgeDetector:
         }
         if len(pc_cam) < int(self.cfg.min_all_points):
             self._stable_count = 0
+            obs_start = time.perf_counter()
             result = EdgeDetectResult(
                 False,
                 0.0,
@@ -1372,12 +1397,21 @@ class OnlineTableEdgeDetector:
                 control_reject_reason="roi_empty",
                 geometry_reject_reason="no_raw_geometry",
             )
+            timing["obs_build_ms"] = _stage_ms(obs_start)
+            _finish_timing()
             base_debug.update({"reject_reason": result.reject_reason})
             return result, base_debug
 
+        stage_start = time.perf_counter()
         table_mask = self._find_table_plane(pc_cam)
         table_pc = pc_cam[table_mask]
+        timing["candidate_select_ms"] = _stage_ms(stage_start)
+
+        stage_start = time.perf_counter()
         plane = self._estimate_front_plane(depth_meters, valid_mask, roi_box)
+        timing["plane_fit_ms"] = _stage_ms(stage_start)
+
+        stage_start = time.perf_counter()
         if bool(getattr(self.cfg, "plane_only_mode", False)) or not bool(getattr(self.cfg, "enable_crease_line", True)):
             line = self._disabled_line_result()
         else:
@@ -1390,6 +1424,9 @@ class OnlineTableEdgeDetector:
         selected_line_type = str(line.get("selected_line_type") or "none")
         upper = dict(line.get("upper") or {})
         lower = dict(line.get("lower") or {})
+        timing["residual_eval_ms"] = _stage_ms(stage_start)
+
+        obs_start = time.perf_counter()
         result = EdgeDetectResult(
             edge_found,
             float(fused.get("yaw", 0.0) or 0.0),
@@ -1467,6 +1504,9 @@ class OnlineTableEdgeDetector:
             final_pose_source=str(fused.get("final_pose_source") or fused.get("pose_source") or "none"),
         )
         self._last_selected_line_type = selected_line_type
+        timing["obs_build_ms"] = _stage_ms(obs_start)
+
+        mask_start = time.perf_counter()
         base_debug.update(
             {
                 "pc_table": table_pc,
@@ -1485,4 +1525,6 @@ class OnlineTableEdgeDetector:
                 "reject_reason": reject_reason,
             }
         )
+        timing["mask_build_ms"] = _stage_ms(mask_start)
+        _finish_timing()
         return result, base_debug

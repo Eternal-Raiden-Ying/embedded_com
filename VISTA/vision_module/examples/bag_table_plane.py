@@ -152,6 +152,22 @@ def _json_ready(value: Any) -> Any:
     return str(value)
 
 
+TIMING_FIELDS = (
+    "frame_prepare_ms",
+    "roi_extract_ms",
+    "point_build_ms",
+    "candidate_select_ms",
+    "plane_fit_ms",
+    "residual_eval_ms",
+    "mask_build_ms",
+    "obs_build_ms",
+    "json_write_ms",
+    "preview_render_ms",
+    "preview_save_ms",
+    "loop_total_ms",
+)
+
+
 COMPACT_OBS_FIELDS = (
     "type",
     "source",
@@ -225,6 +241,8 @@ COMPACT_OBS_FIELDS = (
     "frame_age_ms",
     "depth_frame_fetch_ms",
     "latest_frame_lag_ms",
+    *TIMING_FIELDS,
+    "payload_size_bytes",
     "point_count",
     "table_point_count",
     "inlier_count",
@@ -305,6 +323,7 @@ def _metrics_summary(
     obs_total = len(observations)
     roi_sources = Counter(str(obs.get("roi_source") or "unknown") for obs in observations)
     reject_reasons = Counter(str(obs.get("reject_reason") or obs.get("reason") or "none") for obs in observations)
+    timing = {field: _percentiles([obs.get(field) for obs in observations]) for field in TIMING_FIELDS}
     return {
         "mode": str(preset.mode),
         "purpose": str(preset.purpose),
@@ -317,6 +336,15 @@ def _metrics_summary(
         "target_hz": preset.target_hz,
         "process_ms": _percentiles([obs.get("process_ms", obs.get("vision_process_ms")) for obs in observations]),
         "detector_process_ms": _percentiles([obs.get("process_ms", obs.get("vision_process_ms")) for obs in observations]),
+        "timing_ms": timing,
+        "timing_notes": {
+            "frame_prepare_ms": "bag frame packaging plus ROI/gate preparation before detector call",
+            "roi_extract_ms": "detector depth preprocessing and ROI extraction",
+            "candidate_select_ms": "table candidate selection from generated point cloud",
+            "residual_eval_ms": "crease-line estimation plus fused pose, geometry, and control scoring",
+            "json_write_ms": "compact obs serialization before writing jsonl",
+        },
+        "payload_size_bytes": _percentiles([obs.get("payload_size_bytes") for obs in observations]),
         "obs_total_age_ms": _percentiles([obs.get("obs_total_age_ms") for obs in observations]),
         "update_interval_ms": _percentiles([obs.get("bag_update_interval_ms", obs.get("update_interval_ms")) for obs in observations], include_max=False),
         "roi_source": dict(sorted(roi_sources.items())),
@@ -553,6 +581,8 @@ def main() -> None:
                 if not selected:
                     continue
                 bag_update_interval_ms = None if previous_selected_ms is None else max(0.0, bag_ts_ms - float(previous_selected_ms))
+                loop_total_start = time.perf_counter()
+                frame_prepare_start = time.perf_counter()
                 capture_ts = time.time()
                 frames = {
                     "rgb": pack.get("rgb"),
@@ -560,6 +590,7 @@ def main() -> None:
                     "frame_capture_ts": capture_ts,
                     "timestamp_ms": pack.get("timestamp_ms"),
                 }
+                bag_frame_prepare_ms = (time.perf_counter() - frame_prepare_start) * 1000.0
                 obs = processor.process_camera_frame(
                     frames,
                     frame_seq=frame_seq,
@@ -569,14 +600,49 @@ def main() -> None:
                     source_mode="OFFLINE_BAG",
                     count_dropped=False,
                 )
+                obs["frame_prepare_ms"] = float(obs.get("frame_prepare_ms") or 0.0) + float(bag_frame_prepare_ms)
                 obs["source"] = f"bag_table_plane_{preset.mode}"
                 obs["bag_timestamp_ms"] = bag_ts_ms
                 if bag_update_interval_ms is not None:
                     obs["bag_update_interval_ms"] = bag_update_interval_ms
                     obs["update_interval_ms"] = bag_update_interval_ms
                     obs["edge_update_interval_ms"] = bag_update_interval_ms
+                obs_index = len(observations) + 1
+                can_save_more = preset.preview_max is None or preview_saved_count < int(preset.preview_max)
+                if (
+                    preview_sink is not None
+                    and preview_dir is not None
+                    and can_save_more
+                    and int(preset.preview_every or 0) > 0
+                    and (obs_index % int(preset.preview_every)) == 0
+                ):
+                    preview_render_start = time.perf_counter()
+                    canvas = _make_preview_canvas(preview_sink, pack.get("rgb"), pack.get("depth"), obs, frame_seq)
+                    obs["preview_render_ms"] = (time.perf_counter() - preview_render_start) * 1000.0
+                    try:
+                        import cv2
+
+                        out_path = preview_dir / f"table_plane_preview_{frame_seq:06d}.png"
+                        preview_save_start = time.perf_counter()
+                        if cv2.imwrite(str(out_path), canvas):
+                            preview_saved_count += 1
+                            preview_paths.append(out_path)
+                        obs["preview_save_ms"] = (time.perf_counter() - preview_save_start) * 1000.0
+                    except Exception as exc:
+                        obs["preview_save_ms"] = 0.0
+                        print(f"[BAG_TABLE_PLANE] preview_save_failed frame_seq={frame_seq} error={exc}")
+                json_start = time.perf_counter()
                 clean_obs = _compact_obs(obs)
-                fp.write(json.dumps(clean_obs, ensure_ascii=False, sort_keys=True) + "\n")
+                line = json.dumps(clean_obs, ensure_ascii=False, sort_keys=True)
+                obs["json_write_ms"] = (time.perf_counter() - json_start) * 1000.0
+                obs["loop_total_ms"] = (time.perf_counter() - loop_total_start) * 1000.0
+                clean_obs = _compact_obs(obs)
+                line = json.dumps(clean_obs, ensure_ascii=False, sort_keys=True)
+                clean_obs["payload_size_bytes"] = len(line.encode("utf-8"))
+                line = json.dumps(clean_obs, ensure_ascii=False, sort_keys=True)
+                clean_obs["payload_size_bytes"] = len(line.encode("utf-8"))
+                line = json.dumps(clean_obs, ensure_ascii=False, sort_keys=True)
+                fp.write(line + "\n")
                 observations.append(clean_obs)
                 monitor.sample()
                 print(
@@ -589,25 +655,6 @@ def main() -> None:
                     f"obs_total_age_ms={float(obs.get('obs_total_age_ms') or 0.0):.1f} "
                     f"bag_update_interval_ms={obs.get('bag_update_interval_ms')}"
                 )
-                obs_index = len(observations)
-                can_save_more = preset.preview_max is None or preview_saved_count < int(preset.preview_max)
-                if (
-                    preview_sink is not None
-                    and preview_dir is not None
-                    and can_save_more
-                    and int(preset.preview_every or 0) > 0
-                    and (obs_index % int(preset.preview_every)) == 0
-                ):
-                    canvas = _make_preview_canvas(preview_sink, pack.get("rgb"), pack.get("depth"), obs, frame_seq)
-                    try:
-                        import cv2
-
-                        out_path = preview_dir / f"table_plane_preview_{frame_seq:06d}.png"
-                        if cv2.imwrite(str(out_path), canvas):
-                            preview_saved_count += 1
-                            preview_paths.append(out_path)
-                    except Exception as exc:
-                        print(f"[BAG_TABLE_PLANE] preview_save_failed frame_seq={frame_seq} error={exc}")
     finally:
         processor.release_all()
 
