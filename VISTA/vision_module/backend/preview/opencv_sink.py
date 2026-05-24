@@ -279,10 +279,11 @@ class OpenCVPreviewSink(PreviewSink):
                 [
                     "fast_sparse=on",
                     f"sampled={table_edge.get('fast_raw_sampled_point_count', table_edge.get('sampled_point_count'))} cand={table_edge.get('fast_raw_candidate_count', table_edge.get('candidate_count'))} inliers={table_edge.get('fast_raw_inlier_count', table_edge.get('inlier_count'))}",
-                    f"conf={self._fmt(table_edge.get('fast_raw_confidence'))} reject={table_edge.get('fast_gate_reject_reason') or table_edge.get('reject_reason') or 'none'}",
+                    f"stage={table_edge.get('fast_distance_stage') or 'n/a'} level={table_edge.get('fast_control_level') or table_edge.get('control_level') or 'none'}",
+                    f"conf={self._fmt(table_edge.get('fast_score_final', table_edge.get('fast_raw_confidence')))} reject={table_edge.get('fast_gate_reason') or table_edge.get('fast_gate_reject_reason') or table_edge.get('reject_reason') or 'none'}",
                 ]
             )
-        left_y = max(76, panel.shape[0] - (116 + (57 if fast_sparse else 0)))
+        left_y = max(76, panel.shape[0] - (116 + (76 if fast_sparse else 0)))
         self._text_block(panel, geometry_lines, (16, left_y), fg=(210, 255, 210) if valid_for_control else (210, 230, 255), max_width=min(260, panel.shape[1] - 32), font_scale=0.46, line_h=19)
         return panel
 

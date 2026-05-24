@@ -225,12 +225,26 @@ COMPACT_OBS_FIELDS = (
     "fast_raw_sampled_point_count",
     "fast_raw_reject_reason",
     "fast_gate_reject_reason",
+    "fast_gate_reason",
+    "fast_confidence_version",
+    "fast_distance_stage",
+    "fast_control_level",
     "fast_score_inlier",
+    "fast_score_abs_inlier",
+    "fast_score_inlier_ratio",
+    "fast_score_evidence",
     "fast_score_residual",
     "fast_score_span",
     "fast_score_area",
+    "fast_score_coverage",
+    "fast_score_geometry",
     "fast_score_temporal",
     "fast_score_temporal_available",
+    "fast_temporal_stable_count",
+    "fast_temporal_jump",
+    "fast_temporal_yaw_delta",
+    "fast_temporal_dist_delta",
+    "fast_temporal_cx_delta",
     "fast_score_final",
     "fast_candidate_pixel_count",
     "fast_inlier_pixel_count",
@@ -373,13 +387,20 @@ def _metrics_summary(
     roi_sources = Counter(str(obs.get("roi_source") or "unknown") for obs in observations)
     detector_modes = Counter(str(obs.get("detector_mode") or "unknown") for obs in observations)
     reject_reasons = Counter(str(obs.get("reject_reason") or obs.get("reason") or "none") for obs in observations)
-    fast_gate_reasons = Counter(str(obs.get("fast_gate_reject_reason") or obs.get("fast_raw_reject_reason") or "none") for obs in observations)
+    fast_gate_reasons = Counter(str(obs.get("fast_gate_reason") or obs.get("fast_gate_reject_reason") or obs.get("fast_raw_reject_reason") or "none") for obs in observations)
+    control_levels = Counter(str(obs.get("control_level") or obs.get("fast_control_level") or "none") for obs in observations)
+    distance_stages = Counter(str(obs.get("fast_distance_stage") or "unknown") for obs in observations)
     timing = {field: _percentiles([obs.get(field) for obs in observations]) for field in TIMING_FIELDS}
     fast_score_keys = (
         "fast_score_inlier",
+        "fast_score_abs_inlier",
+        "fast_score_inlier_ratio",
+        "fast_score_evidence",
         "fast_score_residual",
         "fast_score_span",
         "fast_score_area",
+        "fast_score_coverage",
+        "fast_score_geometry",
         "fast_score_temporal",
         "fast_score_final",
     )
@@ -418,12 +439,19 @@ def _metrics_summary(
             key: _percentiles([obs.get(key) for obs in observations], include_max=False).get("p50")
             for key in fast_score_keys
         },
+        "fast_score_components": {
+            key: _percentiles_p10_p50_p90([obs.get(key) for obs in observations])
+            for key in fast_score_keys
+        },
         "obs_total_age_ms": _percentiles([obs.get("obs_total_age_ms") for obs in observations]),
         "update_interval_ms": _percentiles([obs.get("bag_update_interval_ms", obs.get("update_interval_ms")) for obs in observations], include_max=False),
         "roi_source": dict(sorted(roi_sources.items())),
         "detector_mode": dict(sorted(detector_modes.items())),
         "reject_reason": dict(sorted(reject_reasons.items())),
         "fast_gate_reject_reason": dict(sorted(fast_gate_reasons.items())),
+        "fast_gate_reason": dict(sorted(fast_gate_reasons.items())),
+        "control_level": dict(sorted(control_levels.items())),
+        "distance_stage": dict(sorted(distance_stages.items())),
         "plane_found_ratio": _ratio(observations, "plane_found"),
         "usable_for_approach_ratio": _ratio(observations, "usable_for_approach"),
         "valid_for_control_ratio": float(
@@ -610,6 +638,10 @@ FAST_DEBUG_COLUMNS = (
     "plane_found",
     "valid_for_control",
     "edge_valid",
+    "usable_for_approach",
+    "usable_for_alignment",
+    "usable_for_stop",
+    "control_level",
     "reject_reason",
     "control_reject_reason",
     "fast_fit_attempted",
@@ -626,12 +658,26 @@ FAST_DEBUG_COLUMNS = (
     "fast_raw_sampled_point_count",
     "fast_raw_reject_reason",
     "fast_gate_reject_reason",
+    "fast_gate_reason",
+    "fast_confidence_version",
+    "fast_distance_stage",
+    "fast_control_level",
     "fast_score_inlier",
+    "fast_score_abs_inlier",
+    "fast_score_inlier_ratio",
+    "fast_score_evidence",
     "fast_score_residual",
     "fast_score_span",
     "fast_score_area",
+    "fast_score_coverage",
+    "fast_score_geometry",
     "fast_score_temporal",
     "fast_score_temporal_available",
+    "fast_temporal_stable_count",
+    "fast_temporal_jump",
+    "fast_temporal_yaw_delta",
+    "fast_temporal_dist_delta",
+    "fast_temporal_cx_delta",
     "fast_score_final",
     "process_ms",
     "plane_fit_ms",
@@ -653,7 +699,7 @@ def _write_fast_debug_csvs(observations: List[Dict[str, Any]], output_dir: Path)
         return {"fast_debug_csv": None, "fast_key_frames_csv": None}
     debug_path = output_dir / "fast_debug_frames.csv"
     _write_csv_rows(debug_path, fast_rows, FAST_DEBUG_COLUMNS)
-    key_targets = (144, 294, 444, 594, 744)
+    key_targets = (144, 294, 444, 594, 636, 642, 648, 744)
     key_rows = []
     for obs in fast_rows:
         try:

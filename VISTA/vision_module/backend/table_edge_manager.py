@@ -72,6 +72,7 @@ class TableEdgeManager:
         self._last_valid_quadrant_ttl_s = 1.0
         self._last_valid_table_bbox = None
         self._last_valid_table_center_norm = None
+        self._fast_temporal_state: Dict[str, Any] = {}
         self._load_detector()
 
     @staticmethod
@@ -390,6 +391,63 @@ class TableEdgeManager:
         return {
             "detector_mode": str(self._detector_mode),
             "fast_plane_stride": int(self._fast_plane_stride),
+        }
+
+    @staticmethod
+    def _clip01(value: Any) -> float:
+        try:
+            out = float(value)
+        except Exception:
+            return 0.0
+        if not math.isfinite(out):
+            return 0.0
+        return max(0.0, min(1.0, out))
+
+    def _fast_temporal_score(self, *, yaw: float, dist: float, cx_norm: Optional[float]) -> Dict[str, Any]:
+        prev = dict(self._fast_temporal_state or {})
+        if not prev:
+            self._fast_temporal_state = {
+                "yaw": float(yaw),
+                "dist": float(dist),
+                "cx": cx_norm,
+                "stable_count": 0,
+            }
+            return {
+                "score": 0.0,
+                "available": False,
+                "stable_count": 0,
+                "jump": False,
+                "yaw_delta": None,
+                "dist_delta": None,
+                "cx_delta": None,
+            }
+        prev_cx = prev.get("cx")
+        yaw_delta = abs(float(yaw) - float(prev.get("yaw", yaw)))
+        dist_delta = abs(float(dist) - float(prev.get("dist", dist)))
+        cx_delta = abs(float(cx_norm) - float(prev_cx)) if cx_norm is not None and prev_cx is not None else 0.0
+        yaw_score = self._clip01(1.0 - yaw_delta / 0.30)
+        dist_score = self._clip01(1.0 - dist_delta / 0.16)
+        cx_score = self._clip01(1.0 - cx_delta / 0.16)
+        stable_hits = int(yaw_delta < 0.15) + int(dist_delta < 0.08) + int(cx_delta < 0.08)
+        prev_stable = int(prev.get("stable_count", 0) or 0)
+        stable_count = prev_stable + 1 if stable_hits >= 2 else 0
+        jump = bool(yaw_delta > 0.35 or dist_delta > 0.20 or cx_delta > 0.20)
+        continuity = (yaw_score + dist_score + cx_score) / 3.0
+        score = 0.0 if jump else self._clip01(0.80 * continuity + 0.20 * min(1.0, float(stable_count) / 3.0))
+        self._fast_temporal_state = {
+            "yaw": float(yaw),
+            "dist": float(dist),
+            "cx": cx_norm,
+            "stable_count": int(stable_count),
+        }
+        return {
+            "score": float(score),
+            "available": True,
+            "stable_count": int(stable_count),
+            "jump": bool(jump),
+            "yaw_delta": float(yaw_delta),
+            "dist_delta": float(dist_delta),
+            "cx_delta": float(cx_delta),
         }
 
     @staticmethod
@@ -963,6 +1021,7 @@ class TableEdgeManager:
             payload.update({
                 "fast_fit_attempted": False,
                 "fast_gate_reject_reason": "waiting_yolo_table_confirm",
+                "fast_gate_reason": "waiting_yolo_table_confirm",
                 "fast_raw_reject_reason": "waiting_yolo_table_confirm",
             })
             profile["total_edge_process_ms"] = self._ms_since(total_start)
@@ -989,12 +1048,20 @@ class TableEdgeManager:
             "fast_raw_inlier_count": 0,
             "fast_raw_confidence": 0.0,
             "fast_score_inlier": 0.0,
+            "fast_score_abs_inlier": 0.0,
+            "fast_score_inlier_ratio": 0.0,
+            "fast_score_evidence": 0.0,
             "fast_score_residual": 0.0,
             "fast_score_span": 0.0,
             "fast_score_area": 0.0,
+            "fast_score_coverage": 0.0,
+            "fast_score_geometry": 0.0,
             "fast_score_temporal": 0.0,
             "fast_score_temporal_available": False,
             "fast_score_final": 0.0,
+            "fast_confidence_version": "v3",
+            "fast_distance_stage": "unknown",
+            "fast_control_level": "none",
         }
 
         point_start = time.perf_counter()
@@ -1003,7 +1070,7 @@ class TableEdgeManager:
             payload.update(roi_payload)
             payload.update(self._detector_mode_payload())
             payload.update(fast_debug_base)
-            payload.update({"fast_gate_reject_reason": "roi_empty", "fast_raw_reject_reason": "roi_empty"})
+            payload.update({"fast_gate_reject_reason": "roi_empty", "fast_gate_reason": "roi_empty", "fast_raw_reject_reason": "roi_empty"})
             profile["point_build_ms"] = self._ms_since(point_start)
             profile["total_edge_process_ms"] = self._ms_since(total_start)
             return self._attach_profile(payload, profile, path="fast_plane_only_roi_empty")
@@ -1035,6 +1102,7 @@ class TableEdgeManager:
             payload.update({
                 "fast_raw_sampled_point_count": sampled_count,
                 "fast_gate_reject_reason": payload.get("reason") or "not_enough_points",
+                "fast_gate_reason": payload.get("reason") or "not_enough_points",
                 "fast_raw_reject_reason": payload.get("reason") or "not_enough_points",
             })
             profile["total_edge_process_ms"] = self._ms_since(total_start)
@@ -1060,7 +1128,9 @@ class TableEdgeManager:
                 "fast_raw_sampled_point_count": sampled_count,
                 "fast_raw_candidate_count": candidate_count,
                 "fast_score_area": float(candidate_count) / float(max(1, sampled_count)),
+                "fast_score_coverage": float(candidate_count) / float(max(1, sampled_count)),
                 "fast_gate_reject_reason": "not_enough_candidates",
+                "fast_gate_reason": "not_enough_candidates",
                 "fast_raw_reject_reason": "not_enough_candidates",
             })
             profile["total_edge_process_ms"] = self._ms_since(total_start)
@@ -1093,6 +1163,7 @@ class TableEdgeManager:
                 "fast_raw_sampled_point_count": sampled_count,
                 "fast_raw_candidate_count": candidate_count,
                 "fast_gate_reject_reason": f"fast_fit_failed:{exc}",
+                "fast_gate_reason": f"fast_fit_failed:{exc}",
                 "fast_raw_reject_reason": f"fast_fit_failed:{exc}",
             })
             profile["plane_fit_ms"] = self._ms_since(fit_start)
@@ -1108,24 +1179,11 @@ class TableEdgeManager:
         dist_err = float(b) - float(self._target_dist_m)
         inlier_ratio = float(inlier_count) / float(max(1, candidate_count))
         span_min = float(getattr(cfg, "front_plane_min_x_span_m", 0.20) if cfg is not None else 0.20)
-        max_yaw = float(getattr(cfg, "control_max_yaw_rad", 0.70) if cfg is not None else 0.70)
+        max_yaw = max(0.75, float(getattr(cfg, "control_max_yaw_rad", 0.70) if cfg is not None else 0.70))
         residual_score = max(0.0, 1.0 - residual_mean / max(1e-6, residual_threshold))
-        span_score = min(1.0, x_span / max(1e-6, span_min * 1.8))
+        span_score = self._clip01(x_span / max(1e-6, span_min * 1.8))
         area_score = float(candidate_count) / float(max(1, sampled_count))
-        confidence = max(0.0, min(1.0, 0.55 * inlier_ratio + 0.30 * residual_score + 0.15 * span_score))
         residual_p90 = float(np.percentile(residual[inlier], 90)) if inlier_count > 0 else float(np.percentile(residual, 90))
-        reject_reason = ""
-        if inlier_count < min_table:
-            reject_reason = "not_enough_inliers"
-        elif x_span < span_min:
-            reject_reason = "x_span_too_small"
-        elif residual_mean > residual_threshold:
-            reject_reason = "residual_too_large"
-        elif abs(yaw_err) > max_yaw:
-            reject_reason = "yaw_out_of_range"
-        elif confidence < float(getattr(cfg, "control_min_confidence", 0.45) if cfg is not None else 0.45):
-            reject_reason = "confidence_too_low"
-        edge_found = reject_reason == ""
         profile["residual_eval_ms"] = self._ms_since(eval_start)
 
         obs_start = time.perf_counter()
@@ -1141,22 +1199,109 @@ class TableEdgeManager:
             py0 = y0 + int(np.min(yy_inliers)) * stride
             py1 = y0 + int(np.max(yy_inliers)) * stride
             raw_bbox = [px0, py0, px1 + stride, py1 + stride]
-            if edge_found:
-                plane_bbox = raw_bbox
         roi_area = max(1.0, float(max(1, x1 - x0) * max(1, y1 - y0)) / float(max(1, stride * stride)))
-        plane_view = self._plane_view_from_bbox(
-            plane_bbox or roi_box,
-            getattr(depth_frame, "shape", None),
-            area_ratio=float(inlier_count) / roi_area if edge_found else None,
-        )
         raw_plane_view = self._plane_view_from_bbox(
             raw_bbox or roi_box,
             getattr(depth_frame, "shape", None),
             area_ratio=float(inlier_count) / roi_area if inlier_count > 0 else None,
         )
+        raw_width_norm = raw_plane_view.get("plane_width_norm")
+        raw_cx_norm = raw_plane_view.get("plane_cx_norm")
+        width_score = self._clip01((float(raw_width_norm or 0.0) - 0.12) / 0.30)
+        coverage_score = self._clip01(0.40 * width_score + 0.35 * span_score + 0.25 * self._clip01(area_score / 0.70))
+        abs_inlier_score = self._clip01((float(inlier_count) - float(min_table)) / max(1.0, float(min_table) * 5.0))
+        ratio_inlier_score = self._clip01(inlier_ratio / 0.30)
+        evidence_score = self._clip01(0.70 * abs_inlier_score + 0.30 * ratio_inlier_score)
+        yaw_abs = abs(float(yaw_err))
+        geometry_score = self._clip01(1.0 - max(0.0, yaw_abs - 0.10) / max(1e-6, max_yaw - 0.10))
+        temporal = self._fast_temporal_score(yaw=float(yaw_err), dist=float(dist_err), cx_norm=raw_cx_norm)
+        temporal_score = float(temporal.get("score", 0.0) or 0.0)
+        temporal_available = bool(temporal.get("available", False))
+        if temporal_available:
+            confidence = self._clip01(
+                0.30 * evidence_score
+                + 0.20 * residual_score
+                + 0.20 * coverage_score
+                + 0.20 * geometry_score
+                + 0.10 * temporal_score
+            )
+        else:
+            confidence = self._clip01(
+                0.35 * evidence_score
+                + 0.20 * residual_score
+                + 0.25 * coverage_score
+                + 0.20 * geometry_score
+            )
+        if dist_err > 0.60:
+            distance_stage = "far"
+        elif dist_err > 0.25:
+            distance_stage = "middle"
+        else:
+            distance_stage = "near"
+
+        reject_reason = ""
+        control_level = "none"
+        width_min = 0.18
+        hard_span_min = max(0.18, span_min * 0.90)
+        if inlier_count < min_table:
+            reject_reason = "not_enough_inliers"
+        elif candidate_count < min_table:
+            reject_reason = "not_enough_candidates"
+        elif residual_mean > residual_threshold:
+            reject_reason = "residual_too_large"
+        elif yaw_abs > max_yaw:
+            reject_reason = "yaw_out_of_range"
+        elif float(raw_width_norm or 0.0) < width_min:
+            reject_reason = "width_too_small"
+        elif x_span < hard_span_min:
+            reject_reason = "x_span_too_small"
+        elif bool(temporal.get("jump", False)) and confidence < 0.62:
+            reject_reason = "temporal_jump"
+        else:
+            if distance_stage == "near":
+                usable_min, align_min = 0.40, 0.52
+            elif distance_stage == "middle":
+                usable_min, align_min = 0.44, 0.58
+            else:
+                usable_min, align_min = 0.38, 0.66
+            if confidence < usable_min:
+                reject_reason = "confidence_too_low"
+            elif yaw_abs >= 0.55:
+                control_level = "rotate_only"
+            elif distance_stage == "near":
+                if abs(dist_err) <= 0.12 and yaw_abs < 0.30 and confidence >= align_min:
+                    control_level = "stop_ready"
+                elif yaw_abs < 0.45 and confidence >= align_min:
+                    control_level = "align"
+                else:
+                    control_level = "approach_slow"
+            elif distance_stage == "middle":
+                middle_span_ok = x_span >= max(span_min * 1.35, 0.28) and float(raw_width_norm or 0.0) >= 0.28
+                if yaw_abs < 0.40 and confidence >= align_min and middle_span_ok:
+                    control_level = "align"
+                elif yaw_abs >= 0.45:
+                    control_level = "rotate_only"
+                else:
+                    control_level = "approach_slow"
+            else:
+                if yaw_abs < 0.25 and confidence >= align_min:
+                    control_level = "align"
+                elif yaw_abs >= 0.45:
+                    control_level = "rotate_only"
+                else:
+                    control_level = "approach_slow"
+        plane_usable = control_level != "none"
+        valid_for_control = control_level in {"align", "stop_ready"}
         fast_candidate_pixels = self._sparse_pixel_sample(xx_candidates, yy_candidates, x0, y0, stride, cap=1000)
         fast_inlier_pixels = self._sparse_pixel_sample(xx_inliers, yy_inliers, x0, y0, stride, cap=1000)
-        valid_for_control = bool(edge_found)
+        edge_found = bool(plane_usable)
+        if edge_found:
+            plane_bbox = raw_bbox
+        plane_view = self._plane_view_from_bbox(
+            plane_bbox or roi_box,
+            getattr(depth_frame, "shape", None),
+            area_ratio=float(inlier_count) / roi_area if edge_found else None,
+        )
         payload = {
             "table_found": bool(candidate_count > 0),
             "edge_found": bool(edge_found),
@@ -1204,12 +1349,26 @@ class TableEdgeManager:
             "fast_raw_sampled_point_count": int(sampled_count),
             "fast_raw_reject_reason": reject_reason or "none",
             "fast_gate_reject_reason": reject_reason or "none",
+            "fast_gate_reason": reject_reason or "none",
+            "fast_confidence_version": "v3",
+            "fast_distance_stage": distance_stage,
+            "fast_control_level": control_level,
             "fast_score_inlier": float(inlier_ratio),
+            "fast_score_abs_inlier": float(abs_inlier_score),
+            "fast_score_inlier_ratio": float(ratio_inlier_score),
+            "fast_score_evidence": float(evidence_score),
             "fast_score_residual": float(residual_score),
             "fast_score_span": float(span_score),
             "fast_score_area": float(area_score),
-            "fast_score_temporal": 0.0,
-            "fast_score_temporal_available": False,
+            "fast_score_coverage": float(coverage_score),
+            "fast_score_geometry": float(geometry_score),
+            "fast_score_temporal": float(temporal_score),
+            "fast_score_temporal_available": bool(temporal_available),
+            "fast_temporal_stable_count": int(temporal.get("stable_count", 0) or 0),
+            "fast_temporal_jump": bool(temporal.get("jump", False)),
+            "fast_temporal_yaw_delta": temporal.get("yaw_delta"),
+            "fast_temporal_dist_delta": temporal.get("dist_delta"),
+            "fast_temporal_cx_delta": temporal.get("cx_delta"),
             "fast_score_final": float(confidence),
             "fast_candidate_pixel_count": int(len(fast_candidate_pixels)),
             "fast_inlier_pixel_count": int(len(fast_inlier_pixels)),
@@ -1229,11 +1388,11 @@ class TableEdgeManager:
             "target_dist_m": float(self._target_dist_m),
             "plane_only_mode": True,
             "enable_crease_line": False,
-            "usable_for_approach": bool(valid_for_control),
-            "usable_for_alignment": False,
-            "usable_for_stop": False,
-            "control_level": "approach" if valid_for_control else "none",
-            "control_reject_reason": "" if valid_for_control else reject_reason,
+            "usable_for_approach": bool(plane_usable),
+            "usable_for_alignment": bool(control_level in {"align", "stop_ready"}),
+            "usable_for_stop": bool(control_level == "stop_ready"),
+            "control_level": control_level,
+            "control_reject_reason": "" if plane_usable else reject_reason,
             **self._detector_mode_payload(),
             **yolo_gate,
             **roi_payload,
