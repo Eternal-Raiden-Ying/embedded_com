@@ -114,8 +114,6 @@ class ModeController:
             "table_edge_obs": {"policy": "slot", "scope": "stage"},
             "remote_result": {"policy": "slot", "scope": "stage"},
             "runtime_status": {"policy": "slot", "scope": "backend"},
-            "remote_cmd": {"policy": "event", "scope": "backend"},
-            "remote_ack": {"policy": "event", "scope": "backend"},
         }
         if mode_name in {"INIT", "GRASP_REMOTE_INIT"}:
             routes["remote_init_status"] = {"policy": "slot", "scope": "stage"}
@@ -190,8 +188,6 @@ class ModeController:
             "table_edge_obs": ("slot", "stage"),
             "remote_result": ("slot", "stage"),
             "runtime_status": ("slot", "backend"),
-            "remote_cmd": ("event", "backend"),
-            "remote_ack": ("event", "backend"),
         }
         for route_name, (policy, scope) in required.items():
             cfg = dict(routes.get(route_name) or {})
