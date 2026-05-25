@@ -144,39 +144,6 @@ def _target_obs_from_results(results: Dict[str, object], target: Optional[str]) 
 
 
 
-def _remote_command_payload(stage_state: Dict[str, object], target: Optional[str], request_id: str) -> Dict[str, object]:
-    return {
-        "request_id": request_id,
-        "timeout_s": float(stage_state.get("remote_timeout_s", 10.0) or 10.0),
-        "target": target,
-        "robot_id": str(stage_state.get("remote_robot_id") or "arm_001"),
-        "need_depth": bool(stage_state.get("need_depth", True)),
-        "class_id": _coerce_optional_int(stage_state.get("remote_class_id")),
-        "metadata": dict(stage_state.get("remote_metadata") or {}),
-    }
-
-
-def _remote_service_init_payload(stage_state: Dict[str, object]) -> Dict[str, object]:
-    return {
-        "timeout_s": float(stage_state.get("remote_timeout_s", 10.0) or 10.0),
-    }
-
-
-def _frame_ready_for_remote(results: Dict[str, object], required_cameras) -> Dict[str, object]:
-    frame_meta = dict((results or {}).get("frame_meta") or {})
-    available_cameras = sorted(str(name) for name in tuple(frame_meta.get("cameras") or ()))
-    required = [str(name) for name in tuple(required_cameras or ("rgb",))]
-    has_frames = bool(frame_meta.get("has_frames", False))
-    frame_seq = int(frame_meta.get("frame_seq", 0) or 0)
-    ready = bool(has_frames and frame_seq > 0 and set(required).issubset(set(available_cameras)))
-    return {
-        "ready": ready,
-        "frame_seq": frame_seq,
-        "available_cameras": available_cameras,
-        "required_cameras": required,
-    }
-
-
 class GraspStagePlan(BaseStagePlan):
     """Stage plan for micro-adjustment and remote grasp cooperation."""
 
@@ -387,8 +354,6 @@ class GraspStagePlan(BaseStagePlan):
                 stage_state["remote_init_retry_inflight"] = False
                 retry_inflight = False
 
-            frame_gate = _frame_ready_for_remote(results, stage_state.get("remote_required_cameras"))
-
             if not service_init_confirmed:
                 if not retry_inflight and retry_count < retry_limit:
                     next_attempt = int(service_init_attempts) + 1
@@ -431,30 +396,6 @@ class GraspStagePlan(BaseStagePlan):
                                 "service_init_state": service_init_state or "failed",
                                 "service_init_attempts": service_init_attempts,
                                 "status_code": remote_result.get("status_code"),
-                            },
-                        ),
-                        snapshot=output_snapshot,
-                    )
-
-            if service_init_confirmed and not bool(stage_state.get("remote_predict_sent", False)):
-                if frame_gate["ready"]:
-                    stage_state["remote_predict_sent"] = True
-                    stage_state["remote_ready_frame_seq"] = int(frame_gate["frame_seq"])
-                    return StageOutput(
-                        vision_obs=self.build_obs(
-                            ctx,
-                            status="RUNNING",
-                            perception={"target_obs": target_obs},
-                            result={
-                                "remote_state": "predict_requested",
-                                "request_id": request_id,
-                                "init_confirmed": True,
-                                "service_init_state": service_init_state or "ready",
-                                "service_init_attempts": service_init_attempts,
-                                "frame_ready": True,
-                                "frame_seq": int(frame_gate["frame_seq"]),
-                                "required_cameras": list(frame_gate["required_cameras"]),
-                                "available_cameras": list(frame_gate["available_cameras"]),
                             },
                         ),
                         snapshot=output_snapshot,
@@ -545,8 +486,6 @@ class GraspStagePlan(BaseStagePlan):
             remote_state = "awaiting_remote"
             if not service_init_confirmed:
                 remote_state = "awaiting_init_retry" if retry_inflight else "awaiting_init"
-            elif not bool(stage_state.get("remote_predict_sent", False)):
-                remote_state = "awaiting_fresh_frames"
             else:
                 remote_state = "awaiting_predict_result"
 
@@ -570,11 +509,6 @@ class GraspStagePlan(BaseStagePlan):
                         "init_retry_count": int(stage_state.get("remote_init_retry_count", 0) or 0),
                         "init_retry_limit": retry_limit,
                         "init_retry_inflight": bool(stage_state.get("remote_init_retry_inflight", False)),
-                        "predict_sent": bool(stage_state.get("remote_predict_sent", False)),
-                        "frame_ready": bool(frame_gate["ready"]),
-                        "frame_seq": int(frame_gate["frame_seq"]),
-                        "required_cameras": list(frame_gate["required_cameras"]),
-                        "available_cameras": list(frame_gate["available_cameras"]),
                     },
                 ),
                 snapshot=output_snapshot,

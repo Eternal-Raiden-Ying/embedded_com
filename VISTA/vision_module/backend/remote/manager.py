@@ -250,12 +250,13 @@ class RemoteManager:
         except Exception:
             return None
 
-    def _build_predict_request(self, cmd: Dict[str, Any]) -> Optional[RemotePredictRequest]:
-        scheduler = self._scheduler
-        if scheduler is None:
-            return None
-        frame_slot = scheduler.read_slot("camera_frames")
-        frames = frame_slot.get("payload") if isinstance(frame_slot, dict) else None
+    def _build_predict_request(self, cmd: Dict[str, Any], frames: Dict[str, Any] = None) -> Optional[RemotePredictRequest]:
+        if frames is None:
+            scheduler = self._scheduler
+            if scheduler is None:
+                return None
+            frame_slot = scheduler.read_slot("camera_frames")
+            frames = frame_slot.get("payload") if isinstance(frame_slot, dict) else None
         request_id = cmd.get("request_id")
         if not isinstance(frames, dict):
             self._update_result(
@@ -470,7 +471,7 @@ class RemoteManager:
             return
 
         # ── loop worker: no longer used (effects channel removed) ──
-        self.log.warning("remote loop worker started but no effects producer exists; idling")
+        self.logger.warning("remote loop worker started but no effects producer exists; idling")
         self._worker_stop.wait(timeout=1.0)
 
     def _run_task(self, *, action: str, max_retries: int) -> None:
@@ -512,7 +513,10 @@ class RemoteManager:
             # Wait for a fresh camera frame matching current generation.
             # Mode switch clears scheduler slots, so the first frame after
             # camera threads restart may not be published yet.
-            deadline = time.time() + max(3.0, float(self._runtime_profile.get("timeout_s", 10.0) or 10.0) * 0.5)
+            if self._scheduler is None:
+                self._update_result(action="predict", state="predict_failed", ok=False, error="scheduler_unavailable")
+                return
+            deadline = time.time() + min(5.0, float(self._runtime_profile.get("timeout_s", 10.0) or 10.0) * 0.5)
             frames = None
             while time.time() < deadline:
                 if self._worker_stop.is_set():
@@ -530,7 +534,7 @@ class RemoteManager:
             if frames is None:
                 self._update_result(action="predict", state="predict_failed", ok=False, error="missing_camera_frames")
                 return
-            request = self._build_predict_request(cmd)
+            request = self._build_predict_request(cmd, frames=frames)
             if request is not None:
                 resp = self.predict(request)
                 self._record_response("predict", resp)

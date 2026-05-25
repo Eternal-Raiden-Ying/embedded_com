@@ -71,11 +71,67 @@ VistaApp
 - 进入 INIT stage → 执行完毕后自动转入 IDLE，等待 Orchestrator 发请求
 - INIT mode 的 plan 中包含所有启动时需要验证的 capability（camera check、predictor load、remote best-effort `/init`）
 
-### 2.4 effects 残留清理（原 Step D 收尾）
+### 2.4 Silent mode — 所有 stage 的 default
 
+当前各 StagePlan 的 `default_mode` 直接指向业务 mode（`SEARCH→TRACK_LOCAL`、`GRASP→MICRO_ADJUST`、`RETURN→TRACK_LOCAL`），导致 default mode 携带能力实现。改为每个 stage 有一个 **silent mode** 作为兜底：
+
+- 无任何 capability 实现（无 camera、无 predictor、无 remote、无 table_edge）
+- 仅响应 `req.mode_hint` 进行 mode 切换，或由 tick 逻辑主动设置 mode
+- 作为"非预期情况"的安全兜底
+
+**以 GRASP stage 为例**：
+
+| Mode | 触发 | 能力 |
+|------|------|------|
+| `IDLE`（silent default） | 进入 stage 时的初始状态，或 mode_hint 未匹配 | 无 |
+| `MICRO_ADJUST` | req.mode_hint 驱动，或 tick 中 allowlist 回退 | camera + predictor |
+| `GRASP_REMOTE_INIT` | ACCEPT + server_status != ready | remote task init |
+| `GRASP_REMOTE` | ACCEPT + server_status == ready，或 init 完成后自动切换 | camera + depth + remote task predict |
+
+进入 GRASP stage 时 Orchestrator 必带 `mode_hint`，所以不会停留在 silent mode。
+
+### 2.5 remote_init_status 路由 — 拆分 init/predict 结果
+
+当前 `remote_result` 混用：INIT 任务写 `service_init_state`/`service_init_confirmed`，PREDICT 任务写 `result`。拆分为两个路由：
+
+| 路由 | 生产者 | 消费者 | 内容 |
+|------|--------|--------|------|
+| `remote_init_status` | RemoteManager INIT task | StageController（RESPOND 路径）+ GraspStagePlan tick（GRASP_REMOTE_INIT 分支） | `service_init_state`、`service_init_confirmed`、retry 计数 |
+| `remote_result` | RemoteManager PREDICT task | GraspStagePlan tick（GRASP_REMOTE 分支） | `last_action`、`last_ok`、`has_result`、`result` |
+
+RemoteManager `_run_task` 根据 `action` 写入对应路由。Silent mode 订阅 `remote_init_status`，GRASP_REMOTE 订阅 `remote_result`。StageController.handle_request() RESPOND 路径从 `remote_init_status` 读取 server_status，不再依赖 MICRO_ADJUST 的订阅。
+
+### 2.6 ABCD 审计发现
+
+#### HIGH（已修复）
+
+| # | 问题 | 修复 |
+|---|------|------|
+| A1 | `RemoteProfile.command` 与 `action` 不匹配 | `command` 是 HTTP 线格式字段，task worker 用 `action`。暂保留 `command`，待 loop worker 全清后删除 |
+| C1 | RESPOND 路径 server_status 恒为 "unknown"，直达 GRASP_REMOTE 分支死代码 | 由 silent mode + `remote_init_status` 路由解决 |
+| D1 | PREDICT task 在 camera frames 就绪前执行 → `missing_camera_frames` | 已修复：`_run_task("predict")` 自旋等待帧 + generation 匹配 |
+
+#### MEDIUM
+
+| # | 问题 | 评估 |
+|---|------|------|
+| C2 | BUSY 守卫在 server_status 检查前触发——init 刚好完成时 RESPOND 仍返回 FAILED/busy | 将 BUSY 守卫移到 server_status 检查之后。如果 server_status 已是 "ready" 且 mode 仍为 GRASP_REMOTE_INIT（task 刚完成），跳过 BUSY 直接接受 |
+| C3 | GRASP_REMOTE_INIT→GRASP_REMOTE 切 mode 强制重新分配 camera | GRASP_REMOTE_INIT 目前 `enabled_cameras=()`，切到 GRASP_REMOTE 需要 rgb+depth。改为让 GRASP_REMOTE_INIT 也启用 camera（但不做 predict），减少切换开销 |
+| C4 | GRASP_REMOTE_INIT 和 GRASP_REMOTE 各自检查不同的 init 确认字段 | 拆分 `remote_init_status` 后统一用 `service_init_confirmed` |
+| A2 | GRASP_REMOTE 启用 depth camera → 触发 table_edge 启发式 → 意外启用 table_edge 10Hz | `_compile_plan()` 的 table_edge 启发式需增加 escape hatch：`table_edge_path="none"` 时跳过 |
+| A3 | `VISTA_TABLE_EDGE_HZ` 未被列入弃用警告 | 加入 `_warn_deprecated_env()` |
+
+### 2.7 effects 残留清理
+
+**已清理**（`a21ce7f`）：
+- `RemoteManager._worker_loop()` loop 路径 + `_handle_command()` + `_publish_event()` 删除
+
+**待清理**（VisionEngine 删除后）：
 - `stage_controller.py` 中 `_publish_effects()` 确认无其他使用者后删除
-- `Scheduler` 中 `remote_cmd` route 确认无其他使用者后删除
-- `remote_ack` route 确认无消费者后一并删除
+- `Scheduler` 中 `publish_event()` / `consume_event()` 确认无其他 route 使用后删除
+- `mode_controller.py` 中 `remote_cmd` / `remote_ack` route 注册 + `_verify_plan` 校验删除
+- `grasp.py` 中 `remote_ack` 订阅删除
+- 测试中 `remote_cmd` / `remote_ack` 引用更新
 
 ---
 
@@ -99,7 +155,10 @@ VistaApp
 | B | RemoteManager task worker + 孤儿线程 kill + TableEdgeManager path config | A | done |
 | C | GRASP_REMOTE_INIT mode + server_status + GraspStagePlan mode 链 | B | done |
 | D | effects producer 删除（`_remote_effect`） | C | done |
-| E | VisionEngine 删除 + capability 回调删除 + 层级重连 | D | **待做** |
-| F | INIT stage + INIT mode（全局初始化） | E | **待做** |
-| G | effects 残留清理（`_publish_effects`、`remote_cmd`、`remote_ack`） | D | **待做** |
-| H | ARCHITECTURE.md 同步 | E+F+G | **待做** |
+| E | VisionEngine 删除 + capability 回调删除 + 层级重连 | D | done |
+| F1 | INIT stage + INIT mode（全局初始化） | E | done |
+| F2 | Silent mode — 所有 stage 的 default mode 改为无 capability 的兜底 | F1 | **待做** |
+| F3 | remote_init_status 路由 — 拆分 init/predict 结果到独立 route | F2 | **待做** |
+| F4 | Audit findings 修复（C2 C3 C4 A2 A3） | F3 | **待做** |
+| G | effects 残留清理（`remote_cmd`、`remote_ack` route 删除） | E, F3 | **待做** |
+| H | ARCHITECTURE.md 同步 | all done | **待做** |
