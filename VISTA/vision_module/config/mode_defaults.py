@@ -225,16 +225,6 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             release_cooldown_s=0.0,
             metadata={"contract": {"stage": "SILENT"}},
         ),
-        "IDLE": ModeProfile(
-            name="IDLE",
-            enabled_cameras=(),
-            predictor_enabled=False,
-            predictor_model=None,
-            remote=_default_remote_profile(enabled=False),
-            preview=preview_profile("IDLE", enabled=False, sink_name="null"),
-            release_cooldown_s=0.0,
-            metadata={"contract": {"stage": "IDLE"}},
-        ),
         "TRACK_LOCAL": ModeProfile(
             name="TRACK_LOCAL",
             enabled_cameras=("rgb", "depth"),

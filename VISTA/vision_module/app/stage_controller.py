@@ -23,7 +23,7 @@ class StageController:
         self._event_sink = event_sink
         self._mode_controller = mode_controller
         self.scheduler = scheduler
-        self._last_applied_mode = "IDLE"
+        self._last_applied_mode = "SILENT"
         self._last_interaction_state_key = None
         self._last_request_signature = None
         self.last_request_trace: Dict[str, Any] = {}
@@ -31,7 +31,7 @@ class StageController:
             try:
                 self._last_applied_mode = normalize_upper(self._mode_controller.current_mode(), "IDLE")
             except Exception:
-                self._last_applied_mode = "IDLE"
+                self._last_applied_mode = "SILENT"
 
     def _log(self, message: str, **fields) -> None:
         if self.logger is not None:
@@ -315,7 +315,7 @@ class StageController:
         if target == "IDLE":
             self._ctx = StageContext(
                 current_stage="IDLE",
-                current_mode="IDLE",
+                current_mode="SILENT",
                 session_id=self._ctx.session_id,
                 req_id=self._ctx.req_id,
                 epoch=int(self._ctx.epoch),
@@ -615,7 +615,7 @@ class StageController:
     def reset(self) -> None:
         """Reset stage runtime state to a clean idle context."""
         self._ctx = StageContext()
-        self._last_applied_mode = "IDLE"
+        self._last_applied_mode = "SILENT"
         self._last_interaction_state_key = None
 
     def snapshot(self) -> Dict[str, object]:

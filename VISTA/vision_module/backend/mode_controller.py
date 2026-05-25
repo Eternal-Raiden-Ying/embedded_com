@@ -24,7 +24,7 @@ class ModeController:
         self._backend_event_sink = backend_event_sink
         self._preview_allowed = bool(preview_allowed)
         self._profiles: Dict[str, ModeProfile] = {}
-        self._current_mode: str = "IDLE"
+        self._current_mode: str = "SILENT"
         self._target_mode: Optional[str] = None
         self._last_switch_ts: float = 0.0
         self._generation = 0
@@ -32,8 +32,8 @@ class ModeController:
         self._last_switch_result: Dict[str, Any] = {
             "ok": True,
             "reason": "init",
-            "requested_mode": "IDLE",
-            "active_mode": "IDLE",
+            "requested_mode": "SILENT",
+            "active_mode": "SILENT",
             "generation": 0,
         }
 
@@ -106,7 +106,7 @@ class ModeController:
         preview_enabled = bool(profile.preview.enabled and self._preview_allowed)
         remote_profile = profile.remote
         return {
-            "mode": str(profile.name or "IDLE").strip().upper() or "IDLE",
+            "mode": str(profile.name or "SILENT").strip().upper() or "SILENT",
             "contract": {
                 "results": {
                     "stage": ["frame_meta", "local_perception", "table_edge_obs", "remote_result"],
@@ -200,7 +200,7 @@ class ModeController:
         return True
 
     def prepare_switch(self, name: str, reason: str = "", force: bool = False) -> Optional[Dict[str, Any]]:
-        requested = str(name or "IDLE").strip().upper() or "IDLE"
+        requested = str(name or "SILENT").strip().upper() or "SILENT"
         profile = self.resolve_profile(requested)
         if profile is None:
             self._log("mode switch failed", requested_mode=requested, reason=reason)
@@ -242,7 +242,7 @@ class ModeController:
                 level="error",
                 failure_type="mode_plan_invalid",
                 requested_mode=requested,
-                current_mode=str(self._current_mode or "IDLE").strip().upper(),
+                current_mode=str(self._current_mode or "SILENT").strip().upper(),
                 reason=str(reason or ""),
             )
             return None
@@ -272,7 +272,7 @@ class ModeController:
             }
             return profile
 
-        previous_mode = str(switch_state.get("previous_mode") or self._current_mode).strip().upper() or "IDLE"
+        previous_mode = str(switch_state.get("previous_mode") or self._current_mode).strip().upper() or "SILENT"
         next_generation = int(switch_state.get("next_generation", self._generation + 1))
         plan = dict(switch_state.get("plan") or {})
         self._active_plan = dict(plan or {})
@@ -299,8 +299,8 @@ class ModeController:
 
     def record_switch_failure(self, switch_state: Optional[Dict[str, Any]], reason: str = "mode_apply_failed") -> None:
         payload = dict(switch_state or {})
-        requested_mode = str(payload.get("requested_mode") or self._target_mode or self._current_mode or "IDLE").strip().upper() or "IDLE"
-        previous_mode = str(payload.get("previous_mode") or self._current_mode or "IDLE").strip().upper() or "IDLE"
+        requested_mode = str(payload.get("requested_mode") or self._target_mode or self._current_mode or "SILENT").strip().upper() or "SILENT"
+        previous_mode = str(payload.get("previous_mode") or self._current_mode or "SILENT").strip().upper() or "SILENT"
         next_generation = int(payload.get("next_generation", self._generation + 1) or (self._generation + 1))
         self._target_mode = previous_mode
         self._last_switch_result = {
@@ -327,7 +327,7 @@ class ModeController:
             "runtime_running": True,
             "active_runtime_generation": int(self._generation),
             "active_runtime_plan": dict(self._active_plan or {}),
-            "active_runtime_mode": str((self._active_plan or {}).get("mode") or "IDLE").strip().upper() or "IDLE",
+            "active_runtime_mode": str((self._active_plan or {}).get("mode") or "SILENT").strip().upper() or "SILENT",
             "scheduler": self.scheduler.snapshot(),
             "runtime_supervisor": self.supervisor.snapshot(),
         }
@@ -344,7 +344,7 @@ class ModeController:
         }
 
     def reset(self) -> None:
-        self._current_mode = "IDLE"
+        self._current_mode = "SILENT"
         self._target_mode = None
         self._last_switch_ts = 0.0
         self._generation = 0
@@ -352,8 +352,8 @@ class ModeController:
         self._last_switch_result = {
             "ok": True,
             "reason": "reset",
-            "requested_mode": "IDLE",
-            "active_mode": "IDLE",
+            "requested_mode": "SILENT",
+            "active_mode": "SILENT",
             "generation": 0,
         }
 

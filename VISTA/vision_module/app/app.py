@@ -604,7 +604,7 @@ class VistaApp(BaseModule):
     def _enter_cold_idle(self, epoch: int):
         self.log_info("runtime", "enter cold idle")
         self._record_event("ENTER_IDLE", trigger="idle_transition", epoch=int(epoch))
-        self.stage_controller.set_runtime_mode("IDLE", reason="enter_cold_idle", force=True)
+        self.stage_controller.set_runtime_mode("SILENT", reason="enter_cold_idle", force=True)
 
     def _emit_heartbeat_if_needed(self, force: bool = False):
         if not CONFIG.runtime.heartbeat_enabled:
