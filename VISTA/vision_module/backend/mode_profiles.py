@@ -46,6 +46,9 @@ class ModeProfile:
     predictor_model: Optional[str] = None
     remote: RemoteProfile = field(default_factory=RemoteProfile)
     preview: PreviewProfile = field(default_factory=PreviewProfile)
+    table_edge_enabled: bool = False
+    table_edge_path: str = "full"
+    table_edge_update_hz: float = 10.0
     loop_hz: Optional[float] = None
     send_hz: Optional[float] = None
     release_cooldown_s: float = 0.0

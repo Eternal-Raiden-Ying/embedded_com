@@ -233,6 +233,9 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             predictor_model=active_model,
             remote=_default_remote_profile(enabled=False),
             preview=preview_profile("TRACK_LOCAL", enabled=True),
+            table_edge_enabled=True,
+            table_edge_path="lightweight",
+            table_edge_update_hz=5.0,
             release_cooldown_s=2.0,
             metadata={
                 "contract": {
@@ -242,8 +245,6 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
                     "remote": "disabled",
                     "perception": ["target_obs", "table_edge_obs"],
                 },
-                "table_edge_path": "lightweight",
-                "table_edge_update_hz": 5.0,
             },
         ),
         "DEPTH_PERCEPTION": ModeProfile(
@@ -254,6 +255,9 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             predictor_model=table_model if table_bbox_enabled else None,
             remote=_default_remote_profile(enabled=False),
             preview=preview_profile("DEPTH_PERCEPTION", enabled=True),
+            table_edge_enabled=True,
+            table_edge_path="full",
+            table_edge_update_hz=10.0,
             release_cooldown_s=2.0,
             metadata={
                 "contract": {
@@ -262,8 +266,6 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
                     "remote": "disabled",
                     "perception": "table_edge_obs",
                 },
-                "table_edge_path": "full",
-                "table_edge_update_hz": 10.0,
             },
         ),
         "TABLE_EDGE_PERCEPTION": ModeProfile(
@@ -274,6 +276,9 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             predictor_model=active_model,
             remote=_default_remote_profile(enabled=False),
             preview=preview_profile("TABLE_EDGE_PERCEPTION", enabled=True),
+            table_edge_enabled=True,
+            table_edge_path="full",
+            table_edge_update_hz=10.0,
             release_cooldown_s=2.0,
             metadata={
                 "contract": {
@@ -283,8 +288,6 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
                     "remote": "disabled",
                     "perception": ["local_perception", "table_edge_obs"],
                 },
-                "table_edge_path": "full",
-                "table_edge_update_hz": 10.0,
             },
         ),
         "MICRO_ADJUST": ModeProfile(

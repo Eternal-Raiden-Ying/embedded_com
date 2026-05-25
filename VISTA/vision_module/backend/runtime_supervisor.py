@@ -316,6 +316,12 @@ class RuntimeSupervisor:
                 self.table_edge_manager.stop_runtime()
             except Exception:
                 ok = False
+            releaser = getattr(self.table_edge_manager, "release_all", None)
+            if callable(releaser):
+                try:
+                    releaser()
+                except Exception:
+                    ok = False
         return ok
 
     def _resolve_preview_sink(self, payload: Dict[str, Any]):

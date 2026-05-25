@@ -162,13 +162,9 @@ class ModeController:
                     "metadata": dict(remote_profile.metadata or {}),
                 },
                 "table_edge": {
-                    "enabled": bool(
-                        "depth" in set(profile.enabled_cameras or ())
-                        or str(profile.name or "").strip().upper() == "DEPTH_PERCEPTION"
-                        or str(profile.name or "").strip().upper() == "TABLE_EDGE_PERCEPTION"
-                    ),
-                    "path": str((profile.metadata or {}).get("table_edge_path", "full")).strip().lower() or "full",
-                    "update_hz": float((profile.metadata or {}).get("table_edge_update_hz", 10.0)),
+                    "enabled": bool(profile.table_edge_enabled),
+                    "path": str(profile.table_edge_path or "full").strip().lower() or "full",
+                    "update_hz": float(profile.table_edge_update_hz or 10.0),
                 },
                 "preview": {
                     "enabled": preview_enabled,
@@ -191,6 +187,7 @@ class ModeController:
             "camera_frames": ("slot", "backend"),
             "frame_meta": ("slot", "stage"),
             "local_perception": ("slot", "stage"),
+            "table_edge_obs": ("slot", "stage"),
             "remote_result": ("slot", "stage"),
             "runtime_status": ("slot", "backend"),
             "remote_cmd": ("event", "backend"),
