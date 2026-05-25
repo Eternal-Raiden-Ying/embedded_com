@@ -610,6 +610,7 @@ class StageController:
         # Auto-transition: StagePlan set next_stage → transition after current tick output
         if finalized is not None and finalized.next_stage:
             self._transition_to(finalized.next_stage)
+            self._apply_context_mode(reason="auto_transition", force=True)
         return finalized
 
     def reset(self) -> None:

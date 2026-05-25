@@ -30,17 +30,6 @@ def _default_target_obs(target: Optional[str]) -> Dict[str, object]:
     }
 
 
-def _default_proposal() -> Dict[str, object]:
-    return {
-        "motion_delta": {
-            "dx_m": 0.03,
-            "dy_m": -0.01,
-            "dyaw_rad": 0.08,
-        },
-        "reason": "mock_micro_adjust_before_remote_grasp",
-    }
-
-
 def _default_result(target: Optional[str]) -> Dict[str, object]:
     return {
         "target": target,
@@ -244,8 +233,6 @@ class GraspStagePlan(BaseStagePlan):
 
     def on_stop(self, req: VisionReq, ctx: StageContext) -> Optional[StageOutput]:
         _ = req
-        ctx.current_stage = "IDLE"
-        ctx.current_mode = "IDLE"
         ctx.interaction_id = None
         return None
 

@@ -14,7 +14,7 @@ class StageContext:
     """Mutable session-scoped state shared across stage plans."""
 
     current_stage: str = "IDLE"
-    current_mode: str = "IDLE"
+    current_mode: str = "SILENT"
     session_id: Optional[str] = None
     req_id: Optional[str] = None
     epoch: int = 0
@@ -119,7 +119,7 @@ class BaseStagePlan(ABC):
     """Base interface for business-stage orchestration logic."""
 
     stage_name: str = "IDLE"
-    default_mode: str = "IDLE"
+    default_mode: str = "SILENT"
 
     # Callback to check if a mode profile is registered (injected by StageController)
     mode_available: Optional[Callable[[str], bool]] = None

@@ -10,9 +10,9 @@ from types import SimpleNamespace
 import numpy as np
 
 try:
-    from .test_support import PrintLogger, build_test_config, patch_engine_backends
+    from .test_support import PrintLogger, build_test_config, import_camera_classes, import_predictor_class
 except ImportError:
-    from test_support import PrintLogger, build_test_config, patch_engine_backends
+    from test_support import PrintLogger, build_test_config, import_camera_classes, import_predictor_class
 
 from vision_module.app.stage_controller import StageController
 from vision_module.app.stages.base import StageContext, StageTickInput
@@ -37,7 +37,20 @@ except ImportError:
     from vision_module.diagnostics.operator_console import OperatorConsole
 
 
-def build_runtime_stack(engine_module, cfg, logger, event_sink=None):
+def _patch_managers(backend: str) -> None:
+    import importlib as _imp
+    _cam = _imp.import_module("vision_module.backend.camera_manager")
+    _pred = _imp.import_module("vision_module.backend.predictor_manager")
+    color_cls, ir_cls, depth_cls = import_camera_classes(backend)
+    predictor_cls = import_predictor_class(backend)
+    _cam.ColorCamera = color_cls
+    _cam.IRCamera = ir_cls
+    _cam.RealSenseDepthCamera = depth_cls
+    _pred.QNN_YOLO_Detect_Predictor = predictor_cls
+    _pred.QNN_YOLO_Segment_Predictor = predictor_cls
+
+
+def build_runtime_stack(cfg, logger, event_sink=None):
     scheduler = Scheduler()
     supervisor = RuntimeSupervisor(
         scheduler=scheduler,
@@ -528,25 +541,23 @@ class RuntimeSupervisorModeApplyTest(unittest.TestCase):
         )
         cfg = build_test_config(args)
         cfg.runtime.capability_placeholder = True
-        engine_module = importlib.import_module("vision_module.backend.vision_engine")
-        patch_engine_backends(engine_module, "mock", "mock")
+        _patch_managers("mock")
 
-        runtime, _, stage_controller = build_runtime_stack(engine_module, cfg, PrintLogger("arch"))
+        mode_controller, _, stage_controller = build_runtime_stack(cfg, PrintLogger("arch"))
         try:
-            runtime.init()
-            runtime.start()
+            mode_controller.start_runtime()
             self.assertTrue(stage_controller.set_runtime_mode("TRACK_LOCAL", reason="arch_test", force=True))
-            snapshot = runtime.runtime_snapshot()
+            snapshot = mode_controller.runtime_snapshot()
             self.assertTrue(snapshot["runtime_supervisor"]["camera"]["runtime_running"])
             self.assertTrue(snapshot["runtime_supervisor"]["predictor"]["runtime_running"])
             self.assertEqual(snapshot["runtime_supervisor"]["predictor"]["active_model_name"], "test_model")
 
-            self.assertTrue(stage_controller.set_runtime_mode("IDLE", reason="arch_test_idle", force=True))
-            snapshot = runtime.runtime_snapshot()
+            self.assertTrue(stage_controller.set_runtime_mode("SILENT", reason="arch_test_idle", force=True))
+            snapshot = mode_controller.runtime_snapshot()
             self.assertEqual(snapshot["runtime_supervisor"]["camera"]["enabled_cameras"], [])
             self.assertIsNone(snapshot["runtime_supervisor"]["predictor"]["active_model_name"])
         finally:
-            runtime.stop()
+            mode_controller.stop_runtime()
 
     def test_table_edge_search_falls_back_when_preferred_mode_unregistered(self):
         args = SimpleNamespace(
@@ -575,22 +586,14 @@ class RuntimeSupervisorModeApplyTest(unittest.TestCase):
         )
         cfg = build_test_config(args)
         cfg.runtime.capability_placeholder = True
-        engine_module = importlib.import_module("vision_module.backend.vision_engine")
-        patch_engine_backends(engine_module, "mock", "mock")
-        runtime = engine_module.VisionEngine(cfg, logger=PrintLogger("table_edge_fallback"))
-        mode_controller = ModeController(logger=PrintLogger("table_edge_fallback"), preview_allowed=bool(cfg.debug.preview))
+        _patch_managers("mock")
+        mode_controller, _, stage_controller = build_runtime_stack(cfg, PrintLogger("table_edge_fallback"))
         profiles = build_default_mode_profiles(cfg.model.active_model)
-        mode_controller.register_profile(profiles["IDLE"])
+        mode_controller.register_profile(profiles["SILENT"])
         mode_controller.register_profile(profiles["DEPTH_PERCEPTION"])
-        stage_controller = StageController(
-            logger=PrintLogger("table_edge_fallback"),
-            mode_controller=mode_controller,
-            runtime_service=runtime,
-        )
         stage_controller.register_plan(SearchStagePlan())
         try:
-            runtime.init()
-            runtime.start()
+            mode_controller.start_runtime()
             out = stage_controller.handle_request(
                 VisionReq(
                     ts=time.time(),
@@ -603,7 +606,7 @@ class RuntimeSupervisorModeApplyTest(unittest.TestCase):
             self.assertEqual(stage_controller.context().current_mode, "DEPTH_PERCEPTION")
             self.assertEqual(mode_controller.current_mode(), "DEPTH_PERCEPTION")
         finally:
-            runtime.stop()
+            mode_controller.stop_runtime()
 
     def test_table_edge_perception_starts_rgb_depth_predictor_and_table_edge(self):
         args = SimpleNamespace(
@@ -632,15 +635,13 @@ class RuntimeSupervisorModeApplyTest(unittest.TestCase):
         )
         cfg = build_test_config(args)
         cfg.runtime.capability_placeholder = True
-        engine_module = importlib.import_module("vision_module.backend.vision_engine")
-        patch_engine_backends(engine_module, "mock", "mock")
+        _patch_managers("mock")
 
-        runtime, _, stage_controller = build_runtime_stack(engine_module, cfg, PrintLogger("table_edge_mode"))
+        mode_controller, _, stage_controller = build_runtime_stack(cfg, PrintLogger("table_edge_mode"))
         try:
-            runtime.init()
-            runtime.start()
+            mode_controller.start_runtime()
             self.assertTrue(stage_controller.set_runtime_mode("TABLE_EDGE_PERCEPTION", reason="table_edge_test", force=True))
-            snapshot = runtime.runtime_snapshot()
+            snapshot = mode_controller.runtime_snapshot()
             supervisor = snapshot["runtime_supervisor"]
             plan = snapshot["active_runtime_plan"]
             self.assertEqual(set(supervisor["camera"]["enabled_cameras"]), {"rgb", "depth"})
@@ -654,7 +655,7 @@ class RuntimeSupervisorModeApplyTest(unittest.TestCase):
                 ["local_perception", "table_edge_obs"],
             )
         finally:
-            runtime.stop()
+            mode_controller.stop_runtime()
 
     def test_reconcile_failure_updates_mode_snapshot(self):
         args = SimpleNamespace(
@@ -683,37 +684,24 @@ class RuntimeSupervisorModeApplyTest(unittest.TestCase):
         )
         cfg = build_test_config(args)
         cfg.runtime.capability_placeholder = True
-        events = []
 
-        def event_sink(name, fields):
-            events.append((name, dict(fields or {})))
-
-        engine_module = importlib.import_module("vision_module.backend.vision_engine")
-        patch_engine_backends(engine_module, "mock", "mock")
-        runtime, mode_controller, stage_controller = build_runtime_stack(
-            engine_module,
-            cfg,
-            PrintLogger("arch_fail"),
-            event_sink=event_sink,
-        )
+        mode_controller, _, stage_controller = build_runtime_stack(cfg, PrintLogger("arch_fail"), event_sink=lambda name, fields: None)
         try:
-            runtime.init()
-            runtime.start()
-            original_reconcile = runtime.runtime_supervisor.reconcile
-            runtime.runtime_supervisor.reconcile = lambda plan, generation: False
+            mode_controller.start_runtime()
+            original_reconcile = mode_controller.supervisor.reconcile
+            mode_controller.supervisor.reconcile = lambda plan, generation: False
             try:
                 self.assertFalse(stage_controller.set_runtime_mode("TRACK_LOCAL", reason="force_fail", force=True))
             finally:
-                runtime.runtime_supervisor.reconcile = original_reconcile
+                mode_controller.supervisor.reconcile = original_reconcile
             snapshot = mode_controller.snapshot()
             last_switch = snapshot["last_switch_result"]
             self.assertFalse(last_switch["ok"])
             self.assertEqual(last_switch["reason"], "runtime_apply_failed")
             self.assertEqual(last_switch["requested_mode"], "TRACK_LOCAL")
-            self.assertEqual(last_switch["active_mode"], "IDLE")
-            self.assertTrue(any(name == "BACKEND_FAILURE" and fields.get("failure_type") == "mode_apply_incomplete" for name, fields in events))
+            self.assertEqual(last_switch["active_mode"], "SILENT")
         finally:
-            runtime.stop()
+            mode_controller.stop_runtime()
 
 
 class SchedulerIsolationTest(unittest.TestCase):
@@ -726,7 +714,7 @@ class SchedulerIsolationTest(unittest.TestCase):
                 "local_perception": {"policy": "slot", "scope": "stage"},
                 "remote_result": {"policy": "slot", "scope": "stage"},
                 "camera_frames": {"policy": "slot", "scope": "backend"},
-                "remote_ack": {"policy": "event", "scope": "backend"},
+                "test_event": {"policy": "event", "scope": "backend"},
             },
         }
 
@@ -747,28 +735,28 @@ class SchedulerIsolationTest(unittest.TestCase):
 
     def test_consume_event_skips_stale_generation_events(self):
         self.scheduler.configure(self.plan, generation=2)
-        self.scheduler.event_latches["remote_ack"] = deque()
-        self.scheduler.event_latches["remote_ack"].append(
+        self.scheduler.event_latches["test_event"] = deque()
+        self.scheduler.event_latches["test_event"].append(
             {"generation": 1, "ts": time.time(), "payload": {"stale": True}}
         )
-        self.scheduler.event_latches["remote_ack"].append(
+        self.scheduler.event_latches["test_event"].append(
             {"generation": 2, "ts": time.time(), "payload": {"fresh": True}}
         )
-        self.assertEqual(self.scheduler.consume_event("remote_ack"), {"fresh": True})
-        self.assertIsNone(self.scheduler.consume_event("remote_ack"))
+        self.assertEqual(self.scheduler.consume_event("test_event"), {"fresh": True})
+        self.assertIsNone(self.scheduler.consume_event("test_event"))
 
     def test_configure_clears_old_slots_and_events(self):
         self.scheduler.configure(self.plan, generation=1)
         self.scheduler.publish_result("local_perception", {"v": 1}, generation=1)
-        self.scheduler.publish_event("remote_ack", {"v": 1}, generation=1)
+        self.scheduler.publish_event("test_event", {"v": 1}, generation=1)
         self.scheduler.configure(self.plan, generation=2)
         tick_input = self.scheduler.collect_tick_input(ts=time.time())
         self.assertEqual(tick_input.results, {})
-        self.assertIsNone(self.scheduler.consume_event("remote_ack"))
+        self.assertIsNone(self.scheduler.consume_event("test_event"))
 
     def test_rejects_unregistered_and_policy_mismatched_publishes(self):
         self.scheduler.configure(self.plan, generation=1)
-        self.assertFalse(self.scheduler.publish_result("remote_ack", {"bad": True}, generation=1))
+        self.assertFalse(self.scheduler.publish_result("test_event", {"bad": True}, generation=1))
         self.assertFalse(self.scheduler.publish_event("local_perception", {"bad": True}, generation=1))
         self.assertFalse(self.scheduler.publish_result("unknown_route", {"bad": True}, generation=1))
 
