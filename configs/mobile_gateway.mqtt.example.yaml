@@ -39,6 +39,8 @@ orchestrator:
   task_ack_host: "127.0.0.1"
   task_ack_port: 9012
   state_blocks_path: ""
+  state_block_log_mode: "summary"  # summary / full / disabled
+  state_block_log_period_s: 1.0
 
 mobile_gateway:
   cmd_in_host: "127.0.0.1"

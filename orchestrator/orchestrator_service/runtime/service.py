@@ -2232,12 +2232,65 @@ class OrchestratorService(BaseModule):
     def _emit_state_block_if_needed(self):
         block = self.core.export_state_block()
         now = time.time()
-        key = safe_dump(block)
+        key = self._state_block_dedup_key(block)
         if (now - self._last_state_block_ts) < float(self.cfg.runtime.state_block_period_s) and key == self._last_state_block_key:
             return
         self._last_state_block_ts = now
         self._last_state_block_key = key
         self.run_logger.write_state_block(block)
+
+    def _state_block_dedup_key(self, block: Dict[str, Any]) -> str:
+        key_fields = {
+            "state",
+            "prev_state",
+            "resume_state",
+            "task_intent",
+            "active_target",
+            "session_id",
+            "epoch",
+            "req_id",
+            "vision_stage",
+            "vision_mode",
+            "current_edge_id",
+            "edge_visit_index",
+            "edge_transition_count",
+            "table_cycle_count",
+            "last_enter_reason",
+            "last_fail_reason",
+            "last_safety_reason",
+            "vision_req_fail_streak",
+            "has_table_edge_obs",
+            "has_target_obs",
+            "lock_ready",
+            "lock_reason",
+            "table_found",
+            "edge_found",
+            "edge_valid",
+            "control_level",
+            "usable_for_approach",
+            "usable_for_alignment",
+            "usable_for_stop",
+            "pose_found",
+            "table_confirmed_by_yolo",
+            "yolo_gate_open",
+            "table_approach_phase",
+            "stale_level",
+            "stale_guard_active",
+            "stale_guard_reason",
+            "edge_obs_is_stale",
+            "edge_follow_stale",
+            "handoff_state",
+            "slide_ref_ready",
+            "task_result",
+            "edge_retries",
+            "slide_entries",
+            "target_confirm_count",
+            "target_locked_count",
+            "last_matched_cls",
+            "lost_reason",
+            "warnings",
+        }
+        return safe_dump({name: block.get(name) for name in sorted(key_fields)})
 
     def _age_or_none(self, ts_value: float) -> Optional[float]:
         if not ts_value:

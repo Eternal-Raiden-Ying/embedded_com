@@ -477,9 +477,17 @@ class RunLogger:
         self.stack_run_id = str(stack_run_id).strip() or make_stack_run_id()
         self.run_dir = self._resolve_run_dir(runs_root)
         self.run_dir.mkdir(parents=True, exist_ok=True)
+        self.max_jsonl_bytes = self._env_int("ROBOT_JSONL_MAX_BYTES", 64 * 1024 * 1024)
+        self.rotate_backups = self._env_int("ROBOT_JSONL_ROTATE_BACKUPS", 3)
         self._event_fp = None
         if enable_text_events:
             self._event_fp = open(self.run_dir / "events.log", "a", encoding="utf-8")
+
+    def _env_int(self, name: str, default: int) -> int:
+        try:
+            return max(0, int(os.getenv(name, str(default)) or default))
+        except (TypeError, ValueError):
+            return int(default)
 
     def _module_dir_name(self) -> str:
         if self.module_name == "orch":
@@ -507,8 +515,36 @@ class RunLogger:
 
     def _write_json_line(self, path: Path, payload: Dict[str, Any]) -> None:
         line = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        self._rotate_jsonl_if_needed(path, len(line.encode("utf-8")) + 1)
         with open(path, "a", encoding="utf-8") as fp:
             fp.write(line + "\n")
+
+    def _rotate_jsonl_if_needed(self, path: Path, pending_bytes: int) -> None:
+        if self.max_jsonl_bytes <= 0:
+            return
+        try:
+            current_size = path.stat().st_size
+        except FileNotFoundError:
+            return
+        except OSError:
+            return
+        if current_size + max(0, int(pending_bytes)) <= self.max_jsonl_bytes:
+            return
+        backups = max(1, int(self.rotate_backups or 1))
+        for index in range(backups, 0, -1):
+            src = path.with_name(f"{path.name}.{index}")
+            dst = path.with_name(f"{path.name}.{index + 1}")
+            try:
+                if index == backups and src.exists():
+                    src.unlink()
+                elif src.exists():
+                    src.replace(dst)
+            except OSError:
+                return
+        try:
+            path.replace(path.with_name(f"{path.name}.1"))
+        except OSError:
+            return
 
     def _ordered_payload(
         self,

@@ -222,6 +222,11 @@ def _apply_config_file(cfg: MobileGatewayConfig, data: Dict[str, Any]) -> None:
     cfg.orchestrator_task_ack_in.host = str(orch.get("task_ack_host") or cfg.orchestrator_task_ack_in.host)
     cfg.orchestrator_task_ack_in.port = int(orch.get("task_ack_port", cfg.orchestrator_task_ack_in.port) or cfg.orchestrator_task_ack_in.port)
     cfg.backend.state_blocks_path = str(orch.get("state_blocks_path") or cfg.backend.state_blocks_path)
+    cfg.backend.state_block_log_mode = str(orch.get("state_block_log_mode") or cfg.backend.state_block_log_mode)
+    cfg.backend.state_block_log_period_s = float(
+        orch.get("state_block_log_period_s", cfg.backend.state_block_log_period_s)
+        or cfg.backend.state_block_log_period_s
+    )
 
     gateway = dict(data.get("mobile_gateway") or {})
     cfg.command_in.host = str(gateway.get("cmd_in_host") or cfg.command_in.host)
@@ -301,6 +306,14 @@ def build_config(config_file: str = "") -> MobileGatewayConfig:
     cfg.backend.state_blocks_path = _env_str_any(
         ["MOBILE_GATEWAY_STATE_BLOCKS_PATH", "MOBILE_GATEWAY_ORCH_STATE_BLOCKS_PATH"],
         cfg.backend.state_blocks_path,
+    )
+    cfg.backend.state_block_log_mode = _env_str(
+        "MOBILE_GATEWAY_ORCH_STATE_BLOCK_LOG_MODE",
+        cfg.backend.state_block_log_mode,
+    )
+    cfg.backend.state_block_log_period_s = _env_float(
+        "MOBILE_GATEWAY_ORCH_STATE_BLOCK_LOG_PERIOD_S",
+        cfg.backend.state_block_log_period_s,
     )
     cfg.backend.stop_cooldown_s = _env_float("MOBILE_GATEWAY_STOP_COOLDOWN_S", cfg.backend.stop_cooldown_s)
 

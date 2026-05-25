@@ -59,6 +59,8 @@ class GatewayBackendConfig:
     observer_poll_interval_s: float = 0.25
     orchestrator_runs_dir: str = field(default_factory=lambda: str(_ORCH_ROOT / "runs"))
     state_blocks_path: str = ""
+    state_block_log_mode: str = "summary"
+    state_block_log_period_s: float = 1.0
     stop_cooldown_s: float = 1.0
 
 

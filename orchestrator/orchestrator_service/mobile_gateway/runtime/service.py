@@ -347,6 +347,8 @@ class MobileGatewayService(BaseModule):
         self._last_heartbeat_log_ts = 0.0
         self._heartbeat_count = 0
         self._last_observer_poll_ts = 0.0
+        self._last_state_block_log_ts = 0.0
+        self._last_state_block_log_key = ""
         self._last_req_ts = 0.0
         self._last_stop_ts = 0.0
         self._active_template: Optional[TaskTemplate] = None
@@ -925,8 +927,84 @@ class MobileGatewayService(BaseModule):
             status["warnings"] = list(payload.get("warnings") or [])
         if error_info is not None:
             status["raw_error"] = error_info["raw_error"]
-        self.run_logger.write_jsonl("orchestrator_state_block", payload)
+        self._log_orchestrator_state_block(payload)
         self._publish_status(status)
+
+    def _log_orchestrator_state_block(self, payload: Dict[str, Any]) -> None:
+        mode = str(getattr(self.cfg.backend, "state_block_log_mode", "summary") or "summary").strip().lower()
+        if mode in {"0", "false", "off", "none", "disabled"}:
+            return
+        record = dict(payload) if mode in {"full", "raw", "debug"} else self._state_block_summary(payload)
+        key = safe_dump(self._state_block_log_key(record))
+        now = now_ts()
+        period_s = max(0.0, float(getattr(self.cfg.backend, "state_block_log_period_s", 1.0) or 0.0))
+        if (now - self._last_state_block_log_ts) < period_s and key == self._last_state_block_log_key:
+            return
+        self._last_state_block_log_ts = now
+        self._last_state_block_log_key = key
+        self.run_logger.write_jsonl("orchestrator_state_block", record)
+
+    def _state_block_summary(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        fields = (
+            "ts",
+            "state",
+            "prev_state",
+            "resume_state",
+            "task_intent",
+            "active_target",
+            "session_id",
+            "epoch",
+            "req_id",
+            "vision_stage",
+            "vision_mode",
+            "current_edge_id",
+            "edge_visit_index",
+            "edge_transition_count",
+            "table_cycle_count",
+            "last_enter_reason",
+            "last_fail_reason",
+            "last_safety_reason",
+            "has_table_edge_obs",
+            "has_target_obs",
+            "lock_ready",
+            "lock_reason",
+            "table_found",
+            "edge_found",
+            "edge_valid",
+            "control_level",
+            "table_approach_phase",
+            "stale_level",
+            "stale_guard_active",
+            "stale_guard_reason",
+            "task_result",
+            "edge_retries",
+            "slide_entries",
+            "target_confirm_count",
+            "target_locked_count",
+            "last_matched_cls",
+            "last_matched_conf",
+            "last_edge_conf",
+            "lost_reason",
+            "warnings",
+        )
+        return {name: payload.get(name) for name in fields if name in payload}
+
+    def _state_block_log_key(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        key = dict(payload)
+        for name in (
+            "ts",
+            "table_edge_obs_ts",
+            "table_edge_obs_age_ms",
+            "obs_total_age_ms",
+            "control_loop_age_ms",
+            "warmup_elapsed_s",
+            "table_loss_elapsed_s",
+            "target_loss_elapsed_s",
+            "tag_loss_elapsed_s",
+            "task_total_time_s",
+        ):
+            key.pop(name, None)
+        return key
 
     def _publish_status(self, payload: Dict[str, Any], force: bool = False) -> None:
         payload = dict(payload)
