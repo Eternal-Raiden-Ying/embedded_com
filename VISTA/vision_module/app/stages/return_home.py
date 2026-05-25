@@ -84,9 +84,10 @@ class ReturnStagePlan(BaseStagePlan):
     """Stage plan for home-tag or return-target perception."""
 
     stage_name = "RETURN"
-    default_mode = "TRACK_LOCAL"
+    default_mode = "SILENT"
     common_routes = ("frame_meta", "runtime_status")
     optional_routes = {
+        "SILENT": (),
         "TRACK_LOCAL": ("local_perception",),
     }
 
@@ -110,6 +111,8 @@ class ReturnStagePlan(BaseStagePlan):
 
     def tick(self, tick_input: StageTickInput, ctx: StageContext) -> Optional[StageOutput]:
         """Produce home-observation outputs used by the return workflow."""
+        if normalize_upper(ctx.current_mode, self.default_mode) == "SILENT":
+            return StageOutput(vision_obs=self.build_obs(ctx, status="RELAXING"))
         results = dict(tick_input.results or {})
         home_tag_obs, source = resolve_stage_summary(
             results=results,

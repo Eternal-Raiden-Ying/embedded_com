@@ -507,7 +507,7 @@ class StageController:
 
         # START compat: auto-fill mode_hint for stages that have a well-known default
         if op == "START" and not req.mode_hint:
-            _default_mode_hints = {"SEARCH": "TRACK_LOCAL", "GRASP": "GRASP_REMOTE"}
+            _default_mode_hints = {"SEARCH": "TRACK_LOCAL", "GRASP": "GRASP_REMOTE", "RETURN": "TRACK_LOCAL"}
             hint = _default_mode_hints.get(stage)
             if hint:
                 req.mode_hint = hint

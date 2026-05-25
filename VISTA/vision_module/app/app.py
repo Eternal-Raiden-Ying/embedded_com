@@ -854,7 +854,8 @@ class VistaApp(BaseModule):
         self.req_server.start()
         self.mode_controller.start_runtime()
         # Activate INIT stage — non-blocking, task worker starts via mode plan
-        self.stage_controller.activate_stage("INIT")
+        init_req = VisionReq(type="vision_req", op="START", stage="INIT", mode_hint="INIT")
+        self.stage_controller.activate_stage("INIT", req=init_req)
         self._sync_runtime_from_stage_context(reason="service_start")
         self._running = True
         self._record_event("SERVICE_READY", trigger="start")
