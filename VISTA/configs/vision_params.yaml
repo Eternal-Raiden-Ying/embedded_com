@@ -130,6 +130,22 @@ table_edge:
   # 可选：full、fast_plane_only。默认保留 full 检测路径。
   detector_mode: full
   fast_plane_stride: 4
+  # fast_plane_only 使用固定安装位姿把稀疏深度点转换到机器人坐标：
+  # X=左右，Y=向前，Z=离地高度。pitch 为相机光轴向下俯仰角。
+  camera_pitch_deg: 15.0
+  camera_height_m: 0.70
+  camera_roll_deg: 0.0
+  camera_yaw_deg: 0.0
+  table_height_m: 0.40
+  front_face_z_min_m: 0.03
+  front_face_z_max_m: 0.43
+  min_vertical_z_span_m: 0.12
+  min_vertical_support_points: 3
+  x_bin_width_m: 0.04
+  y_cluster_bin_m: 0.04
+  min_front_face_columns: 3
+  min_front_face_x_span_m: 0.07
+  max_yaw_abs_rad: 0.75
 
   # 桌边检测频率。
   target_hz: 10.0

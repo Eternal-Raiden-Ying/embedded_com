@@ -451,6 +451,159 @@ class TableEdgeManager:
         }
 
     @staticmethod
+    def _finite_percentiles(values: Any, qs=(10, 50, 90)) -> Dict[str, Optional[float]]:
+        try:
+            arr = np.asarray(values, dtype=np.float32)
+            arr = arr[np.isfinite(arr)]
+        except Exception:
+            arr = np.asarray([], dtype=np.float32)
+        if arr.size <= 0:
+            return {f"p{int(q)}": None for q in qs}
+        return {f"p{int(q)}": float(np.percentile(arr, q)) for q in qs}
+
+    @staticmethod
+    def _camera_points_to_robot(
+        x_cam: Any,
+        y_cam_down: Any,
+        z_cam_forward: Any,
+        *,
+        pitch_deg: float,
+        camera_height_m: float,
+    ) -> tuple:
+        """Convert RealSense camera coordinates to robot frame.
+
+        Camera convention here is X right, Y down, Z forward. Robot convention is
+        X lateral, Y forward along ground, Z upward from ground. Positive pitch_deg
+        means the optical axis is pitched downward. With pitch=0, Y_robot=Z_cam and
+        Z_robot=camera_height-Y_cam.
+        """
+        theta = math.radians(float(pitch_deg))
+        c, s = math.cos(theta), math.sin(theta)
+        x_r = np.asarray(x_cam, dtype=np.float32)
+        y_down = np.asarray(y_cam_down, dtype=np.float32)
+        z_fwd = np.asarray(z_cam_forward, dtype=np.float32)
+        y_r = z_fwd * c - y_down * s
+        z_r = float(camera_height_m) - (z_fwd * s + y_down * c)
+        return x_r, y_r.astype(np.float32, copy=False), z_r.astype(np.float32, copy=False)
+
+    def _select_fast_front_face_representatives(
+        self,
+        *,
+        x_robot: Any,
+        y_robot: Any,
+        z_robot: Any,
+        px: Any,
+        py: Any,
+        x_bin_width_m: float,
+        y_cluster_bin_m: float,
+        min_support_points: int,
+        min_z_span_m: float,
+    ) -> Dict[str, Any]:
+        x_arr = np.asarray(x_robot, dtype=np.float32)
+        y_arr = np.asarray(y_robot, dtype=np.float32)
+        z_arr = np.asarray(z_robot, dtype=np.float32)
+        px_arr = np.asarray(px, dtype=np.int32)
+        py_arr = np.asarray(py, dtype=np.int32)
+        n = int(min(len(x_arr), len(y_arr), len(z_arr), len(px_arr), len(py_arr)))
+        if n <= 0:
+            return {"count": 0}
+        x_arr, y_arr, z_arr, px_arr, py_arr = x_arr[:n], y_arr[:n], z_arr[:n], px_arr[:n], py_arr[:n]
+        x_bins = np.floor(x_arr / max(1e-6, float(x_bin_width_m))).astype(np.int32)
+        reps = []
+        for xb in sorted(set(int(v) for v in x_bins.tolist())):
+            x_mask = x_bins == xb
+            if int(x_mask.sum()) < int(min_support_points):
+                continue
+            idxs = np.nonzero(x_mask)[0]
+            y_bins = np.floor(y_arr[idxs] / max(1e-6, float(y_cluster_bin_m))).astype(np.int32)
+            best = None
+            y_radius_bins = max(1, int(math.ceil(0.08 / max(1e-6, float(y_cluster_bin_m)))))
+            for yb in sorted(set(int(v) for v in y_bins.tolist())):
+                local = idxs[np.abs(y_bins - int(yb)) <= y_radius_bins]
+                support = int(len(local))
+                if support < int(min_support_points):
+                    continue
+                z_span = float(np.max(z_arr[local]) - np.min(z_arr[local])) if support > 1 else 0.0
+                if z_span < float(min_z_span_m):
+                    continue
+                y_spread = float(np.percentile(y_arr[local], 90) - np.percentile(y_arr[local], 10)) if support > 2 else 0.0
+                if y_spread > max(0.16, float(y_cluster_bin_m) * float(2 * y_radius_bins + 1)):
+                    continue
+                score = float(support) * float(z_span) / max(0.04, y_spread + 0.02)
+                item = {
+                    "score": score,
+                    "support": support,
+                    "z_span": z_span,
+                    "x": float(np.median(x_arr[local])),
+                    "y": float(np.median(y_arr[local])),
+                    "z": float(np.median(z_arr[local])),
+                    "px": int(np.median(px_arr[local])),
+                    "py": int(np.median(py_arr[local])),
+                    "y_spread": y_spread,
+                    "support_px": px_arr[local].astype(np.int32, copy=False),
+                    "support_py": py_arr[local].astype(np.int32, copy=False),
+                    "support_x": x_arr[local].astype(np.float32, copy=False),
+                    "support_y": y_arr[local].astype(np.float32, copy=False),
+                    "support_z": z_arr[local].astype(np.float32, copy=False),
+                }
+                if best is None or item["score"] > best["score"]:
+                    best = item
+            if best is not None:
+                reps.append(best)
+        if not reps:
+            return {"count": 0}
+        reps.sort(key=lambda item: item["x"])
+        return {
+            "count": int(len(reps)),
+            "x": np.asarray([r["x"] for r in reps], dtype=np.float32),
+            "y": np.asarray([r["y"] for r in reps], dtype=np.float32),
+            "z": np.asarray([r["z"] for r in reps], dtype=np.float32),
+            "px": np.asarray([r["px"] for r in reps], dtype=np.int32),
+            "py": np.asarray([r["py"] for r in reps], dtype=np.int32),
+            "support": np.asarray([r["support"] for r in reps], dtype=np.int32),
+            "z_span": np.asarray([r["z_span"] for r in reps], dtype=np.float32),
+            "y_spread": np.asarray([r["y_spread"] for r in reps], dtype=np.float32),
+            "support_total": int(sum(int(r["support"]) for r in reps)),
+            "support_px": np.concatenate([r["support_px"] for r in reps]).astype(np.int32, copy=False),
+            "support_py": np.concatenate([r["support_py"] for r in reps]).astype(np.int32, copy=False),
+            "support_x": np.concatenate([r["support_x"] for r in reps]).astype(np.float32, copy=False),
+            "support_y": np.concatenate([r["support_y"] for r in reps]).astype(np.float32, copy=False),
+            "support_z": np.concatenate([r["support_z"] for r in reps]).astype(np.float32, copy=False),
+        }
+
+    @staticmethod
+    def _weighted_line_fit(x: Any, y: Any, weights: Any = None) -> tuple:
+        x_arr = np.asarray(x, dtype=np.float32)
+        y_arr = np.asarray(y, dtype=np.float32)
+        if weights is None:
+            k, b = np.polyfit(x_arr, y_arr, 1)
+            return float(k), float(b)
+        w_arr = np.asarray(weights, dtype=np.float32)
+        n = int(min(len(x_arr), len(y_arr), len(w_arr)))
+        if n <= 0:
+            k, b = np.polyfit(x_arr, y_arr, 1)
+            return float(k), float(b)
+        w_arr = np.clip(w_arr[:n], 0.2, 3.0)
+        if not np.all(np.isfinite(w_arr)) or float(np.max(w_arr)) <= 0.0:
+            k, b = np.polyfit(x_arr[:n], y_arr[:n], 1)
+        else:
+            k, b = np.polyfit(x_arr[:n], y_arr[:n], 1, w=w_arr)
+        return float(k), float(b)
+
+    @staticmethod
+    def _representative_neighbor_mask(x_values: Any, *, max_gap_m: float) -> np.ndarray:
+        x_arr = np.asarray(x_values, dtype=np.float32)
+        n = int(len(x_arr))
+        if n < 4:
+            return np.ones(n, dtype=bool)
+        out = np.ones(n, dtype=bool)
+        for idx in range(n):
+            left = abs(float(x_arr[idx] - x_arr[idx - 1])) if idx > 0 else float("inf")
+            right = abs(float(x_arr[idx + 1] - x_arr[idx])) if idx < n - 1 else float("inf")
+            out[idx] = min(left, right) <= float(max_gap_m)
+        return out
+
+    @staticmethod
     def _sparse_pixel_sample(xs: Any, ys: Any, x0: int, y0: int, stride: int, *, cap: int = 1000) -> list:
         try:
             xs_arr = np.asarray(xs)
@@ -1115,60 +1268,245 @@ class TableEdgeManager:
         v = (float(y0) + yy.astype(np.float32) * float(stride))
         x_c = (u - float(calib.cx)) * z / float(calib.fx)
         y_c = (v - float(calib.cy)) * z / float(calib.fy)
-        table_mask = (y_c > float(getattr(cfg, "table_y_min", -0.2))) & (y_c < float(getattr(cfg, "table_y_max", 0.2)))
-        candidate_count = int(table_mask.sum())
+        table_edge_cfg = getattr(self.cfg, "table_edge", None)
+        pitch_deg = float(getattr(table_edge_cfg, "camera_pitch_deg", 30.0) or 30.0)
+        camera_height_m = float(getattr(table_edge_cfg, "camera_height_m", 0.60) or 0.60)
+        table_height_m = float(getattr(table_edge_cfg, "table_height_m", 0.40) or 0.40)
+        front_face_z_min = float(getattr(table_edge_cfg, "front_face_z_min_m", 0.03) or 0.03)
+        front_face_z_max = float(getattr(table_edge_cfg, "front_face_z_max_m", 0.43) or 0.43)
+        min_vertical_z_span = float(getattr(table_edge_cfg, "min_vertical_z_span_m", 0.12) or 0.12)
+        min_vertical_support = max(1, int(float(getattr(table_edge_cfg, "min_vertical_support_points", 3) or 3)))
+        x_bin_width_m = float(getattr(table_edge_cfg, "x_bin_width_m", 0.04) or 0.04)
+        y_cluster_bin_m = float(getattr(table_edge_cfg, "y_cluster_bin_m", 0.04) or 0.04)
+        min_front_face_columns = max(2, int(float(getattr(table_edge_cfg, "min_front_face_columns", 3) or 3)))
+        min_front_face_x_span = float(getattr(table_edge_cfg, "min_front_face_x_span_m", 0.07) or 0.07)
+        max_yaw_cfg = float(getattr(table_edge_cfg, "max_yaw_abs_rad", 0.75) or 0.75)
+        x_robot, y_robot, z_robot = self._camera_points_to_robot(
+            x_c,
+            y_c,
+            z,
+            pitch_deg=pitch_deg,
+            camera_height_m=camera_height_m,
+        )
+        robot_z_pct = self._finite_percentiles(z_robot)
+        ground_like_count = int(np.sum((z_robot >= -0.04) & (z_robot <= 0.06)))
+        table_height_like_count = int(np.sum(np.abs(z_robot - table_height_m) <= 0.06))
+        height_mask = (z_robot > front_face_z_min) & (z_robot < front_face_z_max)
+        candidate_count = int(height_mask.sum())
+        height_x = x_robot[height_mask]
+        height_y = y_robot[height_mask]
+        height_z = z_robot[height_mask]
+        height_px = (x0 + xx[height_mask].astype(np.int32) * int(stride)).astype(np.int32)
+        height_py = (y0 + yy[height_mask].astype(np.int32) * int(stride)).astype(np.int32)
+        candidate_z_pct = self._finite_percentiles(height_z)
+        candidate_x_span = float(np.max(height_x) - np.min(height_x)) if len(height_x) > 1 else 0.0
+        raw_sample_pixels = self._sparse_pixel_sample(xx, yy, x0, y0, stride, cap=1000)
+        fast_candidate_pixels = [[int(x), int(y)] for x, y in zip(height_px[:1000].tolist(), height_py[:1000].tolist())]
         profile["candidate_select_ms"] = self._ms_since(select_start)
-        if candidate_count < min_table:
-            payload = self._default_result(depth_valid=True, reason="not_enough_candidates", frame_seq=frame_seq, roi_meta=roi_meta)
+        if point_count <= 0:
+            payload = self._default_result(depth_valid=True, reason="no_robot_points", frame_seq=frame_seq, roi_meta=roi_meta)
+            payload.update(roi_payload)
+            payload.update(self._detector_mode_payload())
+            payload.update({"sampled_point_count": sampled_count, "point_count": point_count, "candidate_count": 0})
+            payload.update(fast_debug_base)
+            payload.update({
+                "fast_coord_frame": "robot_xyz",
+                "fast_camera_pitch_deg": pitch_deg,
+                "fast_camera_height_m": camera_height_m,
+                "fast_table_height_m": table_height_m,
+                "fast_raw_sampled_point_count": sampled_count,
+                "fast_gate_reject_reason": "no_robot_points",
+                "fast_gate_reason": "no_robot_points",
+                "fast_raw_reject_reason": "no_robot_points",
+                "fast_sampled_pixels": raw_sample_pixels,
+                "fast_candidate_pixels": [],
+                "fast_support_pixels": [],
+                "fast_front_face_rep_pixels": [],
+                "fast_inlier_pixels": [],
+                "fast_outlier_pixels": [],
+            })
+            profile["total_edge_process_ms"] = self._ms_since(total_start)
+            return self._attach_profile(payload, profile, path="fast_plane_only_no_robot_points")
+        if candidate_count < max(min_vertical_support, min_front_face_columns):
+            payload = self._default_result(depth_valid=True, reason="height_filter_empty", frame_seq=frame_seq, roi_meta=roi_meta)
             payload.update(roi_payload)
             payload.update(self._detector_mode_payload())
             payload.update({"sampled_point_count": sampled_count, "point_count": point_count, "candidate_count": candidate_count})
             payload.update(fast_debug_base)
             payload.update({
+                "fast_coord_frame": "robot_xyz",
+                "fast_camera_pitch_deg": pitch_deg,
+                "fast_camera_height_m": camera_height_m,
+                "fast_table_height_m": table_height_m,
+                "fast_robot_z_p10": robot_z_pct.get("p10"),
+                "fast_robot_z_p50": robot_z_pct.get("p50"),
+                "fast_robot_z_p90": robot_z_pct.get("p90"),
+                "fast_robot_z_min": float(np.min(z_robot)) if len(z_robot) else None,
+                "fast_robot_z_max": float(np.max(z_robot)) if len(z_robot) else None,
+                "fast_ground_like_count": ground_like_count,
+                "fast_table_height_like_count": table_height_like_count,
+                "candidate_robot_z_min": float(np.min(height_z)) if len(height_z) else None,
+                "candidate_robot_z_p50": candidate_z_pct.get("p50"),
+                "candidate_robot_z_max": float(np.max(height_z)) if len(height_z) else None,
                 "fast_raw_sampled_point_count": sampled_count,
                 "fast_raw_candidate_count": candidate_count,
+                "fast_candidate_point_count": candidate_count,
+                "fast_candidate_x_span_m": candidate_x_span,
                 "fast_score_area": float(candidate_count) / float(max(1, sampled_count)),
                 "fast_score_coverage": float(candidate_count) / float(max(1, sampled_count)),
-                "fast_gate_reject_reason": "not_enough_candidates",
-                "fast_gate_reason": "not_enough_candidates",
-                "fast_raw_reject_reason": "not_enough_candidates",
+                "fast_gate_reject_reason": "height_filter_empty",
+                "fast_gate_reason": "height_filter_empty",
+                "fast_raw_reject_reason": "height_filter_empty",
+                "fast_sampled_pixels": raw_sample_pixels,
+                "fast_candidate_pixel_count": int(len(fast_candidate_pixels)),
+                "fast_support_pixel_count": 0,
+                "fast_front_face_rep_pixel_count": 0,
+                "fast_inlier_pixel_count": 0,
+                "fast_outlier_pixel_count": 0,
+                "fast_candidate_pixels": fast_candidate_pixels,
+                "fast_support_pixels": [],
+                "fast_front_face_rep_pixels": [],
+                "fast_inlier_pixels": [],
+                "fast_outlier_pixels": [],
             })
             profile["total_edge_process_ms"] = self._ms_since(total_start)
-            return self._attach_profile(payload, profile, path="fast_plane_only_not_enough_candidates")
+            return self._attach_profile(payload, profile, path="fast_plane_only_height_filter_empty")
 
         fit_start = time.perf_counter()
-        x_t = x_c[table_mask]
-        z_t = z[table_mask]
-        residual_threshold = float(getattr(cfg, "front_plane_max_residual_m", 0.035) if cfg is not None else 0.035)
+        reps = self._select_fast_front_face_representatives(
+            x_robot=height_x,
+            y_robot=height_y,
+            z_robot=height_z,
+            px=height_px,
+            py=height_py,
+            x_bin_width_m=x_bin_width_m,
+            y_cluster_bin_m=y_cluster_bin_m,
+            min_support_points=min_vertical_support,
+            min_z_span_m=min_vertical_z_span,
+        )
+        rep_count = int(reps.get("count", 0) or 0)
+        support_total = int(reps.get("support_total", 0) or 0)
+        z_span_arr = np.asarray(reps.get("z_span", []), dtype=np.float32)
+        z_span_p50 = float(np.percentile(z_span_arr, 50)) if z_span_arr.size else 0.0
+        z_span_max = float(np.max(z_span_arr)) if z_span_arr.size else 0.0
+        support_x_pre = np.asarray(reps.get("support_x", []), dtype=np.float32)
+        rep_x_pre = np.asarray(reps.get("x", []), dtype=np.float32)
+        support_x_span_pre = float(np.max(support_x_pre) - np.min(support_x_pre)) if support_x_pre.size > 1 else 0.0
+        rep_x_span_pre = float(np.max(rep_x_pre) - np.min(rep_x_pre)) if rep_x_pre.size > 1 else 0.0
+        if rep_count < min_front_face_columns:
+            low_reason = "vertical_support_low" if rep_count <= 0 else "front_face_columns_low"
+            rep_px_pre = np.asarray(reps.get("px", []), dtype=np.int32)
+            rep_py_pre = np.asarray(reps.get("py", []), dtype=np.int32)
+            support_px_pre = np.asarray(reps.get("support_px", []), dtype=np.int32)
+            support_py_pre = np.asarray(reps.get("support_py", []), dtype=np.int32)
+            support_cap = 1600
+            support_step = max(1, int(math.ceil(float(len(support_px_pre)) / float(support_cap)))) if len(support_px_pre) else 1
+            fast_support_pixels = [[int(x), int(y)] for x, y in zip(support_px_pre[::support_step][:support_cap].tolist(), support_py_pre[::support_step][:support_cap].tolist())]
+            fast_rep_pixels = [[int(x), int(y)] for x, y in zip(rep_px_pre[:1000].tolist(), rep_py_pre[:1000].tolist())]
+            payload = self._default_result(depth_valid=True, reason=low_reason, frame_seq=frame_seq, roi_meta=roi_meta)
+            payload.update(roi_payload)
+            payload.update(self._detector_mode_payload())
+            payload.update({"sampled_point_count": sampled_count, "point_count": point_count, "candidate_count": candidate_count})
+            payload.update(fast_debug_base)
+            payload.update({
+                "fast_fit_attempted": False,
+                "fast_coord_frame": "robot_xyz",
+                "fast_camera_pitch_deg": pitch_deg,
+                "fast_camera_height_m": camera_height_m,
+                "fast_table_height_m": table_height_m,
+                "fast_robot_z_p10": robot_z_pct.get("p10"),
+                "fast_robot_z_p50": robot_z_pct.get("p50"),
+                "fast_robot_z_p90": robot_z_pct.get("p90"),
+                "fast_robot_z_min": float(np.min(z_robot)) if len(z_robot) else None,
+                "fast_robot_z_max": float(np.max(z_robot)) if len(z_robot) else None,
+                "candidate_robot_z_min": float(np.min(height_z)) if len(height_z) else None,
+                "candidate_robot_z_p50": candidate_z_pct.get("p50"),
+                "candidate_robot_z_max": float(np.max(height_z)) if len(height_z) else None,
+                "fast_ground_like_count": ground_like_count,
+                "fast_table_height_like_count": table_height_like_count,
+                "fast_raw_sampled_point_count": sampled_count,
+                "fast_raw_candidate_count": candidate_count,
+                "fast_candidate_point_count": candidate_count,
+                "fast_support_point_count": support_total,
+                "fast_rep_count": rep_count,
+                "fast_rep_inlier_count": 0,
+                "fast_rep_outlier_count": rep_count,
+                "fast_candidate_x_span_m": candidate_x_span,
+                "fast_support_x_span_m": support_x_span_pre,
+                "fast_rep_x_span_m": rep_x_span_pre,
+                "fast_fit_inlier_x_span_m": 0.0,
+                "fast_support_mode": "none",
+                "fast_fit_line_source": "none",
+                "fast_front_face_rep_count": rep_count,
+                "fast_front_face_support_point_count": support_total,
+                "fast_z_span_m_p50": z_span_p50,
+                "fast_z_span_m_max": z_span_max,
+                "fast_gate_reject_reason": low_reason,
+                "fast_gate_reason": low_reason,
+                "fast_raw_reject_reason": low_reason,
+                "fast_sampled_pixels": raw_sample_pixels,
+                "fast_candidate_pixel_count": int(len(fast_candidate_pixels)),
+                "fast_support_pixel_count": int(len(fast_support_pixels)),
+                "fast_front_face_rep_pixel_count": int(len(fast_rep_pixels)),
+                "fast_inlier_pixel_count": 0,
+                "fast_outlier_pixel_count": int(len(fast_rep_pixels)),
+                "fast_candidate_pixels": fast_candidate_pixels,
+                "fast_support_pixels": fast_support_pixels,
+                "fast_front_face_rep_pixels": fast_rep_pixels,
+                "fast_inlier_pixels": [],
+                "fast_outlier_pixels": fast_rep_pixels,
+            })
+            profile["plane_fit_ms"] = self._ms_since(fit_start)
+            profile["total_edge_process_ms"] = self._ms_since(total_start)
+            return self._attach_profile(payload, profile, path=f"fast_plane_only_{low_reason}")
+        x_t = np.asarray(reps.get("x"), dtype=np.float32)
+        y_t = np.asarray(reps.get("y"), dtype=np.float32)
+        rep_support = np.asarray(reps.get("support"), dtype=np.int32)
+        rep_z_span = np.asarray(reps.get("z_span", []), dtype=np.float32)
+        support_x = np.asarray(reps.get("support_x", []), dtype=np.float32)
+        support_x_span = float(np.max(support_x) - np.min(support_x)) if support_x.size > 1 else 0.0
+        rep_x_span = float(np.max(x_t) - np.min(x_t)) if x_t.size > 1 else 0.0
+        residual_threshold = max(0.035, float(getattr(cfg, "front_plane_max_residual_m", 0.035) if cfg is not None else 0.035) * 1.5)
         try:
-            k, b = np.polyfit(x_t, z_t, 1)
-            residual = np.abs(z_t - (float(k) * x_t + float(b)))
-            inlier = residual <= residual_threshold
+            support_w = np.sqrt(np.clip(rep_support.astype(np.float32), 1.0, 36.0))
+            z_w = np.clip(rep_z_span / max(1e-6, float(min_vertical_z_span)), 0.5, 1.5) if rep_z_span.size else 1.0
+            weights = np.clip(support_w * z_w, 0.5, 3.0)
+            k, b = self._weighted_line_fit(x_t, y_t, weights)
+            residual = np.abs(y_t - (float(k) * x_t + float(b)))
+            neighbor_mask = self._representative_neighbor_mask(x_t, max_gap_m=max(0.18, float(x_bin_width_m) * 5.0))
+            inlier = (residual <= residual_threshold) & neighbor_mask
             inlier_count = int(inlier.sum())
-            if inlier_count >= min_table:
-                k, b = np.polyfit(x_t[inlier], z_t[inlier], 1)
-                residual = np.abs(z_t - (float(k) * x_t + float(b)))
-                inlier = residual <= residual_threshold
+            if inlier_count >= min_front_face_columns:
+                k, b = self._weighted_line_fit(x_t[inlier], y_t[inlier], weights[inlier])
+                residual = np.abs(y_t - (float(k) * x_t + float(b)))
+                inlier = (residual <= residual_threshold) & neighbor_mask
                 inlier_count = int(inlier.sum())
             residual_mean = float(np.mean(residual[inlier])) if inlier_count > 0 else float(np.mean(residual))
             residual_max = float(np.max(residual[inlier])) if inlier_count > 0 else float(np.max(residual))
+            outlier = ~inlier
         except Exception as exc:
-            payload = self._default_result(depth_valid=True, reason=f"fast_fit_failed:{exc}", frame_seq=frame_seq, roi_meta=roi_meta)
+            payload = self._default_result(depth_valid=True, reason=f"birdview_fit_failed:{exc}", frame_seq=frame_seq, roi_meta=roi_meta)
             payload.update(roi_payload)
             payload.update(self._detector_mode_payload())
             payload.update({"sampled_point_count": sampled_count, "point_count": point_count, "candidate_count": candidate_count})
             payload.update(fast_debug_base)
             payload.update({
                 "fast_fit_attempted": True,
+                "fast_coord_frame": "robot_xyz",
                 "fast_raw_sampled_point_count": sampled_count,
                 "fast_raw_candidate_count": candidate_count,
-                "fast_gate_reject_reason": f"fast_fit_failed:{exc}",
-                "fast_gate_reason": f"fast_fit_failed:{exc}",
-                "fast_raw_reject_reason": f"fast_fit_failed:{exc}",
+                "fast_front_face_rep_count": rep_count,
+                "fast_front_face_support_point_count": support_total,
+                "fast_gate_reject_reason": f"birdview_fit_failed:{exc}",
+                "fast_gate_reason": f"birdview_fit_failed:{exc}",
+                "fast_raw_reject_reason": f"birdview_fit_failed:{exc}",
             })
             profile["plane_fit_ms"] = self._ms_since(fit_start)
             profile["total_edge_process_ms"] = self._ms_since(total_start)
             return self._attach_profile(payload, profile, path="fast_plane_only_fit_failed")
+        representative_inlier_count = int(inlier_count)
+        representative_outlier_count = int(np.sum(outlier)) if "outlier" in locals() else max(0, rep_count - representative_inlier_count)
+        support_inlier_count = int(np.sum(rep_support[inlier])) if representative_inlier_count > 0 and rep_support.size else 0
         profile["plane_fit_ms"] = self._ms_since(fit_start)
         profile["plane_or_edge_fit_ms"] = float(profile["plane_fit_ms"])
 
@@ -1177,60 +1515,84 @@ class TableEdgeManager:
         x_span = float(np.max(inlier_x) - np.min(inlier_x)) if inlier_x.size > 1 else 0.0
         yaw_err = math.atan(float(k))
         dist_err = float(b) - float(self._target_dist_m)
-        inlier_ratio = float(inlier_count) / float(max(1, candidate_count))
-        span_min = float(getattr(cfg, "front_plane_min_x_span_m", 0.20) if cfg is not None else 0.20)
-        max_yaw = max(0.75, float(getattr(cfg, "control_max_yaw_rad", 0.70) if cfg is not None else 0.70))
+        inlier_ratio = float(representative_inlier_count) / float(max(1, rep_count))
+        support_ratio = float(support_inlier_count) / float(max(1, support_total))
+        span_min = float(min_front_face_x_span)
+        max_yaw = float(max_yaw_cfg)
         residual_score = max(0.0, 1.0 - residual_mean / max(1e-6, residual_threshold))
         span_score = self._clip01(x_span / max(1e-6, span_min * 1.8))
         area_score = float(candidate_count) / float(max(1, sampled_count))
+        accepted_column_score = self._clip01(float(rep_count) / float(max(1, min_front_face_columns * 2)))
+        vertical_support_score = self._clip01(float(support_total) / float(max(1, min_front_face_columns * min_vertical_support * 2)))
+        z_span_score = self._clip01(z_span_p50 / max(1e-6, min_vertical_z_span * 1.5))
+        x_span_score = self._clip01(x_span / max(1e-6, min_front_face_x_span * 1.5))
         residual_p90 = float(np.percentile(residual[inlier], 90)) if inlier_count > 0 else float(np.percentile(residual, 90))
+        if representative_inlier_count >= 8 and x_span >= 0.30:
+            support_mode = "vertical"
+        elif representative_inlier_count >= 4 and x_span >= 0.15:
+            support_mode = "partial"
+        elif representative_inlier_count > 0:
+            support_mode = "edge"
+        else:
+            support_mode = "none"
         profile["residual_eval_ms"] = self._ms_since(eval_start)
 
         obs_start = time.perf_counter()
         plane_bbox = None
-        yy_candidates = yy[table_mask]
-        xx_candidates = xx[table_mask]
-        yy_inliers = yy_candidates[inlier] if inlier_count > 0 else np.asarray([], dtype=np.int64)
-        xx_inliers = xx_candidates[inlier] if inlier_count > 0 else np.asarray([], dtype=np.int64)
+        rep_px = np.asarray(reps.get("px"), dtype=np.int32)
+        rep_py = np.asarray(reps.get("py"), dtype=np.int32)
+        rep_inlier_px = rep_px[inlier] if representative_inlier_count > 0 else np.asarray([], dtype=np.int32)
+        rep_inlier_py = rep_py[inlier] if representative_inlier_count > 0 else np.asarray([], dtype=np.int32)
+        rep_outlier_px = rep_px[outlier] if representative_outlier_count > 0 else np.asarray([], dtype=np.int32)
+        rep_outlier_py = rep_py[outlier] if representative_outlier_count > 0 else np.asarray([], dtype=np.int32)
         raw_bbox = None
-        if inlier_count > 0 and len(xx_inliers) > 0 and len(yy_inliers) > 0:
-            px0 = x0 + int(np.min(xx_inliers)) * stride
-            px1 = x0 + int(np.max(xx_inliers)) * stride
-            py0 = y0 + int(np.min(yy_inliers)) * stride
-            py1 = y0 + int(np.max(yy_inliers)) * stride
+        if representative_inlier_count > 0 and len(rep_inlier_px) > 0 and len(rep_inlier_py) > 0:
+            px0 = int(np.min(rep_inlier_px))
+            px1 = int(np.max(rep_inlier_px))
+            py0 = int(np.min(rep_inlier_py))
+            py1 = int(np.max(rep_inlier_py))
             raw_bbox = [px0, py0, px1 + stride, py1 + stride]
         roi_area = max(1.0, float(max(1, x1 - x0) * max(1, y1 - y0)) / float(max(1, stride * stride)))
         raw_plane_view = self._plane_view_from_bbox(
             raw_bbox or roi_box,
             getattr(depth_frame, "shape", None),
-            area_ratio=float(inlier_count) / roi_area if inlier_count > 0 else None,
+            area_ratio=float(support_inlier_count) / roi_area if representative_inlier_count > 0 else None,
         )
         raw_width_norm = raw_plane_view.get("plane_width_norm")
         raw_cx_norm = raw_plane_view.get("plane_cx_norm")
         width_score = self._clip01((float(raw_width_norm or 0.0) - 0.12) / 0.30)
-        coverage_score = self._clip01(0.40 * width_score + 0.35 * span_score + 0.25 * self._clip01(area_score / 0.70))
-        abs_inlier_score = self._clip01((float(inlier_count) - float(min_table)) / max(1.0, float(min_table) * 5.0))
-        ratio_inlier_score = self._clip01(inlier_ratio / 0.30)
-        evidence_score = self._clip01(0.70 * abs_inlier_score + 0.30 * ratio_inlier_score)
+        coverage_score = self._clip01(0.30 * width_score + 0.35 * x_span_score + 0.20 * accepted_column_score + 0.15 * self._clip01(area_score / 0.70))
+        abs_inlier_score = self._clip01(float(representative_inlier_count) / float(max(1, min_front_face_columns * 2)))
+        ratio_inlier_score = self._clip01(inlier_ratio / 0.70)
+        support_inlier_score = self._clip01(support_ratio / 0.70)
+        evidence_score = self._clip01(0.40 * abs_inlier_score + 0.25 * ratio_inlier_score + 0.35 * support_inlier_score)
         yaw_abs = abs(float(yaw_err))
         geometry_score = self._clip01(1.0 - max(0.0, yaw_abs - 0.10) / max(1e-6, max_yaw - 0.10))
+        support_geometry_score = self._clip01(
+            0.35 * vertical_support_score
+            + 0.25 * accepted_column_score
+            + 0.20 * z_span_score
+            + 0.20 * x_span_score
+        )
         temporal = self._fast_temporal_score(yaw=float(yaw_err), dist=float(dist_err), cx_norm=raw_cx_norm)
         temporal_score = float(temporal.get("score", 0.0) or 0.0)
         temporal_available = bool(temporal.get("available", False))
         if temporal_available:
             confidence = self._clip01(
-                0.30 * evidence_score
-                + 0.20 * residual_score
+                0.25 * evidence_score
+                + 0.15 * residual_score
                 + 0.20 * coverage_score
-                + 0.20 * geometry_score
+                + 0.15 * geometry_score
+                + 0.15 * support_geometry_score
                 + 0.10 * temporal_score
             )
         else:
             confidence = self._clip01(
-                0.35 * evidence_score
-                + 0.20 * residual_score
+                0.30 * evidence_score
+                + 0.15 * residual_score
                 + 0.25 * coverage_score
-                + 0.20 * geometry_score
+                + 0.15 * geometry_score
+                + 0.15 * support_geometry_score
             )
         if dist_err > 0.60:
             distance_stage = "far"
@@ -1241,12 +1603,14 @@ class TableEdgeManager:
 
         reject_reason = ""
         control_level = "none"
-        width_min = 0.18
-        hard_span_min = max(0.18, span_min * 0.90)
-        if inlier_count < min_table:
-            reject_reason = "not_enough_inliers"
-        elif candidate_count < min_table:
-            reject_reason = "not_enough_candidates"
+        width_min = max(0.06, float(min_front_face_x_span) * 0.90)
+        hard_span_min = max(float(min_front_face_x_span), span_min * 0.90)
+        if representative_inlier_count < min_front_face_columns:
+            reject_reason = "vertical_support_low"
+        elif support_inlier_count < min_front_face_columns * min_vertical_support:
+            reject_reason = "vertical_support_low"
+        elif rep_count < min_front_face_columns:
+            reject_reason = "front_face_columns_low"
         elif residual_mean > residual_threshold:
             reject_reason = "residual_too_large"
         elif yaw_abs > max_yaw:
@@ -1254,7 +1618,7 @@ class TableEdgeManager:
         elif float(raw_width_norm or 0.0) < width_min:
             reject_reason = "width_too_small"
         elif x_span < hard_span_min:
-            reject_reason = "x_span_too_small"
+            reject_reason = "front_face_x_span_low"
         elif bool(temporal.get("jump", False)) and confidence < 0.62:
             reject_reason = "temporal_jump"
         else:
@@ -1290,17 +1654,35 @@ class TableEdgeManager:
                     control_level = "rotate_only"
                 else:
                     control_level = "approach_slow"
+        if not reject_reason:
+            if yaw_abs > max_yaw:
+                reject_reason = "yaw_out_of_range"
+                control_level = "none"
+            elif representative_inlier_count <= 3 or x_span < 0.15:
+                if control_level in {"stop_ready", "align"}:
+                    control_level = "approach_slow"
+                support_mode = "edge" if representative_inlier_count > 0 else "none"
+            elif (4 <= representative_inlier_count <= 7) or (0.15 <= x_span < 0.30):
+                if control_level == "stop_ready":
+                    control_level = "align"
+                support_mode = "partial"
         plane_usable = control_level != "none"
         valid_for_control = control_level in {"align", "stop_ready"}
-        fast_candidate_pixels = self._sparse_pixel_sample(xx_candidates, yy_candidates, x0, y0, stride, cap=1000)
-        fast_inlier_pixels = self._sparse_pixel_sample(xx_inliers, yy_inliers, x0, y0, stride, cap=1000)
+        support_px = np.asarray(reps.get("support_px", []), dtype=np.int32)
+        support_py = np.asarray(reps.get("support_py", []), dtype=np.int32)
+        support_cap = 1600
+        support_step = max(1, int(math.ceil(float(len(support_px)) / float(support_cap)))) if len(support_px) else 1
+        fast_support_pixels = [[int(x), int(y)] for x, y in zip(support_px[::support_step][:support_cap].tolist(), support_py[::support_step][:support_cap].tolist())]
+        fast_rep_pixels = [[int(x), int(y)] for x, y in zip(rep_px[:1000].tolist(), rep_py[:1000].tolist())]
+        fast_inlier_pixels = [[int(x), int(y)] for x, y in zip(rep_inlier_px[:1000].tolist(), rep_inlier_py[:1000].tolist())]
+        fast_outlier_pixels = [[int(x), int(y)] for x, y in zip(rep_outlier_px[:1000].tolist(), rep_outlier_py[:1000].tolist())]
         edge_found = bool(plane_usable)
         if edge_found:
             plane_bbox = raw_bbox
         plane_view = self._plane_view_from_bbox(
             plane_bbox or roi_box,
             getattr(depth_frame, "shape", None),
-            area_ratio=float(inlier_count) / roi_area if edge_found else None,
+            area_ratio=float(support_inlier_count) / roi_area if edge_found else None,
         )
         payload = {
             "table_found": bool(candidate_count > 0),
@@ -1321,8 +1703,10 @@ class TableEdgeManager:
             "sampled_point_count": int(sampled_count),
             "candidate_count": int(candidate_count),
             "table_point_count": int(candidate_count),
-            "inlier_count": int(inlier_count),
-            "edge_inlier_count": int(inlier_count),
+            "inlier_count": int(support_inlier_count),
+            "edge_inlier_count": int(support_inlier_count),
+            "representative_inlier_count": int(representative_inlier_count),
+            "support_point_count": int(support_inlier_count),
             "valid_edge_points": int(point_count),
             "selected_edge": bool(edge_found),
             "near_edge": valid_for_control,
@@ -1343,13 +1727,51 @@ class TableEdgeManager:
             "fast_raw_plane_x_span_m": float(x_span),
             "fast_raw_residual_mean": float(residual_mean),
             "fast_raw_residual_p90": float(residual_p90),
+            "fast_candidate_point_count": int(candidate_count),
+            "fast_support_point_count": int(support_total),
+            "fast_rep_count": int(rep_count),
+            "fast_rep_inlier_count": int(representative_inlier_count),
+            "fast_rep_outlier_count": int(representative_outlier_count),
+            "fast_candidate_x_span_m": float(candidate_x_span),
+            "fast_support_x_span_m": float(support_x_span),
+            "fast_rep_x_span_m": float(rep_x_span),
+            "fast_fit_inlier_x_span_m": float(x_span),
+            "fast_residual_mean": float(residual_mean),
+            "fast_residual_p90": float(residual_p90),
+            "fast_support_mode": str(support_mode),
+            "fast_fit_line_source": "reps_inlier",
             "fast_raw_confidence": float(confidence),
-            "fast_raw_inlier_count": int(inlier_count),
+            "fast_raw_inlier_count": int(support_inlier_count),
             "fast_raw_candidate_count": int(candidate_count),
             "fast_raw_sampled_point_count": int(sampled_count),
             "fast_raw_reject_reason": reject_reason or "none",
             "fast_gate_reject_reason": reject_reason or "none",
             "fast_gate_reason": reject_reason or "none",
+            "fast_coord_frame": "robot_xyz",
+            "fast_camera_pitch_deg": float(pitch_deg),
+            "fast_camera_height_m": float(camera_height_m),
+            "fast_table_height_m": float(table_height_m),
+            "fast_robot_z_p10": robot_z_pct.get("p10"),
+            "fast_robot_z_p50": robot_z_pct.get("p50"),
+            "fast_robot_z_p90": robot_z_pct.get("p90"),
+            "fast_robot_z_min": float(np.min(z_robot)) if len(z_robot) else None,
+            "fast_robot_z_max": float(np.max(z_robot)) if len(z_robot) else None,
+            "candidate_robot_z_min": float(np.min(height_z)) if len(height_z) else None,
+            "candidate_robot_z_p50": candidate_z_pct.get("p50"),
+            "candidate_robot_z_max": float(np.max(height_z)) if len(height_z) else None,
+            "fast_ground_like_count": int(ground_like_count),
+            "fast_table_height_like_count": int(table_height_like_count),
+            "fast_front_face_rep_count": int(rep_count),
+            "fast_front_face_support_point_count": int(support_total),
+            "fast_representative_inlier_count": int(representative_inlier_count),
+            "fast_support_inlier_count": int(support_inlier_count),
+            "fast_vertical_support_score": float(vertical_support_score),
+            "fast_accepted_column_score": float(accepted_column_score),
+            "fast_z_span_score": float(z_span_score),
+            "fast_x_span_score": float(x_span_score),
+            "fast_z_span_m_p50": float(z_span_p50),
+            "fast_z_span_m_max": float(z_span_max),
+            "fast_birdview_fit_residual_mean": float(residual_mean),
             "fast_confidence_version": "v3",
             "fast_distance_stage": distance_stage,
             "fast_control_level": control_level,
@@ -1362,6 +1784,7 @@ class TableEdgeManager:
             "fast_score_area": float(area_score),
             "fast_score_coverage": float(coverage_score),
             "fast_score_geometry": float(geometry_score),
+            "fast_score_support_geometry": float(support_geometry_score),
             "fast_score_temporal": float(temporal_score),
             "fast_score_temporal_available": bool(temporal_available),
             "fast_temporal_stable_count": int(temporal.get("stable_count", 0) or 0),
@@ -1371,9 +1794,16 @@ class TableEdgeManager:
             "fast_temporal_cx_delta": temporal.get("cx_delta"),
             "fast_score_final": float(confidence),
             "fast_candidate_pixel_count": int(len(fast_candidate_pixels)),
+            "fast_support_pixel_count": int(len(fast_support_pixels)),
+            "fast_front_face_rep_pixel_count": int(len(fast_rep_pixels)),
             "fast_inlier_pixel_count": int(len(fast_inlier_pixels)),
+            "fast_outlier_pixel_count": int(len(fast_outlier_pixels)),
+            "fast_sampled_pixels": raw_sample_pixels,
             "fast_candidate_pixels": fast_candidate_pixels,
+            "fast_support_pixels": fast_support_pixels,
+            "fast_front_face_rep_pixels": fast_rep_pixels,
             "fast_inlier_pixels": fast_inlier_pixels,
+            "fast_outlier_pixels": fast_outlier_pixels,
             "pose_source": "fast_plane_only" if edge_found else "none",
             "final_pose_source": "fast_plane_only" if edge_found else "none",
             "view_err_norm": plane_view.get("plane_cx_norm") if edge_found else None,

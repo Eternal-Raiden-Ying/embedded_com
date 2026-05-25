@@ -82,11 +82,14 @@ def _obs_label_lines(obs: Dict[str, Any], *, side: str, frame_seq: int) -> List[
         "detector_mode=fast_plane_only_v3",
         f"frame_seq={frame_seq}",
         f"roi_source={obs.get('roi_source') or 'NA'} roi={_roi_text(obs)}",
+        f"coord={obs.get('fast_coord_frame') or 'NA'} pitch={_fmt(obs.get('fast_camera_pitch_deg'))}deg hcam={_fmt(obs.get('fast_camera_height_m'))} htbl={_fmt(obs.get('fast_table_height_m'))}",
         f"raw_yaw={_fmt(yaw)}rad/{_deg(yaw)}deg raw_dist={_fmt(obs.get('fast_raw_dist_err_m', obs.get('dist_err_m')))}m",
         f"raw_cx={_fmt(obs.get('fast_raw_plane_cx_norm'))} conf={_fmt(obs.get('fast_score_final', obs.get('fast_raw_confidence')))} level={obs.get('fast_control_level') or obs.get('control_level') or 'NA'}",
         f"reject={obs.get('fast_gate_reason') or obs.get('fast_gate_reject_reason') or obs.get('reject_reason') or 'none'} stage={obs.get('fast_distance_stage') or 'NA'}",
-        f"sampled={obs.get('fast_raw_sampled_point_count', obs.get('sampled_point_count', 'NA'))} cand={obs.get('fast_raw_candidate_count', obs.get('candidate_count', 'NA'))} inliers={obs.get('fast_raw_inlier_count', obs.get('inlier_count', 'NA'))}",
-        f"width={_fmt(obs.get('fast_raw_plane_width_norm'))} x_span={_fmt(obs.get('fast_raw_plane_x_span_m'))} resid={_fmt(obs.get('fast_raw_residual_mean'))}",
+        f"sampled={obs.get('fast_raw_sampled_point_count', obs.get('sampled_point_count', 'NA'))} height_candidate={obs.get('fast_candidate_point_count', obs.get('fast_raw_candidate_count', 'NA'))}",
+        f"support_pixels={obs.get('fast_support_point_count', obs.get('fast_front_face_support_point_count', 'NA'))} reps={obs.get('fast_rep_count', obs.get('fast_front_face_rep_count', 'NA'))} in={obs.get('fast_rep_inlier_count', obs.get('fast_representative_inlier_count', 'NA'))} out={obs.get('fast_rep_outlier_count', 'NA')}",
+        f"span c/s/r/fit={_fmt(obs.get('fast_candidate_x_span_m'))}/{_fmt(obs.get('fast_support_x_span_m'))}/{_fmt(obs.get('fast_rep_x_span_m'))}/{_fmt(obs.get('fast_fit_inlier_x_span_m', obs.get('fast_raw_plane_x_span_m')))}",
+        f"support_mode={obs.get('fast_support_mode') or 'NA'} line={obs.get('fast_fit_line_source') or 'NA'} resid={_fmt(obs.get('fast_residual_mean', obs.get('fast_raw_residual_mean')))}",
     ]
 
 

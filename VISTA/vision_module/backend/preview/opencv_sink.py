@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+import math
 import time
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -255,7 +256,13 @@ class OpenCVPreviewSink(PreviewSink):
         roi = table_edge.get("edge_roi") or table_edge.get("table_edge_roi") or table_edge.get("depth_edge_roi")
         if roi:
             self._draw_roi(panel, roi, scale, offset, "ROI", (80, 220, 255), dashed=True)
-        fast_sparse = bool(table_edge.get("fast_candidate_pixels") or table_edge.get("fast_inlier_pixels"))
+        fast_sparse = bool(
+            table_edge.get("fast_candidate_pixels")
+            or table_edge.get("fast_support_pixels")
+            or table_edge.get("fast_front_face_rep_pixels")
+            or table_edge.get("fast_inlier_pixels")
+            or table_edge.get("fast_outlier_pixels")
+        )
         plane_mask_missing = not bool(
             table_edge.get("plane_mask_status") in ("present", "fast_sparse")
             or table_edge.get("front_plane_inlier_mask")
@@ -275,16 +282,24 @@ class OpenCVPreviewSink(PreviewSink):
             f"control={table_edge.get('control_level') or 'none'}",
         ]
         if fast_sparse:
+            yaw = table_edge.get("fast_raw_yaw_err_rad", table_edge.get("yaw_err_rad"))
+            yaw_num = self._as_float(yaw)
+            yaw_deg = None if yaw_num is None else yaw_num * 180.0 / math.pi
             geometry_lines.extend(
                 [
-                    "fast_sparse=on",
-                    f"sampled={table_edge.get('fast_raw_sampled_point_count', table_edge.get('sampled_point_count'))} cand={table_edge.get('fast_raw_candidate_count', table_edge.get('candidate_count'))} inliers={table_edge.get('fast_raw_inlier_count', table_edge.get('inlier_count'))}",
-                    f"stage={table_edge.get('fast_distance_stage') or 'n/a'} level={table_edge.get('fast_control_level') or table_edge.get('control_level') or 'none'}",
-                    f"conf={self._fmt(table_edge.get('fast_score_final', table_edge.get('fast_raw_confidence')))} reject={table_edge.get('fast_gate_reason') or table_edge.get('fast_gate_reject_reason') or table_edge.get('reject_reason') or 'none'}",
+                    f"mode={table_edge.get('detector_mode') or 'fast_plane_only'} frame={table_edge.get('frame_seq', 'NA')}",
+                    f"coord={table_edge.get('fast_coord_frame') or 'robot_xyz'} pitch={self._fmt_na(table_edge.get('fast_camera_pitch_deg'))} hcam={self._fmt_na(table_edge.get('fast_camera_height_m'))} htbl={self._fmt_na(table_edge.get('fast_table_height_m'))}",
+                    f"roi={table_edge.get('roi_source') or 'NA'} {roi or 'NA'}",
+                    f"sampled={table_edge.get('fast_raw_sampled_point_count', table_edge.get('sampled_point_count', 'NA'))} height_candidate={table_edge.get('fast_candidate_point_count', table_edge.get('fast_raw_candidate_count', 'NA'))}",
+                    f"support_pixels={table_edge.get('fast_support_point_count', table_edge.get('fast_front_face_support_point_count', 'NA'))} reps={table_edge.get('fast_rep_count', table_edge.get('fast_front_face_rep_count', 'NA'))} in={table_edge.get('fast_rep_inlier_count', table_edge.get('fast_representative_inlier_count', 'NA'))} out={table_edge.get('fast_rep_outlier_count', 'NA')}",
+                    f"span cand/support/rep/fit={self._fmt_na(table_edge.get('fast_candidate_x_span_m'))}/{self._fmt_na(table_edge.get('fast_support_x_span_m'))}/{self._fmt_na(table_edge.get('fast_rep_x_span_m'))}/{self._fmt_na(table_edge.get('fast_fit_inlier_x_span_m', table_edge.get('fast_raw_plane_x_span_m')))}",
+                    f"yaw={self._fmt_na(yaw)}rad/{self._fmt_na(yaw_deg)}deg dist={self._fmt_na(table_edge.get('fast_raw_dist_err_m', table_edge.get('dist_err_m')))}",
+                    f"conf={self._fmt_na(table_edge.get('fast_score_final', table_edge.get('fast_raw_confidence')))} control={table_edge.get('fast_control_level') or table_edge.get('control_level') or 'none'} reject={table_edge.get('fast_gate_reason') or table_edge.get('fast_gate_reject_reason') or table_edge.get('reject_reason') or 'none'}",
+                    f"resid mean/p90={self._fmt_na(table_edge.get('fast_residual_mean', table_edge.get('fast_raw_residual_mean')))}/{self._fmt_na(table_edge.get('fast_residual_p90', table_edge.get('fast_raw_residual_p90')))}",
                 ]
             )
-        left_y = max(76, panel.shape[0] - (116 + (76 if fast_sparse else 0)))
-        self._text_block(panel, geometry_lines, (16, left_y), fg=(210, 255, 210) if valid_for_control else (210, 230, 255), max_width=min(260, panel.shape[1] - 32), font_scale=0.46, line_h=19)
+        left_y = max(60, panel.shape[0] - (116 + (132 if fast_sparse else 0)))
+        self._text_block(panel, geometry_lines, (16, left_y), fg=(210, 255, 210) if valid_for_control else (210, 230, 255), max_width=min(330, panel.shape[1] - 32), font_scale=0.40 if fast_sparse else 0.46, line_h=16 if fast_sparse else 19)
         return panel
 
     def _make_info_panel(
@@ -418,9 +433,15 @@ class OpenCVPreviewSink(PreviewSink):
         if plane_mask is not None:
             self._overlay_mask(panel, plane_mask, (40, 220, 70), alpha=0.42)
         else:
-            self._draw_pixel_points(panel, table_edge.get("fast_candidate_pixels"), (40, 210, 255), radius=1, alpha=0.90)
-            self._draw_pixel_points(panel, table_edge.get("fast_inlier_pixels"), (40, 255, 80), radius=2, alpha=0.95)
+            self._draw_pixel_points(panel, table_edge.get("fast_sampled_pixels"), (80, 80, 120), radius=1, alpha=0.45)
+            self._draw_pixel_points(panel, table_edge.get("fast_candidate_pixels"), (0, 220, 255), radius=1, alpha=0.78)
+            self._draw_pixel_points(panel, table_edge.get("fast_support_pixels"), (255, 235, 80), radius=1, alpha=0.72)
+            self._draw_pixel_points(panel, table_edge.get("fast_front_face_rep_pixels"), (255, 160, 255), radius=4, alpha=0.95, marker="cross")
+            self._draw_pixel_points(panel, table_edge.get("fast_outlier_pixels"), (40, 40, 255), radius=5, alpha=0.95, marker="cross")
+            self._draw_pixel_points(panel, table_edge.get("fast_inlier_pixels"), (40, 255, 80), radius=4, alpha=0.98, marker="circle")
             self._draw_pixel_points(panel, table_edge.get("front_plane_candidate_pixels"), (40, 220, 70), radius=2, alpha=0.55)
+            if table_edge.get("fast_candidate_pixels") or table_edge.get("fast_support_pixels"):
+                self._draw_fast_legend(panel)
         return panel
 
     def _plane_mask_to_frame(self, table_edge: Dict[str, Any], frame_shape: Tuple[int, int]) -> Optional[np.ndarray]:
@@ -504,7 +525,27 @@ class OpenCVPreviewSink(PreviewSink):
         overlay[:] = color
         panel[mask] = cv2.addWeighted(panel, 1.0 - float(alpha), overlay, float(alpha), 0)[mask]
 
-    def _draw_pixel_points(self, panel: np.ndarray, points: Any, color: Tuple[int, int, int], radius: int = 1, alpha: float = 1.0) -> None:
+    def _draw_fast_legend(self, panel: np.ndarray) -> None:
+        items = (
+            ("sampled", (80, 80, 120), "circle"),
+            ("height_candidate", (0, 220, 255), "circle"),
+            ("support_pixels", (255, 235, 80), "circle"),
+            ("reps", (255, 160, 255), "cross"),
+            ("rep_inliers", (40, 255, 80), "circle"),
+            ("rep_outliers", (40, 40, 255), "cross"),
+        )
+        x = max(12, panel.shape[1] - 190)
+        y = 56
+        self._rect(panel, (x - 8, y - 18), (panel.shape[1] - 8, y + len(items) * 17 + 4), (0, 0, 0), 0.45)
+        for idx, (label, color, marker) in enumerate(items):
+            yy = y + idx * 17
+            if marker == "cross":
+                cv2.drawMarker(panel, (x + 5, yy - 5), color, cv2.MARKER_TILTED_CROSS, 10, 1, line_type=cv2.LINE_AA)
+            else:
+                cv2.circle(panel, (x + 5, yy - 5), 3, color, -1, lineType=cv2.LINE_AA)
+            cv2.putText(panel, label, (x + 18, yy), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (230, 230, 230), 1, cv2.LINE_AA)
+
+    def _draw_pixel_points(self, panel: np.ndarray, points: Any, color: Tuple[int, int, int], radius: int = 1, alpha: float = 1.0, marker: str = "circle") -> None:
         if not isinstance(points, (list, tuple)):
             return
         h, w = panel.shape[:2]
@@ -518,7 +559,10 @@ class OpenCVPreviewSink(PreviewSink):
             except Exception:
                 continue
             if 0 <= x < w and 0 <= y < h:
-                cv2.circle(target, (x, y), int(radius), color, -1)
+                if marker == "cross":
+                    cv2.drawMarker(target, (x, y), color, cv2.MARKER_TILTED_CROSS, max(5, int(radius) * 3), 1, line_type=cv2.LINE_AA)
+                else:
+                    cv2.circle(target, (x, y), int(radius), color, -1, lineType=cv2.LINE_AA)
         if alpha < 1.0:
             cv2.addWeighted(target, float(alpha), panel, 1.0 - float(alpha), 0, dst=panel)
 
@@ -914,6 +958,12 @@ class OpenCVPreviewSink(PreviewSink):
         num = self._as_float(value)
         if num is None:
             return "n/a"
+        return f"{num:.3f}"
+
+    def _fmt_na(self, value: Any) -> str:
+        num = self._as_float(value)
+        if num is None:
+            return "NA"
         return f"{num:.3f}"
 
     def close(self) -> None:
