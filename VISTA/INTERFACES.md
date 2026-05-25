@@ -193,6 +193,7 @@
 - `WAITING_RESPONSE`
 - `RESULT_READY`
 - `FAILED`
+- `RELAXING`
 
 `DONE` 不是当前稳定 contract，调用方不应依赖它。
 
@@ -202,9 +203,10 @@
 | --- | --- | --- |
 | `SEARCH` | `RUNNING` | `perception.target_obs` |
 | `RETURN` | `RUNNING` | `perception.home_tag_obs` |
-| `GRASP` | `WAITING_RESPONSE` | `perception.target_obs` + `proposal` + `interaction` |
-| `GRASP` | `RUNNING` | remote 进行中的中间状态，常见于 `result.remote_state` 等 |
-| `GRASP` | `RESULT_READY` | remote grasp 结果或最终阶段结果，位于 `result` |
+| `GRASP` | `RELAXING` | SILENT mode idle — no capability, waiting for instruction |
+| `GRASP` | `WAITING_RESPONSE` | MICRO_ADJUST mode — waiting for orchestrator adjust/accept decision |
+| `GRASP` | `RUNNING` | GRASP_REMOTE_INIT/GRASP_REMOTE 进行中，常见于 `result.remote_state` |
+| `GRASP` | `RESULT_READY` | remote grasp 成功结果，位于 `result.grasp` |
 | `GRASP` | `FAILED` | 失败原因，常见于 `result.reason` |
 
 ### 关于 `GRASP` 的结果语义

@@ -505,6 +505,13 @@ class StageController:
                 reason="respond",
             )
 
+        # START compat: auto-fill mode_hint for stages that have a well-known default
+        if op == "START" and not req.mode_hint:
+            _default_mode_hints = {"SEARCH": "TRACK_LOCAL", "GRASP": "GRASP_REMOTE"}
+            hint = _default_mode_hints.get(stage)
+            if hint:
+                req.mode_hint = hint
+
         if current is None or normalize_upper(self._ctx.current_stage) != stage:
             plan = self._transition_to(stage, req=req)
             requested_mode = normalize_upper(self._ctx.current_mode, "IDLE")

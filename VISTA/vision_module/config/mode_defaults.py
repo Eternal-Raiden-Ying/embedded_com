@@ -170,6 +170,7 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
         depth_perception_cameras["rgb"] = track_local_rgb
     preview_layout_defaults = {
         "INIT": "rgb_minimal",
+        "SILENT": "rgb_minimal",
         "IDLE": "rgb_minimal",
         "DEPTH_PERCEPTION": "rgb_depth_edge",
         "TABLE_EDGE_PERCEPTION": "rgb_depth_edge",
@@ -212,6 +213,17 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             preview=preview_profile("INIT", enabled=False, sink_name="null"),
             release_cooldown_s=0.0,
             metadata={"contract": {"stage": "INIT", "remote": "required"}},
+        ),
+        "SILENT": ModeProfile(
+            name="SILENT",
+            enabled_cameras=(),
+            camera_overrides={},
+            predictor_enabled=False,
+            predictor_model=None,
+            remote=_default_remote_profile(enabled=False),
+            preview=preview_profile("SILENT", enabled=False, sink_name="null"),
+            release_cooldown_s=0.0,
+            metadata={"contract": {"stage": "SILENT"}},
         ),
         "IDLE": ModeProfile(
             name="IDLE",
@@ -287,13 +299,13 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
         ),
         "MICRO_ADJUST": ModeProfile(
             name="MICRO_ADJUST",
-            enabled_cameras=("rgb",),
-            camera_overrides={"rgb": micro_adjust_rgb},
-            predictor_enabled=True,
-            predictor_model=active_model,
+            enabled_cameras=(),
+            camera_overrides={},
+            predictor_enabled=False,
+            predictor_model=None,
             remote=_default_remote_profile(enabled=False),
-            preview=preview_profile("MICRO_ADJUST", enabled=True),
-            release_cooldown_s=2.0,
+            preview=preview_profile("MICRO_ADJUST", enabled=False, sink_name="null"),
+            release_cooldown_s=0.0,
             metadata={"contract": {"interaction": "MOVE_HINT"}},
         ),
         "GRASP_REMOTE_INIT": ModeProfile(
