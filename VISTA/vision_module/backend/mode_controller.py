@@ -105,8 +105,22 @@ class ModeController:
     def _compile_plan(self, profile: ModeProfile) -> Dict[str, Any]:
         preview_enabled = bool(profile.preview.enabled and self._preview_allowed)
         remote_profile = profile.remote
+        mode_name = str(profile.name or "SILENT").strip().upper() or "SILENT"
+        # INIT / GRASP_REMOTE_INIT modes need remote_init_status for server health tracking
+        routes = {
+            "camera_frames": {"policy": "slot", "scope": "backend"},
+            "frame_meta": {"policy": "slot", "scope": "stage"},
+            "local_perception": {"policy": "slot", "scope": "stage"},
+            "table_edge_obs": {"policy": "slot", "scope": "stage"},
+            "remote_result": {"policy": "slot", "scope": "stage"},
+            "runtime_status": {"policy": "slot", "scope": "backend"},
+            "remote_cmd": {"policy": "event", "scope": "backend"},
+            "remote_ack": {"policy": "event", "scope": "backend"},
+        }
+        if mode_name in {"INIT", "GRASP_REMOTE_INIT"}:
+            routes["remote_init_status"] = {"policy": "slot", "scope": "stage"}
         return {
-            "mode": str(profile.name or "SILENT").strip().upper() or "SILENT",
+            "mode": mode_name,
             "contract": {
                 "results": {
                     "stage": ["frame_meta", "local_perception", "table_edge_obs", "remote_result"],
@@ -122,16 +136,7 @@ class ModeController:
                 },
                 "capability": dict((profile.metadata or {}).get("contract") or {}),
             },
-            "routes": {
-                "camera_frames": {"policy": "slot", "scope": "backend"},
-                "frame_meta": {"policy": "slot", "scope": "stage"},
-                "local_perception": {"policy": "slot", "scope": "stage"},
-                "table_edge_obs": {"policy": "slot", "scope": "stage"},
-                "remote_result": {"policy": "slot", "scope": "stage"},
-                "runtime_status": {"policy": "slot", "scope": "backend"},
-                "remote_cmd": {"policy": "event", "scope": "backend"},
-                "remote_ack": {"policy": "event", "scope": "backend"},
-            },
+            "routes": routes,
             "capabilities": {
                 "camera": {
                     "enabled_cameras": list(profile.enabled_cameras or ()),

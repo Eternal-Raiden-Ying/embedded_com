@@ -165,7 +165,7 @@ class GraspStagePlan(BaseStagePlan):
     common_routes = ("frame_meta", "runtime_status")
     optional_routes = {
         "SILENT": (),
-        "GRASP_REMOTE_INIT": ("remote_result",),
+        "GRASP_REMOTE_INIT": ("remote_init_status",),
         "GRASP_REMOTE": ("remote_result",),
         "MICRO_ADJUST": (),
     }

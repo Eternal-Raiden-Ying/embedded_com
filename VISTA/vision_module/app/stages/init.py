@@ -17,7 +17,7 @@ class InitStagePlan(BaseStagePlan):
     default_mode = "SILENT"
     common_routes = ("frame_meta", "runtime_status")
     optional_routes = {
-        "INIT": ("remote_result",),
+        "INIT": ("remote_init_status",),
     }
 
     def on_enter(self, req, ctx: StageContext) -> None:

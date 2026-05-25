@@ -464,9 +464,9 @@ class RemoteManager:
         max_retries = max(1, int(self._runtime_profile.get("max_retries", 1) or 1))
 
         if kind == "task" and action:
-            # ── task worker: execute action once, publish result, exit ──
+            # ── task worker: execute action once, publish to action-specific route, exit ──
             self._run_task(action=action, max_retries=max_retries)
-            self._publish_result("remote_result", self.result_summary())
+            self._publish_result(self._task_route(action), self._task_payload(action))
             self._runtime_running = False
             return
 
@@ -542,6 +542,36 @@ class RemoteManager:
 
         if action == "release":
             self._release_service_if_ready(timeout_s=timeout_s)
+
+    @staticmethod
+    def _task_route(action: str) -> str:
+        _ROUTES = {"init": "remote_init_status", "predict": "remote_result", "release": "remote_result"}
+        return _ROUTES.get(str(action or "").strip().lower(), "remote_result")
+
+    def _task_payload(self, action: str) -> dict:
+        action = str(action or "").strip().lower()
+        if action == "init":
+            return {
+                "service_init_state": str(self._service_init_state or "uninitialized"),
+                "service_init_confirmed": bool(self._service_init_confirmed),
+                "service_init_attempts": int(self._service_init_attempts),
+                "service_init_last_error": str(self._service_init_last_error or ""),
+                "service_init_last_ok": bool(self._service_init_last_ok),
+                "service_init_last_ts": self._service_init_last_ts,
+                "ts": time.time(),
+            }
+        # predict / release
+        return {
+            "last_action": str(self._last_result.get("last_action") or action),
+            "last_ok": bool(self._last_result.get("last_ok", False)),
+            "last_error": str(self._last_result.get("last_error") or ""),
+            "status_code": self._last_result.get("status_code"),
+            "has_result": bool(self._last_result.get("has_result", False)),
+            "result": self._last_result.get("result"),
+            "request_id": self._last_result.get("request_id"),
+            "sequence": int(self._last_result.get("sequence", 0) or 0),
+            "ts": float(self._last_result.get("ts", 0.0) or 0.0),
+        }
 
     def _update_result(
         self,

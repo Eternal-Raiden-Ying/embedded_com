@@ -468,7 +468,7 @@ class StageController:
             # The last tick's cache may be stale if INIT just completed between ticks.
             if stage == "GRASP" and self.scheduler is not None:
                 try:
-                    remote = self.scheduler.read_result("remote_result", default={})
+                    remote = self.scheduler.read_result("remote_init_status", default={})
                     if isinstance(remote, dict):
                         self._ctx.server_status = str(remote.get("service_init_state") or remote.get("server_status") or "unknown")
                 except Exception:
@@ -593,8 +593,8 @@ class StageController:
         plan = self.current_plan()
         if plan is None:
             return None
-        # Sync server_status from remote_result (tick-level cache, no need for ctx persistence)
-        remote = dict(getattr(tick_input, "results", {}) or {}).get("remote_result")
+        # Sync server_status from remote_init_status (tick-level cache, no need for ctx persistence)
+        remote = dict(getattr(tick_input, "results", {}) or {}).get("remote_init_status")
         if isinstance(remote, dict):
             self._ctx.server_status = str(remote.get("service_init_state") or remote.get("server_status") or "unknown")
         ctx_before = self._clone_context()
