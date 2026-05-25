@@ -262,6 +262,9 @@ class OpenCVPreviewSink(PreviewSink):
             or table_edge.get("fast_front_face_rep_pixels")
             or table_edge.get("fast_inlier_pixels")
             or table_edge.get("fast_outlier_pixels")
+            or table_edge.get("fast_background_pixels")
+            or table_edge.get("fast_weak_pixels")
+            or table_edge.get("fast_edge_pixels")
         )
         plane_mask_missing = not bool(
             table_edge.get("plane_mask_status") in ("present", "fast_sparse")
@@ -292,13 +295,17 @@ class OpenCVPreviewSink(PreviewSink):
                     f"roi={table_edge.get('roi_source') or 'NA'} {roi or 'NA'}",
                     f"sampled={table_edge.get('fast_raw_sampled_point_count', table_edge.get('sampled_point_count', 'NA'))} height_candidate={table_edge.get('fast_candidate_point_count', table_edge.get('fast_raw_candidate_count', 'NA'))}",
                     f"support_pixels={table_edge.get('fast_support_point_count', table_edge.get('fast_front_face_support_point_count', 'NA'))} reps={table_edge.get('fast_rep_count', table_edge.get('fast_front_face_rep_count', 'NA'))} in={table_edge.get('fast_rep_inlier_count', table_edge.get('fast_representative_inlier_count', 'NA'))} out={table_edge.get('fast_rep_outlier_count', 'NA')}",
+                    f"clusters={table_edge.get('fast_rep_cluster_count', 'NA')} selected={table_edge.get('fast_selected_cluster_index', 'NA')} y={self._fmt_na(table_edge.get('fast_selected_cluster_y_center'))} score={self._fmt_na(table_edge.get('fast_selected_cluster_score'))}",
+                    f"front_reps={table_edge.get('fast_front_rep_count', 'NA')} front_span={self._fmt_na(table_edge.get('fast_selected_cluster_x_span_m'))} background_reps={table_edge.get('fast_background_rep_count', 'NA')}",
+                    f"line_source={table_edge.get('fast_line_source') or table_edge.get('fast_fit_line_source') or 'NA'} edge={table_edge.get('fast_edge_inlier_count', table_edge.get('fast_edge_candidate_count', 'NA'))} edge_span={self._fmt_na(table_edge.get('fast_edge_x_span_m'))} edge_score={self._fmt_na(table_edge.get('fast_edge_support_score'))}",
+                    f"frontness={self._fmt_na(table_edge.get('fast_frontness_score'))} bg_blocked={int(bool(table_edge.get('fast_background_blocked', False)))} local_band={table_edge.get('fast_local_band_support_count', 'NA')}/{self._fmt_na(table_edge.get('fast_local_band_x_span_m'))}/{self._fmt_na(table_edge.get('fast_local_band_residual_mean'))}",
                     f"span cand/support/rep/fit={self._fmt_na(table_edge.get('fast_candidate_x_span_m'))}/{self._fmt_na(table_edge.get('fast_support_x_span_m'))}/{self._fmt_na(table_edge.get('fast_rep_x_span_m'))}/{self._fmt_na(table_edge.get('fast_fit_inlier_x_span_m', table_edge.get('fast_raw_plane_x_span_m')))}",
                     f"yaw={self._fmt_na(yaw)}rad/{self._fmt_na(yaw_deg)}deg dist={self._fmt_na(table_edge.get('fast_raw_dist_err_m', table_edge.get('dist_err_m')))}",
                     f"conf={self._fmt_na(table_edge.get('fast_score_final', table_edge.get('fast_raw_confidence')))} control={table_edge.get('fast_control_level') or table_edge.get('control_level') or 'none'} reject={table_edge.get('fast_gate_reason') or table_edge.get('fast_gate_reject_reason') or table_edge.get('reject_reason') or 'none'}",
                     f"resid mean/p90={self._fmt_na(table_edge.get('fast_residual_mean', table_edge.get('fast_raw_residual_mean')))}/{self._fmt_na(table_edge.get('fast_residual_p90', table_edge.get('fast_raw_residual_p90')))}",
                 ]
             )
-        left_y = max(60, panel.shape[0] - (116 + (132 if fast_sparse else 0)))
+        left_y = max(60, panel.shape[0] - (116 + (198 if fast_sparse else 0)))
         self._text_block(panel, geometry_lines, (16, left_y), fg=(210, 255, 210) if valid_for_control else (210, 230, 255), max_width=min(330, panel.shape[1] - 32), font_scale=0.40 if fast_sparse else 0.46, line_h=16 if fast_sparse else 19)
         return panel
 
@@ -435,7 +442,10 @@ class OpenCVPreviewSink(PreviewSink):
         else:
             self._draw_pixel_points(panel, table_edge.get("fast_sampled_pixels"), (80, 80, 120), radius=1, alpha=0.45)
             self._draw_pixel_points(panel, table_edge.get("fast_candidate_pixels"), (0, 220, 255), radius=1, alpha=0.78)
+            self._draw_pixel_points(panel, table_edge.get("fast_edge_pixels"), (255, 190, 40), radius=2, alpha=0.95)
             self._draw_pixel_points(panel, table_edge.get("fast_support_pixels"), (255, 235, 80), radius=1, alpha=0.72)
+            self._draw_pixel_points(panel, table_edge.get("fast_background_pixels"), (120, 160, 255), radius=4, alpha=0.88, marker="cross")
+            self._draw_pixel_points(panel, table_edge.get("fast_weak_pixels"), (210, 80, 210), radius=4, alpha=0.88, marker="cross")
             self._draw_pixel_points(panel, table_edge.get("fast_front_face_rep_pixels"), (255, 160, 255), radius=4, alpha=0.95, marker="cross")
             self._draw_pixel_points(panel, table_edge.get("fast_outlier_pixels"), (40, 40, 255), radius=5, alpha=0.95, marker="cross")
             self._draw_pixel_points(panel, table_edge.get("fast_inlier_pixels"), (40, 255, 80), radius=4, alpha=0.98, marker="circle")
@@ -529,10 +539,13 @@ class OpenCVPreviewSink(PreviewSink):
         items = (
             ("sampled", (80, 80, 120), "circle"),
             ("height_candidate", (0, 220, 255), "circle"),
+            ("front_edge", (255, 190, 40), "circle"),
             ("support_pixels", (255, 235, 80), "circle"),
             ("reps", (255, 160, 255), "cross"),
             ("rep_inliers", (40, 255, 80), "circle"),
             ("rep_outliers", (40, 40, 255), "cross"),
+            ("rep_background", (120, 160, 255), "cross"),
+            ("rep_weak", (210, 80, 210), "cross"),
         )
         x = max(12, panel.shape[1] - 190)
         y = 56

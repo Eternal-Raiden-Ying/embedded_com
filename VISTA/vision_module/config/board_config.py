@@ -217,6 +217,7 @@ def _apply_vision_params(data: Dict[str, Any]) -> None:
             "y_cluster_bin_m",
             "min_front_face_columns",
             "min_front_face_x_span_m",
+            "front_cluster_gap_m",
             "max_yaw_abs_rad",
             "target_hz",
             "update_hz",

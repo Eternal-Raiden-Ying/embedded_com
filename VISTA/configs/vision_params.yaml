@@ -145,6 +145,7 @@ table_edge:
   y_cluster_bin_m: 0.04
   min_front_face_columns: 3
   min_front_face_x_span_m: 0.07
+  front_cluster_gap_m: 0.10
   max_yaw_abs_rad: 0.75
 
   # 桌边检测频率。

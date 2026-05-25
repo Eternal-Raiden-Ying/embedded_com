@@ -158,6 +158,7 @@ class TableEdgeConfig:
     y_cluster_bin_m: float = 0.04
     min_front_face_columns: int = 3
     min_front_face_x_span_m: float = 0.07
+    front_cluster_gap_m: float = 0.10
     max_yaw_abs_rad: float = 0.75
     target_hz: float = 10.0
     update_hz: float = 10.0

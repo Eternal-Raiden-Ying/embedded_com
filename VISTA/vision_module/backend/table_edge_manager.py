@@ -553,6 +553,11 @@ class TableEdgeManager:
         if not reps:
             return {"count": 0}
         reps.sort(key=lambda item: item["x"])
+        support_rep_index = [
+            np.full(len(r["support_px"]), idx, dtype=np.int32)
+            for idx, r in enumerate(reps)
+            if len(r["support_px"]) > 0
+        ]
         return {
             "count": int(len(reps)),
             "x": np.asarray([r["x"] for r in reps], dtype=np.float32),
@@ -569,6 +574,7 @@ class TableEdgeManager:
             "support_x": np.concatenate([r["support_x"] for r in reps]).astype(np.float32, copy=False),
             "support_y": np.concatenate([r["support_y"] for r in reps]).astype(np.float32, copy=False),
             "support_z": np.concatenate([r["support_z"] for r in reps]).astype(np.float32, copy=False),
+            "support_rep_index": np.concatenate(support_rep_index).astype(np.int32, copy=False) if support_rep_index else np.asarray([], dtype=np.int32),
         }
 
     @staticmethod
@@ -602,6 +608,324 @@ class TableEdgeManager:
             right = abs(float(x_arr[idx + 1] - x_arr[idx])) if idx < n - 1 else float("inf")
             out[idx] = min(left, right) <= float(max_gap_m)
         return out
+
+    def _extract_fast_front_edge_cue(
+        self,
+        *,
+        depth_m: Any,
+        x0: int,
+        y0: int,
+        stride: int,
+        calib: Any,
+        pitch_deg: float,
+        camera_height_m: float,
+        z_min: float,
+        z_max: float,
+        target_dist_m: float,
+        min_x_span_m: float,
+        max_yaw: float,
+    ) -> Dict[str, Any]:
+        arr = np.asarray(depth_m, dtype=np.float32)
+        if arr.ndim != 2 or arr.size <= 0:
+            return {"count": 0, "inlier_count": 0, "score": 0.0}
+        h, w = int(arr.shape[0]), int(arr.shape[1])
+        if h < 7 or w < 4:
+            return {"count": 0, "inlier_count": 0, "score": 0.0}
+        candidates = []
+        for col in range(0, w, 1):
+            prof = arr[:, col]
+            valid = np.isfinite(prof) & (prof > float(z_min)) & (prof < float(z_max))
+            if int(valid.sum()) < 7:
+                continue
+            filled = prof.astype(np.float32, copy=True)
+            finite_idx = np.flatnonzero(valid)
+            if finite_idx.size < 7:
+                continue
+            filled[~valid] = np.interp(np.flatnonzero(~valid), finite_idx, prof[finite_idx]).astype(np.float32) if int((~valid).sum()) else filled[~valid]
+            smooth = np.convolve(filled, np.asarray([0.25, 0.50, 0.25], dtype=np.float32), mode="same")
+            best = None
+            for row in range(3, h - 3):
+                if not bool(valid[row]):
+                    continue
+                if not (smooth[row] < smooth[row - 1] and smooth[row] <= smooth[row + 1]):
+                    continue
+                before = float(np.percentile(smooth[max(0, row - 6):row], 70))
+                after = float(np.percentile(smooth[row + 1:min(h, row + 7)], 70))
+                valley = float(smooth[row])
+                # A front edge in pitched camera depth often appears as far -> near -> far along image v.
+                prominence = min(before - valley, after - valley)
+                if prominence < 0.025:
+                    continue
+                if row < 4 or row > h - 5:
+                    continue
+                item = (float(prominence), int(col), int(row), float(prof[row]))
+                if best is None or item[0] > best[0]:
+                    best = item
+            if best is not None:
+                candidates.append(best)
+        if len(candidates) < 3:
+            return {"count": int(len(candidates)), "inlier_count": 0, "score": 0.0}
+
+        candidates.sort(key=lambda item: item[1])
+        groups = []
+        current = [candidates[0]]
+        for item in candidates[1:]:
+            if int(item[1]) - int(current[-1][1]) <= 2:
+                current.append(item)
+            else:
+                groups.append(current)
+                current = [item]
+        groups.append(current)
+        group = max(groups, key=lambda g: (len(g), sum(float(v[0]) for v in g)))
+        if len(group) < 3:
+            return {"count": int(len(candidates)), "inlier_count": 0, "score": 0.0}
+
+        cols = np.asarray([g[1] for g in group], dtype=np.float32)
+        rows = np.asarray([g[2] for g in group], dtype=np.float32)
+        depths = np.asarray([g[3] for g in group], dtype=np.float32)
+        px = (float(x0) + cols * float(stride)).astype(np.int32)
+        py = (float(y0) + rows * float(stride)).astype(np.int32)
+        u = px.astype(np.float32)
+        v = py.astype(np.float32)
+        x_c = (u - float(calib.cx)) * depths / float(calib.fx)
+        y_c = (v - float(calib.cy)) * depths / float(calib.fy)
+        x_r, y_r, z_r = self._camera_points_to_robot(
+            x_c,
+            y_c,
+            depths,
+            pitch_deg=pitch_deg,
+            camera_height_m=camera_height_m,
+        )
+        try:
+            k, b = self._weighted_line_fit(x_r, y_r, np.ones_like(x_r, dtype=np.float32))
+            residual = np.abs(y_r - (float(k) * x_r + float(b)))
+            threshold = 0.055
+            inlier = residual <= threshold
+            if int(inlier.sum()) >= 3:
+                k, b = self._weighted_line_fit(x_r[inlier], y_r[inlier], np.ones(int(inlier.sum()), dtype=np.float32))
+                residual = np.abs(y_r - (float(k) * x_r + float(b)))
+                inlier = residual <= threshold
+            inlier_count = int(inlier.sum())
+            inlier_x = x_r[inlier] if inlier_count > 0 else np.asarray([], dtype=np.float32)
+            x_span = float(np.max(inlier_x) - np.min(inlier_x)) if inlier_x.size > 1 else 0.0
+            residual_mean = float(np.mean(residual[inlier])) if inlier_count > 0 else float(np.mean(residual))
+            yaw = math.atan(float(k))
+            dist = float(b) - float(target_dist_m)
+            span_score = self._clip01(x_span / max(1e-6, float(min_x_span_m) * 2.0))
+            count_score = self._clip01(float(inlier_count) / 10.0)
+            residual_score = max(0.0, 1.0 - residual_mean / threshold)
+            yaw_score = self._clip01(1.0 - abs(float(yaw)) / max(1e-6, float(max_yaw)))
+            score = float(0.35 * span_score + 0.25 * count_score + 0.25 * residual_score + 0.15 * yaw_score)
+        except Exception:
+            k, b, yaw, dist = 0.0, 0.0, 0.0, 0.0
+            residual = np.zeros(len(px), dtype=np.float32)
+            inlier = np.zeros(len(px), dtype=bool)
+            inlier_count, x_span, residual_mean, score = 0, 0.0, 0.0, 0.0
+        return {
+            "count": int(len(candidates)),
+            "inlier_count": int(inlier_count),
+            "x_span_m": float(x_span),
+            "median_py": float(np.median(py)) if len(py) else None,
+            "residual_mean": float(residual_mean),
+            "k": float(k),
+            "b": float(b),
+            "yaw": float(yaw),
+            "dist": float(dist),
+            "score": float(score),
+            "x": x_r.astype(np.float32, copy=False),
+            "y": y_r.astype(np.float32, copy=False),
+            "z": z_r.astype(np.float32, copy=False),
+            "y_median_m": float(np.median(y_r)) if len(y_r) else None,
+            "px": px.astype(np.int32, copy=False),
+            "py": py.astype(np.int32, copy=False),
+            "inlier": inlier.astype(bool, copy=False),
+        }
+
+    @staticmethod
+    def _fast_local_band_stats(x_values: Any, y_values: Any, edge_x: Any, edge_y: Any, *, k: float, b: float, band_m: float) -> Dict[str, Any]:
+        x_arr = np.asarray(x_values, dtype=np.float32)
+        y_arr = np.asarray(y_values, dtype=np.float32)
+        n = int(min(len(x_arr), len(y_arr)))
+        if n <= 0:
+            return {"count": 0, "x_span_m": 0.0, "edge_support": 0, "residual_mean": 0.0}
+        residual = np.abs(y_arr[:n] - (float(k) * x_arr[:n] + float(b)))
+        mask = residual <= float(band_m)
+        xs = x_arr[:n][mask]
+        edge_x_arr = np.asarray(edge_x, dtype=np.float32)
+        edge_y_arr = np.asarray(edge_y, dtype=np.float32)
+        if len(edge_x_arr) and len(edge_y_arr):
+            en = int(min(len(edge_x_arr), len(edge_y_arr)))
+            edge_res = np.abs(edge_y_arr[:en] - (float(k) * edge_x_arr[:en] + float(b)))
+            edge_support = int(np.sum(edge_res <= float(band_m)))
+        else:
+            edge_support = 0
+        return {
+            "count": int(mask.sum()),
+            "x_span_m": float(np.max(xs) - np.min(xs)) if xs.size > 1 else 0.0,
+            "edge_support": int(edge_support),
+            "residual_mean": float(np.mean(residual[mask])) if int(mask.sum()) > 0 else float(np.mean(residual)),
+        }
+
+    def _fit_fast_front_cluster_line(
+        self,
+        *,
+        x_t: Any,
+        y_t: Any,
+        rep_support: Any,
+        rep_z_span: Any,
+        min_front_face_columns: int,
+        min_front_face_x_span: float,
+        min_vertical_support: int,
+        min_vertical_z_span: float,
+        residual_threshold: float,
+        max_yaw: float,
+        x_bin_width_m: float,
+        front_cluster_gap_m: float,
+        target_dist_m: float,
+    ) -> Dict[str, Any]:
+        x_arr = np.asarray(x_t, dtype=np.float32)
+        y_arr = np.asarray(y_t, dtype=np.float32)
+        support_arr = np.asarray(rep_support, dtype=np.int32)
+        z_span_arr = np.asarray(rep_z_span, dtype=np.float32)
+        n = int(min(len(x_arr), len(y_arr), len(support_arr)))
+        if n <= 0:
+            return {"selected": None, "clusters": [], "reject_reason": "no_front_cluster"}
+        x_arr, y_arr, support_arr = x_arr[:n], y_arr[:n], support_arr[:n]
+        z_span_arr = z_span_arr[:n] if len(z_span_arr) >= n else np.zeros(n, dtype=np.float32)
+
+        # Robot Y is forward distance along the ground; smaller Y is nearer/front-most.
+        order_y = np.argsort(y_arr, kind="mergesort")
+        clusters: list = []
+        current = [int(order_y[0])]
+        for raw_idx in order_y[1:]:
+            idx = int(raw_idx)
+            prev = current[-1]
+            if float(y_arr[idx] - y_arr[prev]) > float(front_cluster_gap_m):
+                clusters.append(current)
+                current = [idx]
+            else:
+                current.append(idx)
+        clusters.append(current)
+
+        cluster_infos = []
+        min_support_sum = int(min_front_face_columns) * int(min_vertical_support)
+        hard_span_min = max(float(min_front_face_x_span), float(min_front_face_x_span) * 0.90)
+        for cluster_index, idx_list in enumerate(clusters):
+            idx = np.asarray(sorted(idx_list, key=lambda i: float(x_arr[i])), dtype=np.int32)
+            cx = x_arr[idx]
+            cy = y_arr[idx]
+            cs = support_arr[idx]
+            cz_span = z_span_arr[idx]
+            rep_count = int(len(idx))
+            support_sum = int(np.sum(cs)) if cs.size else 0
+            x_span = float(np.max(cx) - np.min(cx)) if cx.size > 1 else 0.0
+            y_center = float(np.median(cy)) if cy.size else None
+            y_min = float(np.min(cy)) if cy.size else None
+            y_max = float(np.max(cy)) if cy.size else None
+            z_span_p50 = float(np.percentile(cz_span, 50)) if cz_span.size else 0.0
+            z_span_max = float(np.max(cz_span)) if cz_span.size else 0.0
+            info: Dict[str, Any] = {
+                "index": int(cluster_index),
+                "rep_indices": idx,
+                "rep_count": rep_count,
+                "support_sum": support_sum,
+                "x_span_m": x_span,
+                "y_center": y_center,
+                "y_min": y_min,
+                "y_max": y_max,
+                "z_span_p50": z_span_p50,
+                "z_span_max": z_span_max,
+                "valid": False,
+                "invalid_reason": "",
+                "score": 0.0,
+            }
+            if rep_count < int(min_front_face_columns):
+                info["invalid_reason"] = "front_cluster_weak"
+                cluster_infos.append(info)
+                continue
+            if x_span < hard_span_min:
+                info["invalid_reason"] = "front_face_x_span_low"
+                cluster_infos.append(info)
+                continue
+            if support_sum < min_support_sum:
+                info["invalid_reason"] = "vertical_support_low"
+                cluster_infos.append(info)
+                continue
+            try:
+                support_w = np.sqrt(np.clip(cs.astype(np.float32), 1.0, 36.0))
+                z_w = np.clip(cz_span / max(1e-6, float(min_vertical_z_span)), 0.5, 1.5) if cz_span.size else 1.0
+                weights = np.clip(support_w * z_w, 0.5, 3.0)
+                k, b = self._weighted_line_fit(cx, cy, weights)
+                residual = np.abs(cy - (float(k) * cx + float(b)))
+                neighbor_mask = self._representative_neighbor_mask(cx, max_gap_m=max(0.18, float(x_bin_width_m) * 5.0))
+                inlier_local = (residual <= float(residual_threshold)) & neighbor_mask
+                if int(inlier_local.sum()) >= int(min_front_face_columns):
+                    k, b = self._weighted_line_fit(cx[inlier_local], cy[inlier_local], weights[inlier_local])
+                    residual = np.abs(cy - (float(k) * cx + float(b)))
+                    inlier_local = (residual <= float(residual_threshold)) & neighbor_mask
+                inlier_count = int(inlier_local.sum())
+                inlier_x = cx[inlier_local] if inlier_count > 0 else np.asarray([], dtype=np.float32)
+                inlier_x_span = float(np.max(inlier_x) - np.min(inlier_x)) if inlier_x.size > 1 else 0.0
+                residual_mean = float(np.mean(residual[inlier_local])) if inlier_count > 0 else float(np.mean(residual))
+                residual_p90 = float(np.percentile(residual[inlier_local], 90)) if inlier_count > 0 else float(np.percentile(residual, 90))
+                yaw = math.atan(float(k))
+                dist = float(b) - float(target_dist_m)
+                inlier_support = int(np.sum(cs[inlier_local])) if inlier_count > 0 else 0
+            except Exception as exc:
+                info["invalid_reason"] = f"cluster_fit_failed:{exc}"
+                cluster_infos.append(info)
+                continue
+
+            info.update({
+                "k": float(k),
+                "b": float(b),
+                "yaw": float(yaw),
+                "dist": float(dist),
+                "residual": residual.astype(np.float32, copy=False),
+                "inlier_local": inlier_local.astype(bool, copy=False),
+                "inlier_count": int(inlier_count),
+                "inlier_support": int(inlier_support),
+                "inlier_x_span_m": float(inlier_x_span),
+                "residual_mean": float(residual_mean),
+                "residual_p90": float(residual_p90),
+            })
+            strict_for_farther = cluster_index > 0
+            if inlier_count < int(min_front_face_columns):
+                info["invalid_reason"] = "front_cluster_weak"
+            elif inlier_support < min_support_sum:
+                info["invalid_reason"] = "vertical_support_low"
+            elif inlier_x_span < hard_span_min:
+                info["invalid_reason"] = "front_face_x_span_low"
+            elif residual_mean > float(residual_threshold):
+                info["invalid_reason"] = "residual_too_large"
+            elif abs(float(yaw)) > float(max_yaw):
+                info["invalid_reason"] = "yaw_out_of_range"
+            elif strict_for_farther and (
+                inlier_count < max(int(min_front_face_columns) + 1, 4)
+                or inlier_x_span < max(float(min_front_face_x_span) * 1.5, 0.15)
+                or inlier_support < min_support_sum * 2
+                or residual_mean > float(residual_threshold) * 0.80
+            ):
+                info["invalid_reason"] = "selected_cluster_invalid"
+            else:
+                info["valid"] = True
+                frontness_score = max(0.0, 1.0 - 0.35 * float(cluster_index))
+                span_score = self._clip01(inlier_x_span / max(1e-6, float(min_front_face_x_span) * 2.0))
+                support_score = self._clip01(float(inlier_support) / float(max(1, min_support_sum * 3)))
+                residual_score = max(0.0, 1.0 - residual_mean / max(1e-6, float(residual_threshold)))
+                info["score"] = float(5.0 * frontness_score + 1.2 * span_score + 1.0 * support_score + 1.0 * residual_score)
+            cluster_infos.append(info)
+
+        selected = None
+        for info in cluster_infos:
+            if bool(info.get("valid")):
+                selected = info
+                break
+        if selected is None:
+            reject = "no_front_cluster" if not cluster_infos else str(cluster_infos[0].get("invalid_reason") or "front_cluster_weak")
+        else:
+            reject = "none"
+        return {"selected": selected, "clusters": cluster_infos, "reject_reason": reject}
 
     @staticmethod
     def _sparse_pixel_sample(xs: Any, ys: Any, x0: int, y0: int, stride: int, *, cap: int = 1000) -> list:
@@ -1215,6 +1539,35 @@ class TableEdgeManager:
             "fast_confidence_version": "v3",
             "fast_distance_stage": "unknown",
             "fast_control_level": "none",
+            "fast_rep_cluster_count": 0,
+            "fast_selected_cluster_index": None,
+            "fast_selected_cluster_y_center": None,
+            "fast_selected_cluster_x_span_m": 0.0,
+            "fast_selected_cluster_support": 0,
+            "fast_selected_cluster_score": 0.0,
+            "fast_background_rep_count": 0,
+            "fast_front_rep_count": 0,
+            "fast_line_source": "none",
+            "fast_line_score": 0.0,
+            "fast_frontness_score": 0.0,
+            "fast_edge_consistency_score": 0.0,
+            "fast_background_penalty": 0.0,
+            "fast_edge_candidate_count": 0,
+            "fast_edge_inlier_count": 0,
+            "fast_edge_x_span_m": 0.0,
+            "fast_edge_y_median_px": None,
+            "fast_edge_residual": 0.0,
+            "fast_edge_line_yaw_rad": None,
+            "fast_edge_line_dist_m": None,
+            "fast_edge_support_score": 0.0,
+            "fast_local_band_support_count": 0,
+            "fast_local_band_x_span_m": 0.0,
+            "fast_local_band_edge_support": 0,
+            "fast_local_band_residual_mean": 0.0,
+            "fast_background_blocked": False,
+            "fast_near_stage_far_jump": False,
+            "fast_selected_dist_source": "none",
+            "fast_prev_dist_used": None,
         }
 
         point_start = time.perf_counter()
@@ -1252,6 +1605,7 @@ class TableEdgeManager:
             payload.update(self._detector_mode_payload())
             payload.update({"sampled_point_count": sampled_count, "point_count": point_count, "candidate_count": 0})
             payload.update(fast_debug_base)
+            payload.update(edge_debug_payload)
             payload.update({
                 "fast_raw_sampled_point_count": sampled_count,
                 "fast_gate_reject_reason": payload.get("reason") or "not_enough_points",
@@ -1302,6 +1656,41 @@ class TableEdgeManager:
         candidate_x_span = float(np.max(height_x) - np.min(height_x)) if len(height_x) > 1 else 0.0
         raw_sample_pixels = self._sparse_pixel_sample(xx, yy, x0, y0, stride, cap=1000)
         fast_candidate_pixels = [[int(x), int(y)] for x, y in zip(height_px[:1000].tolist(), height_py[:1000].tolist())]
+        edge_cue = self._extract_fast_front_edge_cue(
+            depth_m=depth_m,
+            x0=x0,
+            y0=y0,
+            stride=stride,
+            calib=calib,
+            pitch_deg=pitch_deg,
+            camera_height_m=camera_height_m,
+            z_min=z_min,
+            z_max=z_max,
+            target_dist_m=float(self._target_dist_m),
+            min_x_span_m=float(min_front_face_x_span),
+            max_yaw=float(max_yaw_cfg),
+        )
+        edge_px = np.asarray(edge_cue.get("px", []), dtype=np.int32)
+        edge_py = np.asarray(edge_cue.get("py", []), dtype=np.int32)
+        edge_inlier_mask = np.asarray(edge_cue.get("inlier", []), dtype=bool)
+        if edge_inlier_mask.size == edge_px.size and int(edge_inlier_mask.sum()) > 0:
+            edge_draw_px = edge_px[edge_inlier_mask]
+            edge_draw_py = edge_py[edge_inlier_mask]
+        else:
+            edge_draw_px = edge_px
+            edge_draw_py = edge_py
+        fast_edge_pixels = [[int(x), int(y)] for x, y in zip(edge_draw_px[:1000].tolist(), edge_draw_py[:1000].tolist())]
+        edge_debug_payload = {
+            "fast_edge_candidate_count": int(edge_cue.get("count", 0) or 0),
+            "fast_edge_inlier_count": int(edge_cue.get("inlier_count", 0) or 0),
+            "fast_edge_x_span_m": float(edge_cue.get("x_span_m", 0.0) or 0.0),
+            "fast_edge_y_median_px": edge_cue.get("median_py"),
+            "fast_edge_residual": float(edge_cue.get("residual_mean", 0.0) or 0.0),
+            "fast_edge_line_yaw_rad": edge_cue.get("yaw") if int(edge_cue.get("inlier_count", 0) or 0) > 0 else None,
+            "fast_edge_line_dist_m": edge_cue.get("dist") if int(edge_cue.get("inlier_count", 0) or 0) > 0 else None,
+            "fast_edge_support_score": float(edge_cue.get("score", 0.0) or 0.0),
+            "fast_edge_pixels": fast_edge_pixels,
+        }
         profile["candidate_select_ms"] = self._ms_since(select_start)
         if point_count <= 0:
             payload = self._default_result(depth_valid=True, reason="no_robot_points", frame_seq=frame_seq, roi_meta=roi_meta)
@@ -1333,6 +1722,7 @@ class TableEdgeManager:
             payload.update(self._detector_mode_payload())
             payload.update({"sampled_point_count": sampled_count, "point_count": point_count, "candidate_count": candidate_count})
             payload.update(fast_debug_base)
+            payload.update(edge_debug_payload)
             payload.update({
                 "fast_coord_frame": "robot_xyz",
                 "fast_camera_pitch_deg": pitch_deg,
@@ -1403,11 +1793,143 @@ class TableEdgeManager:
             support_step = max(1, int(math.ceil(float(len(support_px_pre)) / float(support_cap)))) if len(support_px_pre) else 1
             fast_support_pixels = [[int(x), int(y)] for x, y in zip(support_px_pre[::support_step][:support_cap].tolist(), support_py_pre[::support_step][:support_cap].tolist())]
             fast_rep_pixels = [[int(x), int(y)] for x, y in zip(rep_px_pre[:1000].tolist(), rep_py_pre[:1000].tolist())]
+            edge_enough = (
+                int(edge_cue.get("inlier_count", 0) or 0) >= max(4, min_front_face_columns)
+                and float(edge_cue.get("x_span_m", 0.0) or 0.0) >= max(0.15, float(min_front_face_x_span) * 1.5)
+                and float(edge_cue.get("score", 0.0) or 0.0) >= 0.45
+                and abs(float(edge_cue.get("yaw", 0.0) or 0.0)) <= max_yaw_cfg
+            )
+            if edge_enough:
+                edge_yaw = float(edge_cue.get("yaw", 0.0) or 0.0)
+                edge_dist = float(edge_cue.get("dist", 0.0) or 0.0)
+                edge_conf = self._clip01(0.35 + 0.55 * float(edge_cue.get("score", 0.0) or 0.0))
+                edge_control = "rotate_only" if abs(edge_yaw) >= 0.55 else "approach_slow"
+                edge_bbox = None
+                if len(edge_draw_px) > 0 and len(edge_draw_py) > 0:
+                    edge_bbox = [int(np.min(edge_draw_px)), int(np.min(edge_draw_py)), int(np.max(edge_draw_px)) + stride, int(np.max(edge_draw_py)) + stride]
+                edge_view = self._plane_view_from_bbox(edge_bbox or roi_box, getattr(depth_frame, "shape", None), area_ratio=None)
+                payload = {
+                    "table_found": bool(candidate_count > 0),
+                    "edge_found": True,
+                    "edge_valid": False,
+                    "valid_for_control": False,
+                    "confidence": float(edge_conf),
+                    "edge_conf": float(edge_conf),
+                    "yaw_err_rad": float(edge_yaw),
+                    "yaw_err": float(edge_yaw),
+                    "dist_err_m": float(edge_dist),
+                    "dist_err": float(edge_dist),
+                    "edge_k": float(edge_cue.get("k", 0.0) or 0.0),
+                    "edge_b": float(edge_cue.get("b", 0.0) or 0.0),
+                    "depth_valid": True,
+                    "point_count": int(point_count),
+                    "sampled_point_count": int(sampled_count),
+                    "candidate_count": int(candidate_count),
+                    "table_point_count": int(candidate_count),
+                    "inlier_count": int(edge_cue.get("inlier_count", 0) or 0),
+                    "edge_inlier_count": int(edge_cue.get("inlier_count", 0) or 0),
+                    "representative_inlier_count": 0,
+                    "support_point_count": 0,
+                    "selected_edge": True,
+                    "near_edge": False,
+                    **edge_view,
+                    "plane_found": True,
+                    "plane_confidence": float(edge_conf),
+                    "plane_residual_mean": float(edge_cue.get("residual_mean", 0.0) or 0.0),
+                    "plane_residual_max": float(edge_cue.get("residual_mean", 0.0) or 0.0),
+                    "plane_x_span_m": float(edge_cue.get("x_span_m", 0.0) or 0.0),
+                    "plane_yaw_err_rad": float(edge_yaw),
+                    "plane_dist_err_m": float(edge_dist),
+                    "plane_mask_status": "fast_sparse",
+                    **fast_debug_base,
+                    **edge_debug_payload,
+                    "fast_fit_attempted": False,
+                    "fast_raw_yaw_err_rad": float(edge_yaw),
+                    "fast_raw_dist_err_m": float(edge_dist),
+                    "fast_raw_plane_cx_norm": edge_view.get("plane_cx_norm"),
+                    "fast_raw_plane_width_norm": edge_view.get("plane_width_norm"),
+                    "fast_raw_plane_x_span_m": float(edge_cue.get("x_span_m", 0.0) or 0.0),
+                    "fast_raw_residual_mean": float(edge_cue.get("residual_mean", 0.0) or 0.0),
+                    "fast_raw_residual_p90": float(edge_cue.get("residual_mean", 0.0) or 0.0),
+                    "fast_candidate_point_count": int(candidate_count),
+                    "fast_support_point_count": int(support_total),
+                    "fast_rep_count": int(rep_count),
+                    "fast_rep_inlier_count": 0,
+                    "fast_rep_outlier_count": int(rep_count),
+                    "fast_candidate_x_span_m": float(candidate_x_span),
+                    "fast_support_x_span_m": float(support_x_span_pre),
+                    "fast_rep_x_span_m": float(rep_x_span_pre),
+                    "fast_fit_inlier_x_span_m": float(edge_cue.get("x_span_m", 0.0) or 0.0),
+                    "fast_residual_mean": float(edge_cue.get("residual_mean", 0.0) or 0.0),
+                    "fast_residual_p90": float(edge_cue.get("residual_mean", 0.0) or 0.0),
+                    "fast_support_mode": "edge",
+                    "fast_fit_line_source": "front_edge",
+                    "fast_line_source": "edge",
+                    "fast_line_score": float(edge_conf),
+                    "fast_frontness_score": 1.0,
+                    "fast_edge_consistency_score": 1.0,
+                    "fast_background_penalty": 0.0,
+                    "fast_selected_dist_source": "edge",
+                    "fast_raw_confidence": float(edge_conf),
+                    "fast_raw_inlier_count": int(edge_cue.get("inlier_count", 0) or 0),
+                    "fast_raw_candidate_count": int(candidate_count),
+                    "fast_raw_sampled_point_count": int(sampled_count),
+                    "fast_raw_reject_reason": "front_line_weak",
+                    "fast_gate_reject_reason": "front_line_weak",
+                    "fast_gate_reason": "front_line_weak",
+                    "fast_coord_frame": "robot_xyz",
+                    "fast_camera_pitch_deg": float(pitch_deg),
+                    "fast_camera_height_m": float(camera_height_m),
+                    "fast_table_height_m": float(table_height_m),
+                    "fast_distance_stage": "near" if edge_dist <= 0.25 else "middle" if edge_dist <= 0.60 else "far",
+                    "fast_control_level": edge_control,
+                    "fast_score_final": float(edge_conf),
+                    "fast_candidate_pixel_count": int(len(fast_candidate_pixels)),
+                    "fast_support_pixel_count": int(len(fast_support_pixels)),
+                    "fast_front_face_rep_pixel_count": int(len(fast_rep_pixels)),
+                    "fast_inlier_pixel_count": 0,
+                    "fast_outlier_pixel_count": int(len(fast_rep_pixels)),
+                    "fast_sampled_pixels": raw_sample_pixels,
+                    "fast_candidate_pixels": fast_candidate_pixels,
+                    "fast_support_pixels": fast_support_pixels,
+                    "fast_front_face_rep_pixels": fast_rep_pixels,
+                    "fast_inlier_pixels": [],
+                    "fast_outlier_pixels": fast_rep_pixels,
+                    "fast_background_pixels": [],
+                    "fast_rep_background_pixels": [],
+                    "fast_weak_pixels": fast_rep_pixels,
+                    "pose_source": "fast_plane_only",
+                    "final_pose_source": "fast_plane_only",
+                    "view_err_norm": edge_view.get("plane_cx_norm"),
+                    "view_source": "plane",
+                    "view_reliable": True,
+                    "frame_id": int(self._frame_id),
+                    "frame_seq": int(frame_seq),
+                    "source": "vision_table_edge_manager",
+                    "reason": "front_line_weak",
+                    "reject_reason": "front_line_weak",
+                    "target_dist_m": float(self._target_dist_m),
+                    "plane_only_mode": True,
+                    "enable_crease_line": False,
+                    "usable_for_approach": True,
+                    "usable_for_alignment": False,
+                    "usable_for_stop": False,
+                    "control_level": edge_control,
+                    "control_reject_reason": "front_line_weak",
+                    **self._detector_mode_payload(),
+                    **yolo_gate,
+                    **roi_payload,
+                    "type": "table_edge_obs",
+                }
+                profile["plane_fit_ms"] = self._ms_since(fit_start)
+                profile["total_edge_process_ms"] = self._ms_since(total_start)
+                return self._attach_profile(payload, profile, path="fast_plane_only_front_edge_fallback")
             payload = self._default_result(depth_valid=True, reason=low_reason, frame_seq=frame_seq, roi_meta=roi_meta)
             payload.update(roi_payload)
             payload.update(self._detector_mode_payload())
             payload.update({"sampled_point_count": sampled_count, "point_count": point_count, "candidate_count": candidate_count})
             payload.update(fast_debug_base)
+            payload.update(edge_debug_payload)
             payload.update({
                 "fast_fit_attempted": False,
                 "fast_coord_frame": "robot_xyz",
@@ -1455,6 +1977,9 @@ class TableEdgeManager:
                 "fast_front_face_rep_pixels": fast_rep_pixels,
                 "fast_inlier_pixels": [],
                 "fast_outlier_pixels": fast_rep_pixels,
+                "fast_background_pixels": [],
+                "fast_rep_background_pixels": [],
+                "fast_weak_pixels": fast_rep_pixels,
             })
             profile["plane_fit_ms"] = self._ms_since(fit_start)
             profile["total_edge_process_ms"] = self._ms_since(total_start)
@@ -1467,46 +1992,144 @@ class TableEdgeManager:
         support_x_span = float(np.max(support_x) - np.min(support_x)) if support_x.size > 1 else 0.0
         rep_x_span = float(np.max(x_t) - np.min(x_t)) if x_t.size > 1 else 0.0
         residual_threshold = max(0.035, float(getattr(cfg, "front_plane_max_residual_m", 0.035) if cfg is not None else 0.035) * 1.5)
+        front_cluster_gap_m = float(getattr(table_edge_cfg, "front_cluster_gap_m", 0.10) or 0.10)
         try:
-            support_w = np.sqrt(np.clip(rep_support.astype(np.float32), 1.0, 36.0))
-            z_w = np.clip(rep_z_span / max(1e-6, float(min_vertical_z_span)), 0.5, 1.5) if rep_z_span.size else 1.0
-            weights = np.clip(support_w * z_w, 0.5, 3.0)
-            k, b = self._weighted_line_fit(x_t, y_t, weights)
-            residual = np.abs(y_t - (float(k) * x_t + float(b)))
-            neighbor_mask = self._representative_neighbor_mask(x_t, max_gap_m=max(0.18, float(x_bin_width_m) * 5.0))
-            inlier = (residual <= residual_threshold) & neighbor_mask
-            inlier_count = int(inlier.sum())
-            if inlier_count >= min_front_face_columns:
-                k, b = self._weighted_line_fit(x_t[inlier], y_t[inlier], weights[inlier])
-                residual = np.abs(y_t - (float(k) * x_t + float(b)))
-                inlier = (residual <= residual_threshold) & neighbor_mask
-                inlier_count = int(inlier.sum())
-            residual_mean = float(np.mean(residual[inlier])) if inlier_count > 0 else float(np.mean(residual))
-            residual_max = float(np.max(residual[inlier])) if inlier_count > 0 else float(np.max(residual))
-            outlier = ~inlier
+            cluster_fit = self._fit_fast_front_cluster_line(
+                x_t=x_t,
+                y_t=y_t,
+                rep_support=rep_support,
+                rep_z_span=rep_z_span,
+                min_front_face_columns=min_front_face_columns,
+                min_front_face_x_span=min_front_face_x_span,
+                min_vertical_support=min_vertical_support,
+                min_vertical_z_span=min_vertical_z_span,
+                residual_threshold=residual_threshold,
+                max_yaw=max_yaw_cfg,
+                x_bin_width_m=x_bin_width_m,
+                front_cluster_gap_m=front_cluster_gap_m,
+                target_dist_m=float(self._target_dist_m),
+            )
         except Exception as exc:
-            payload = self._default_result(depth_valid=True, reason=f"birdview_fit_failed:{exc}", frame_seq=frame_seq, roi_meta=roi_meta)
+            cluster_fit = {"selected": None, "clusters": [], "reject_reason": f"birdview_fit_failed:{exc}"}
+        clusters = list(cluster_fit.get("clusters") or [])
+        selected_cluster = cluster_fit.get("selected")
+        rep_px = np.asarray(reps.get("px"), dtype=np.int32)
+        rep_py = np.asarray(reps.get("py"), dtype=np.int32)
+        support_px_all = np.asarray(reps.get("support_px", []), dtype=np.int32)
+        support_py_all = np.asarray(reps.get("support_py", []), dtype=np.int32)
+        support_rep_index = np.asarray(reps.get("support_rep_index", []), dtype=np.int32)
+
+        if selected_cluster is None:
+            cluster_reason = str(cluster_fit.get("reject_reason") or "no_front_cluster")
+            if cluster_reason.startswith("birdview_fit_failed:"):
+                low_reason = cluster_reason
+            elif clusters:
+                low_reason = "front_cluster_weak" if cluster_reason in {"front_cluster_weak", "front_face_columns_low", "vertical_support_low", "front_face_x_span_low"} else cluster_reason
+            else:
+                low_reason = "no_front_cluster"
+            support_cap = 1600
+            support_step = max(1, int(math.ceil(float(len(support_px_all)) / float(support_cap)))) if len(support_px_all) else 1
+            fast_support_pixels = [[int(x), int(y)] for x, y in zip(support_px_all[::support_step][:support_cap].tolist(), support_py_all[::support_step][:support_cap].tolist())]
+            fast_rep_pixels = [[int(x), int(y)] for x, y in zip(rep_px[:1000].tolist(), rep_py[:1000].tolist())]
+            payload = self._default_result(depth_valid=True, reason=low_reason, frame_seq=frame_seq, roi_meta=roi_meta)
             payload.update(roi_payload)
             payload.update(self._detector_mode_payload())
             payload.update({"sampled_point_count": sampled_count, "point_count": point_count, "candidate_count": candidate_count})
             payload.update(fast_debug_base)
+            payload.update(edge_debug_payload)
             payload.update({
-                "fast_fit_attempted": True,
+                "fast_fit_attempted": bool(rep_count > 0),
                 "fast_coord_frame": "robot_xyz",
+                "fast_camera_pitch_deg": pitch_deg,
+                "fast_camera_height_m": camera_height_m,
+                "fast_table_height_m": table_height_m,
                 "fast_raw_sampled_point_count": sampled_count,
                 "fast_raw_candidate_count": candidate_count,
+                "fast_candidate_point_count": candidate_count,
+                "fast_support_point_count": 0,
+                "fast_rep_count": rep_count,
+                "fast_rep_inlier_count": 0,
+                "fast_rep_outlier_count": 0,
+                "fast_background_rep_count": rep_count,
+                "fast_front_rep_count": 0,
+                "fast_rep_cluster_count": int(len(clusters)),
+                "fast_selected_cluster_index": None,
+                "fast_selected_cluster_y_center": None,
+                "fast_selected_cluster_x_span_m": 0.0,
+                "fast_selected_cluster_support": 0,
+                "fast_selected_cluster_score": 0.0,
+                "fast_candidate_x_span_m": candidate_x_span,
+                "fast_support_x_span_m": support_x_span,
+                "fast_rep_x_span_m": rep_x_span,
+                "fast_fit_inlier_x_span_m": 0.0,
+                "fast_support_mode": "none",
+                "fast_fit_line_source": "front_cluster",
                 "fast_front_face_rep_count": rep_count,
                 "fast_front_face_support_point_count": support_total,
-                "fast_gate_reject_reason": f"birdview_fit_failed:{exc}",
-                "fast_gate_reason": f"birdview_fit_failed:{exc}",
-                "fast_raw_reject_reason": f"birdview_fit_failed:{exc}",
+                "fast_gate_reject_reason": low_reason,
+                "fast_gate_reason": low_reason,
+                "fast_raw_reject_reason": low_reason,
+                "fast_sampled_pixels": raw_sample_pixels,
+                "fast_candidate_pixel_count": int(len(fast_candidate_pixels)),
+                "fast_support_pixel_count": int(len(fast_support_pixels)),
+                "fast_front_face_rep_pixel_count": int(len(fast_rep_pixels)),
+                "fast_inlier_pixel_count": 0,
+                "fast_outlier_pixel_count": 0,
+                "fast_background_pixel_count": int(len(fast_rep_pixels)),
+                "fast_candidate_pixels": fast_candidate_pixels,
+                "fast_support_pixels": fast_support_pixels,
+                "fast_front_face_rep_pixels": fast_rep_pixels,
+                "fast_inlier_pixels": [],
+                "fast_outlier_pixels": [],
+                "fast_background_pixels": fast_rep_pixels,
+                "fast_rep_background_pixels": fast_rep_pixels,
+                "fast_weak_pixels": fast_rep_pixels,
             })
             profile["plane_fit_ms"] = self._ms_since(fit_start)
             profile["total_edge_process_ms"] = self._ms_since(total_start)
-            return self._attach_profile(payload, profile, path="fast_plane_only_fit_failed")
-        representative_inlier_count = int(inlier_count)
-        representative_outlier_count = int(np.sum(outlier)) if "outlier" in locals() else max(0, rep_count - representative_inlier_count)
+            return self._attach_profile(payload, profile, path=f"fast_plane_only_{low_reason.split(':', 1)[0]}")
+
+        selected_cluster_index = int(selected_cluster.get("index", 0))
+        selected_rep_indices = np.asarray(selected_cluster.get("rep_indices", []), dtype=np.int32)
+        selected_mask = np.zeros(rep_count, dtype=bool)
+        selected_mask[selected_rep_indices] = True
+        local_inlier = np.asarray(selected_cluster.get("inlier_local", []), dtype=bool)
+        inlier = np.zeros(rep_count, dtype=bool)
+        if local_inlier.size == selected_rep_indices.size:
+            inlier[selected_rep_indices] = local_inlier
+        outlier = selected_mask & ~inlier
+        background_mask = np.zeros(rep_count, dtype=bool)
+        weak_mask = np.zeros(rep_count, dtype=bool)
+        for info in clusters:
+            idx = np.asarray(info.get("rep_indices", []), dtype=np.int32)
+            if idx.size <= 0 or int(info.get("index", -1)) == selected_cluster_index:
+                continue
+            if int(info.get("index", -1)) > selected_cluster_index:
+                background_mask[idx] = True
+            else:
+                weak_mask[idx] = True
+        k = float(selected_cluster.get("k", 0.0))
+        b = float(selected_cluster.get("b", 0.0))
+        residual = np.full(rep_count, np.nan, dtype=np.float32)
+        selected_residual = np.asarray(selected_cluster.get("residual", []), dtype=np.float32)
+        if selected_residual.size == selected_rep_indices.size:
+            residual[selected_rep_indices] = selected_residual
+        residual_mean = float(selected_cluster.get("residual_mean", 0.0) or 0.0)
+        residual_p90 = float(selected_cluster.get("residual_p90", 0.0) or 0.0)
+        residual_max = float(np.nanmax(residual[inlier])) if int(inlier.sum()) > 0 else float(np.nanmax(selected_residual)) if selected_residual.size else 0.0
+        representative_inlier_count = int(inlier.sum())
+        inlier_count = representative_inlier_count
+        representative_outlier_count = int(outlier.sum())
         support_inlier_count = int(np.sum(rep_support[inlier])) if representative_inlier_count > 0 and rep_support.size else 0
+        selected_cluster_support = int(selected_cluster.get("support_sum", support_inlier_count) or 0)
+        selected_cluster_x_span = float(selected_cluster.get("x_span_m", 0.0) or 0.0)
+        selected_cluster_y_center = selected_cluster.get("y_center")
+        selected_cluster_score = float(selected_cluster.get("score", 0.0) or 0.0)
+        background_rep_count = int(background_mask.sum())
+        front_rep_count = int(selected_mask.sum())
+        selected_support_mask = np.isin(support_rep_index, selected_rep_indices) if support_rep_index.size else np.asarray([], dtype=bool)
+        selected_support_x = support_x[selected_support_mask] if support_x.size and selected_support_mask.size == support_x.size else np.asarray([], dtype=np.float32)
+        selected_support_x_span = float(np.max(selected_support_x) - np.min(selected_support_x)) if selected_support_x.size > 1 else selected_cluster_x_span
         profile["plane_fit_ms"] = self._ms_since(fit_start)
         profile["plane_or_edge_fit_ms"] = float(profile["plane_fit_ms"])
 
@@ -1516,17 +2139,17 @@ class TableEdgeManager:
         yaw_err = math.atan(float(k))
         dist_err = float(b) - float(self._target_dist_m)
         inlier_ratio = float(representative_inlier_count) / float(max(1, rep_count))
-        support_ratio = float(support_inlier_count) / float(max(1, support_total))
+        support_ratio = float(support_inlier_count) / float(max(1, selected_cluster_support))
         span_min = float(min_front_face_x_span)
         max_yaw = float(max_yaw_cfg)
         residual_score = max(0.0, 1.0 - residual_mean / max(1e-6, residual_threshold))
         span_score = self._clip01(x_span / max(1e-6, span_min * 1.8))
         area_score = float(candidate_count) / float(max(1, sampled_count))
-        accepted_column_score = self._clip01(float(rep_count) / float(max(1, min_front_face_columns * 2)))
-        vertical_support_score = self._clip01(float(support_total) / float(max(1, min_front_face_columns * min_vertical_support * 2)))
+        accepted_column_score = self._clip01(float(front_rep_count) / float(max(1, min_front_face_columns * 2)))
+        vertical_support_score = self._clip01(float(selected_cluster_support) / float(max(1, min_front_face_columns * min_vertical_support * 2)))
         z_span_score = self._clip01(z_span_p50 / max(1e-6, min_vertical_z_span * 1.5))
         x_span_score = self._clip01(x_span / max(1e-6, min_front_face_x_span * 1.5))
-        residual_p90 = float(np.percentile(residual[inlier], 90)) if inlier_count > 0 else float(np.percentile(residual, 90))
+        residual_p90 = float(np.percentile(residual[inlier], 90)) if inlier_count > 0 else float(residual_p90)
         if representative_inlier_count >= 8 and x_span >= 0.30:
             support_mode = "vertical"
         elif representative_inlier_count >= 4 and x_span >= 0.15:
@@ -1577,6 +2200,56 @@ class TableEdgeManager:
         temporal = self._fast_temporal_score(yaw=float(yaw_err), dist=float(dist_err), cx_norm=raw_cx_norm)
         temporal_score = float(temporal.get("score", 0.0) or 0.0)
         temporal_available = bool(temporal.get("available", False))
+        edge_x = np.asarray(edge_cue.get("x", []), dtype=np.float32)
+        edge_y = np.asarray(edge_cue.get("y", []), dtype=np.float32)
+        edge_inlier_full = np.asarray(edge_cue.get("inlier", []), dtype=bool)
+        if edge_inlier_full.size == edge_x.size and int(edge_inlier_full.sum()) > 0:
+            edge_x_eval = edge_x[edge_inlier_full]
+            edge_y_eval = edge_y[edge_inlier_full]
+        else:
+            edge_x_eval = edge_x
+            edge_y_eval = edge_y
+        if len(edge_x_eval) and len(edge_y_eval):
+            edge_res_to_selected = np.abs(edge_y_eval - (float(k) * edge_x_eval + float(b)))
+            edge_consistency_score = max(0.0, 1.0 - float(np.mean(edge_res_to_selected)) / 0.08)
+            edge_support_on_selected = int(np.sum(edge_res_to_selected <= 0.06))
+        else:
+            edge_consistency_score = 0.0
+            edge_support_on_selected = 0
+        selected_y_center_num = None if selected_cluster_y_center is None else float(selected_cluster_y_center)
+        edge_y_median_m = edge_cue.get("y_median_m")
+        front_y_gap = None
+        if selected_y_center_num is not None and edge_y_median_m is not None:
+            front_y_gap = float(selected_y_center_num) - float(edge_y_median_m)
+        frontness_score = max(0.0, 1.0 - 0.35 * float(selected_cluster_index))
+        background_penalty = 0.0
+        if selected_cluster_index > 0:
+            background_penalty = max(background_penalty, 0.45)
+        if front_y_gap is not None:
+            background_penalty = max(background_penalty, self._clip01((front_y_gap - 0.12) / 0.25))
+        local_band = self._fast_local_band_stats(
+            height_x,
+            height_y,
+            edge_x_eval,
+            edge_y_eval,
+            k=float(k),
+            b=float(b),
+            band_m=max(0.055, float(residual_threshold)),
+        )
+        local_band_support_count = int(local_band.get("count", 0) or 0)
+        local_band_x_span = float(local_band.get("x_span_m", 0.0) or 0.0)
+        local_band_edge_support = int(local_band.get("edge_support", 0) or edge_support_on_selected)
+        local_band_residual_mean = float(local_band.get("residual_mean", 0.0) or 0.0)
+        line_source = "hybrid" if edge_consistency_score >= 0.55 and local_band_edge_support >= 3 else "vertical"
+        line_score = self._clip01(
+            0.30 * evidence_score
+            + 0.20 * support_geometry_score
+            + 0.18 * residual_score
+            + 0.14 * frontness_score
+            + 0.12 * edge_consistency_score
+            + 0.06 * temporal_score
+            - 0.25 * background_penalty
+        )
         if temporal_available:
             confidence = self._clip01(
                 0.25 * evidence_score
@@ -1600,12 +2273,33 @@ class TableEdgeManager:
             distance_stage = "middle"
         else:
             distance_stage = "near"
+        prev_dist_used = None
+        dist_delta = temporal.get("dist_delta")
+        if dist_delta is not None:
+            try:
+                prev_dist_used = float(dist_err) - float(dist_delta)
+            except Exception:
+                prev_dist_used = None
+        previous_near = prev_dist_used is not None and float(prev_dist_used) <= 0.25
+        near_stage_far_jump = bool(previous_near and (float(dist_err) - float(prev_dist_used) > 0.22) and edge_consistency_score < 0.65)
+        background_blocked = bool(
+            (front_y_gap is not None and front_y_gap > 0.16 and int(edge_cue.get("inlier_count", 0) or 0) >= 3)
+            or (selected_cluster_index > 0 and distance_stage == "near")
+            or near_stage_far_jump
+        )
 
         reject_reason = ""
         control_level = "none"
         width_min = max(0.06, float(min_front_face_x_span) * 0.90)
         hard_span_min = max(float(min_front_face_x_span), span_min * 0.90)
-        if representative_inlier_count < min_front_face_columns:
+        local_band_min = max(20, min_front_face_columns * min_vertical_support * 2)
+        if near_stage_far_jump:
+            reject_reason = "near_stage_far_jump"
+        elif background_blocked and background_penalty >= 0.60:
+            reject_reason = "far_background_selected_blocked"
+        elif selected_cluster_index > 0 and distance_stage == "near":
+            reject_reason = "background_only"
+        elif representative_inlier_count < min_front_face_columns:
             reject_reason = "vertical_support_low"
         elif support_inlier_count < min_front_face_columns * min_vertical_support:
             reject_reason = "vertical_support_low"
@@ -1619,6 +2313,10 @@ class TableEdgeManager:
             reject_reason = "width_too_small"
         elif x_span < hard_span_min:
             reject_reason = "front_face_x_span_low"
+        elif local_band_support_count < local_band_min and local_band_edge_support < 3:
+            reject_reason = "front_line_weak"
+        elif int(edge_cue.get("inlier_count", 0) or 0) >= 4 and edge_consistency_score < 0.20 and background_penalty > 0.30:
+            reject_reason = "edge_inconsistent"
         elif bool(temporal.get("jump", False)) and confidence < 0.62:
             reject_reason = "temporal_jump"
         else:
@@ -1658,6 +2356,9 @@ class TableEdgeManager:
             if yaw_abs > max_yaw:
                 reject_reason = "yaw_out_of_range"
                 control_level = "none"
+            elif background_blocked:
+                reject_reason = "far_background_selected_blocked"
+                control_level = "none"
             elif representative_inlier_count <= 3 or x_span < 0.15:
                 if control_level in {"stop_ready", "align"}:
                     control_level = "approach_slow"
@@ -1666,16 +2367,34 @@ class TableEdgeManager:
                 if control_level == "stop_ready":
                     control_level = "align"
                 support_mode = "partial"
+            if control_level == "stop_ready" and (
+                line_source == "vertical"
+                and edge_consistency_score < 0.25
+                and int(edge_cue.get("inlier_count", 0) or 0) >= 4
+            ):
+                control_level = "align"
+            if control_level == "stop_ready" and (
+                local_band_support_count < max(40, local_band_min * 2)
+                or local_band_x_span < 0.30
+                or background_penalty > 0.0
+            ):
+                control_level = "align"
         plane_usable = control_level != "none"
         valid_for_control = control_level in {"align", "stop_ready"}
-        support_px = np.asarray(reps.get("support_px", []), dtype=np.int32)
-        support_py = np.asarray(reps.get("support_py", []), dtype=np.int32)
+        support_px = support_px_all[selected_support_mask] if selected_support_mask.size == support_px_all.size else np.asarray([], dtype=np.int32)
+        support_py = support_py_all[selected_support_mask] if selected_support_mask.size == support_py_all.size else np.asarray([], dtype=np.int32)
         support_cap = 1600
         support_step = max(1, int(math.ceil(float(len(support_px)) / float(support_cap)))) if len(support_px) else 1
         fast_support_pixels = [[int(x), int(y)] for x, y in zip(support_px[::support_step][:support_cap].tolist(), support_py[::support_step][:support_cap].tolist())]
         fast_rep_pixels = [[int(x), int(y)] for x, y in zip(rep_px[:1000].tolist(), rep_py[:1000].tolist())]
         fast_inlier_pixels = [[int(x), int(y)] for x, y in zip(rep_inlier_px[:1000].tolist(), rep_inlier_py[:1000].tolist())]
         fast_outlier_pixels = [[int(x), int(y)] for x, y in zip(rep_outlier_px[:1000].tolist(), rep_outlier_py[:1000].tolist())]
+        rep_background_px = rep_px[background_mask] if background_rep_count > 0 else np.asarray([], dtype=np.int32)
+        rep_background_py = rep_py[background_mask] if background_rep_count > 0 else np.asarray([], dtype=np.int32)
+        rep_weak_px = rep_px[weak_mask] if int(weak_mask.sum()) > 0 else np.asarray([], dtype=np.int32)
+        rep_weak_py = rep_py[weak_mask] if int(weak_mask.sum()) > 0 else np.asarray([], dtype=np.int32)
+        fast_background_pixels = [[int(x), int(y)] for x, y in zip(rep_background_px[:1000].tolist(), rep_background_py[:1000].tolist())]
+        fast_weak_pixels = [[int(x), int(y)] for x, y in zip(rep_weak_px[:1000].tolist(), rep_weak_py[:1000].tolist())]
         edge_found = bool(plane_usable)
         if edge_found:
             plane_bbox = raw_bbox
@@ -1728,18 +2447,41 @@ class TableEdgeManager:
             "fast_raw_residual_mean": float(residual_mean),
             "fast_raw_residual_p90": float(residual_p90),
             "fast_candidate_point_count": int(candidate_count),
-            "fast_support_point_count": int(support_total),
+            "fast_support_point_count": int(selected_cluster_support),
+            "fast_all_support_point_count": int(support_total),
             "fast_rep_count": int(rep_count),
             "fast_rep_inlier_count": int(representative_inlier_count),
             "fast_rep_outlier_count": int(representative_outlier_count),
+            "fast_background_rep_count": int(background_rep_count),
+            "fast_front_rep_count": int(front_rep_count),
+            "fast_rep_cluster_count": int(len(clusters)),
+            "fast_selected_cluster_index": int(selected_cluster_index),
+            "fast_selected_cluster_y_center": selected_cluster_y_center,
+            "fast_selected_cluster_x_span_m": float(selected_cluster_x_span),
+            "fast_selected_cluster_support": int(selected_cluster_support),
+            "fast_selected_cluster_score": float(selected_cluster_score),
             "fast_candidate_x_span_m": float(candidate_x_span),
-            "fast_support_x_span_m": float(support_x_span),
+            "fast_support_x_span_m": float(selected_support_x_span),
+            "fast_all_support_x_span_m": float(support_x_span),
             "fast_rep_x_span_m": float(rep_x_span),
             "fast_fit_inlier_x_span_m": float(x_span),
             "fast_residual_mean": float(residual_mean),
             "fast_residual_p90": float(residual_p90),
             "fast_support_mode": str(support_mode),
-            "fast_fit_line_source": "reps_inlier",
+            "fast_fit_line_source": str(line_source),
+            "fast_line_source": str(line_source),
+            "fast_line_score": float(line_score),
+            "fast_frontness_score": float(frontness_score),
+            "fast_edge_consistency_score": float(edge_consistency_score),
+            "fast_background_penalty": float(background_penalty),
+            "fast_local_band_support_count": int(local_band_support_count),
+            "fast_local_band_x_span_m": float(local_band_x_span),
+            "fast_local_band_edge_support": int(local_band_edge_support),
+            "fast_local_band_residual_mean": float(local_band_residual_mean),
+            "fast_background_blocked": bool(background_blocked),
+            "fast_near_stage_far_jump": bool(near_stage_far_jump),
+            "fast_selected_dist_source": str(line_source),
+            "fast_prev_dist_used": prev_dist_used,
             "fast_raw_confidence": float(confidence),
             "fast_raw_inlier_count": int(support_inlier_count),
             "fast_raw_candidate_count": int(candidate_count),
@@ -1762,7 +2504,7 @@ class TableEdgeManager:
             "fast_ground_like_count": int(ground_like_count),
             "fast_table_height_like_count": int(table_height_like_count),
             "fast_front_face_rep_count": int(rep_count),
-            "fast_front_face_support_point_count": int(support_total),
+            "fast_front_face_support_point_count": int(selected_cluster_support),
             "fast_representative_inlier_count": int(representative_inlier_count),
             "fast_support_inlier_count": int(support_inlier_count),
             "fast_vertical_support_score": float(vertical_support_score),
@@ -1793,17 +2535,23 @@ class TableEdgeManager:
             "fast_temporal_dist_delta": temporal.get("dist_delta"),
             "fast_temporal_cx_delta": temporal.get("cx_delta"),
             "fast_score_final": float(confidence),
+            **edge_debug_payload,
             "fast_candidate_pixel_count": int(len(fast_candidate_pixels)),
             "fast_support_pixel_count": int(len(fast_support_pixels)),
             "fast_front_face_rep_pixel_count": int(len(fast_rep_pixels)),
             "fast_inlier_pixel_count": int(len(fast_inlier_pixels)),
             "fast_outlier_pixel_count": int(len(fast_outlier_pixels)),
+            "fast_background_pixel_count": int(len(fast_background_pixels)),
+            "fast_weak_pixel_count": int(len(fast_weak_pixels)),
             "fast_sampled_pixels": raw_sample_pixels,
             "fast_candidate_pixels": fast_candidate_pixels,
             "fast_support_pixels": fast_support_pixels,
             "fast_front_face_rep_pixels": fast_rep_pixels,
             "fast_inlier_pixels": fast_inlier_pixels,
             "fast_outlier_pixels": fast_outlier_pixels,
+            "fast_background_pixels": fast_background_pixels,
+            "fast_rep_background_pixels": fast_background_pixels,
+            "fast_weak_pixels": fast_weak_pixels,
             "pose_source": "fast_plane_only" if edge_found else "none",
             "final_pose_source": "fast_plane_only" if edge_found else "none",
             "view_err_norm": plane_view.get("plane_cx_norm") if edge_found else None,
