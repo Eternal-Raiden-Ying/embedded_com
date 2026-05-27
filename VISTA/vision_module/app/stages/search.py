@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import os
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 from ...config.data import normalize_class_name
 from ...ipc.protocol import VisionReq
@@ -342,11 +342,22 @@ class SearchStagePlan(BaseStagePlan):
 
     stage_name = "SEARCH"
     default_mode = "TRACK_LOCAL"
+    common_routes = ("frame_meta", "runtime_status")
+    optional_routes = {
+        "TRACK_LOCAL": ("local_perception",),
+        "DEPTH_PERCEPTION": ("table_edge_obs",),
+        "TABLE_EDGE_PERCEPTION": ("local_perception", "table_edge_obs"),
+    }
 
     def _resolve_mode(self, req: VisionReq) -> str:
         search_kind = _search_kind(req, self.default_mode)
         if search_kind == "TABLE_EDGE" or _is_edge_follow_target(search_kind):
-            return "TABLE_EDGE_PERCEPTION"
+            preferred = "TABLE_EDGE_PERCEPTION"
+            # If TABLE_EDGE_PERCEPTION is not registered but DEPTH_PERCEPTION is,
+            # silently downgrade to DEPTH_PERCEPTION
+            if self.mode_available is not None and not self.mode_available(preferred) and self.mode_available("DEPTH_PERCEPTION"):
+                return "DEPTH_PERCEPTION"
+            return preferred
         if req.mode_hint:
             return normalize_upper(req.mode_hint, self.default_mode)
         return self.default_mode

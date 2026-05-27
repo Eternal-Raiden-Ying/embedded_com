@@ -8,10 +8,9 @@
 
 VISTA 当前的主线设计已经收敛为：
 
-- `VistaApp` 负责服务生命周期、IPC、主循环、日志和心跳
-- `StageController` 负责业务阶段控制和 stage state
-- `ModeController` 负责 mode profile、switch state 和 runtime plan 编译
-- `VisionEngine` 负责 backend runtime 装配与对外 facade
+- `VistaApp` 负责服务生命周期、IPC、主循环、日志、心跳，直接创建 Scheduler + Managers + ModeController
+- `StageController` 负责业务阶段控制和 stage state，持有 Scheduler 引用
+- `ModeController` 负责 mode profile、switch state、runtime plan 编译，持有 Scheduler + RuntimeSupervisor
 - `RuntimeSupervisor` 负责 capability reconcile
 - `Scheduler` 负责 manager 与 stage 之间的摘要数据交换
 - 各 `Manager` 自己维护 worker loop，不把高频工作塞回主线程
@@ -22,38 +21,34 @@ VISTA 当前的主线设计已经收敛为：
 Orchestrator --vision_req--> VistaApp
                               |
                               v
-                        StageController
-                         |           \
-                         |            \
-                         v             v
-                    StagePlan      ModeController
+                        StageController ──┬── scheduler.read_result("remote_init_status")
+                         |           \    │    (RESPOND path, GRASP stage only)
+                         v            v   │
+                    StagePlan      ModeController(scheduler + supervisor)
                          |             |
-                         |             | prepare_switch / commit_switch
+                         |             | switch_mode() 内含 scheduler.configure + supervisor.reconcile
                          |             |
-                         +-------> VisionEngine.apply_mode_plan(...)
-                                       |
-                                       v
-                               RuntimeSupervisor
-                             /    |      |      \
-                            v     v      v       v
-                   CameraManager Predictor Remote Preview
-                            \      |      /        |
-                             +-----+-----+---------+
-                                           |
-                                           v
-                                      Scheduler
-                                           |
-                                           v
-                      StageController.collect_tick_input() / tick()
-                                           |
-                                           v
-                                 VistaApp --vision_obs--> Orchestrator
+                         +-------> RuntimeSupervisor
+                         |          /   |   |    \        \
+                         |         v    v   v     v        v
+                         |    Camera Predictor Remote Preview TableEdge
+                         |       \      |       |      /     /
+                         |        +-----+------+------+-----+
+                         v                     |
+                      Scheduler <─────────────┘
+                         |
+                         v
+              scheduler.collect_tick_input() / StageController.tick()
+                         |
+                         v
+               VistaApp --vision_obs--> Orchestrator
 ```
 
 ## 活跃基线
 
 ### 当前 stage
 
+- `INIT`：服务初始化，启动时自动执行 remote `/init`
 - `SEARCH`
 - `GRASP`
 - `RETURN`
@@ -61,16 +56,21 @@ Orchestrator --vision_req--> VistaApp
 
 ### 当前默认 mode
 
-- `IDLE`
-- `TRACK_LOCAL`
-- `MICRO_ADJUST`
-- `GRASP_REMOTE`
-- `IDLE_HOT`
+所有 StagePlan 的 `default_mode` 统一为 `SILENT`（零能力兜底）。业务 mode 由 Orchestrator 的 `mode_hint` 或 StageController 的 START 兼容逻辑触发。
 
-说明：
+| Mode | 类型 | 能力 | 说明 |
+|------|------|------|------|
+| `SILENT` | 兜底 | 无 | 所有 stage 的默认 mode，无任何 capability |
+| `INIT` | 全局 | remote task init | 服务启动时执行一次 remote `/init` |
+| `TRACK_LOCAL` | SEARCH/RETURN | rgb+depth+Predictor+TableEdge | 本地目标追踪 |
+| `DEPTH_PERCEPTION` | SEARCH | depth(+可选 rgb)+TableEdge | 纯深度桌边感知 |
+| `TABLE_EDGE_PERCEPTION` | SEARCH | rgb+depth+Predictor+TableEdge | 完整桌边+目标观测 |
+| `MICRO_ADJUST` | GRASP | 无 | 等待 Orchestrator 调整决策 |
+| `GRASP_REMOTE_INIT` | GRASP | rgb+depth+remote task init | 远程抓取初始化（至多 3 次重试） |
+| `GRASP_REMOTE` | GRASP | rgb+depth+remote task predict | 远程抓取预测 |
+| `IDLE_HOT` | IDLE | rgb+preview | 热待机 |
 
-- `DEPTH_PERCEPTION` 等概念仍可作为未来扩展方向
-- 但它们不是当前已注册、已收口的默认 runtime 基线
+GRASP stage 状态机：`GRASP_REMOTE_INIT → GRASP_REMOTE ↔ MICRO_ADJUST`。`GRASP_REMOTE_INIT` 在 server ready 后自动切 `GRASP_REMOTE`。`GRASP_REMOTE` 收到 RESPOND ACCEPT 切 `MICRO_ADJUST`（等待调整），`MICRO_ADJUST` 收到 ACCEPT 切回 `GRASP_REMOTE`（重试 predict）。
 
 ## 分层职责
 
@@ -80,7 +80,7 @@ Orchestrator --vision_req--> VistaApp
 
 职责：
 
-- 创建 `ModeController`、`VisionEngine`、`StageController`
+- 直接创建 `Scheduler`、各 Manager、`RuntimeSupervisor`、`ModeController`、`StageController`
 - 启动 `req_in` 和 `obs_out` IPC
 - 在主循环中接收请求、驱动 stage tick、发送 `vision_obs`
 - 记录 `event.jsonl`、`ipc.jsonl`、`heartbeat.jsonl`
@@ -98,23 +98,28 @@ Orchestrator --vision_req--> VistaApp
 
 - `vision_module/app/stage_controller.py`
 - `vision_module/app/stages/base.py`
+- `vision_module/app/stages/init.py`
 - `vision_module/app/stages/search.py`
 - `vision_module/app/stages/grasp.py`
 - `vision_module/app/stages/return_home.py`
 
 职责：
 
-- 维护 `StageContext`
+- 维护 `StageContext`（含 `server_status`）
 - 处理 `START` / `UPDATE` / `RESPOND` / `STOP`
+- START 兼容：缺 `mode_hint` 时自动补（GRASP→GRASP_REMOTE, SEARCH→TRACK_LOCAL, RETURN→TRACK_LOCAL）
 - 进行 stage enter / restart / stop
-- 调用 `ModeController` + `VisionEngine` 完成 mode 变更
+- 调用 `ModeController.switch_mode()` 完成 mode 变更
 - 从 `Scheduler` 采样 `StageTickInput`
-- 产出 `StageOutput`，并通过 `vision_obs` 对外输出结果
+- 每 tick 同步 `ctx.server_status` 从 `remote_init_status`
+- RESPOND 路径直接从 Scheduler 读 `remote_init_status`（保证时效性）
+- 产出 `StageOutput`（含 `next_stage` 用于自动 stage 切换），并通过 `vision_obs` 对外输出结果
 
 当前 stage 消费关系：
 
+- `INIT`：消费 `remote_init_status`，就绪后自动切 IDLE
 - `SEARCH`：主要消费 `local_perception`
-- `GRASP`：主要消费 `remote_result`，并在微调阶段消费 `local_perception`
+- `GRASP`：消费 `remote_init_status`（GRASP_REMOTE_INIT）/ `remote_result`（GRASP_REMOTE）
 - `RETURN`：当前消费 `local_perception`，并已通过 detect 主线生成 outward-compatible 的 `home_tag_obs`
 
 ### 3. Mode 控制层
@@ -134,26 +139,22 @@ Orchestrator --vision_req--> VistaApp
 
 当前边界：
 
-- `ModeController` 负责资源需求描述
+- `ModeController` 持有 `Scheduler` + `RuntimeSupervisor`
+- `switch_mode()` 内部直接 `scheduler.configure()` + `supervisor.reconcile()`，失败时回滚 scheduler
+- 提供 `start_runtime()` / `stop_runtime()` / `runtime_snapshot()`
 - 不直接拥有 manager worker
-- capability reconcile 真正发生在 `VisionEngine -> RuntimeSupervisor`
 
 ### 4. Runtime 层
 
 文件：
 
-- `vision_module/backend/vision_engine.py`
 - `vision_module/backend/runtime_supervisor.py`
 
-职责划分：
+职责：
 
-- `VisionEngine`
-  - runtime 根对象
-  - 持有 `Scheduler`、各 manager、`RuntimeSupervisor`
-  - 暴露 `start()`、`stop()`、`apply_mode_plan()`、`collect_tick_input()`、`publish_result()`、`publish_event()`
 - `RuntimeSupervisor`
   - 根据 mode plan 配置 managers
-  - 把 capability plan 转成 camera / predictor / remote / preview 的启停与配置动作
+  - 把 capability plan 转成 camera / predictor / remote / preview / table_edge 的启停与配置动作
   - 发出 `BACKEND_RUNTIME_RECONCILED`
 
 ### 5. Scheduler / 数据总线层
@@ -174,10 +175,10 @@ Orchestrator --vision_req--> VistaApp
 - `camera_frames`：slot，backend scope
 - `frame_meta`：slot，stage scope
 - `local_perception`：slot，stage scope
-- `remote_result`：slot，stage scope
+- `table_edge_obs`：slot，stage scope — 由 `TableEdgeManager` 发布，`SearchStagePlan` 和 `PreviewManager` 消费
+- `remote_init_status`：slot，stage scope — 条件注册（INIT / GRASP_REMOTE_INIT mode），RemoteManager INIT task 写入，StageController 读取 `server_status`
+- `remote_result`：slot，stage scope — RemoteManager PREDICT task 写入，GRASP_REMOTE mode 消费
 - `runtime_status`：slot，backend scope
-- `remote_cmd`：event，backend scope
-- `remote_ack`：event，backend scope，当前更接近辅助诊断 route，不应被视为主业务 contract 真值
 
 设计边界：
 
@@ -193,13 +194,15 @@ Orchestrator --vision_req--> VistaApp
 - `vision_module/backend/predictor_manager.py`
 - `vision_module/backend/remote/manager.py`
 - `vision_module/backend/preview/manager.py`
+- `vision_module/backend/table_edge_manager.py`
 
 职责：
 
 - `CameraManager`：相机实例生命周期和采集 worker，发布 `camera_frames`、`frame_meta`
 - `PredictorManager`：模型生命周期和推理 worker，读取 `camera_frames`，发布 `local_perception`
-- `RemoteManager`：远程抓取协作 worker，消费 `remote_cmd`，发布 `remote_result`、`remote_ack`
-- `PreviewManager`：预览 worker，读取 `camera_frames`、`runtime_status`、`local_perception`，渲染调试预览
+- `RemoteManager`：远程抓取协作 worker，支持 task 和 loop 两种模式。task 模式执行一次后线程退出（INIT→`remote_init_status`，PREDICT→`remote_result`，RELEASE→`remote_result`）
+- `PreviewManager`：预览 worker，读取 `camera_frames`、`runtime_status`、`local_perception`、`table_edge_obs`，渲染调试预览
+- `TableEdgeManager`：桌边感知 worker，读取 `camera_frames`、`local_perception`、`runtime_status`，发布 `table_edge_obs`
 
 约束：
 
@@ -215,6 +218,7 @@ Orchestrator --vision_req--> VistaApp
 - `vision_module/backend/predictor/*`
 - `vision_module/backend/remote/client.py`
 - `vision_module/backend/preview/*`
+- `vision_module/backend/edge_detect/*`
 
 职责：
 
@@ -231,32 +235,35 @@ VistaApp._handle_request_payload()
   -> StageController.handle_request(...)
   -> StagePlan.on_enter / on_update / on_respond / on_stop(...)
   -> StageController._apply_context_mode(...)
-  -> ModeController.prepare_switch(...)
-  -> VisionEngine.apply_mode_plan(...)
-  -> RuntimeSupervisor.reconcile(...)
-  -> ModeController.commit_switch(...)
+  -> ModeController.switch_mode(...)           ← 内含 scheduler.configure + supervisor.reconcile + 失败回滚
   -> VistaApp 发送 vision_obs
 ```
+
+注：`ModeController.switch_mode()` 内部直接操作 Scheduler 和 RuntimeSupervisor，不再通过回调。
 
 ### 控制循环链
 
 ```text
 VistaApp._tick_stage()
-  -> StageController.collect_tick_input(...)
-  -> Scheduler.collect_tick_input(...)
-  -> StageController.tick(...)
+  -> scheduler.collect_tick_input(ts=now, route_filter=...)
+  -> StageController.tick(tick_input)
   -> StagePlan.tick(...)
   -> VistaApp 发送 vision_obs
 ```
+
+注：`VistaApp` 直接调 `scheduler.collect_tick_input()`，`route_filter` 由当前 StagePlan 的 `subscribed_routes(mode)` 提供。
 
 ### 数据面链路
 
 ```text
 CameraManager -> Scheduler(camera_frames, frame_meta)
 PredictorManager -> Scheduler(local_perception)
-RemoteManager -> Scheduler(remote_result, remote_ack)
-StageController effects -> Scheduler(remote_cmd)
-PreviewManager <- Scheduler(camera_frames, runtime_status, local_perception)
+TableEdgeManager -> Scheduler(table_edge_obs)
+RemoteManager -> Scheduler(remote_init_status | remote_result)
+PreviewManager <- Scheduler(camera_frames, runtime_status, local_perception, table_edge_obs)
+TableEdgeManager <- Scheduler(camera_frames, local_perception, runtime_status)
+StageController -> Scheduler(runtime_status)
+StageController <- Scheduler(remote_init_status)  # RESPOND path only
 ```
 
 ## 当前架构的关键边界
@@ -304,34 +311,21 @@ PreviewManager <- Scheduler(camera_frames, runtime_status, local_perception)
 
 - 类别 vocabulary 应跟随 active model/profile，而不是由单一全局 target 表硬编码主导
 
-### 3. Remote request sequencing 当前基线
+### 3. Remote task execution 当前基线
 
 现状：
 
-- `RemoteManager` 在 service startup 时会对可用 `base_url` 做一次 best-effort `/init`
-- `GRASP` stage 在 `RESPOND ACCEPT` 后进入 `GRASP_REMOTE`
-- `StagePlan` 会等待 service-level init confirmed 和 fresh frame gate，同时最多触发 3 次 init retry
-- `RemoteManager` 也会在 manager 层拒绝 `init_not_confirmed` 的 `PREDICT`
+- RemoteManager 支持两种 worker 模式：`kind="task"`（执行一次后线程退出）和 `kind="loop"`（持续运行，已废弃）
+- INIT task：进入 INIT / GRASP_REMOTE_INIT mode 时触发，至多 3 次重试，结果写入 `remote_init_status`
+- PREDICT task：进入 GRASP_REMOTE mode 时触发，自旋等待 fresh camera frames（generation 匹配），结果写入 `remote_result`
+- RELEASE task：mode 停止/引擎关闭时触发 `/release`
+- 孤儿线程 kill：`stop_runtime()` 设 stop event + join(1s)，超时后线程成为孤儿（daemon 线程，HTTP client 10s timeout 后自然退出）
 
 影响：
 
-- integrated path 现在与最小脚本的 session-style 主干顺序一致：
-  - service startup best-effort `/init`
-  - grasp-time wait init success / retry if needed
-  - `/predict`
-  - `/release` on shutdown / disable / explicit reset
-
-### 4. `GRASP_REMOTE` fresh-frame barrier 当前基线
-
-现状：
-
-- mode 切换仍会带来 generation 变化和 scheduler state 清空
-- `GRASP_REMOTE` 当前通过 stage-visible `frame_meta` gate 等待新 generation 下的 fresh frame
-
-影响：
-
-- `mode applied` 与 `data ready` 已被拆开，不再依赖 timing 碰运气
-- 远程抓取何时发起 `PREDICT` 现在由 stage 明确控制
+- 不再依赖 effects 通道，mode 切换即命令派发
+- INIT/PREDICT 时序由 mode 链保证：`GRASP_REMOTE_INIT → GRASP_REMOTE`（server ready 后自动切换）
+- fresh-frame gate 由 RemoteManager `_run_task("predict")` 内部处理（轮询 camera_frames 等 generation 匹配）
 
 ### 5. Camera 与上传参数所有权当前基线
 
@@ -398,16 +392,21 @@ PreviewManager <- Scheduler(camera_frames, runtime_status, local_perception)
 - `ReadMe.md`：当前总览与操作基线
 - `INTERFACES.md`：外部协议基线
 - `ARCHITECTURE.md`：内部结构与已知缺口基线
-- `IMPLEMENTATION_STATUS.md`：总计划与完成状态基线
-- `NEXT_TODO.md`：当前下一轮行动项
+- `EVENT_DESCRIPTION.md`：内部事件与日志语义基线
+- `docs/handover.md`：已完成工作与待处置事项移交
 
-如果代码继续调整，应优先同步这些文件，而不是继续依赖旧的迁移计划文档。
+如果代码继续调整，应优先同步这些文件。
 ## 2026-04 Audit Follow-Up Baseline
 
 - Camera and predictor runtime backend ownership now belongs to package-level backend selectors. `VISTA_BACKEND=mock|real|auto` is the control-plane truth. `capability_placeholder` is no longer allowed to choose the main runtime path.
-- `PredictorManager` now validates detect output at the manager boundary before publishing `local_perception`. Stable detect payload fields now include `contract_ok`, `contract_error`, `contract_warnings`, `class_names`, `class_names_source`, and `infer_box_format`.
+- `PredictorManager` now validates detect output at the manager boundary before publishing `local_perception`. Stable detect payload fields now include `contract_ok`, `contract_error`, `contract_warnings`, `class_names`, `class_names_source`, `infer_box_format`, `has_infer`, `implementation`, `model_name`, `predictor_type`, `box_count`, `infer_boxes`, `infer_masks`, `rgb_shape`, `obs_ts`, `frame_seq`, `age_ms`, `table_bbox`, `table_quadrant`, `rgb_search_roi`, `table_roi_source`.
 - Detect class-name fallback no longer returns to the legacy `grasping_coco20` table. Structural fallback is now normalized `coco80`, and weakened payloads are marked with `class_names_source=fallback_coco80`.
 - Frame-consuming managers are now generation-aware. `PredictorManager` and `PreviewManager` gate on `(generation, seq)` rather than raw `seq`, so `Scheduler.configure()` slot reset on mode switch does not stall local inference or freeze preview.
 - The default camera color baseline is now BGR. Detect follows BGR end-to-end to match the tmp benchmark path; the optional segment predictor converts BGR to RGB internally where needed.
-- Mode-profile camera ownership is now explicit rather than just structural. `TRACK_LOCAL`, `MICRO_ADJUST`, and `GRASP_REMOTE` each publish their own RGB capture contract through `ModeProfile.camera_overrides`.
+- Mode-profile camera ownership is now explicit rather than just structural. `TRACK_LOCAL` and `GRASP_REMOTE` each publish their own RGB capture contract through `ModeProfile.camera_overrides`.
 - Legacy alias cleanup is in progress: `vision_stream.py` is removed and `QNNPredictor` is no longer part of the supported predictor export surface.
+- `VisionEngine` has been deleted (2026-05). Responsibilities distributed to ModeController (owns Scheduler + Supervisor), StageController (holds Scheduler directly), and VistaApp (direct component assembly).
+- `remote_cmd` / `remote_ack` event routes removed. effects mechanism replaced by mode-driven task execution (RemoteManager `kind=task`).
+- GRASP stage mode chain: `SILENT(default) → GRASP_REMOTE_INIT → GRASP_REMOTE ↔ MICRO_ADJUST`. All StagePlan default_mode unified to `SILENT`.
+- `remote_init_status` route registered conditionally for INIT / GRASP_REMOTE_INIT modes. RemoteManager task writes init/predict payloads to separate routes.
+- `ModeProfile` now has explicit `table_edge_enabled`, `table_edge_path`, `table_edge_update_hz` fields. No longer derived from camera config.

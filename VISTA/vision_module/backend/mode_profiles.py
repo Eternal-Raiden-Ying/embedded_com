@@ -13,6 +13,9 @@ class RemoteProfile:
     base_url: Optional[str] = None
     command: str = "predict"
     require_depth: bool = False
+    kind: str = "loop"       # "loop" | "task"
+    action: str = ""         # task only: "init" | "predict" | "release"
+    max_retries: int = 1     # task only
     timeout_s: float = 10.0
     rgb_encoding: str = "jpeg"
     depth_encoding: str = "png"
@@ -43,6 +46,9 @@ class ModeProfile:
     predictor_model: Optional[str] = None
     remote: RemoteProfile = field(default_factory=RemoteProfile)
     preview: PreviewProfile = field(default_factory=PreviewProfile)
+    table_edge_enabled: bool = False
+    table_edge_path: str = "full"
+    table_edge_update_hz: float = 10.0
     loop_hz: Optional[float] = None
     send_hz: Optional[float] = None
     release_cooldown_s: float = 0.0

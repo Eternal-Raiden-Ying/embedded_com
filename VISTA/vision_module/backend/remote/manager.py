@@ -38,6 +38,9 @@ class RemoteManager:
         self._worker_interval_s = 0.05
         self._sequence = 0
         self._runtime_profile: Dict[str, Any] = {
+            "kind": "loop",
+            "action": "",
+            "max_retries": 1,
             "base_url": None,
             "command": "predict",
             "require_depth": False,
@@ -153,6 +156,9 @@ class RemoteManager:
         next_profile = dict(self._runtime_profile)
         next_profile.update(
             {
+                "kind": str(profile.get("kind") or "loop").strip().lower() or "loop",
+                "action": str(profile.get("action") or "").strip().lower(),
+                "max_retries": max(1, int(profile.get("max_retries", 1) or 1)),
                 "base_url": str(profile.get("base_url") or "").strip() or None,
                 "command": str(profile.get("command") or "predict").strip() or "predict",
                 "require_depth": bool(profile.get("require_depth", False)),
@@ -197,6 +203,8 @@ class RemoteManager:
         thread = self._worker_thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=1.0)
+            if thread.is_alive():
+                self._log("warn", "remote task worker still alive after 1s join, orphaning")
         self._worker_thread = None
 
     def _publish_result(self, route: str, payload: Any) -> None:
@@ -209,19 +217,6 @@ class RemoteManager:
             generation = 0
         try:
             scheduler.publish_result(route, payload, generation=generation)
-        except Exception:
-            pass
-
-    def _publish_event(self, route: str, payload: Any) -> None:
-        scheduler = self._scheduler
-        if scheduler is None:
-            return
-        try:
-            generation = int(self._generation_getter())
-        except Exception:
-            generation = 0
-        try:
-            scheduler.publish_event(route, payload, generation=generation)
         except Exception:
             pass
 
@@ -255,12 +250,13 @@ class RemoteManager:
         except Exception:
             return None
 
-    def _build_predict_request(self, cmd: Dict[str, Any]) -> Optional[RemotePredictRequest]:
-        scheduler = self._scheduler
-        if scheduler is None:
-            return None
-        frame_slot = scheduler.read_slot("camera_frames")
-        frames = frame_slot.get("payload") if isinstance(frame_slot, dict) else None
+    def _build_predict_request(self, cmd: Dict[str, Any], frames: Dict[str, Any] = None) -> Optional[RemotePredictRequest]:
+        if frames is None:
+            scheduler = self._scheduler
+            if scheduler is None:
+                return None
+            frame_slot = scheduler.read_slot("camera_frames")
+            frames = frame_slot.get("payload") if isinstance(frame_slot, dict) else None
         request_id = cmd.get("request_id")
         if not isinstance(frames, dict):
             self._update_result(
@@ -462,79 +458,120 @@ class RemoteManager:
             pass
         self._reset_service_init_state()
 
-    def _handle_command(self, cmd: Dict[str, Any]) -> Dict[str, Any]:
-        op = str(cmd.get("op") or "").strip().upper()
-        timeout_s = float(self._effective_runtime_field(cmd, "timeout_s", self._runtime_profile.get("timeout_s", 5.0)) or 5.0)
-        request_id = cmd.get("request_id")
-        client = self.client
-        base_url = self._runtime_base_url()
-        if client is not None and base_url:
-            try:
-                client.configure(base_url)
-            except Exception:
-                pass
-        ack = {"op": op, "ok": False, "reason": "unsupported", "request_id": request_id}
-        try:
-            if op == "INIT":
-                ack = self._run_service_init(timeout_s=timeout_s, source="command")
-            elif op == "PREDICT":
-                if not self._service_init_confirmed:
-                    self._update_result(
-                        action="predict",
-                        state="predict_failed",
-                        ok=False,
-                        error="init_not_confirmed",
-                        request_id=request_id,
-                    )
-                    return {
-                        "op": op,
-                        "ok": False,
-                        "reason": "init_not_confirmed",
-                        "request_id": request_id,
-                    }
-                request = self._build_predict_request(cmd)
-                resp = self.predict(request, request_id=request_id) if request is not None else None
-                ack = {
-                    "op": op,
-                    "ok": bool(resp is not None and resp.ok),
-                    "reason": str((resp.error if resp is not None else self._last_result.get("last_error")) or ""),
-                    "status_code": getattr(resp, "status_code", None),
-                    "request_id": request_id,
-                }
-            elif op == "RELEASE":
-                resp = self.release_server(timeout_s=timeout_s)
-                self._reset_service_init_state()
-                ack = {
-                    "op": op,
-                    "ok": bool(resp is not None and resp.ok),
-                    "reason": str((resp.error if resp is not None else "") or ""),
-                    "status_code": getattr(resp, "status_code", None),
-                    "request_id": request_id,
-                }
-        except Exception as exc:
-            ack = {"op": op, "ok": False, "reason": str(exc), "request_id": request_id}
-            self._update_result(
-                action=op.lower() or "remote",
-                state=f"{op.lower()}_failed" if op else "remote_failed",
-                ok=False,
-                error=str(exc),
-                request_id=request_id,
-            )
-        return ack
-
     def _worker_loop(self) -> None:
-        while self._runtime_running and not self._worker_stop.is_set():
-            if self._service_init_pending and not self._service_init_inflight:
-                timeout_s = float(self._runtime_profile.get("timeout_s", 10.0) or 10.0)
-                self._run_service_init(timeout_s=timeout_s, source="startup")
-            scheduler = self._scheduler
-            if scheduler is not None:
-                cmd = scheduler.consume_event("remote_cmd")
-                if isinstance(cmd, dict):
-                    ack = self._handle_command(cmd)
-                    self._publish_event("remote_ack", ack)
-            self._publish_result("remote_result", self.result_summary())
-            self._worker_stop.wait(timeout=self._worker_interval_s)
+        kind = str(self._runtime_profile.get("kind") or "loop").strip().lower()
+        action = str(self._runtime_profile.get("action") or "").strip().lower()
+        max_retries = max(1, int(self._runtime_profile.get("max_retries", 1) or 1))
+
+        if kind == "task" and action:
+            # ── task worker: execute action once, publish to action-specific route, exit ──
+            self._run_task(action=action, max_retries=max_retries)
+            self._publish_result(self._task_route(action), self._task_payload(action))
+            self._runtime_running = False
+            return
+
+        # ── loop worker: no longer used (effects channel removed) ──
+        self.logger.warning("remote loop worker started but no effects producer exists; idling")
+        self._worker_stop.wait(timeout=1.0)
+
+    def _run_task(self, *, action: str, max_retries: int) -> None:
+        """Execute a finite task action (init / predict / release).
+
+        For ``init``: retry up to *max_retries* times.
+        For ``predict``: issue one /predict after init is confirmed.
+        For ``release``: issue one /release unconditionally.
+        """
+        action = str(action or "").strip().lower()
+        if action not in {"init", "predict", "release"}:
+            self._update_result(action=action, state="bad_action", ok=False, error=f"unknown task action: {action}")
+            return
+
+        timeout_s = float(self._runtime_profile.get("timeout_s", 10.0) or 10.0)
+
+        if action == "init":
+            for attempt in range(1, max_retries + 1):
+                if self._worker_stop.is_set():
+                    self._update_result(action="init", state="init_cancelled", ok=False, error="stopped")
+                    return
+                self._run_service_init(timeout_s=timeout_s, source="task_init")
+                if self._service_init_confirmed:
+                    return
+            self._update_result(action="init", state="init_exhausted", ok=False,
+                                error=f"init failed after {max_retries} retries")
+            return
+
+        if action == "predict":
+            if not self._service_init_confirmed:
+                self._update_result(action="predict", state="predict_failed", ok=False, error="init_not_confirmed")
+                return
+            require_depth = bool(self._runtime_profile.get("require_depth", False))
+            cmd = {
+                "need_depth": require_depth,
+                "class_id": None,
+                **dict(self._runtime_profile.get("metadata") or {}),
+            }
+            # Wait for a fresh camera frame matching current generation.
+            # Mode switch clears scheduler slots, so the first frame after
+            # camera threads restart may not be published yet.
+            if self._scheduler is None:
+                self._update_result(action="predict", state="predict_failed", ok=False, error="scheduler_unavailable")
+                return
+            deadline = time.time() + min(5.0, float(self._runtime_profile.get("timeout_s", 10.0) or 10.0) * 0.5)
+            frames = None
+            while time.time() < deadline:
+                if self._worker_stop.is_set():
+                    return
+                frame_slot = self._scheduler.read_slot("camera_frames") if self._scheduler else None
+                if isinstance(frame_slot, dict):
+                    slot_gen = int(frame_slot.get("generation", 0) or 0)
+                    expected_gen = int(self._generation_getter())
+                    if slot_gen == expected_gen:
+                        payload = frame_slot.get("payload")
+                        if isinstance(payload, dict) and payload:
+                            frames = payload
+                            break
+                self._worker_stop.wait(timeout=0.05)
+            if frames is None:
+                self._update_result(action="predict", state="predict_failed", ok=False, error="missing_camera_frames")
+                return
+            request = self._build_predict_request(cmd, frames=frames)
+            if request is not None:
+                resp = self.predict(request)
+                self._record_response("predict", resp)
+            return
+
+        if action == "release":
+            self._release_service_if_ready(timeout_s=timeout_s)
+
+    @staticmethod
+    def _task_route(action: str) -> str:
+        _ROUTES = {"init": "remote_init_status", "predict": "remote_result", "release": "remote_result"}
+        return _ROUTES.get(str(action or "").strip().lower(), "remote_result")
+
+    def _task_payload(self, action: str) -> dict:
+        action = str(action or "").strip().lower()
+        if action == "init":
+            return {
+                "service_init_state": str(self._service_init_state or "uninitialized"),
+                "service_init_confirmed": bool(self._service_init_confirmed),
+                "service_init_attempts": int(self._service_init_attempts),
+                "service_init_last_error": str(self._service_init_last_error or ""),
+                "service_init_last_ok": bool(self._service_init_last_ok),
+                "service_init_last_ts": self._service_init_last_ts,
+                "ts": time.time(),
+            }
+        # predict / release
+        return {
+            "last_action": str(self._last_result.get("last_action") or action),
+            "last_ok": bool(self._last_result.get("last_ok", False)),
+            "last_error": str(self._last_result.get("last_error") or ""),
+            "status_code": self._last_result.get("status_code"),
+            "has_result": bool(self._last_result.get("has_result", False)),
+            "result": self._last_result.get("result"),
+            "request_id": self._last_result.get("request_id"),
+            "sequence": int(self._last_result.get("sequence", 0) or 0),
+            "ts": float(self._last_result.get("ts", 0.0) or 0.0),
+        }
 
     def _update_result(
         self,

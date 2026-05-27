@@ -8,19 +8,23 @@ from .mode_profiles import ModeProfile
 
 
 class ModeController:
-    """Pure control-plane owner for mode profiles and mode switch state."""
+    """Pure control-plane owner for mode profiles, scheduler, and runtime supervisor."""
 
     def __init__(
         self,
+        scheduler,
+        supervisor,
         logger=None,
         backend_event_sink=None,
         preview_allowed: bool = True,
     ):
+        self.scheduler = scheduler
+        self.supervisor = supervisor
         self.logger = logger
         self._backend_event_sink = backend_event_sink
         self._preview_allowed = bool(preview_allowed)
         self._profiles: Dict[str, ModeProfile] = {}
-        self._current_mode: str = "IDLE"
+        self._current_mode: str = "SILENT"
         self._target_mode: Optional[str] = None
         self._last_switch_ts: float = 0.0
         self._generation = 0
@@ -28,8 +32,8 @@ class ModeController:
         self._last_switch_result: Dict[str, Any] = {
             "ok": True,
             "reason": "init",
-            "requested_mode": "IDLE",
-            "active_mode": "IDLE",
+            "requested_mode": "SILENT",
+            "active_mode": "SILENT",
             "generation": 0,
         }
 
@@ -62,7 +66,6 @@ class ModeController:
         name: str,
         reason: str = "",
         force: bool = False,
-        apply_mode_plan=None,
     ) -> Optional[ModeProfile]:
         switch_state = self.prepare_switch(name=name, reason=reason, force=force)
         if switch_state is None:
@@ -72,14 +75,16 @@ class ModeController:
 
         plan = dict(switch_state.get("plan") or {})
         generation = int(switch_state.get("next_generation", self._generation + 1))
-        if callable(apply_mode_plan):
-            try:
-                ok = bool(apply_mode_plan(plan=plan, generation=generation))
-            except Exception:
-                ok = False
-            if not ok:
-                self.record_switch_failure(switch_state, reason="runtime_apply_failed")
-                return None
+
+        previous_plan = self._active_plan
+        previous_generation = self._generation
+        self.scheduler.configure(plan=plan, generation=generation)
+        ok = bool(self.supervisor.reconcile(plan=plan, generation=generation))
+        if not ok:
+            if previous_plan is not None:
+                self.scheduler.configure(plan=previous_plan, generation=previous_generation)
+            self.record_switch_failure(switch_state, reason="runtime_apply_failed")
+            return None
 
         return self.commit_switch(switch_state, reason=reason)
 
@@ -100,8 +105,20 @@ class ModeController:
     def _compile_plan(self, profile: ModeProfile) -> Dict[str, Any]:
         preview_enabled = bool(profile.preview.enabled and self._preview_allowed)
         remote_profile = profile.remote
+        mode_name = str(profile.name or "SILENT").strip().upper() or "SILENT"
+        # INIT / GRASP_REMOTE_INIT modes need remote_init_status for server health tracking
+        routes = {
+            "camera_frames": {"policy": "slot", "scope": "backend"},
+            "frame_meta": {"policy": "slot", "scope": "stage"},
+            "local_perception": {"policy": "slot", "scope": "stage"},
+            "table_edge_obs": {"policy": "slot", "scope": "stage"},
+            "remote_result": {"policy": "slot", "scope": "stage"},
+            "runtime_status": {"policy": "slot", "scope": "backend"},
+        }
+        if mode_name in {"INIT", "GRASP_REMOTE_INIT"}:
+            routes["remote_init_status"] = {"policy": "slot", "scope": "stage"}
         return {
-            "mode": str(profile.name or "IDLE").strip().upper() or "IDLE",
+            "mode": mode_name,
             "contract": {
                 "results": {
                     "stage": ["frame_meta", "local_perception", "table_edge_obs", "remote_result"],
@@ -117,16 +134,7 @@ class ModeController:
                 },
                 "capability": dict((profile.metadata or {}).get("contract") or {}),
             },
-            "routes": {
-                "camera_frames": {"policy": "slot", "scope": "backend"},
-                "frame_meta": {"policy": "slot", "scope": "stage"},
-                "local_perception": {"policy": "slot", "scope": "stage"},
-                "table_edge_obs": {"policy": "slot", "scope": "stage"},
-                "remote_result": {"policy": "slot", "scope": "stage"},
-                "runtime_status": {"policy": "slot", "scope": "backend"},
-                "remote_cmd": {"policy": "event", "scope": "backend"},
-                "remote_ack": {"policy": "event", "scope": "backend"},
-            },
+            "routes": routes,
             "capabilities": {
                 "camera": {
                     "enabled_cameras": list(profile.enabled_cameras or ()),
@@ -138,6 +146,9 @@ class ModeController:
                 },
                 "remote": {
                     "enabled": bool(remote_profile.enabled),
+                    "kind": str(remote_profile.kind or "loop").strip().lower() or "loop",
+                    "action": str(remote_profile.action or "").strip().lower(),
+                    "max_retries": int(remote_profile.max_retries),
                     "base_url": remote_profile.base_url,
                     "command": remote_profile.command,
                     "require_depth": bool(remote_profile.require_depth),
@@ -149,11 +160,9 @@ class ModeController:
                     "metadata": dict(remote_profile.metadata or {}),
                 },
                 "table_edge": {
-                    "enabled": bool(
-                        "depth" in set(profile.enabled_cameras or ())
-                        or str(profile.name or "").strip().upper() == "DEPTH_PERCEPTION"
-                        or str(profile.name or "").strip().upper() == "TABLE_EDGE_PERCEPTION"
-                    ),
+                    "enabled": bool(profile.table_edge_enabled),
+                    "path": str(profile.table_edge_path or "full").strip().lower() or "full",
+                    "update_hz": float(profile.table_edge_update_hz or 10.0),
                 },
                 "preview": {
                     "enabled": preview_enabled,
@@ -176,10 +185,9 @@ class ModeController:
             "camera_frames": ("slot", "backend"),
             "frame_meta": ("slot", "stage"),
             "local_perception": ("slot", "stage"),
+            "table_edge_obs": ("slot", "stage"),
             "remote_result": ("slot", "stage"),
             "runtime_status": ("slot", "backend"),
-            "remote_cmd": ("event", "backend"),
-            "remote_ack": ("event", "backend"),
         }
         for route_name, (policy, scope) in required.items():
             cfg = dict(routes.get(route_name) or {})
@@ -190,7 +198,7 @@ class ModeController:
         return True
 
     def prepare_switch(self, name: str, reason: str = "", force: bool = False) -> Optional[Dict[str, Any]]:
-        requested = str(name or "IDLE").strip().upper() or "IDLE"
+        requested = str(name or "SILENT").strip().upper() or "SILENT"
         profile = self.resolve_profile(requested)
         if profile is None:
             self._log("mode switch failed", requested_mode=requested, reason=reason)
@@ -232,7 +240,7 @@ class ModeController:
                 level="error",
                 failure_type="mode_plan_invalid",
                 requested_mode=requested,
-                current_mode=str(self._current_mode or "IDLE").strip().upper(),
+                current_mode=str(self._current_mode or "SILENT").strip().upper(),
                 reason=str(reason or ""),
             )
             return None
@@ -262,7 +270,7 @@ class ModeController:
             }
             return profile
 
-        previous_mode = str(switch_state.get("previous_mode") or self._current_mode).strip().upper() or "IDLE"
+        previous_mode = str(switch_state.get("previous_mode") or self._current_mode).strip().upper() or "SILENT"
         next_generation = int(switch_state.get("next_generation", self._generation + 1))
         plan = dict(switch_state.get("plan") or {})
         self._active_plan = dict(plan or {})
@@ -289,8 +297,8 @@ class ModeController:
 
     def record_switch_failure(self, switch_state: Optional[Dict[str, Any]], reason: str = "mode_apply_failed") -> None:
         payload = dict(switch_state or {})
-        requested_mode = str(payload.get("requested_mode") or self._target_mode or self._current_mode or "IDLE").strip().upper() or "IDLE"
-        previous_mode = str(payload.get("previous_mode") or self._current_mode or "IDLE").strip().upper() or "IDLE"
+        requested_mode = str(payload.get("requested_mode") or self._target_mode or self._current_mode or "SILENT").strip().upper() or "SILENT"
+        previous_mode = str(payload.get("previous_mode") or self._current_mode or "SILENT").strip().upper() or "SILENT"
         next_generation = int(payload.get("next_generation", self._generation + 1) or (self._generation + 1))
         self._target_mode = previous_mode
         self._last_switch_result = {
@@ -300,6 +308,26 @@ class ModeController:
             "active_mode": previous_mode,
             "generation": int(self._generation),
             "failed_generation": next_generation,
+        }
+
+    def start_runtime(self) -> None:
+        self.scheduler.start_runtime()
+        if self._active_plan is not None:
+            self.scheduler.configure(plan=self._active_plan, generation=self._generation)
+        self.supervisor.start_runtime()
+
+    def stop_runtime(self) -> None:
+        self.supervisor.stop_runtime()
+        self.scheduler.stop_runtime()
+
+    def runtime_snapshot(self) -> Dict[str, Any]:
+        return {
+            "runtime_running": True,
+            "active_runtime_generation": int(self._generation),
+            "active_runtime_plan": dict(self._active_plan or {}),
+            "active_runtime_mode": str((self._active_plan or {}).get("mode") or "SILENT").strip().upper() or "SILENT",
+            "scheduler": self.scheduler.snapshot(),
+            "runtime_supervisor": self.supervisor.snapshot(),
         }
 
     def snapshot(self) -> Dict[str, Any]:
@@ -314,7 +342,7 @@ class ModeController:
         }
 
     def reset(self) -> None:
-        self._current_mode = "IDLE"
+        self._current_mode = "SILENT"
         self._target_mode = None
         self._last_switch_ts = 0.0
         self._generation = 0
@@ -322,8 +350,8 @@ class ModeController:
         self._last_switch_result = {
             "ok": True,
             "reason": "reset",
-            "requested_mode": "IDLE",
-            "active_mode": "IDLE",
+            "requested_mode": "SILENT",
+            "active_mode": "SILENT",
             "generation": 0,
         }
 

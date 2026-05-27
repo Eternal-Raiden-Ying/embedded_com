@@ -3,18 +3,11 @@
 
 from copy import deepcopy
 import time
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 from ...ipc.protocol import VisionReq
 from ...utils.detect import compute_target_obs
 from .base import BaseStagePlan, StageContext, StageOutput, StageTickInput, next_interaction_id, normalize_upper
-
-
-def _merge(base: Dict[str, object], override: Optional[Dict[str, object]]) -> Dict[str, object]:
-    merged = dict(base)
-    if isinstance(override, dict):
-        merged.update(override)
-    return merged
 
 
 def _coerce_optional_int(value) -> Optional[int]:
@@ -34,17 +27,6 @@ def _default_target_obs(target: Optional[str]) -> Dict[str, object]:
         "cx_norm": 0.12,
         "size_norm": 0.18,
         "bbox": [180, 140, 360, 360],
-    }
-
-
-def _default_proposal() -> Dict[str, object]:
-    return {
-        "motion_delta": {
-            "dx_m": 0.03,
-            "dy_m": -0.01,
-            "dyaw_rad": 0.08,
-        },
-        "reason": "mock_micro_adjust_before_remote_grasp",
     }
 
 
@@ -77,9 +59,8 @@ def _grasp_state_from_req(req: VisionReq, target: Optional[str]) -> Dict[str, ob
     payload = req.payload if isinstance(req.payload, dict) else {}
     need_depth = bool(payload.get("need_depth", True))
     return {
-        "target_obs": _merge(_default_target_obs(target), payload.get("target_obs") or payload.get("mock_target_obs")),
-        "proposal": _merge(_default_proposal(), payload.get("proposal")),
-        "result_template": _merge(_default_result(target), payload.get("result")),
+        "target_obs": dict(payload.get("target_obs") or payload.get("mock_target_obs") or _default_target_obs(target)),
+        "result": dict(payload.get("result") or _default_result(target)),
         "remote_grasp": bool(payload.get("remote_grasp", True)),
         "need_depth": need_depth,
         "adjust_round": 0,
@@ -143,55 +124,42 @@ def _target_obs_from_results(results: Dict[str, object], target: Optional[str]) 
     return payload
 
 
-def _remote_effect(op: str, payload: Dict[str, object]) -> Dict[str, object]:
-    return {
-        "type": "PUBLISH_EVENT",
-        "route": "remote_cmd",
-        "payload": {
-            "op": normalize_upper(op, "UNKNOWN"),
-            **dict(payload or {}),
-        },
-    }
-
-
-def _remote_command_payload(stage_state: Dict[str, object], target: Optional[str], request_id: str) -> Dict[str, object]:
-    return {
-        "request_id": request_id,
-        "timeout_s": float(stage_state.get("remote_timeout_s", 10.0) or 10.0),
-        "target": target,
-        "robot_id": str(stage_state.get("remote_robot_id") or "arm_001"),
-        "need_depth": bool(stage_state.get("need_depth", True)),
-        "class_id": _coerce_optional_int(stage_state.get("remote_class_id")),
-        "metadata": dict(stage_state.get("remote_metadata") or {}),
-    }
-
-
-def _remote_service_init_payload(stage_state: Dict[str, object]) -> Dict[str, object]:
-    return {
-        "timeout_s": float(stage_state.get("remote_timeout_s", 10.0) or 10.0),
-    }
-
-
-def _frame_ready_for_remote(results: Dict[str, object], required_cameras) -> Dict[str, object]:
-    frame_meta = dict((results or {}).get("frame_meta") or {})
-    available_cameras = sorted(str(name) for name in tuple(frame_meta.get("cameras") or ()))
-    required = [str(name) for name in tuple(required_cameras or ("rgb",))]
-    has_frames = bool(frame_meta.get("has_frames", False))
-    frame_seq = int(frame_meta.get("frame_seq", 0) or 0)
-    ready = bool(has_frames and frame_seq > 0 and set(required).issubset(set(available_cameras)))
-    return {
-        "ready": ready,
-        "frame_seq": frame_seq,
-        "available_cameras": available_cameras,
-        "required_cameras": required,
-    }
-
+# ── GraspStagePlan ─────────────────────────────────────────────────────────
 
 class GraspStagePlan(BaseStagePlan):
-    """Stage plan for micro-adjustment and remote grasp cooperation."""
+    """Grasp stage state machine.
+
+    Mode transitions
+    ================
+    on_enter:  mode_hint or ``SILENT`` (default).
+    on_respond:
+      GRASP_REMOTE_INIT  → return initializing (no mode switch)
+      GRASP_REMOTE + ACCEPT    → *MICRO_ADJUST*
+      GRASP_REMOTE + other     → *SILENT*
+      MICRO_ADJUST + ACCEPT    → *GRASP_REMOTE*
+      MICRO_ADJUST + REJECT    → *SILENT*
+    tick:
+      GRASP_REMOTE_INIT        → ready → *GRASP_REMOTE*   (auto)
+
+    Mode behaviours
+    ===============
+    SILENT              RELAXING  — no capability, waiting for instruction
+    GRASP_REMOTE_INIT   RUNNING   — task init, auto-switch to GRASP_REMOTE
+    GRASP_REMOTE        RUNNING   — task predict, outputs result/reposition/fail
+    MICRO_ADJUST        WAITING_RESPONSE — waiting for orchestrator to respond
+    """
 
     stage_name = "GRASP"
-    default_mode = "MICRO_ADJUST"
+    default_mode = "SILENT"
+    common_routes = ("frame_meta", "runtime_status")
+    optional_routes = {
+        "SILENT": (),
+        "GRASP_REMOTE_INIT": ("remote_init_status",),
+        "GRASP_REMOTE": ("remote_result",),
+        "MICRO_ADJUST": (),
+    }
+
+    # ── on_* handlers (request-driven) ─────────────────────────────────
 
     def on_enter(self, req: VisionReq, ctx: StageContext) -> None:
         super().on_enter(req, ctx)
@@ -227,88 +195,48 @@ class GraspStagePlan(BaseStagePlan):
         return StageOutput()
 
     def on_respond(self, req: VisionReq, ctx: StageContext) -> Optional[StageOutput]:
-        stage_state = ctx.stage_state
-        target_obs = deepcopy(stage_state.get("target_obs") or _default_target_obs(ctx.target_name))
-        if ctx.interaction_id and req.interaction_id and str(req.interaction_id) != str(ctx.interaction_id):
-            return StageOutput(
-                vision_obs=self.build_obs(
-                    ctx,
-                    status="FAILED",
-                    perception={"target_obs": target_obs},
-                    result={
-                        "reason": "interaction_id_mismatch",
-                        "expected": ctx.interaction_id,
-                        "received": req.interaction_id,
-                    },
-                ),
-                signals={"response": "ERROR", "reason": "interaction_id_mismatch"},
-            )
-
+        current_mode = normalize_upper(ctx.current_mode, self.default_mode)
         decision = normalize_upper((req.response or {}).get("decision"), "REJECT")
-        stage_state["last_response"] = dict(req.response or {})
-        stage_state["last_feedback"] = dict(req.payload or {}) if isinstance(req.payload, dict) else {}
+        ctx.stage_state["last_response"] = dict(req.response or {})
+        ctx.stage_state["last_feedback"] = dict(req.payload or {}) if isinstance(req.payload, dict) else {}
 
-        if decision != "ACCEPT":
-            ctx.current_mode = "MICRO_ADJUST"
+        # ── GRASP_REMOTE_INIT → return initializing (task still running) ──
+        if current_mode == "GRASP_REMOTE_INIT":
+            return StageOutput(signals={"response": "BUSY", "reason": "init_in_progress"})
+
+        # ── GRASP_REMOTE → ACCEPT → MICRO_ADJUST (reposition flow) ──
+        if current_mode == "GRASP_REMOTE":
+            if decision == "ACCEPT":
+                ctx.current_mode = "MICRO_ADJUST"
+                ctx.interaction_id = None
+                return StageOutput(signals={"response": "ACCEPT"})
+            ctx.current_mode = "SILENT"
             ctx.interaction_id = None
-            stage_state["remote_request_id"] = None
-            stage_state["remote_predict_sent"] = False
-            stage_state["remote_result_sent"] = False
-            stage_state["remote_ready_frame_seq"] = 0
-            stage_state["remote_init_retry_count"] = 0
-            stage_state["remote_init_retry_inflight"] = False
-            stage_state["remote_init_retry_target_attempt"] = 0
             return StageOutput(signals={"response": decision or "REJECT"})
 
-        if not bool(stage_state.get("remote_grasp", True)):
-            result = deepcopy(stage_state.get("result_template") or _default_result(ctx.target_name))
-            result["accepted"] = True
-            result["response"] = dict(req.response or {})
-            result["feedback"] = dict(req.payload or {}) if isinstance(req.payload, dict) else {}
+        # ── MICRO_ADJUST → ACCEPT → GRASP_REMOTE (retry predict) ──
+        if current_mode == "MICRO_ADJUST":
+            if decision == "ACCEPT":
+                ctx.current_mode = "GRASP_REMOTE"
+                ctx.interaction_id = None
+                ctx.stage_state["remote_request_id"] = _next_remote_request_id()
+                ctx.stage_state["remote_predict_sent"] = False
+                ctx.stage_state["remote_result_sent"] = False
+                ctx.stage_state["remote_ready_frame_seq"] = 0
+                return StageOutput(signals={"response": "ACCEPT"})
+            ctx.current_mode = "SILENT"
             ctx.interaction_id = None
-            return StageOutput(
-                vision_obs=self.build_obs(
-                    ctx,
-                    status="RESULT_READY",
-                    perception={"target_obs": target_obs},
-                    result=result,
-                ),
-                signals={"response": "ACCEPT"},
-            )
+            return StageOutput(signals={"response": decision or "REJECT"})
 
-        class_id = _coerce_optional_int(stage_state.get("remote_class_id"))
-        if class_id is None:
-            ctx.current_mode = "MICRO_ADJUST"
-            ctx.interaction_id = None
-            return StageOutput(
-                vision_obs=self.build_obs(
-                    ctx,
-                    status="FAILED",
-                    perception={"target_obs": target_obs},
-                    result={"reason": "missing_class_id"},
-                ),
-                signals={"response": "ERROR", "reason": "missing_class_id"},
-            )
-
-        request_id = _next_remote_request_id()
-        stage_state["remote_class_id"] = class_id
-        stage_state["remote_request_id"] = request_id
-        stage_state["remote_predict_sent"] = False
-        stage_state["remote_result_sent"] = False
-        stage_state["remote_ready_frame_seq"] = 0
-        stage_state["remote_init_retry_count"] = 0
-        stage_state["remote_init_retry_inflight"] = False
-        stage_state["remote_init_retry_target_attempt"] = 0
-        ctx.current_mode = "GRASP_REMOTE"
-        ctx.interaction_id = None
-        return StageOutput(signals={"response": "ACCEPT"})
+        # ── SILENT / unknown → stay silent ──
+        return StageOutput(signals={"response": decision})
 
     def on_stop(self, req: VisionReq, ctx: StageContext) -> Optional[StageOutput]:
         _ = req
-        ctx.current_stage = "IDLE"
-        ctx.current_mode = "IDLE"
         ctx.interaction_id = None
         return None
+
+    # ── tick ───────────────────────────────────────────────────────────
 
     def tick(self, tick_input: StageTickInput, ctx: StageContext) -> Optional[StageOutput]:
         results = dict(tick_input.results or {})
@@ -319,245 +247,157 @@ class GraspStagePlan(BaseStagePlan):
         else:
             stage_state["target_obs"] = dict(target_obs)
         target_obs = deepcopy(target_obs)
-        remote_result = dict(results.get("remote_result") or {})
-        output_snapshot = {
-            "generation": int(tick_input.generation),
-            "result_keys": sorted(results.keys()),
-        }
+        current_mode = normalize_upper(ctx.current_mode, self.default_mode)
+        snapshot = {"generation": int(tick_input.generation), "result_keys": sorted(results.keys())}
 
-        if normalize_upper(ctx.current_mode, self.default_mode) == "GRASP_REMOTE":
-            request_id = str(stage_state.get("remote_request_id") or "").strip()
-            matched = bool(request_id) and str(remote_result.get("request_id") or "").strip() == request_id
-            last_action = normalize_upper(remote_result.get("last_action"), "")
-            remote_error = str(remote_result.get("last_error") or "")
-            service_init_confirmed = bool(
-                remote_result.get("service_init_confirmed", remote_result.get("init_confirmed", False))
+        # ── SILENT ─────────────────────────────────────────────────
+        if current_mode == "SILENT":
+            return StageOutput(
+                vision_obs=self.build_obs(ctx, status="RELAXING"),
+                snapshot=snapshot,
             )
-            service_init_state = str(remote_result.get("service_init_state") or "")
-            service_init_attempts = int(remote_result.get("service_init_attempts", 0) or 0)
-            service_init_error = str(remote_result.get("service_init_last_error") or remote_error or "")
-            retry_count = int(stage_state.get("remote_init_retry_count", 0) or 0)
-            retry_limit = int(stage_state.get("remote_init_retry_limit", 3) or 3)
-            retry_inflight = bool(stage_state.get("remote_init_retry_inflight", False))
-            retry_target_attempt = int(stage_state.get("remote_init_retry_target_attempt", 0) or 0)
 
-            if retry_inflight and service_init_attempts >= retry_target_attempt and last_action == "INIT":
-                stage_state["remote_init_retry_inflight"] = False
-                retry_inflight = False
-
-            frame_gate = _frame_ready_for_remote(results, stage_state.get("remote_required_cameras"))
-
-            if not service_init_confirmed:
-                if not retry_inflight and retry_count < retry_limit:
-                    next_attempt = int(service_init_attempts) + 1
-                    stage_state["remote_init_retry_count"] = retry_count + 1
-                    stage_state["remote_init_retry_inflight"] = True
-                    stage_state["remote_init_retry_target_attempt"] = next_attempt
-                    return StageOutput(
-                        vision_obs=self.build_obs(
-                            ctx,
-                            status="RUNNING",
-                            perception={"target_obs": target_obs},
-                            result={
-                                "remote_state": "retrying_init",
-                                "request_id": request_id,
-                                "init_confirmed": False,
-                                "service_init_state": service_init_state or "uninitialized",
-                                "service_init_attempts": service_init_attempts,
-                                "init_retry_count": int(stage_state.get("remote_init_retry_count", 0) or 0),
-                                "init_retry_limit": retry_limit,
-                                "remote_error": service_init_error,
-                            },
-                        ),
-                        effects=[_remote_effect("INIT", _remote_service_init_payload(stage_state))],
-                        snapshot=output_snapshot,
-                    )
-                if not retry_inflight and retry_count >= retry_limit:
-                    if stage_state.get("remote_result_sent", False):
-                        return None
-                    stage_state["remote_result_sent"] = True
-                    return StageOutput(
-                        vision_obs=self.build_obs(
-                            ctx,
-                            status="FAILED",
-                            perception={"target_obs": target_obs},
-                            result={
-                                "reason": "remote_init_failed",
-                                "request_id": request_id,
-                                "remote_error": service_init_error or "init_failed",
-                                "init_attempts": retry_limit,
-                                "init_confirmed": False,
-                                "service_init_state": service_init_state or "failed",
-                                "service_init_attempts": service_init_attempts,
-                                "status_code": remote_result.get("status_code"),
-                            },
-                        ),
-                        snapshot=output_snapshot,
-                    )
-
-            if service_init_confirmed and not bool(stage_state.get("remote_predict_sent", False)):
-                if frame_gate["ready"]:
-                    stage_state["remote_predict_sent"] = True
-                    stage_state["remote_ready_frame_seq"] = int(frame_gate["frame_seq"])
-                    return StageOutput(
-                        vision_obs=self.build_obs(
-                            ctx,
-                            status="RUNNING",
-                            perception={"target_obs": target_obs},
-                            result={
-                                "remote_state": "predict_requested",
-                                "request_id": request_id,
-                                "init_confirmed": True,
-                                "service_init_state": service_init_state or "ready",
-                                "service_init_attempts": service_init_attempts,
-                                "frame_ready": True,
-                                "frame_seq": int(frame_gate["frame_seq"]),
-                                "required_cameras": list(frame_gate["required_cameras"]),
-                                "available_cameras": list(frame_gate["available_cameras"]),
-                            },
-                        ),
-                        effects=[
-                            _remote_effect("PREDICT", _remote_command_payload(stage_state, ctx.target_name, request_id)),
-                        ],
-                        snapshot=output_snapshot,
-                    )
-
-            if matched and last_action == "PREDICT" and bool(remote_result.get("last_ok", False)) and bool(remote_result.get("has_result", False)):
-                if stage_state.get("remote_result_sent", False):
-                    return None
-                stage_state["remote_result_sent"] = True
-                server_response = remote_result.get("result") or {}
-                server_status = str(server_response.get("status") or "").strip().lower()
-                server_detection = server_response.get("detection") if isinstance(server_response.get("detection"), dict) else {}
-                server_reason = str(server_response.get("reason") or "")
-                server_message = str(server_response.get("message") or "")
-
-                if server_status == "success":
-                    targets = server_response.get("targets") if isinstance(server_response.get("targets"), list) else []
-                    grasp = dict(targets[0]) if targets else {}
-                    return StageOutput(
-                        vision_obs=self.build_obs(
-                            ctx,
-                            status="RESULT_READY",
-                            perception={"target_obs": target_obs},
-                            result={
-                                "grasp": grasp,
-                                "detection": server_detection,
-                                "source": "remote_grasp_client",
-                                "request_id": request_id,
-                            },
-                        ),
-                        snapshot=output_snapshot,
-                    )
-
-                if server_status == "reposition_required":
-                    reposition_proposal = server_response.get("reposition_proposal")
-                    return StageOutput(
-                        vision_obs=self.build_obs(
-                            ctx,
-                            status="RUNNING",
-                            perception={"target_obs": target_obs},
-                            result={
-                                "reposition_proposal": reposition_proposal if isinstance(reposition_proposal, dict) else None,
-                                "reason": server_reason or "reposition_required",
-                                "message": server_message,
-                                "detection": server_detection,
-                                "source": "remote_grasp_client",
-                                "request_id": request_id,
-                            },
-                        ),
-                        snapshot=output_snapshot,
-                    )
-
+        # ── GRASP_REMOTE_INIT ───────────────────────────────────────
+        if current_mode == "GRASP_REMOTE_INIT":
+            if ctx.server_status == "ready":
+                ctx.current_mode = "GRASP_REMOTE"
                 return StageOutput(
-                    vision_obs=self.build_obs(
-                        ctx,
-                        status="FAILED",
-                        perception={"target_obs": target_obs},
-                        result={
-                            "reason": server_reason or server_status or "grasp_failed",
-                            "message": server_message,
-                            "detection": server_detection,
-                            "source": "remote_grasp_client",
-                            "request_id": request_id,
-                        },
-                    ),
-                    snapshot=output_snapshot,
+                    vision_obs=self.build_obs(ctx, status="RUNNING",
+                                               perception={"target_obs": target_obs},
+                                               result={"remote_state": "init_ok_switching_to_predict"}),
+                    snapshot=snapshot,
+                )
+            if ctx.server_status == "error":
+                return StageOutput(
+                    vision_obs=self.build_obs(ctx, status="FAILED",
+                                               perception={"target_obs": target_obs},
+                                               result={"reason": "init_failed", "server_status": ctx.server_status}),
+                    snapshot=snapshot,
+                )
+            return StageOutput(
+                vision_obs=self.build_obs(ctx, status="RUNNING",
+                                           perception={"target_obs": target_obs},
+                                           result={"remote_state": "initializing"}),
+                snapshot=snapshot,
+            )
+
+        # ── GRASP_REMOTE ────────────────────────────────────────────
+        if current_mode == "GRASP_REMOTE":
+            remote = dict(results.get("remote_result") or {})
+            request_id = str(stage_state.get("remote_request_id") or "").strip()
+            last_action = normalize_upper(remote.get("last_action"), "")
+            remote_error = str(remote.get("last_error") or "")
+
+            # Waiting for PREDICT task to complete
+            if last_action != "predict":
+                return StageOutput(
+                    vision_obs=self.build_obs(ctx, status="RUNNING",
+                                               perception={"target_obs": target_obs},
+                                               result={"remote_state": "awaiting_predict", "request_id": request_id}),
+                    snapshot=snapshot,
                 )
 
-            if matched and last_action == "PREDICT" and not bool(remote_result.get("last_ok", False)):
-                if stage_state.get("remote_result_sent", False):
-                    return None
-                stage_state["remote_result_sent"] = True
+            # PREDICT result arrived
+            if stage_state.get("remote_result_sent", False):
+                return None
+            stage_state["remote_result_sent"] = True
+
+            if not bool(remote.get("last_ok", False)):
                 return StageOutput(
                     vision_obs=self.build_obs(
-                        ctx,
-                        status="FAILED",
+                        ctx, status="FAILED",
                         perception={"target_obs": target_obs},
-                        result={
-                            "reason": "remote_predict_failed",
-                            "request_id": request_id,
-                            "remote_error": remote_error or "predict_failed",
-                            "status_code": remote_result.get("status_code"),
-                        },
+                        result={"reason": "remote_predict_failed", "request_id": request_id,
+                                "remote_error": remote_error or "predict_failed",
+                                "status_code": remote.get("status_code")},
                     ),
-                    snapshot=output_snapshot,
+                    snapshot=snapshot,
                 )
 
-            remote_state = "awaiting_remote"
-            if not service_init_confirmed:
-                remote_state = "awaiting_init_retry" if retry_inflight else "awaiting_init"
-            elif not bool(stage_state.get("remote_predict_sent", False)):
-                remote_state = "awaiting_fresh_frames"
-            else:
-                remote_state = "awaiting_predict_result"
+            if not bool(remote.get("has_result", False)):
+                return StageOutput(
+                    vision_obs=self.build_obs(ctx, status="RUNNING",
+                                               perception={"target_obs": target_obs},
+                                               result={"remote_state": "awaiting_predict_result", "request_id": request_id}),
+                    snapshot=snapshot,
+                )
 
+            server_response = remote.get("result") or {}
+            server_status = str(server_response.get("status") or "").strip().lower()
+            server_detection = server_response.get("detection") if isinstance(server_response.get("detection"), dict) else {}
+            server_reason = str(server_response.get("reason") or "")
+
+            if server_status == "success":
+                targets = server_response.get("targets")
+                first_target = dict(targets[0]) if isinstance(targets, (list, tuple)) and targets else {}
+                result = {
+                    "grasp": first_target,
+                    "detection": dict(server_detection),
+                    "source": "remote_grasp_client",
+                    "request_id": request_id,
+                }
+                return StageOutput(
+                    vision_obs=self.build_obs(ctx, status="RESULT_READY",
+                                               perception={"target_obs": target_obs},
+                                               result=result),
+                    snapshot=snapshot,
+                )
+
+            if server_status == "reposition_required":
+                result = {
+                    "reposition_proposal": server_response.get("reposition_proposal") or {},
+                    "reason": server_reason or "reposition_required",
+                    "message": str(server_response.get("message") or ""),
+                    "detection": dict(server_detection),
+                    "source": "remote_grasp_client",
+                    "request_id": request_id,
+                }
+                return StageOutput(
+                    vision_obs=self.build_obs(ctx, status="RUNNING",
+                                               perception={"target_obs": target_obs},
+                                               result=result),
+                    snapshot=snapshot,
+                )
+
+            # Unknown status → FAILED
+            return StageOutput(
+                vision_obs=self.build_obs(
+                    ctx, status="FAILED",
+                    perception={"target_obs": target_obs},
+                    result={
+                        "reason": server_reason or server_status or "grasp_failed",
+                        "message": str(server_response.get("message") or ""),
+                        "detection": dict(server_detection),
+                        "source": "remote_grasp_client",
+                        "request_id": request_id,
+                    },
+                ),
+                snapshot=snapshot,
+            )
+
+        # ── MICRO_ADJUST ────────────────────────────────────────────
+        if current_mode == "MICRO_ADJUST":
+            if not ctx.interaction_id:
+                ctx.interaction_id = next_interaction_id()
+                stage_state["adjust_round"] = int(stage_state.get("adjust_round", 0) or 0) + 1
             return StageOutput(
                 vision_obs=self.build_obs(
                     ctx,
-                    status="RUNNING",
+                    status="WAITING_RESPONSE",
                     perception={"target_obs": target_obs},
-                    result={
-                        "remote_state": remote_state,
-                        "request_id": request_id,
-                        "last_response": deepcopy(stage_state.get("last_response")),
-                        "remote_enabled": bool(remote_result.get("enabled")),
-                        "remote_error": remote_error,
-                        "remote_sequence": int(remote_result.get("sequence", 0) or 0),
-                        "remote_last_action": str(remote_result.get("last_action") or ""),
-                        "remote_last_ok": bool(remote_result.get("last_ok", False)),
-                        "init_confirmed": service_init_confirmed,
-                        "service_init_state": service_init_state or ("ready" if service_init_confirmed else "failed"),
-                        "service_init_attempts": service_init_attempts,
-                        "init_retry_count": int(stage_state.get("remote_init_retry_count", 0) or 0),
-                        "init_retry_limit": retry_limit,
-                        "init_retry_inflight": bool(stage_state.get("remote_init_retry_inflight", False)),
-                        "predict_sent": bool(stage_state.get("remote_predict_sent", False)),
-                        "frame_ready": bool(frame_gate["ready"]),
-                        "frame_seq": int(frame_gate["frame_seq"]),
-                        "required_cameras": list(frame_gate["required_cameras"]),
-                        "available_cameras": list(frame_gate["available_cameras"]),
+                    interaction={
+                        "required": True,
+                        "interaction_id": ctx.interaction_id,
+                        "kind": "MOVE_HINT",
+                        "round": int(stage_state.get("adjust_round", 1) or 1),
                     },
                 ),
-                snapshot=output_snapshot,
+                snapshot=snapshot,
             )
 
-        if not ctx.interaction_id:
-            ctx.interaction_id = next_interaction_id()
-            stage_state["adjust_round"] = int(stage_state.get("adjust_round", 0) or 0) + 1
-        ctx.current_mode = "MICRO_ADJUST"
+        # ── Unknown mode → SILENT ───────────────────────────────────
+        ctx.current_mode = "SILENT"
         return StageOutput(
-            vision_obs=self.build_obs(
-                ctx,
-                status="WAITING_RESPONSE",
-                perception={"target_obs": target_obs},
-                proposal=deepcopy(stage_state.get("proposal") or _default_proposal()),
-                interaction={
-                    "required": True,
-                    "interaction_id": ctx.interaction_id,
-                    "kind": "MOVE_HINT",
-                    "round": int(stage_state.get("adjust_round", 1) or 1),
-                },
-            ),
-            snapshot=output_snapshot,
+            vision_obs=self.build_obs(ctx, status="RELAXING"),
+            snapshot=snapshot,
         )

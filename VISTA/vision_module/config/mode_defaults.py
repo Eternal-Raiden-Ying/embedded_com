@@ -24,15 +24,6 @@ def _as_camera_tuple(value: Any, default) -> tuple:
     return tuple(default or ())
 
 
-def build_default_stage_entry_modes() -> Dict[str, str]:
-    """Return the recommended initial mode for each business stage."""
-    return {
-        "IDLE": "IDLE",
-        "SEARCH": "TRACK_LOCAL",
-        "GRASP": "MICRO_ADJUST",
-        "RETURN": "TRACK_LOCAL",
-    }
-
 
 def _camera_override_from_config(cfg, camera_name: str) -> Dict[str, Any]:
     camera_cfg = getattr(getattr(cfg, "camera", None), "streams", {}).get(camera_name)
@@ -97,9 +88,14 @@ def _camera_override_with_updates(cfg, camera_name: str, **updates: Any) -> Dict
     return payload
 
 
-def _default_remote_profile(*, enabled: bool, require_depth: bool = False) -> RemoteProfile:
+def _default_remote_profile(*, enabled: bool, require_depth: bool = False,
+                             kind: str = "loop", action: str = "",
+                             max_retries: int = 1) -> RemoteProfile:
     return RemoteProfile(
         enabled=bool(enabled),
+        kind=str(kind or "loop").strip().lower() or "loop",
+        action=str(action or "").strip().lower(),
+        max_retries=int(max_retries),
         base_url=str(os.getenv("VISION_REMOTE_BASE_URL", "")).strip() or None,
         require_depth=bool(require_depth),
         rgb_encoding=str(os.getenv("VISION_REMOTE_RGB_ENCODING", "jpeg")).strip().lower() or "jpeg",
@@ -186,11 +182,14 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
     if "rgb" in depth_cameras:
         depth_perception_cameras["rgb"] = track_local_rgb
     preview_layout_defaults = {
+        "INIT": "rgb_minimal",
+        "SILENT": "rgb_minimal",
         "IDLE": "rgb_minimal",
         "DEPTH_PERCEPTION": "rgb_depth_edge",
         "TABLE_EDGE_PERCEPTION": "rgb_depth_edge",
         "TRACK_LOCAL": "rgb_yolo_edge_overlay",
         "MICRO_ADJUST": "rgb_minimal",
+        "GRASP_REMOTE_INIT": "rgb_minimal",
         "GRASP_REMOTE": "rgb_depth_edge",
         "IDLE_HOT": "rgb_hot_preview",
     }
@@ -216,15 +215,28 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
         )
 
     profiles = {
-        "IDLE": ModeProfile(
-            name="IDLE",
+        "INIT": ModeProfile(
+            name="INIT",
             enabled_cameras=(),
+            camera_overrides={},
+            predictor_enabled=False,
+            predictor_model=None,
+            remote=_default_remote_profile(enabled=True, require_depth=False,
+                                             kind="task", action="init", max_retries=3),
+            preview=preview_profile("INIT", enabled=False, sink_name="null"),
+            release_cooldown_s=0.0,
+            metadata={"contract": {"stage": "INIT", "remote": "required"}},
+        ),
+        "SILENT": ModeProfile(
+            name="SILENT",
+            enabled_cameras=(),
+            camera_overrides={},
             predictor_enabled=False,
             predictor_model=None,
             remote=_default_remote_profile(enabled=False),
-            preview=preview_profile("IDLE", enabled=False, sink_name="null"),
+            preview=preview_profile("SILENT", enabled=False, sink_name="null"),
             release_cooldown_s=0.0,
-            metadata={"contract": {"stage": "IDLE"}},
+            metadata={"contract": {"stage": "SILENT"}},
         ),
         "TRACK_LOCAL": ModeProfile(
             name="TRACK_LOCAL",
@@ -234,6 +246,9 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             predictor_model=active_model,
             remote=_default_remote_profile(enabled=False),
             preview=preview_profile("TRACK_LOCAL", enabled=True),
+            table_edge_enabled=True,
+            table_edge_path="lightweight",
+            table_edge_update_hz=5.0,
             release_cooldown_s=2.0,
             metadata={
                 "contract": {
@@ -242,7 +257,7 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
                     "table_edge": "required",
                     "remote": "disabled",
                     "perception": ["target_obs", "table_edge_obs"],
-                }
+                },
             },
         ),
         "DEPTH_PERCEPTION": ModeProfile(
@@ -253,6 +268,9 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             predictor_model=table_model if table_bbox_enabled else None,
             remote=_default_remote_profile(enabled=False),
             preview=preview_profile("DEPTH_PERCEPTION", enabled=True),
+            table_edge_enabled=True,
+            table_edge_path="full",
+            table_edge_update_hz=10.0,
             release_cooldown_s=2.0,
             metadata={
                 "contract": {
@@ -260,7 +278,7 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
                     "predictor": "optional_table_bbox" if table_bbox_enabled else "disabled",
                     "remote": "disabled",
                     "perception": "table_edge_obs",
-                }
+                },
             },
         ),
         "TABLE_EDGE_PERCEPTION": ModeProfile(
@@ -271,6 +289,9 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             predictor_model=active_model,
             remote=_default_remote_profile(enabled=False),
             preview=preview_profile("TABLE_EDGE_PERCEPTION", enabled=True),
+            table_edge_enabled=True,
+            table_edge_path="full",
+            table_edge_update_hz=10.0,
             release_cooldown_s=2.0,
             metadata={
                 "contract": {
@@ -279,19 +300,38 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
                     "table_edge": "required",
                     "remote": "disabled",
                     "perception": ["local_perception", "table_edge_obs"],
-                }
+                },
             },
         ),
         "MICRO_ADJUST": ModeProfile(
             name="MICRO_ADJUST",
-            enabled_cameras=("rgb",),
-            camera_overrides={"rgb": micro_adjust_rgb},
-            predictor_enabled=True,
-            predictor_model=active_model,
+            enabled_cameras=(),
+            camera_overrides={},
+            predictor_enabled=False,
+            predictor_model=None,
             remote=_default_remote_profile(enabled=False),
-            preview=preview_profile("MICRO_ADJUST", enabled=True),
-            release_cooldown_s=2.0,
+            preview=preview_profile("MICRO_ADJUST", enabled=False, sink_name="null"),
+            release_cooldown_s=0.0,
             metadata={"contract": {"interaction": "MOVE_HINT"}},
+        ),
+        "GRASP_REMOTE_INIT": ModeProfile(
+            name="GRASP_REMOTE_INIT",
+            enabled_cameras=(),
+            camera_overrides={},
+            predictor_enabled=False,
+            predictor_model=None,
+            remote=_default_remote_profile(enabled=True, require_depth=False,
+                                             kind="task", action="init", max_retries=3),
+            preview=preview_profile("GRASP_REMOTE_INIT", enabled=True),
+            release_cooldown_s=3.0,
+            metadata={
+                "contract": {
+                    "cameras": [],
+                    "predictor": "disabled",
+                    "remote": "required",
+                    "result": "remote_result",
+                }
+            },
         ),
         "GRASP_REMOTE": ModeProfile(
             name="GRASP_REMOTE",
@@ -299,7 +339,8 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             camera_overrides=grasp_remote_cameras,
             predictor_enabled=False,
             predictor_model=None,
-            remote=_default_remote_profile(enabled=True, require_depth=True),
+            remote=_default_remote_profile(enabled=True, require_depth=True,
+                                             kind="task", action="predict", max_retries=1),
             preview=preview_profile("GRASP_REMOTE", enabled=True),
             release_cooldown_s=3.0,
             metadata={

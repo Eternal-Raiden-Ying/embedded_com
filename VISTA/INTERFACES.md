@@ -43,7 +43,7 @@
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `type` | `str` | 否 | 建议固定为 `vision_req` |
+| `type` | `str` | 是 | 代码中固定为 `"vision_req"`；旧协议 type 值归一化后存入 `legacy_type` |
 | `ts` | `float` | 否 | 请求时间戳，未传则由接收端补当前时间 |
 | `op` | `str` | 建议必填 | `START` / `UPDATE` / `RESPOND` / `STOP` |
 | `stage` | `str` | 建议必填 | `SEARCH` / `GRASP` / `RETURN` / `IDLE` |
@@ -51,6 +51,8 @@
 | `mode_hint` | `str` | 否 | 建议优先 mode |
 | `session_id` | `str` | 否 | 会话 ID |
 | `req_id` | `str` | 否 | 请求 ID |
+| `req_type` | `str` | 否 | 控制面请求分类：`mode_request` / `target_update` / `keepalive`；由 StageController 判定 |
+| `legacy_type` | `str` | 否 | 旧协议 `type` 原值（如 `home_tag_req`），归一化后保留用于追溯 |
 | `epoch` | `int` | 否 | 上游任务 epoch |
 | `interaction_id` | `str` | 否 | `RESPOND` 时对应交互回合 |
 | `response` | `dict` | 否 | 对交互回合的响应内容 |
@@ -120,6 +122,7 @@
 | `remote_grasp` | `bool` | 当前支持 | 是否走 remote grasp，默认当前实现偏向 `true` |
 | `need_depth` | `bool` | 当前支持 | 是否要求 depth，remote 路径通常应显式传入 |
 | `class_id` | `int` | 当前支持，推荐显式必传 | remote grasp 目标类别 |
+| `robot_id` | `str` | 当前支持 | 机器人标识，用于 remote manager 区分请求来源 |
 | `remote_timeout_s` | `float` | 当前支持 | request 级超时覆盖项 |
 | `remote_metadata` | `dict` | 当前支持 | 附加 remote metadata |
 
@@ -131,22 +134,23 @@
 
 #### `RESPOND` 语义
 
-`GRASP` 当前的交互主链路是：
+`GRASP` 当前的交互主链路（VISTA 侧职责）：
 
-1. VISTA 发出 `WAITING_RESPONSE`
-2. 上游执行或确认动作
-3. 上游发送 `RESPOND`
-4. 如果进入 remote grasp，VISTA 会执行：
-   - `INIT`
-   - wait `INIT` success
-   - wait fresh `GRASP_REMOTE` frame
-   - `PREDICT`
-   - `RELEASE`
+1. VISTA 发出 `WAITING_RESPONSE`，等待上游决策
+2. 上游执行或确认动作后发送 `RESPOND`（含 `response.decision` 和 `payload.class_id`）
+3. VISTA 收到 `RESPOND ACCEPT` 后，若进入 remote grasp 路径：
+   - `class_id` 校验：缺失 `class_id` 时显式拒绝，返回 `FAILED` + `reason=missing_class_id`
+   - `INIT`：确认 remote 服务就绪（含最多 3 次 retry）
+   - 等待 `GRASP_REMOTE` mode 的新 generation fresh frame
+   - `PREDICT`：发送抓取预测请求
+   - 返回 `RESULT_READY`（成功）/ `FAILED`（失败）/ `RUNNING`（`reposition_required`，需上游再次 RESPOND）
+4. 上游 Orchestrator 负责循环逻辑：根据结果决定重试（再次 RESPOND）或进入下游执行
 
-典型字段：
-
-- `interaction_id`
-- `response.decision`: `ACCEPT` / `REJECT`
+**重要边界**：
+- **重试循环在 Orchestrator，不在 VISTA**。VISTA 仅处理单次 RESPOND → PREDICT → 返回结果
+- **`RELEASE` 不是 per-grasp 步骤**。remote 服务的 `/release` 仅在 VISTA 引擎停止/禁用/显式 reset 时调用（`RuntimeSupervisor._stop_remote()`），属于资源清理而非抓取生命周期的一部分
+- 状态转换：`WAITING_RESPONSE` → (收到 RESPOND) → `RUNNING` → `RESULT_READY` / `FAILED` / `RUNNING`(reposition)
+- `DONE` 不是稳定状态值，调用方不应依赖
 
 ## 出站协议：`vision_obs`
 
@@ -168,7 +172,7 @@
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `type` | `str` | 是 | 固定为 `vision_obs` |
+| `type` | `str` | 是 | 固定为 `vision_obs`。注：在 JSON 输出中 `type` 为最后一个字段（dataclass 声明顺序由 `asdict()` 保留） |
 | `ts` | `float` | 是 | VISTA 生成该消息的时间 |
 | `stage` | `str` | 是 | 当前业务 stage |
 | `mode` | `str` | 是 | 当前 active mode |
@@ -189,6 +193,7 @@
 - `WAITING_RESPONSE`
 - `RESULT_READY`
 - `FAILED`
+- `RELAXING`
 
 `DONE` 不是当前稳定 contract，调用方不应依赖它。
 
@@ -198,9 +203,10 @@
 | --- | --- | --- |
 | `SEARCH` | `RUNNING` | `perception.target_obs` |
 | `RETURN` | `RUNNING` | `perception.home_tag_obs` |
-| `GRASP` | `WAITING_RESPONSE` | `perception.target_obs` + `proposal` + `interaction` |
-| `GRASP` | `RUNNING` | remote 进行中的中间状态，常见于 `result.remote_state` 等 |
-| `GRASP` | `RESULT_READY` | remote grasp 结果或最终阶段结果，位于 `result` |
+| `GRASP` | `RELAXING` | SILENT mode idle — no capability, waiting for instruction |
+| `GRASP` | `WAITING_RESPONSE` | MICRO_ADJUST mode — waiting for orchestrator adjust/accept decision |
+| `GRASP` | `RUNNING` | GRASP_REMOTE_INIT/GRASP_REMOTE 进行中，常见于 `result.remote_state` |
+| `GRASP` | `RESULT_READY` | remote grasp 成功结果，位于 `result.grasp` |
 | `GRASP` | `FAILED` | 失败原因，常见于 `result.reason` |
 
 ### 关于 `GRASP` 的结果语义
@@ -310,14 +316,37 @@
 - 上游不应把 `target` 当作 remote `class_id` 的替代字段
 - 上游处理 `GRASP` 时，应支持 `WAITING_RESPONSE -> RESPOND -> RESULT_READY/FAILED` 这一轮交互链路
 
-## 当前未完全收口的地方
+## 当前收口状态
 
-以下项目已经是架构方向，但当前实现仍在收口中：
+remote request 的最小稳定字段集合已收缩完成，segmentation 相关 remote surface 已删除。上游可以依赖当前文档列出的字段作为稳定 contract。
 
-- remote request 的最小稳定字段集合仍在收缩中
-- segmentation 相关 remote surface 仍待删除
+## 序列化行为
 
-这些属于当前实现债务，不应被上游拿来当正式 contract 依赖。
+本节描述 `vision_obs` 序列化时上游需要注意的行为，这些行为在 `protocol.py` 中实现。
+
+### `_compact()` 与 None 值处理
+
+`vision_obs` 输出 JSON 前会经过 `_compact()` 处理（`protocol.py:49-68`）：
+
+- **默认行为**：值为 `None` 的字段会被**省略**，不出现在 JSON 中
+- **例外（`_PRESERVE_NONE_KEYS`）**：以下 key 即使值为 `None` 也会输出 `null`（`protocol.py:39-46`）：
+  - `yaw_err`、`dist_err` — 姿态估计误差
+  - `obs_ts`、`age_ms` — 观测时间戳与年龄
+  - `frame_id`、`seq` — 帧标识与序号
+- **空 dict**：值为 `{}` 的字段会被移除
+- **列表**：列表中的 `None` 元素会被移除
+
+上游解析方应注意：同一个字段可能在一条消息中存在（有值或 `null`），在下一条消息中完全不存在。
+
+### Transport 行为
+
+- **帧协议**：JSONL（每行一个 JSON object，以 `\n` 分隔），UTF-8 编码
+- **发送队列**：容量 `maxsize=5`；满时丢弃最旧消息（`transport.py:98-103`）
+- **发送频率**：主循环 8Hz，`vision_obs` 发送受速率限制（默认 `send_hz=5.0`，TRACK_LOCAL 模式 `track_local_send_hz=8.0`）。请求处理后的 `vision_obs` 不受速率限制（`force_send=True`）
+- **重连**：对端断开后自动重连（间隔 1.0s），同一消息最多重试 2 次后丢失
+- **入站校验**：只接受 `type=vision_req` 或 `type=home_tag_req` 的消息；其他 type 值**静默丢弃**（无日志、无错误回复）
+- **JSON parse 失败**：记录 warning 日志，静默跳过该行，不回复上游
+
 ## 2026-04 Contract Notes
 
 - `target` and remote `class_id` are different fields. Remote grasp requests must provide explicit `payload.class_id`; VISTA no longer infers `class_id` from `target`.

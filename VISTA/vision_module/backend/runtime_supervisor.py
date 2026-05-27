@@ -300,6 +300,12 @@ class RuntimeSupervisor:
             return True
         enabled = bool(payload.get("enabled", False))
         ok = True
+        configurator = getattr(self.table_edge_manager, "configure", None)
+        if callable(configurator):
+            try:
+                configurator(dict(payload or {}))
+            except Exception:
+                ok = False
         if enabled:
             try:
                 self.table_edge_manager.start_runtime()
@@ -310,6 +316,12 @@ class RuntimeSupervisor:
                 self.table_edge_manager.stop_runtime()
             except Exception:
                 ok = False
+            releaser = getattr(self.table_edge_manager, "release_all", None)
+            if callable(releaser):
+                try:
+                    releaser()
+                except Exception:
+                    ok = False
         return ok
 
     def _resolve_preview_sink(self, payload: Dict[str, Any]):

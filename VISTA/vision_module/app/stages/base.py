@@ -4,7 +4,7 @@
 from abc import ABC
 from dataclasses import dataclass, field
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ...ipc.protocol import VisionObs, VisionReq
 
@@ -14,12 +14,13 @@ class StageContext:
     """Mutable session-scoped state shared across stage plans."""
 
     current_stage: str = "IDLE"
-    current_mode: str = "IDLE"
+    current_mode: str = "SILENT"
     session_id: Optional[str] = None
     req_id: Optional[str] = None
     epoch: int = 0
     target_name: Optional[str] = None
     interaction_id: Optional[str] = None
+    server_status: str = "unknown"  # "unknown" | "ready" | "error" — remote grasp server health
     stage_state: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -53,6 +54,7 @@ class StageOutput:
     signals: Dict[str, Any] = field(default_factory=dict)
     effects: List[Dict[str, Any]] = field(default_factory=list)
     snapshot: Dict[str, Any] = field(default_factory=dict)
+    next_stage: Optional[str] = None  # set to auto-transition after tick (e.g. INIT → IDLE)
 
     def has_outbound(self) -> bool:
         return self.vision_obs is not None
@@ -117,7 +119,16 @@ class BaseStagePlan(ABC):
     """Base interface for business-stage orchestration logic."""
 
     stage_name: str = "IDLE"
-    default_mode: str = "IDLE"
+    default_mode: str = "SILENT"
+
+    # Callback to check if a mode profile is registered (injected by StageController)
+    mode_available: Optional[Callable[[str], bool]] = None
+
+    # routes subscribed in ALL modes under this stage
+    common_routes: Tuple[str, ...] = ("frame_meta", "runtime_status")
+
+    # additional routes per specific mode; key=mode_name, value=tuple of route names
+    optional_routes: Dict[str, Tuple[str, ...]] = {}
 
     def on_enter(self, req: VisionReq, ctx: StageContext) -> None:
         """Initialize stage-owned state when the stage becomes active."""
@@ -145,6 +156,11 @@ class BaseStagePlan(ABC):
     def on_exit(self, ctx: StageContext) -> None:
         """Release stage-local state before another stage takes control."""
         ctx.stage_state.clear()
+
+    def subscribed_routes(self, mode: str) -> Tuple[str, ...]:
+        """Return the union of common and optional routes for the given mode."""
+        optional = self.optional_routes.get(mode, ())
+        return self.common_routes + optional
 
     def build_obs(
         self,

@@ -54,6 +54,7 @@ runs/
 # Voice third-party assets stay local on board and are not tracked in Git.
 Voice/thirdparty/
 VISTA/grasp_module/graspness_unofficial/
+VISTA/vision_module/model/*
 
 # Environment
 .env
@@ -63,6 +64,9 @@ configs/mobile_gateway.mqtt.yaml
 # Test data and extracts for offline edge test
 VISTA/Offline_Edge_Test/test_data/
 VISTA/Offline_Edge_Test/bag_extract/
+
+# Committed archives (test data, not source)
+*.zip
 
 # Snapshots, PIDs, and runs for online edge detect
 VISTA/Online_Edge_Detect/snapshots/

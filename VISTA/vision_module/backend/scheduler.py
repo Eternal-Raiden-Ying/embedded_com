@@ -206,7 +206,7 @@ class Scheduler:
             self.pending_signals.update(dict(signals or {}))
             self.last_snapshot["last_stage_signal_ts"] = time.time()
 
-    def collect_tick_input(self, ts: float) -> StageTickInput:
+    def collect_tick_input(self, ts: float, route_filter: set = None) -> StageTickInput:
         with self._lock:
             signals = dict(self.pending_signals or {})
             self.pending_signals.clear()
@@ -214,6 +214,8 @@ class Scheduler:
             for route_name in sorted((self.routes or {}).keys()):
                 cfg = self._route_cfg(route_name)
                 if str(cfg.get("scope", "stage")).strip().lower() != "stage":
+                    continue
+                if route_filter is not None and route_name not in route_filter:
                     continue
                 slot = self.result_slots.get(route_name)
                 if not self._slot_visible(slot):

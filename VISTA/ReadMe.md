@@ -33,7 +33,7 @@ Orchestrator <--vision_obs:9002--- VISTA
 
 | mode | 摄像头/模型 | 主要输出 | 说明 |
 |------|-------------|----------|------|
-| `TRACK_LOCAL` | RGB + 本地模型 | `target_obs`，返航时输出 home tag 观测 | 桌边目标搜索、返航 |
+| `TRACK_LOCAL` | RGB + depth + 本地模型 | `target_obs` + `table_edge_obs`，返航时输出 home tag 观测 | 桌边目标搜索、返航；轻量 depth 用于 table edge 提升抓取稳定性 |
 | `DEPTH_PERCEPTION` | depth；可选 RGB 桌面框模型 | `table_edge_obs` | 搜桌边、粗对齐、接近、最终锁边 |
 | `TABLE_EDGE_PERCEPTION` | RGB + depth + 本地模型 | `table_edge_obs` + `target_obs` | 同时保持桌边与目标观测 |
 | `MICRO_ADJUST` | RGB + 本地模型 | micro-adjust proposal | 抓取前微调 |
@@ -85,9 +85,12 @@ cd /home/aidlux/embedded_com/VISTA
 | 路径 | 内容 |
 |------|------|
 | `VISTA/logs/vision.out` | 启动脚本 stdout/stderr |
-| `VISTA/runs/run_*/timeline.jsonl` | stage/mode/backend 事件 |
-| `VISTA/runs/run_*/ipc.jsonl` | `vision_req` / `vision_obs` |
-| `VISTA/runs/run_*/events.jsonl` | 结构化事件 |
+| `VISTA/runs/<stack_run_id>/event.jsonl` | 结构化事件 |
+| `VISTA/runs/<stack_run_id>/ipc.jsonl` | `vision_req` / `vision_obs` |
+| `VISTA/runs/<stack_run_id>/heartbeat.jsonl` | 心跳事件（`VISION_HEARTBEAT_ENABLED=1` 时写入） |
+| `VISTA/runs/<stack_run_id>/meta.json` | 运行元数据 |
+
+注：`stack_run_id` 格式为 `run_20260505_120000_abc123`，在 VISTA 启动时创建。旧名 `timeline.jsonl` 和 `events.jsonl`（复数）已废弃不再使用。
 
 ## 验收
 

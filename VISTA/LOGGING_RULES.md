@@ -9,7 +9,7 @@ The default logging target set is:
 - `meta.json`: one file per run, static startup config and file locations
 - `event.jsonl`: one ordered event stream for VISTA runtime milestones
 - `ipc.jsonl`: one ordered IPC stream for communication with other modules
-- `heartbeat.jsonl`: optional low-frequency health snapshots, disabled by default
+- `heartbeat.jsonl`: low-frequency health snapshots, **enabled by default** (interval 2.0s); disable with `VISION_HEARTBEAT_ENABLED=0`
 - `logs/vision.log`: plain text console mirror, not a structured data file
 
 Deprecated by default for VISTA:
@@ -21,6 +21,9 @@ Deprecated by default for VISTA:
 - `camera.jsonl`
 - `detections.jsonl`
 - `runs/<run_id>/events.log`
+- `runs/<stack_run_id>/rate.jsonl`: per-mode rate summary (TRACK_LOCAL mode, ~1 Hz)
+- `runs/<stack_run_id>/vision_request_trace.jsonl`: per-request trace (mode_request / target_update / keepalive)
+- `runs/<stack_run_id>/edge_profile.jsonl`: per-frame edge profile (TRACK_LOCAL mode with valid edge_profile)
 
 Current code note:
 
@@ -182,11 +185,11 @@ Purpose:
 
 Default:
 
-- Disabled unless `VISION_HEARTBEAT_ENABLED=1`.
+- Enabled by default (`VISION_HEARTBEAT_ENABLED` defaults to `"1"`). Disable with `VISION_HEARTBEAT_ENABLED=0`.
 
 Recommended interval:
 
-- `5.0` seconds or slower.
+- `2.0` seconds (default). Adjust with `VISION_HEARTBEAT_INTERVAL_S`.
 
 Use it for:
 
@@ -248,7 +251,7 @@ Current implementation source:
 - `VISION_LOG_MODE`: `concise` or `full`
 - `VISION_LOG_ENABLED`: `1` or `0`
 - `VISION_HEARTBEAT_ENABLED`: `1` or `0`
-- `VISION_HEARTBEAT_INTERVAL_S`: default `5.0`
+- `VISION_HEARTBEAT_INTERVAL_S`: default `2.0`
 
 ## Operator Workflow
 
@@ -256,4 +259,4 @@ Current implementation source:
 - Use `runs/<run_id>/meta.json` to confirm the active run and output file paths.
 - Use `event.jsonl` to reconstruct VISTA control flow.
 - Use `ipc.jsonl` to debug communication with orchestrator or local test tools.
-- Enable `heartbeat.jsonl` only when the service appears alive but silent.
+- Disable `heartbeat.jsonl` (`VISION_HEARTBEAT_ENABLED=0`) when disk I/O reduction is preferred.

@@ -136,3 +136,6 @@ class QNN_YOLO_Detect_Predictor(IPredictor):
         return detections, []
 
 
+
+
+

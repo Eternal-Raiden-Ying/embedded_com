@@ -16,14 +16,14 @@ class StageController:
     and handoff between stage logic and the mode/capability layer.
     """
 
-    def __init__(self, logger=None, event_sink=None, mode_controller=None, runtime_service=None):
+    def __init__(self, logger=None, event_sink=None, mode_controller=None, scheduler=None):
         self._plans: Dict[str, BaseStagePlan] = {}
         self._ctx = StageContext()
         self.logger = logger
         self._event_sink = event_sink
         self._mode_controller = mode_controller
-        self._runtime_service = runtime_service
-        self._last_applied_mode = "IDLE"
+        self.scheduler = scheduler
+        self._last_applied_mode = "SILENT"
         self._last_interaction_state_key = None
         self._last_request_signature = None
         self.last_request_trace: Dict[str, Any] = {}
@@ -31,7 +31,7 @@ class StageController:
             try:
                 self._last_applied_mode = normalize_upper(self._mode_controller.current_mode(), "IDLE")
             except Exception:
-                self._last_applied_mode = "IDLE"
+                self._last_applied_mode = "SILENT"
 
     def _log(self, message: str, **fields) -> None:
         if self.logger is not None:
@@ -183,21 +183,11 @@ class StageController:
         if self._mode_controller is None:
             self._last_applied_mode = target_mode
             return True
-        if (
-            target_mode == "TABLE_EDGE_PERCEPTION"
-            and normalize_upper(self._ctx.current_stage, "IDLE") == "SEARCH"
-            and normalize_upper(self._ctx.stage_state.get("search_kind"), "") == "TABLE_EDGE"
-        ):
-            resolver = getattr(self._mode_controller, "resolve_profile", None)
-            if callable(resolver) and resolver(target_mode) is None and resolver("DEPTH_PERCEPTION") is not None:
-                target_mode = "DEPTH_PERCEPTION"
-                self._ctx.current_mode = target_mode
         try:
             profile = self._mode_controller.switch_mode(
                 target_mode,
                 reason=reason,
                 force=force,
-                apply_mode_plan=(self._runtime_service.apply_mode_plan if self._runtime_service is not None else None),
             )
         except Exception:
             return False
@@ -274,32 +264,14 @@ class StageController:
 
     def _finalize_output(self, plan: Optional[BaseStagePlan], output: Optional[StageOutput]) -> Optional[StageOutput]:
         finalized = self._ensure_output(plan, output)
-        if finalized is not None and finalized.signals and self._runtime_service is not None:
+        if finalized is not None and finalized.signals and self.scheduler is not None:
             try:
-                self._runtime_service.push_stage_signals(dict(finalized.signals or {}))
+                self.scheduler.push_stage_signals(dict(finalized.signals or {}))
             except Exception:
                 pass
-        if finalized is not None and finalized.effects:
-            self._publish_effects(finalized.effects)
         self._publish_runtime_status()
         self._emit_output_events(finalized)
         return finalized
-
-    def _publish_effects(self, effects) -> None:
-        if self._runtime_service is None:
-            return
-        for effect in list(effects or ()):
-            if not isinstance(effect, dict):
-                continue
-            effect_type = normalize_upper(effect.get("type"), "")
-            route = str(effect.get("route") or "").strip()
-            payload = dict(effect.get("payload") or {})
-            if effect_type != "PUBLISH_EVENT" or not route:
-                continue
-            try:
-                self._runtime_service.publish_event(route, payload)
-            except Exception:
-                pass
 
     def _runtime_status_payload(self) -> Dict[str, Any]:
         payload = {
@@ -326,10 +298,11 @@ class StageController:
         return payload
 
     def _publish_runtime_status(self) -> None:
-        if self._runtime_service is None:
+        if self.scheduler is None:
             return
         try:
-            self._runtime_service.publish_result("runtime_status", self._runtime_status_payload())
+            generation = self._mode_controller.current_generation() if self._mode_controller is not None else 0
+            self.scheduler.publish_result("runtime_status", self._runtime_status_payload(), generation=generation)
         except Exception:
             pass
 
@@ -342,7 +315,7 @@ class StageController:
         if target == "IDLE":
             self._ctx = StageContext(
                 current_stage="IDLE",
-                current_mode="IDLE",
+                current_mode="SILENT",
                 session_id=self._ctx.session_id,
                 req_id=self._ctx.req_id,
                 epoch=int(self._ctx.epoch),
@@ -359,6 +332,15 @@ class StageController:
             self._ctx.current_mode = plan.default_mode
         return plan
 
+    def _mode_available(self, name: str) -> bool:
+        """Check whether a mode profile is registered and available."""
+        if self._mode_controller is None:
+            return True
+        resolver = getattr(self._mode_controller, "resolve_profile", None)
+        if callable(resolver):
+            return resolver(normalize_upper(name, "IDLE")) is not None
+        return True
+
     def _ensure_output(self, plan: Optional[BaseStagePlan], output: Optional[StageOutput]) -> Optional[StageOutput]:
         if plan is None and output is None:
             return None
@@ -368,6 +350,7 @@ class StageController:
 
     def register_plan(self, plan: BaseStagePlan) -> None:
         """Register one stage plan instance by its declared stage name."""
+        plan.mode_available = self._mode_available
         self._plans[str(plan.stage_name).upper()] = plan
 
     def register_default_plans(self, plans: Dict[str, BaseStagePlan]) -> None:
@@ -481,6 +464,15 @@ class StageController:
             if plan is None:
                 self._store_request_trace(req, ctx_before, req_type=req_type, idempotent=False, reason="respond_no_plan")
                 return None
+            # For GRASP RESPOND: read server_status from Scheduler directly for timeliness.
+            # The last tick's cache may be stale if INIT just completed between ticks.
+            if stage == "GRASP" and self.scheduler is not None:
+                try:
+                    remote = self.scheduler.read_result("remote_init_status", default={})
+                    if isinstance(remote, dict):
+                        self._ctx.server_status = str(remote.get("service_init_state") or remote.get("server_status") or "unknown")
+                except Exception:
+                    pass
             output = plan.on_respond(req, self._ctx)
             requested_mode = normalize_upper(self._ctx.current_mode, "IDLE")
             if not self._apply_context_mode(reason="respond", force=False):
@@ -512,6 +504,13 @@ class StageController:
                 idempotent=False,
                 reason="respond",
             )
+
+        # START compat: auto-fill mode_hint for stages that have a well-known default
+        if op == "START" and not req.mode_hint:
+            _default_mode_hints = {"SEARCH": "TRACK_LOCAL", "GRASP": "GRASP_REMOTE", "RETURN": "TRACK_LOCAL"}
+            hint = _default_mode_hints.get(stage)
+            if hint:
+                req.mode_hint = hint
 
         if current is None or normalize_upper(self._ctx.current_stage) != stage:
             plan = self._transition_to(stage, req=req)
@@ -594,6 +593,10 @@ class StageController:
         plan = self.current_plan()
         if plan is None:
             return None
+        # Sync server_status from remote_init_status (tick-level cache, no need for ctx persistence)
+        remote = dict(getattr(tick_input, "results", {}) or {}).get("remote_init_status")
+        if isinstance(remote, dict):
+            self._ctx.server_status = str(remote.get("service_init_state") or remote.get("server_status") or "unknown")
         ctx_before = self._clone_context()
         output = plan.tick(tick_input, self._ctx)
         requested_mode = normalize_upper(self._ctx.current_mode, "IDLE")
@@ -603,12 +606,17 @@ class StageController:
                 self.current_plan(),
                 self._mode_apply_failed_output("TICK", self._ctx.current_stage, requested_mode, reason="tick_mode_apply_failed"),
             )
-        return self._finalize_output(plan, output)
+        finalized = self._finalize_output(plan, output)
+        # Auto-transition: StagePlan set next_stage → transition after current tick output
+        if finalized is not None and finalized.next_stage:
+            self._transition_to(finalized.next_stage)
+            self._apply_context_mode(reason="auto_transition", force=True)
+        return finalized
 
     def reset(self) -> None:
         """Reset stage runtime state to a clean idle context."""
         self._ctx = StageContext()
-        self._last_applied_mode = "IDLE"
+        self._last_applied_mode = "SILENT"
         self._last_interaction_state_key = None
 
     def snapshot(self) -> Dict[str, object]:
