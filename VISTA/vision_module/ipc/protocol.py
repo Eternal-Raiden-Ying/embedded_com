@@ -142,6 +142,12 @@ class VisionReq:
     def to_dict(self) -> Dict[str, Any]:
         return _compact(asdict(self))
 
+    _DEFAULT_MODE_HINTS = {"SEARCH": "TRACK_LOCAL", "GRASP": "SILENT", "RETURN": "SILENT"}
+
+    def get_default_mode_hint(self) -> Optional[str]:
+        """Protocol-compat fallback: return the well-known mode for this stage."""
+        return self._DEFAULT_MODE_HINTS.get(self.stage)
+
     def is_stop(self) -> bool:
         return self.op == "STOP" or self.stage == "IDLE"
 

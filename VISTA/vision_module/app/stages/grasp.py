@@ -164,10 +164,17 @@ class GraspStagePlan(BaseStagePlan):
     def on_enter(self, req: VisionReq, ctx: StageContext) -> None:
         super().on_enter(req, ctx)
         ctx.target_name = req.target or ctx.target_name
-        ctx.current_mode = normalize_upper(req.mode_hint, self.default_mode)
+        requested = normalize_upper(req.mode_hint, self.default_mode)
+        ctx.current_mode = requested
         ctx.interaction_id = None
         ctx.stage_state.clear()
         ctx.stage_state.update(_grasp_state_from_req(req, ctx.target_name))
+        if requested == "GRASP_REMOTE" and ctx.server_status != "ready":
+            ctx.current_mode = "GRASP_REMOTE_INIT"
+            ctx.stage_state["mode_override_reason"] = (
+                f"requested={requested} actual=GRASP_REMOTE_INIT"
+                f" server_status={ctx.server_status}"
+            )
 
     def on_update(self, req: VisionReq, ctx: StageContext) -> Optional[StageOutput]:
         if req.target:

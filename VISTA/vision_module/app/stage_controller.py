@@ -505,10 +505,9 @@ class StageController:
                 reason="respond",
             )
 
-        # START compat: auto-fill mode_hint for stages that have a well-known default
+        # START compat: auto-fill mode_hint from protocol-level stage defaults
         if op == "START" and not req.mode_hint:
-            _default_mode_hints = {"SEARCH": "TRACK_LOCAL", "GRASP": "GRASP_REMOTE", "RETURN": "TRACK_LOCAL"}
-            hint = _default_mode_hints.get(stage)
+            hint = req.get_default_mode_hint()
             if hint:
                 req.mode_hint = hint
 
