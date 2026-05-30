@@ -88,10 +88,10 @@ class ReturnStagePlan(BaseStagePlan):
     common_routes = ("frame_meta", "runtime_status")
     optional_routes = {
         "SILENT": (),
-        "TRACK_LOCAL": ("local_perception",),
+        "FIND_OBJECT": ("local_perception",),
     }
 
-    def on_enter(self, req: VisionReq, ctx: StageContext) -> None:
+    def on_enter(self, req: VisionReq, ctx: StageContext) -> Optional[StageOutput]:
         """Initialize return-home state and choose the initial return mode."""
         super().on_enter(req, ctx)
         ctx.target_name = req.target or ctx.target_name

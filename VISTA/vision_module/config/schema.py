@@ -177,9 +177,8 @@ class TableEdgeConfig:
 class PreviewConfig:
     mode_layouts: Dict[str, str] = field(default_factory=lambda: {
         "IDLE": "rgb_minimal",
-        "DEPTH_PERCEPTION": "rgb_depth_edge",
-        "TABLE_EDGE_PERCEPTION": "rgb_depth_edge",
-        "TRACK_LOCAL": "rgb_yolo_edge_overlay",
+        "FIND_EDGE": "rgb_depth_edge",
+        "FIND_OBJECT": "rgb_yolo_edge_overlay",
         "MICRO_ADJUST": "rgb_minimal",
         "GRASP_REMOTE": "rgb_depth_edge",
         "IDLE_HOT": "rgb_hot_preview",

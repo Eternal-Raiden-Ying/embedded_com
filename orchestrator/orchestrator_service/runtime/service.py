@@ -1814,7 +1814,7 @@ class OrchestratorService(BaseModule):
             if self.core.ctx.last_target_obs is None:
                 return "waiting_first_target_obs"
             return "target_search_hold"
-        if str(self.core.ctx.active_vision_mode or "").upper() == "TRACK_LOCAL" and self.core.ctx.last_table_obs is None:
+        if str(self.core.ctx.active_vision_mode or "").upper() == "FIND_OBJECT" and self.core.ctx.last_table_obs is None:
             return "no_table_edge_obs_in_track_local"
         if not bool(getattr(self.cfg.control, "edge_relocate_enabled", True)):
             return "config_disabled"

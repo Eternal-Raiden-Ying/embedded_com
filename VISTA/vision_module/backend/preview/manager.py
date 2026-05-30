@@ -54,9 +54,8 @@ class PreviewManager:
         self._stale_warn_s = 1.0
         self._mode_layouts: Dict[str, str] = {
             "IDLE": "rgb_minimal",
-            "DEPTH_PERCEPTION": "rgb_depth_edge",
-            "TABLE_EDGE_PERCEPTION": "rgb_depth_edge",
-            "TRACK_LOCAL": "rgb_yolo_edge_overlay",
+            "FIND_EDGE": "rgb_depth_edge",
+            "FIND_OBJECT": "rgb_yolo_edge_overlay",
             "MICRO_ADJUST": "rgb_minimal",
             "GRASP_REMOTE": "rgb_depth_edge",
             "IDLE_HOT": "rgb_hot_preview",
@@ -116,7 +115,7 @@ class PreviewManager:
         old_mode = self._current_mode
         old_layout = self._current_layout
         new_layout = self._resolve_layout(mode_name)
-        if mode_name == "TRACK_LOCAL" and self._debug_four_panel_in_track_local:
+        if mode_name == "FIND_OBJECT" and self._debug_four_panel_in_track_local:
             new_layout = "rgb_depth_edge"
         if new_layout not in self._supported_layouts:
             self._warn_operator(
@@ -347,11 +346,11 @@ class PreviewManager:
             target_obs = dict(scheduler.read_result("target_obs", default={}) or {})
             mode = str(status.get("mode") or "IDLE").upper()
             preview_layout = self._resolve_layout(mode)
-            if mode == "TRACK_LOCAL" and self._debug_four_panel_in_track_local:
+            if mode == "FIND_OBJECT" and self._debug_four_panel_in_track_local:
                 preview_layout = "rgb_depth_edge"
             if preview_layout not in self._supported_layouts:
                 preview_layout = "rgb_minimal"
-            if mode == "TRACK_LOCAL":
+            if mode == "FIND_OBJECT":
                 target_obs = self._target_overlay(status, local, target_obs)
                 if self._show_age_ms:
                     target_obs["frame_age_ms"] = int(round(stale_age * 1000.0))
@@ -394,9 +393,9 @@ class PreviewManager:
                 if reason:
                     lines.append(f"reason={reason[:42]}")
                 self._emit_operator("preview:table_edge_obs", self._table_edge_summary_line(status, table_edge))
-            if mode == "TRACK_LOCAL" and not bool(local.get("has_infer", bool(local.get("infer_boxes")))):
+            if mode == "FIND_OBJECT" and not bool(local.get("has_infer", bool(local.get("infer_boxes")))):
                 self._emit_operator("preview:target_predictor_not_ready", f"[VISTA] WARN TARGET predictor_not_ready mode={mode}")
-            if mode == "TRACK_LOCAL" and bool(target_obs.get("class_not_supported")):
+            if mode == "FIND_OBJECT" and bool(target_obs.get("class_not_supported")):
                 available = ",".join(str(v) for v in list(target_obs.get("available_classes") or [])[:16])
                 self._emit_operator(
                     "preview:target_class_not_supported",
@@ -406,7 +405,7 @@ class PreviewManager:
                 self._emit_operator("preview:target_obs", self._target_summary_line(status, target_obs))
             if not target_obs:
                 lines.append("target_obs=unavailable")
-            if mode == "TRACK_LOCAL":
+            if mode == "FIND_OBJECT":
                 lines.append(f"preview_layout={preview_layout}")
                 lines.append(
                     f"target_found={int(bool(target_obs.get('target_found', target_obs.get('found', False))))} "

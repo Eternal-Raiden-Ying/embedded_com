@@ -161,7 +161,7 @@ class GraspStagePlan(BaseStagePlan):
 
     # ── on_* handlers (request-driven) ─────────────────────────────────
 
-    def on_enter(self, req: VisionReq, ctx: StageContext) -> None:
+    def on_enter(self, req: VisionReq, ctx: StageContext) -> Optional[StageOutput]:
         super().on_enter(req, ctx)
         ctx.target_name = req.target or ctx.target_name
         requested = normalize_upper(req.mode_hint, self.default_mode)

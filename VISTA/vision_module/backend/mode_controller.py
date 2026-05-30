@@ -160,9 +160,13 @@ class ModeController:
                     "metadata": dict(remote_profile.metadata or {}),
                 },
                 "table_edge": {
-                    "enabled": bool(profile.table_edge_enabled),
-                    "path": str(profile.table_edge_path or "full").strip().lower() or "full",
-                    "update_hz": float(profile.table_edge_update_hz or 10.0),
+                    "enabled": bool(profile.table_edge.enabled),
+                    "detector_mode": str(profile.table_edge.detector_mode or "lightweight"),
+                    "update_hz": float(profile.table_edge.update_hz or 5.0),
+                    "light_stride": int(profile.table_edge.light_stride),
+                    "fast_plane_stride": int(profile.table_edge.fast_plane_stride),
+                    "require_yolo_confirm": bool(profile.table_edge.require_yolo_confirm),
+                    "static_roi_enabled": bool(profile.table_edge.static_roi_enabled),
                 },
                 "preview": {
                     "enabled": preview_enabled,

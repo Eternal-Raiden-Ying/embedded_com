@@ -261,7 +261,7 @@ def send_table_obs(cfg, *, session_id: str, epoch: int, yaw: float, dist: float,
     send_jsonl(
         cfg.vision_obs_in.host,
         cfg.vision_obs_in.port,
-        wrap_vision_obs("table_edge_obs", base, obs, mode="DEPTH_PERCEPTION"),
+        wrap_vision_obs("table_edge_obs", base, obs, mode="FIND_EDGE"),
     )
 
 
@@ -277,7 +277,7 @@ def send_target_obs(cfg, *, session_id: str, epoch: int, target: str, found: boo
     send_jsonl(
         cfg.vision_obs_in.host,
         cfg.vision_obs_in.port,
-        wrap_vision_obs("target_obs", base, obs, mode="TRACK_LOCAL"),
+        wrap_vision_obs("target_obs", base, obs, mode="FIND_OBJECT"),
     )
 
 
@@ -291,7 +291,7 @@ def send_home_obs(cfg, *, session_id: str, epoch: int, yaw: float, distance_m: f
     send_jsonl(
         cfg.vision_obs_in.host,
         cfg.vision_obs_in.port,
-        wrap_vision_obs("home_tag_obs", base, obs, mode="TRACK_LOCAL"),
+        wrap_vision_obs("home_tag_obs", base, obs, mode="FIND_OBJECT"),
     )
 
 

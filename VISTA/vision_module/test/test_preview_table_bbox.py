@@ -147,7 +147,7 @@ class PreviewTableBboxTest(unittest.TestCase):
         sink._make_rgb_panel(
             np.zeros((100, 100, 3), dtype=np.uint8),
             {
-                "runtime_status": {"mode": "TRACK_LOCAL"},
+                "runtime_status": {"mode": "FIND_OBJECT"},
                 "target": "apple",
                 "local_perception": {
                     "table_bbox": [10, 20, 80, 90],
@@ -174,7 +174,7 @@ class PreviewTableBboxTest(unittest.TestCase):
             sink._draw_status_sections(
                 panel,
                 {"preview_layout": "rgb_yolo_edge_overlay", "window_id": "VISTA App Dashboard#1"},
-                {"stage": "SEARCH", "mode": "TRACK_LOCAL", "req_id": "req-test"},
+                {"stage": "SEARCH", "mode": "FIND_OBJECT", "req_id": "req-test"},
                 {"edge_found": True, "table_found": True, "confidence": 0.8},
                 {"target": "apple", "found": False, "boxes_count": 0},
                 {"has_infer": True, "box_count": 0},

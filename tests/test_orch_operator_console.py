@@ -68,7 +68,7 @@ def _service(lines, mode="operator"):
             state=SimpleNamespace(value="CONTROLLED_APPROACH"),
             current_edge_id=1,
             active_target="apple",
-            active_vision_mode="TRACK_LOCAL",
+            active_vision_mode="FIND_OBJECT",
             last_target_obs=None,
             last_table_obs=None,
             table_lock_frames=0,
@@ -273,7 +273,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         lines = []
         svc = _service(lines, mode="operator")
         svc.core.ctx.state = SimpleNamespace(value="EDGE_SLIDE_SEARCH")
-        payload = {"type": "target_obs", "target": "apple", "found": False, "boxes_count": 3, "vision_mode": "TRACK_LOCAL"}
+        payload = {"type": "target_obs", "target": "apple", "found": False, "boxes_count": 3, "vision_mode": "FIND_OBJECT"}
         svc._emit_target_obs_console(payload)
         self.assertEqual(lines, ["[ORCH] OBS target=apple found=0 boxes=3 mode=TRACK_LOCAL"])
         svc.operator_console._last_ts_by_key.clear()
@@ -438,7 +438,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         lines = []
         svc = _service(lines, mode="operator")
         svc.core.ctx.state = SimpleNamespace(value="EDGE_SLIDE_SEARCH")
-        svc.core.ctx.active_vision_mode = "TRACK_LOCAL"
+        svc.core.ctx.active_vision_mode = "FIND_OBJECT"
         decision = MotionDecision(
             cmd=CmdVel(ts=now_ts(), mode="EDGE_SLIDE_SEARCH", vx_norm=0.0, vy_norm=0.0, wz_norm=0.0),
             control_summary={"state": "EDGE_SLIDE_SEARCH", "reason": "safety_hold"},
@@ -569,7 +569,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
             {
                 "type": "vision_req",
                 "stage": "SEARCH",
-                "mode_hint": "TRACK_LOCAL",
+                "mode_hint": "FIND_OBJECT",
                 "target": "apple",
                 "req_id": "req_1",
                 "payload": {"search_kind": "TARGET"},
@@ -751,7 +751,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         cfg.control.edge_slide_pause_s = 0.0
         core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
         core.ctx.state = State.EDGE_SLIDE_SEARCH
-        core.ctx.active_vision_mode = "TRACK_LOCAL"
+        core.ctx.active_vision_mode = "FIND_OBJECT"
         core.ctx.state_enter_mono = monotonic_ts() - 1.0
         _set_slide_ref(core)
         core.handle_table_obs(TableEdgeObs(ts=now_ts(), table_found=True, edge_found=True, confidence=0.9, yaw_err_rad=0.01, dist_err_m=0.02))
@@ -767,7 +767,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         cfg.car.edge_slide_weak_vy_norm = 0.05
         core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
         core.ctx.state = State.EDGE_SLIDE_SEARCH
-        core.ctx.active_vision_mode = "TRACK_LOCAL"
+        core.ctx.active_vision_mode = "FIND_OBJECT"
         core.ctx.locked_yaw_err = -0.03
         core.ctx.locked_dist_err = 0.02
         core.ctx.locked_edge_conf = 0.82
@@ -782,7 +782,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
                 confidence=0.22,
                 yaw_err_rad=-0.035,
                 dist_err_m=0.023,
-                source_mode="TRACK_LOCAL",
+                source_mode="FIND_OBJECT",
             )
         )
         decision = core.tick()
@@ -800,7 +800,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         cfg.control.edge_handoff_min_s = 0.5
         core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
         core.ctx.state = State.SEARCH_TARGET_INIT
-        core.ctx.active_vision_mode = "TRACK_LOCAL"
+        core.ctx.active_vision_mode = "FIND_OBJECT"
         core.ctx.locked_yaw_err = -0.035
         core.ctx.locked_dist_err = 0.016
         core.ctx.locked_edge_conf = 0.798
@@ -823,7 +823,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
                     dist_err_m=dist,
                     frame_id=seq,
                     seq=seq,
-                    source_mode="TRACK_LOCAL",
+                    source_mode="FIND_OBJECT",
                 )
             )
             decision = core.tick()
@@ -847,7 +847,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
                 dist_err_m=0.039,
                 frame_id=4,
                 seq=4,
-                source_mode="TRACK_LOCAL",
+                source_mode="FIND_OBJECT",
             )
         )
         decision = core.tick()
@@ -864,7 +864,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         cfg.control.edge_slide_dist_tolerance_m = 0.05
         core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
         core.ctx.state = State.EDGE_SLIDE_SEARCH
-        core.ctx.active_vision_mode = "TRACK_LOCAL"
+        core.ctx.active_vision_mode = "FIND_OBJECT"
         core.ctx.state_enter_mono = monotonic_ts() - 1.0
         _set_slide_ref(core, yaw=0.01, dist=0.08, conf=0.9)
         core.handle_table_obs(TableEdgeObs(ts=now_ts(), table_found=True, edge_found=True, confidence=0.9, yaw_err_rad=0.01, dist_err_m=0.08))
@@ -886,7 +886,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
         core.ctx.state = State.EDGE_SLIDE_SEARCH
         core.ctx.active_target = "apple"
-        core.ctx.active_vision_mode = "TRACK_LOCAL"
+        core.ctx.active_vision_mode = "FIND_OBJECT"
         _set_slide_ref(core, yaw=0.01, dist=0.08, conf=0.9)
         core.handle_table_obs(TableEdgeObs(ts=now_ts(), table_found=True, edge_found=True, confidence=0.9, yaw_err_rad=0.01, dist_err_m=0.08))
         core.ctx.table_loss_since_mono = monotonic_ts() - 0.2
@@ -909,7 +909,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         cfg.control.edge_slide_recover_timeout_s = 5.0
         core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
         core.ctx.state = State.EDGE_SLIDE_SEARCH
-        core.ctx.active_vision_mode = "TRACK_LOCAL"
+        core.ctx.active_vision_mode = "FIND_OBJECT"
         core.ctx.locked_yaw_err = 0.0
         core.ctx.locked_dist_err = 0.02
         core.ctx.locked_edge_conf = 0.80
@@ -924,7 +924,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
                 confidence=0.45,
                 yaw_err_rad=0.20,
                 dist_err_m=0.02,
-                source_mode="TRACK_LOCAL",
+                source_mode="FIND_OBJECT",
             )
         )
         decision = core.tick()
@@ -950,7 +950,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         cfg.control.edge_slide_pause_s = 0.0
         core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
         core.ctx.state = State.EDGE_SLIDE_SEARCH
-        core.ctx.active_vision_mode = "TRACK_LOCAL"
+        core.ctx.active_vision_mode = "FIND_OBJECT"
         core.ctx.state_enter_mono = monotonic_ts() - 1.0
         decision = core.tick()
         self.assertEqual(core.ctx.state, State.SEARCH_TARGET_INIT)
@@ -965,7 +965,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         cfg.control.edge_follow_stale_fallback_state = "FINAL_LOCK"
         core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
         core.ctx.state = State.EDGE_SLIDE_SEARCH
-        core.ctx.active_vision_mode = "TRACK_LOCAL"
+        core.ctx.active_vision_mode = "FIND_OBJECT"
         core.ctx.state_enter_mono = monotonic_ts() - 1.0
         _set_slide_ref(core)
         stale_ts = now_ts() - 0.8
@@ -981,7 +981,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
                 dist_err_m=0.02,
                 frame_id=7,
                 seq=7,
-                source_mode="TRACK_LOCAL",
+                source_mode="FIND_OBJECT",
             )
         )
         decision = core.tick()

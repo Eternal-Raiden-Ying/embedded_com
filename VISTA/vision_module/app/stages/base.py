@@ -130,11 +130,16 @@ class BaseStagePlan(ABC):
     # additional routes per specific mode; key=mode_name, value=tuple of route names
     optional_routes: Dict[str, Tuple[str, ...]] = {}
 
-    def on_enter(self, req: VisionReq, ctx: StageContext) -> None:
-        """Initialize stage-owned state when the stage becomes active."""
+    def on_enter(self, req: VisionReq, ctx: StageContext) -> Optional[StageOutput]:
+        """Initialize stage-owned state when the stage becomes active.
+
+        Return a StageOutput to abort the transition (e.g. invalid request),
+        or None to proceed normally.
+        """
         _ = req
         ctx.current_stage = self.stage_name
         ctx.current_mode = self.default_mode
+        return None
 
     def on_update(self, req: VisionReq, ctx: StageContext) -> Optional[StageOutput]:
         """Handle START or UPDATE messages that keep execution in this stage."""

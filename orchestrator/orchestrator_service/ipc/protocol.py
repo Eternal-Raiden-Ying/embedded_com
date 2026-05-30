@@ -779,7 +779,7 @@ def make_home_tag_req(
     req_id: str = "",
     *,
     op: str = "START",
-    mode_hint: str = "TRACK_LOCAL",
+    mode_hint: str = "FIND_OBJECT",
     payload: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     return make_vision_req(

@@ -41,7 +41,7 @@ class OpenCVPreviewSink(PreviewSink):
         self.show_rgb = self._env_bool("VISTA_PREVIEW_RGB_PANEL", self._env_bool("VISTA_PREVIEW_RGB", True))
         self.show_depth = self._env_bool("VISTA_PREVIEW_DEPTH", True)
         self.show_edge = self._env_bool("VISTA_PREVIEW_EDGE", True)
-        self._supported_layouts = {"rgb_minimal", "rgb_depth_edge", "rgb_yolo_edge_overlay", "rgb_hot_preview"}
+        self._supported_layouts = {"rgb_minimal", "rgb_depth_edge", "rgb_yolo_edge_overlay", "rgb_yolo_overlay", "rgb_hot_preview"}
         self._opened = False
         self._last_frame_ts = 0.0
         self._last_render_ts = 0.0
@@ -108,6 +108,12 @@ class OpenCVPreviewSink(PreviewSink):
             info_table_edge = table_edge if bool(metadata.get("show_edge_overlay_in_track_local", True)) else {}
             info_panel = self._make_info_panel(frame, target_metadata, info_table_edge, target_obs, (info_w, self.canvas_h))
             canvas = np.hstack([rgb_panel, info_panel])
+        elif layout == "rgb_yolo_overlay":
+            table_metadata = dict(metadata)
+            table_metadata["preview_layout"] = layout
+            table_metadata["window_id"] = self.window_id
+            table_metadata["show_yolo_boxes"] = True
+            canvas = self._make_rgb_panel(frames.get("rgb") if frames else frame.image, table_metadata, (self.canvas_w, self.canvas_h))
         elif layout == "rgb_depth_edge":
             panel_w = max(320, self.canvas_w // 2)
             panel_h = max(220, self.canvas_h // 2)
@@ -167,7 +173,7 @@ class OpenCVPreviewSink(PreviewSink):
         target_name = str(target_obs.get("target") or metadata.get("target") or status.get("target") or "").strip()
         panel, scale, offset = self._fit_with_transform(self._to_bgr(image, prefer_rgb=False), size)
         self._title(panel, "RGB")
-        if mode == "TRACK_LOCAL" or bool(metadata.get("show_yolo_boxes", False)):
+        if mode == "FIND_OBJECT" or bool(metadata.get("show_yolo_boxes", False)):
             self._draw_detection_boxes(panel, local, scale, offset, target_name)
         else:
             table_bbox = self._find_table_bbox(local, getattr(image, "shape", None))
@@ -188,7 +194,7 @@ class OpenCVPreviewSink(PreviewSink):
             if object_roi:
                 self._draw_roi(panel, object_roi, scale, offset, "object_roi", CYAN, dashed=True)
         if isinstance(target_obs.get("bbox"), (list, tuple)):
-            if mode == "TRACK_LOCAL":
+            if mode == "FIND_OBJECT":
                 self._draw_roi(panel, target_obs.get("bbox"), scale, offset, f"target:{target_name or 'target'}", (0, 255, 80), dashed=False)
             else:
                 self._draw_roi(panel, target_obs.get("bbox"), scale, offset, "target_bbox", (90, 180, 255), dashed=False)
@@ -328,7 +334,7 @@ class OpenCVPreviewSink(PreviewSink):
         local = dict(metadata.get("local_perception") or {})
         self._title(panel, "STATUS / TOP VIEW")
         self._draw_status_sections(panel, metadata, status, table_edge, target_obs, local, source_cameras, target_name, frame_age)
-        if str(status.get("mode") or "").upper() != "TRACK_LOCAL":
+        if str(status.get("mode") or "").upper() != "FIND_OBJECT":
             self._draw_top_view(panel, table_edge, graph=(w - 250, h - 170, w - 18, h - 18))
         return panel
 

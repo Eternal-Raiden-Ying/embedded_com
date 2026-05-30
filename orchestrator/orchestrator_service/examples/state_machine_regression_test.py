@@ -144,7 +144,7 @@ def main():
         drain_last_vision_req(core),
         op="START",
         stage="SEARCH",
-        mode_hint="DEPTH_PERCEPTION",
+        mode_hint="FIND_EDGE",
         search_kind="TABLE_EDGE",
         target="",
     )
@@ -157,7 +157,7 @@ def main():
         drain_last_vision_req(core),
         op="UPDATE",
         stage="SEARCH",
-        mode_hint="DEPTH_PERCEPTION",
+        mode_hint="FIND_EDGE",
         search_kind="TABLE_EDGE",
         target="",
     )
@@ -177,14 +177,14 @@ def main():
     assert_state(core, State.AT_TABLE_EDGE, "final lock should reach AT_TABLE_EDGE")
 
     core.ctx.state_enter_mono = monotonic_ts() - 0.2
-    core.handle_table_obs(make_table_obs(yaw=0.01, dist=0.01, edge_ready=True, table_cx=0.0, table_size=0.60, source_mode="TRACK_LOCAL"))
+    core.handle_table_obs(make_table_obs(yaw=0.01, dist=0.01, edge_ready=True, table_cx=0.0, table_size=0.60, source_mode="FIND_OBJECT"))
     core.tick()
     assert_state(core, State.SEARCH_TARGET_INIT, "after settle should enter SEARCH_TARGET_INIT")
     assert_vision_req(
         drain_last_vision_req(core),
         op="UPDATE",
         stage="SEARCH",
-        mode_hint="TRACK_LOCAL",
+        mode_hint="FIND_OBJECT",
         search_kind="TARGET",
         target="apple",
     )
@@ -222,7 +222,7 @@ def main():
             "type": "vision_obs",
             "ts": time.time(),
             "stage": "SEARCH",
-            "mode": "TRACK_LOCAL",
+            "mode": "FIND_OBJECT",
             "status": "RUNNING",
             "session_id": "sess_test_find",
             "req_id": "req_test",

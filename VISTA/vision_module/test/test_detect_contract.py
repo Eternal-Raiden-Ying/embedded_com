@@ -223,7 +223,7 @@ class PredictorManagerContractTest(unittest.TestCase):
         scheduler.start_runtime()
         scheduler.configure(
             {
-                "mode": "TRACK_LOCAL",
+                "mode": "FIND_OBJECT",
                 "routes": {
                     "camera_frames": {"policy": "slot", "scope": "backend"},
                     "local_perception": {"policy": "slot", "scope": "stage"},
@@ -304,7 +304,7 @@ class PredictorManagerContractTest(unittest.TestCase):
         scheduler.start_runtime()
         scheduler.configure(
             {
-                "mode": "TRACK_LOCAL",
+                "mode": "FIND_OBJECT",
                 "routes": {
                     "camera_frames": {"policy": "slot", "scope": "backend"},
                     "local_perception": {"policy": "slot", "scope": "stage"},

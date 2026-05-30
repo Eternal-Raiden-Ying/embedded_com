@@ -4,7 +4,7 @@
 import os
 from typing import Any, Dict, Optional
 
-from ..backend.mode_profiles import ModeProfile, PreviewProfile, RemoteProfile
+from ..backend.mode_profiles import ModeProfile, PreviewProfile, RemoteProfile, TableEdgeProfile
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -108,10 +108,6 @@ def _default_remote_profile(*, enabled: bool, require_depth: bool = False,
 def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) -> Dict[str, ModeProfile]:
     """Build the initial mode profile set for VISTA."""
     mode_cfg = dict(getattr(cfg, "mode_profiles", {}) or {})
-    table_bbox_cfg = dict(mode_cfg.get("table_bbox") or {})
-    table_bbox_enabled = bool(table_bbox_cfg.get("enabled", _env_bool("VISTA_TABLE_BBOX_ENABLE", False)))
-    depth_cameras = ("rgb", "depth") if table_bbox_enabled else ("depth",)
-    table_model = str(table_bbox_cfg.get("model", os.getenv("VISTA_TABLE_MODEL", "yolov7_detect")) or "yolov7_detect").strip()
 
     track_local_rgb = _camera_override_with_updates(
         cfg,
@@ -174,20 +170,13 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
         "rgb": grasp_remote_rgb,
         **depth_overrides,
     }
-    table_edge_cameras = {
-        "rgb": track_local_rgb,
-        **depth_overrides,
-    }
-    depth_perception_cameras = _camera_overrides_for(cfg, depth_cameras)
-    if "rgb" in depth_cameras:
-        depth_perception_cameras["rgb"] = track_local_rgb
     preview_layout_defaults = {
         "INIT": "rgb_minimal",
         "SILENT": "rgb_minimal",
         "IDLE": "rgb_minimal",
-        "DEPTH_PERCEPTION": "rgb_depth_edge",
-        "TABLE_EDGE_PERCEPTION": "rgb_depth_edge",
-        "TRACK_LOCAL": "rgb_yolo_edge_overlay",
+        "FIND_OBJECT": "rgb_yolo_edge_overlay",
+        "FIND_EDGE": "rgb_depth_edge",
+        "FIND_TABLE": "rgb_yolo_overlay",
         "MICRO_ADJUST": "rgb_minimal",
         "GRASP_REMOTE_INIT": "rgb_minimal",
         "GRASP_REMOTE": "rgb_depth_edge",
@@ -238,17 +227,19 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             release_cooldown_s=0.0,
             metadata={"contract": {"stage": "SILENT"}},
         ),
-        "TRACK_LOCAL": ModeProfile(
-            name="TRACK_LOCAL",
+        "FIND_OBJECT": ModeProfile(
+            name="FIND_OBJECT",
             enabled_cameras=("rgb", "depth"),
             camera_overrides={"rgb": track_local_rgb},
             predictor_enabled=True,
             predictor_model=active_model,
             remote=_default_remote_profile(enabled=False),
-            preview=preview_profile("TRACK_LOCAL", enabled=True),
-            table_edge_enabled=True,
-            table_edge_path="lightweight",
-            table_edge_update_hz=5.0,
+            preview=preview_profile("FIND_OBJECT", enabled=True),
+            table_edge=TableEdgeProfile(
+                enabled=True,
+                detector_mode="lightweight",
+                update_hz=5.0,
+            ),
             release_cooldown_s=2.0,
             metadata={
                 "contract": {
@@ -260,38 +251,19 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
                 },
             },
         ),
-        "DEPTH_PERCEPTION": ModeProfile(
-            name="DEPTH_PERCEPTION",
-            enabled_cameras=depth_cameras,
-            camera_overrides=depth_perception_cameras,
-            predictor_enabled=table_bbox_enabled,
-            predictor_model=table_model if table_bbox_enabled else None,
-            remote=_default_remote_profile(enabled=False),
-            preview=preview_profile("DEPTH_PERCEPTION", enabled=True),
-            table_edge_enabled=True,
-            table_edge_path="full",
-            table_edge_update_hz=10.0,
-            release_cooldown_s=2.0,
-            metadata={
-                "contract": {
-                    "cameras": list(depth_cameras),
-                    "predictor": "optional_table_bbox" if table_bbox_enabled else "disabled",
-                    "remote": "disabled",
-                    "perception": "table_edge_obs",
-                },
-            },
-        ),
-        "TABLE_EDGE_PERCEPTION": ModeProfile(
-            name="TABLE_EDGE_PERCEPTION",
+        "FIND_EDGE": ModeProfile(
+            name="FIND_EDGE",
             enabled_cameras=("rgb", "depth"),
-            camera_overrides=table_edge_cameras,
+            camera_overrides={"rgb": track_local_rgb},
             predictor_enabled=True,
             predictor_model=active_model,
             remote=_default_remote_profile(enabled=False),
-            preview=preview_profile("TABLE_EDGE_PERCEPTION", enabled=True),
-            table_edge_enabled=True,
-            table_edge_path="full",
-            table_edge_update_hz=10.0,
+            preview=preview_profile("FIND_EDGE", enabled=True),
+            table_edge=TableEdgeProfile(
+                enabled=True,
+                detector_mode="fast_plane_only",
+                update_hz=10.0,
+            ),
             release_cooldown_s=2.0,
             metadata={
                 "contract": {
@@ -300,6 +272,28 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
                     "table_edge": "required",
                     "remote": "disabled",
                     "perception": ["local_perception", "table_edge_obs"],
+                },
+            },
+        ),
+        "FIND_TABLE": ModeProfile(
+            name="FIND_TABLE",
+            enabled_cameras=("rgb",),
+            camera_overrides={"rgb": track_local_rgb},
+            predictor_enabled=True,
+            predictor_model=active_model,
+            remote=_default_remote_profile(enabled=False),
+            preview=preview_profile("FIND_TABLE", enabled=True),
+            table_edge=TableEdgeProfile(
+                enabled=False,
+            ),
+            release_cooldown_s=2.0,
+            metadata={
+                "contract": {
+                    "cameras": ["rgb"],
+                    "predictor": "required",
+                    "table_edge": "disabled",
+                    "remote": "disabled",
+                    "perception": ["target_obs"],
                 },
             },
         ),
@@ -388,6 +382,24 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             profile.preview.enabled = bool(section.get("preview_enabled"))
         if "preview_layout" in section and section.get("preview_layout"):
             profile.preview.metadata["layout"] = str(section.get("preview_layout")).strip()
+
+        table_edge_section = section.get("table_edge")
+        if isinstance(table_edge_section, dict):
+            te = dict(table_edge_section)
+            if "enabled" in te:
+                profile.table_edge.enabled = bool(te.get("enabled"))
+            if "detector_mode" in te:
+                profile.table_edge.detector_mode = str(te.get("detector_mode"))
+            if "update_hz" in te and te.get("update_hz") is not None:
+                profile.table_edge.update_hz = float(te.get("update_hz"))
+            if "light_stride" in te and te.get("light_stride") is not None:
+                profile.table_edge.light_stride = int(te.get("light_stride"))
+            if "fast_plane_stride" in te and te.get("fast_plane_stride") is not None:
+                profile.table_edge.fast_plane_stride = int(te.get("fast_plane_stride"))
+            if "require_yolo_confirm" in te:
+                profile.table_edge.require_yolo_confirm = bool(te.get("require_yolo_confirm"))
+            if "static_roi_enabled" in te:
+                profile.table_edge.static_roi_enabled = bool(te.get("static_roi_enabled"))
 
         camera_overrides = dict(section.get("camera_overrides") or {})
         for camera_name in ("rgb", "depth", "grey"):

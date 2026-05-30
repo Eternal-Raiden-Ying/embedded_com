@@ -44,8 +44,9 @@ class TableEdgeManager:
         self._detector_mode = self._normalize_detector_mode(getattr(table_edge_cfg, "detector_mode", "full"))
         self._fast_plane_stride = max(1, int(float(getattr(table_edge_cfg, "fast_plane_stride", 4) or 4)))
         self._default_interval_s = self._worker_interval_s
-        self._edge_path = "full"
         self._edge_update_hz = edge_hz
+        self._require_yolo_confirm = True  # default, overridden by configure
+        self._static_roi_enabled = False
         self._last_camera_generation = 0
         self._last_camera_seq = 0
         self._last_publish_ts = 0.0
@@ -163,11 +164,20 @@ class TableEdgeManager:
             pass
 
     def configure(self, payload: Dict[str, Any]) -> None:
-        path = str(payload.get("path") or "full").strip().lower()
-        self._edge_path = path if path in {"lightweight", "full"} else "full"
+        mode = str(payload.get("detector_mode") or "full")
+        self._detector_mode = mode if mode in {"lightweight", "full", "fast_plane_only"} else "full"
         self._edge_update_hz = float(payload.get("update_hz", self._edge_update_hz) or self._edge_update_hz)
         if self._edge_update_hz > 0:
             self._worker_interval_s = 1.0 / max(1.0, self._edge_update_hz)
+        # also handle new fields from TableEdgeProfile:
+        if "light_stride" in payload:
+            self._light_stride = max(1, int(payload.get("light_stride")))
+        if "fast_plane_stride" in payload:
+            self._fast_plane_stride = max(1, int(payload.get("fast_plane_stride")))
+        if "require_yolo_confirm" in payload:
+            self._require_yolo_confirm = bool(payload.get("require_yolo_confirm"))
+        if "static_roi_enabled" in payload:
+            self._static_roi_enabled = bool(payload.get("static_roi_enabled"))
 
     @staticmethod
     def _pick_frame_capture_ts(frame_slot: Dict[str, Any], frames: Dict[str, Any]) -> float:
@@ -221,7 +231,7 @@ class TableEdgeManager:
         out["latest_frame_lag_ms"] = float(latest_frame_lag_ms)
         unavailable = bool(out.get("edge_obs_unavailable", False))
         out["is_stale"] = bool(out.get("is_stale", False) or unavailable)
-        out["source_mode"] = self._source_mode_override if self._source_mode_override is not None else self._edge_path
+        out["source_mode"] = self._source_mode_override if self._source_mode_override is not None else self._detector_mode
         out.setdefault("timestamp", float(obs_ts))
         out.setdefault("seq", out.get("frame_seq", out.get("frame_id")))
         out.setdefault("frame_id", out.get("frame_seq", out.get("seq")))
@@ -1154,7 +1164,7 @@ class TableEdgeManager:
     @staticmethod
     def _locked_roi_meta(runtime_status: Dict[str, Any], depth_shape: Optional[object]) -> Optional[Dict[str, Any]]:
         mode = str((runtime_status or {}).get("mode") or "").strip().upper()
-        if mode != "TRACK_LOCAL":
+        if mode != "FIND_OBJECT":
             return None
         roi_raw = (runtime_status or {}).get("locked_roi")
         if not isinstance(roi_raw, (list, tuple)) or len(roi_raw) != 4:
@@ -1268,7 +1278,7 @@ class TableEdgeManager:
     def _process_depth(self, depth_frame: np.ndarray, frame_seq: int) -> Dict[str, Any]:
         if self._detector_mode == "fast_plane_only":
             return self._process_depth_fast_plane_only(depth_frame, frame_seq)
-        if self._edge_path == "lightweight":
+        if self._detector_mode == "lightweight":
             return self._process_depth_lightweight(depth_frame, frame_seq)
         total_start = time.perf_counter()
         profile = self._profile_template()
@@ -2875,5 +2885,6 @@ class TableEdgeManager:
             "target_dist_m": float(self._target_dist_m),
             "last_valid_quadrant": self._last_valid_quadrant,
             "default_update_hz": 1.0 / max(1e-6, float(self._default_interval_s)),
+            "detector_mode": self._detector_mode,
             "edge_update_hz": self._edge_update_hz,
         }

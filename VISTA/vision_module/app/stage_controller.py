@@ -306,7 +306,8 @@ class StageController:
         except Exception:
             pass
 
-    def _transition_to(self, stage: str, req: Optional[VisionReq] = None) -> Optional[BaseStagePlan]:
+    def _transition_to(self, stage: str, req: Optional[VisionReq] = None) -> tuple:
+        """Return (plan, on_enter_error) — error is None unless on_enter returned a StageOutput."""
         target = normalize_upper(stage, "IDLE")
         current = self.current_plan()
         if current is not None and normalize_upper(current.stage_name) != target:
@@ -320,17 +321,19 @@ class StageController:
                 req_id=self._ctx.req_id,
                 epoch=int(self._ctx.epoch),
             )
-            return None
+            return None, None
         plan = self.plan_for(target)
         if plan is None:
-            return None
+            return None, None
         self._ctx.stage_state.clear()
         self._ctx.current_stage = plan.stage_name
         if req is not None:
-            plan.on_enter(req, self._ctx)
+            output = plan.on_enter(req, self._ctx)
+            if output is not None:
+                return None, output
         else:
             self._ctx.current_mode = plan.default_mode
-        return plan
+        return plan, None
 
     def _mode_available(self, name: str) -> bool:
         """Check whether a mode profile is registered and available."""
@@ -512,7 +515,17 @@ class StageController:
                 req.mode_hint = hint
 
         if current is None or normalize_upper(self._ctx.current_stage) != stage:
-            plan = self._transition_to(stage, req=req)
+            plan, on_enter_output = self._transition_to(stage, req=req)
+            if on_enter_output is not None:
+                return self._finalize_request(
+                    current,
+                    on_enter_output,
+                    req,
+                    ctx_before,
+                    req_type=req_type,
+                    idempotent=False,
+                    reason="enter",
+                )
             requested_mode = normalize_upper(self._ctx.current_mode, "IDLE")
             if not self._apply_context_mode(reason="enter", force=False):
                 self._restore_context(ctx_before)

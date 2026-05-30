@@ -43,7 +43,7 @@ class OperatorConsoleColorTest(unittest.TestCase):
             os.environ.pop("NO_COLOR", None)
             os.environ.pop("FORCE_COLOR", None)
             console = OperatorConsole(mode="operator", sink=lines.append)
-            console.emit("[VISTA] TARGET mode=TRACK_LOCAL target=apple found=0")
+            console.emit("[VISTA] TARGET mode=FIND_OBJECT target=apple found=0")
         self.assertEqual(len(lines), 1)
         self.assertRegex(lines[0], ANSI_RE)
 

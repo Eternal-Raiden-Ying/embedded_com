@@ -10,21 +10,6 @@ from ...utils.detect import compute_target_obs, resolve_target_classes
 from .base import BaseStagePlan, StageContext, StageOutput, StageTickInput, normalize_upper, resolve_stage_summary
 
 
-def _search_kind(req: VisionReq, default_mode: str) -> str:
-    payload = req.payload if isinstance(req.payload, dict) else {}
-    explicit = normalize_upper(payload.get("search_kind"), "")
-    if explicit in {"TABLE_EDGE", "TARGET", "EDGE_FOLLOW_TARGET", "TARGET_ON_EDGE"}:
-        return explicit
-    hinted_mode = normalize_upper(req.mode_hint, default_mode)
-    if hinted_mode == "TABLE_EDGE_PERCEPTION":
-        return "EDGE_FOLLOW_TARGET"
-    if hinted_mode == "DEPTH_PERCEPTION":
-        return "TABLE_EDGE"
-    return "TARGET"
-
-
-def _is_edge_follow_target(search_kind: str) -> bool:
-    return normalize_upper(search_kind, "") in {"EDGE_FOLLOW_TARGET", "TARGET_ON_EDGE"}
 
 
 def _target_obs_from_payload(payload: Optional[Dict[str, object]], target: Optional[str]) -> Dict[str, object]:
@@ -341,45 +326,44 @@ class SearchStagePlan(BaseStagePlan):
     """Stage plan for local target search and depth-based table-edge perception."""
 
     stage_name = "SEARCH"
-    default_mode = "TRACK_LOCAL"
+    default_mode = "FIND_OBJECT"
     common_routes = ("frame_meta", "runtime_status")
     optional_routes = {
-        "TRACK_LOCAL": ("local_perception",),
-        "DEPTH_PERCEPTION": ("table_edge_obs",),
-        "TABLE_EDGE_PERCEPTION": ("local_perception", "table_edge_obs"),
+        "FIND_OBJECT": ("local_perception", "table_edge_obs"),
+        "FIND_EDGE": ("local_perception", "table_edge_obs"),
+        "FIND_TABLE": ("local_perception",),
     }
 
-    def _resolve_mode(self, req: VisionReq) -> str:
-        search_kind = _search_kind(req, self.default_mode)
-        if search_kind == "TABLE_EDGE" or _is_edge_follow_target(search_kind):
-            preferred = "TABLE_EDGE_PERCEPTION"
-            # If TABLE_EDGE_PERCEPTION is not registered but DEPTH_PERCEPTION is,
-            # silently downgrade to DEPTH_PERCEPTION
-            if self.mode_available is not None and not self.mode_available(preferred) and self.mode_available("DEPTH_PERCEPTION"):
-                return "DEPTH_PERCEPTION"
-            return preferred
-        if req.mode_hint:
-            return normalize_upper(req.mode_hint, self.default_mode)
-        return self.default_mode
-
-    def on_enter(self, req: VisionReq, ctx: StageContext) -> None:
-        """Prepare target metadata and choose the initial local tracking mode."""
+    def on_enter(self, req: VisionReq, ctx: StageContext) -> Optional[StageOutput]:
         super().on_enter(req, ctx)
         ctx.target_name = req.target or ctx.target_name
-        ctx.current_mode = self._resolve_mode(req)
+        ctx.current_mode = normalize_upper(req.mode_hint, self.default_mode)
         ctx.interaction_id = None
-        ctx.stage_state["search_kind"] = _search_kind(req, self.default_mode)
-        ctx.stage_state["target_obs"] = _target_obs_from_payload(req.payload, ctx.target_name)
-        ctx.stage_state["table_edge_obs"] = _table_edge_obs_from_payload(req.payload)
+        payload = req.payload if isinstance(req.payload, dict) else {}
+        search_kind = normalize_upper(payload.get("search_kind", ""), "")
+        if search_kind not in {"TABLE_EDGE", "TARGET"}:
+            return StageOutput(
+                vision_obs=self.build_obs(ctx, status="error", perception={}),
+                signals={"invalid_search_kind": True},
+            )
+        ctx.stage_state["search_kind"] = search_kind
+        ctx.stage_state["target_obs"] = _target_obs_from_payload(payload, ctx.target_name)
+        ctx.stage_state["table_edge_obs"] = _table_edge_obs_from_payload(payload)
         _sync_edge_follow_payload(req, ctx)
+        return None
 
     def on_update(self, req: VisionReq, ctx: StageContext) -> Optional[StageOutput]:
-        """Refresh target or search parameters without leaving SEARCH."""
         if req.target:
             ctx.target_name = req.target
-        ctx.current_mode = self._resolve_mode(req)
+        ctx.current_mode = normalize_upper(req.mode_hint, self.default_mode)
         if isinstance(req.payload, dict):
-            ctx.stage_state["search_kind"] = _search_kind(req, self.default_mode)
+            search_kind = normalize_upper(req.payload.get("search_kind", ""), "")
+            if search_kind not in {"TABLE_EDGE", "TARGET"}:
+                return StageOutput(
+                    vision_obs=self.build_obs(ctx, status="error", perception={}),
+                    signals={"invalid_search_kind": True},
+                )
+            ctx.stage_state["search_kind"] = search_kind
             _sync_edge_follow_payload(req, ctx)
             if _payload_has_target_obs(req.payload):
                 ctx.stage_state["target_obs"] = _target_obs_from_payload(req.payload, ctx.target_name)
@@ -392,12 +376,12 @@ class SearchStagePlan(BaseStagePlan):
         return StageOutput()
 
     def tick(self, tick_input: StageTickInput, ctx: StageContext) -> Optional[StageOutput]:
-        """Produce SEARCH stage outputs for target or table-edge perception."""
         results = dict(tick_input.results or {})
-        search_kind = normalize_upper(ctx.stage_state.get("search_kind"), "TARGET")
+        mode = normalize_upper(ctx.current_mode, "")
 
-        if search_kind == "TABLE_EDGE" or _is_edge_follow_target(search_kind):
-            table_edge_obs, source = resolve_stage_summary(
+        if mode == "FIND_EDGE":
+            local_perception = results.get("local_perception")
+            table_edge_obs, table_edge_source = resolve_stage_summary(
                 results=results,
                 stage_state=ctx.stage_state,
                 state_key="table_edge_obs",
@@ -408,83 +392,93 @@ class SearchStagePlan(BaseStagePlan):
             table_edge_obs = _annotate_table_edge_obs(
                 table_edge_obs,
                 tick_ts=tick_input.ts,
-                source=source,
+                source=table_edge_source,
                 source_mode=ctx.current_mode,
             )
             ctx.stage_state["table_edge_obs"] = dict(table_edge_obs)
-            if _is_edge_follow_target(search_kind):
-                target_obs, target_source = resolve_stage_summary(
-                    results=results,
-                    stage_state=ctx.stage_state,
-                    state_key="target_obs",
-                    default_factory=lambda: _target_obs_from_payload(None, ctx.target_name),
-                    result_factory=lambda payload: _target_obs_from_results(payload, ctx.target_name),
-                )
-                return StageOutput(
-                    vision_obs=self.build_obs(
-                        ctx,
-                        status="RUNNING",
-                        perception={
-                            "table_edge_obs": table_edge_obs,
-                            "target_obs": target_obs,
-                        },
-                    ),
-                    snapshot={
-                        "generation": int(tick_input.generation),
-                        "result_keys": sorted(results.keys()),
-                        "source": {"table_edge_obs": source, "target_obs": target_source},
-                        "search_kind": search_kind,
-                    },
-                )
             return StageOutput(
                 vision_obs=self.build_obs(
                     ctx,
                     status="RUNNING",
-                    perception={"table_edge_obs": table_edge_obs},
+                    perception={
+                        "table_edge_obs": table_edge_obs,
+                        "local_perception": local_perception,
+                    },
                 ),
                 snapshot={
                     "generation": int(tick_input.generation),
                     "result_keys": sorted(results.keys()),
-                    "source": source,
-                    "search_kind": search_kind,
+                    "source": {"table_edge_obs": table_edge_source},
+                    "search_kind": ctx.stage_state.get("search_kind"),
                 },
             )
 
-        target_obs, source = resolve_stage_summary(
-            results=results,
-            stage_state=ctx.stage_state,
-            state_key="target_obs",
-            default_factory=lambda: _target_obs_from_payload(None, ctx.target_name),
-            result_factory=lambda payload: _target_obs_from_results(payload, ctx.target_name),
-        )
-        table_edge_obs, table_edge_source = resolve_stage_summary(
-            results=results,
-            stage_state=ctx.stage_state,
-            state_key="table_edge_obs",
-            default_factory=lambda: _table_edge_obs_from_payload(None),
-            result_factory=_table_edge_obs_from_results,
-            result_route="table_edge_obs",
-        )
-        table_edge_obs = _annotate_table_edge_obs(
-            table_edge_obs,
-            tick_ts=tick_input.ts,
-            source=table_edge_source,
-            source_mode=ctx.current_mode,
-        )
-        ctx.stage_state["table_edge_obs"] = dict(table_edge_obs)
-        return StageOutput(
-            vision_obs=self.build_obs(
-                ctx,
-                status="RUNNING",
-                perception={
-                    "target_obs": target_obs,
-                    "table_edge_obs": table_edge_obs,
+        if mode == "FIND_TABLE":
+            target_obs, target_source = resolve_stage_summary(
+                results=results,
+                stage_state=ctx.stage_state,
+                state_key="target_obs",
+                default_factory=lambda: _target_obs_from_payload(None, ctx.target_name),
+                result_factory=lambda payload: _target_obs_from_results(payload, ctx.target_name),
+            )
+            return StageOutput(
+                vision_obs=self.build_obs(
+                    ctx,
+                    status="RUNNING",
+                    perception={"target_obs": target_obs},
+                ),
+                snapshot={
+                    "generation": int(tick_input.generation),
+                    "result_keys": sorted(results.keys()),
+                    "source": {"target_obs": target_source},
+                    "search_kind": ctx.stage_state.get("search_kind"),
                 },
-            ),
+            )
+
+        if mode == "FIND_OBJECT":
+            target_obs, source = resolve_stage_summary(
+                results=results,
+                stage_state=ctx.stage_state,
+                state_key="target_obs",
+                default_factory=lambda: _target_obs_from_payload(None, ctx.target_name),
+                result_factory=lambda payload: _target_obs_from_results(payload, ctx.target_name),
+            )
+            table_edge_obs, table_edge_source = resolve_stage_summary(
+                results=results,
+                stage_state=ctx.stage_state,
+                state_key="table_edge_obs",
+                default_factory=lambda: _table_edge_obs_from_payload(None),
+                result_factory=_table_edge_obs_from_results,
+                result_route="table_edge_obs",
+            )
+            table_edge_obs = _annotate_table_edge_obs(
+                table_edge_obs,
+                tick_ts=tick_input.ts,
+                source=table_edge_source,
+                source_mode=ctx.current_mode,
+            )
+            ctx.stage_state["table_edge_obs"] = dict(table_edge_obs)
+            return StageOutput(
+                vision_obs=self.build_obs(
+                    ctx,
+                    status="RUNNING",
+                    perception={
+                        "target_obs": target_obs,
+                        "table_edge_obs": table_edge_obs,
+                    },
+                ),
+                snapshot={
+                    "generation": int(tick_input.generation),
+                    "result_keys": sorted(results.keys()),
+                    "source": {"target_obs": source, "table_edge_obs": table_edge_source},
+                    "search_kind": ctx.stage_state.get("search_kind"),
+                },
+            )
+
+        return StageOutput(
+            vision_obs=self.build_obs(ctx, status="RELAXING", perception={}),
             snapshot={
                 "generation": int(tick_input.generation),
                 "result_keys": sorted(results.keys()),
-                "source": {"target_obs": source, "table_edge_obs": table_edge_source},
-                "search_kind": search_kind,
             },
         )

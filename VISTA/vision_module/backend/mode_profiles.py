@@ -36,6 +36,20 @@ class PreviewProfile:
 
 
 @dataclass
+class TableEdgeProfile:
+    """Capability requirements for table-edge depth perception."""
+
+    enabled: bool = False
+    detector_mode: str = "lightweight"  # "lightweight" | "full" | "fast_plane_only"
+    update_hz: float = 5.0
+    light_stride: int = 4
+    fast_plane_stride: int = 4
+    require_yolo_confirm: bool = True
+    static_roi_enabled: bool = False
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class ModeProfile:
     """Resource-only definition for one runtime mode."""
 
@@ -46,9 +60,7 @@ class ModeProfile:
     predictor_model: Optional[str] = None
     remote: RemoteProfile = field(default_factory=RemoteProfile)
     preview: PreviewProfile = field(default_factory=PreviewProfile)
-    table_edge_enabled: bool = False
-    table_edge_path: str = "full"
-    table_edge_update_hz: float = 10.0
+    table_edge: TableEdgeProfile = field(default_factory=TableEdgeProfile)
     loop_hz: Optional[float] = None
     send_hz: Optional[float] = None
     release_cooldown_s: float = 0.0

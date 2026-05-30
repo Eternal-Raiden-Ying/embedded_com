@@ -20,7 +20,7 @@ class InitStagePlan(BaseStagePlan):
         "INIT": ("remote_init_status",),
     }
 
-    def on_enter(self, req, ctx: StageContext) -> None:
+    def on_enter(self, req, ctx: StageContext) -> Optional[StageOutput]:
         ctx.current_stage = self.stage_name
         ctx.current_mode = normalize_upper(getattr(req, "mode_hint", None) or self.default_mode)
 

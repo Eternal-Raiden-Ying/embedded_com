@@ -18,7 +18,7 @@ from common.runtime_logging import RunLogger, ensure_dir, env_flag
 from ..backend.camera_manager import CameraManager
 from ..backend.mode_controller import ModeController
 from ..backend.predictor_manager import PredictorManager
-from ..backend.preview.base import NullPreviewSink
+from ..backend.preview import NullPreviewSink
 from ..backend.preview.manager import PreviewManager
 from ..backend.remote.client import RemoteGraspClient
 from ..backend.remote.manager import RemoteManager
@@ -132,9 +132,9 @@ class VistaApp(BaseModule):
 
     def _warn_deprecated_env(self):
         deprecated = {
-            "VISTA_TRACK_LOCAL_LIGHT_EDGE": "ModeProfile.metadata.table_edge_path",
-            "VISTA_TRACK_LOCAL_EDGE_STRIDE": "ModeProfile.metadata.table_edge_update_hz",
-            "VISTA_TRACK_LOCAL_EDGE_UPDATE_HZ": "ModeProfile.metadata.table_edge_update_hz",
+            "VISTA_TRACK_LOCAL_LIGHT_EDGE": "TableEdgeProfile.detector_mode",
+            "VISTA_TRACK_LOCAL_EDGE_STRIDE": "TableEdgeProfile.light_stride / fast_plane_stride",
+            "VISTA_TRACK_LOCAL_EDGE_UPDATE_HZ": "TableEdgeProfile.update_hz",
         }
         for var, replacement in deprecated.items():
             if os.environ.get(var):
@@ -447,7 +447,7 @@ class VistaApp(BaseModule):
     def _record_rate_sample(self, out_payload: Dict[str, Any], sent_ts: float) -> None:
         if str(out_payload.get("type") or "") != "vision_obs":
             return
-        if str(out_payload.get("mode") or "").strip().upper() != "TRACK_LOCAL":
+        if str(out_payload.get("mode") or "").strip().upper() != "FIND_OBJECT":
             return
         perception = out_payload.get("perception")
         if not isinstance(perception, dict):
@@ -497,7 +497,7 @@ class VistaApp(BaseModule):
                 pass
 
     def _emit_rate_summary_if_needed(self, force: bool = False) -> None:
-        if self._safe_mode_text(self._ctx().current_mode) != "TRACK_LOCAL":
+        if self._safe_mode_text(self._ctx().current_mode) != "FIND_OBJECT":
             return
         now = time.time()
         period_s = max(0.5, float(CONFIG.runtime.operator_summary_interval_s))
@@ -534,7 +534,7 @@ class VistaApp(BaseModule):
         self.operator_console.emit_rate_limited(
             "vision_rate",
             "[VISION][RATE] "
-            f"mode=TRACK_LOCAL "
+            f"mode=FIND_OBJECT "
             f"request_rate_hz={self._fmt_rate_value(request_hz)} "
             f"mode_request_rate_hz={self._fmt_rate_value(mode_request_hz)} "
             f"target_update_rate_hz={self._fmt_rate_value(target_update_hz)} "
@@ -655,7 +655,7 @@ class VistaApp(BaseModule):
 
     def _send_interval_s(self) -> float:
         send_hz = float(CONFIG.runtime.send_hz)
-        if self._safe_mode_text(self._ctx().current_mode) == "TRACK_LOCAL":
+        if self._safe_mode_text(self._ctx().current_mode) == "FIND_OBJECT":
             send_hz = max(send_hz, float(getattr(CONFIG.runtime, "track_local_send_hz", send_hz) or send_hz))
         return 1.0 / max(0.5, send_hz)
 
@@ -688,7 +688,7 @@ class VistaApp(BaseModule):
                     "mode",
                     f"[VISTA] MODE {prev_mode} -> {mode} reason={reason}",
                 )
-                if mode == "TRACK_LOCAL" and reason == "target_search":
+                if mode == "FIND_OBJECT" and reason == "target_search":
                     self.operator_console.emit_change(
                         "target_view",
                         f"[VISTA] TARGET_VIEW enter target={ctx.target_name or 'target'}",
@@ -708,7 +708,7 @@ class VistaApp(BaseModule):
 
     def _request_sync_reason(self, req: VisionReq, request_stage: str, req_kind: str) -> str:
         mode_hint = self._safe_mode_text(req.mode_hint)
-        if request_stage == "SEARCH" and req_kind == "TARGET" and mode_hint == "TRACK_LOCAL":
+        if request_stage == "SEARCH" and req_kind == "TARGET" and mode_hint == "FIND_OBJECT":
             return "target_search"
         return f"request:{req.op}"
 
@@ -796,7 +796,7 @@ class VistaApp(BaseModule):
         sync_reason = self._request_sync_reason(req, request_stage, req_kind)
         self._sync_runtime_from_stage_context(reason=sync_reason)
         self._record_request_trace(req)
-        if request_stage == "SEARCH" and req_kind == "TARGET" and self._safe_mode_text(self._ctx().current_mode) == "TRACK_LOCAL":
+        if request_stage == "SEARCH" and req_kind == "TARGET" and self._safe_mode_text(self._ctx().current_mode) == "FIND_OBJECT":
             self.operator_console.emit_change(
                 "target_view",
                 f"[VISTA] TARGET_VIEW enter target={self._ctx().target_name or req.target or 'target'}",
@@ -854,7 +854,7 @@ class VistaApp(BaseModule):
         self.req_server.start()
         self.mode_controller.start_runtime()
         # Activate INIT stage — non-blocking, task worker starts via mode plan
-        init_req = VisionReq(type="vision_req", op="START", stage="INIT", mode_hint="INIT")
+        init_req = VisionReq(ts=time.time(), op="START", stage="INIT", mode_hint="INIT")
         self.stage_controller.activate_stage("INIT", req=init_req)
         self._sync_runtime_from_stage_context(reason="service_start")
         self._running = True

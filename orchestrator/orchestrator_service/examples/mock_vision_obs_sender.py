@@ -17,7 +17,7 @@ def send(payload):
     print("sent", payload)
 
 
-def wrap_vision_obs(kind: str, base: dict, perception: dict, *, mode: str = "TRACK_LOCAL", status: str = "RUNNING") -> dict:
+def wrap_vision_obs(kind: str, base: dict, perception: dict, *, mode: str = "FIND_OBJECT", status: str = "RUNNING") -> dict:
     stage = "RETURN" if kind == "home_tag_obs" else "SEARCH"
     return {
         **base,
@@ -68,6 +68,6 @@ if __name__ == "__main__":
             "table_edge_obs",
             base,
             obs,
-            mode="DEPTH_PERCEPTION",
+            mode="FIND_EDGE",
         )
     send(payload)

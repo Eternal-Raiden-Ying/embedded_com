@@ -159,7 +159,7 @@ def main() -> None:
             base,
             "table_edge_obs",
             obs,
-            mode="DEPTH_PERCEPTION",
+            mode="FIND_EDGE",
         )
         send_payload(args.host, args.port, payload)
         return
@@ -188,7 +188,7 @@ def main() -> None:
             base,
             "target_obs",
             obs,
-            mode="TRACK_LOCAL",
+            mode="FIND_OBJECT",
         )
         send_payload(args.host, args.port, payload)
         return
@@ -224,7 +224,7 @@ def main() -> None:
                 base,
                 "table_edge_obs",
                 obs,
-                mode="DEPTH_PERCEPTION",
+                mode="FIND_EDGE",
             )
             send_payload(args.vision_host, args.vision_port, payload)
             time.sleep(args.period)
@@ -248,7 +248,7 @@ def main() -> None:
                 base,
                 "table_edge_obs",
                 obs,
-                mode="DEPTH_PERCEPTION",
+                mode="FIND_EDGE",
             )
             send_payload(args.vision_host, args.vision_port, payload)
             time.sleep(args.period)
@@ -266,7 +266,7 @@ def main() -> None:
                 base,
                 "target_obs",
                 obs,
-                mode="TRACK_LOCAL",
+                mode="FIND_OBJECT",
             )
             send_payload(args.vision_host, args.vision_port, payload)
             time.sleep(args.period)
@@ -287,7 +287,7 @@ def main() -> None:
                 base,
                 "target_obs",
                 obs,
-                mode="TRACK_LOCAL",
+                mode="FIND_OBJECT",
             )
             send_payload(args.vision_host, args.vision_port, payload)
             time.sleep(args.period)

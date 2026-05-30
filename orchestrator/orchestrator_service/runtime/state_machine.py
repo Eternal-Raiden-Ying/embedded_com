@@ -1945,7 +1945,7 @@ class OrchestratorCore:
         if state in TABLE_VISION_STATES:
             return VisionStageBinding(
                 stage="SEARCH",
-                mode_hint="DEPTH_PERCEPTION",
+                mode_hint="FIND_EDGE",
                 target=None,
                 payload={
                     "search_kind": "TABLE_EDGE",
@@ -1959,7 +1959,7 @@ class OrchestratorCore:
         if state in TARGET_VISION_STATES or state == State.AT_TABLE_EDGE:
             return VisionStageBinding(
                 stage="SEARCH",
-                mode_hint="TRACK_LOCAL",
+                mode_hint="FIND_OBJECT",
                 target=self.ctx.active_target,
                 payload={
                     "search_kind": "TARGET",
@@ -1994,7 +1994,7 @@ class OrchestratorCore:
         if state == State.RETURN_HOME:
             return VisionStageBinding(
                 stage="RETURN",
-                mode_hint="TRACK_LOCAL",
+                mode_hint="FIND_OBJECT",
                 target=None,
                 payload={
                     "search_kind": "HOME_TAG",
@@ -2154,7 +2154,7 @@ class OrchestratorCore:
     def _slide_ref_obs_usable(self, obs: Optional[TableEdgeObs]) -> bool:
         if obs is None or not self._table_visible(obs):
             return False
-        if str(obs.source_mode or "").strip().upper() != "TRACK_LOCAL":
+        if str(obs.source_mode or "").strip().upper() != "FIND_OBJECT":
             return False
         if self._edge_obs_is_stale(obs):
             return False
@@ -2265,7 +2265,7 @@ class OrchestratorCore:
 
     def _edge_follow_quality(self, obs: TableEdgeObs) -> Dict[str, Any]:
         source_mode = str(obs.source_mode or self.ctx.active_vision_mode or "").strip().upper()
-        is_track_local = source_mode == "TRACK_LOCAL" or str(self.ctx.active_vision_mode or "").strip().upper() == "TRACK_LOCAL"
+        is_track_local = source_mode == "FIND_OBJECT" or str(self.ctx.active_vision_mode or "").strip().upper() == "FIND_OBJECT"
         min_conf = float(
             getattr(
                 self.cfg,

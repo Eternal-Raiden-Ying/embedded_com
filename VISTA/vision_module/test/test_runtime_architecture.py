@@ -21,7 +21,7 @@ from vision_module.app.stages.return_home import ReturnStagePlan
 from vision_module.app.stages.search import SearchStagePlan
 from vision_module.backend.camera_manager import CameraManager
 from vision_module.backend.mode_controller import ModeController
-from vision_module.backend.preview.base import NullPreviewSink, PreviewFrame, PreviewSink
+from vision_module.backend.preview import NullPreviewSink, PreviewFrame, PreviewSink
 from vision_module.backend.preview.manager import PreviewManager
 from vision_module.backend.remote.client import RemoteGraspClient
 from vision_module.backend.remote.manager import RemoteManager
@@ -356,7 +356,7 @@ class SearchStagePlanKindTest(unittest.TestCase):
 
     def test_target_search_outputs_target_and_table_edge_obs(self):
         plan, ctx = self._enter("TARGET")
-        self.assertEqual(ctx.current_mode, "TRACK_LOCAL")
+        self.assertEqual(ctx.current_mode, "FIND_OBJECT")
         output = plan.tick(
             StageTickInput(
                 ts=time.time(),
@@ -378,7 +378,7 @@ class SearchStagePlanKindTest(unittest.TestCase):
         self.assertIn("dist_err", perception["table_edge_obs"])
         self.assertIn("obs_ts", perception["table_edge_obs"])
         self.assertIn("age_ms", perception["table_edge_obs"])
-        self.assertEqual(perception["table_edge_obs"]["source_mode"], "TRACK_LOCAL")
+        self.assertEqual(perception["table_edge_obs"]["source_mode"], "FIND_OBJECT")
         self.assertFalse(perception["table_edge_obs"]["is_stale"])
 
     def test_target_search_builds_obs_from_yolo_boxes(self):
@@ -454,7 +454,7 @@ class SearchStagePlanKindTest(unittest.TestCase):
             op="UPDATE",
             stage="SEARCH",
             target="apple",
-            mode_hint="TRACK_LOCAL",
+            mode_hint="FIND_OBJECT",
             payload={"search_kind": "TARGET", "orchestrator_state": "EDGE_SLIDE_SEARCH"},
         )
         plan.on_update(update_req, ctx)
@@ -463,7 +463,7 @@ class SearchStagePlanKindTest(unittest.TestCase):
 
     def test_table_edge_search_outputs_only_table_edge_obs(self):
         plan, ctx = self._enter("TABLE_EDGE")
-        self.assertEqual(ctx.current_mode, "TABLE_EDGE_PERCEPTION")
+        self.assertEqual(ctx.current_mode, "FIND_EDGE")
         output = plan.tick(
             StageTickInput(
                 ts=time.time(),
@@ -481,7 +481,7 @@ class SearchStagePlanKindTest(unittest.TestCase):
 
     def test_edge_follow_target_outputs_both_and_keeps_partial_results(self):
         plan, ctx = self._enter("EDGE_FOLLOW_TARGET")
-        self.assertEqual(ctx.current_mode, "TABLE_EDGE_PERCEPTION")
+        self.assertEqual(ctx.current_mode, "FIND_EDGE")
         output = plan.tick(
             StageTickInput(
                 ts=time.time(),
@@ -499,7 +499,7 @@ class SearchStagePlanKindTest(unittest.TestCase):
         self.assertTrue(perception["table_edge_obs"]["is_stale"])
 
         alias_plan, alias_ctx = self._enter("TARGET_ON_EDGE")
-        self.assertEqual(alias_ctx.current_mode, "TABLE_EDGE_PERCEPTION")
+        self.assertEqual(alias_ctx.current_mode, "FIND_EDGE")
         self.assertEqual(alias_ctx.stage_state["search_kind"], "TARGET_ON_EDGE")
 
 
@@ -507,7 +507,7 @@ class StageControllerStatusTest(unittest.TestCase):
     def test_runtime_status_includes_active_target(self):
         controller = StageController()
         controller._ctx.current_stage = "SEARCH"
-        controller._ctx.current_mode = "TRACK_LOCAL"
+        controller._ctx.current_mode = "FIND_OBJECT"
         controller._ctx.target_name = "apple"
         status = controller._runtime_status_payload()
         self.assertEqual(status["target"], "apple")
@@ -546,7 +546,7 @@ class RuntimeSupervisorModeApplyTest(unittest.TestCase):
         mode_controller, _, stage_controller = build_runtime_stack(cfg, PrintLogger("arch"))
         try:
             mode_controller.start_runtime()
-            self.assertTrue(stage_controller.set_runtime_mode("TRACK_LOCAL", reason="arch_test", force=True))
+            self.assertTrue(stage_controller.set_runtime_mode("FIND_OBJECT", reason="arch_test", force=True))
             snapshot = mode_controller.runtime_snapshot()
             self.assertTrue(snapshot["runtime_supervisor"]["camera"]["runtime_running"])
             self.assertTrue(snapshot["runtime_supervisor"]["predictor"]["runtime_running"])
@@ -590,7 +590,7 @@ class RuntimeSupervisorModeApplyTest(unittest.TestCase):
         mode_controller, _, stage_controller = build_runtime_stack(cfg, PrintLogger("table_edge_fallback"))
         profiles = build_default_mode_profiles(cfg.model.active_model)
         mode_controller.register_profile(profiles["SILENT"])
-        mode_controller.register_profile(profiles["DEPTH_PERCEPTION"])
+        mode_controller.register_profile(profiles["FIND_EDGE"])
         stage_controller.register_plan(SearchStagePlan())
         try:
             mode_controller.start_runtime()
@@ -603,8 +603,8 @@ class RuntimeSupervisorModeApplyTest(unittest.TestCase):
                 )
             )
             self.assertIsNotNone(out)
-            self.assertEqual(stage_controller.context().current_mode, "DEPTH_PERCEPTION")
-            self.assertEqual(mode_controller.current_mode(), "DEPTH_PERCEPTION")
+            self.assertEqual(stage_controller.context().current_mode, "FIND_EDGE")
+            self.assertEqual(mode_controller.current_mode(), "FIND_EDGE")
         finally:
             mode_controller.stop_runtime()
 
@@ -640,7 +640,7 @@ class RuntimeSupervisorModeApplyTest(unittest.TestCase):
         mode_controller, _, stage_controller = build_runtime_stack(cfg, PrintLogger("table_edge_mode"))
         try:
             mode_controller.start_runtime()
-            self.assertTrue(stage_controller.set_runtime_mode("TABLE_EDGE_PERCEPTION", reason="table_edge_test", force=True))
+            self.assertTrue(stage_controller.set_runtime_mode("FIND_EDGE", reason="table_edge_test", force=True))
             snapshot = mode_controller.runtime_snapshot()
             supervisor = snapshot["runtime_supervisor"]
             plan = snapshot["active_runtime_plan"]
@@ -691,14 +691,14 @@ class RuntimeSupervisorModeApplyTest(unittest.TestCase):
             original_reconcile = mode_controller.supervisor.reconcile
             mode_controller.supervisor.reconcile = lambda plan, generation: False
             try:
-                self.assertFalse(stage_controller.set_runtime_mode("TRACK_LOCAL", reason="force_fail", force=True))
+                self.assertFalse(stage_controller.set_runtime_mode("FIND_OBJECT", reason="force_fail", force=True))
             finally:
                 mode_controller.supervisor.reconcile = original_reconcile
             snapshot = mode_controller.snapshot()
             last_switch = snapshot["last_switch_result"]
             self.assertFalse(last_switch["ok"])
             self.assertEqual(last_switch["reason"], "runtime_apply_failed")
-            self.assertEqual(last_switch["requested_mode"], "TRACK_LOCAL")
+            self.assertEqual(last_switch["requested_mode"], "FIND_OBJECT")
             self.assertEqual(last_switch["active_mode"], "SILENT")
         finally:
             mode_controller.stop_runtime()
@@ -709,7 +709,7 @@ class SchedulerIsolationTest(unittest.TestCase):
         self.scheduler = Scheduler()
         self.scheduler.start_runtime()
         self.plan = {
-            "mode": "TRACK_LOCAL",
+            "mode": "FIND_OBJECT",
             "routes": {
                 "local_perception": {"policy": "slot", "scope": "stage"},
                 "remote_result": {"policy": "slot", "scope": "stage"},
@@ -784,7 +784,7 @@ class PreviewBehaviorTest(unittest.TestCase):
         scheduler.start_runtime()
         scheduler.configure(
             {
-                "mode": "TRACK_LOCAL",
+                "mode": "FIND_OBJECT",
                 "routes": {
                     "camera_frames": {"policy": "slot", "scope": "backend"},
                     "local_perception": {"policy": "slot", "scope": "stage"},
@@ -797,7 +797,7 @@ class PreviewBehaviorTest(unittest.TestCase):
         manager = PreviewManager(sink=sink, logger=PrintLogger("preview"))
         manager.bind_runtime(scheduler, lambda: 1)
         scheduler.publish_result("camera_frames", {"rgb": [[0, 0], [0, 0]]}, generation=1)
-        scheduler.publish_result("runtime_status", {"stage": "SEARCH", "mode": "TRACK_LOCAL", "epoch": 1}, generation=1)
+        scheduler.publish_result("runtime_status", {"stage": "SEARCH", "mode": "FIND_OBJECT", "epoch": 1}, generation=1)
         scheduler.publish_result("local_perception", {"box_count": 0}, generation=1)
         try:
             manager.enable()
@@ -831,7 +831,7 @@ class PreviewBehaviorTest(unittest.TestCase):
         scheduler.start_runtime()
         scheduler.configure(
             {
-                "mode": "TRACK_LOCAL",
+                "mode": "FIND_OBJECT",
                 "routes": {
                     "camera_frames": {"policy": "slot", "scope": "backend"},
                     "local_perception": {"policy": "slot", "scope": "stage"},
@@ -846,7 +846,7 @@ class PreviewBehaviorTest(unittest.TestCase):
         manager = PreviewManager(sink=sink, logger=None, operator_console=console)
         manager.bind_runtime(scheduler, lambda: 1)
         scheduler.publish_result("camera_frames", {"rgb": np.zeros((16, 16, 3), dtype=np.uint8)}, generation=1)
-        scheduler.publish_result("runtime_status", {"stage": "SEARCH", "mode": "TRACK_LOCAL", "target": "apple"}, generation=1)
+        scheduler.publish_result("runtime_status", {"stage": "SEARCH", "mode": "FIND_OBJECT", "target": "apple"}, generation=1)
         scheduler.publish_result("local_perception", {"has_infer": True, "box_count": 0, "infer_boxes": []}, generation=1)
         try:
             manager.enable()
@@ -863,7 +863,7 @@ class PreviewBehaviorTest(unittest.TestCase):
         lines = []
         console = OperatorConsole(mode="operator", default_interval_s=1.0, sink=lines.append)
         manager = PreviewManager(sink=self._ExitSink(), logger=None, operator_console=console)
-        status = {"stage": "SEARCH", "mode": "DEPTH_PERCEPTION"}
+        status = {"stage": "SEARCH", "mode": "FIND_EDGE"}
         table_edge = {
             "table_found": True,
             "edge_found": True,
@@ -901,7 +901,7 @@ class PreviewBehaviorTest(unittest.TestCase):
         scheduler.start_runtime()
         scheduler.configure(
             {
-                "mode": "TRACK_LOCAL",
+                "mode": "FIND_OBJECT",
                 "routes": {
                     "camera_frames": {"policy": "slot", "scope": "backend"},
                     "frame_meta": {"policy": "slot", "scope": "stage"},
@@ -917,7 +917,7 @@ class PreviewBehaviorTest(unittest.TestCase):
         manager = PreviewManager(sink=sink, logger=None)
         manager.bind_runtime(scheduler, lambda: 1)
         scheduler.publish_result("camera_frames", {"rgb": np.zeros((16, 16, 3), dtype=np.uint8)}, generation=1)
-        scheduler.publish_result("runtime_status", {"stage": "SEARCH", "mode": "TRACK_LOCAL", "target": "apple"}, generation=1)
+        scheduler.publish_result("runtime_status", {"stage": "SEARCH", "mode": "FIND_OBJECT", "target": "apple"}, generation=1)
         scheduler.publish_result("local_perception", {"has_infer": True, "box_count": 0, "infer_boxes": []}, generation=1)
         try:
             manager.enable()
@@ -959,15 +959,15 @@ class PreviewBehaviorTest(unittest.TestCase):
         manager = PreviewManager(sink=sink, logger=None, operator_console=console)
         metadata = {
             "mode_layouts": {
-                "TABLE_EDGE_PERCEPTION": "rgb_depth_edge",
-                "TRACK_LOCAL": "rgb_yolo_edge_overlay",
+                "FIND_EDGE": "rgb_depth_edge",
+                "FIND_OBJECT": "rgb_yolo_edge_overlay",
                 "IDLE_HOT": "rgb_hot_preview",
             },
             "clear_overlay_on_mode_switch": True,
         }
-        manager.configure_preview_mode("TABLE_EDGE_PERCEPTION", metadata=metadata, reason="unit")
-        manager.configure_preview_mode("TRACK_LOCAL", metadata=metadata, reason="unit")
-        manager.configure_preview_mode("TRACK_LOCAL", metadata=metadata, reason="target_confirm")
+        manager.configure_preview_mode("FIND_EDGE", metadata=metadata, reason="unit")
+        manager.configure_preview_mode("FIND_OBJECT", metadata=metadata, reason="unit")
+        manager.configure_preview_mode("FIND_OBJECT", metadata=metadata, reason="target_confirm")
 
         self.assertIn(("rgb_depth_edge", "unit"), sink.layouts)
         self.assertIn(("rgb_yolo_edge_overlay", "unit"), sink.layouts)
@@ -1000,13 +1000,13 @@ class PreviewBehaviorTest(unittest.TestCase):
         console = OperatorConsole(mode="operator", default_interval_s=0.0, sink=lines.append)
         sink = LayoutSink()
         manager = PreviewManager(sink=sink, logger=None, operator_console=console)
-        manager.configure_preview_mode("TRACK_LOCAL", metadata={"layout": "unknown_panel"}, reason="unit")
+        manager.configure_preview_mode("FIND_OBJECT", metadata={"layout": "unknown_panel"}, reason="unit")
         self.assertEqual(sink.layouts[-1], "rgb_minimal")
         self.assertTrue(any("layout_unsupported" in line for line in lines))
 
     def test_track_local_target_summary_found_zero_with_boxes(self):
         manager = PreviewManager(sink=self._ExitSink(), logger=None)
-        status = {"mode": "TRACK_LOCAL", "target": "apple"}
+        status = {"mode": "FIND_OBJECT", "target": "apple"}
         local = {
             "has_infer": True,
             "box_count": 3,
@@ -1025,7 +1025,7 @@ class PreviewBehaviorTest(unittest.TestCase):
 
     def test_track_local_target_summary_found_one(self):
         manager = PreviewManager(sink=self._ExitSink(), logger=None)
-        status = {"mode": "TRACK_LOCAL", "target": "apple"}
+        status = {"mode": "FIND_OBJECT", "target": "apple"}
         local = {"has_infer": True, "rgb_shape": [100, 100, 3], "infer_boxes": [[10, 20, 40, 60, 0.81, 0]], "class_names": ["apple"]}
         target = manager._target_overlay(status, local, {"found": True, "target": "apple", "confidence": 0.81, "cx_norm": 0.54, "bbox": [10, 20, 40, 60]})
         line = manager._target_summary_line(status, target)
@@ -1036,7 +1036,7 @@ class PreviewBehaviorTest(unittest.TestCase):
 
     def test_target_summary_found_zero_no_boxes_has_reason(self):
         manager = PreviewManager(sink=self._ExitSink(), logger=None)
-        status = {"mode": "TRACK_LOCAL", "target": "apple"}
+        status = {"mode": "FIND_OBJECT", "target": "apple"}
         target = manager._target_overlay(status, {"has_infer": True, "box_count": 0, "infer_boxes": []}, {"found": False, "target": "apple"})
         line = manager._target_summary_line(status, target)
         self.assertIn("found=0", line)
@@ -1141,7 +1141,7 @@ class OperatorConsoleIpcPolicyTest(unittest.TestCase):
             ts=time.time(),
             op="START",
             stage="SEARCH",
-            mode_hint="TRACK_LOCAL",
+            mode_hint="FIND_OBJECT",
             target="apple",
             payload={"search_kind": "TARGET"},
         )
@@ -1411,7 +1411,7 @@ class ModeProfileCameraContractTest(unittest.TestCase):
         cfg = build_test_config(args)
         profiles = build_default_mode_profiles("test_model", cfg)
 
-        track_rgb = dict(profiles["TRACK_LOCAL"].camera_overrides["rgb"])
+        track_rgb = dict(profiles["FIND_OBJECT"].camera_overrides["rgb"])
         micro_rgb = dict(profiles["MICRO_ADJUST"].camera_overrides["rgb"])
         grasp_rgb = dict(profiles["GRASP_REMOTE"].camera_overrides["rgb"])
 
@@ -1496,7 +1496,7 @@ class GenerationAwareFrameConsumptionTest(unittest.TestCase):
         scheduler = Scheduler()
         scheduler.start_runtime()
         plan = {
-            "mode": "TRACK_LOCAL",
+            "mode": "FIND_OBJECT",
             "routes": {
                 "camera_frames": {"policy": "slot", "scope": "backend"},
                 "local_perception": {"policy": "slot", "scope": "stage"},
@@ -1545,7 +1545,7 @@ class GenerationAwareFrameConsumptionTest(unittest.TestCase):
         scheduler = Scheduler()
         scheduler.start_runtime()
         plan = {
-            "mode": "TRACK_LOCAL",
+            "mode": "FIND_OBJECT",
             "routes": {
                 "camera_frames": {"policy": "slot", "scope": "backend"},
                 "local_perception": {"policy": "slot", "scope": "stage"},
@@ -1559,7 +1559,7 @@ class GenerationAwareFrameConsumptionTest(unittest.TestCase):
         manager.bind_runtime(scheduler, lambda: generation["value"])
         try:
             manager.start_runtime()
-            scheduler.publish_result("runtime_status", {"stage": "SEARCH", "mode": "TRACK_LOCAL", "epoch": 1}, generation=1)
+            scheduler.publish_result("runtime_status", {"stage": "SEARCH", "mode": "FIND_OBJECT", "epoch": 1}, generation=1)
             scheduler.publish_result("camera_frames", {"depth": np.zeros((16, 16), dtype=np.uint16)}, generation=1)
             scheduler.publish_result("camera_frames", {"depth": np.zeros((16, 16), dtype=np.uint16)}, generation=1)
             deadline = time.time() + 1.0
@@ -1571,7 +1571,7 @@ class GenerationAwareFrameConsumptionTest(unittest.TestCase):
 
             generation["value"] = 2
             scheduler.configure(plan, generation=2)
-            scheduler.publish_result("runtime_status", {"stage": "SEARCH", "mode": "TRACK_LOCAL", "epoch": 2}, generation=2)
+            scheduler.publish_result("runtime_status", {"stage": "SEARCH", "mode": "FIND_OBJECT", "epoch": 2}, generation=2)
             scheduler.publish_result("camera_frames", {"depth": np.zeros((16, 16), dtype=np.uint16)}, generation=2)
             payload = None
             deadline = time.time() + 1.0
@@ -1582,7 +1582,7 @@ class GenerationAwareFrameConsumptionTest(unittest.TestCase):
                     break
                 time.sleep(0.05)
             self.assertIsInstance(payload, dict)
-            self.assertEqual(payload["source_mode"], "TRACK_LOCAL")
+            self.assertEqual(payload["source_mode"], "FIND_OBJECT")
             self.assertEqual(manager.snapshot()["last_camera_generation"], 2)
         finally:
             manager.release_all()
@@ -1592,7 +1592,7 @@ class GenerationAwareFrameConsumptionTest(unittest.TestCase):
         scheduler = Scheduler()
         scheduler.start_runtime()
         plan = {
-            "mode": "TABLE_EDGE_PERCEPTION",
+            "mode": "FIND_EDGE",
             "routes": {
                 "camera_frames": {"policy": "slot", "scope": "backend"},
                 "table_edge_obs": {"policy": "slot", "scope": "stage"},
@@ -1652,7 +1652,7 @@ class GenerationAwareFrameConsumptionTest(unittest.TestCase):
         scheduler = Scheduler()
         scheduler.start_runtime()
         plan = {
-            "mode": "TRACK_LOCAL",
+            "mode": "FIND_OBJECT",
             "routes": {
                 "camera_frames": {"policy": "slot", "scope": "backend"},
                 "local_perception": {"policy": "slot", "scope": "stage"},
@@ -1667,7 +1667,7 @@ class GenerationAwareFrameConsumptionTest(unittest.TestCase):
         try:
             manager.enable()
             manager.start_runtime()
-            scheduler.publish_result("runtime_status", {"stage": "SEARCH", "mode": "TRACK_LOCAL", "epoch": 1}, generation=1)
+            scheduler.publish_result("runtime_status", {"stage": "SEARCH", "mode": "FIND_OBJECT", "epoch": 1}, generation=1)
             scheduler.publish_result("local_perception", {"box_count": 0}, generation=1)
             scheduler.publish_result("camera_frames", {"rgb": np.zeros((16, 16, 3), dtype=np.uint8)}, generation=1)
             deadline = time.time() + 1.0
@@ -1679,7 +1679,7 @@ class GenerationAwareFrameConsumptionTest(unittest.TestCase):
 
             generation["value"] = 2
             scheduler.configure(plan, generation=2)
-            scheduler.publish_result("runtime_status", {"stage": "SEARCH", "mode": "TRACK_LOCAL", "epoch": 2}, generation=2)
+            scheduler.publish_result("runtime_status", {"stage": "SEARCH", "mode": "FIND_OBJECT", "epoch": 2}, generation=2)
             scheduler.publish_result("local_perception", {"box_count": 0}, generation=2)
             previous_count = sink.render_count
             scheduler.publish_result("camera_frames", {"rgb": np.zeros((16, 16, 3), dtype=np.uint8)}, generation=2)

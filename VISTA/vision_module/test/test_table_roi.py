@@ -159,14 +159,14 @@ class TableRoiTest(unittest.TestCase):
 
     def test_diagnostics_summary_formatters_are_short_lines(self):
         edge = format_table_edge_summary(
-            {"stage": "SEARCH", "mode": "TABLE_EDGE_PERCEPTION"},
+            {"stage": "SEARCH", "mode": "FIND_EDGE"},
             {"edge_found": True, "confidence": 0.86, "yaw_err_rad": -0.02, "dist_err_m": -0.01, "roi_source": "local_perception_table_bbox", "table_quadrant": "LT"},
         )
         target = format_target_summary(
-            {"stage": "SEARCH", "mode": "TRACK_LOCAL"},
+            {"stage": "SEARCH", "mode": "FIND_OBJECT"},
             {"found": True, "target": "bottle", "confidence": 0.82, "cx_norm": 0.54, "cy_norm": 0.47},
         )
-        runtime = format_runtime_summary({"stage": "SEARCH", "mode": "TRACK_LOCAL", "req_id": "r1", "epoch": 2})
+        runtime = format_runtime_summary({"stage": "SEARCH", "mode": "FIND_OBJECT", "req_id": "r1", "epoch": 2})
         self.assertIn("[VISTA] EDGE stage=SEARCH mode=TABLE_EDGE_PERCEPTION", edge)
         self.assertIn("roi=local_perception_table_bbox q=LT", edge)
         self.assertIn("[VISTA] TARGET stage=SEARCH mode=TRACK_LOCAL found=1 cls=bottle", target)
