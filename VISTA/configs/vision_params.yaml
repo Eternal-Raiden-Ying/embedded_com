@@ -162,11 +162,14 @@ table_edge:
 preview:
   # 可选 layout 见 preview/manager 和 opencv_sink 支持项。
   mode_layouts:
+    INIT: rgb_minimal
+    SILENT: rgb_minimal
     IDLE: rgb_minimal
-    DEPTH_PERCEPTION: rgb_depth_edge
-    TABLE_EDGE_PERCEPTION: rgb_depth_edge
-    TRACK_LOCAL: rgb_yolo_edge_overlay
+    FIND_OBJECT: rgb_yolo_edge_overlay
+    FIND_EDGE: rgb_depth_edge
+    FIND_TABLE: rgb_yolo_overlay
     MICRO_ADJUST: rgb_minimal
+    GRASP_REMOTE_INIT: rgb_minimal
     GRASP_REMOTE: rgb_depth_edge
     IDLE_HOT: rgb_hot_preview
 
@@ -176,20 +179,22 @@ preview:
   clear_overlay_on_mode_switch: true
 
 mode_profiles:
-  # DEPTH_PERCEPTION 是否也打开 RGB + YOLO table bbox。
+  # table_bbox 是否也打开 RGB + YOLO table bbox（当前 FIND_* 模式下已无独立 DEPTH_PERCEPTION）。
   table_bbox:
     enabled: false
     model: yolov7_detect
 
   modes:
-    TRACK_LOCAL:
-      # 可选相机写法：rgb,depth 或 [rgb, depth]。
+    FIND_OBJECT:
       enabled_cameras: [rgb, depth]
       predictor_enabled: true
       predictor_model: yolov7_detect
       preview_enabled: true
       preview_layout: rgb_yolo_edge_overlay
       release_cooldown_s: 2.0
+      table_edge:
+        detector_mode: fast_plane_only
+        update_hz: 5.0
       rgb:
         fps: 24
         crop_x: 280
@@ -197,12 +202,29 @@ mode_profiles:
         crop_w: 720
         crop_h: 720
 
-    TABLE_EDGE_PERCEPTION:
+    FIND_EDGE:
       enabled_cameras: [rgb, depth]
       predictor_enabled: true
       predictor_model: yolov7_detect
       preview_enabled: true
       preview_layout: rgb_depth_edge
+      release_cooldown_s: 2.0
+      table_edge:
+        detector_mode: fast_plane_only
+        update_hz: 10.0
+      rgb:
+        fps: 24
+        crop_x: 280
+        crop_y: 0
+        crop_w: 720
+        crop_h: 720
+
+    FIND_TABLE:
+      enabled_cameras: [rgb]
+      predictor_enabled: true
+      predictor_model: yolov7_detect
+      preview_enabled: true
+      preview_layout: rgb_yolo_overlay
       release_cooldown_s: 2.0
       rgb:
         fps: 24

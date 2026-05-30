@@ -237,7 +237,7 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             preview=preview_profile("FIND_OBJECT", enabled=True),
             table_edge=TableEdgeProfile(
                 enabled=True,
-                detector_mode="lightweight",
+                detector_mode="fast_plane_only",
                 update_hz=5.0,
             ),
             release_cooldown_s=2.0,
