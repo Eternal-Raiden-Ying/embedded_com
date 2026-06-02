@@ -306,7 +306,7 @@ grey.crop_w = 0
 grey.crop_h = 0
 
 # model config
-CONFIG.model.active_model = "yolov7_detect"
+CONFIG.model.active_model = "yolo26s_detect"
 CONFIG.model.profiles["yolov7_detect"] = SingleModelConfig(
     target_model=str(_DEFAULT_DETECT_MODEL),
     width=640,
@@ -355,6 +355,24 @@ CONFIG.model.profiles["yolo26s_seg_qnn216"] = SingleModelConfig(
     class_num=20,
     classes=grasping_coco20,
     predictor_type="segment",
+    model_backend="qnn",
+)
+CONFIG.model.profiles["yolo26s_detect"] = SingleModelConfig(
+    target_model=str(
+        Path(_DEFAULT_MODEL_ROOT)
+        / "yolo26s"
+        / "models"
+        / "QCS6490"
+        / "W8A8"
+        / "cutoff_yolo26s_qcs6490_w8a8.qnn236.ctx.bin"
+    ),
+    width=640,
+    height=640,
+    conf_thres=0.25,
+    iou_thres=0.45,
+    class_num=80,
+    classes=coco80,
+    predictor_type="detect26",
     model_backend="qnn",
 )
 

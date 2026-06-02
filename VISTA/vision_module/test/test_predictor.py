@@ -38,11 +38,12 @@ def build_dummy_frame(args: argparse.Namespace) -> np.ndarray:
 
 def choose_predictor(requested_backend: str, args: argparse.Namespace):
     profile = make_model_profile(args)
+    predictor_type = getattr(args, "predictor_type", "detect") or "detect"
 
     def real_factory():
         if not args.model_path:
             raise RuntimeError("--model-path is required for real predictor")
-        cls = import_predictor_class("real")
+        cls = import_predictor_class("real", predictor_type=predictor_type)
         return cls(profile)
 
     def mock_factory():

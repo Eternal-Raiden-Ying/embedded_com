@@ -57,8 +57,9 @@ class InitStagePlan(BaseStagePlan):
                 return StageOutput(
                     vision_obs=self.build_obs(
                         ctx, status="FAILED",
-                        result={"reason": "init_failed", "server_status": ctx.server_status},
+                        result={"reason": "init_exhausted", "server_status": ctx.server_status},
                     ),
+                    next_stage="IDLE",
                 )
             return StageOutput(
                 vision_obs=self.build_obs(

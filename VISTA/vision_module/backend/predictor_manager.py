@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from .predictor import (
     MockPredictor,
     QNN_YOLO_Detect_Predictor,
+    QNN_YOLO26_Detect_Predictor,
     QNN_YOLO_Segment_Predictor,
     predictor_backend_status,
 )
@@ -172,6 +173,8 @@ class PredictorManager:
         predictor_type = self._predictor_type_for(profile)
         if predictor_type == "segment":
             return QNN_YOLO_Segment_Predictor
+        if predictor_type == "detect26":
+            return QNN_YOLO26_Detect_Predictor
         return QNN_YOLO_Detect_Predictor
 
     def _infer_box_format(self) -> str:

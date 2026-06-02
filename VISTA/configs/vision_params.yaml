@@ -73,8 +73,8 @@ camera:
     crop_h: 0
 
 model:
-  # 可选：yolov7_detect、yolov8s_seg、yolo26s_seg、yolo26s_seg_qnn216。
-  active_model: yolov7_detect
+  # 可选：yolov7_detect、yolo26s_detect、yolov8s_seg、yolo26s_seg、yolo26s_seg_qnn216。
+  active_model: yolo26s_detect
 
   profiles:
     yolov7_detect:
@@ -86,6 +86,16 @@ model:
       iou_thres: 0.45
       class_num: 80
       predictor_type: detect
+      model_backend: qnn
+
+    yolo26s_detect:
+      target_model: null
+      width: 640
+      height: 640
+      conf_thres: 0.25
+      iou_thres: 0.45
+      class_num: 80
+      predictor_type: detect26
       model_backend: qnn
 
     yolov8s_seg:
@@ -152,13 +162,13 @@ mode_profiles:
   # table_bbox 是否也打开 RGB + YOLO table bbox（当前 FIND_* 模式下已无独立 DEPTH_PERCEPTION）。
   table_bbox:
     enabled: false
-    model: yolov7_detect
+    model: yolo26s_detect
 
   modes:
     FIND_OBJECT:
       enabled_cameras: [rgb, depth]
       predictor_enabled: true
-      predictor_model: yolov7_detect
+      predictor_model: yolo26s_detect
       preview_enabled: true
       preview_layout: rgb_yolo_edge_overlay
       release_cooldown_s: 2.0
@@ -192,7 +202,7 @@ mode_profiles:
     FIND_EDGE:
       enabled_cameras: [rgb, depth]
       predictor_enabled: true
-      predictor_model: yolov7_detect
+      predictor_model: yolo26s_detect
       preview_enabled: true
       preview_layout: rgb_depth_edge
       release_cooldown_s: 2.0
@@ -226,7 +236,7 @@ mode_profiles:
     FIND_TABLE:
       enabled_cameras: [rgb]
       predictor_enabled: true
-      predictor_model: yolov7_detect
+      predictor_model: yolo26s_detect
       preview_enabled: true
       preview_layout: rgb_yolo_overlay
       release_cooldown_s: 2.0
@@ -240,7 +250,7 @@ mode_profiles:
     MICRO_ADJUST:
       enabled_cameras: [rgb]
       predictor_enabled: true
-      predictor_model: yolov7_detect
+      predictor_model: yolo26s_detect
       preview_enabled: true
       preview_layout: rgb_minimal
       release_cooldown_s: 2.0

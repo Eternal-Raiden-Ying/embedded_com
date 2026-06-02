@@ -126,6 +126,12 @@ def add_model_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--conf-thres", type=float, default=DEFAULT_CONF_THRES)
     parser.add_argument("--iou-thres", type=float, default=DEFAULT_IOU_THRES)
     parser.add_argument("--class-num", type=int, default=DEFAULT_CLASS_NUM)
+    parser.add_argument(
+        "--predictor-type",
+        choices=["detect", "detect26", "segment"],
+        default="detect26",
+        help="Predictor class to use (detect=yoloV7, detect26=yolo26s)",
+    )
 
 
 def print_header(title: str, args: argparse.Namespace) -> None:
@@ -186,10 +192,16 @@ def import_camera_classes(backend: str):
     return color.ColorCamera, ir.IRCamera, depth.RealSenseDepthCamera
 
 
-def import_predictor_class(backend: str):
+def import_predictor_class(backend: str, predictor_type: str = "detect"):
     if backend == "mock":
         module = importlib.import_module("vision_module.backend.predictor.mock")
         return module.MockPredictor
+    if predictor_type == "detect26":
+        module = importlib.import_module("vision_module.backend.predictor.QNN_YOLO26_Detect_Predictor")
+        return module.QNN_YOLO26_Detect_Predictor
+    if predictor_type == "segment":
+        module = importlib.import_module("vision_module.backend.predictor.QNN_YOLO_Segment_Predictor")
+        return module.QNN_YOLO_Segment_Predictor
     module = importlib.import_module("vision_module.backend.predictor.QNN_YOLO_Detect_Predictor")
     return module.QNN_YOLO_Detect_Predictor
 
@@ -229,6 +241,8 @@ def make_ir_kwargs(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def make_model_profile(args: argparse.Namespace) -> SingleModelConfig:
+    predictor_type = getattr(args, "predictor_type", "detect") or "detect"
+    is_detect26 = predictor_type == "detect26"
     return SingleModelConfig(
         target_model=args.model_path,
         width=args.model_width,
@@ -237,14 +251,14 @@ def make_model_profile(args: argparse.Namespace) -> SingleModelConfig:
         iou_thres=args.iou_thres,
         class_num=args.class_num,
         classes=None,
-        predictor_type="detect",
+        predictor_type=predictor_type,
         model_backend="qnn",
-        anchors=(
+        anchors=None if is_detect26 else (
             (12, 16, 19, 36, 40, 28),
             (36, 75, 76, 55, 72, 146),
             (142, 110, 192, 243, 459, 401),
         ),
-        strides=(8, 16, 32),
+        strides=None if is_detect26 else (8, 16, 32),
     )
 
 
@@ -326,7 +340,6 @@ def patch_engine_backends(engine_module: Any, camera_backend: str, predictor_bac
     predictor_cls = import_predictor_class(predictor_backend)
     engine_module.ColorCamera = color_cls
     engine_module.IRCamera = ir_cls
-    engine_module.HardwareCamera = color_cls
     engine_module.RealSenseDepthCamera = depth_cls
     engine_module.QNN_YOLO_Detect_Predictor = predictor_cls
     engine_module.QNN_YOLO_Segment_Predictor = predictor_cls
@@ -338,4 +351,5 @@ def patch_engine_backends(engine_module: Any, camera_backend: str, predictor_bac
     camera_manager_module.IRCamera = ir_cls
     camera_manager_module.RealSenseDepthCamera = depth_cls
     predictor_manager_module.QNN_YOLO_Detect_Predictor = predictor_cls
+    predictor_manager_module.QNN_YOLO26_Detect_Predictor = predictor_cls
     predictor_manager_module.QNN_YOLO_Segment_Predictor = predictor_cls

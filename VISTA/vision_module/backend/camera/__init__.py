@@ -16,7 +16,6 @@ _LOG = logging.getLogger("vision.camera")
 
 ColorCamera = None  # type: ignore
 IRCamera = None  # type: ignore
-HardwareCamera = None  # type: ignore
 RealSenseDepthCamera = None  # type: ignore
 
 
@@ -37,25 +36,22 @@ def _prefer_mock_platform() -> bool:
 
 
 def _set_mock_exports() -> None:
-    global ColorCamera, IRCamera, HardwareCamera, RealSenseDepthCamera
+    global ColorCamera, IRCamera, RealSenseDepthCamera
 
     ColorCamera = MockCamera
     IRCamera = MockCamera
-    HardwareCamera = MockCamera
     RealSenseDepthCamera = MockCamera
 
 
 def _set_real_exports() -> None:
-    global ColorCamera, IRCamera, HardwareCamera, RealSenseDepthCamera
+    global ColorCamera, IRCamera, RealSenseDepthCamera
 
     from .ColorCamera import ColorCamera as _ColorCamera
     from .IRCamera import IRCamera as _IRCamera
-    from .HardwareCamera import HardwareCamera as _HardwareCamera
     from .RealSenseDepthCamera import RealSenseDepthCamera as _RealSenseDepthCamera
 
     ColorCamera = _ColorCamera
     IRCamera = _IRCamera
-    HardwareCamera = _HardwareCamera
     RealSenseDepthCamera = _RealSenseDepthCamera
 
 
@@ -99,7 +95,6 @@ __all__ = [
     "MockCamera",
     "ColorCamera",
     "IRCamera",
-    "HardwareCamera",
     "RealSenseDepthCamera",
     "camera_backend_status",
 ]

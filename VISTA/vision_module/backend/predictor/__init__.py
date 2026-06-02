@@ -15,6 +15,7 @@ from .mock import MockPredictor  # noqa: F401
 _LOG = logging.getLogger("vision.predictor")
 
 QNN_YOLO_Detect_Predictor = None  # type: ignore
+QNN_YOLO26_Detect_Predictor = None  # type: ignore
 QNN_YOLO_Segment_Predictor = None  # type: ignore
 
 
@@ -35,15 +36,17 @@ def _prefer_mock_platform() -> bool:
 
 
 def _set_mock_exports() -> None:
-    global QNN_YOLO_Detect_Predictor, QNN_YOLO_Segment_Predictor
+    global QNN_YOLO_Detect_Predictor, QNN_YOLO26_Detect_Predictor, QNN_YOLO_Segment_Predictor
 
     QNN_YOLO_Detect_Predictor = MockPredictor  # noqa: N816
+    QNN_YOLO26_Detect_Predictor = MockPredictor  # noqa: N816
     QNN_YOLO_Segment_Predictor = MockPredictor  # noqa: N816
 
 
 def _set_real_exports() -> None:
-    global QNN_YOLO_Detect_Predictor, QNN_YOLO_Segment_Predictor
+    global QNN_YOLO_Detect_Predictor, QNN_YOLO26_Detect_Predictor, QNN_YOLO_Segment_Predictor
     from .QNN_YOLO_Detect_Predictor import QNN_YOLO_Detect_Predictor  # noqa: F401
+    from .QNN_YOLO26_Detect_Predictor import QNN_YOLO26_Detect_Predictor  # noqa: F401
     from .QNN_YOLO_Segment_Predictor import QNN_YOLO_Segment_Predictor  # noqa: F401
 
 
@@ -85,6 +88,7 @@ __all__ = [
     "IPredictor",
     "MockPredictor",
     "QNN_YOLO_Detect_Predictor",
+    "QNN_YOLO26_Detect_Predictor",
     "QNN_YOLO_Segment_Predictor",
     "predictor_backend_status",
 ]
