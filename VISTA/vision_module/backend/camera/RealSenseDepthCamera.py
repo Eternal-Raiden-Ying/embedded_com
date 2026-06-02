@@ -3,6 +3,7 @@ import numpy as np
 import logging
 
 from .base import ICamera
+from ..depth_calibration import depth_intrinsics_from_rs_profile
 
 
 logger = logging.getLogger("vision.camera")
@@ -31,6 +32,7 @@ class RealSenseDepthCamera(ICamera):
             
         self.dev = devices[0]
         self.depth_sensor = self.dev.first_depth_sensor()
+        self.depth_scale = float(self.depth_sensor.get_depth_scale())
         
         # 2. 查找匹配的底层数据流配置
         target_profile = None
@@ -57,9 +59,28 @@ class RealSenseDepthCamera(ICamera):
         
         # 4. 打开传感器并启动流
         self.depth_sensor.open(target_profile)
+        self.depth_intrinsics = depth_intrinsics_from_rs_profile(
+            target_profile,
+            depth_scale=self.depth_scale,
+            source="realsense_profile",
+        )
         self.depth_sensor.start(self.frame_queue)
         self.is_running = True
-        logger.info("camera /dev/video2 started: %sx%s @ %sfps", width, height, fps)
+        logger.info(
+            "camera /dev/video2 started: %sx%s @ %sfps calib_source=%s fx=%.3f fy=%.3f cx=%.3f cy=%.3f depth_scale=%.6f",
+            width,
+            height,
+            fps,
+            getattr(self.depth_intrinsics, "source", "unavailable"),
+            float(getattr(self.depth_intrinsics, "fx", 0.0) or 0.0),
+            float(getattr(self.depth_intrinsics, "fy", 0.0) or 0.0),
+            float(getattr(self.depth_intrinsics, "cx", 0.0) or 0.0),
+            float(getattr(self.depth_intrinsics, "cy", 0.0) or 0.0),
+            self.depth_scale,
+        )
+
+    def get_depth_intrinsics(self):
+        return self.depth_intrinsics.to_dict() if self.depth_intrinsics is not None else None
 
     def read_frame(self) -> np.ndarray:
         """

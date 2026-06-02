@@ -14,6 +14,7 @@ if str(STACK_ROOT) not in sys.path:
 
 from common.base_module import BaseModule
 from common.runtime_logging import RunLogger, ensure_dir, env_flag
+from common.system_metrics import SystemMetricsSampler
 
 from ..backend.camera_manager import CameraManager
 from ..backend.mode_controller import ModeController
@@ -91,6 +92,8 @@ class VistaApp(BaseModule):
             uds_path=CONFIG.obs_out.uds_path,
             name="obs_out",
             logger=self._log_ipc_event,
+            queue_size=1,
+            latest_only=True,
         )
         self.stage_controller = StageController(
             logger=self.child_logger("stage"),
@@ -125,9 +128,19 @@ class VistaApp(BaseModule):
         self._rate_target_update_ts = deque(maxlen=128)
         self._rate_idempotent_request_ts = deque(maxlen=128)
         self._rate_mode_reset_ts = deque(maxlen=64)
+        self._rate_ipc_rx_ts = deque(maxlen=256)
+        self._rate_ipc_tx_ts = deque(maxlen=256)
+        self._rate_ipc_enqueue_ts = deque(maxlen=256)
+        self._rate_obs_out_send_ts = deque(maxlen=256)
+        self._last_obs_out_send_ts = 0.0
+        self._obs_out_drop_or_skip_count = 0
+        self._obs_out_skip_reason = ""
         self._last_rate_target_key = None
         self._last_rate_edge_key = None
         self._last_request_trace_ts = 0.0
+        self._last_periodic_log_ts: Dict[str, float] = {}
+        self._system_metrics = SystemMetricsSampler("vision", interval_s=float(os.getenv("VISION_SYSTEM_METRICS_INTERVAL_S", "1.0") or 1.0))
+        self._last_preview_timing_log_ts = 0.0
         self._warn_deprecated_env()
 
     def _warn_deprecated_env(self):
@@ -155,6 +168,12 @@ class VistaApp(BaseModule):
             "loop_hz": CONFIG.runtime.loop_hz,
             "send_hz": CONFIG.runtime.send_hz,
             "track_local_send_hz": CONFIG.runtime.track_local_send_hz,
+            "camera_max_fps": CONFIG.camera.max_fps,
+            "camera_stream_fps": {
+                name: getattr(stream, "fps", None)
+                for name, stream in dict(CONFIG.camera.streams or {}).items()
+            },
+            "camera_publish_hz": CONFIG.camera.max_fps,
             "hot_standby_s": CONFIG.runtime.hot_standby_s,
             "keep_preview_after_stop": CONFIG.runtime.keep_preview_after_stop,
             "keep_model_hot_in_standby": CONFIG.runtime.keep_model_hot_in_standby,
@@ -283,6 +302,25 @@ class VistaApp(BaseModule):
     def _heartbeat_console_enabled(self) -> bool:
         return self._console_is_full() or bool(CONFIG.runtime.heartbeat_console) or env_flag("VISION_HEARTBEAT_CONSOLE", "0")
 
+    def _verbose_ipc_success_enabled(self) -> bool:
+        return self._console_is_full() or env_flag("VISION_IPC_VERBOSE_SUCCESS", "0")
+
+    def _should_log_periodic(self, name: str, interval_s: float, now: Optional[float] = None) -> bool:
+        now = time.time() if now is None else float(now)
+        interval_s = max(0.0, float(interval_s))
+        last_ts = float(self._last_periodic_log_ts.get(name, 0.0) or 0.0)
+        if last_ts > 0.0 and (now - last_ts) < interval_s:
+            return False
+        self._last_periodic_log_ts[name] = now
+        return True
+
+    @staticmethod
+    def _float_or_none(value) -> Optional[float]:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
     def _console_allows_event(self, event_name: str, level: str = "info", data=None) -> bool:
         if self.operator_console.mode == "silent":
             return False
@@ -327,15 +365,30 @@ class VistaApp(BaseModule):
         channel = payload.get("name", payload.get("src", "ipc"))
         event = payload.get("event", payload.get("msg", "log"))
         details = {k: v for k, v in payload.items() if k not in {"level", "src", "name", "event", "msg"}}
-        self._record_ipc(
-            direction=self._ipc_direction_for(channel),
-            channel=channel,
-            event=event,
-            level=level,
-            **details,
-        )
+        event_norm = str(event).strip().lower()
+        now = time.time()
+        if event_norm == "recv_ok":
+            samples = getattr(self, "_rate_ipc_rx_ts", None)
+            if samples is not None:
+                samples.append(now)
+        elif event_norm == "send_ok":
+            samples = getattr(self, "_rate_ipc_tx_ts", None)
+            if samples is not None:
+                samples.append(now)
+        elif event_norm == "enqueue_ok":
+            samples = getattr(self, "_rate_ipc_enqueue_ts", None)
+            if samples is not None:
+                samples.append(now)
         success_events = {"recv_ok", "send_ok", "send_attempt", "enqueue_ok"}
-        noisy_success = str(event).strip().lower() in success_events
+        noisy_success = event_norm in success_events
+        if not noisy_success or self._verbose_ipc_success_enabled():
+            self._record_ipc(
+                direction=self._ipc_direction_for(channel),
+                channel=channel,
+                event=event,
+                level=level,
+                **details,
+            )
         console_events = {
             "listening",
             "connected",
@@ -368,21 +421,41 @@ class VistaApp(BaseModule):
         return (req_stage, target, session_id, int(epoch))
 
     def _send_obs(self, out_payload):
-        queued = self.obs_sender.send(out_payload)
-        self._record_ipc(
-            direction="TX",
-            channel="obs_out",
-            event="enqueue_ok" if queued else "enqueue_failed",
-            level="info" if queued else "warn",
-            ok=queued,
-            req_id=out_payload.get("req_id"),
-            session_id=out_payload.get("session_id"),
-            epoch=out_payload.get("epoch"),
-            stage=out_payload.get("stage"),
-            mode=out_payload.get("mode"),
-            msg_type=out_payload.get("type"),
-            status=out_payload.get("status"),
+        now = time.time()
+        send_interval_ms = (
+            max(0.0, (now - float(self._last_obs_out_send_ts)) * 1000.0)
+            if float(self._last_obs_out_send_ts or 0.0) > 0.0
+            else None
         )
+        send_hz = 1000.0 / float(send_interval_ms) if send_interval_ms and send_interval_ms > 0.0 else 0.0
+        perception = out_payload.get("perception") if isinstance(out_payload, dict) else None
+        edge_obs = perception.get("table_edge_obs") if isinstance(perception, dict) else None
+        if isinstance(edge_obs, dict):
+            edge_obs["obs_out_send_ts_ms"] = int(round(now * 1000.0))
+            edge_obs["obs_out_send_interval_ms"] = send_interval_ms
+            edge_obs["obs_out_send_hz"] = float(send_hz)
+            edge_obs["obs_out_drop_or_skip_count"] = int(self._obs_out_drop_or_skip_count)
+            edge_obs["obs_out_skip_reason"] = str(self._obs_out_skip_reason or "")
+            edge_obs["send_hz_config"] = float(CONFIG.runtime.send_hz)
+            edge_obs["track_local_send_hz_config"] = float(CONFIG.runtime.track_local_send_hz)
+        queued = self.obs_sender.send(out_payload)
+        if not queued:
+            self._obs_out_drop_or_skip_count += 1
+            self._obs_out_skip_reason = "enqueue_failed"
+            self._record_ipc(
+                direction="TX",
+                channel="obs_out",
+                event="enqueue_failed",
+                level="warn",
+                ok=queued,
+                req_id=out_payload.get("req_id"),
+                session_id=out_payload.get("session_id"),
+                epoch=out_payload.get("epoch"),
+                stage=out_payload.get("stage"),
+                mode=out_payload.get("mode"),
+                msg_type=out_payload.get("type"),
+                status=out_payload.get("status"),
+            )
         if not queued:
             self.log_warn("runtime", "obs_out queue busy; skipped enqueue")
         elif self._ipc_console_enabled():
@@ -395,6 +468,10 @@ class VistaApp(BaseModule):
                     "msg_type": out_payload.get("type"),
                 },
             )
+        if queued:
+            self._last_obs_out_send_ts = now
+            self._rate_obs_out_send_ts.append(now)
+            self._obs_out_skip_reason = ""
         return queued
 
     def _trim_rate_window(self, now: float) -> None:
@@ -408,6 +485,10 @@ class VistaApp(BaseModule):
             self._rate_target_update_ts,
             self._rate_idempotent_request_ts,
             self._rate_mode_reset_ts,
+            getattr(self, "_rate_ipc_rx_ts", ()),
+            getattr(self, "_rate_ipc_tx_ts", ()),
+            getattr(self, "_rate_ipc_enqueue_ts", ()),
+            getattr(self, "_rate_obs_out_send_ts", ()),
         ):
             while samples and float(samples[0][0] if isinstance(samples[0], tuple) else samples[0]) < cutoff:
                 samples.popleft()
@@ -444,6 +525,14 @@ class VistaApp(BaseModule):
         except Exception:
             return None
 
+    def _preview_timing_snapshot(self) -> Dict[str, Any]:
+        try:
+            preview = dict(self.mode_controller.runtime_snapshot().get("capabilities", {}).get("preview") or {})
+            timing = dict(preview.get("preview_timing") or {})
+            return timing
+        except Exception:
+            return {}
+
     def _record_rate_sample(self, out_payload: Dict[str, Any], sent_ts: float) -> None:
         if str(out_payload.get("type") or "") != "vision_obs":
             return
@@ -464,8 +553,16 @@ class VistaApp(BaseModule):
                 self._rate_target_ts.append(float(sent_ts))
         edge_obs = perception.get("table_edge_obs")
         if isinstance(edge_obs, dict):
+            now = time.time()
             profile = edge_obs.get("edge_profile")
-            if isinstance(profile, dict):
+            edge_profile_log_ms = None
+            edge_profile_every_frame = env_flag("VISION_EDGE_PROFILE_EVERY_FRAME", "0") or self._console_is_full()
+            should_log_edge_profile = bool(
+                isinstance(profile, dict)
+                and (edge_profile_every_frame or self._should_log_periodic("edge_profile", 2.0, now=now))
+            )
+            if should_log_edge_profile:
+                profile_log_start = time.perf_counter()
                 self.run_logger.write_jsonl(
                     "edge_profile",
                     {
@@ -479,6 +576,87 @@ class VistaApp(BaseModule):
                         "obs_ts": edge_obs.get("obs_ts"),
                         "edge_process_path": edge_obs.get("edge_process_path"),
                         **profile,
+                    },
+                )
+                edge_profile_log_ms = max(0.0, (time.perf_counter() - profile_log_start) * 1000.0)
+            obs_total_age_ms = self._float_or_none(edge_obs.get("obs_total_age_ms"))
+            vision_process_ms = self._float_or_none(edge_obs.get("vision_process_ms"))
+            abnormal_frame = (
+                (obs_total_age_ms is not None and obs_total_age_ms >= 300.0)
+                or (vision_process_ms is not None and vision_process_ms >= 180.0)
+            )
+            should_log_frame_timing = abnormal_frame or self._should_log_periodic("frame_timing", 1.0, now=now)
+            frame_record = {
+                "mode": out_payload.get("mode"),
+                "stage": out_payload.get("stage"),
+                "req_id": out_payload.get("req_id"),
+                "session_id": out_payload.get("session_id"),
+                "epoch": out_payload.get("epoch"),
+                "frame_id": edge_obs.get("frame_id"),
+                "seq": edge_obs.get("seq"),
+                "obs_ts": edge_obs.get("obs_ts"),
+                "obs_seq": edge_obs.get("obs_seq"),
+                "camera_frame_seq": edge_obs.get("camera_frame_seq"),
+                "frame_capture_ts": edge_obs.get("frame_capture_ts"),
+                "camera_frame_ts_ms": edge_obs.get("camera_frame_ts_ms"),
+                "vision_start_ts": edge_obs.get("vision_start_ts"),
+                "vision_done_ts": edge_obs.get("vision_done_ts"),
+                "obs_publish_ts": edge_obs.get("obs_publish_ts"),
+                "vision_process_start_ts_ms": edge_obs.get("vision_process_start_ts_ms"),
+                "vision_process_end_ts_ms": edge_obs.get("vision_process_end_ts_ms"),
+                "vision_publish_ts_ms": edge_obs.get("vision_publish_ts_ms"),
+                "obs_out_send_ts_ms": edge_obs.get("obs_out_send_ts_ms"),
+                "obs_send_enqueue_ts": float(sent_ts),
+                "log_record_start_ts": time.time(),
+                "camera_frame_interval_ms": edge_obs.get("camera_frame_interval_ms"),
+                "camera_frame_hz": edge_obs.get("camera_frame_hz", edge_obs.get("camera_frames_hz")),
+                "vision_process_interval_ms": edge_obs.get("vision_process_interval_ms"),
+                "vision_publish_interval_ms": edge_obs.get("vision_publish_interval_ms", edge_obs.get("table_edge_publish_interval_ms")),
+                "table_edge_worker_interval_ms": edge_obs.get("table_edge_worker_interval_ms"),
+                "table_edge_no_new_frame_count": edge_obs.get("table_edge_no_new_frame_count"),
+                "scheduler_publish_ms": edge_obs.get("scheduler_publish_ms"),
+                "obs_out_send_interval_ms": edge_obs.get("obs_out_send_interval_ms"),
+                "obs_out_send_hz": edge_obs.get("obs_out_send_hz"),
+                "obs_out_drop_or_skip_count": edge_obs.get("obs_out_drop_or_skip_count"),
+                "obs_out_skip_reason": edge_obs.get("obs_out_skip_reason"),
+                "send_hz_config": edge_obs.get("send_hz_config"),
+                "track_local_send_hz_config": edge_obs.get("track_local_send_hz_config"),
+                "frame_age_ms": edge_obs.get("frame_age_ms"),
+                "vision_process_ms": edge_obs.get("vision_process_ms"),
+                "publish_delay_ms": edge_obs.get("publish_delay_ms"),
+                "obs_total_age_ms": edge_obs.get("obs_total_age_ms"),
+                "latest_frame_lag_ms": edge_obs.get("latest_frame_lag_ms"),
+                "depth_frame_fetch_ms": edge_obs.get("depth_frame_fetch_ms"),
+                "edge_process_path": edge_obs.get("edge_process_path"),
+                "detector_mode": edge_obs.get("detector_mode"),
+                "source_mode": edge_obs.get("source_mode"),
+                "dropped_frame_count": edge_obs.get("dropped_frame_count"),
+                "processed_frame_count": edge_obs.get("processed_frame_count"),
+                "edge_profile_log_write_ms": edge_profile_log_ms,
+            }
+            frame_log_ms = None
+            if should_log_frame_timing:
+                frame_log_start = time.perf_counter()
+                self.run_logger.write_jsonl("frame_timing", frame_record)
+                frame_log_ms = max(0.0, (time.perf_counter() - frame_log_start) * 1000.0)
+            slow_log_write = any(
+                value is not None and float(value) > 10.0
+                for value in (edge_profile_log_ms, frame_log_ms)
+            )
+            if slow_log_write or self._should_log_periodic("log_timing", 5.0, now=now):
+                self.run_logger.write_jsonl(
+                    "log_timing",
+                    {
+                        "mode": out_payload.get("mode"),
+                        "stage": out_payload.get("stage"),
+                        "req_id": out_payload.get("req_id"),
+                        "session_id": out_payload.get("session_id"),
+                        "epoch": out_payload.get("epoch"),
+                        "frame_id": edge_obs.get("frame_id"),
+                        "seq": edge_obs.get("seq"),
+                        "edge_profile_log_write_ms": edge_profile_log_ms,
+                        "frame_timing_log_write_ms": frame_log_ms,
+                        "summary": not slow_log_write,
                     },
                 )
             edge_key = (
@@ -500,7 +678,7 @@ class VistaApp(BaseModule):
         if self._safe_mode_text(self._ctx().current_mode) != "FIND_OBJECT":
             return
         now = time.time()
-        period_s = max(0.5, float(CONFIG.runtime.operator_summary_interval_s))
+        period_s = max(5.0, float(CONFIG.runtime.operator_summary_interval_s))
         if not force and (now - float(self._last_rate_emit_ts or 0.0)) < period_s:
             return
         self._last_rate_emit_ts = now
@@ -512,9 +690,14 @@ class VistaApp(BaseModule):
         p50 = self._percentile(ages, 0.50)
         p95 = self._percentile(ages, 0.95)
         preview_fps = self._preview_fps_snapshot()
+        preview_timing = self._preview_timing_snapshot()
         request_hz = self._hz_for_samples(self._rate_request_ts, now)
         mode_request_hz = self._hz_for_samples(self._rate_mode_request_ts, now)
         target_update_hz = self._hz_for_samples(self._rate_target_update_ts, now)
+        ipc_rx_hz = self._hz_for_samples(getattr(self, "_rate_ipc_rx_ts", ()), now)
+        ipc_tx_hz = self._hz_for_samples(getattr(self, "_rate_ipc_tx_ts", ()), now)
+        ipc_enqueue_hz = self._hz_for_samples(getattr(self, "_rate_ipc_enqueue_ts", ()), now)
+        obs_out_send_hz = self._hz_for_samples(getattr(self, "_rate_obs_out_send_ts", ()), now)
         record = {
             "mode": self._safe_mode_text(self._ctx().current_mode),
             "request_rate_hz": float(request_hz),
@@ -526,11 +709,38 @@ class VistaApp(BaseModule):
             "table_edge_obs_hz": float(edge_hz),
             "edge_update_hz": float(edge_hz),
             "preview_fps": preview_fps,
+            "preview_enabled": preview_timing.get("preview_enabled"),
+            "preview_layout": preview_timing.get("preview_layout"),
+            "preview_text_level": preview_timing.get("preview_text_level"),
+            "preview_debug_points_enabled": preview_timing.get("preview_debug_points_enabled"),
+            "preview_total_ms_avg": preview_timing.get("preview_total_ms_avg"),
+            "preview_total_ms_p95": preview_timing.get("preview_total_ms_p95"),
+            "preview_total_ms_max": preview_timing.get("preview_total_ms_max"),
+            "preview_compose_ms_avg": preview_timing.get("preview_compose_ms_avg"),
+            "preview_draw_points_ms_avg": preview_timing.get("preview_draw_points_ms_avg"),
+            "preview_draw_text_ms_avg": preview_timing.get("preview_draw_text_ms_avg"),
+            "preview_draw_legend_ms_avg": preview_timing.get("preview_draw_legend_ms_avg"),
+            "preview_imshow_ms_avg": preview_timing.get("preview_imshow_ms_avg"),
+            "preview_waitkey_ms_avg": preview_timing.get("preview_waitkey_ms_avg"),
             "edge_age_p50": p50,
             "edge_age_p95": p95,
+            "ipc_rx_hz": float(ipc_rx_hz),
+            "ipc_tx_hz": float(ipc_tx_hz),
+            "ipc_enqueue_hz": float(ipc_enqueue_hz),
+            "obs_out_send_hz": float(obs_out_send_hz),
+            "obs_out_drop_or_skip_count": int(self._obs_out_drop_or_skip_count),
+            "obs_out_skip_reason": str(self._obs_out_skip_reason or ""),
+            "send_hz_config": float(CONFIG.runtime.send_hz),
+            "track_local_send_hz_config": float(CONFIG.runtime.track_local_send_hz),
+            "camera_publish_hz_config": float(CONFIG.camera.max_fps),
+            "table_edge_update_hz_config": None,  # per-mode
+            "table_edge_track_local_update_hz_config": None,  # per-mode
             "window_s": float(window_s),
         }
         self.run_logger.write_jsonl("rate", record)
+        if preview_timing and (force or now - float(self._last_preview_timing_log_ts or 0.0) >= 1.0):
+            self._last_preview_timing_log_ts = now
+            self.run_logger.write_jsonl("preview_timing", preview_timing)
         self.operator_console.emit_rate_limited(
             "vision_rate",
             "[VISION][RATE] "
@@ -540,6 +750,9 @@ class VistaApp(BaseModule):
             f"target_update_rate_hz={self._fmt_rate_value(target_update_hz)} "
             f"target_obs_hz={self._fmt_rate_value(target_hz)} "
             f"table_edge_obs_hz={self._fmt_rate_value(edge_hz)} "
+            f"ipc_rx_hz={self._fmt_rate_value(ipc_rx_hz)} "
+            f"ipc_tx_hz={self._fmt_rate_value(ipc_tx_hz)} "
+            f"obs_out_send_hz={self._fmt_rate_value(obs_out_send_hz)} "
             f"preview_fps={self._fmt_rate_value(preview_fps)} "
             f"edge_age_p50={self._fmt_rate_value(p50, 0)} "
             f"edge_age_p95={self._fmt_rate_value(p95, 0)}",
@@ -718,6 +931,8 @@ class VistaApp(BaseModule):
         if output.vision_obs is None:
             return False
         if not force_send and (now - self.last_send_ts) < self._send_interval_s():
+            self._obs_out_drop_or_skip_count += 1
+            self._obs_out_skip_reason = "send_hz_limit"
             return False
         queued = self._send_obs(output.vision_obs)
         if queued:
@@ -873,6 +1088,7 @@ class VistaApp(BaseModule):
                 },
             )
         self._emit_heartbeat_if_needed(force=True)
+        self._emit_system_metrics_if_needed(force=True)
 
     def stop(self):
         if self._stopped:
@@ -883,6 +1099,7 @@ class VistaApp(BaseModule):
         self.req_server.close()
         self.obs_sender.close()
         self.mode_controller.stop_runtime()
+        self._emit_system_metrics_if_needed(force=True)
         self._record_event("SERVICE_STOPPED", trigger="stop")
         self.operator_console.emit(f"[VISTA] SERVICE_STOPPED run={self.run_logger.stack_run_id}")
         if self._console_is_full():
@@ -918,6 +1135,7 @@ class VistaApp(BaseModule):
                 self._expire_hot_standby(now)
 
                 self._emit_heartbeat_if_needed()
+                self._emit_system_metrics_if_needed()
                 dt = time.time() - loop_start
                 if dt < target_frame_time:
                     time.sleep(target_frame_time - dt)
@@ -929,6 +1147,11 @@ class VistaApp(BaseModule):
             self.log_error("runtime", f"vista main loop crashed: {exc}")
         finally:
             self.stop()
+
+    def _emit_system_metrics_if_needed(self, force: bool = False) -> None:
+        sample = self._system_metrics.sample_if_due(force=force)
+        if sample is not None:
+            self.run_logger.write_jsonl("system_metrics", sample)
 
 
 def main():

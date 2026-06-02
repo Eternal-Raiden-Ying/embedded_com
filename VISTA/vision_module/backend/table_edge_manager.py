@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, Optional
 
 import numpy as np
 
+from .depth_calibration import DepthIntrinsics, depth_intrinsics_from_dict
 from .table_edge_roi import choose_depth_roi
 from ..config.schema import VisionServiceConfig
 from ..utils.table_roi import table_detection_debug
@@ -68,6 +69,17 @@ class TableEdgeManager:
         self._save_debug_frames = bool(getattr(table_edge_cfg, "save_debug_frames", False))
         self._last_camera_generation = 0
         self._last_camera_seq = 0
+        self._last_camera_frame_capture_ts = 0.0
+        self._last_camera_frame_interval_ms: Optional[float] = None
+        self._last_worker_loop_ts = 0.0
+        self._last_worker_interval_ms: Optional[float] = None
+        self._last_process_start_ts = 0.0
+        self._last_table_edge_process_interval_ms: Optional[float] = None
+        self._last_publish_interval_ms: Optional[float] = None
+        self._last_scheduler_read_ms = 0.0
+        self._last_scheduler_publish_ms = 0.0
+        self._table_edge_no_new_frame_count = 0
+        self._last_obs_seq = 0
         self._last_publish_ts = 0.0
         self._last_obs_ts = 0.0
         self._last_depth_frame_fetch_ms = 0.0
@@ -82,6 +94,9 @@ class TableEdgeManager:
         self._detector = None
         self._detector_cfg = None
         self._detector_error = ""
+        self._fallback_calib = None
+        self._frame_calib_payload: Dict[str, Any] = {}
+        self._last_calib_log_key = ""
         self._target_dist_m = 0.5
         self._source_mode_override: Optional[str] = None
         self._local_perception_override: Optional[Dict[str, Any]] = None
@@ -130,6 +145,7 @@ class TableEdgeManager:
                 target_dist = float(edge_cfg.detector.target_dist_m_override)
             self._detector = OnlineTableEdgeDetector(calib, edge_cfg.detector, target_dist)
             self._detector_cfg = edge_cfg.detector
+            self._fallback_calib = calib
             self._target_dist_m = float(target_dist)
             self._detector_error = ""
             self._emit(
@@ -140,6 +156,7 @@ class TableEdgeManager:
         except Exception as exc:
             self._detector = None
             self._detector_cfg = None
+            self._fallback_calib = None
             self._detector_error = str(exc or "detector_unavailable")
             self._emit("load_failed", error=self._detector_error)
 
@@ -174,10 +191,29 @@ class TableEdgeManager:
             generation = 0
         try:
             if isinstance(payload, dict):
+                publish_start = time.perf_counter()
+                now = time.time()
+                payload["table_edge_publish_interval_ms"] = (
+                    (now - float(self._last_publish_ts)) * 1000.0
+                    if float(self._last_publish_ts or 0.0) > 0.0
+                    else None
+                )
+                self._last_publish_interval_ms = payload.get("table_edge_publish_interval_ms")
                 payload["obs_publish_ts"] = float(time.time())
+                payload["vision_publish_ts_ms"] = self._epoch_ms(payload["obs_publish_ts"])
                 done_ts = float(payload.get("vision_done_ts") or payload["obs_publish_ts"])
                 payload["publish_delay_ms"] = max(0.0, (payload["obs_publish_ts"] - done_ts) * 1000.0)
+                profile = payload.get("edge_profile")
+                if isinstance(profile, dict):
+                    profile["table_edge_publish_interval_ms"] = payload.get("table_edge_publish_interval_ms")
+                    profile["vision_publish_ts_ms"] = payload.get("vision_publish_ts_ms")
             scheduler.publish_result(route, payload, generation=generation)
+            if isinstance(payload, dict):
+                self._last_scheduler_publish_ms = self._ms_since(publish_start)
+                payload["scheduler_publish_ms"] = float(self._last_scheduler_publish_ms)
+                profile = payload.get("edge_profile")
+                if isinstance(profile, dict):
+                    profile["scheduler_publish_ms"] = float(self._last_scheduler_publish_ms)
             self._last_publish_ts = time.time()
         except Exception:
             pass
@@ -263,11 +299,21 @@ class TableEdgeManager:
         update_interval_ms = ((obs_ts - previous_obs_ts) * 1000.0) if previous_obs_ts > 0.0 else None
         self._last_obs_ts = float(obs_ts)
         self._last_update_interval_ms = update_interval_ms
+        obs_hz = 1000.0 / float(update_interval_ms) if update_interval_ms and update_interval_ms > 0.0 else 0.0
         out["ts"] = float(obs_ts)
         out["obs_ts"] = float(obs_ts)
         out["frame_capture_ts"] = float(frame_capture_ts)
         out["vision_start_ts"] = float(vision_start_ts)
         out["vision_done_ts"] = float(vision_done_ts)
+        out["obs_seq"] = int(out.get("obs_seq") or self._last_obs_seq or 0)
+        out["camera_frame_ts_ms"] = self._epoch_ms(frame_capture_ts)
+        out["vision_process_start_ts_ms"] = self._epoch_ms(vision_start_ts)
+        out["vision_process_end_ts_ms"] = self._epoch_ms(vision_done_ts)
+        out.setdefault("vision_publish_ts_ms", None)
+        out.setdefault("obs_out_send_ts_ms", None)
+        out.setdefault("orchestrator_recv_ts_ms", None)
+        out.setdefault("state_machine_consume_ts_ms", None)
+        out.setdefault("cmd_publish_ts_ms", None)
         out["frame_age_ms"] = max(0.0, (float(vision_start_ts) - float(frame_capture_ts)) * 1000.0)
         out["vision_process_ms"] = max(0.0, (float(vision_done_ts) - float(vision_start_ts)) * 1000.0)
         out["obs_total_age_ms"] = max(0.0, (float(obs_ts) - float(frame_capture_ts)) * 1000.0)
@@ -281,6 +327,47 @@ class TableEdgeManager:
         out["dropped_frame_count"] = int(self._dropped_frame_count)
         out["processed_frame_count"] = int(self._processed_frame_count)
         out["latest_frame_lag_ms"] = float(latest_frame_lag_ms)
+        out["camera_frame_seq"] = out.get("camera_frame_seq", out.get("frame_seq", out.get("seq")))
+        out["camera_frame_age_ms"] = float(latest_frame_lag_ms)
+        out["camera_frame_interval_ms"] = self._last_camera_frame_interval_ms
+        out["camera_frame_hz"] = (
+            1000.0 / float(self._last_camera_frame_interval_ms)
+            if self._last_camera_frame_interval_ms and self._last_camera_frame_interval_ms > 0.0
+            else 0.0
+        )
+        out["camera_frames_hz"] = out["camera_frame_hz"]
+        out["table_edge_worker_interval_ms"] = self._last_worker_interval_ms
+        out["table_edge_no_new_frame_count"] = int(self._table_edge_no_new_frame_count)
+        out["table_edge_process_interval_ms"] = self._last_table_edge_process_interval_ms
+        out["vision_process_interval_ms"] = self._last_table_edge_process_interval_ms
+        out["table_edge_publish_interval_ms"] = self._last_publish_interval_ms
+        out["vision_publish_interval_ms"] = self._last_publish_interval_ms
+        out["table_edge_obs_hz"] = float(obs_hz)
+        out["scheduler_read_ms"] = float(self._last_scheduler_read_ms)
+        out["scheduler_publish_ms"] = float(self._last_scheduler_publish_ms)
+        profile = out.get("edge_profile")
+        if isinstance(profile, dict):
+            for key in (
+                "camera_frame_seq",
+                "obs_seq",
+                "camera_frame_ts_ms",
+                "vision_process_start_ts_ms",
+                "vision_process_end_ts_ms",
+                "camera_frame_age_ms",
+                "camera_frame_interval_ms",
+                "camera_frame_hz",
+                "camera_frames_hz",
+                "table_edge_worker_interval_ms",
+                "table_edge_no_new_frame_count",
+                "table_edge_process_interval_ms",
+                "vision_process_interval_ms",
+                "table_edge_publish_interval_ms",
+                "vision_publish_interval_ms",
+                "table_edge_obs_hz",
+                "scheduler_read_ms",
+                "scheduler_publish_ms",
+            ):
+                profile[key] = out.get(key)
         unavailable = bool(out.get("edge_obs_unavailable", False))
         out["is_stale"] = bool(out.get("is_stale", False) or unavailable)
         out["source_mode"] = self._source_mode_override if self._source_mode_override is not None else self._detector_mode
@@ -306,18 +393,143 @@ class TableEdgeManager:
             return
         self._last_profile_log_ts = now
         self.log.info(
-            "[TABLE_EDGE_PROFILE] obs_total_age_ms=%.1f vision_process_ms=%.1f edge_update_interval_ms=%s dropped=%d processed=%d latest_frame_lag_ms=%.1f",
+            "[TABLE_EDGE_PROFILE] obs_total_age_ms=%.1f vision_process_ms=%.1f edge_update_interval_ms=%s dropped=%d processed=%d latest_frame_lag_ms=%.1f depth_shape=%s fx=%.3f fy=%.3f cx=%.3f cy=%.3f depth_scale=%.6f calib_source=%s warning=%s",
             float(payload.get("obs_total_age_ms") or 0.0),
             float(payload.get("vision_process_ms") or 0.0),
             "None" if payload.get("edge_update_interval_ms") is None else f"{float(payload.get('edge_update_interval_ms')):.1f}",
             int(payload.get("dropped_frame_count") or 0),
             int(payload.get("processed_frame_count") or 0),
             float(payload.get("latest_frame_lag_ms") or 0.0),
+            payload.get("depth_shape"),
+            float(payload.get("fx") or 0.0),
+            float(payload.get("fy") or 0.0),
+            float(payload.get("cx") or 0.0),
+            float(payload.get("cy") or 0.0),
+            float(payload.get("depth_scale") or 0.0),
+            payload.get("calib_source"),
+            payload.get("calib_mismatch_warning") or "none",
         )
 
     @staticmethod
     def _ms_since(start_ts: float) -> float:
         return max(0.0, (time.perf_counter() - float(start_ts)) * 1000.0)
+
+    @staticmethod
+    def _epoch_ms(ts: Any) -> Optional[int]:
+        try:
+            value = float(ts)
+            if value <= 0.0:
+                return None
+            return int(round(value * 1000.0))
+        except Exception:
+            return None
+
+    def _calib_from_depth_intrinsics(self, intr: DepthIntrinsics):
+        try:
+            from .edge_detect.detector import CameraCalib
+        except ImportError:
+            from vision_module.backend.edge_detect.detector import CameraCalib  # type: ignore
+        return CameraCalib(
+            fx=float(intr.fx),
+            fy=float(intr.fy),
+            cx=float(intr.cx),
+            cy=float(intr.cy),
+            depth_scale=float(intr.depth_scale),
+            width=int(intr.width),
+            height=int(intr.height),
+            source=str(intr.source or "runtime_profile"),
+            profile_info=str(intr.profile_info or ""),
+        )
+
+    def _resolve_frame_calib(self, frames: Dict[str, Any], depth: Any) -> Any:
+        fallback = self._fallback_calib or getattr(self._detector, "calib", None)
+        intr = depth_intrinsics_from_dict((frames or {}).get("depth_intrinsics"))
+        if intr is not None:
+            return self._calib_from_depth_intrinsics(intr)
+        if fallback is not None:
+            try:
+                fallback.source = "calib_json_fallback"
+            except Exception:
+                pass
+            return fallback
+        return None
+
+    @staticmethod
+    def _depth_shape_payload(depth: Any) -> tuple[Optional[int], Optional[int], Optional[list[int]]]:
+        shape = getattr(depth, "shape", None)
+        if not isinstance(shape, tuple) or len(shape) < 2:
+            return None, None, None
+        try:
+            h = int(shape[0])
+            w = int(shape[1])
+        except Exception:
+            return None, None, None
+        if h <= 0 or w <= 0:
+            return None, None, None
+        return h, w, [h, w]
+
+    def _build_calib_payload(self, calib: Any, depth: Any) -> Dict[str, Any]:
+        h, w, depth_shape = self._depth_shape_payload(depth)
+        if calib is None:
+            return {
+                "depth_shape": depth_shape,
+                "calib_width": None,
+                "calib_height": None,
+                "fx": None,
+                "fy": None,
+                "cx": None,
+                "cy": None,
+                "depth_scale": None,
+                "calib_source": "unavailable",
+                "calib_mismatch_warning": "CALIB_UNAVAILABLE",
+            }
+        calib_w = int(getattr(calib, "width", 0) or 0) or None
+        calib_h = int(getattr(calib, "height", 0) or 0) or None
+        fx = float(getattr(calib, "fx", 0.0) or 0.0)
+        fy = float(getattr(calib, "fy", 0.0) or 0.0)
+        cx = float(getattr(calib, "cx", 0.0) or 0.0)
+        cy = float(getattr(calib, "cy", 0.0) or 0.0)
+        source = str(getattr(calib, "source", "") or "calib_json_fallback")
+        warnings = []
+        if w is not None and h is not None:
+            if not (0.0 <= cx <= float(w)) or not (0.0 <= cy <= float(h)):
+                warnings.append(f"CALIB_MISMATCH: depth={w}x{h} cx={cx:.3f} cy={cy:.3f}")
+            if calib_w is not None and calib_h is not None and (int(calib_w) != int(w) or int(calib_h) != int(h)):
+                warnings.append(f"CALIB_MISMATCH: depth={w}x{h} calib={calib_w}x{calib_h}")
+        if source == "calib_json_fallback":
+            warnings.append("CALIB_FALLBACK: calib_json_fallback")
+        warning = " | ".join(dict.fromkeys(warnings))
+        payload = {
+            "depth_shape": depth_shape,
+            "calib_width": calib_w,
+            "calib_height": calib_h,
+            "fx": fx,
+            "fy": fy,
+            "cx": cx,
+            "cy": cy,
+            "depth_scale": float(getattr(calib, "depth_scale", 0.001) or 0.001),
+            "calib_source": source,
+            "calib_profile_info": str(getattr(calib, "profile_info", "") or ""),
+            "calib_mismatch_warning": warning,
+        }
+        log_key = f"{source}|{w}x{h}|{calib_w}x{calib_h}|{fx:.2f}|{fy:.2f}|{cx:.2f}|{cy:.2f}|{warning}"
+        if log_key != self._last_calib_log_key:
+            self._last_calib_log_key = log_key
+            log_fn = self.log.warning if warning else self.log.info
+            log_fn(
+                "[TABLE_EDGE_CALIB] depth_shape=%s calib=%sx%s fx=%.3f fy=%.3f cx=%.3f cy=%.3f depth_scale=%.6f calib_source=%s warning=%s",
+                depth_shape,
+                calib_w,
+                calib_h,
+                fx,
+                fy,
+                cx,
+                cy,
+                float(payload["depth_scale"]),
+                source,
+                warning or "none",
+            )
+        return payload
 
     @staticmethod
     def _shape_hw(shape: Any) -> Optional[tuple[int, int]]:
@@ -435,6 +647,29 @@ class TableEdgeManager:
             "preview_save_ms": 0.0,
             "loop_total_ms": 0.0,
             "payload_size_bytes": 0.0,
+            "camera_frame_age_ms": 0.0,
+            "camera_frame_interval_ms": 0.0,
+            "camera_frames_hz": 0.0,
+            "table_edge_worker_interval_ms": 0.0,
+            "table_edge_no_new_frame_count": 0.0,
+            "table_edge_process_interval_ms": 0.0,
+            "table_edge_publish_interval_ms": 0.0,
+            "table_edge_obs_hz": 0.0,
+            "scheduler_read_ms": 0.0,
+            "scheduler_publish_ms": 0.0,
+            "fast_roi_extract_ms": 0.0,
+            "fast_depth_valid_ms": 0.0,
+            "fast_projection_ms": 0.0,
+            "fast_robot_transform_ms": 0.0,
+            "fast_height_filter_ms": 0.0,
+            "fast_rep_select_ms": 0.0,
+            "fast_front_cluster_fit_ms": 0.0,
+            "fast_front_edge_ms": 0.0,
+            "fast_local_band_ms": 0.0,
+            "fast_background_protect_ms": 0.0,
+            "fast_control_gate_ms": 0.0,
+            "fast_debug_payload_ms": 0.0,
+            "fast_total_ms": 0.0,
         }
 
     def _detector_mode_payload(self) -> Dict[str, Any]:
@@ -500,6 +735,146 @@ class TableEdgeManager:
             "cx_delta": float(cx_delta),
         }
 
+    def _fast_debug_pixels_enabled(self) -> bool:
+        cfg = getattr(self.cfg, "table_edge", None)
+        if not bool(getattr(cfg, "fast_debug_pixels", True)):
+            return False
+        mode = str(self._source_mode_override or "").upper()
+        is_offline = "OFFLINE" in mode or "BAG" in mode
+        if is_offline:
+            return bool(getattr(cfg, "fast_debug_pixels_offline", True))
+        return bool(getattr(cfg, "fast_debug_pixels_online", False))
+
+    def _fast_debug_pixel_cap(self) -> int:
+        cfg = getattr(self.cfg, "table_edge", None)
+        try:
+            return max(0, int(float(getattr(cfg, "fast_debug_pixel_cap", 300) or 300)))
+        except Exception:
+            return 300
+
+    @staticmethod
+    def _sparse_pixel_pairs(px: Any, py: Any, *, cap: int) -> list:
+        px_arr = np.asarray(px, dtype=np.int32)
+        py_arr = np.asarray(py, dtype=np.int32)
+        n = int(min(len(px_arr), len(py_arr)))
+        if n <= 0 or int(cap) <= 0:
+            return []
+        cap_i = int(cap)
+        step = max(1, int(math.ceil(float(n) / float(cap_i))))
+        return [[int(x), int(y)] for x, y in zip(px_arr[:n][::step][:cap_i].tolist(), py_arr[:n][::step][:cap_i].tolist())]
+
+    @staticmethod
+    def _pixel_payload(enabled: bool, **items: Any) -> Dict[str, Any]:
+        if not bool(enabled):
+            return {}
+        return {str(k): v for k, v in items.items()}
+
+    @staticmethod
+    def _empty_fast_edge_cue() -> Dict[str, Any]:
+        empty_f = np.asarray([], dtype=np.float32)
+        empty_i = np.asarray([], dtype=np.int32)
+        return {
+            "count": 0,
+            "inlier_count": 0,
+            "x_span_m": 0.0,
+            "median_py": None,
+            "residual_mean": 0.0,
+            "k": 0.0,
+            "b": 0.0,
+            "yaw": 0.0,
+            "dist": 0.0,
+            "score": 0.0,
+            "x": empty_f,
+            "y": empty_f,
+            "z": empty_f,
+            "y_median_m": None,
+            "px": empty_i,
+            "py": empty_i,
+            "inlier": np.asarray([], dtype=bool),
+        }
+
+    def _fast_edge_debug_payload(
+        self,
+        edge_cue: Dict[str, Any],
+        *,
+        debug_pixels_enabled: bool,
+        debug_cap: int,
+        skipped: bool,
+        skip_reason: str,
+    ) -> Dict[str, Any]:
+        edge_px = np.asarray(edge_cue.get("px", []), dtype=np.int32)
+        edge_py = np.asarray(edge_cue.get("py", []), dtype=np.int32)
+        edge_inlier_mask = np.asarray(edge_cue.get("inlier", []), dtype=bool)
+        if edge_inlier_mask.size == edge_px.size and int(edge_inlier_mask.sum()) > 0:
+            edge_draw_px = edge_px[edge_inlier_mask]
+            edge_draw_py = edge_py[edge_inlier_mask]
+        else:
+            edge_draw_px = edge_px
+            edge_draw_py = edge_py
+        out = {
+            "fast_front_edge_skipped": bool(skipped),
+            "fast_front_edge_skip_reason": str(skip_reason or ""),
+            "fast_edge_candidate_count": int(edge_cue.get("count", 0) or 0),
+            "fast_edge_inlier_count": int(edge_cue.get("inlier_count", 0) or 0),
+            "fast_edge_x_span_m": float(edge_cue.get("x_span_m", 0.0) or 0.0),
+            "fast_edge_y_median_px": edge_cue.get("median_py"),
+            "fast_edge_residual": float(edge_cue.get("residual_mean", 0.0) or 0.0),
+            "fast_edge_line_yaw_rad": edge_cue.get("yaw") if int(edge_cue.get("inlier_count", 0) or 0) > 0 else None,
+            "fast_edge_line_dist_m": edge_cue.get("dist") if int(edge_cue.get("inlier_count", 0) or 0) > 0 else None,
+            "fast_edge_support_score": float(edge_cue.get("score", 0.0) or 0.0),
+            "fast_edge_pixel_count": int(min(len(edge_draw_px), max(0, int(debug_cap)))) if debug_pixels_enabled else 0,
+        }
+        out.update(self._pixel_payload(
+            debug_pixels_enabled,
+            fast_edge_pixels=self._sparse_pixel_pairs(edge_draw_px, edge_draw_py, cap=debug_cap),
+        ))
+        return out
+
+    def _should_run_fast_verify(
+        self,
+        *,
+        distance_stage: str,
+        representative_inlier_count: int,
+        support_inlier_count: int,
+        selected_cluster_support: int,
+        fit_inlier_x_span_m: float,
+        residual_mean: float,
+        residual_threshold: float,
+        yaw_abs: float,
+        max_yaw: float,
+        selected_cluster_index: int,
+        selected_cluster_score: float,
+        background_rep_count: int,
+        background_penalty_seed: float,
+        temporal: Dict[str, Any],
+        min_front_face_columns: int,
+        min_vertical_support: int,
+        min_front_face_x_span: float,
+    ) -> tuple:
+        if bool(temporal.get("jump", False)):
+            return True, "temporal_jump"
+        if not bool(temporal.get("available", False)):
+            return True, "previous_obs_missing"
+        min_support = int(min_front_face_columns) * int(min_vertical_support)
+        if int(representative_inlier_count) < max(int(min_front_face_columns) * 2, 8):
+            return True, "rep_inlier_weak"
+        if int(support_inlier_count) < max(min_support * 2, 18):
+            return True, "support_weak"
+        if float(fit_inlier_x_span_m) < max(float(min_front_face_x_span) * 2.2, 0.28):
+            return True, "fit_span_weak"
+        if float(residual_mean) > max(1e-6, float(residual_threshold)) * 0.70:
+            return True, "residual_high"
+        if float(yaw_abs) > max(0.40, float(max_yaw) * 0.70):
+            return True, "yaw_high"
+        if int(selected_cluster_index) > 0:
+            return True, "background_risk"
+        if float(background_penalty_seed) > 0.05:
+            return True, "background_penalty"
+        if float(selected_cluster_score) < 0.55:
+            return True, "cluster_score_low"
+        stage = str(distance_stage or "unknown").strip().lower()
+        return False, "strong_stable_near_core" if stage == "near" else "strong_stable_far_core"
+
     @staticmethod
     def _finite_percentiles(values: Any, qs=(10, 50, 90)) -> Dict[str, Optional[float]]:
         try:
@@ -536,6 +911,31 @@ class TableEdgeManager:
         z_r = float(camera_height_m) - (z_fwd * s + y_down * c)
         return x_r, y_r.astype(np.float32, copy=False), z_r.astype(np.float32, copy=False)
 
+    @staticmethod
+    def _fast_quantile_span(values: Any, low_q: float = 0.10, high_q: float = 0.90) -> float:
+        arr = np.asarray(values)
+        n = int(arr.size)
+        if n <= 2:
+            return 0.0
+        lo = max(0, min(n - 1, int(round(float(low_q) * float(n - 1)))))
+        hi = max(0, min(n - 1, int(round(float(high_q) * float(n - 1)))))
+        if hi < lo:
+            lo, hi = hi, lo
+        part = np.partition(arr, (lo, hi))
+        return float(part[hi] - part[lo])
+
+    @staticmethod
+    def _fast_median_value(values: Any) -> float:
+        arr = np.asarray(values)
+        n = int(arr.size)
+        if n <= 0:
+            return 0.0
+        mid = n // 2
+        if n % 2:
+            return float(np.partition(arr, mid)[mid])
+        part = np.partition(arr, (mid - 1, mid))
+        return float((part[mid - 1] + part[mid]) * 0.5)
+
     def _select_fast_front_face_representatives(
         self,
         *,
@@ -560,41 +960,55 @@ class TableEdgeManager:
         x_arr, y_arr, z_arr, px_arr, py_arr = x_arr[:n], y_arr[:n], z_arr[:n], px_arr[:n], py_arr[:n]
         x_bins = np.floor(x_arr / max(1e-6, float(x_bin_width_m))).astype(np.int32)
         reps = []
-        for xb in sorted(set(int(v) for v in x_bins.tolist())):
-            x_mask = x_bins == xb
-            if int(x_mask.sum()) < int(min_support_points):
+        x_order = np.argsort(x_bins, kind="mergesort")
+        x_bins_sorted = x_bins[x_order]
+        x_change = np.flatnonzero(np.diff(x_bins_sorted)) + 1
+        x_starts = np.concatenate((np.asarray([0], dtype=np.int32), x_change.astype(np.int32, copy=False)))
+        x_ends = np.concatenate((x_change.astype(np.int32, copy=False), np.asarray([len(x_bins_sorted)], dtype=np.int32)))
+        y_radius_bins = max(1, int(math.ceil(0.08 / max(1e-6, float(y_cluster_bin_m)))))
+        for start, end in zip(x_starts, x_ends):
+            if int(end - start) < int(min_support_points):
                 continue
-            idxs = np.nonzero(x_mask)[0]
+            idxs = x_order[int(start):int(end)]
             y_bins = np.floor(y_arr[idxs] / max(1e-6, float(y_cluster_bin_m))).astype(np.int32)
+            y_order = np.argsort(y_bins, kind="mergesort")
+            y_bins_sorted = y_bins[y_order]
+            idxs_sorted = idxs[y_order]
             best = None
-            y_radius_bins = max(1, int(math.ceil(0.08 / max(1e-6, float(y_cluster_bin_m)))))
-            for yb in sorted(set(int(v) for v in y_bins.tolist())):
-                local = idxs[np.abs(y_bins - int(yb)) <= y_radius_bins]
+            for yb in np.unique(y_bins_sorted):
+                left = int(np.searchsorted(y_bins_sorted, int(yb) - y_radius_bins, side="left"))
+                right = int(np.searchsorted(y_bins_sorted, int(yb) + y_radius_bins, side="right"))
+                local = idxs_sorted[left:right]
                 support = int(len(local))
                 if support < int(min_support_points):
                     continue
-                z_span = float(np.max(z_arr[local]) - np.min(z_arr[local])) if support > 1 else 0.0
+                local_z = z_arr[local]
+                z_span = float(np.max(local_z) - np.min(local_z)) if support > 1 else 0.0
                 if z_span < float(min_z_span_m):
                     continue
-                y_spread = float(np.percentile(y_arr[local], 90) - np.percentile(y_arr[local], 10)) if support > 2 else 0.0
+                local_y = y_arr[local]
+                y_spread = self._fast_quantile_span(local_y) if support > 2 else 0.0
                 if y_spread > max(0.16, float(y_cluster_bin_m) * float(2 * y_radius_bins + 1)):
                     continue
+                local_x = x_arr[local]
+                local_px = px_arr[local]
+                local_py = py_arr[local]
                 score = float(support) * float(z_span) / max(0.04, y_spread + 0.02)
                 item = {
                     "score": score,
                     "support": support,
                     "z_span": z_span,
-                    "x": float(np.median(x_arr[local])),
-                    "y": float(np.median(y_arr[local])),
-                    "z": float(np.median(z_arr[local])),
-                    "px": int(np.median(px_arr[local])),
-                    "py": int(np.median(py_arr[local])),
+                    "x": self._fast_median_value(local_x),
+                    "y": self._fast_median_value(local_y),
+                    "z": self._fast_median_value(local_z),
+                    "px": int(self._fast_median_value(local_px)),
+                    "py": int(self._fast_median_value(local_py)),
                     "y_spread": y_spread,
-                    "support_px": px_arr[local].astype(np.int32, copy=False),
-                    "support_py": py_arr[local].astype(np.int32, copy=False),
-                    "support_x": x_arr[local].astype(np.float32, copy=False),
-                    "support_y": y_arr[local].astype(np.float32, copy=False),
-                    "support_z": z_arr[local].astype(np.float32, copy=False),
+                    "support_px": local_px.astype(np.int32, copy=False),
+                    "support_py": local_py.astype(np.int32, copy=False),
+                    "support_x": local_x.astype(np.float32, copy=False),
+                    "support_y": local_y.astype(np.float32, copy=False),
+                    "support_z": local_z.astype(np.float32, copy=False),
                 }
                 if best is None or item["score"] > best["score"]:
                     best = item
@@ -675,6 +1089,9 @@ class TableEdgeManager:
         min_x_span_m: float,
         max_yaw: float,
     ) -> Dict[str, Any]:
+        # Current implementation intentionally keeps the legacy column/row scan
+        # semantics. This method is the replacement point for a future vectorized
+        # NumPy/OpenCV front-edge cue; keep callers and output keys stable.
         arr = np.asarray(depth_m, dtype=np.float32)
         if arr.ndim != 2 or arr.size <= 0:
             return {"count": 0, "inlier_count": 0, "score": 0.0}
@@ -1049,11 +1466,43 @@ class TableEdgeManager:
 
     def _attach_profile(self, payload: Dict[str, Any], profile: Dict[str, Any], *, path: str) -> Dict[str, Any]:
         out = dict(payload or {})
+        if out.get("fast_debug_pixels_enabled") is False:
+            for key in (
+                "fast_sampled_pixels",
+                "fast_candidate_pixels",
+                "fast_support_pixels",
+                "fast_front_face_rep_pixels",
+                "fast_inlier_pixels",
+                "fast_outlier_pixels",
+                "fast_background_pixels",
+                "fast_rep_background_pixels",
+                "fast_weak_pixels",
+                "fast_edge_pixels",
+            ):
+                out.pop(key, None)
         prof = self._profile_template()
         prof.update({k: float(v) for k, v in dict(profile or {}).items() if isinstance(v, (int, float))})
         prof["total_edge_process_ms"] = float(prof.get("total_edge_process_ms", 0.0) or 0.0)
+        if str(path or "").startswith("fast_plane_only") and float(prof.get("fast_total_ms", 0.0) or 0.0) <= 0.0:
+            prof["fast_total_ms"] = float(prof.get("total_edge_process_ms", 0.0) or 0.0)
         out.update(prof)
+        out.update(dict(self._frame_calib_payload or {}))
+        out.setdefault("preview_enabled", False)
+        out.setdefault("preview_skipped_reason", "disabled")
         out["edge_profile"] = dict(prof)
+        out["edge_profile"].update(dict(self._frame_calib_payload or {}))
+        out["edge_profile"]["preview_enabled"] = bool(out.get("preview_enabled", False))
+        out["edge_profile"]["preview_skipped_reason"] = str(out.get("preview_skipped_reason") or "")
+        for key in (
+            "fast_front_edge_skipped",
+            "fast_front_edge_skip_reason",
+            "fast_local_band_skipped",
+            "fast_local_band_skip_reason",
+            "fast_debug_pixels_enabled",
+            "fast_debug_pixel_cap",
+        ):
+            if key in out:
+                out["edge_profile"][key] = out.get(key)
         out["edge_process_path"] = str(path or "")
         return out
 
@@ -1526,6 +1975,16 @@ class TableEdgeManager:
         profile = self._profile_template()
         profile["depth_frame_fetch_ms"] = float(self._last_depth_frame_fetch_ms)
         cfg = self._detector_cfg
+        debug_pixels_enabled = self._fast_debug_pixels_enabled()
+        debug_cap = self._fast_debug_pixel_cap()
+        edge_cue = self._empty_fast_edge_cue()
+        edge_debug_payload = self._fast_edge_debug_payload(
+            edge_cue,
+            debug_pixels_enabled=debug_pixels_enabled,
+            debug_cap=debug_cap,
+            skipped=True,
+            skip_reason="not_run_yet",
+        )
 
         frame_prepare_start = time.perf_counter()
         roi_meta = self._select_roi(depth_frame)
@@ -1560,10 +2019,13 @@ class TableEdgeManager:
         x0, y0, x1, y1 = [int(v) for v in roi_box]
         stride = max(1, int(self._fast_plane_stride))
         depth_roi = depth_frame[y0:y1:stride, x0:x1:stride]
-        profile["roi_extract_ms"] = self._ms_since(roi_start)
-        profile["roi_crop_ms"] = float(profile["roi_extract_ms"])
+        profile["fast_roi_extract_ms"] = self._ms_since(roi_start)
+        profile["roi_extract_ms"] = float(profile["fast_roi_extract_ms"])
+        profile["roi_crop_ms"] = float(profile["fast_roi_extract_ms"])
         roi_payload = self._roi_payload(roi_box, roi_meta)
         fast_debug_base: Dict[str, Any] = {
+            "fast_debug_pixels_enabled": bool(debug_pixels_enabled),
+            "fast_debug_pixel_cap": int(debug_cap),
             "fast_fit_attempted": False,
             "fast_raw_sampled_point_count": 0,
             "fast_raw_candidate_count": 0,
@@ -1605,10 +2067,14 @@ class TableEdgeManager:
             "fast_edge_line_yaw_rad": None,
             "fast_edge_line_dist_m": None,
             "fast_edge_support_score": 0.0,
+            "fast_front_edge_skipped": True,
+            "fast_front_edge_skip_reason": "not_run_yet",
             "fast_local_band_support_count": 0,
             "fast_local_band_x_span_m": 0.0,
             "fast_local_band_edge_support": 0,
             "fast_local_band_residual_mean": 0.0,
+            "fast_local_band_skipped": True,
+            "fast_local_band_skip_reason": "not_run_yet",
             "fast_background_blocked": False,
             "fast_near_stage_far_jump": False,
             "fast_selected_dist_source": "none",
@@ -1635,7 +2101,8 @@ class TableEdgeManager:
         yy, xx = np.nonzero(valid_mask)
         sampled_count = int(depth_roi.size)
         point_count = int(len(xx))
-        profile["point_build_ms"] = self._ms_since(point_start)
+        profile["fast_depth_valid_ms"] = self._ms_since(point_start)
+        profile["point_build_ms"] = float(profile["fast_depth_valid_ms"])
 
         min_all = max(60, int(getattr(cfg, "min_all_points", 1000) if cfg is not None else 1000) // max(1, stride * stride))
         min_table = max(45, int(getattr(cfg, "plane_min_inliers", 220) if cfg is not None else 220) // max(1, stride))
@@ -1661,6 +2128,7 @@ class TableEdgeManager:
             return self._attach_profile(payload, profile, path="fast_plane_only_not_enough_points")
 
         select_start = time.perf_counter()
+        projection_start = time.perf_counter()
         z = depth_m[valid_mask]
         calib = self._detector.calib
         u = (float(x0) + xx.astype(np.float32) * float(stride))
@@ -1686,6 +2154,8 @@ class TableEdgeManager:
             pitch_deg=pitch_deg,
             camera_height_m=camera_height_m,
         )
+        profile["fast_robot_transform_ms"] = self._ms_since(robot_transform_start)
+        height_filter_start = time.perf_counter()
         robot_z_pct = self._finite_percentiles(z_robot)
         ground_like_count = int(np.sum((z_robot >= -0.04) & (z_robot <= 0.06)))
         table_height_like_count = int(np.sum(np.abs(z_robot - table_height_m) <= 0.06))
@@ -1698,43 +2168,9 @@ class TableEdgeManager:
         height_py = (y0 + yy[height_mask].astype(np.int32) * int(stride)).astype(np.int32)
         candidate_z_pct = self._finite_percentiles(height_z)
         candidate_x_span = float(np.max(height_x) - np.min(height_x)) if len(height_x) > 1 else 0.0
-        raw_sample_pixels = self._sparse_pixel_sample(xx, yy, x0, y0, stride, cap=1000)
-        fast_candidate_pixels = [[int(x), int(y)] for x, y in zip(height_px[:1000].tolist(), height_py[:1000].tolist())]
-        edge_cue = self._extract_fast_front_edge_cue(
-            depth_m=depth_m,
-            x0=x0,
-            y0=y0,
-            stride=stride,
-            calib=calib,
-            pitch_deg=pitch_deg,
-            camera_height_m=camera_height_m,
-            z_min=z_min,
-            z_max=z_max,
-            target_dist_m=float(self._target_dist_m),
-            min_x_span_m=float(min_front_face_x_span),
-            max_yaw=float(max_yaw_cfg),
-        )
-        edge_px = np.asarray(edge_cue.get("px", []), dtype=np.int32)
-        edge_py = np.asarray(edge_cue.get("py", []), dtype=np.int32)
-        edge_inlier_mask = np.asarray(edge_cue.get("inlier", []), dtype=bool)
-        if edge_inlier_mask.size == edge_px.size and int(edge_inlier_mask.sum()) > 0:
-            edge_draw_px = edge_px[edge_inlier_mask]
-            edge_draw_py = edge_py[edge_inlier_mask]
-        else:
-            edge_draw_px = edge_px
-            edge_draw_py = edge_py
-        fast_edge_pixels = [[int(x), int(y)] for x, y in zip(edge_draw_px[:1000].tolist(), edge_draw_py[:1000].tolist())]
-        edge_debug_payload = {
-            "fast_edge_candidate_count": int(edge_cue.get("count", 0) or 0),
-            "fast_edge_inlier_count": int(edge_cue.get("inlier_count", 0) or 0),
-            "fast_edge_x_span_m": float(edge_cue.get("x_span_m", 0.0) or 0.0),
-            "fast_edge_y_median_px": edge_cue.get("median_py"),
-            "fast_edge_residual": float(edge_cue.get("residual_mean", 0.0) or 0.0),
-            "fast_edge_line_yaw_rad": edge_cue.get("yaw") if int(edge_cue.get("inlier_count", 0) or 0) > 0 else None,
-            "fast_edge_line_dist_m": edge_cue.get("dist") if int(edge_cue.get("inlier_count", 0) or 0) > 0 else None,
-            "fast_edge_support_score": float(edge_cue.get("score", 0.0) or 0.0),
-            "fast_edge_pixels": fast_edge_pixels,
-        }
+        profile["fast_height_filter_ms"] = self._ms_since(height_filter_start)
+        raw_sample_pixels = self._sparse_pixel_sample(xx, yy, x0, y0, stride, cap=debug_cap) if debug_pixels_enabled else []
+        fast_candidate_pixels = self._sparse_pixel_pairs(height_px, height_py, cap=debug_cap) if debug_pixels_enabled else []
         profile["candidate_select_ms"] = self._ms_since(select_start)
         if point_count <= 0:
             payload = self._default_result(depth_valid=True, reason="no_robot_points", frame_seq=frame_seq, roi_meta=roi_meta)
@@ -1818,6 +2254,7 @@ class TableEdgeManager:
             min_support_points=min_vertical_support,
             min_z_span_m=min_vertical_z_span,
         )
+        profile["fast_rep_select_ms"] = self._ms_since(fit_start)
         rep_count = int(reps.get("count", 0) or 0)
         support_total = int(reps.get("support_total", 0) or 0)
         z_span_arr = np.asarray(reps.get("z_span", []), dtype=np.float32)
@@ -1828,15 +2265,45 @@ class TableEdgeManager:
         support_x_span_pre = float(np.max(support_x_pre) - np.min(support_x_pre)) if support_x_pre.size > 1 else 0.0
         rep_x_span_pre = float(np.max(rep_x_pre) - np.min(rep_x_pre)) if rep_x_pre.size > 1 else 0.0
         if rep_count < min_front_face_columns:
+            front_edge_start = time.perf_counter()
+            edge_cue = self._extract_fast_front_edge_cue(
+                depth_m=depth_m,
+                x0=x0,
+                y0=y0,
+                stride=stride,
+                calib=calib,
+                pitch_deg=pitch_deg,
+                camera_height_m=camera_height_m,
+                z_min=z_min,
+                z_max=z_max,
+                target_dist_m=float(self._target_dist_m),
+                min_x_span_m=float(min_front_face_x_span),
+                max_yaw=float(max_yaw_cfg),
+            )
+            profile["fast_front_edge_ms"] = self._ms_since(front_edge_start)
+            edge_debug_payload = self._fast_edge_debug_payload(
+                edge_cue,
+                debug_pixels_enabled=debug_pixels_enabled,
+                debug_cap=debug_cap,
+                skipped=False,
+                skip_reason="vertical_support_failed",
+            )
+            edge_px = np.asarray(edge_cue.get("px", []), dtype=np.int32)
+            edge_py = np.asarray(edge_cue.get("py", []), dtype=np.int32)
+            edge_inlier_mask = np.asarray(edge_cue.get("inlier", []), dtype=bool)
+            if edge_inlier_mask.size == edge_px.size and int(edge_inlier_mask.sum()) > 0:
+                edge_draw_px = edge_px[edge_inlier_mask]
+                edge_draw_py = edge_py[edge_inlier_mask]
+            else:
+                edge_draw_px = edge_px
+                edge_draw_py = edge_py
             low_reason = "vertical_support_low" if rep_count <= 0 else "front_face_columns_low"
             rep_px_pre = np.asarray(reps.get("px", []), dtype=np.int32)
             rep_py_pre = np.asarray(reps.get("py", []), dtype=np.int32)
             support_px_pre = np.asarray(reps.get("support_px", []), dtype=np.int32)
             support_py_pre = np.asarray(reps.get("support_py", []), dtype=np.int32)
-            support_cap = 1600
-            support_step = max(1, int(math.ceil(float(len(support_px_pre)) / float(support_cap)))) if len(support_px_pre) else 1
-            fast_support_pixels = [[int(x), int(y)] for x, y in zip(support_px_pre[::support_step][:support_cap].tolist(), support_py_pre[::support_step][:support_cap].tolist())]
-            fast_rep_pixels = [[int(x), int(y)] for x, y in zip(rep_px_pre[:1000].tolist(), rep_py_pre[:1000].tolist())]
+            fast_support_pixels = self._sparse_pixel_pairs(support_px_pre, support_py_pre, cap=debug_cap) if debug_pixels_enabled else []
+            fast_rep_pixels = self._sparse_pixel_pairs(rep_px_pre, rep_py_pre, cap=debug_cap) if debug_pixels_enabled else []
             edge_enough = (
                 int(edge_cue.get("inlier_count", 0) or 0) >= max(4, min_front_face_columns)
                 and float(edge_cue.get("x_span_m", 0.0) or 0.0) >= max(0.15, float(min_front_face_x_span) * 1.5)
@@ -2055,6 +2522,7 @@ class TableEdgeManager:
             )
         except Exception as exc:
             cluster_fit = {"selected": None, "clusters": [], "reject_reason": f"birdview_fit_failed:{exc}"}
+        profile["fast_front_cluster_fit_ms"] = self._ms_since(front_cluster_start)
         clusters = list(cluster_fit.get("clusters") or [])
         selected_cluster = cluster_fit.get("selected")
         rep_px = np.asarray(reps.get("px"), dtype=np.int32)
@@ -2071,10 +2539,8 @@ class TableEdgeManager:
                 low_reason = "front_cluster_weak" if cluster_reason in {"front_cluster_weak", "front_face_columns_low", "vertical_support_low", "front_face_x_span_low"} else cluster_reason
             else:
                 low_reason = "no_front_cluster"
-            support_cap = 1600
-            support_step = max(1, int(math.ceil(float(len(support_px_all)) / float(support_cap)))) if len(support_px_all) else 1
-            fast_support_pixels = [[int(x), int(y)] for x, y in zip(support_px_all[::support_step][:support_cap].tolist(), support_py_all[::support_step][:support_cap].tolist())]
-            fast_rep_pixels = [[int(x), int(y)] for x, y in zip(rep_px[:1000].tolist(), rep_py[:1000].tolist())]
+            fast_support_pixels = self._sparse_pixel_pairs(support_px_all, support_py_all, cap=debug_cap) if debug_pixels_enabled else []
+            fast_rep_pixels = self._sparse_pixel_pairs(rep_px, rep_py, cap=debug_cap) if debug_pixels_enabled else []
             payload = self._default_result(depth_valid=True, reason=low_reason, frame_seq=frame_seq, roi_meta=roi_meta)
             payload.update(roi_payload)
             payload.update(self._detector_mode_payload())
@@ -2244,6 +2710,65 @@ class TableEdgeManager:
         temporal = self._fast_temporal_score(yaw=float(yaw_err), dist=float(dist_err), cx_norm=raw_cx_norm)
         temporal_score = float(temporal.get("score", 0.0) or 0.0)
         temporal_available = bool(temporal.get("available", False))
+        if dist_err > 0.60:
+            distance_stage = "far"
+        elif dist_err > 0.25:
+            distance_stage = "middle"
+        else:
+            distance_stage = "near"
+        frontness_score = max(0.0, 1.0 - 0.35 * float(selected_cluster_index))
+        background_penalty_seed = 0.45 if int(selected_cluster_index) > 0 else 0.0
+        run_verify, verify_reason = self._should_run_fast_verify(
+            distance_stage=distance_stage,
+            representative_inlier_count=representative_inlier_count,
+            support_inlier_count=support_inlier_count,
+            selected_cluster_support=selected_cluster_support,
+            fit_inlier_x_span_m=x_span,
+            residual_mean=residual_mean,
+            residual_threshold=residual_threshold,
+            yaw_abs=yaw_abs,
+            max_yaw=max_yaw,
+            selected_cluster_index=selected_cluster_index,
+            selected_cluster_score=selected_cluster_score,
+            background_rep_count=background_rep_count,
+            background_penalty_seed=background_penalty_seed,
+            temporal=temporal,
+            min_front_face_columns=min_front_face_columns,
+            min_vertical_support=min_vertical_support,
+            min_front_face_x_span=min_front_face_x_span,
+        )
+        if run_verify:
+            front_edge_start = time.perf_counter()
+            edge_cue = self._extract_fast_front_edge_cue(
+                depth_m=depth_m,
+                x0=x0,
+                y0=y0,
+                stride=stride,
+                calib=calib,
+                pitch_deg=pitch_deg,
+                camera_height_m=camera_height_m,
+                z_min=z_min,
+                z_max=z_max,
+                target_dist_m=float(self._target_dist_m),
+                min_x_span_m=float(min_front_face_x_span),
+                max_yaw=float(max_yaw_cfg),
+            )
+            profile["fast_front_edge_ms"] = self._ms_since(front_edge_start)
+            edge_debug_payload = self._fast_edge_debug_payload(
+                edge_cue,
+                debug_pixels_enabled=debug_pixels_enabled,
+                debug_cap=debug_cap,
+                skipped=False,
+                skip_reason=verify_reason,
+            )
+        else:
+            edge_debug_payload = self._fast_edge_debug_payload(
+                edge_cue,
+                debug_pixels_enabled=debug_pixels_enabled,
+                debug_cap=debug_cap,
+                skipped=True,
+                skip_reason=verify_reason,
+            )
         edge_x = np.asarray(edge_cue.get("x", []), dtype=np.float32)
         edge_y = np.asarray(edge_cue.get("y", []), dtype=np.float32)
         edge_inlier_full = np.asarray(edge_cue.get("inlier", []), dtype=bool)
@@ -2265,25 +2790,34 @@ class TableEdgeManager:
         front_y_gap = None
         if selected_y_center_num is not None and edge_y_median_m is not None:
             front_y_gap = float(selected_y_center_num) - float(edge_y_median_m)
-        frontness_score = max(0.0, 1.0 - 0.35 * float(selected_cluster_index))
-        background_penalty = 0.0
-        if selected_cluster_index > 0:
-            background_penalty = max(background_penalty, 0.45)
+        background_penalty = float(background_penalty_seed)
         if front_y_gap is not None:
             background_penalty = max(background_penalty, self._clip01((front_y_gap - 0.12) / 0.25))
-        local_band = self._fast_local_band_stats(
-            height_x,
-            height_y,
-            edge_x_eval,
-            edge_y_eval,
-            k=float(k),
-            b=float(b),
-            band_m=max(0.055, float(residual_threshold)),
-        )
-        local_band_support_count = int(local_band.get("count", 0) or 0)
-        local_band_x_span = float(local_band.get("x_span_m", 0.0) or 0.0)
-        local_band_edge_support = int(local_band.get("edge_support", 0) or edge_support_on_selected)
-        local_band_residual_mean = float(local_band.get("residual_mean", 0.0) or 0.0)
+        if run_verify:
+            local_band_start = time.perf_counter()
+            local_band = self._fast_local_band_stats(
+                height_x,
+                height_y,
+                edge_x_eval,
+                edge_y_eval,
+                k=float(k),
+                b=float(b),
+                band_m=max(0.055, float(residual_threshold)),
+            )
+            profile["fast_local_band_ms"] = self._ms_since(local_band_start)
+            local_band_support_count = int(local_band.get("count", 0) or 0)
+            local_band_x_span = float(local_band.get("x_span_m", 0.0) or 0.0)
+            local_band_edge_support = int(local_band.get("edge_support", 0) or edge_support_on_selected)
+            local_band_residual_mean = float(local_band.get("residual_mean", 0.0) or 0.0)
+            local_band_skipped = False
+            local_band_skip_reason = ""
+        else:
+            local_band_support_count = int(support_inlier_count)
+            local_band_x_span = float(x_span)
+            local_band_edge_support = 0
+            local_band_residual_mean = float(residual_mean)
+            local_band_skipped = True
+            local_band_skip_reason = str(verify_reason)
         line_source = "hybrid" if edge_consistency_score >= 0.55 and local_band_edge_support >= 3 else "vertical"
         line_score = self._clip01(
             0.30 * evidence_score
@@ -2311,12 +2845,6 @@ class TableEdgeManager:
                 + 0.15 * geometry_score
                 + 0.15 * support_geometry_score
             )
-        if dist_err > 0.60:
-            distance_stage = "far"
-        elif dist_err > 0.25:
-            distance_stage = "middle"
-        else:
-            distance_stage = "near"
         prev_dist_used = None
         dist_delta = temporal.get("dist_delta")
         if dist_delta is not None:
@@ -2325,13 +2853,16 @@ class TableEdgeManager:
             except Exception:
                 prev_dist_used = None
         previous_near = prev_dist_used is not None and float(prev_dist_used) <= 0.25
+        background_protect_start = time.perf_counter()
         near_stage_far_jump = bool(previous_near and (float(dist_err) - float(prev_dist_used) > 0.22) and edge_consistency_score < 0.65)
         background_blocked = bool(
             (front_y_gap is not None and front_y_gap > 0.16 and int(edge_cue.get("inlier_count", 0) or 0) >= 3)
             or (selected_cluster_index > 0 and distance_stage == "near")
             or near_stage_far_jump
         )
+        profile["fast_background_protect_ms"] = self._ms_since(background_protect_start)
 
+        control_gate_start = time.perf_counter()
         reject_reason = ""
         control_level = "none"
         width_min = max(0.06, float(min_front_face_x_span) * 0.90)
@@ -2423,22 +2954,23 @@ class TableEdgeManager:
                 or background_penalty > 0.0
             ):
                 control_level = "align"
+        profile["fast_control_gate_ms"] = self._ms_since(control_gate_start)
         plane_usable = control_level != "none"
         valid_for_control = control_level in {"align", "stop_ready"}
+        debug_payload_start = time.perf_counter()
         support_px = support_px_all[selected_support_mask] if selected_support_mask.size == support_px_all.size else np.asarray([], dtype=np.int32)
         support_py = support_py_all[selected_support_mask] if selected_support_mask.size == support_py_all.size else np.asarray([], dtype=np.int32)
-        support_cap = 1600
-        support_step = max(1, int(math.ceil(float(len(support_px)) / float(support_cap)))) if len(support_px) else 1
-        fast_support_pixels = [[int(x), int(y)] for x, y in zip(support_px[::support_step][:support_cap].tolist(), support_py[::support_step][:support_cap].tolist())]
-        fast_rep_pixels = [[int(x), int(y)] for x, y in zip(rep_px[:1000].tolist(), rep_py[:1000].tolist())]
-        fast_inlier_pixels = [[int(x), int(y)] for x, y in zip(rep_inlier_px[:1000].tolist(), rep_inlier_py[:1000].tolist())]
-        fast_outlier_pixels = [[int(x), int(y)] for x, y in zip(rep_outlier_px[:1000].tolist(), rep_outlier_py[:1000].tolist())]
+        fast_support_pixels = self._sparse_pixel_pairs(support_px, support_py, cap=debug_cap) if debug_pixels_enabled else []
+        fast_rep_pixels = self._sparse_pixel_pairs(rep_px, rep_py, cap=debug_cap) if debug_pixels_enabled else []
+        fast_inlier_pixels = self._sparse_pixel_pairs(rep_inlier_px, rep_inlier_py, cap=debug_cap) if debug_pixels_enabled else []
+        fast_outlier_pixels = self._sparse_pixel_pairs(rep_outlier_px, rep_outlier_py, cap=debug_cap) if debug_pixels_enabled else []
         rep_background_px = rep_px[background_mask] if background_rep_count > 0 else np.asarray([], dtype=np.int32)
         rep_background_py = rep_py[background_mask] if background_rep_count > 0 else np.asarray([], dtype=np.int32)
         rep_weak_px = rep_px[weak_mask] if int(weak_mask.sum()) > 0 else np.asarray([], dtype=np.int32)
         rep_weak_py = rep_py[weak_mask] if int(weak_mask.sum()) > 0 else np.asarray([], dtype=np.int32)
-        fast_background_pixels = [[int(x), int(y)] for x, y in zip(rep_background_px[:1000].tolist(), rep_background_py[:1000].tolist())]
-        fast_weak_pixels = [[int(x), int(y)] for x, y in zip(rep_weak_px[:1000].tolist(), rep_weak_py[:1000].tolist())]
+        fast_background_pixels = self._sparse_pixel_pairs(rep_background_px, rep_background_py, cap=debug_cap) if debug_pixels_enabled else []
+        fast_weak_pixels = self._sparse_pixel_pairs(rep_weak_px, rep_weak_py, cap=debug_cap) if debug_pixels_enabled else []
+        profile["fast_debug_payload_ms"] = self._ms_since(debug_payload_start)
         edge_found = bool(plane_usable)
         if edge_found:
             plane_bbox = raw_bbox
@@ -2482,6 +3014,8 @@ class TableEdgeManager:
             "plane_yaw_err_rad": float(yaw_err) if edge_found else None,
             "plane_dist_err_m": float(dist_err) if edge_found else None,
             "plane_mask_status": "fast_sparse",
+            "fast_debug_pixels_enabled": bool(debug_pixels_enabled),
+            "fast_debug_pixel_cap": int(debug_cap),
             "fast_fit_attempted": True,
             "fast_raw_yaw_err_rad": float(yaw_err),
             "fast_raw_dist_err_m": float(dist_err),
@@ -2522,6 +3056,8 @@ class TableEdgeManager:
             "fast_local_band_x_span_m": float(local_band_x_span),
             "fast_local_band_edge_support": int(local_band_edge_support),
             "fast_local_band_residual_mean": float(local_band_residual_mean),
+            "fast_local_band_skipped": bool(local_band_skipped),
+            "fast_local_band_skip_reason": str(local_band_skip_reason),
             "fast_background_blocked": bool(background_blocked),
             "fast_near_stage_far_jump": bool(near_stage_far_jump),
             "fast_selected_dist_source": str(line_source),
@@ -2804,6 +3340,7 @@ class TableEdgeManager:
         if count_dropped:
             self._last_camera_seq = seq
         self._frame_id += 1
+        self._last_obs_seq += 1
         slot = dict(frame_slot or {})
         if "seq" not in slot:
             slot["seq"] = seq
@@ -2811,8 +3348,14 @@ class TableEdgeManager:
             slot["payload"] = frames
         self._last_depth_frame_fetch_ms = float(depth_frame_fetch_ms or 0.0)
         frame_capture_ts = self._pick_frame_capture_ts(slot, frames)
+        if float(self._last_camera_frame_capture_ts or 0.0) > 0.0:
+            self._last_camera_frame_interval_ms = max(0.0, (float(frame_capture_ts) - float(self._last_camera_frame_capture_ts)) * 1000.0)
+        self._last_camera_frame_capture_ts = float(frame_capture_ts)
         latest_frame_lag_ms = max(0.0, (time.time() - float(frame_capture_ts)) * 1000.0)
         vision_start_ts = time.time()
+        if float(self._last_process_start_ts or 0.0) > 0.0:
+            self._last_table_edge_process_interval_ms = max(0.0, (float(vision_start_ts) - float(self._last_process_start_ts)) * 1000.0)
+        self._last_process_start_ts = float(vision_start_ts)
         prev_source_mode = self._source_mode_override
         prev_local = self._local_perception_override
         prev_runtime = self._runtime_status_override
@@ -2821,6 +3364,10 @@ class TableEdgeManager:
         self._runtime_status_override = dict(runtime_status) if runtime_status is not None else prev_runtime
         self._processing_busy = True
         depth = frames.get("depth")
+        frame_calib = self._resolve_frame_calib(frames, depth)
+        self._frame_calib_payload = self._build_calib_payload(frame_calib, depth)
+        if self._detector is not None and frame_calib is not None:
+            self._detector.calib = frame_calib
         try:
             if not isinstance(depth, np.ndarray) or depth.size <= 0:
                 payload = self._default_result(
@@ -2841,6 +3388,9 @@ class TableEdgeManager:
         finally:
             self._processing_busy = False
         vision_done_ts = time.time()
+        if isinstance(payload, dict):
+            payload["obs_seq"] = int(self._last_obs_seq)
+            payload["camera_frame_seq"] = int(seq)
         self._processed_frame_count += 1
         self._last_process_ms = max(0.0, (vision_done_ts - vision_start_ts) * 1000.0)
         try:
@@ -2859,6 +3409,9 @@ class TableEdgeManager:
     def _worker_loop(self) -> None:
         while self._runtime_running and not self._worker_stop.is_set():
             loop_start = time.time()
+            if float(self._last_worker_loop_ts or 0.0) > 0.0:
+                self._last_worker_interval_ms = max(0.0, (float(loop_start) - float(self._last_worker_loop_ts)) * 1000.0)
+            self._last_worker_loop_ts = float(loop_start)
             scheduler = self._scheduler
             interval_s = self._worker_interval_s
             if scheduler is None:
@@ -2867,7 +3420,9 @@ class TableEdgeManager:
             fetch_start = time.perf_counter()
             frame_slot = scheduler.read_slot("camera_frames")
             self._last_depth_frame_fetch_ms = self._ms_since(fetch_start)
+            self._last_scheduler_read_ms = float(self._last_depth_frame_fetch_ms)
             if not isinstance(frame_slot, dict):
+                self._table_edge_no_new_frame_count += 1
                 self._worker_stop.wait(timeout=interval_s)
                 continue
             generation = int(frame_slot.get("generation", 0) or 0)
@@ -2877,6 +3432,7 @@ class TableEdgeManager:
             seq = int(frame_slot.get("seq", 0) or 0)
             frames = frame_slot.get("payload")
             if seq <= self._last_camera_seq or not isinstance(frames, dict):
+                self._table_edge_no_new_frame_count += 1
                 self._worker_stop.wait(timeout=interval_s)
                 continue
             if seq > self._last_camera_seq + 1 and self._last_camera_seq > 0:
@@ -2937,4 +3493,6 @@ class TableEdgeManager:
             "default_update_hz": 1.0 / max(1e-6, float(self._default_interval_s)),
             "detector_mode": self._detector_mode,
             "edge_update_hz": self._edge_update_hz,
+            "detector_mode": str(self._detector_mode),
+            "fast_plane_stride": int(self._fast_plane_stride),
         }

@@ -1,0 +1,14 @@
+# Project-level Python runtime dependencies for /usr/bin/python3 on the AidLux board.
+# AidLux system packages such as pyaidlite/aidlite-qnn236/aidrtcm are board-image
+# dependencies and should be restored through the board image, apt packages, or
+# environment backup rather than plain PyPI on a fresh machine.
+numpy==1.24.4
+opencv-contrib-python==4.11.0.86
+onnxruntime==1.19.2
+paho-mqtt==2.1.0
+psutil==7.0.0
+pyserial==3.5
+PyYAML==5.3.1
+requests==2.28.1
+scipy==1.10.1
+shapely==2.0.7

@@ -39,6 +39,7 @@ class MotionController:
         self._last_table_wz = 0.0
         self._last_view_err_norm = 0.0
         self._last_view_ts = 0.0
+        self._pose_missing_since_mono = 0.0
 
     @staticmethod
     def _clamp(v: float, lo: float, hi: float) -> float:
@@ -224,7 +225,22 @@ class MotionController:
         self._reset_fallback_memory()
         self.docking.reset()
         cmd = self._cmd(mode, brake=brake)
-        return MotionDecision(cmd=cmd, control_summary=self._summary(mode, cmd, reason="stop"))
+        summary = self._summary(mode, cmd, reason="stop")
+        summary.update({
+            "speed_profile": "stop",
+            "speed_limit_reason": "stop",
+            "forward_block_reason": "stop",
+            "vx_norm": 0.0,
+            "vy_norm": 0.0,
+            "wz_norm": 0.0,
+            "vx_mps": 0.0,
+            "vy_mps": 0.0,
+            "wz_radps": 0.0,
+            "vx_mps_per_norm": self._axis_scale("vx"),
+            "vy_mps_per_norm": self._axis_scale("vy"),
+            "wz_radps_per_norm": self._axis_scale("wz"),
+        })
+        return MotionDecision(cmd=cmd, control_summary=summary)
 
     def search_table_cmd(self, turn_sign: int = 1) -> MotionDecision:
         self._reset_fallback_memory()
@@ -386,9 +402,18 @@ class MotionController:
         if abs(wz) < 0.02:
             wz = 0.0
         self._last_fallback_vx, self._last_fallback_wz = vx, wz
+        vx, vy, wz, speed_summary = self._apply_table_speed_profile(mode, mode, vx, 0.0, wz)
         cmd = self._cmd(mode, vx=vx, wz=wz)
         reason = "fallback_table"
-        return MotionDecision(cmd=cmd, cx_norm_abs=x_abs, distance_ratio=distance_ratio, control_summary=self._summary(mode, cmd, obs, reason=reason))
+        summary = self._summary(mode, cmd, obs, reason=reason)
+        summary.update(speed_summary)
+        summary.update({
+            "vx_norm": float(vx),
+            "vy_norm": float(vy),
+            "wz_norm": float(wz),
+            "forward_block_reason": "" if allow_forward and abs(vx) > 0.0 else "fallback_align_or_spin_only",
+        })
+        return MotionDecision(cmd=cmd, cx_norm_abs=x_abs, distance_ratio=distance_ratio, control_summary=summary)
 
     def _plane_stable(self, obs: Optional[TableEdgeObs]) -> bool:
         if obs is None or obs.yaw_err_rad is None or obs.dist_err_m is None:
@@ -459,6 +484,120 @@ class MotionController:
         if delta < -max_delta:
             return float(prev) - max_delta
         return float(target)
+
+    def _axis_scale(self, axis: str) -> float:
+        attr = {
+            "vx": "vx_mps_per_norm",
+            "vy": "vy_mps_per_norm",
+            "wz": "wz_radps_per_norm",
+        }.get(axis, "vx_mps_per_norm")
+        return max(1e-6, abs(float(getattr(self.car_cfg, attr, 1.0) or 1.0)))
+
+    def _norm_to_physical(self, axis: str, value: float) -> float:
+        return float(value) * self._axis_scale(axis)
+
+    def _physical_to_norm(self, axis: str, value: float) -> float:
+        return float(value) / self._axis_scale(axis)
+
+    def _table_speed_profile_name(self, mode: str, phase: str = "") -> str:
+        mode_text = str(mode or "").strip().upper()
+        phase_text = str(phase or "").strip().upper()
+        if mode_text == "COARSE_ALIGN":
+            return "coarse_align"
+        if mode_text == "FINAL_LOCK" or phase_text == "PLANE_STOP":
+            return "final_lock"
+        if mode_text == "CONTROLLED_APPROACH":
+            return "controlled_approach"
+        return "search"
+
+    def _table_profile_limits(self, profile: str) -> Dict[str, float]:
+        prefix = {
+            "coarse_align": "table_coarse_align",
+            "controlled_approach": "table_controlled",
+            "final_lock": "table_final_lock",
+        }.get(profile)
+        if prefix is None:
+            return {}
+        return {
+            "vx_min": abs(float(getattr(self.car_cfg, f"{prefix}_vx_min_mps", 0.0) or 0.0)),
+            "vx_max": abs(float(getattr(self.car_cfg, f"{prefix}_vx_max_mps", 0.0) or 0.0)),
+            "vy_min": abs(float(getattr(self.car_cfg, f"{prefix}_vy_min_mps", 0.0) or 0.0)),
+            "vy_max": abs(float(getattr(self.car_cfg, f"{prefix}_vy_max_mps", 0.0) or 0.0)),
+            "wz_min": abs(float(getattr(self.car_cfg, f"{prefix}_wz_min_radps", 0.0) or 0.0)),
+            "wz_max": abs(float(getattr(self.car_cfg, f"{prefix}_wz_max_radps", 0.0) or 0.0)),
+            "vx_deadband": abs(float(getattr(self.car_cfg, "table_vx_deadband_mps", 0.0) or 0.0)),
+            "vy_deadband": abs(float(getattr(self.car_cfg, "table_vy_deadband_mps", 0.0) or 0.0)),
+            "wz_deadband": abs(float(getattr(self.car_cfg, "table_wz_deadband_radps", 0.0) or 0.0)),
+        }
+
+    @staticmethod
+    def _limit_physical_axis(value: float, min_abs: float, max_abs: float, deadband: float) -> Tuple[float, str]:
+        magnitude = abs(float(value))
+        if max_abs <= 0.0 or magnitude <= max(0.0, float(deadband)):
+            return 0.0, "deadband" if magnitude > 0.0 else "zero"
+        sign = 1.0 if value >= 0.0 else -1.0
+        limited = min(magnitude, max_abs)
+        reason = "max" if magnitude > max_abs else ""
+        if min_abs > 0.0 and limited < min_abs:
+            limited = min(min_abs, max_abs)
+            reason = "min"
+        return sign * limited, reason or "pass"
+
+    def _apply_table_speed_profile(
+        self,
+        mode: str,
+        phase: str,
+        vx: float,
+        vy: float,
+        wz: float,
+    ) -> Tuple[float, float, float, Dict[str, Any]]:
+        profile = self._table_speed_profile_name(mode, phase)
+        limits = self._table_profile_limits(profile)
+        if not limits:
+            return vx, vy, wz, {
+                "speed_profile": profile,
+                "speed_limit_reason": "no_table_profile",
+            }
+        vx_mps = self._norm_to_physical("vx", vx)
+        vy_mps = self._norm_to_physical("vy", vy)
+        wz_radps = self._norm_to_physical("wz", wz)
+        vx_limited, vx_reason = self._limit_physical_axis(vx_mps, limits["vx_min"], limits["vx_max"], limits["vx_deadband"])
+        vy_limited, vy_reason = self._limit_physical_axis(vy_mps, limits["vy_min"], limits["vy_max"], limits["vy_deadband"])
+        wz_limited, wz_reason = self._limit_physical_axis(wz_radps, limits["wz_min"], limits["wz_max"], limits["wz_deadband"])
+        if profile == "final_lock":
+            vx_limited = self._clamp(vx_limited, -limits["vx_max"], limits["vx_max"])
+        reason_parts = [
+            f"vx:{vx_reason}",
+            f"vy:{vy_reason}",
+            f"wz:{wz_reason}",
+        ]
+        return (
+            self._physical_to_norm("vx", vx_limited),
+            self._physical_to_norm("vy", vy_limited),
+            self._physical_to_norm("wz", wz_limited),
+            {
+                "speed_profile": profile,
+                "speed_limit_reason": ",".join(reason_parts),
+                "vx_mps": float(vx_limited),
+                "vy_mps": float(vy_limited),
+                "wz_radps": float(wz_limited),
+                "vx_mps_raw": float(vx_mps),
+                "vy_mps_raw": float(vy_mps),
+                "wz_radps_raw": float(wz_radps),
+                "vx_mps_min": float(limits["vx_min"]),
+                "vx_mps_max": float(limits["vx_max"]),
+                "vy_mps_min": float(limits["vy_min"]),
+                "vy_mps_max": float(limits["vy_max"]),
+                "wz_radps_min": float(limits["wz_min"]),
+                "wz_radps_max": float(limits["wz_max"]),
+                "vx_deadband_mps": float(limits["vx_deadband"]),
+                "vy_deadband_mps": float(limits["vy_deadband"]),
+                "wz_deadband_radps": float(limits["wz_deadband"]),
+                "vx_mps_per_norm": self._axis_scale("vx"),
+                "vy_mps_per_norm": self._axis_scale("vy"),
+                "wz_radps_per_norm": self._axis_scale("wz"),
+            },
+        )
 
     def _limit_table_cmd(self, vx: float, vy: float, wz: float) -> Tuple[float, float, float]:
         now_s = time.time()
@@ -656,15 +795,72 @@ class MotionController:
             elif hard_guard:
                 vy = direction * recover_vy * float(getattr(self.car_cfg, "table_view_vy_sign", -1.0))
                 wz = direction * recover_wz * float(getattr(self.car_cfg, "table_view_wz_sign", -1.0))
-        if abs(vx) < 0.005:
+        if obs_stale:
             vx = 0.0
-        if abs(vy) < 0.005:
             vy = 0.0
-        if abs(wz) < 0.005:
+            wz = 0.0
+            self._last_table_vx = 0.0
+            self._last_table_vy = 0.0
+            self._last_table_wz = 0.0
+
+        now_mono = time.monotonic()
+        pose_missing_duration_s = 0.0
+        pose_missing_safe_vx_active = False
+        if pose_found:
+            self._pose_missing_since_mono = 0.0
+        elif obs is not None:
+            if self._pose_missing_since_mono <= 0.0:
+                self._pose_missing_since_mono = now_mono
+            pose_missing_duration_s = max(0.0, now_mono - self._pose_missing_since_mono)
+        else:
+            self._pose_missing_since_mono = 0.0
+
+        final_lock_dist_tol = max(0.0, float(self.cfg.final_lock_dist_tol_m))
+        pose_missing_hold_s = max(0.0, float(getattr(self.car_cfg, "table_pose_missing_max_hold_s", 3.0) or 3.0))
+        pose_missing_safe_vx_mps = abs(float(getattr(self.car_cfg, "table_pose_missing_safe_vx_mps", 0.010) or 0.010))
+        pose_missing_safe_vx_norm = self._physical_to_norm("vx", pose_missing_safe_vx_mps)
+        valid_for_safe_forward = bool(
+            obs is not None
+            and not pose_found
+            and bool(getattr(obs, "edge_found", False))
+            and bool(getattr(obs, "valid_for_control", False) or getattr(obs, "usable_for_approach", False))
+            and stale_level not in {"hard_stale", "dead"}
+            and not hard_guard
+            and yaw_abs <= yaw_stop_th
+            and dist_err > final_lock_dist_tol
+            and str(getattr(obs, "reject_reason", "") or "").strip().lower() in {"", "none"}
+            and getattr(obs, "depth_valid", True) is not False
+            and phase_name not in {"PLANE_ACQUIRE", "PLANE_STOP"}
+        )
+        if valid_for_safe_forward:
+            if pose_missing_duration_s <= pose_missing_hold_s:
+                vx = max(float(vx), pose_missing_safe_vx_norm)
+                forward_block_reason = "pose_missing_safe_vx"
+                pose_missing_safe_vx_active = True
+            else:
+                vx = 0.0
+                forward_block_reason = "pose_missing_timeout"
+        elif not pose_found and obs is not None:
+            if stale_level in {"hard_stale", "dead"}:
+                forward_block_reason = "vision_stale"
+            elif hard_guard:
+                forward_block_reason = fov_guard_reason or "edge_invalid"
+            elif yaw_abs > yaw_stop_th:
+                forward_block_reason = "yaw_out_of_range"
+            elif not bool(getattr(obs, "edge_found", False) and (getattr(obs, "valid_for_control", False) or getattr(obs, "usable_for_approach", False))):
+                forward_block_reason = "edge_invalid"
+        vx, vy, wz, speed_summary = self._apply_table_speed_profile(mode, phase_name, vx, vy, wz)
+        if abs(vx) < self._physical_to_norm("vx", abs(float(getattr(self.car_cfg, "table_vx_deadband_mps", 0.004) or 0.004))):
+            vx = 0.0
+        if abs(vy) < self._physical_to_norm("vy", abs(float(getattr(self.car_cfg, "table_vy_deadband_mps", 0.003) or 0.003))):
+            vy = 0.0
+        if abs(wz) < self._physical_to_norm("wz", abs(float(getattr(self.car_cfg, "table_wz_deadband_radps", 0.006) or 0.006))):
             wz = 0.0
 
         cmd = self._cmd(mode, vx=vx, vy=vy, wz=wz)
         summary = self._summary(mode, cmd, obs, reason=reason)
+        if abs(float(vx)) <= 1e-9 and forward_allowed and not forward_block_reason:
+            forward_block_reason = "speed_profile_deadband_or_limit"
         summary.update(
             {
                 "table_approach_phase": phase_name,
@@ -683,8 +879,19 @@ class MotionController:
                 "stale_guard_reason": str(guard.get("stale_guard_reason") or ""),
                 "pose_found": bool(pose_found),
                 "control_level": control_level,
+                "normalized_control_level": control_level,
+                "yaw_err": float(yaw_err),
+                "dist_err_m": float(dist_err),
                 "forward_allowed": bool(forward_allowed),
-                "forward_block_reason": forward_block_reason,
+                "forward_block_reason": forward_block_reason or "none",
+                "final_lock_enabled": bool(getattr(self.cfg, "enable_final_lock", False)),
+                "micro_adjust_enabled": bool(getattr(self.cfg, "enable_micro_adjust", False)),
+                "stop_ready_ignored_for_stage_transition": False,
+                "micro_adjust_skipped": False,
+                "pose_missing_duration_s": float(pose_missing_duration_s),
+                "pose_missing_safe_vx_active": bool(pose_missing_safe_vx_active),
+                "pose_missing_safe_vx_mps": float(pose_missing_safe_vx_mps),
+                "pose_missing_max_hold_s": float(pose_missing_hold_s),
                 "min_forward_dist_err_m": float(min_forward_dist),
                 "vx_norm_min": float(vx_min),
                 "vx_norm_max": float(vx_max),
@@ -702,6 +909,9 @@ class MotionController:
                 "final_vx": float(vx),
                 "final_vy": float(vy),
                 "final_wz": float(wz),
+                "vx_norm": float(vx),
+                "vy_norm": float(vy),
+                "wz_norm": float(wz),
                 "table_confirmed_by_yolo": bool(getattr(obs, "table_confirmed_by_yolo", False)) if obs is not None else False,
                 "yolo_reliable": bool(getattr(obs, "yolo_reliable", False)) if obs is not None else False,
                 "yolo_gate_open": bool(getattr(obs, "yolo_gate_open", False)) if obs is not None else False,
@@ -711,6 +921,7 @@ class MotionController:
                 "plane_touch_right": bool(getattr(obs, "plane_touch_right", False)) if obs is not None else False,
             }
         )
+        summary.update(speed_summary)
         return MotionDecision(
             cmd=cmd,
             cx_norm_abs=abs(float(view_err)),
@@ -754,12 +965,21 @@ class MotionController:
                 base_wz=out.wz,
                 reason="docking_control_fov",
             )
-        cmd = self._cmd(mode, vx=out.vx, vy=out.vy, wz=out.wz)
+        vx, vy, wz, speed_summary = self._apply_table_speed_profile(mode, mode, out.vx, out.vy, out.wz)
+        cmd = self._cmd(mode, vx=vx, vy=vy, wz=wz)
+        summary = self._summary(mode, cmd, obs, reason="docking_control")
+        summary.update(speed_summary)
+        summary.update({
+            "vx_norm": float(vx),
+            "vy_norm": float(vy),
+            "wz_norm": float(wz),
+            "forward_block_reason": "coarse_align_no_forward" if mode == "COARSE_ALIGN" else "",
+        })
         return MotionDecision(
             cmd=cmd,
             cx_norm_abs=abs(float(edge_obs.yaw_err_rad or 0.0)),
             distance_ratio=abs(float(edge_obs.dist_err_m or 0.0)),
-            control_summary=self._summary(mode, cmd, obs, reason="docking_control"),
+            control_summary=summary,
         )
 
     def coarse_align_cmd(self, obs: Optional[TableEdgeObs]) -> MotionDecision:

@@ -176,7 +176,7 @@ class UartBridge:
             "port": self.port,
             "baudrate": self.baudrate,
             "dry_run": self.dry_run,
-            "serial_open": bool(self._ser is not None) if not self.dry_run else True,
+            "serial_open": bool(self._ser is not None),
             "tx_worker_alive": bool(self._tx_thread is not None and self._tx_thread.is_alive()),
             "rx_worker_alive": bool(self._rx_thread is not None and self._rx_thread.is_alive()),
             "pending_tx": bool(self._pending_tx is not None),
@@ -280,10 +280,11 @@ class UartBridge:
         error = ""
         if self.dry_run:
             ok = True
-            for part in raw_line.splitlines() or [raw_line]:
-                text = part.strip()
-                if text:
-                    print(f"[MOTION][DRYRUN_TX] {text}", flush=True)
+            if self.dry_run_echo_stdout:
+                for part in raw_line.splitlines() or [raw_line]:
+                    text = part.strip()
+                    if text:
+                        print(f"[MOTION][DRYRUN_TX] {text}", flush=True)
         else:
             if self._ser is None:
                 error = "UART not started"

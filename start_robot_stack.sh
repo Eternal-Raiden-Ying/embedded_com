@@ -31,7 +31,7 @@ VISTA_MOCK_TABLE_BBOX="${VISTA_MOCK_TABLE_BBOX:-}"
 # dryrun：不连接小车，只打印将要发送到 UART 的实际控制信号。
 # full：连接小车串口，真实下发控制。
 # STACK_PROFILE="full"
-STACK_PROFILE="${STACK_PROFILE:-full}"
+STACK_PROFILE="${STACK_PROFILE:-dryrun}"
 
 # orchestrator 是否使用 sudo：auto / 0 / 1
 # full 模式通常需要 sudo 访问串口；dryrun 一般不需要。
@@ -47,6 +47,8 @@ READY_TIMEOUT_S="${READY_TIMEOUT_S:-35}"
 # STOP 后按 Ctrl+C 只退出当前日志显示，不停止服务
 FOLLOW_STACK_LOGS_AFTER_START="${FOLLOW_STACK_LOGS_AFTER_START:-1}"
 ROBOT_CONSOLE_LEVEL="${ROBOT_CONSOLE_LEVEL:-normal}"
+ENABLE_GATEWAY_LOGS="${ENABLE_GATEWAY_LOGS:-false}"
+COLLECT_GATEWAY_LOGS="${COLLECT_GATEWAY_LOGS:-false}"
 
 # 当前终端显示的状态摘要和手机链路关键字
 ORCH_SUMMARY_PATTERN='状态切换|MODE |DRY_RUN|UART|stop_class=|搜索超时|已发现目标|目标丢失|开始寻找|AUTOEXPLORE|AUTOSEARCH|SEARCH|RETURN|收到 STOP 命令|热待机|重新发现目标|自动搜索超时|TASK_CMD|task_cmd|vision_req|TASK_DONE|DEMO|IDLE_HOT|preview kept alive|waiting for next command|target        :|session_id    :|result        :|final_state   :|reason        :|total_time_s  :|next_state    :|preview       :|waiting       :|━━━━━━━━'
@@ -87,8 +89,17 @@ VISION_LOG_FILE="$VISION_LOG_DIR/vision.out"
 ORCH_LOG_FILE="$ORCH_LOG_DIR/orchestrator.out"
 GATEWAY_LOG_FILE="$GATEWAY_LOG_DIR/mobile_gateway.out"
 
-mkdir -p "$VISION_LOG_DIR" "$ORCH_LOG_DIR" "$GATEWAY_LOG_DIR" \
-         "$STACK_RUNS_ROOT" "$VISION_PID_DIR" "$ORCH_PID_DIR" "$GATEWAY_PID_DIR" "$STACK_SOCK_DIR"
+gateway_logs_enabled() {
+  case "${ENABLE_GATEWAY_LOGS:-false}:${COLLECT_GATEWAY_LOGS:-false}" in
+    *1*|*true*|*yes*|*on*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+mkdir -p "$VISION_LOG_DIR" "$ORCH_LOG_DIR" "$STACK_RUNS_ROOT" "$VISION_PID_DIR" "$ORCH_PID_DIR" "$GATEWAY_PID_DIR" "$STACK_SOCK_DIR"
+if gateway_logs_enabled; then
+  mkdir -p "$GATEWAY_LOG_DIR"
+fi
 
 # ---------- pretty output ----------
 if [[ -t 1 ]]; then
@@ -250,7 +261,7 @@ apply_profile_defaults() {
     dryrun)
       ORCH_SERIAL_DRY_RUN=1
       ORCH_TTS_EVENT_OUT_TRANSPORT="disabled"
-      ORCH_DRY_RUN_ECHO_STDOUT=1
+      ORCH_DRY_RUN_ECHO_STDOUT=0
       ;;
     full)
       ORCH_SERIAL_DRY_RUN=0
@@ -298,8 +309,15 @@ apply_run_log_paths() {
   GATEWAY_LOG_DIR="$run_dir/mobile_gateway"
   VISION_LOG_FILE="$VISION_LOG_DIR/vision.out"
   ORCH_LOG_FILE="$ORCH_LOG_DIR/orchestrator.out"
-  GATEWAY_LOG_FILE="$GATEWAY_LOG_DIR/mobile_gateway.out"
-  mkdir -p "$VISION_LOG_DIR" "$ORCH_LOG_DIR" "$GATEWAY_LOG_DIR" "$STACK_RUNS_ROOT"
+  if gateway_logs_enabled; then
+    GATEWAY_LOG_FILE="$GATEWAY_LOG_DIR/mobile_gateway.out"
+  else
+    GATEWAY_LOG_FILE="/dev/null"
+  fi
+  mkdir -p "$VISION_LOG_DIR" "$ORCH_LOG_DIR" "$STACK_RUNS_ROOT"
+  if gateway_logs_enabled; then
+    mkdir -p "$GATEWAY_LOG_DIR"
+  fi
 }
 
 prepare_start_run_paths() {
@@ -398,7 +416,9 @@ rotate_log() {
 
 launch_bg_user() {
   local name="$1" pid_file="$2" log_file="$3" cmd="$4"
-  rotate_log "$log_file"
+  if [[ "$log_file" != "/dev/null" ]]; then
+    rotate_log "$log_file"
+  fi
   nohup setsid bash -lc "$cmd" > "$log_file" 2>&1 &
   echo $! > "$pid_file"
   mark ok "$name 已拉起: pid=$(cat "$pid_file")  log=$log_file"
@@ -530,8 +550,10 @@ export STACK_RUN_ID="$STACK_RUN_ID"
 unset FORCE_COLOR
 export PYTHONPATH="$ORCH_ROOT"
 export ROBOT_CONSOLE_LEVEL="$ROBOT_CONSOLE_LEVEL"
+export MOBILE_GATEWAY_LOG_ENABLED="$(gateway_logs_enabled && echo 1 || echo 0)"
+export MOBILE_GATEWAY_STATUS_STDOUT="$(gateway_logs_enabled && echo 1 || echo 0)"
 export MOBILE_GATEWAY_LOG_DIR="$GATEWAY_LOG_DIR"
-export MOBILE_GATEWAY_LOG_FILE="$GATEWAY_LOG_DIR/mobile_gateway.log"
+export MOBILE_GATEWAY_LOG_FILE="$(gateway_logs_enabled && echo "$GATEWAY_LOG_DIR/mobile_gateway.log" || echo "/dev/null")"
 export MOBILE_GATEWAY_RUNS_DIR="$STACK_RUNS_ROOT"
 export MOBILE_GATEWAY_ORCH_RUNS_DIR="$STACK_RUNS_ROOT"
 export MOBILE_GATEWAY_ORCH_STATE_BLOCKS_PATH="$STACK_RUN_DIR/orchestrator/state_blocks.jsonl"
@@ -560,7 +582,7 @@ is_port_listening() {
 
 wait_for_ports() {
   local name="$1" ports_str="$2" timeout_s="$3" extra_s="$4"
-  local start_ts now_ts all_ok p
+  local start_ts now_ts all_ok p pid_file use_sudo
   start_ts=$(date +%s)
   while true; do
     all_ok=1
@@ -572,6 +594,26 @@ wait_for_ports() {
     done
     if [[ "$all_ok" == "1" ]]; then
       [[ "$extra_s" -gt 0 ]] && sleep "$extra_s"
+      pid_file=""
+      use_sudo=0
+      case "$name" in
+        vision)
+          pid_file="$VISION_PID_FILE"
+          ;;
+        orchestrator)
+          pid_file="$ORCH_PID_FILE"
+          if orch_use_sudo_effective; then
+            use_sudo=1
+          fi
+          ;;
+        mobile_gateway)
+          pid_file="$GATEWAY_PID_FILE"
+          ;;
+      esac
+      if [[ -n "$pid_file" ]] && ! pid_alive "$pid_file" "$use_sudo"; then
+        mark err "$name ready-check 失败：端口曾经可用，但进程已退出"
+        return 1
+      fi
       mark ok "$name ready  ports=[$ports_str]"
       return 0
     fi
@@ -791,10 +833,15 @@ start_stack() {
   fi
 
   start_gateway_bg
-  if ! wait_for_log_pattern "mobile_gateway" "$GATEWAY_LOG_FILE" "$GATEWAY_READY_PATTERN" "$READY_TIMEOUT_S" "$GATEWAY_READY_EXTRA_S"; then
-    tail_last_logs_on_failure "mobile_gateway" "$GATEWAY_LOG_FILE"
-    stop_all || true
-    exit 1
+  if gateway_logs_enabled; then
+    if ! wait_for_log_pattern "mobile_gateway" "$GATEWAY_LOG_FILE" "$GATEWAY_READY_PATTERN" "$READY_TIMEOUT_S" "$GATEWAY_READY_EXTRA_S"; then
+      tail_last_logs_on_failure "mobile_gateway" "$GATEWAY_LOG_FILE"
+      stop_all || true
+      exit 1
+    fi
+  else
+    sleep "$GATEWAY_READY_EXTRA_S"
+    mark note "gateway logs disabled by default; skipped log-based gateway ready-check"
   fi
 
   headline "启动完成"

@@ -3,6 +3,7 @@
 
 import math
 import time
+from collections import deque
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
@@ -43,12 +44,19 @@ class OpenCVPreviewSink(PreviewSink):
         self.destroy_all_on_close = True
         self.table_bbox_enabled = True
         self.mock_table_bbox: Optional[str] = None
+        self.text_level = "compact"
+        self.debug_points_enabled = False
+        self.legend_level = "compact"
         self._supported_layouts = {"rgb_minimal", "rgb_depth_edge", "rgb_yolo_edge_overlay", "rgb_yolo_overlay", "rgb_hot_preview"}
         self._opened = False
+        self._open_failed = False
+        self._open_error = ""
         self._last_frame_ts = 0.0
         self._last_render_ts = 0.0
         self._fps = 0.0
         self._frame_count = 0
+        self._timing_frame: Optional[Dict[str, float]] = None
+        self._timing_recent = deque(maxlen=240)
 
     def configure_display(self, **kwargs: Any) -> None:
         """Accept display/table-bbox params pushed from RuntimeSupervisor (CONFIG)."""
@@ -67,31 +75,71 @@ class OpenCVPreviewSink(PreviewSink):
             if key in kwargs:
                 setattr(self, key, kwargs[key])
 
+    @staticmethod
+    def _env_choice(name: str, default: str, allowed: set) -> str:
+        value = str(os.getenv(name, default) or default).strip().lower()
+        return value if value in allowed else default
+
+    def _add_timing(self, key: str, ms: float) -> None:
+        if self._timing_frame is not None:
+            self._timing_frame[key] = float(self._timing_frame.get(key, 0.0) or 0.0) + float(ms)
+
     def open(self) -> None:
         """Prepare the dashboard window and sink-local resources."""
+        if self._open_failed:
+            return
         try:
             cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
             cv2.resizeWindow(self.window_name, int(self.canvas_w * self.scale), int(self.canvas_h * self.scale))
-        except Exception:
-            cv2.namedWindow(self.window_name)
-        self._opened = True
+            self._opened = True
+            self._open_error = ""
+            return
+        except Exception as first_exc:
+            try:
+                cv2.namedWindow(self.window_name)
+                self._opened = True
+                self._open_error = ""
+                return
+            except Exception as second_exc:
+                self._opened = False
+                self._open_failed = True
+                self._open_error = str(second_exc or first_exc or "preview_open_failed")
 
     def set_layout(self, layout: str, reason: str = "") -> None:
         """Switch layout without replacing or rebuilding the OpenCV window."""
         value = str(layout or "").strip() or "rgb_minimal"
+        self.text_level = "compact"
+        self.debug_points_enabled = False
+        self.legend_level = "compact"
         self.layout = value if value in self._supported_layouts else "rgb_minimal"
 
     def render(self, frame: PreviewFrame) -> bool:
         """Render one frame bundle and return False when the user asks to exit."""
+        total_start = time.perf_counter()
+        self._timing_frame = {
+            "preview_compose_ms": 0.0,
+            "preview_draw_points_ms": 0.0,
+            "preview_draw_text_ms": 0.0,
+            "preview_draw_legend_ms": 0.0,
+            "preview_imshow_ms": 0.0,
+            "preview_waitkey_ms": 0.0,
+        }
         if not self._opened:
             self.open()
+        if not self._opened:
+            self._timing_frame = None
+            return True
 
+        compose_start = time.perf_counter()
         frames = frame.image if isinstance(frame.image, dict) else {}
         metadata = dict(getattr(frame.overlay, "metadata", {}) or {})
         mode = str(dict(metadata.get("runtime_status") or {}).get("mode") or frame.mode or "").upper()
         table_edge = metadata.get("table_edge_obs") or {}
         target_obs = metadata.get("target_obs") or {}
         layout = str(metadata.get("preview_layout") or self.layout or "rgb_minimal").strip()
+        self.text_level = "compact"
+        self.debug_points_enabled = False
+        self.legend_level = "compact"
         if layout not in self._supported_layouts:
             layout = "rgb_minimal"
         self.layout = layout
@@ -139,11 +187,27 @@ class OpenCVPreviewSink(PreviewSink):
             canvas = cv2.resize(canvas, (self.canvas_w, self.canvas_h), interpolation=cv2.INTER_AREA)
         if self.scale > 0 and abs(self.scale - 1.0) > 1e-3:
             canvas = cv2.resize(canvas, None, fx=self.scale, fy=self.scale, interpolation=cv2.INTER_AREA)
+        self._add_timing("preview_compose_ms", (time.perf_counter() - compose_start) * 1000.0)
 
+        imshow_start = time.perf_counter()
         cv2.imshow(self.window_name, canvas)
+        self._add_timing("preview_imshow_ms", (time.perf_counter() - imshow_start) * 1000.0)
         self._last_frame_ts = float(frame.ts or 0.0)
         self._update_fps()
-        if cv2.waitKey(1) & 0xFF == 27:
+        wait_start = time.perf_counter()
+        key = cv2.waitKey(1)
+        self._add_timing("preview_waitkey_ms", (time.perf_counter() - wait_start) * 1000.0)
+        timing = dict(self._timing_frame or {})
+        timing["preview_total_ms"] = (time.perf_counter() - total_start) * 1000.0
+        timing["preview_fps"] = float(self._fps)
+        timing["ts"] = time.time()
+        timing["preview_layout"] = self.layout
+        timing["preview_text_level"] = self.text_level
+        timing["preview_legend_level"] = self.legend_level
+        timing["preview_debug_points_enabled"] = bool(self.debug_points_enabled)
+        self._timing_recent.append(timing)
+        self._timing_frame = None
+        if key & 0xFF == 27:
             return False
         return True
 
@@ -283,11 +347,17 @@ class OpenCVPreviewSink(PreviewSink):
         source = table_edge.get("final_pose_source") or table_edge.get("pose_source") or "none"
         geometry_lines = [
             f"use={source}",
-            f"plane yaw={self._fmt(table_edge.get('yaw_err_rad'))}",
-            f"dist={self._fmt(table_edge.get('dist_err_m'))}",
-            f"score={self._fmt(table_edge.get('front_plane_score', table_edge.get('table_geometry_score')))}",
+            f"yaw={self._fmt_na(table_edge.get('yaw_err_rad'))}rad/{self._fmt_na(self._deg(table_edge.get('yaw_err_rad')))}deg",
+            f"dist={self._fmt_na(table_edge.get('dist_err_m'))}m",
+            f"conf={self._fmt_na(table_edge.get('confidence', table_edge.get('edge_conf')))}",
             f"control={table_edge.get('control_level') or 'none'}",
+            f"roi={roi or 'NA'}",
+            f"calib={table_edge.get('calib_source') or 'NA'}",
+            f"reject={table_edge.get('fast_gate_reason') or table_edge.get('fast_gate_reject_reason') or table_edge.get('reject_reason') or table_edge.get('reason') or 'none'}",
         ]
+        calib_warning = str(table_edge.get("calib_mismatch_warning") or "").strip()
+        if calib_warning:
+            geometry_lines.append(calib_warning[:92])
         if fast_sparse:
             yaw = table_edge.get("fast_raw_yaw_err_rad", table_edge.get("yaw_err_rad"))
             yaw_num = self._as_float(yaw)
@@ -295,8 +365,6 @@ class OpenCVPreviewSink(PreviewSink):
             geometry_lines.extend(
                 [
                     f"mode={table_edge.get('detector_mode') or 'fast_plane_only'} frame={table_edge.get('frame_seq', 'NA')}",
-                    f"coord={table_edge.get('fast_coord_frame') or 'robot_xyz'} pitch={self._fmt_na(table_edge.get('fast_camera_pitch_deg'))} hcam={self._fmt_na(table_edge.get('fast_camera_height_m'))} htbl={self._fmt_na(table_edge.get('fast_table_height_m'))}",
-                    f"roi={table_edge.get('roi_source') or 'NA'} {roi or 'NA'}",
                     f"sampled={table_edge.get('fast_raw_sampled_point_count', table_edge.get('sampled_point_count', 'NA'))} height_candidate={table_edge.get('fast_candidate_point_count', table_edge.get('fast_raw_candidate_count', 'NA'))}",
                     f"support_pixels={table_edge.get('fast_support_point_count', table_edge.get('fast_front_face_support_point_count', 'NA'))} reps={table_edge.get('fast_rep_count', table_edge.get('fast_front_face_rep_count', 'NA'))} in={table_edge.get('fast_rep_inlier_count', table_edge.get('fast_representative_inlier_count', 'NA'))} out={table_edge.get('fast_rep_outlier_count', 'NA')}",
                     f"clusters={table_edge.get('fast_rep_cluster_count', 'NA')} selected={table_edge.get('fast_selected_cluster_index', 'NA')} y={self._fmt_na(table_edge.get('fast_selected_cluster_y_center'))} score={self._fmt_na(table_edge.get('fast_selected_cluster_score'))}",
@@ -309,9 +377,27 @@ class OpenCVPreviewSink(PreviewSink):
                     f"resid mean/p90={self._fmt_na(table_edge.get('fast_residual_mean', table_edge.get('fast_raw_residual_mean')))}/{self._fmt_na(table_edge.get('fast_residual_p90', table_edge.get('fast_raw_residual_p90')))}",
                 ]
             )
+        if self.text_level == "compact":
+            geometry_lines = geometry_lines[:9]
         left_y = max(60, panel.shape[0] - (116 + (198 if fast_sparse else 0)))
         self._text_block(panel, geometry_lines, (16, left_y), fg=(210, 255, 210) if valid_for_control else (210, 230, 255), max_width=min(330, panel.shape[1] - 32), font_scale=0.40 if fast_sparse else 0.46, line_h=16 if fast_sparse else 19)
         return panel
+
+    @staticmethod
+    def _deg(value: Any) -> Optional[float]:
+        try:
+            return float(value) * 180.0 / math.pi
+        except Exception:
+            return None
+
+    @staticmethod
+    def _fmt_depth_shape(value: Any) -> str:
+        if isinstance(value, (list, tuple)) and len(value) >= 2:
+            try:
+                return f"{int(value[1])}x{int(value[0])}"
+            except Exception:
+                return "NA"
+        return "NA"
 
     def _make_info_panel(
         self,
@@ -448,11 +534,12 @@ class OpenCVPreviewSink(PreviewSink):
             self._draw_pixel_points(panel, table_edge.get("fast_candidate_pixels"), (0, 220, 255), radius=1, alpha=0.78)
             self._draw_pixel_points(panel, table_edge.get("fast_edge_pixels"), (255, 190, 40), radius=2, alpha=0.95)
             self._draw_pixel_points(panel, table_edge.get("fast_support_pixels"), (255, 235, 80), radius=1, alpha=0.72)
-            self._draw_pixel_points(panel, table_edge.get("fast_background_pixels"), (120, 160, 255), radius=4, alpha=0.88, marker="cross")
-            self._draw_pixel_points(panel, table_edge.get("fast_weak_pixels"), (210, 80, 210), radius=4, alpha=0.88, marker="cross")
             self._draw_pixel_points(panel, table_edge.get("fast_front_face_rep_pixels"), (255, 160, 255), radius=4, alpha=0.95, marker="cross")
-            self._draw_pixel_points(panel, table_edge.get("fast_outlier_pixels"), (40, 40, 255), radius=5, alpha=0.95, marker="cross")
             self._draw_pixel_points(panel, table_edge.get("fast_inlier_pixels"), (40, 255, 80), radius=4, alpha=0.98, marker="circle")
+            if self.debug_points_enabled:
+                self._draw_pixel_points(panel, table_edge.get("fast_background_pixels"), (120, 160, 255), radius=4, alpha=0.88, marker="cross")
+                self._draw_pixel_points(panel, table_edge.get("fast_weak_pixels"), (210, 80, 210), radius=4, alpha=0.88, marker="cross")
+                self._draw_pixel_points(panel, table_edge.get("fast_outlier_pixels"), (40, 40, 255), radius=5, alpha=0.95, marker="cross")
             self._draw_pixel_points(panel, table_edge.get("front_plane_candidate_pixels"), (40, 220, 70), radius=2, alpha=0.55)
             if table_edge.get("fast_candidate_pixels") or table_edge.get("fast_support_pixels"):
                 self._draw_fast_legend(panel)
@@ -540,29 +627,37 @@ class OpenCVPreviewSink(PreviewSink):
         panel[mask] = cv2.addWeighted(panel, 1.0 - float(alpha), overlay, float(alpha), 0)[mask]
 
     def _draw_fast_legend(self, panel: np.ndarray) -> None:
-        items = (
+        start = time.perf_counter()
+        items = [
             ("sampled", (80, 80, 120), "circle"),
             ("height_candidate", (0, 220, 255), "circle"),
             ("front_edge", (255, 190, 40), "circle"),
-            ("support_pixels", (255, 235, 80), "circle"),
-            ("reps", (255, 160, 255), "cross"),
-            ("rep_inliers", (40, 255, 80), "circle"),
-            ("rep_outliers", (40, 40, 255), "cross"),
-            ("rep_background", (120, 160, 255), "cross"),
-            ("rep_weak", (210, 80, 210), "cross"),
-        )
-        x = max(12, panel.shape[1] - 190)
-        y = 56
-        self._rect(panel, (x - 8, y - 18), (panel.shape[1] - 8, y + len(items) * 17 + 4), (0, 0, 0), 0.45)
+            ("support/inlier", (40, 255, 80), "circle"),
+            ("final_line", (255, 235, 80), "circle"),
+        ]
+        if self.legend_level in {"debug", "full"}:
+            items.extend(
+                [
+                    ("reps", (255, 160, 255), "cross"),
+                    ("rep_outliers", (40, 40, 255), "cross"),
+                    ("rep_background", (120, 160, 255), "cross"),
+                    ("rep_weak", (210, 80, 210), "cross"),
+                ]
+            )
+        x = max(12, panel.shape[1] - 150)
+        y = max(56, panel.shape[0] - (len(items) * 14 + 18))
+        self._rect(panel, (x - 6, y - 14), (panel.shape[1] - 6, y + len(items) * 14 + 3), (0, 0, 0), 0.42)
         for idx, (label, color, marker) in enumerate(items):
-            yy = y + idx * 17
+            yy = y + idx * 14
             if marker == "cross":
-                cv2.drawMarker(panel, (x + 5, yy - 5), color, cv2.MARKER_TILTED_CROSS, 10, 1, line_type=cv2.LINE_AA)
+                cv2.drawMarker(panel, (x + 5, yy - 4), color, cv2.MARKER_TILTED_CROSS, 8, 1, line_type=cv2.LINE_AA)
             else:
-                cv2.circle(panel, (x + 5, yy - 5), 3, color, -1, lineType=cv2.LINE_AA)
-            cv2.putText(panel, label, (x + 18, yy), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (230, 230, 230), 1, cv2.LINE_AA)
+                cv2.circle(panel, (x + 5, yy - 4), 2, color, -1, lineType=cv2.LINE_AA)
+            cv2.putText(panel, label, (x + 15, yy), cv2.FONT_HERSHEY_SIMPLEX, 0.30, (230, 230, 230), 1, cv2.LINE_AA)
+        self._add_timing("preview_draw_legend_ms", (time.perf_counter() - start) * 1000.0)
 
     def _draw_pixel_points(self, panel: np.ndarray, points: Any, color: Tuple[int, int, int], radius: int = 1, alpha: float = 1.0, marker: str = "circle") -> None:
+        start = time.perf_counter()
         if not isinstance(points, (list, tuple)):
             return
         h, w = panel.shape[:2]
@@ -582,6 +677,7 @@ class OpenCVPreviewSink(PreviewSink):
                     cv2.circle(target, (x, y), int(radius), color, -1, lineType=cv2.LINE_AA)
         if alpha < 1.0:
             cv2.addWeighted(target, float(alpha), panel, 1.0 - float(alpha), 0, dst=panel)
+        self._add_timing("preview_draw_points_ms", (time.perf_counter() - start) * 1000.0)
 
     def _find_table_bbox(self, local: Dict[str, Any], rgb_shape: Any = None) -> Optional[List[int]]:
         if not self.table_bbox_enabled:
@@ -777,10 +873,12 @@ class OpenCVPreviewSink(PreviewSink):
             ("TABLE", [
                 f"found={self._boolish(table_edge.get('edge_found'))} control={self._boolish(table_edge.get('valid_for_control', table_edge.get('edge_valid')))} source={table_edge.get('final_pose_source') or table_edge.get('pose_source', 'n/a')}",
                 f"level={table_edge.get('control_level', 'none')} geom={self._fmt(table_edge.get('table_geometry_score'))} stable={table_edge.get('stable_count', 'n/a')}",
-                f"usable approach={int(self._boolish(table_edge.get('usable_for_approach')))} align={int(self._boolish(table_edge.get('usable_for_alignment')))} stop={int(self._boolish(table_edge.get('usable_for_stop')))}",
+                f"depth={self._fmt_depth_shape(table_edge.get('depth_shape'))} calib={table_edge.get('calib_source') or 'n/a'}",
+                f"fx/fy={self._fmt_na(table_edge.get('fx'))}/{self._fmt_na(table_edge.get('fy'))} cx/cy={self._fmt_na(table_edge.get('cx'))}/{self._fmt_na(table_edge.get('cy'))}",
+                f"candidate/support/inliers={table_edge.get('fast_candidate_point_count', table_edge.get('candidate_count', 'n/a'))}/{table_edge.get('fast_support_point_count', table_edge.get('support_point_count', 'n/a'))}/{table_edge.get('inlier_count', table_edge.get('edge_inlier_count', 'n/a'))}",
+                f"line={table_edge.get('fast_line_source') or table_edge.get('fast_fit_line_source') or table_edge.get('selected_line_type') or 'n/a'} residual={self._fmt(table_edge.get('fast_residual_mean', table_edge.get('plane_residual_mean')))}",
+                f"frontness={self._fmt(table_edge.get('fast_frontness_score'))} bg_blocked={int(bool(table_edge.get('fast_background_blocked', False)))}",
                 f"yaw={self._fmt(table_edge.get('yaw_err_rad'))} dist={self._fmt(table_edge.get('dist_err_m'))} target={self._fmt(table_edge.get('target_dist_m'))}",
-                f"front_score={self._fmt(table_edge.get('front_plane_score'))} conf={self._fmt(table_edge.get('plane_confidence'))} area={self._fmt(table_edge.get('front_face_area_ratio'))}",
-                f"span={self._fmt(table_edge.get('plane_x_span_m'))} residual={self._fmt(table_edge.get('plane_residual_mean'))} inliers={table_edge.get('inlier_count', table_edge.get('edge_inlier_count', 'n/a'))}",
                 f"reject geom={table_edge.get('geometry_reject_reason') or 'ok'} ctrl={table_edge.get('control_reject_reason') or table_edge.get('reject_reason') or table_edge.get('reason') or 'ok'}",
             ]),
             ("ROI", [
@@ -813,6 +911,8 @@ class OpenCVPreviewSink(PreviewSink):
                 f"source_cameras={source_cameras}",
             ]),
         ]
+        if self.text_level == "compact":
+            sections = [(title, lines[:8]) for title, lines in sections[:4]]
         y = 54
         for title, lines in sections:
             cv2.putText(panel, title, (18, y), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (80, 255, 160), 2)
@@ -840,6 +940,7 @@ class OpenCVPreviewSink(PreviewSink):
         font_scale: float = 0.55,
         line_h: int = 24,
     ) -> None:
+        start = time.perf_counter()
         clean = [str(line) for line in lines if line is not None]
         if not clean:
             return
@@ -860,6 +961,7 @@ class OpenCVPreviewSink(PreviewSink):
             if yy > panel.shape[0] - 12:
                 break
             cv2.putText(panel, line[:max_chars], (x, yy), cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness)
+        self._add_timing("preview_draw_text_ms", (time.perf_counter() - start) * 1000.0)
 
     def _rect(
         self,
@@ -1004,6 +1106,7 @@ class OpenCVPreviewSink(PreviewSink):
     def snapshot(self) -> Dict[str, Any]:
         """Expose sink configuration and last-render bookkeeping."""
         snap = super().snapshot()
+        timing_summary = self._timing_summary()
         snap.update(
             {
                 "window_name": self.window_name,
@@ -1014,9 +1117,60 @@ class OpenCVPreviewSink(PreviewSink):
                 "show_rgb": self.show_rgb,
                 "show_depth": self.show_depth,
                 "show_edge": self.show_edge,
+                "preview_text_level": self.text_level,
+                "preview_legend_level": self.legend_level,
+                "preview_debug_points_enabled": bool(self.debug_points_enabled),
                 "opened": self._opened,
+                "open_failed": self._open_failed,
+                "open_error": self._open_error,
                 "last_frame_ts": self._last_frame_ts,
                 "fps": self._fps,
+                "timing": timing_summary,
             }
         )
         return snap
+
+    def _timing_summary(self) -> Dict[str, Any]:
+        now = time.time()
+        recent = [item for item in self._timing_recent if now - float(item.get("ts", now) or now) <= 5.0]
+        if not recent:
+            return {
+                "preview_enabled": bool(self._opened),
+                "preview_layout": self.layout,
+                "preview_fps": float(self._fps),
+                "preview_text_level": self.text_level,
+                "preview_legend_level": self.legend_level,
+                "preview_debug_points_enabled": bool(self.debug_points_enabled),
+                "sample_count": 0,
+            }
+
+        def stats(key: str) -> Dict[str, float]:
+            vals = sorted(float(item.get(key, 0.0) or 0.0) for item in recent)
+            if not vals:
+                return {"avg": 0.0, "p95": 0.0, "max": 0.0}
+            idx = min(len(vals) - 1, int(round(0.95 * float(len(vals) - 1))))
+            return {"avg": sum(vals) / float(len(vals)), "p95": vals[idx], "max": vals[-1]}
+
+        out: Dict[str, Any] = {
+            "preview_enabled": bool(self._opened),
+            "preview_layout": self.layout,
+            "preview_fps": float(self._fps),
+            "preview_text_level": self.text_level,
+            "preview_legend_level": self.legend_level,
+            "preview_debug_points_enabled": bool(self.debug_points_enabled),
+            "sample_count": int(len(recent)),
+        }
+        for key in (
+            "preview_compose_ms",
+            "preview_draw_points_ms",
+            "preview_draw_text_ms",
+            "preview_draw_legend_ms",
+            "preview_imshow_ms",
+            "preview_waitkey_ms",
+            "preview_total_ms",
+        ):
+            s = stats(key)
+            out[f"{key}_avg"] = s["avg"]
+            out[f"{key}_p95"] = s["p95"]
+            out[f"{key}_max"] = s["max"]
+        return out

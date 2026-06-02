@@ -24,6 +24,10 @@ class CameraCalib:
     cx: float
     cy: float
     depth_scale: float = 0.001
+    width: int = 0
+    height: int = 0
+    source: str = "calib_json_fallback"
+    profile_info: str = ""
 
 
 @dataclass
@@ -108,12 +112,18 @@ class EdgeDetectResult:
 def load_calib(json_path: Path) -> Tuple[CameraCalib, float]:
     with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
+    inferred_width = int(data.get("width", 0) or round(float(data["cx"]) * 2.0))
+    inferred_height = int(data.get("height", 0) or round(float(data["cy"]) * 2.0))
     calib = CameraCalib(
         fx=float(data["fx"]),
         fy=float(data["fy"]),
         cx=float(data["cx"]),
         cy=float(data["cy"]),
         depth_scale=float(data.get("depth_scale", 0.001)),
+        width=inferred_width,
+        height=inferred_height,
+        source="calib_json_fallback",
+        profile_info=str(json_path),
     )
     return calib, float(data["target_dist_m"])
 

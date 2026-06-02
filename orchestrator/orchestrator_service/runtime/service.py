@@ -13,6 +13,7 @@ from ..bridge.arm_protocol import encode_pose, parse_arm_response
 from common.console_presenter import DemoConsolePresenter
 from common.base_module import BaseModule
 from common.runtime_logging import OperatorConsole
+from common.system_metrics import SystemMetricsSampler
 from ..bridge.simple_car_protocol import SimpleCarMapper, parse_car_state_line
 from ..bridge.uart_bridge import UartBridge
 from ..config.schema import OrchestratorConfig, SocketEndpoint
@@ -49,6 +50,10 @@ class OrchestratorService(BaseModule):
         self._ipc_console_enabled = self._env_bool("ORCH_IPC_CONSOLE", False)
         self._heartbeat_console_enabled = self._env_bool("ORCH_HEARTBEAT_CONSOLE", False)
         self._uart_console_mode = self._env_choice("ORCH_UART_CONSOLE", "operator", {"operator", "full", "silent"})
+        self._uart_full_log = self._env_bool("ORCH_UART_FULL_LOG", False)
+        self._vision_full_obs_log = self._env_bool("VISION_LOG_FULL_OBS", False) or self._env_bool("VISION_DEBUG_FULL_LOG", False)
+        self._state_blocks_full_log = self._env_bool("ORCH_STATE_BLOCKS_FULL_LOG", False) or self._env_bool("VISION_DEBUG_FULL_LOG", False)
+        self._system_metrics = SystemMetricsSampler("orchestrator", interval_s=self._env_float("ORCH_SYSTEM_METRICS_INTERVAL_S", 1.0))
         self._mobile_status_console_mode = self._env_choice("ORCH_MOBILE_STATUS_CONSOLE", "change", {"change", "full", "silent"})
         self._last_obs_flags = {"table_edge": False, "target": False}
         self._last_target_obs_console_payload: Dict[str, Any] = {}
@@ -72,6 +77,21 @@ class OrchestratorService(BaseModule):
         self._last_uart_tx_ts = 0.0
         self._edge_obs_rate_ts = deque(maxlen=128)
         self._target_obs_rate_ts = deque(maxlen=128)
+        self._obs_freq_last_emit_ts = 0.0
+        self._obs_trace_samples: Dict[str, deque] = {
+            "table_edge_obs_recv_interval_ms": deque(maxlen=512),
+            "state_machine_tick_interval_ms": deque(maxlen=512),
+            "state_machine_consume_interval_ms": deque(maxlen=512),
+            "obs_age_at_consume_ms": deque(maxlen=512),
+            "vision_publish_to_orch_recv_ms": deque(maxlen=512),
+            "orch_recv_to_state_consume_ms": deque(maxlen=512),
+        }
+        self._last_table_edge_recv_ts = 0.0
+        self._last_state_machine_tick_ts = 0.0
+        self._last_state_machine_consume_ts = 0.0
+        self._last_consumed_table_obs_key = None
+        self._last_consumed_obs_seq: Optional[int] = None
+        self._same_obs_reuse_count = 0
         self._last_tx_summary: Dict[str, float] = {
             "task_ack_out": 0.0,
             "vision_req_out": 0.0,
@@ -85,6 +105,21 @@ class OrchestratorService(BaseModule):
         self._uart_lowfreq_last_emit_ts = 0.0
         self._uart_lowfreq_repeat_count = 0
         self._uart_lowfreq_last_payload: Optional[Dict[str, Any]] = None
+        self._uart_keepalive_last_tx_ts = 0.0
+        self._uart_keepalive_last_summary_ts = self._boot_ts
+        self._uart_keepalive_tx_ts = deque(maxlen=512)
+        self._uart_keepalive_interval_samples = deque(maxlen=512)
+        self._uart_keepalive_last_key = ""
+        self._uart_keepalive_same_cmd_repeat_count = 0
+        self._uart_keepalive_tx_count = 0
+        self._uart_keepalive_last_interval_ms: Optional[float] = None
+        self._uart_keepalive_last_cmd_type = ""
+        self._last_motion_log_ts = 0.0
+        self._last_motion_log_signature = None
+        self._last_motion_adapter_log_key = ""
+        self._last_motion_adapter_log_emit_ts = 0.0
+        self._last_motion_tx_context: Dict[str, Any] = {}
+        self._last_edge_slide_trace_signature = None
         self._motion_seq = 0
         self._last_stm32_status_poll_ts = 0.0
         self.motion_status: Dict[str, Any] = {
@@ -108,7 +143,7 @@ class OrchestratorService(BaseModule):
         )
         self.motion_adapter = Stm32MotionAdapter(
             self.uart,
-            logger=self._operator_emit,
+            logger=self._motion_operator_emit,
             tx_meta_factory=self._build_stm32_motion_tx_meta,
             wheel_speed_limit=cfg.car.stm32_wheel_speed_limit,
             vx_scale=cfg.car.vx_mps_per_norm,
@@ -124,6 +159,87 @@ class OrchestratorService(BaseModule):
         self.vision_req_sender = self._build_sender(cfg.vision_req_out, "vision_req_out", async_allowed=True)
         self.tts_sender = self._build_sender(cfg.tts_event_out, "tts_event_out", async_allowed=True)
         self._running = False
+
+    @staticmethod
+    def _lite_table_edge_obs(obs: Dict[str, Any]) -> Dict[str, Any]:
+        roi = obs.get("edge_roi") or obs.get("table_edge_roi") or obs.get("depth_edge_roi") or obs.get("plane_roi")
+        keys = (
+            "ts",
+            "obs_seq",
+            "camera_frame_seq",
+            "camera_frame_ts_ms",
+            "vision_process_start_ts_ms",
+            "vision_process_end_ts_ms",
+            "vision_publish_ts_ms",
+            "obs_out_send_ts_ms",
+            "orchestrator_recv_ts_ms",
+            "state_machine_consume_ts_ms",
+            "cmd_publish_ts_ms",
+            "seq",
+            "frame_id",
+            "edge_found",
+            "valid_for_control",
+            "control_level",
+            "yaw_err_rad",
+            "dist_err_m",
+            "edge_conf",
+            "obs_total_age_ms",
+            "vision_process_ms",
+            "camera_frame_interval_ms",
+            "camera_frame_hz",
+            "vision_process_interval_ms",
+            "vision_publish_interval_ms",
+            "obs_out_send_interval_ms",
+            "obs_out_send_hz",
+            "table_edge_obs_recv_interval_ms",
+            "orchestrator_recv_interval_ms",
+            "table_edge_obs_recv_hz",
+            "state_machine_tick_interval_ms",
+            "state_machine_consume_interval_ms",
+            "same_obs_reuse_count",
+            "obs_seq_gap",
+            "obs_age_at_consume_ms",
+            "vision_publish_to_orch_recv_ms",
+            "orch_recv_to_state_consume_ms",
+            "edge_update_interval_ms",
+            "depth_shape",
+            "calib_source",
+            "reject_reason",
+            "source",
+            "detector_mode",
+        )
+        out = {key: obs.get(key) for key in keys if obs.get(key) is not None}
+        if roi is not None:
+            out["roi"] = roi
+        out["type"] = "table_edge_obs"
+        return out
+
+    @classmethod
+    def _lite_vision_obs(cls, env: VisionObsEnvelope) -> Dict[str, Any]:
+        perception = dict(env.perception or {})
+        edge = perception.get("table_edge_obs") if isinstance(perception.get("table_edge_obs"), dict) else None
+        target = perception.get("target_obs") if isinstance(perception.get("target_obs"), dict) else None
+        lite_perception: Dict[str, Any] = {}
+        if isinstance(edge, dict):
+            lite_perception["table_edge_obs"] = cls._lite_table_edge_obs(edge)
+        if isinstance(target, dict):
+            lite_perception["target_obs"] = {
+                key: target.get(key)
+                for key in ("ts", "seq", "frame_id", "found", "target_found", "target", "confidence", "best_cls", "matched_cls")
+                if target.get(key) is not None
+            }
+        return {
+            "ts": env.ts,
+            "stage": env.stage,
+            "mode": env.mode,
+            "status": env.status,
+            "session_id": env.session_id,
+            "req_id": env.req_id,
+            "epoch": int(env.epoch),
+            "source": env.source,
+            "perception": lite_perception,
+            "type": "vision_obs",
+        }
 
     @staticmethod
     def _env_bool(name: str, default: bool) -> bool:
@@ -211,6 +327,18 @@ class OrchestratorService(BaseModule):
 
     def _operator_emit(self, line: str) -> bool:
         return self.operator_console.emit(line)
+
+    def _motion_operator_emit(self, line: str) -> bool:
+        text = str(line or "")
+        if not text.startswith("[MOTION]"):
+            return self._operator_emit(text)
+        key = re.sub(r"\bseq=\d+\b", "seq=*", text)
+        now = time.time()
+        if key == self._last_motion_adapter_log_key and (now - self._last_motion_adapter_log_emit_ts) < 5.0:
+            return False
+        self._last_motion_adapter_log_key = key
+        self._last_motion_adapter_log_emit_ts = now
+        return self._operator_emit(text)
 
     def _emit_demo_dry_run_notice(self, key: str) -> None:
         self.demo_console.dry_run = bool(getattr(self.cfg.serial, "dry_run", False))
@@ -419,12 +547,62 @@ class OrchestratorService(BaseModule):
             f"warnings={warnings}"
         )
 
+    @staticmethod
+    def _motion_float_sig(value: Any) -> float:
+        try:
+            return round(float(value), 4)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _motion_log_period_s(self) -> float:
+        try:
+            period_ms = float(os.getenv("ORCH_MOTION_LOG_PERIOD_MS", "500") or 500.0)
+        except (TypeError, ValueError):
+            period_ms = 500.0
+        return max(0.0, period_ms / 1000.0)
+
+    def _motion_log_signature(self, cmd, car_cmd, reason: str) -> tuple:
+        cmd_payload = cmd.to_dict() if hasattr(cmd, "to_dict") else {}
+        return (
+            str(getattr(car_cmd, "mode", cmd_payload.get("mode", "")) or ""),
+            str(getattr(car_cmd, "kind", cmd_payload.get("kind", "")) or ""),
+            self._motion_float_sig(getattr(cmd, "vx_norm", cmd_payload.get("vx", cmd_payload.get("vx_norm", 0.0)))),
+            self._motion_float_sig(getattr(cmd, "vy_norm", cmd_payload.get("vy", cmd_payload.get("vy_norm", 0.0)))),
+            self._motion_float_sig(getattr(cmd, "wz_norm", cmd_payload.get("wz", cmd_payload.get("wz_norm", 0.0)))),
+            bool(getattr(cmd, "stop", cmd_payload.get("stop", False))),
+            bool(getattr(car_cmd, "brake", False)),
+            str(reason or ""),
+        )
+
+    def _should_log_motion(self, signature: tuple, now: Optional[float] = None) -> bool:
+        now = time.time() if now is None else float(now)
+        changed = signature != getattr(self, "_last_motion_log_signature", None)
+        period_s = self._motion_log_period_s()
+        periodic = (now - float(getattr(self, "_last_motion_log_ts", 0.0) or 0.0)) >= period_s
+        if not changed and not periodic:
+            return False
+        self._last_motion_log_signature = signature
+        self._last_motion_log_ts = now
+        return True
+
+    def _verbose_ipc_success_enabled(self) -> bool:
+        return (
+            self.operator_console.full
+            or str(getattr(self.cfg.runtime, "log_mode", "") or "").strip().lower() == "full"
+            or bool(getattr(self.cfg.runtime, "debug", False))
+            or self._env_bool("ORCH_IPC_VERBOSE_SUCCESS", False)
+        )
+
     def _log_json(self, payload):
         level = payload.get("level", "info")
         event = payload.get("event", "")
         name = payload.get("name", payload.get("src", "module"))
         extra = {k: v for k, v in payload.items() if k not in {"level", "msg"}}
         message = event or payload.get("msg", "")
+        if payload.get("src") == "ipc":
+            success_events = {"send_ok", "send_attempt", "async_enqueue", "enqueue_ok", "received", "envelope_received", "ack_sent"}
+            if str(event or "").strip().lower() in success_events and not self._verbose_ipc_success_enabled():
+                return
         log_level = level
         if payload.get("src") == "ipc" and not self.operator_console.full:
             log_level = "info"
@@ -481,6 +659,9 @@ class OrchestratorService(BaseModule):
             "log_dir": self.cfg.runtime.log_dir,
             "log_file": self.cfg.runtime.log_file,
             "tick_hz": self.cfg.runtime.tick_hz,
+            "state_machine_tick_hz": self.cfg.runtime.tick_hz,
+            "orchestrator_table_edge_receiver_poll_interval_ms": int(round((1.0 / max(1.0, float(self.cfg.runtime.tick_hz))) * 1000.0)),
+            "status_publish_hz": 1.0 / max(1e-6, float(self.cfg.runtime.state_block_period_s or 1.0)),
             "heartbeat_period_s": self.cfg.runtime.heartbeat_period_s,
             "console_mode": self.operator_console.mode,
             "operator_summary_interval_s": self.operator_console.default_interval_s,
@@ -516,6 +697,10 @@ class OrchestratorService(BaseModule):
                 "final_lock_yaw_tol_rad": self.cfg.control.final_lock_yaw_tol_rad,
                 "final_lock_dist_tol_m": self.cfg.control.final_lock_dist_tol_m,
                 "final_lock_frames_to_arrive": self.cfg.control.final_lock_frames_to_arrive,
+                "enable_final_lock": self.cfg.control.enable_final_lock,
+                "enable_micro_adjust": self.cfg.control.enable_micro_adjust,
+                "final_lock_enter_dist_th_m": self.cfg.control.final_lock_enter_dist_th_m,
+                "final_lock_enter_yaw_th_rad": self.cfg.control.final_lock_enter_yaw_th_rad,
                 "edge_slide_dist_tolerance_m": self.cfg.control.edge_slide_dist_tolerance_m,
                 "table_edge_obs_max_age_ms": self.cfg.control.table_edge_obs_max_age_ms,
                 "edge_follow_min_edge_conf": self.cfg.control.edge_follow_min_edge_conf,
@@ -531,6 +716,8 @@ class OrchestratorService(BaseModule):
             },
             "car_cmd": {
                 "send_period_ms": self.cfg.car.send_period_ms,
+                "uart_keepalive_hz": self.cfg.car.uart_keepalive_hz,
+                "min_uart_keepalive_hz": self.cfg.car.min_uart_keepalive_hz,
                 "hold_ms": self.cfg.car.cmd_hold_ms,
                 "max_vx_norm": self.cfg.car.max_vx_norm,
                 "max_vy_norm": self.cfg.car.max_vy_norm,
@@ -546,6 +733,38 @@ class OrchestratorService(BaseModule):
                 "jog_turn_speed": self.cfg.car.jog_turn_speed,
                 "jog_duration_ms": self.cfg.car.jog_duration_ms,
                 "stop_on_state_enter": self.cfg.car.stop_on_state_enter,
+            },
+            "table_docking_motion": {
+                "pose_missing_safe_vx_mps": self.cfg.car.table_pose_missing_safe_vx_mps,
+                "pose_missing_max_hold_s": self.cfg.car.table_pose_missing_max_hold_s,
+                "coarse_align": {
+                    "vx_max_mps": self.cfg.car.table_coarse_align_vx_max_mps,
+                    "vy_min_mps": self.cfg.car.table_coarse_align_vy_min_mps,
+                    "vy_max_mps": self.cfg.car.table_coarse_align_vy_max_mps,
+                    "wz_min_radps": self.cfg.car.table_coarse_align_wz_min_radps,
+                    "wz_max_radps": self.cfg.car.table_coarse_align_wz_max_radps,
+                },
+                "controlled_approach": {
+                    "vx_min_mps": self.cfg.car.table_controlled_vx_min_mps,
+                    "vx_max_mps": self.cfg.car.table_controlled_vx_max_mps,
+                    "vy_min_mps": self.cfg.car.table_controlled_vy_min_mps,
+                    "vy_max_mps": self.cfg.car.table_controlled_vy_max_mps,
+                    "wz_min_radps": self.cfg.car.table_controlled_wz_min_radps,
+                    "wz_max_radps": self.cfg.car.table_controlled_wz_max_radps,
+                },
+                "final_lock": {
+                    "vx_min_mps": self.cfg.car.table_final_lock_vx_min_mps,
+                    "vx_max_mps": self.cfg.car.table_final_lock_vx_max_mps,
+                    "vy_min_mps": self.cfg.car.table_final_lock_vy_min_mps,
+                    "vy_max_mps": self.cfg.car.table_final_lock_vy_max_mps,
+                    "wz_min_radps": self.cfg.car.table_final_lock_wz_min_radps,
+                    "wz_max_radps": self.cfg.car.table_final_lock_wz_max_radps,
+                },
+                "deadband": {
+                    "vx_mps": self.cfg.car.table_vx_deadband_mps,
+                    "vy_mps": self.cfg.car.table_vy_deadband_mps,
+                    "wz_radps": self.cfg.car.table_wz_deadband_radps,
+                },
             },
             "docking": {
                 "min_confidence": self.cfg.docking.min_confidence,
@@ -637,7 +856,7 @@ class OrchestratorService(BaseModule):
         return meta
 
     def _build_stm32_motion_tx_meta(self, kind: str, seq: int, reason: str) -> Dict[str, Any]:
-        return {
+        meta = {
             "mode": str(self.core.ctx.state.value),
             "state": self.core.ctx.state.value,
             "task_intent": self.core.ctx.task_intent or "",
@@ -649,6 +868,41 @@ class OrchestratorService(BaseModule):
             "seq": int(seq),
             "reason": str(reason or ""),
         }
+        context = dict(getattr(self, "_last_motion_tx_context", {}) or {})
+        for key in (
+            "speed_profile",
+            "speed_limit_reason",
+            "forward_block_reason",
+            "vx_norm",
+            "vy_norm",
+            "wz_norm",
+            "vx_mps",
+            "vy_mps",
+            "wz_radps",
+            "vx_mps_per_norm",
+            "vy_mps_per_norm",
+            "wz_radps_per_norm",
+            "table_approach_phase",
+            "final_lock_enabled",
+            "micro_adjust_enabled",
+            "stop_ready_ignored_for_stage_transition",
+            "micro_adjust_skipped",
+            "pose_missing_duration_s",
+            "pose_missing_safe_vx_active",
+            "normalized_control_level",
+            "yaw_err",
+            "dist_err_m",
+            "final_lock_enter_allowed",
+            "final_lock_enter_block_reason",
+            "stable_lock_count",
+            "required_lock_count",
+            "lock_count_inc_reason",
+            "lock_count_hold_reason",
+            "lock_count_reset_reason",
+        ):
+            if context.get(key) is not None:
+                meta[key] = context.get(key)
+        return meta
 
     def _render_uart_line(self, payload: Dict[str, Any]) -> str:
         raw = str(payload.get("raw", "")).strip("\n")
@@ -727,12 +981,26 @@ class OrchestratorService(BaseModule):
         if uart_kind == "brake":
             return f"[ORCH] CAR_BRAKE mode={payload.get('mode') or 'BRAKE'}"
         if uart_kind == "stm32_vel":
+            profile = str(payload.get("speed_profile") or "n/a")
+            limit_reason = str(payload.get("speed_limit_reason") or "n/a")
+            block_reason = str(payload.get("forward_block_reason") or "")
             return (
                 f"[ORCH] STM32_V "
-                f"mode={payload.get('wire_mode', payload.get('mode', 'SEARCH'))} "
-                f"vx={self._fmt_float(payload.get('vx_mps', payload.get('actual_vx_norm', 0.0)))} "
-                f"vy={self._fmt_float(payload.get('vy_mps', payload.get('actual_vy_norm', 0.0)))} "
-                f"wz={self._fmt_float(payload.get('wz_radps', payload.get('actual_wz_norm', 0.0)))} "
+                f"state={payload.get('state', payload.get('mode', 'SEARCH'))} "
+                f"phase={payload.get('table_approach_phase', 'n/a')} "
+                f"profile={profile} "
+                f"vx_norm={self._fmt_float(payload.get('vx_norm', 0.0))} "
+                f"vy_norm={self._fmt_float(payload.get('vy_norm', 0.0))} "
+                f"wz_norm={self._fmt_float(payload.get('wz_norm', 0.0))} "
+                f"vx_mps={self._fmt_float(payload.get('vx_mps', payload.get('actual_vx_norm', 0.0)))} "
+                f"vy_mps={self._fmt_float(payload.get('vy_mps', payload.get('actual_vy_norm', 0.0)))} "
+                f"wz_radps={self._fmt_float(payload.get('wz_radps', payload.get('actual_wz_norm', 0.0)))} "
+                f"limit={limit_reason} "
+                f"block={block_reason or 'none'} "
+                f"final_lock={str(payload.get('final_lock_enabled', 'n/a')).lower()} "
+                f"micro_adjust={str(payload.get('micro_adjust_enabled', 'n/a')).lower()} "
+                f"pose_missing_s={self._fmt_float(payload.get('pose_missing_duration_s', 0.0))} "
+                f"pose_safe_vx={str(payload.get('pose_missing_safe_vx_active', False)).lower()} "
                 f"seq={payload.get('seq', 'n/a')}"
             )
         if uart_kind == "stm32_jog":
@@ -747,7 +1015,11 @@ class OrchestratorService(BaseModule):
         if uart_kind == "stm32_status":
             return "[ORCH] STM32_STATUS"
         if uart_kind == "stm32_stop":
-            return f"[ORCH] STM32_STOP seq={payload.get('seq', 'n/a')}"
+            return (
+                f"[ORCH] STM32_STOP state={payload.get('state', payload.get('mode', 'STOP'))} "
+                f"profile={payload.get('speed_profile', 'stop')} block={payload.get('forward_block_reason', 'stop')} "
+                f"seq={payload.get('seq', 'n/a')}"
+            )
         mode = str(payload.get("mode") or payload.get("state") or "").strip() or "UNKNOWN"
         kind = str(payload.get("kind") or "").strip()
         if kind == "stop" or str(payload.get("raw", "")).strip().upper().endswith("STOP"):
@@ -888,6 +1160,74 @@ class OrchestratorService(BaseModule):
                 f"[ORCH] WARN no_vel_sent state={state} reason={reason}",
             )
 
+    def _update_uart_keepalive_stats(self, payload: Dict[str, Any], actual_payloads: List[Dict[str, Any]]) -> None:
+        now = float(payload.get("ts", time.time()))
+        key = str(payload.get("summary_key") or self._uart_event_key(payload))
+        if self._uart_keepalive_last_key and key == self._uart_keepalive_last_key:
+            self._uart_keepalive_same_cmd_repeat_count += 1
+        else:
+            self._uart_keepalive_last_key = key
+            self._uart_keepalive_same_cmd_repeat_count = 0
+        if self._uart_keepalive_last_tx_ts > 0.0:
+            interval_ms = max(0.0, (now - self._uart_keepalive_last_tx_ts) * 1000.0)
+            self._uart_keepalive_last_interval_ms = interval_ms
+            self._uart_keepalive_interval_samples.append((now, interval_ms))
+        self._uart_keepalive_last_tx_ts = now
+        self._uart_keepalive_tx_ts.append(now)
+        self._uart_keepalive_tx_count += 1
+        if actual_payloads:
+            self._uart_keepalive_last_cmd_type = str(actual_payloads[-1].get("uart_kind") or "")
+        elif payload.get("uart_kind"):
+            self._uart_keepalive_last_cmd_type = str(payload.get("uart_kind") or "")
+        self._emit_uart_keepalive_summary_if_needed(now)
+
+    def _emit_uart_keepalive_summary_if_needed(self, now: Optional[float] = None, force: bool = False) -> None:
+        now = time.time() if now is None else float(now)
+        period_s = 5.0
+        if not force and (now - float(self._uart_keepalive_last_summary_ts or 0.0)) < period_s:
+            return
+        self._uart_keepalive_last_summary_ts = now
+        window_start = now - period_s
+        recent_ts = [float(ts) for ts in self._uart_keepalive_tx_ts if float(ts) >= window_start]
+        recent_intervals = [
+            float(interval_ms)
+            for ts, interval_ms in self._uart_keepalive_interval_samples
+            if float(ts) >= window_start
+        ]
+        if len(recent_ts) >= 2:
+            elapsed = max(1e-6, recent_ts[-1] - recent_ts[0])
+            actual_hz = float(len(recent_ts) - 1) / elapsed
+        elif recent_intervals:
+            avg_interval_s = max(1e-6, (sum(recent_intervals) / float(len(recent_intervals))) / 1000.0)
+            actual_hz = 1.0 / avg_interval_s
+        else:
+            actual_hz = 0.0
+        p50 = self._percentile(recent_intervals, 0.50)
+        p90 = self._percentile(recent_intervals, 0.90)
+        record = {
+            "ts": now,
+            "uart_dry_run": bool(self.cfg.serial.dry_run),
+            "uart_keepalive_target_hz": float(self.cfg.car.uart_keepalive_hz),
+            "uart_min_keepalive_hz": float(self.cfg.car.min_uart_keepalive_hz),
+            "uart_tx_interval_ms": self._uart_keepalive_last_interval_ms,
+            "uart_tx_hz": actual_hz,
+            "uart_tx_interval_p50": p50,
+            "uart_tx_interval_p90": p90,
+            "uart_tx_count": int(self._uart_keepalive_tx_count),
+            "last_cmd_type": self._uart_keepalive_last_cmd_type,
+            "same_cmd_repeat_count": int(self._uart_keepalive_same_cmd_repeat_count),
+        }
+        self.run_logger.write_jsonl("uart_keepalive_summary", record)
+        self._operator_emit(
+            "[UART_KEEPALIVE] "
+            f"dry_run={str(record['uart_dry_run']).lower()} "
+            f"target={record['uart_keepalive_target_hz']:.1f}Hz "
+            f"actual={actual_hz:.1f}Hz "
+            f"interval_p50={(p50 if p50 is not None else 0.0):.1f}ms "
+            f"interval_p90={(p90 if p90 is not None else 0.0):.1f}ms "
+            f"last_cmd={self._uart_keepalive_last_cmd_type or 'n/a'}"
+        )
+
     def _on_uart_tx(self, raw_line: str, dry_run: bool, tx_meta: Optional[Dict[str, Any]] = None):
         self._last_uart_tx_ts = time.time()
         payload = {
@@ -899,10 +1239,12 @@ class OrchestratorService(BaseModule):
             payload.update({k: v for k, v in tx_meta.items() if v not in (None, "")})
         payload["summary_key"] = self._uart_event_key(payload)
         payload["rendered"] = self._render_uart_line(payload)
-        self.run_logger.write_jsonl("uart_tx", payload)
+        if self._uart_full_log or not bool(dry_run):
+            self.run_logger.write_jsonl("uart_tx", payload)
         self._update_uart_lowfreq(payload)
         actual_payloads = self._actual_uart_payloads(payload)
         self._emit_no_vel_if_needed(payload, actual_payloads)
+        self._update_uart_keepalive_stats(payload, actual_payloads)
         for item in actual_payloads or [payload]:
             self._update_uart_console(item)
 
@@ -928,6 +1270,7 @@ class OrchestratorService(BaseModule):
         self._operator_emit(
             "[ORCH] PARAMS "
             f"tick_hz={float(self.cfg.runtime.tick_hz):.2f} send_period_ms={int(self.cfg.car.send_period_ms)} "
+            f"uart_keepalive={float(self.cfg.car.uart_keepalive_hz):.1f}Hz "
             f"protocol=MODE/V/STOP "
             f"final_lock yaw={self.cfg.control.final_lock_yaw_tol_rad:.3f} "
             f"dist={self.cfg.control.final_lock_dist_tol_m:.3f} "
@@ -945,6 +1288,7 @@ class OrchestratorService(BaseModule):
         self._operator_emit(f"[ORCH] READY state={self.core.ctx.state.value} dry_run={int(effective_dry_run)} uart={uart_mode}")
         self.log_info("runtime", "SERVICE_READY", {"run_dir": str(self.run_logger.run_dir)})
         self._emit_heartbeat_if_needed(force=True)
+        self._emit_system_metrics_if_needed(force=True)
 
     def stop(self):
         if self._stopped:
@@ -969,6 +1313,7 @@ class OrchestratorService(BaseModule):
         self.task_ack_sender.close()
         self.vision_req_sender.close()
         self.tts_sender.close()
+        self._emit_system_metrics_if_needed(force=True)
         self.run_logger.write_service_event("SERVICE_STOPPED")
         self.run_logger.write_timeline("STOP")
         self._operator_emit(" ".join([f"[ORCH] STOPPED", "reason=service_stop"]))
@@ -984,12 +1329,15 @@ class OrchestratorService(BaseModule):
                 self._drain_uart_feedback()
                 self._drain_task_cmds()
                 self._drain_vision_msgs()
+                self._mark_state_machine_consume(loop_start)
                 decision = self.core.tick()
+                self._mark_cmd_publish(decision)
                 self._flush_pending_msgs()
                 self._emit_motion(decision)
                 self._poll_stm32_status_if_needed()
                 self._emit_state_block_if_needed()
                 self._emit_heartbeat_if_needed()
+                self._emit_system_metrics_if_needed()
                 elapsed = time.time() - loop_start
                 time.sleep(max(0.0, period_s - elapsed))
         finally:
@@ -1268,7 +1616,7 @@ class OrchestratorService(BaseModule):
         msg_type = str(payload.get("type", "") or "").strip().lower()
         if msg_type == "vision_obs":
             env = VisionObsEnvelope.from_dict(payload)
-            self.run_logger.write_jsonl("vision_obs", env.to_dict())
+            self.run_logger.write_jsonl("vision_obs", env.to_dict() if self._vision_full_obs_log else self._lite_vision_obs(env))
             perception = dict(env.perception or {})
             has_table_edge = isinstance(perception.get("table_edge_obs"), dict)
             has_target = isinstance(perception.get("target_obs"), dict)
@@ -1336,12 +1684,30 @@ class OrchestratorService(BaseModule):
                     if msg_type == "table_edge_obs":
                         parsed = TableEdgeObs.from_dict(payload)
                         parsed.obs_recv_ts = recv_ts
+                        parsed.orchestrator_recv_ts_ms = self._epoch_ms(recv_ts)
+                        recv_interval_ms = (
+                            max(0.0, (recv_ts - float(self._last_table_edge_recv_ts)) * 1000.0)
+                            if float(self._last_table_edge_recv_ts or 0.0) > 0.0
+                            else None
+                        )
+                        self._last_table_edge_recv_ts = recv_ts
+                        recv_hz = 1000.0 / float(recv_interval_ms) if recv_interval_ms and recv_interval_ms > 0.0 else 0.0
+                        parsed.table_edge_obs_recv_interval_ms = recv_interval_ms
+                        parsed.orchestrator_recv_interval_ms = recv_interval_ms
+                        parsed.table_edge_obs_recv_hz = float(recv_hz)
+                        if parsed.vision_publish_ts_ms is not None:
+                            try:
+                                parsed.vision_publish_to_orch_recv_ms = max(0.0, float(parsed.orchestrator_recv_ts_ms) - float(parsed.vision_publish_ts_ms))
+                            except Exception:
+                                pass
                         if parsed.obs_publish_ts is not None:
                             try:
                                 parsed.publish_delay_ms = max(0.0, (recv_ts - float(parsed.obs_publish_ts)) * 1000.0)
                             except Exception:
                                 pass
                         self._edge_obs_rate_ts.append(recv_ts)
+                        self._observe_trace_sample("table_edge_obs_recv_interval_ms", recv_interval_ms)
+                        self._observe_trace_sample("vision_publish_to_orch_recv_ms", getattr(parsed, "vision_publish_to_orch_recv_ms", None))
                         if priority >= latest_table_priority:
                             latest_table = parsed
                             latest_table_priority = priority
@@ -1360,6 +1726,13 @@ class OrchestratorService(BaseModule):
                             "edge_update_interval_ms": parsed.edge_update_interval_ms,
                             "frame_id": parsed.frame_id,
                             "seq": parsed.seq,
+                            "obs_seq": parsed.obs_seq,
+                            "camera_frame_seq": parsed.camera_frame_seq,
+                            "orchestrator_recv_ts_ms": parsed.orchestrator_recv_ts_ms,
+                            "table_edge_obs_recv_interval_ms": parsed.table_edge_obs_recv_interval_ms,
+                            "orchestrator_recv_interval_ms": parsed.orchestrator_recv_interval_ms,
+                            "table_edge_obs_recv_hz": parsed.table_edge_obs_recv_hz,
+                            "vision_publish_to_orch_recv_ms": parsed.vision_publish_to_orch_recv_ms,
                             "source_mode": parsed.source_mode,
                             "is_stale": parsed.is_stale,
                             "point_count": parsed.point_count,
@@ -1384,6 +1757,13 @@ class OrchestratorService(BaseModule):
                             edge_update_interval_ms=parsed.edge_update_interval_ms,
                             frame_id=parsed.frame_id,
                             seq=parsed.seq,
+                            obs_seq=parsed.obs_seq,
+                            camera_frame_seq=parsed.camera_frame_seq,
+                            orchestrator_recv_ts_ms=parsed.orchestrator_recv_ts_ms,
+                            table_edge_obs_recv_interval_ms=parsed.table_edge_obs_recv_interval_ms,
+                            orchestrator_recv_interval_ms=parsed.orchestrator_recv_interval_ms,
+                            table_edge_obs_recv_hz=parsed.table_edge_obs_recv_hz,
+                            vision_publish_to_orch_recv_ms=parsed.vision_publish_to_orch_recv_ms,
                             source_mode=parsed.source_mode,
                             is_stale=parsed.is_stale,
                             point_count=parsed.point_count,
@@ -1636,6 +2016,32 @@ class OrchestratorService(BaseModule):
             "obs_total_age_ms",
             "vision_process_ms",
             "control_loop_age_ms",
+            "obs_seq",
+            "camera_frame_seq",
+            "camera_frame_ts_ms",
+            "vision_process_start_ts_ms",
+            "vision_process_end_ts_ms",
+            "vision_publish_ts_ms",
+            "obs_out_send_ts_ms",
+            "orchestrator_recv_ts_ms",
+            "state_machine_consume_ts_ms",
+            "cmd_publish_ts_ms",
+            "camera_frame_interval_ms",
+            "camera_frame_hz",
+            "vision_process_interval_ms",
+            "vision_publish_interval_ms",
+            "obs_out_send_interval_ms",
+            "obs_out_send_hz",
+            "table_edge_obs_recv_interval_ms",
+            "orchestrator_recv_interval_ms",
+            "table_edge_obs_recv_hz",
+            "state_machine_tick_interval_ms",
+            "state_machine_consume_interval_ms",
+            "same_obs_reuse_count",
+            "obs_seq_gap",
+            "obs_age_at_consume_ms",
+            "vision_publish_to_orch_recv_ms",
+            "orch_recv_to_state_consume_ms",
             "edge_update_interval_ms",
             "stale_level",
             "stale_guard_active",
@@ -1727,6 +2133,18 @@ class OrchestratorService(BaseModule):
         cmd = dict(summary.get("cmd") or {})
         state = str(summary.get("state") or self.core.ctx.state.value)
         reason = str(summary.get("reason") or summary.get("lock_reason") or "").strip() or "n/a"
+        speed_profile = str(summary.get("speed_profile") or "n/a")
+        speed_limit = str(summary.get("speed_limit_reason") or "n/a")
+        forward_block = str(summary.get("forward_block_reason") or "none")
+        vx_mps = summary.get("vx_mps")
+        vy_mps = summary.get("vy_mps")
+        wz_radps = summary.get("wz_radps")
+        if vx_mps is None:
+            vx_mps = float(cmd.get("vx", 0.0) or 0.0) * float(self.cfg.car.vx_mps_per_norm)
+        if vy_mps is None:
+            vy_mps = float(cmd.get("vy", 0.0) or 0.0) * float(self.cfg.car.vy_mps_per_norm)
+        if wz_radps is None:
+            wz_radps = float(cmd.get("wz", 0.0) or 0.0) * float(self.cfg.car.wz_radps_per_norm)
         base = (
             f"state={state} edge={int(bool(summary.get('edge_found')))} "
             f"conf={self._fmt_float(summary.get('confidence'), 2, signed=False)} "
@@ -1737,7 +2155,9 @@ class OrchestratorService(BaseModule):
             f"dt={self._fmt_float(summary.get('edge_update_interval_ms'), 0, signed=False)}ms "
             f"stale={summary.get('stale_level') or 'n/a'} "
             f"lock={int(bool(summary.get('lock_ready')))} reason={reason} "
-            f"cmd vx={self._fmt_float(cmd.get('vx'))} vy={self._fmt_float(cmd.get('vy'))} wz={self._fmt_float(cmd.get('wz'))}"
+            f"profile={speed_profile} limit={speed_limit} block={forward_block} "
+            f"cmd vx_norm={self._fmt_float(cmd.get('vx'))} vy_norm={self._fmt_float(cmd.get('vy'))} wz_norm={self._fmt_float(cmd.get('wz'))} "
+            f"vx_mps={self._fmt_float(vx_mps)} vy_mps={self._fmt_float(vy_mps)} wz_radps={self._fmt_float(wz_radps)}"
         )
         if state == "FINAL_LOCK":
             stable = int(self.core.ctx.table_lock_frames)
@@ -1752,7 +2172,9 @@ class OrchestratorService(BaseModule):
                 f"dt={self._fmt_float(summary.get('edge_update_interval_ms'), 0, signed=False)}ms "
                 f"stale={summary.get('stale_level') or 'n/a'} "
                 f"ready={int(bool(summary.get('lock_ready')))} reason={reason} "
-                f"cmd vx={self._fmt_float(cmd.get('vx'))} vy={self._fmt_float(cmd.get('vy'))} wz={self._fmt_float(cmd.get('wz'))}"
+                f"profile={speed_profile} limit={speed_limit} block={forward_block} "
+                f"cmd vx_norm={self._fmt_float(cmd.get('vx'))} vy_norm={self._fmt_float(cmd.get('vy'))} wz_norm={self._fmt_float(cmd.get('wz'))} "
+                f"vx_mps={self._fmt_float(vx_mps)} vy_mps={self._fmt_float(vy_mps)} wz_radps={self._fmt_float(wz_radps)}"
             )
         if state == "EDGE_SLIDE_SEARCH":
             zero_cmd = all(abs(float(cmd.get(key, 0.0) or 0.0)) <= 1e-9 for key in ("vx", "vy", "wz"))
@@ -1849,15 +2271,14 @@ class OrchestratorService(BaseModule):
 
     def _emit_operator_control(self, decision) -> None:
         summary = self._control_summary_with_context(decision)
+        self.run_logger.write_jsonl("control_summary", summary)
         state = str(summary.get("state") or self.core.ctx.state.value)
         self._emit_demo_health(summary)
         if state in {"IDLE", "DONE", "ERROR_RECOVERY"} and not self.operator_console.full:
             return
         line = self._operator_control_line(summary)
         key = "lock" if state == "FINAL_LOCK" else ("slide" if state == "EDGE_SLIDE_SEARCH" else "ctrl")
-        period_s = self.operator_console.default_interval_s
-        if state == "EDGE_SLIDE_SEARCH":
-            period_s = max(0.1, float(getattr(self.cfg.control, "edge_follow_log_period_ms", 500) or 500) / 1000.0)
+        period_s = 5.0
         self.operator_console.emit_rate_limited(key, line, period_s)
         self._emit_target_obs_missing_warning()
 
@@ -1866,6 +2287,157 @@ class OrchestratorService(BaseModule):
         cutoff = now - max(1.0, float(window_s))
         recent = [float(ts) for ts in list(samples) if float(ts) >= cutoff]
         return float(len(recent)) / max(1.0, float(window_s))
+
+    @staticmethod
+    def _epoch_ms(ts: Any) -> int:
+        try:
+            return int(round(float(ts) * 1000.0))
+        except Exception:
+            return int(round(time.time() * 1000.0))
+
+    @staticmethod
+    def _obs_key(obs: Optional[TableEdgeObs]):
+        if obs is None:
+            return None
+        return (
+            getattr(obs, "obs_seq", None),
+            getattr(obs, "camera_frame_seq", None),
+            getattr(obs, "seq", None),
+            getattr(obs, "frame_id", None),
+            getattr(obs, "obs_ts", None),
+        )
+
+    @staticmethod
+    def _percentile(values, p: float) -> Optional[float]:
+        nums = sorted(float(v) for v in values if v is not None)
+        if not nums:
+            return None
+        idx = int(round((len(nums) - 1) * max(0.0, min(1.0, float(p)))))
+        return nums[idx]
+
+    def _observe_trace_sample(self, key: str, value: Any) -> None:
+        try:
+            number = float(value)
+        except Exception:
+            return
+        samples = self._obs_trace_samples.get(key)
+        if samples is not None:
+            samples.append(number)
+
+    def _trace_stats(self, key: str) -> Dict[str, Optional[float]]:
+        values = list(self._obs_trace_samples.get(key) or [])
+        return {
+            "p50": self._percentile(values, 0.50),
+            "p90": self._percentile(values, 0.90),
+            "max": max(values) if values else None,
+        }
+
+    def _mark_state_machine_consume(self, loop_start: float) -> None:
+        now = time.time()
+        tick_interval_ms = (
+            max(0.0, (now - float(self._last_state_machine_tick_ts)) * 1000.0)
+            if float(self._last_state_machine_tick_ts or 0.0) > 0.0
+            else None
+        )
+        self._last_state_machine_tick_ts = now
+        if tick_interval_ms is not None:
+            self._observe_trace_sample("state_machine_tick_interval_ms", tick_interval_ms)
+        obs = self.core.ctx.last_table_obs
+        if obs is None:
+            return
+        consume_interval_ms = (
+            max(0.0, (now - float(self._last_state_machine_consume_ts)) * 1000.0)
+            if float(self._last_state_machine_consume_ts or 0.0) > 0.0
+            else None
+        )
+        self._last_state_machine_consume_ts = now
+        key = self._obs_key(obs)
+        is_new_obs = key != self._last_consumed_table_obs_key
+        if not is_new_obs:
+            self._same_obs_reuse_count += 1
+        else:
+            self._last_consumed_table_obs_key = key
+            self._same_obs_reuse_count = 0
+        obs_seq = getattr(obs, "obs_seq", None)
+        seq_gap = None
+        try:
+            if obs_seq is not None and self._last_consumed_obs_seq is not None:
+                seq_gap = int(obs_seq) - int(self._last_consumed_obs_seq)
+            if obs_seq is not None and is_new_obs:
+                self._last_consumed_obs_seq = int(obs_seq)
+        except Exception:
+            seq_gap = None
+        if obs_seq is not None and self._last_consumed_obs_seq is None:
+            try:
+                self._last_consumed_obs_seq = int(obs_seq)
+            except Exception:
+                pass
+        consume_ms = self._epoch_ms(now)
+        obs.state_machine_consume_ts_ms = consume_ms
+        obs.state_machine_tick_interval_ms = tick_interval_ms
+        obs.state_machine_consume_interval_ms = consume_interval_ms
+        obs.same_obs_reuse_count = int(self._same_obs_reuse_count)
+        obs.obs_seq_gap = seq_gap
+        if getattr(obs, "frame_capture_ts", None) is not None:
+            try:
+                obs.obs_age_at_consume_ms = max(0.0, (now - float(obs.frame_capture_ts)) * 1000.0)
+            except Exception:
+                pass
+        if getattr(obs, "obs_recv_ts", None) is not None:
+            try:
+                obs.orch_recv_to_state_consume_ms = max(0.0, (now - float(obs.obs_recv_ts)) * 1000.0)
+            except Exception:
+                pass
+        if consume_interval_ms is not None:
+            self._observe_trace_sample("state_machine_consume_interval_ms", consume_interval_ms)
+        self._observe_trace_sample("obs_age_at_consume_ms", getattr(obs, "obs_age_at_consume_ms", None))
+        self._observe_trace_sample("orch_recv_to_state_consume_ms", getattr(obs, "orch_recv_to_state_consume_ms", None))
+        self._emit_obs_frequency_summary_if_needed()
+
+    def _mark_cmd_publish(self, decision) -> None:
+        now_ms = self._epoch_ms(time.time())
+        obs = self.core.ctx.last_table_obs
+        if obs is not None:
+            obs.cmd_publish_ts_ms = now_ms
+        summary = getattr(decision, "control_summary", None)
+        if isinstance(summary, dict):
+            summary["cmd_publish_ts_ms"] = now_ms
+
+    def _emit_obs_frequency_summary_if_needed(self, force: bool = False) -> None:
+        now = time.time()
+        period_s = 5.0
+        if not force and (now - float(self._obs_freq_last_emit_ts or 0.0)) < period_s:
+            return
+        self._obs_freq_last_emit_ts = now
+        recv_hz = self._rate_hz(self._edge_obs_rate_ts, window_s=period_s)
+        target_hz = self._rate_hz(self._target_obs_rate_ts, window_s=period_s)
+        obs = self.core.ctx.last_table_obs
+        record = {
+            "ts": now,
+            "table_edge_obs_recv_hz": float(recv_hz),
+            "target_obs_recv_hz": float(target_hz),
+            "same_obs_reuse_count": int(self._same_obs_reuse_count),
+            "obs_seq": getattr(obs, "obs_seq", None) if obs is not None else None,
+            "camera_frame_seq": getattr(obs, "camera_frame_seq", None) if obs is not None else None,
+            "seq": getattr(obs, "seq", None) if obs is not None else None,
+            "state": self.core.ctx.state.value,
+            "tick_hz_config": float(self.cfg.runtime.tick_hz),
+            "receiver_poll_interval_ms_config": int(round((1.0 / max(1.0, float(self.cfg.runtime.tick_hz))) * 1000.0)),
+            "status_publish_hz_config": 1.0 / max(1e-6, float(self.cfg.runtime.state_block_period_s or 1.0)),
+        }
+        for key in self._obs_trace_samples:
+            record[key] = self._trace_stats(key)
+        self.run_logger.write_jsonl("obs_frequency_summary", record)
+        self.operator_console.emit_rate_limited(
+            "obs_frequency_summary",
+            "[ORCH][OBS_FREQ] "
+            f"edge_recv_hz={self._fmt_float(recv_hz, 1, signed=False)} "
+            f"target_recv_hz={self._fmt_float(target_hz, 1, signed=False)} "
+            f"tick_ms_p50={self._fmt_float(record['state_machine_tick_interval_ms'].get('p50'), 0, signed=False)} "
+            f"consume_age_p50={self._fmt_float(record['obs_age_at_consume_ms'].get('p50'), 0, signed=False)} "
+            f"same_reuse={int(self._same_obs_reuse_count)}",
+            interval_s=period_s,
+        )
 
     def _emit_demo_health(self, summary: Dict[str, Any]) -> None:
         if str(getattr(self.demo_console, "level", "normal")) == "demo":
@@ -1934,14 +2506,29 @@ class OrchestratorService(BaseModule):
             self._emit_jog_motion(decision, jog_action)
             return
         cmd = decision.cmd
-        self.run_logger.write_jsonl("cmd_vel", cmd.to_dict())
-        self._emit_edge_slide_trace(decision)
         self._emit_operator_control(decision)
         self._flush_state_traces(decision)
         car_cmd = self.mapper.from_cmd_vel(cmd, cx_norm_abs=decision.cx_norm_abs, distance_ratio=decision.distance_ratio)
         tx_meta = self._build_uart_tx_meta(car_cmd)
         reason = str(tx_meta.get("reason") or car_cmd.kind or "").strip()
         velocity = self.motion_adapter.cmd_vel_to_velocity(cmd)
+        summary = dict(getattr(decision, "control_summary", None) or {})
+        speed_profile = str(summary.get("speed_profile") or ("stop" if car_cmd.kind in {"stop", "brake"} else "search"))
+        self._last_motion_tx_context = {
+            "speed_profile": speed_profile,
+            "speed_limit_reason": summary.get("speed_limit_reason") or "",
+            "forward_block_reason": summary.get("forward_block_reason") or "",
+            "table_approach_phase": summary.get("table_approach_phase") or "",
+            "vx_norm": float(getattr(cmd, "vx_norm", 0.0) or 0.0),
+            "vy_norm": float(getattr(cmd, "vy_norm", 0.0) or 0.0),
+            "wz_norm": float(getattr(cmd, "wz_norm", 0.0) or 0.0),
+            "vx_mps": float(velocity[0]),
+            "vy_mps": float(velocity[1]),
+            "wz_radps": float(velocity[2]),
+            "vx_mps_per_norm": float(self.cfg.car.vx_mps_per_norm),
+            "vy_mps_per_norm": float(self.cfg.car.vy_mps_per_norm),
+            "wz_radps_per_norm": float(self.cfg.car.wz_radps_per_norm),
+        }
         seq = self.motion_adapter.send_cmd_vel(cmd, reason=reason)
         self.motion_status["last_seq"] = seq
         self.motion_status["jog_running"] = False
@@ -1962,9 +2549,22 @@ class OrchestratorService(BaseModule):
             },
             "raw": "STOP" if car_cmd.kind in {"stop", "brake"} else f"V {velocity[0]:.3f} {velocity[1]:.3f} {velocity[2]:.3f}",
             "legacy_raw": car_cmd.raw_line.rstrip("\r\n"),
+            "speed_profile": speed_profile,
+            "speed_limit_reason": self._last_motion_tx_context["speed_limit_reason"],
+            "forward_block_reason": self._last_motion_tx_context["forward_block_reason"],
+            "vx_mps_per_norm": self.cfg.car.vx_mps_per_norm,
+            "vy_mps_per_norm": self.cfg.car.vy_mps_per_norm,
+            "wz_radps_per_norm": self.cfg.car.wz_radps_per_norm,
         }
         car_record.update({k: v for k, v in tx_meta.items() if v not in (None, "")})
-        self.run_logger.write_jsonl("car_cmd", car_record)
+        log_now = time.time()
+        motion_signature = self._motion_log_signature(cmd, car_cmd, reason)
+        if self._should_log_motion(motion_signature, now=log_now):
+            cmd_record = cmd.to_dict()
+            cmd_record.update(self._last_motion_tx_context)
+            self.run_logger.write_jsonl("cmd_vel", cmd_record)
+            self.run_logger.write_jsonl("car_cmd", car_record)
+        self._emit_edge_slide_trace(decision)
 
     def _emit_jog_motion(self, decision, jog_action: str) -> None:
         cmd = decision.cmd
@@ -1997,9 +2597,9 @@ class OrchestratorService(BaseModule):
 
     def _emit_edge_slide_trace(self, decision) -> None:
         if str(getattr(self.core.ctx.state, "value", self.core.ctx.state) or "") != "EDGE_SLIDE_SEARCH":
+            self._last_edge_slide_trace_signature = None
             return
         now = time.time()
-        self._last_edge_slide_trace_ts = now
         edge_obs = self.core.ctx.last_table_obs
         target_obs = self.core.ctx.last_target_obs
         cmd = decision.cmd
@@ -2119,6 +2719,29 @@ class OrchestratorService(BaseModule):
             "stale_hold_s": float(getattr(self.cfg.control, "edge_follow_stale_hold_s", self.cfg.control.table_loss_hold_s)),
             "fallback_state": str(getattr(self.cfg.control, "edge_slide_fallback_state", "CONTROLLED_APPROACH") or "CONTROLLED_APPROACH"),
         }
+        trace_signature = (
+            reason,
+            self._motion_float_sig(cmd.vx_norm),
+            self._motion_float_sig(cmd.vy_norm),
+            self._motion_float_sig(cmd.wz_norm),
+            bool(edge_is_stale),
+            bool(edge_obs is None or not edge_valid),
+            record.get("fallback_decision"),
+            record.get("fallback_suppressed_reason"),
+            record.get("stop_reason"),
+        )
+        try:
+            period_ms = float(getattr(self.cfg.control, "edge_follow_log_period_ms", 500.0) or 500.0)
+        except (TypeError, ValueError):
+            period_ms = 500.0
+        period_s = max(0.0, period_ms / 1000.0)
+        previous_signature = getattr(self, "_last_edge_slide_trace_signature", None)
+        changed = trace_signature != previous_signature
+        periodic = (now - float(getattr(self, "_last_edge_slide_trace_ts", 0.0) or 0.0)) >= period_s
+        if not changed and not periodic:
+            return
+        self._last_edge_slide_trace_signature = trace_signature
+        self._last_edge_slide_trace_ts = now
         self.run_logger.write_jsonl("edge_slide_search", record)
 
     def _flush_state_traces(self, decision) -> None:
@@ -2237,7 +2860,57 @@ class OrchestratorService(BaseModule):
             return
         self._last_state_block_ts = now
         self._last_state_block_key = key
-        self.run_logger.write_state_block(block)
+        if self._state_blocks_full_log:
+            self.run_logger.write_state_block(block)
+        else:
+            self.run_logger.write_jsonl("state_blocks_lite", self._state_block_lite(block))
+
+    @staticmethod
+    def _state_block_lite(block: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            key: block.get(key)
+            for key in (
+                "ts",
+                "state",
+                "prev_state",
+                "task_intent",
+                "active_target",
+                "session_id",
+                "epoch",
+                "req_id",
+                "vision_stage",
+                "vision_mode",
+                "current_edge_id",
+                "edge_visit_index",
+                "last_enter_reason",
+                "last_fail_reason",
+                "yaw_err_rad",
+                "dist_err_m",
+                "obs_total_age_ms",
+                "valid_for_control",
+                "usable_for_approach",
+                "control_level",
+                "reject_reason",
+                "control_reject_reason",
+                "confidence",
+                "final_lock_yaw_ok",
+                "final_lock_dist_ok",
+                "final_lock_age_ok",
+                "final_lock_confidence_ok",
+                "stable_lock_count",
+                "required_lock_count",
+                "lock_count_inc_reason",
+                "lock_count_hold_reason",
+                "lock_count_reset_reason",
+                "lock_ready",
+                "lock_reason",
+                "lock_reset_reason",
+                "vision_stale_reason",
+                "stale_level",
+                "stale_guard_reason",
+            )
+            if block.get(key) is not None
+        }
 
     def _state_block_dedup_key(self, block: Dict[str, Any]) -> str:
         key_fields = {
@@ -2263,10 +2936,23 @@ class OrchestratorService(BaseModule):
             "has_target_obs",
             "lock_ready",
             "lock_reason",
+            "lock_reset_reason",
+            "vision_stale_reason",
+            "final_lock_yaw_ok",
+            "final_lock_dist_ok",
+            "final_lock_age_ok",
+            "final_lock_confidence_ok",
+            "stable_lock_count",
+            "required_lock_count",
+            "lock_count_inc_reason",
+            "lock_count_hold_reason",
+            "lock_count_reset_reason",
             "table_found",
             "edge_found",
             "edge_valid",
             "control_level",
+            "reject_reason",
+            "control_reject_reason",
             "usable_for_approach",
             "usable_for_alignment",
             "usable_for_stop",
@@ -2356,6 +3042,11 @@ class OrchestratorService(BaseModule):
                 f"[ORCH] HEARTBEAT state={summary['state']} vision_req={vision_req_snap.get('link_state')} task_cmd={int(bool(task_snap.get('listening')))}",
                 1.0,
             )
+
+    def _emit_system_metrics_if_needed(self, force: bool = False) -> None:
+        sample = self._system_metrics.sample_if_due(force=force)
+        if sample is not None:
+            self.run_logger.write_jsonl("system_metrics", sample)
 
 
 def run_orchestrator_service(cfg: OrchestratorConfig):

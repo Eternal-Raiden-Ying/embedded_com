@@ -37,6 +37,17 @@ class InitStagePlan(BaseStagePlan):
         mode = normalize_upper(ctx.current_mode, self.default_mode)
 
         if mode == "INIT":
+            plan = dict((getattr(tick_input, "snapshot", {}) or {}).get("plan") or {})
+            remote = dict((plan.get("capabilities") or {}).get("remote") or {})
+            if not bool(remote.get("enabled", False)):
+                return StageOutput(
+                    vision_obs=self.build_obs(
+                        ctx,
+                        status="RUNNING",
+                        result={"message": "init skipped; remote disabled", "server_status": ctx.server_status},
+                    ),
+                    next_stage="IDLE",
+                )
             if ctx.server_status == "ready":
                 return StageOutput(
                     vision_obs=self.build_obs(ctx, status="RUNNING"),

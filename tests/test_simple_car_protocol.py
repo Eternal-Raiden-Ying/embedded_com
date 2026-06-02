@@ -138,6 +138,29 @@ class SimpleCarProtocolTest(unittest.TestCase):
         self.assertIn("[MOTION][DRYRUN_TX] MODE SEARCH", out.getvalue())
         self.assertIn("[MOTION][DRYRUN_TX] V 0.100 0.000 0.500", out.getvalue())
 
+    def test_uart_bridge_dry_run_repeats_same_command(self) -> None:
+        captured = []
+        bridge = UartBridge(
+            "/dev/null",
+            115200,
+            0.01,
+            dry_run=True,
+            dry_run_echo_stdout=False,
+            tx_callback=lambda line, dry_run, meta: captured.append((line, dry_run, meta)),
+        )
+        with redirect_stdout(StringIO()):
+            bridge.start()
+            for _ in range(3):
+                self.assertTrue(bridge.send_motion_line("STOP\r\n", tx_meta={"kind": "stm32_stop"}))
+                time.sleep(0.12)
+            deadline = time.time() + 1.0
+            while len(captured) < 3 and time.time() < deadline:
+                time.sleep(0.01)
+            bridge.close()
+        self.assertGreaterEqual(len(captured), 3)
+        self.assertEqual([item[0] for item in captured[:3]], ["STOP\r\n", "STOP\r\n", "STOP\r\n"])
+        self.assertTrue(all(item[1] for item in captured[:3]))
+
     def test_service_tracks_stm32_feedback(self) -> None:
         service = object.__new__(OrchestratorService)
         service.motion_status = {

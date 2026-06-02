@@ -276,14 +276,40 @@ class OrchestratorStateObserver:
         return candidates[-1]
 
 
+class _NullRunLogger:
+    def __init__(self, module_name: str, stack_run_id: str = ""):
+        self.module_name = module_name
+        self.stack_run_id = str(stack_run_id or "")
+        self.run_dir = Path("/dev/null")
+
+    def write_meta(self, payload: Dict[str, Any]) -> None:
+        pass
+
+    def write_service_event(self, event: str, **fields: Any) -> None:
+        pass
+
+    def write_jsonl(self, name: str, payload: Dict[str, Any]) -> None:
+        pass
+
+    def write_ipc_record(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    def write_heartbeat_record(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
 class MobileGatewayService(BaseModule):
     def __init__(self, cfg: MobileGatewayConfig):
         self.cfg = cfg
         super().__init__("mobile_gateway", cfg.runtime.log_enabled, cfg.runtime.log_mode)
-        ensure_dir(cfg.runtime.log_dir)
+        if cfg.runtime.log_enabled:
+            ensure_dir(cfg.runtime.log_dir)
         ensure_dir(cfg.runtime.runs_dir)
         ensure_dir(cfg.runtime.pid_dir)
-        self.run_logger = RunLogger("mobile_gateway", cfg.runtime.runs_dir, cfg.runtime.stack_run_id)
+        self.run_logger = RunLogger("mobile_gateway", cfg.runtime.runs_dir, cfg.runtime.stack_run_id) if cfg.runtime.log_enabled else _NullRunLogger("mobile_gateway", cfg.runtime.stack_run_id)
         self.command_server = JsonlInboundServer(
             mode=cfg.command_in.transport,
             tcp_host=cfg.command_in.host,

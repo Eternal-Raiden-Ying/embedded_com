@@ -315,10 +315,27 @@ class OrchestratorCore:
             "has_target_obs": target_obs is not None,
             "lock_ready": bool(lock_status["lock_ready"]),
             "lock_reason": str(lock_status["reason"]),
+            "final_lock_debug": dict(lock_status),
+            "final_lock_yaw_ok": bool(lock_status.get("yaw_ok", False)),
+            "final_lock_dist_ok": bool(lock_status.get("dist_ok", False)),
+            "final_lock_age_ok": bool(lock_status.get("age_ok", False)),
+            "final_lock_confidence_ok": bool(lock_status.get("confidence_ok", False)),
+            "stable_lock_count": int(lock_status.get("stable_lock_count", self.ctx.table_lock_frames) or 0),
+            "required_lock_count": int(lock_status.get("required_lock_count", self._required_lock_count()) or 0),
+            "lock_count_inc_reason": str(lock_status.get("lock_count_inc_reason", "") or ""),
+            "lock_count_hold_reason": str(lock_status.get("lock_count_hold_reason", "") or ""),
+            "lock_count_reset_reason": str(lock_status.get("lock_count_reset_reason", "") or ""),
+            "lock_reset_reason": str(lock_status.get("lock_reset_reason", "") or ""),
+            "vision_stale_reason": str(lock_status.get("vision_stale_reason", "") or ""),
             "table_found": bool(table_obs.table_found) if table_obs is not None else False,
             "edge_found": bool(table_obs.edge_found) if table_obs is not None else False,
             "edge_valid": bool(getattr(table_obs, "edge_valid", table_obs.edge_found)) if table_obs is not None else False,
-            "control_level": getattr(table_obs, "control_level", "none") if table_obs is not None else "none",
+            "valid_for_control": bool(getattr(table_obs, "valid_for_control", False)) if table_obs is not None else False,
+            "raw_control_level": self._raw_control_level(table_obs),
+            "normalized_control_level": self._control_level(table_obs),
+            "control_level": self._control_level(table_obs),
+            "reject_reason": getattr(table_obs, "reject_reason", None) if table_obs is not None else None,
+            "control_reject_reason": getattr(table_obs, "control_reject_reason", None) if table_obs is not None else None,
             "usable_for_approach": bool(getattr(table_obs, "usable_for_approach", False)) if table_obs is not None else False,
             "usable_for_alignment": bool(getattr(table_obs, "usable_for_alignment", False)) if table_obs is not None else False,
             "usable_for_stop": bool(getattr(table_obs, "usable_for_stop", False)) if table_obs is not None else False,
@@ -351,8 +368,34 @@ class OrchestratorCore:
             "stale_guard_reason": self._table_obs_stale_reason(table_obs),
             "table_edge_obs_frame_id": table_obs.frame_id if table_obs is not None else None,
             "table_edge_obs_seq": table_obs.seq if table_obs is not None else None,
+            "obs_seq": table_obs.obs_seq if table_obs is not None else None,
+            "camera_frame_seq": table_obs.camera_frame_seq if table_obs is not None else None,
+            "camera_frame_ts_ms": table_obs.camera_frame_ts_ms if table_obs is not None else None,
+            "vision_process_start_ts_ms": table_obs.vision_process_start_ts_ms if table_obs is not None else None,
+            "vision_process_end_ts_ms": table_obs.vision_process_end_ts_ms if table_obs is not None else None,
+            "vision_publish_ts_ms": table_obs.vision_publish_ts_ms if table_obs is not None else None,
+            "obs_out_send_ts_ms": table_obs.obs_out_send_ts_ms if table_obs is not None else None,
+            "orchestrator_recv_ts_ms": table_obs.orchestrator_recv_ts_ms if table_obs is not None else None,
+            "state_machine_consume_ts_ms": table_obs.state_machine_consume_ts_ms if table_obs is not None else None,
+            "cmd_publish_ts_ms": table_obs.cmd_publish_ts_ms if table_obs is not None else None,
             "edge_update_interval_ms": table_obs.edge_update_interval_ms if table_obs is not None else None,
             "edge_process_ms": table_obs.edge_process_ms if table_obs is not None else None,
+            "camera_frame_interval_ms": table_obs.camera_frame_interval_ms if table_obs is not None else None,
+            "camera_frame_hz": table_obs.camera_frame_hz if table_obs is not None else None,
+            "vision_process_interval_ms": table_obs.vision_process_interval_ms if table_obs is not None else None,
+            "vision_publish_interval_ms": table_obs.vision_publish_interval_ms if table_obs is not None else None,
+            "obs_out_send_interval_ms": table_obs.obs_out_send_interval_ms if table_obs is not None else None,
+            "obs_out_send_hz": table_obs.obs_out_send_hz if table_obs is not None else None,
+            "table_edge_obs_recv_interval_ms": table_obs.table_edge_obs_recv_interval_ms if table_obs is not None else None,
+            "orchestrator_recv_interval_ms": table_obs.orchestrator_recv_interval_ms if table_obs is not None else None,
+            "table_edge_obs_recv_hz": table_obs.table_edge_obs_recv_hz if table_obs is not None else None,
+            "state_machine_tick_interval_ms": table_obs.state_machine_tick_interval_ms if table_obs is not None else None,
+            "state_machine_consume_interval_ms": table_obs.state_machine_consume_interval_ms if table_obs is not None else None,
+            "same_obs_reuse_count": table_obs.same_obs_reuse_count if table_obs is not None else None,
+            "obs_seq_gap": table_obs.obs_seq_gap if table_obs is not None else None,
+            "obs_age_at_consume_ms": table_obs.obs_age_at_consume_ms if table_obs is not None else None,
+            "vision_publish_to_orch_recv_ms": table_obs.vision_publish_to_orch_recv_ms if table_obs is not None else None,
+            "orch_recv_to_state_consume_ms": table_obs.orch_recv_to_state_consume_ms if table_obs is not None else None,
             "table_edge_obs_source_mode": table_obs.source_mode if table_obs is not None else None,
             "edge_obs_is_stale": self._edge_obs_is_stale(table_obs),
             "edge_follow_stale": self._edge_obs_is_stale(table_obs) if self.ctx.state == State.EDGE_SLIDE_SEARCH else False,
@@ -544,6 +587,7 @@ class OrchestratorCore:
             "coarse_align_frames_to_advance": int(self.cfg.coarse_align_frames_to_advance),
             "table_lock_frames": int(self.ctx.table_lock_frames),
             "final_lock_frames_to_arrive": int(self.cfg.final_lock_frames_to_arrive),
+            "required_lock_count": int(self._required_lock_count()),
             "target_found_frames": int(self.ctx.target_found_frames),
             "target_found_frames_to_confirm": int(self.cfg.target_found_frames_to_confirm),
             "target_lost_frames": int(self.ctx.target_lost_frames),
@@ -563,6 +607,10 @@ class OrchestratorCore:
             "table_settle_ms": int(round(float(getattr(self.cfg, "table_settle_s", 0.3)) * 1000.0)),
             "table_stop_margin_m": float(getattr(self.cfg, "table_stop_margin_m", 0.05)),
             "table_max_micro_adjust": int(getattr(self.cfg, "table_max_micro_adjust", 4)),
+            "final_lock_enabled": self._table_final_lock_enabled(),
+            "micro_adjust_enabled": self._table_micro_adjust_enabled(),
+            "final_lock_enter_dist_th_m": float(getattr(self.cfg, "final_lock_enter_dist_th_m", 0.08)),
+            "final_lock_enter_yaw_th_rad": float(getattr(self.cfg, "final_lock_enter_yaw_th_rad", 0.10)),
             "search_target_init_hold_ms": int(round(float(self.cfg.search_target_init_hold_s) * 1000.0)),
             "target_lock_settle_ms": int(round(float(self.cfg.target_lock_settle_s) * 1000.0)),
             "freeze_settle_ms": int(round(float(self.cfg.freeze_settle_s) * 1000.0)),
@@ -992,10 +1040,7 @@ class OrchestratorCore:
                 self._transition(State.CONTROLLED_APPROACH, "warmup已有fresh plane obs，进入plane-only approach")
                 return self.controller.fov_table_approach_cmd(obs, phase="PLANE_APPROACH")
             if level == "stop":
-                self._transition(State.FINAL_LOCK, "warmup已有fresh stop obs，进入最终停车")
-                if self._table_dock_should_stop(obs):
-                    return self.controller.stop_cmd("FINAL_LOCK")
-                return self.controller.fov_table_approach_cmd(obs, phase="PLANE_STOP", mode="FINAL_LOCK")
+                return self._enter_final_lock_or_keep_approach(obs, "warmup已有fresh stop obs，进入最终停车")
             self._transition(State.COARSE_ALIGN, "warmup已有fresh plane obs，进入plane yaw/dist对齐")
             return self.controller.fov_table_approach_cmd(obs, phase="PLANE_FINAL_LOCK", mode="COARSE_ALIGN")
 
@@ -1014,10 +1059,7 @@ class OrchestratorCore:
                     self._transition(State.CONTROLLED_APPROACH, "plane_confirmed_table_front，plane_only_approach")
                     return self.controller.fov_table_approach_cmd(obs, phase="PLANE_APPROACH")
                 if level == "stop":
-                    self._transition(State.FINAL_LOCK, "plane-only stop 可用，进入最终停车")
-                    if self._table_dock_should_stop(obs):
-                        return self.controller.stop_cmd("FINAL_LOCK")
-                    return self.controller.fov_table_approach_cmd(obs, phase="PLANE_STOP", mode="FINAL_LOCK")
+                    return self._enter_final_lock_or_keep_approach(obs, "plane-only stop 可用，进入最终停车")
                 self._transition(State.COARSE_ALIGN, "plane_confirmed_table_front，进入plane yaw/dist对齐")
                 return self.controller.fov_table_approach_cmd(obs, phase="PLANE_FINAL_LOCK", mode="COARSE_ALIGN")
         else:
@@ -1040,10 +1082,7 @@ class OrchestratorCore:
             self._transition(State.CONTROLLED_APPROACH, "plane-only approach 可用，低速靠近")
             return self.controller.fov_table_approach_cmd(obs, phase="PLANE_APPROACH")
         if level == "stop":
-            self._transition(State.FINAL_LOCK, "plane-only stop 可用，进入停车确认")
-            if self._table_dock_should_stop(obs):
-                return self.controller.stop_cmd("FINAL_LOCK")
-            return self.controller.fov_table_approach_cmd(obs, phase="PLANE_STOP", mode="FINAL_LOCK")
+            return self._enter_final_lock_or_keep_approach(obs, "plane-only stop 可用，进入停车确认")
         if self._coarse_aligned(obs):
             self.ctx.approach_aligned_frames += 1
             if self.ctx.approach_aligned_frames >= int(self.cfg.coarse_align_frames_to_advance):
@@ -1067,19 +1106,21 @@ class OrchestratorCore:
         if level == "approach":
             return self.controller.fov_table_approach_cmd(obs, phase="PLANE_APPROACH")
         if level == "stop":
-            self._transition(State.FINAL_LOCK, "plane-only stop 可用，进入最终停车")
-            if self._table_dock_should_stop(obs):
-                return self.controller.stop_cmd("FINAL_LOCK")
-            return self.controller.fov_table_approach_cmd(obs, phase="PLANE_STOP", mode="FINAL_LOCK")
+            return self._enter_final_lock_or_keep_approach(obs, "plane-only stop 可用，进入最终停车")
         if self._edge_ready(obs):
-            self._transition(State.FINAL_LOCK, "进入最终锁边")
-            return self.controller.fov_table_approach_cmd(obs, phase="PLANE_FINAL_LOCK", mode="FINAL_LOCK")
+            return self._enter_final_lock_or_keep_approach(obs, "进入最终锁边")
         if self._state_elapsed() >= float(self.cfg.approach_timeout_s):
             return self._enter_dock_retry_or_next("受控接近超时")
         self._maybe_resend_req(self._active_req_payload())
-        return self.controller.fov_table_approach_cmd(obs, phase="PLANE_FINAL_LOCK")
+        return self._table_approach_decision(obs, phase="PLANE_FINAL_LOCK")
 
     def _tick_final_lock(self) -> MotionDecision:
+        if not self._table_final_lock_enabled():
+            obs = self._fresh_table_obs()
+            if self._table_visible(obs):
+                self._transition(State.CONTROLLED_APPROACH, "final_lock disabled，回到受控接近")
+                return self._table_approach_decision(obs, phase="PLANE_APPROACH", stop_ready_ignored=True)
+            return self._handle_table_loss("final_lock disabled 且桌边丢失，回到搜索", State.SEARCH_TABLE, "FINAL_LOCK_DISABLED_HOLD")
         obs = self._fresh_table_obs()
         if not self._table_visible(obs):
             stale_obs = self.ctx.last_table_obs if obs is None else obs
@@ -1092,19 +1133,28 @@ class OrchestratorCore:
 
         phase = str(self.ctx.table_dock_phase or "APPROACH").upper()
         if phase == "APPROACH":
-            if self._table_dock_should_stop(obs):
+            status = self._update_final_lock_count(obs)
+            self._log_final_lock_summary(
+                obs,
+                lock_ready=bool(status["lock_ready"]),
+                reason=str(status["reason"]),
+                stable_count=self.ctx.table_lock_frames,
+                phase=phase,
+            )
+            level = str(status.get("normalized_control_level") or self._control_level(obs))
+            if not self._table_micro_adjust_enabled() and str(status.get("reason") or "") == "distance_too_far":
+                self._transition(State.CONTROLLED_APPROACH, "final_lock_distance_too_far_return_approach")
+                return self._table_approach_decision(obs, phase="PLANE_APPROACH")
+            if bool(status["lock_ready"]) or level == "stop" or bool(getattr(obs, "usable_for_stop", False)):
                 self.ctx.table_stop_sent = True
-                self._enter_table_dock_phase("STOP_AND_SETTLE", "[TABLE_DOCK][STOP] dist reached stop window")
+                self._enter_table_dock_phase("STOP_AND_SETTLE", "[TABLE_DOCK][STOP] final lock/stop condition reached")
                 self._log("info", "[TABLE_DOCK][SETTLE] begin after STOP")
-                return self.controller.stop_cmd("FINAL_LOCK")
+                return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_LOCK"), status)
             if self._state_elapsed() >= float(self.cfg.approach_timeout_s):
-                status = self._final_lock_status(obs, stable_count=self.ctx.table_lock_frames)
-                self._log_final_lock_summary(obs, lock_ready=False, reason=str(status["reason"]), stable_count=self.ctx.table_lock_frames)
                 return self._enter_dock_retry_or_next(f"最终锁边超时:{status['reason']}")
             self._maybe_resend_req(self._active_req_payload())
-            level = self._control_level(obs)
             if level == "none":
-                return self.controller.stop_cmd("FINAL_LOCK")
+                return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_LOCK"), status)
             if level == "approach":
                 return self.controller.plane_approach_cmd(obs, mode="FINAL_LOCK", reason="plane_final_approach")
             if level == "stop":
@@ -1114,32 +1164,47 @@ class OrchestratorCore:
         if phase == "STOP_AND_SETTLE":
             settle_s = max(0.0, float(getattr(self.cfg, "table_settle_s", 0.30)))
             if monotonic_ts() - float(self.ctx.table_dock_phase_since_mono or 0.0) < settle_s:
-                return self.controller.stop_cmd("FINAL_LOCK")
-            lock_status = self._final_lock_status(obs, stable_count=self.ctx.table_lock_frames)
+                return self._annotate_final_lock_decision(
+                    self.controller.stop_cmd("FINAL_LOCK"),
+                    self._final_lock_status(obs, stable_count=self.ctx.table_lock_frames),
+                )
+            lock_status = self._update_final_lock_count(obs)
+            self._log_final_lock_summary(
+                obs,
+                lock_ready=bool(lock_status["lock_ready"]),
+                reason=str(lock_status["reason"]),
+                stable_count=self.ctx.table_lock_frames,
+                phase=phase,
+            )
             if bool(lock_status["lock_ready"]):
-                self.ctx.table_lock_frames += 1
                 self._log(
                     "info",
                     "[TABLE_DOCK][STABLE] "
-                    f"frames={self.ctx.table_lock_frames}/{max(1, int(self.cfg.table_stable_frames))} "
+                    f"frames={self.ctx.table_lock_frames}/{self._required_lock_count()} "
                     f"dist_err={obs.dist_err_m} yaw_err={obs.yaw_err_rad}",
                 )
-                if self.ctx.table_lock_frames >= max(1, int(self.cfg.table_stable_frames)):
+                if self.ctx.table_lock_frames >= self._required_lock_count():
                     self.ctx.dock_retry_count = 0
-                    self._log_final_lock_summary(obs, lock_ready=True, reason="lock_ready", stable_count=self.ctx.table_lock_frames)
                     self._capture_locked_edge(obs)
                     self._log("info", "[TABLE_DOCK][DONE] stable final lock confirmed")
                     if self._table_edge_only_test_enabled():
                         self._log("info", "[TABLE_EDGE_ONLY][DONE] table edge reached; stopping before target search")
                         self._transition(State.DONE, "table_edge_only_done")
                         self._queue_tts("桌边停靠测试完成")
-                        return self.controller.stop_cmd("DONE")
+                        return self._annotate_final_lock_decision(self.controller.stop_cmd("DONE"), lock_status)
                     self._transition(State.AT_TABLE_EDGE, "lock_ready")
                     self._queue_tts("已完成桌边停靠")
-                    return self.controller.stop_cmd("AT_TABLE_EDGE")
-                return self.controller.stop_cmd("FINAL_LOCK")
+                    return self._annotate_final_lock_decision(self.controller.stop_cmd("AT_TABLE_EDGE"), lock_status)
+                return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_LOCK"), lock_status)
 
-            self.ctx.table_lock_frames = 0
+            hold_reason = str(lock_status.get("lock_count_hold_reason") or "")
+            if hold_reason:
+                return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_LOCK"), lock_status)
+
+            if not self._table_micro_adjust_enabled() and str(lock_status.get("reason") or "") == "distance_too_far":
+                self._transition(State.CONTROLLED_APPROACH, "final_lock_distance_too_far_return_approach")
+                return self._table_approach_decision(obs, phase="PLANE_APPROACH")
+
             self._enter_table_dock_phase("MICRO_ADJUST", f"[TABLE_DOCK][SETTLE] done reason={lock_status['reason']}")
 
         if str(self.ctx.table_dock_phase or "").upper() == "MICRO_ADJUST":
@@ -1152,7 +1217,10 @@ class OrchestratorCore:
             self._log_final_lock_summary(obs, lock_ready=False, reason=str(status["reason"]), stable_count=self.ctx.table_lock_frames)
             return self._enter_dock_retry_or_next(f"最终锁边超时:{status['reason']}")
         self._maybe_resend_req(self._active_req_payload())
-        return self.controller.stop_cmd("FINAL_LOCK")
+        return self._annotate_final_lock_decision(
+            self.controller.stop_cmd("FINAL_LOCK"),
+            self._final_lock_status(obs, stable_count=self.ctx.table_lock_frames),
+        )
 
     def _tick_dock_retry(self) -> MotionDecision:
         if self._state_elapsed() < float(self.cfg.dock_retry_backoff_s):
@@ -1187,6 +1255,9 @@ class OrchestratorCore:
         if not self.ctx.slide_ref_ready:
             self.ctx.handoff_state = "collecting" if self._state_elapsed() < max_s or not enough_samples else "waiting_valid_light_edge"
             if self._state_elapsed() >= float(getattr(self.cfg, "reacquire_timeout_s", 8.0) or 8.0):
+                if not self._table_final_lock_enabled():
+                    self._transition(State.CONTROLLED_APPROACH, "slide_ref_handoff_timeout final_lock disabled")
+                    return self._table_approach_decision(edge_obs, phase="PLANE_APPROACH", stop_ready_ignored=True)
                 self._transition(State.FINAL_LOCK, "slide_ref_handoff_timeout")
                 return self.controller.final_lock_cmd(edge_obs)
             return self.controller.stop_cmd("SEARCH_TARGET_INIT")
@@ -1352,6 +1423,8 @@ class OrchestratorCore:
         return self._annotate_edge_slide_decision(decision, quality, fallback_decision="slide")
 
     def _edge_slide_fallback_state(self) -> State:
+        if not self._table_final_lock_enabled():
+            return State.CONTROLLED_APPROACH
         raw = str(getattr(self.cfg, "edge_slide_fallback_state", "") or "").strip().upper()
         direct = bool(getattr(self.cfg, "edge_slide_direct_fallback_to_controlled_approach", False))
         if direct and raw == State.CONTROLLED_APPROACH.value:
@@ -1359,6 +1432,8 @@ class OrchestratorCore:
         return State.FINAL_LOCK
 
     def _edge_slide_stale_fallback_state(self) -> State:
+        if not self._table_final_lock_enabled():
+            return State.CONTROLLED_APPROACH
         raw = str(getattr(self.cfg, "edge_follow_stale_fallback_state", "") or "").strip().upper()
         direct = bool(getattr(self.cfg, "edge_slide_direct_fallback_to_controlled_approach", False))
         if direct and raw == State.CONTROLLED_APPROACH.value:
@@ -2075,6 +2150,35 @@ class OrchestratorCore:
         age_text = "unknown" if age_ms is None else f"{float(age_ms):.0f}"
         return f"{level}:obs_total_age_ms={age_text}"
 
+    def _vision_stale_reason(self, obs: Optional[TableEdgeObs]) -> str:
+        if obs is None:
+            return "no_recent_obs"
+        if bool(getattr(obs, "is_stale", False)) or obs.depth_valid is False:
+            return "obs_invalid"
+        if bool(getattr(obs, "fast_temporal_jump", False)):
+            return "temporal_jump"
+        reject_reason = str(getattr(obs, "control_reject_reason", "") or getattr(obs, "reject_reason", "") or getattr(obs, "reason", "") or "").strip().lower()
+        if reject_reason in {"temporal_jump", "yaw_jump", "dist_jump"}:
+            return reject_reason
+        if "yaw_jump" in reject_reason:
+            return "yaw_jump"
+        if "dist_jump" in reject_reason or "far_jump" in reject_reason:
+            return "dist_jump"
+        age_ms = self._table_obs_age_ms(obs)
+        if age_ms is None:
+            return "age_over_limit"
+        stale_level = self._table_obs_stale_level(obs)
+        if stale_level == "soft_stale":
+            return "soft_stale"
+        if stale_level in {"hard_stale", "dead"}:
+            return "hard_stale"
+        if reject_reason and reject_reason.lower() not in {"none", "ok", "valid"}:
+            return "reject_reason"
+        control_level = self._control_level(obs)
+        if control_level in {"none", ""} or not bool(getattr(obs, "usable_for_approach", False) or getattr(obs, "usable_for_alignment", False) or getattr(obs, "usable_for_stop", False)):
+            return "control_level_not_usable"
+        return "unknown"
+
     def _edge_obs_is_stale(self, obs: Optional[TableEdgeObs]) -> bool:
         if obs is None:
             return True
@@ -2343,11 +2447,26 @@ class OrchestratorCore:
         }
 
     @staticmethod
-    def _control_level(obs: Optional[TableEdgeObs]) -> str:
+    def _raw_control_level(obs: Optional[TableEdgeObs]) -> str:
         if obs is None:
             return "none"
-        level = str(getattr(obs, "control_level", "none") or "none").strip().lower()
-        return level if level in {"approach", "alignment", "stop"} else "none"
+        return str(getattr(obs, "control_level", "none") or "none").strip().lower()
+
+    @classmethod
+    def _control_level(cls, obs: Optional[TableEdgeObs]) -> str:
+        level = cls._raw_control_level(obs)
+        aliases = {
+            "approach_slow": "approach",
+            "approach": "approach",
+            "rotate_only": "alignment",
+            "align": "alignment",
+            "alignment": "alignment",
+            "stop_ready": "stop",
+            "stop": "stop",
+            "none": "none",
+            "": "none",
+        }
+        return aliases.get(level, "none")
 
     def _table_yolo_reliable(self, obs: Optional[TableEdgeObs]) -> bool:
         if obs is None:
@@ -2404,6 +2523,64 @@ class OrchestratorCore:
             return abs(float(obs.dist_err_m)) <= float(self.cfg.final_lock_dist_tol_m) * 2.0
         return bool(obs.edge_found)
 
+    def _final_lock_enter_status(self, obs: Optional[TableEdgeObs]) -> Dict[str, object]:
+        level = self._control_level(obs)
+        yaw_th = abs(float(getattr(self.cfg, "final_lock_enter_yaw_th_rad", 0.10) or 0.10))
+        dist_th = abs(float(getattr(self.cfg, "final_lock_enter_dist_th_m", 0.08) or 0.08))
+        min_conf = float(getattr(self.controller.docking.cfg, "min_confidence", 0.0) or 0.0)
+        status: Dict[str, object] = {
+            "final_lock_enabled": self._table_final_lock_enabled(),
+            "micro_adjust_enabled": self._table_micro_adjust_enabled(),
+            "normalized_control_level": level,
+            "yaw_err": getattr(obs, "yaw_err_rad", None) if obs is not None else None,
+            "dist_err_m": getattr(obs, "dist_err_m", None) if obs is not None else None,
+            "final_lock_enter_allowed": False,
+            "final_lock_enter_block_reason": "",
+            "final_lock_enter_dist_th_m": float(dist_th),
+            "final_lock_enter_yaw_th_rad": float(yaw_th),
+        }
+        if not self._table_final_lock_enabled():
+            status["final_lock_enter_block_reason"] = "final_lock_disabled"
+            return status
+        if obs is None:
+            status["final_lock_enter_block_reason"] = "no_recent_obs"
+            return status
+        stale_level = self._table_obs_stale_level(obs)
+        if stale_level in {"hard_stale", "dead"}:
+            status["final_lock_enter_block_reason"] = "vision_stale"
+            return status
+        if bool(getattr(obs, "is_stale", False)) or getattr(obs, "depth_valid", True) is False:
+            status["final_lock_enter_block_reason"] = "obs_invalid"
+            return status
+        if not self._table_visible(obs) or not bool(getattr(obs, "edge_found", False)):
+            status["final_lock_enter_block_reason"] = "edge_invalid"
+            return status
+        if not bool(getattr(obs, "valid_for_control", False) or getattr(obs, "usable_for_stop", False)):
+            status["final_lock_enter_block_reason"] = "not_valid_for_control"
+            return status
+        if level != "stop" and not bool(getattr(obs, "usable_for_stop", False)):
+            status["final_lock_enter_block_reason"] = "not_stop_ready"
+            return status
+        confidence = float(getattr(obs, "confidence", 0.0) or 0.0)
+        if confidence < min_conf:
+            status["final_lock_enter_block_reason"] = "low_confidence"
+            return status
+        if obs.yaw_err_rad is None:
+            status["final_lock_enter_block_reason"] = "yaw_missing"
+            return status
+        if abs(float(obs.yaw_err_rad)) > yaw_th:
+            status["final_lock_enter_block_reason"] = "yaw_out_of_range"
+            return status
+        if obs.dist_err_m is None:
+            status["final_lock_enter_block_reason"] = "dist_missing"
+            return status
+        if abs(float(obs.dist_err_m)) > dist_th:
+            status["final_lock_enter_block_reason"] = "distance_too_far" if float(obs.dist_err_m) > 0.0 else "distance_too_close"
+            return status
+        status["final_lock_enter_allowed"] = True
+        status["final_lock_enter_block_reason"] = "allowed"
+        return status
+
     def _table_target_dist_m(self, obs: Optional[TableEdgeObs] = None) -> float:
         target = getattr(self.cfg, "table_target_dist_m", 0.015)
         if obs is not None and obs.target_dist_m is not None:
@@ -2430,6 +2607,63 @@ class OrchestratorCore:
         margin = max(0.0, float(getattr(self.cfg, "table_stop_margin_m", 0.05)))
         return float(measured) <= target + margin
 
+    def _table_final_lock_enabled(self) -> bool:
+        return bool(getattr(self.cfg, "enable_final_lock", False))
+
+    def _table_micro_adjust_enabled(self) -> bool:
+        return bool(getattr(self.cfg, "enable_micro_adjust", False))
+
+    def _table_approach_decision(
+        self,
+        obs: Optional[TableEdgeObs],
+        *,
+        phase: str = "PLANE_APPROACH",
+        mode: str = "CONTROLLED_APPROACH",
+        stop_ready_ignored: bool = False,
+    ) -> MotionDecision:
+        decision = self.controller.fov_table_approach_cmd(obs, phase=phase, mode=mode)
+        if decision.control_summary is not None:
+            enter_status = self._final_lock_enter_status(obs)
+            decision.control_summary.update(
+                {
+                    **enter_status,
+                    "stop_ready_ignored_for_stage_transition": bool(stop_ready_ignored),
+                }
+            )
+        return decision
+
+    def _enter_final_lock_or_keep_approach(self, obs: Optional[TableEdgeObs], reason: str) -> MotionDecision:
+        enter_status = self._final_lock_enter_status(obs)
+        if bool(enter_status.get("final_lock_enter_allowed")):
+            self._transition(State.FINAL_LOCK, reason)
+            decision = self.controller.fov_table_approach_cmd(obs, phase="PLANE_FINAL_LOCK", mode="FINAL_LOCK")
+            if decision.control_summary is not None:
+                decision.control_summary.update(enter_status)
+            return decision
+        block_reason = str(enter_status.get("final_lock_enter_block_reason") or "blocked")
+        decision = self._table_approach_decision(obs, phase="PLANE_APPROACH", stop_ready_ignored=True)
+        if self.ctx.state != State.CONTROLLED_APPROACH:
+            self._transition(State.CONTROLLED_APPROACH, f"final_lock_enter_blocked:{block_reason}")
+        return decision
+
+    def _annotate_final_lock_decision(self, decision: MotionDecision, status: Dict[str, object]) -> MotionDecision:
+        if decision.control_summary is not None:
+            decision.control_summary.update(
+                {
+                    "final_lock_enabled": self._table_final_lock_enabled(),
+                    "micro_adjust_enabled": self._table_micro_adjust_enabled(),
+                    "normalized_control_level": status.get("normalized_control_level"),
+                    "yaw_err": status.get("yaw_err"),
+                    "dist_err_m": status.get("dist_err"),
+                    "stable_lock_count": status.get("stable_lock_count"),
+                    "required_lock_count": status.get("required_lock_count"),
+                    "lock_count_inc_reason": status.get("lock_count_inc_reason"),
+                    "lock_count_hold_reason": status.get("lock_count_hold_reason"),
+                    "lock_count_reset_reason": status.get("lock_count_reset_reason"),
+                }
+            )
+        return decision
+
     def _enter_table_dock_phase(self, phase: str, log_line: str = "") -> None:
         phase = str(phase or "").upper()
         if self.ctx.table_dock_phase != phase:
@@ -2439,6 +2673,12 @@ class OrchestratorCore:
             self._log("info", log_line)
 
     def _table_dock_micro_adjust(self, obs: Optional[TableEdgeObs]) -> Optional[MotionDecision]:
+        if not self._table_micro_adjust_enabled():
+            self._log("info", "[TABLE_DOCK][MICRO_ADJUST] skipped enable_micro_adjust=false")
+            decision = self._table_approach_decision(obs, phase="PLANE_APPROACH", stop_ready_ignored=True)
+            if decision.control_summary is not None:
+                decision.control_summary.update({"micro_adjust_skipped": True, "table_dock_phase": "MICRO_ADJUST_DISABLED"})
+            return decision
         max_adjust = max(0, int(getattr(self.cfg, "table_max_micro_adjust", 4)))
         if self.ctx.table_micro_adjust_count >= max_adjust:
             reason = f"[TABLE_DOCK][FAIL] max_micro_adjust={max_adjust}"
@@ -2495,71 +2735,113 @@ class OrchestratorCore:
     def _final_lock_ready(self, obs: Optional[TableEdgeObs]) -> bool:
         return bool(self._final_lock_status(obs, stable_count=self.ctx.table_lock_frames)["lock_ready"])
 
+    def _required_lock_count(self) -> int:
+        return max(1, int(getattr(self.cfg, "table_stable_frames", self.cfg.final_lock_frames_to_arrive)))
+
+    def _update_final_lock_count(self, obs: Optional[TableEdgeObs]) -> Dict[str, object]:
+        status = self._final_lock_status(obs, stable_count=self.ctx.table_lock_frames)
+        if bool(status["lock_ready"]):
+            self.ctx.table_lock_frames += 1
+            status["stable_count"] = int(self.ctx.table_lock_frames)
+            status["stable_lock_count"] = int(self.ctx.table_lock_frames)
+            status["lock_count_inc_reason"] = "fresh_lock_ready"
+            status["lock_count_hold_reason"] = ""
+            status["lock_count_reset_reason"] = ""
+            status["lock_reset_reason"] = ""
+            return status
+
+        hold_reason = str(status.get("lock_count_hold_reason") or "")
+        if hold_reason:
+            status["stable_count"] = int(self.ctx.table_lock_frames)
+            status["stable_lock_count"] = int(self.ctx.table_lock_frames)
+            status["lock_count_inc_reason"] = ""
+            status["lock_count_reset_reason"] = ""
+            status["lock_reset_reason"] = ""
+            return status
+
+        reset_reason = str(status.get("lock_count_reset_reason") or status.get("vision_stale_reason") or status.get("reason") or "lock_ready_false")
+        self.ctx.table_lock_frames = 0
+        status["stable_count"] = 0
+        status["stable_lock_count"] = 0
+        status["lock_count_inc_reason"] = ""
+        status["lock_count_hold_reason"] = ""
+        status["lock_count_reset_reason"] = reset_reason
+        status["lock_reset_reason"] = reset_reason
+        return status
+
     def _final_lock_status(self, obs: Optional[TableEdgeObs], stable_count: int = 0) -> Dict[str, object]:
+        required_count = self._required_lock_count()
+
+        def _status(
+            *,
+            lock_ready: bool,
+            reason: str,
+            yaw_locked: bool = False,
+            dist_locked: bool = False,
+            lat_locked: bool = False,
+            confidence_ok: bool = False,
+            lock_count_inc_reason: str = "",
+            lock_count_hold_reason: str = "",
+            lock_count_reset_reason: str = "",
+        ) -> Dict[str, object]:
+            obs_age_ms = self._table_obs_age_ms(obs)
+            stale_reason = self._vision_stale_reason(obs)
+            valid_for_control = bool(getattr(obs, "valid_for_control", False)) if obs is not None else False
+            usable_for_approach = bool(getattr(obs, "usable_for_approach", False)) if obs is not None else False
+            usable_for_stop = bool(getattr(obs, "usable_for_stop", False)) if obs is not None else False
+            raw_control_level = self._raw_control_level(obs)
+            normalized_control_level = self._control_level(obs)
+            out_reason = str(reason or "")
+            hold_text = str(lock_count_hold_reason or "")
+            reset_text = str(lock_count_reset_reason or ("" if (bool(lock_ready) or hold_text) else out_reason))
+            return {
+                "lock_ready": bool(lock_ready),
+                "reason": out_reason,
+                "yaw_locked": bool(yaw_locked),
+                "dist_locked": bool(dist_locked),
+                "lat_locked": bool(lat_locked),
+                "stable_count": int(stable_count),
+                "yaw_err": getattr(obs, "yaw_err_rad", None) if obs is not None else None,
+                "dist_err": getattr(obs, "dist_err_m", None) if obs is not None else None,
+                "obs_age_ms": obs_age_ms,
+                "valid_for_control": bool(valid_for_control),
+                "usable_for_approach": bool(usable_for_approach),
+                "usable_for_stop": bool(usable_for_stop),
+                "raw_control_level": raw_control_level,
+                "normalized_control_level": normalized_control_level,
+                "control_level": normalized_control_level,
+                "confidence": float(getattr(obs, "confidence", 0.0) or 0.0) if obs is not None else 0.0,
+                "yaw_ok": bool(yaw_locked),
+                "dist_ok": bool(dist_locked),
+                "age_ok": bool(obs is not None and self._table_obs_stale_level(obs) == "fresh"),
+                "confidence_ok": bool(confidence_ok),
+                "stable_lock_count": int(stable_count),
+                "required_lock_count": int(required_count),
+                "lock_count_inc_reason": str(lock_count_inc_reason or ("lock_ready" if bool(lock_ready) else "")),
+                "lock_count_hold_reason": hold_text,
+                "lock_count_reset_reason": reset_text,
+                "lock_reset_reason": reset_text,
+                "vision_stale_reason": stale_reason,
+            }
+
         if obs is None:
             reason = "vision_stale" if self.ctx.last_table_obs is not None else "table_lost"
-            return {
-                "lock_ready": False,
-                "reason": reason,
-                "yaw_locked": False,
-                "dist_locked": False,
-                "lat_locked": False,
-                "stable_count": int(stable_count),
-            }
+            return _status(lock_ready=False, reason=reason, lock_count_reset_reason="no_recent_obs")
         if not bool(getattr(obs, "table_found", False)):
-            return {
-                "lock_ready": False,
-                "reason": "table_lost",
-                "yaw_locked": False,
-                "dist_locked": False,
-                "lat_locked": False,
-                "stable_count": int(stable_count),
-            }
+            return _status(lock_ready=False, reason="table_lost", lock_count_reset_reason="table_lost")
         if not bool(obs.edge_found):
-            return {
-                "lock_ready": False,
-                "reason": "no_edge",
-                "yaw_locked": False,
-                "dist_locked": False,
-                "lat_locked": False,
-                "stable_count": int(stable_count),
-            }
+            return _status(lock_ready=False, reason="no_edge", lock_count_reset_reason="no_edge")
         if not self._edge_valid_for_follow(obs):
-            return {
-                "lock_ready": False,
-                "reason": "edge_invalid",
-                "yaw_locked": False,
-                "dist_locked": False,
-                "lat_locked": False,
-                "stable_count": int(stable_count),
-            }
-        if self._edge_obs_is_stale(obs):
-            return {
-                "lock_ready": False,
-                "reason": "vision_stale",
-                "yaw_locked": False,
-                "dist_locked": False,
-                "lat_locked": False,
-                "stable_count": int(stable_count),
-            }
-        if float(obs.confidence or 0.0) < float(getattr(self.controller.docking.cfg, "min_confidence", 0.0)):
-            return {
-                "lock_ready": False,
-                "reason": "low_confidence",
-                "yaw_locked": False,
-                "dist_locked": False,
-                "lat_locked": False,
-                "stable_count": int(stable_count),
-            }
+            return _status(lock_ready=False, reason="edge_invalid", lock_count_reset_reason="edge_invalid")
+        stale_reason = self._vision_stale_reason(obs)
+        if stale_reason in {"hard_stale", "obs_invalid", "temporal_jump", "no_recent_obs", "yaw_jump", "dist_jump"}:
+            return _status(lock_ready=False, reason="vision_stale", lock_count_reset_reason=stale_reason)
+        min_confidence = float(getattr(self.controller.docking.cfg, "min_confidence", 0.0))
+        confidence_ok = float(obs.confidence or 0.0) >= min_confidence
+        if not confidence_ok:
+            return _status(lock_ready=False, reason="low_confidence", confidence_ok=False, lock_count_reset_reason="low_confidence")
         if obs.depth_valid is False:
-            return {
-                "lock_ready": False,
-                "reason": "vision_stale",
-                "yaw_locked": False,
-                "dist_locked": False,
-                "lat_locked": False,
-                "stable_count": int(stable_count),
-            }
+            return _status(lock_ready=False, reason="vision_stale", confidence_ok=confidence_ok, lock_count_reset_reason="obs_invalid")
         yaw_tol = float(getattr(self.cfg, "table_yaw_tol_rad", self.cfg.final_lock_yaw_tol_rad))
         dist_tol = float(getattr(self.cfg, "table_dist_tol_m", self.cfg.final_lock_dist_tol_m))
         yaw_ok = obs.yaw_err_rad is not None and abs(float(obs.yaw_err_rad)) <= yaw_tol
@@ -2577,14 +2859,20 @@ class OrchestratorCore:
             reason = "distance_too_far" if float(dist_delta) > 0 else "distance_too_close"
         elif not lat_ok:
             reason = "yaw_not_aligned"
-        return {
-            "lock_ready": bool(yaw_ok and dist_ok and lat_ok),
-            "reason": reason,
-            "yaw_locked": bool(yaw_ok),
-            "dist_locked": bool(dist_ok),
-            "lat_locked": bool(lat_ok),
-            "stable_count": int(stable_count),
-        }
+        lock_ready = bool(yaw_ok and dist_ok and lat_ok and stale_reason != "soft_stale")
+        hold_reason = "soft_stale" if stale_reason == "soft_stale" else ""
+        reset_reason = "" if (lock_ready or hold_reason) else reason
+        return _status(
+            lock_ready=lock_ready,
+            reason="soft_stale" if hold_reason else reason,
+            yaw_locked=bool(yaw_ok),
+            dist_locked=bool(dist_ok),
+            lat_locked=bool(lat_ok),
+            confidence_ok=confidence_ok,
+            lock_count_inc_reason="fresh_lock_ready" if lock_ready else "",
+            lock_count_hold_reason=hold_reason,
+            lock_count_reset_reason=reset_reason,
+        )
 
     def _log_final_lock_summary(
         self,
@@ -2593,6 +2881,7 @@ class OrchestratorCore:
         lock_ready: bool,
         reason: str,
         stable_count: int,
+        phase: str = "",
     ) -> None:
         status = self._final_lock_status(obs, stable_count=stable_count)
         measured_distance = None
@@ -2601,17 +2890,48 @@ class OrchestratorCore:
             target_distance = obs.target_dist_m
             if obs.dist_err_m is not None and target_distance is not None:
                 measured_distance = float(target_distance) + float(obs.dist_err_m)
+        reset_reason = str(status.get("lock_count_reset_reason") or status.get("lock_reset_reason") or "")
+        stale_reason = str(status.get("vision_stale_reason") or "")
+        reason_text = str(reason or status.get("reason") or "")
+        should_emit = bool(
+            reset_reason
+            or "stale" in stale_reason
+            or "stale" in reason_text
+            or "lost" in reason_text
+            or "reset" in reason_text
+        )
+        if not should_emit:
+            return
         lines = [
             "FINAL_LOCK summary:",
+            f"phase={phase or str(self.ctx.table_dock_phase or '').upper() or self.ctx.state.value}",
             f"table_found={bool(obs.table_found) if obs is not None else False}",
             f"conf={float(obs.confidence or 0.0):.3f}" if obs is not None else "conf=0.000",
             f"yaw_err={obs.yaw_err_rad}" if obs is not None else "yaw_err=None",
+            f"obs_age_ms={status.get('obs_age_ms')}",
             f"measured_distance={measured_distance}",
             f"target_distance={target_distance}",
             f"dist_err={obs.dist_err_m if obs is not None else None}",
+            f"yaw_ok={bool(status.get('yaw_ok'))}",
+            f"dist_ok={bool(status.get('dist_ok'))}",
             f"yaw_locked={bool(status['yaw_locked'])}",
             f"dist_locked={bool(status['dist_locked'])}",
+            f"age_ok={bool(status.get('age_ok'))}",
+            f"confidence_ok={bool(status.get('confidence_ok'))}",
+            f"valid_for_control={bool(status.get('valid_for_control'))}",
+            f"usable_for_approach={bool(status.get('usable_for_approach'))}",
+            f"usable_for_stop={bool(status.get('usable_for_stop'))}",
+            f"raw_control_level={status.get('raw_control_level')}",
+            f"normalized_control_level={status.get('normalized_control_level')}",
+            f"control_level={status.get('control_level')}",
+            f"stable_lock_count={int(stable_count)}",
             f"stable_count={int(stable_count)}",
+            f"required_lock_count={int(status.get('required_lock_count', 0) or 0)}",
+            f"lock_count_inc_reason={status.get('lock_count_inc_reason')}",
+            f"lock_count_hold_reason={status.get('lock_count_hold_reason')}",
+            f"lock_count_reset_reason={status.get('lock_count_reset_reason')}",
+            f"vision_stale_reason={status.get('vision_stale_reason')}",
+            f"lock_reset_reason={status.get('lock_reset_reason')}",
             f"lock_ready={bool(lock_ready)}",
             f"reason={reason or status['reason']}",
         ]

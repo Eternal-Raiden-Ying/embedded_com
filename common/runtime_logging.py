@@ -4,9 +4,12 @@
 import json
 import logging
 import os
+import queue
 import sys
+import threading
 import time
 import uuid
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional
@@ -482,12 +485,65 @@ class RunLogger:
         self._event_fp = None
         if enable_text_events:
             self._event_fp = open(self.run_dir / "events.log", "a", encoding="utf-8")
+        self._async_enabled = env_flag("ASYNC_LOG_ENABLED", "1")
+        self._async_queue_size = self._env_int("ASYNC_LOG_QUEUE_SIZE", 2048)
+        self._async_flush_interval_s = self._env_float("ASYNC_LOG_FLUSH_INTERVAL_S", 1.0)
+        self._async_drop_low_priority = env_flag("ASYNC_LOG_DROP_LOW_PRIORITY", "1")
+        self._log_queue: Optional["queue.Queue[Dict[str, Any]]"] = None
+        self._log_stop = threading.Event()
+        self._log_thread: Optional[threading.Thread] = None
+        self._log_writer_files: Dict[Path, Any] = {}
+        self._log_writer_last_flush_ts = 0.0
+        self._drop_lock = threading.Lock()
+        self._drop_counts: Dict[str, int] = {}
+        self._last_drop_summary_ts = 0.0
+        self._summary_start_wall = time.time()
+        self._summary_stats: Dict[str, Any] = {
+            "table_edge_count": 0,
+            "table_edge_found": 0,
+            "table_edge_valid": 0,
+            "vision_process_ms": [],
+            "obs_total_age_ms": [],
+            "camera_frame_interval_ms": [],
+            "vision_process_interval_ms": [],
+            "vision_publish_interval_ms": [],
+            "obs_out_send_interval_ms": [],
+            "orchestrator_recv_interval_ms": [],
+            "state_machine_tick_interval_ms": [],
+            "vision_publish_to_orch_recv_ms": [],
+            "orch_recv_to_state_consume_ms": [],
+            "same_obs_reuse_count": [],
+            "table_edge_ts": [],
+            "reject_reasons": Counter(),
+            "detector_mode": Counter(),
+            "depth_shape": Counter(),
+            "calib_source": Counter(),
+            "calib": {},
+            "preview": {},
+            "cpu": {
+                "process_cpu_percent": [],
+                "system_cpu_percent": [],
+                "process_rss_mb": [],
+                "system_mem_percent": [],
+            },
+            "ipc": Counter(),
+        }
+        if self._async_enabled:
+            self._log_queue = queue.Queue(maxsize=max(1, int(self._async_queue_size or 2048)))
+            self._log_thread = threading.Thread(target=self._log_writer_loop, daemon=True, name=f"{self.module_name}_log_writer")
+            self._log_thread.start()
 
     def _env_int(self, name: str, default: int) -> int:
         try:
             return max(0, int(os.getenv(name, str(default)) or default))
         except (TypeError, ValueError):
             return int(default)
+
+    def _env_float(self, name: str, default: float) -> float:
+        try:
+            return max(0.0, float(os.getenv(name, str(default)) or default))
+        except (TypeError, ValueError):
+            return float(default)
 
     def _module_dir_name(self) -> str:
         if self.module_name == "orch":
@@ -518,6 +574,165 @@ class RunLogger:
         self._rotate_jsonl_if_needed(path, len(line.encode("utf-8")) + 1)
         with open(path, "a", encoding="utf-8") as fp:
             fp.write(line + "\n")
+
+    def _write_json_line_async_worker(self, path: Path, payload: Dict[str, Any]) -> None:
+        line = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        pending_bytes = len(line.encode("utf-8")) + 1
+        fp = self._log_writer_files.get(path)
+        if fp is not None:
+            try:
+                fp.flush()
+            except Exception:
+                pass
+        if self.max_jsonl_bytes > 0:
+            try:
+                needs_rotate = path.exists() and path.stat().st_size + max(0, int(pending_bytes)) > self.max_jsonl_bytes
+            except OSError:
+                needs_rotate = False
+            if needs_rotate and fp is not None:
+                try:
+                    fp.close()
+                except Exception:
+                    pass
+                self._log_writer_files.pop(path, None)
+                fp = None
+        self._rotate_jsonl_if_needed(path, pending_bytes)
+        try:
+            if fp is not None and getattr(fp, "closed", False):
+                fp = None
+            if fp is None:
+                fp = open(path, "a", encoding="utf-8")
+                self._log_writer_files[path] = fp
+            fp.write(line + "\n")
+        except Exception:
+            try:
+                if fp is not None:
+                    fp.close()
+            except Exception:
+                pass
+            self._log_writer_files.pop(path, None)
+
+    def _flush_log_writer_files(self) -> None:
+        for fp in list(self._log_writer_files.values()):
+            try:
+                fp.flush()
+            except Exception:
+                pass
+        self._log_writer_last_flush_ts = time.time()
+
+    def _close_log_writer_files(self) -> None:
+        for fp in list(self._log_writer_files.values()):
+            try:
+                fp.flush()
+                fp.close()
+            except Exception:
+                pass
+        self._log_writer_files.clear()
+
+    def _log_priority_for(self, name: str, payload: Dict[str, Any]) -> str:
+        log_name = str(name or "").strip()
+        event = str(payload.get("event") or "").strip().lower()
+        level = str(payload.get("level") or "").strip().lower()
+        low_names = {
+            "frame_timing",
+            "edge_profile",
+            "log_timing",
+            "rate",
+            "cmd_vel",
+            "car_cmd",
+            "edge_slide_search",
+        }
+        ipc_success = event in {"recv_ok", "send_attempt", "send_ok", "enqueue_ok", "async_enqueue", "received", "envelope_received", "ack_sent"}
+        if log_name in low_names or (log_name == "ipc" and ipc_success and level not in {"warn", "warning", "error", "fatal"}):
+            return "low"
+        critical_events = {
+            "service_starting",
+            "service_ready",
+            "service_stopping",
+            "service_stopped",
+            "state_transition",
+            "task_cmd",
+            "task_ack",
+            "send_failed",
+            "connect_failed",
+            "queue_drop",
+            "queue_drop_oldest",
+            "queue_drop_new",
+            "queue_drop_failed",
+            "stale_obs",
+            "emergency_stop",
+            "arm_cmd",
+            "grasp",
+        }
+        if level in {"warn", "warning", "error", "fatal"} or any(key in event for key in critical_events):
+            return "high"
+        return "normal"
+
+    def _record_log_drop(self, name: str, priority: str) -> None:
+        with self._drop_lock:
+            key = f"{name}:{priority}"
+            self._drop_counts[key] = int(self._drop_counts.get(key, 0)) + 1
+
+    def _pop_log_drop_summary(self) -> Dict[str, int]:
+        with self._drop_lock:
+            counts = dict(self._drop_counts)
+            self._drop_counts.clear()
+            return counts
+
+    def _emit_log_writer_summary_if_needed(self, force: bool = False) -> None:
+        now = time.time()
+        interval_s = min(5.0, max(1.0, float(self._async_flush_interval_s or 1.0)))
+        if not force and (now - float(self._last_drop_summary_ts or 0.0)) < interval_s:
+            return
+        counts = self._pop_log_drop_summary()
+        if not counts:
+            return
+        self._last_drop_summary_ts = now
+        payload = self._with_common_fields(
+            {
+                "channel": "log_writer_summary",
+                "priority": "normal",
+                "dropped": counts,
+                "queue_size": self._async_queue_size,
+                "queue_depth": self._log_queue.qsize() if self._log_queue is not None else 0,
+            }
+        )
+        self._write_json_line_async_worker(self._path_for("log_writer_summary.jsonl"), payload)
+
+    def _enqueue_json_line(self, name: str, payload: Dict[str, Any]) -> None:
+        if not self._async_enabled or self._log_queue is None:
+            self._write_json_line(self._path_for(f"{name}.jsonl"), payload)
+            return
+        priority = self._log_priority_for(name, payload)
+        record = dict(payload)
+        record.setdefault("channel", name)
+        record.setdefault("priority", priority)
+        item = {"name": name, "path": self._path_for(f"{name}.jsonl"), "payload": record, "priority": priority}
+        try:
+            self._log_queue.put_nowait(item)
+            return
+        except queue.Full:
+            if priority == "low" and self._async_drop_low_priority:
+                self._record_log_drop(name, priority)
+                return
+            self._write_json_line(self._path_for(f"{name}.jsonl"), record)
+
+    def _log_writer_loop(self) -> None:
+        self._log_writer_last_flush_ts = time.time()
+        while not self._log_stop.is_set() or (self._log_queue is not None and not self._log_queue.empty()):
+            try:
+                item = self._log_queue.get(timeout=0.1) if self._log_queue is not None else None
+            except queue.Empty:
+                item = None
+            if item is not None:
+                self._write_json_line_async_worker(item["path"], item["payload"])
+            now = time.time()
+            if (now - float(self._log_writer_last_flush_ts or 0.0)) >= max(0.1, float(self._async_flush_interval_s or 1.0)):
+                self._emit_log_writer_summary_if_needed()
+                self._flush_log_writer_files()
+        self._emit_log_writer_summary_if_needed(force=True)
+        self._flush_log_writer_files()
+        self._close_log_writer_files()
 
     def _rotate_jsonl_if_needed(self, path: Path, pending_bytes: int) -> None:
         if self.max_jsonl_bytes <= 0:
@@ -600,8 +815,160 @@ class RunLogger:
             fp.write("\n")
 
     def write_jsonl(self, name: str, payload: Dict[str, Any]) -> None:
-        path = self._path_for(f"{name}.jsonl")
-        self._write_json_line(path, self._with_common_fields(payload))
+        log_name = str(name).strip()
+        record = self._with_common_fields(payload)
+        self._observe_summary(log_name, record)
+        self._enqueue_json_line(log_name, record)
+
+    @staticmethod
+    def _finite_float(value: Any) -> Optional[float]:
+        try:
+            out = float(value)
+        except Exception:
+            return None
+        if out != out or out in (float("inf"), float("-inf")):
+            return None
+        return out
+
+    @classmethod
+    def _summary_percentiles(cls, values: Iterable[Any]) -> Dict[str, Optional[float]]:
+        vals = sorted(v for v in (cls._finite_float(item) for item in values) if v is not None)
+        if not vals:
+            return {"avg": None, "p50": None, "p90": None, "p95": None, "max": None}
+        avg = sum(vals) / float(len(vals))
+        def pick(p: float) -> float:
+            idx = min(len(vals) - 1, int(round(float(p) * float(len(vals) - 1))))
+            return float(vals[idx])
+        return {"avg": float(avg), "p50": pick(0.50), "p90": pick(0.90), "p95": pick(0.95), "max": float(vals[-1])}
+
+    def _observe_table_edge_timing_summary(self, payload: Dict[str, Any]) -> None:
+        stats = self._summary_stats
+        for key in (
+            "vision_process_ms",
+            "obs_total_age_ms",
+            "camera_frame_interval_ms",
+            "vision_process_interval_ms",
+            "vision_publish_interval_ms",
+            "obs_out_send_interval_ms",
+            "table_edge_obs_recv_interval_ms",
+            "orchestrator_recv_interval_ms",
+            "state_machine_tick_interval_ms",
+            "vision_publish_to_orch_recv_ms",
+            "orch_recv_to_state_consume_ms",
+            "same_obs_reuse_count",
+        ):
+            value = self._finite_float(payload.get(key))
+            if value is not None:
+                stat_key = "orchestrator_recv_interval_ms" if key == "table_edge_obs_recv_interval_ms" else key
+                if stat_key in stats:
+                    stats[stat_key].append(value)
+
+    def _observe_table_edge_summary(self, payload: Dict[str, Any]) -> None:
+        stats = self._summary_stats
+        stats["table_edge_count"] += 1
+        if bool(payload.get("edge_found")):
+            stats["table_edge_found"] += 1
+        if bool(payload.get("valid_for_control") or payload.get("edge_valid")):
+            stats["table_edge_valid"] += 1
+        self._observe_table_edge_timing_summary(payload)
+        ts = self._finite_float(payload.get("obs_ts", payload.get("ts")))
+        if ts is not None:
+            stats["table_edge_ts"].append(ts)
+        reason = str(payload.get("reject_reason") or payload.get("reason") or "none").strip() or "none"
+        stats["reject_reasons"][reason] += 1
+        mode = str(payload.get("detector_mode") or "unknown").strip() or "unknown"
+        stats["detector_mode"][mode] += 1
+        depth_shape = payload.get("depth_shape")
+        if isinstance(depth_shape, (list, tuple)) and len(depth_shape) >= 2:
+            stats["depth_shape"][f"{int(depth_shape[1])}x{int(depth_shape[0])}"] += 1
+        source = str(payload.get("calib_source") or "unknown").strip() or "unknown"
+        stats["calib_source"][source] += 1
+        if payload.get("fx") is not None:
+            stats["calib"] = {
+                "depth_shape": payload.get("depth_shape"),
+                "calib_source": payload.get("calib_source"),
+                "fx": payload.get("fx"),
+                "fy": payload.get("fy"),
+                "cx": payload.get("cx"),
+                "cy": payload.get("cy"),
+                "depth_scale": payload.get("depth_scale"),
+            }
+
+    def _observe_summary(self, name: str, payload: Dict[str, Any]) -> None:
+        stats = self._summary_stats
+        if name in {"table_edge_obs", "table_edge_obs_lite"}:
+            self._observe_table_edge_summary(payload)
+        elif name == "control_summary":
+            self._observe_table_edge_timing_summary(payload)
+        elif name == "vision_obs":
+            perception = payload.get("perception") if isinstance(payload.get("perception"), dict) else {}
+            edge = perception.get("table_edge_obs") if isinstance(perception, dict) else None
+            if isinstance(edge, dict):
+                self._observe_table_edge_summary(edge)
+        elif name == "rate":
+            preview = stats["preview"]
+            for key in ("preview_fps", "preview_total_ms_avg", "preview_total_ms_p95", "preview_total_ms_max"):
+                if payload.get(key) is not None:
+                    preview[key] = payload.get(key)
+        elif name == "preview_timing":
+            stats["preview"] = dict(payload)
+        elif name == "system_metrics":
+            cpu = stats["cpu"]
+            for key in tuple(cpu.keys()):
+                value = self._finite_float(payload.get(key))
+                if value is not None:
+                    cpu[key].append(value)
+        elif name == "ipc":
+            channel = str(payload.get("channel") or "unknown")
+            event = str(payload.get("event") or "event")
+            stats["ipc"][f"{channel}:{event}"] += 1
+
+    def write_run_summary(self) -> None:
+        stats = self._summary_stats
+        end_ts = time.time()
+        count = int(stats["table_edge_count"])
+        edge_ts = sorted(float(v) for v in stats["table_edge_ts"])
+        hz = None
+        if len(edge_ts) >= 2 and edge_ts[-1] > edge_ts[0]:
+            hz = float(len(edge_ts) - 1) / max(1e-6, edge_ts[-1] - edge_ts[0])
+        summary = {
+            "run_start_time": self._summary_start_wall,
+            "run_end_time": end_ts,
+            "duration_s": max(0.0, end_ts - float(self._summary_start_wall)),
+            "module": self.module_name,
+            "stack_run_id": self.stack_run_id,
+            "detector_mode": dict(stats["detector_mode"].most_common()),
+            "depth_shape": dict(stats["depth_shape"].most_common()),
+            "calib_source": dict(stats["calib_source"].most_common()),
+            "calib": dict(stats["calib"]),
+            "table_edge_obs": {
+                "count": count,
+                "found_rate": (float(stats["table_edge_found"]) / float(count)) if count else None,
+                "valid_for_control_rate": (float(stats["table_edge_valid"]) / float(count)) if count else None,
+                "avg_hz": hz,
+            },
+            "vision_process_ms": self._summary_percentiles(stats["vision_process_ms"]),
+            "camera_frame_interval_ms": self._summary_percentiles(stats["camera_frame_interval_ms"]),
+            "vision_process_interval_ms": self._summary_percentiles(stats["vision_process_interval_ms"]),
+            "vision_publish_interval_ms": self._summary_percentiles(stats["vision_publish_interval_ms"]),
+            "obs_out_send_interval_ms": self._summary_percentiles(stats["obs_out_send_interval_ms"]),
+            "orchestrator_recv_interval_ms": self._summary_percentiles(stats["orchestrator_recv_interval_ms"]),
+            "state_machine_tick_interval_ms": self._summary_percentiles(stats["state_machine_tick_interval_ms"]),
+            "obs_total_age_ms": self._summary_percentiles(stats["obs_total_age_ms"]),
+            "vision_publish_to_orch_recv_ms": self._summary_percentiles(stats["vision_publish_to_orch_recv_ms"]),
+            "orch_recv_to_state_consume_ms": self._summary_percentiles(stats["orch_recv_to_state_consume_ms"]),
+            "same_obs_reuse_count": self._summary_percentiles(stats["same_obs_reuse_count"]),
+            "ipc_summary": dict(stats["ipc"].most_common(32)),
+            "preview_summary": dict(stats["preview"]),
+            "cpu_summary": {key: self._summary_percentiles(values) for key, values in stats["cpu"].items()},
+            "main_warnings_reject_reasons": dict(stats["reject_reasons"].most_common(32)),
+        }
+        with open(self._path_for("run_summary.json"), "w", encoding="utf-8") as fp:
+            json.dump(summary, fp, ensure_ascii=False, indent=2, sort_keys=True)
+            fp.write("\n")
+        with open(self._path_for("metrics_summary.json"), "w", encoding="utf-8") as fp:
+            json.dump(summary, fp, ensure_ascii=False, indent=2, sort_keys=True)
+            fp.write("\n")
 
     def write_event_record(
         self,
@@ -633,7 +1000,7 @@ class RunLogger:
             }
         )
         ordered = self._ordered_payload(payload, EVENT_FIELD_ORDER, extras_into_data=True)
-        self._write_json_line(self._path_for("event.jsonl"), ordered)
+        self._enqueue_json_line("event", ordered)
 
     def write_ipc_record(
         self,
@@ -669,7 +1036,7 @@ class RunLogger:
             }
         )
         ordered = self._ordered_payload(payload, IPC_FIELD_ORDER, extras_into_data=True)
-        self._write_json_line(self._path_for("ipc.jsonl"), ordered)
+        self._enqueue_json_line("ipc", ordered)
 
     def write_heartbeat_record(
         self,
@@ -697,7 +1064,7 @@ class RunLogger:
             }
         )
         ordered = self._ordered_payload(payload, HEARTBEAT_FIELD_ORDER, extras_into_data=True)
-        self._write_json_line(self._path_for("heartbeat.jsonl"), ordered)
+        self._enqueue_json_line("heartbeat", ordered)
 
     def write_event(self, text: str) -> None:
         if self._event_fp is None:
@@ -740,6 +1107,13 @@ class RunLogger:
         self.write_event(one_line)
 
     def close(self) -> None:
+        try:
+            self.write_run_summary()
+        except Exception:
+            pass
+        if self._async_enabled and self._log_thread is not None:
+            self._log_stop.set()
+            self._log_thread.join(timeout=2.0)
         try:
             self._event_fp.close()
         except Exception:

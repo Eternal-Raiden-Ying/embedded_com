@@ -482,6 +482,7 @@ class PreviewManager:
         if self.enabled and self.sink is not None:
             try:
                 self.sink.open()
+                self._warn_if_sink_open_failed()
             except Exception:
                 pass
 
@@ -514,6 +515,7 @@ class PreviewManager:
         self.enabled = True
         if self.sink is not None:
             self.sink.open()
+            self._warn_if_sink_open_failed()
         if self.logger is not None:
             self.logger.info(
                 "preview started | sink=%s",
@@ -521,6 +523,21 @@ class PreviewManager:
             )
         self._emit("enabled", enabled=True, sink_name=getattr(self.sink, "sink_name", "unknown"))
         return True
+
+    def _warn_if_sink_open_failed(self) -> None:
+        if self.sink is None or not hasattr(self.sink, "snapshot"):
+            return
+        try:
+            snapshot = self.sink.snapshot()
+        except Exception:
+            return
+        if not snapshot.get("open_failed"):
+            return
+        error = str(snapshot.get("open_error") or "unknown")[:160]
+        sink_name = getattr(self.sink, "sink_name", "unknown")
+        if self.logger is not None:
+            self.logger.warning("preview open failed | sink=%s error=%s", sink_name, error)
+        self._emit_operator("preview:open_failed", f"[VISTA] WARN PREVIEW open_failed sink={sink_name} error={error}")
 
     def disable(self) -> bool:
         """Disable preview output and close sink-local resources."""
@@ -548,9 +565,11 @@ class PreviewManager:
         now = time.time()
         recent = [float(ts) for ts in self._render_times if now - float(ts) <= 5.0]
         preview_fps = (len(recent) / 5.0) if recent else 0.0
+        sink_snapshot = self.sink.snapshot() if self.sink is not None else None
+        timing = dict((sink_snapshot or {}).get("timing") or {})
         return {
             "enabled": self.enabled,
-            "sink": self.sink.snapshot() if self.sink is not None else None,
+            "sink": sink_snapshot,
             "runtime_running": bool(self._runtime_running),
             "last_frame_generation": int(self._last_frame_generation),
             "last_frame_seq": int(self._last_frame_seq),
@@ -559,4 +578,5 @@ class PreviewManager:
             "current_layout": self._current_layout,
             "mode_layouts": dict(self._mode_layouts),
             "preview_fps": float(preview_fps),
+            "preview_timing": timing,
         }

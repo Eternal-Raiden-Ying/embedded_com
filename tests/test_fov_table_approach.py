@@ -18,6 +18,7 @@ from orchestrator_service.config.schema import CarMotionConfig, ControlThreshold
 from orchestrator_service.control.motion_adapter import Stm32MotionAdapter  # noqa: E402
 from orchestrator_service.ipc.protocol import CmdVel, TableEdgeObs, now_ts  # noqa: E402
 from orchestrator_service.runtime.controller import MotionController  # noqa: E402
+from orchestrator_service.runtime.context import State  # noqa: E402
 from orchestrator_service.runtime.state_machine import OrchestratorCore  # noqa: E402
 
 
@@ -94,7 +95,9 @@ class FovTableApproachTest(unittest.TestCase):
         self.assertEqual(decision.control_summary["table_approach_reason"], "plane_confirmed_table_front")
         self.assertEqual(decision.control_summary["approach_source"], "plane_only")
         self.assertGreaterEqual(decision.cmd.vx_norm, 0.0)
-        self.assertNotEqual(decision.cmd.wz_norm, 0.0)
+        self.assertEqual(decision.control_summary["speed_profile"], "controlled_approach")
+        self.assertLessEqual(abs(decision.control_summary["vx_mps"]), 0.030)
+        self.assertLessEqual(abs(decision.control_summary["wz_radps"]), 0.050)
 
     def test_hard_view_error_forces_vx_zero(self) -> None:
         controller = _controller()
@@ -142,20 +145,27 @@ class FovTableApproachTest(unittest.TestCase):
         self.assertGreater(decision.cmd.vx_norm, 0.0)
         self.assertTrue(decision.control_summary["forward_allowed"])
 
-    def test_forward_release_requires_pose_found(self) -> None:
+    def test_pose_missing_uses_safe_vx_then_times_out(self) -> None:
         controller = _controller()
         obs = _obs(pose_found=False, dist_err_m=0.30, control_level="approach")
         decision = controller.fov_table_approach_cmd(obs)
-        self.assertEqual(decision.cmd.vx_norm, 0.0)
+        self.assertAlmostEqual(decision.control_summary["vx_mps"], 0.010, places=3)
         self.assertFalse(decision.control_summary["forward_allowed"])
-        self.assertEqual(decision.control_summary["forward_block_reason"], "pose_missing")
+        self.assertEqual(decision.control_summary["forward_block_reason"], "pose_missing_safe_vx")
+        self.assertTrue(decision.control_summary["pose_missing_safe_vx_active"])
+
+        controller._pose_missing_since_mono = time.monotonic() - 3.5
+        timed_out = controller.fov_table_approach_cmd(obs)
+        self.assertEqual(timed_out.cmd.vx_norm, 0.0)
+        self.assertEqual(timed_out.control_summary["forward_block_reason"], "pose_missing_timeout")
 
     def test_forward_release_uses_low_speed_clamp(self) -> None:
         controller = _controller()
         obs = _obs(dist_err_m=0.30, control_level="approach", yaw_err_rad=0.0, view_err_norm=0.0, plane_cx_norm=0.0)
         decision = controller.fov_table_approach_cmd(obs)
         self.assertTrue(decision.control_summary["forward_allowed"])
-        self.assertAlmostEqual(decision.cmd.vx_norm, 0.03, places=6)
+        self.assertGreaterEqual(decision.control_summary["vx_mps"], 0.012)
+        self.assertLessEqual(decision.control_summary["vx_mps"], 0.030)
         self.assertLessEqual(decision.cmd.vx_norm, controller.car_cfg.table_vx_norm_max)
 
     def test_forward_release_respects_min_distance(self) -> None:
@@ -170,13 +180,13 @@ class FovTableApproachTest(unittest.TestCase):
         yaw_obs = _obs(dist_err_m=0.30, yaw_err_rad=0.30, control_level="approach", view_err_norm=0.0, plane_cx_norm=0.0)
         yaw_decision = controller.fov_table_approach_cmd(yaw_obs)
         self.assertTrue(0.0 < yaw_decision.control_summary["yaw_gate"] < 1.0)
-        self.assertLess(yaw_decision.cmd.vx_norm, yaw_decision.control_summary["vx_from_dist"])
+        self.assertLess(yaw_decision.control_summary["vx_mps_raw"], yaw_decision.control_summary["vx_from_dist"] * controller.car_cfg.vx_mps_per_norm)
 
         controller = _controller()
         fov_obs = _obs(dist_err_m=0.30, yaw_err_rad=0.0, control_level="approach", view_err_norm=0.30, plane_cx_norm=0.30)
         fov_decision = controller.fov_table_approach_cmd(fov_obs)
         self.assertTrue(0.0 < fov_decision.control_summary["fov_gate"] < 1.0)
-        self.assertLess(fov_decision.cmd.vx_norm, fov_decision.control_summary["vx_from_dist"])
+        self.assertLess(fov_decision.control_summary["vx_mps_raw"], fov_decision.control_summary["vx_from_dist"] * controller.car_cfg.vx_mps_per_norm)
 
     def test_stop_level_does_not_release_forward(self) -> None:
         controller = _controller()
@@ -218,7 +228,109 @@ class FovTableApproachTest(unittest.TestCase):
         obs = _obs(frame_capture_ts=now_ts() - 0.35, dist_err_m=0.0, yaw_err_rad=0.0, usable_for_stop=True)
         status = core._final_lock_status(obs, stable_count=10)
         self.assertFalse(status["lock_ready"])
-        self.assertEqual(status["reason"], "vision_stale")
+        self.assertEqual(status["reason"], "soft_stale")
+        self.assertEqual(status["lock_count_hold_reason"], "soft_stale")
+
+    def test_fast_control_level_aliases_normalize(self) -> None:
+        core = OrchestratorCore(ControlThresholds(), CarMotionConfig())
+        self.assertEqual(core._control_level(_obs(control_level="approach_slow")), "approach")
+        self.assertEqual(core._control_level(_obs(control_level="rotate_only")), "alignment")
+        self.assertEqual(core._control_level(_obs(control_level="align")), "alignment")
+        self.assertEqual(core._control_level(_obs(control_level="stop_ready")), "stop")
+        self.assertEqual(core._control_level(_obs(control_level="bad_level")), "none")
+
+    def test_final_lock_count_inc_hold_and_reset(self) -> None:
+        cfg = ControlThresholds()
+        cfg.table_obs_stale_soft_ms = 300
+        cfg.table_obs_stale_stop_ms = 500
+        cfg.table_obs_stale_hard_ms = 800
+        core = OrchestratorCore(cfg, CarMotionConfig())
+
+        fresh = _obs(control_level="stop_ready", usable_for_stop=True, usable_for_alignment=True, dist_err_m=0.0, yaw_err_rad=0.0)
+        status = core._update_final_lock_count(fresh)
+        self.assertTrue(status["lock_ready"])
+        self.assertEqual(core.ctx.table_lock_frames, 1)
+        self.assertEqual(status["lock_count_inc_reason"], "fresh_lock_ready")
+
+        soft = _obs(frame_capture_ts=now_ts() - 0.35, control_level="stop_ready", usable_for_stop=True, usable_for_alignment=True, dist_err_m=0.0, yaw_err_rad=0.0)
+        status = core._update_final_lock_count(soft)
+        self.assertFalse(status["lock_ready"])
+        self.assertEqual(core.ctx.table_lock_frames, 1)
+        self.assertEqual(status["lock_count_hold_reason"], "soft_stale")
+
+        hard = _obs(frame_capture_ts=now_ts() - 0.65, control_level="stop_ready", usable_for_stop=True, usable_for_alignment=True, dist_err_m=0.0, yaw_err_rad=0.0)
+        status = core._update_final_lock_count(hard)
+        self.assertEqual(core.ctx.table_lock_frames, 0)
+        self.assertEqual(status["lock_count_reset_reason"], "hard_stale")
+
+    def test_final_lock_approach_enters_stop_and_settle_on_lock_ready(self) -> None:
+        cfg = ControlThresholds()
+        cfg.enable_final_lock = True
+        cfg.enable_micro_adjust = True
+        cfg.table_settle_s = 0.0
+        cfg.table_stable_frames = 2
+        core = OrchestratorCore(cfg, CarMotionConfig())
+        core.ctx.state = State.FINAL_LOCK
+        core.ctx.table_dock_phase = "APPROACH"
+        core.handle_table_obs(_obs(control_level="stop_ready", usable_for_stop=True, usable_for_alignment=True, dist_err_m=0.0, yaw_err_rad=0.0))
+
+        decision = core.tick()
+
+        self.assertEqual(core.ctx.state, State.FINAL_LOCK)
+        self.assertEqual(core.ctx.table_dock_phase, "STOP_AND_SETTLE")
+        self.assertEqual(core.ctx.table_lock_frames, 1)
+        self.assertEqual(core._control_level(core.ctx.last_table_obs), "stop")
+        self.assertEqual(decision.cmd.vx_norm, 0.0)
+
+        core.handle_table_obs(_obs(control_level="align", usable_for_stop=False, usable_for_alignment=True, dist_err_m=0.0, yaw_err_rad=0.0))
+        core.tick()
+        self.assertEqual(core.ctx.state, State.AT_TABLE_EDGE)
+
+    def test_final_lock_disabled_keeps_stop_ready_in_controlled_approach(self) -> None:
+        cfg = ControlThresholds()
+        cfg.enable_final_lock = False
+        core = OrchestratorCore(cfg, CarMotionConfig())
+        core.ctx.state = State.CONTROLLED_APPROACH
+        core.ctx.task_start_wall_ts = now_ts() - 1.0
+        core.handle_table_obs(_obs(control_level="stop_ready", usable_for_stop=True, usable_for_alignment=True, dist_err_m=0.0, yaw_err_rad=0.0))
+
+        decision = core.tick()
+
+        self.assertEqual(core.ctx.state, State.CONTROLLED_APPROACH)
+        self.assertNotEqual(decision.cmd.mode, "FINAL_LOCK")
+        self.assertFalse(decision.control_summary["final_lock_enabled"])
+        self.assertTrue(decision.control_summary["stop_ready_ignored_for_stage_transition"])
+
+    def test_stop_ready_far_distance_stays_in_controlled_approach(self) -> None:
+        cfg = ControlThresholds()
+        cfg.enable_final_lock = True
+        cfg.final_lock_enter_dist_th_m = 0.08
+        core = OrchestratorCore(cfg, CarMotionConfig())
+        core.ctx.state = State.CONTROLLED_APPROACH
+        core.ctx.task_start_wall_ts = now_ts() - 1.0
+        core.handle_table_obs(_obs(control_level="stop_ready", usable_for_stop=True, usable_for_alignment=True, dist_err_m=0.12, yaw_err_rad=0.02))
+
+        decision = core.tick()
+
+        self.assertEqual(core.ctx.state, State.CONTROLLED_APPROACH)
+        self.assertFalse(decision.control_summary["final_lock_enter_allowed"])
+        self.assertEqual(decision.control_summary["final_lock_enter_block_reason"], "distance_too_far")
+
+    def test_stop_ready_near_distance_enters_final_lock(self) -> None:
+        cfg = ControlThresholds()
+        cfg.enable_final_lock = True
+        cfg.final_lock_enter_dist_th_m = 0.08
+        cfg.final_lock_enter_yaw_th_rad = 0.10
+        core = OrchestratorCore(cfg, CarMotionConfig())
+        core.ctx.state = State.CONTROLLED_APPROACH
+        core.ctx.task_start_wall_ts = now_ts() - 1.0
+        core.handle_table_obs(_obs(control_level="stop_ready", usable_for_stop=True, usable_for_alignment=True, dist_err_m=0.02, yaw_err_rad=0.02))
+
+        decision = core.tick()
+
+        self.assertEqual(core.ctx.state, State.FINAL_LOCK)
+        self.assertTrue(decision.control_summary["final_lock_enter_allowed"])
+        self.assertEqual(decision.cmd.mode, "FINAL_LOCK")
 
     def test_missing_frame_capture_ts_falls_back_safely(self) -> None:
         controller = _controller()

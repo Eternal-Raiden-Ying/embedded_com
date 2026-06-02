@@ -11,6 +11,13 @@ final_lock:
   stable_frames: 5
   max_micro_adjust: 3
 
+table_docking:
+  # Normal staged docking: allow FINAL_LOCK, but keep jog/micro-adjust disabled by default.
+  enable_final_lock: true
+  enable_micro_adjust: false
+  final_lock_enter_dist_th_m: 0.08
+  final_lock_enter_yaw_th_rad: 0.10
+
 controlled_approach:
   target_dist_m: 0.015
   max_vx_norm: 0.28
@@ -25,6 +32,41 @@ controlled_approach:
   view_vy_max_norm: 0.01
   view_wz_max_norm: 0.05
   plane_wz_max_norm: 0.06
+
+# 如何快速调整桌边靠近速度:
+# - 想让小车前进更快：改 table_docking_motion.controlled_approach.vx_max_mps / vx_min_mps。
+# - 想让最终停车更稳：降低 table_docking_motion.final_lock.vx_max_mps / wz_max_radps。
+# - 想让对齐更快：提高 table_docking_motion.coarse_align.wz_max_radps 和 vy_max_mps。
+# - 想减少抖动：增大 deadband 或降低 min speed。
+# - 想保守测试：整体乘以 0.5。
+# - 想激进测试：整体乘以 1.3，但不要超过当前 max 的安全上限。
+table_docking_motion:
+  pose_missing_safe_vx_mps: 0.010
+  pose_missing_max_hold_s: 3.0
+  coarse_align:
+    vx_max_mps: 0.000
+    vy_min_mps: 0.010
+    vy_max_mps: 0.025
+    wz_min_radps: 0.020
+    wz_max_radps: 0.060
+  controlled_approach:
+    vx_min_mps: 0.008
+    vx_max_mps: 0.030
+    vy_min_mps: 0.008
+    vy_max_mps: 0.020
+    wz_min_radps: 0.015
+    wz_max_radps: 0.050
+  final_lock:
+    vx_min_mps: 0.000
+    vx_max_mps: 0.008
+    vy_min_mps: 0.006
+    vy_max_mps: 0.012
+    wz_min_radps: 0.010
+    wz_max_radps: 0.025
+  deadband:
+    vx_mps: 0.004
+    vy_mps: 0.001
+    wz_radps: 0.006
 
 edge_slide_search:
   slide_vy_norm: 0.14

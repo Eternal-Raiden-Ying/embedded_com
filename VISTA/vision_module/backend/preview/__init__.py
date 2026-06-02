@@ -1,5 +1,4 @@
-from .base import PreviewFrame, PreviewOverlay, PreviewSink
-from .null_sink import NullPreviewSink
+from .base import NullPreviewSink, PreviewFrame, PreviewOverlay, PreviewSink
 
 try:
     from .opencv_sink import OpenCVPreviewSink

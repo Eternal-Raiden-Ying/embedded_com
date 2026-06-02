@@ -1165,7 +1165,7 @@ class OperatorConsoleIpcPolicyTest(unittest.TestCase):
                 app._log_ipc_event({"level": "info", "name": "obs_out", "event": event})
             self.assertEqual(app.operator_console_lines, [])
             self.assertEqual(app.log_lines, [])
-            self.assertEqual([item["event"] for item in app.run_logger.ipc], ["recv_ok", "send_ok", "enqueue_ok"])
+            self.assertEqual([item["event"] for item in app.run_logger.ipc], [])
         finally:
             cfg.runtime.console_mode = old_console_mode
             cfg.runtime.ipc_console = old_ipc_console

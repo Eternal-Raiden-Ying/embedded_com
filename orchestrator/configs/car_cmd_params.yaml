@@ -1,5 +1,7 @@
 car_cmd:
   send_period_ms: 100
+  uart_keepalive_hz: 10.0
+  min_uart_keepalive_hz: 7.0
   hold_ms: 150
   max_vx_norm: 1.0
   max_vy_norm: 1.0

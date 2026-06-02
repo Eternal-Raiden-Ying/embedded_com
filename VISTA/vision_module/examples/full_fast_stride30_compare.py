@@ -72,6 +72,7 @@ def _obs_label_lines(obs: Dict[str, Any], *, side: str, frame_seq: int) -> List[
             "detector_mode=full",
             f"frame_seq={frame_seq}",
             f"roi_source={obs.get('roi_source') or 'NA'} roi={_roi_text(obs)}",
+            f"depth={obs.get('depth_shape') or 'NA'} calib={obs.get('calib_source') or 'NA'} fx/fy={_fmt(obs.get('fx'))}/{_fmt(obs.get('fy'))} cx/cy={_fmt(obs.get('cx'))}/{_fmt(obs.get('cy'))}",
             f"yaw={_fmt(yaw)}rad/{_deg(yaw)}deg dist={_fmt(obs.get('dist_err_m', obs.get('plane_dist_err_m')))}m",
             f"cx={_fmt(obs.get('plane_cx_norm'))} conf={_fmt(obs.get('confidence', obs.get('plane_confidence')))}",
             f"inliers={obs.get('inlier_count', obs.get('edge_inlier_count', 'NA'))} area={_fmt(obs.get('plane_area_ratio'))} width={_fmt(obs.get('plane_width_norm'))}",
@@ -82,6 +83,7 @@ def _obs_label_lines(obs: Dict[str, Any], *, side: str, frame_seq: int) -> List[
         "detector_mode=fast_plane_only_v3",
         f"frame_seq={frame_seq}",
         f"roi_source={obs.get('roi_source') or 'NA'} roi={_roi_text(obs)}",
+        f"depth={obs.get('depth_shape') or 'NA'} calib={obs.get('calib_source') or 'NA'} fx/fy={_fmt(obs.get('fx'))}/{_fmt(obs.get('fy'))} cx/cy={_fmt(obs.get('cx'))}/{_fmt(obs.get('cy'))}",
         f"coord={obs.get('fast_coord_frame') or 'NA'} pitch={_fmt(obs.get('fast_camera_pitch_deg'))}deg hcam={_fmt(obs.get('fast_camera_height_m'))} htbl={_fmt(obs.get('fast_table_height_m'))}",
         f"raw_yaw={_fmt(yaw)}rad/{_deg(yaw)}deg raw_dist={_fmt(obs.get('fast_raw_dist_err_m', obs.get('dist_err_m')))}m",
         f"raw_cx={_fmt(obs.get('fast_raw_plane_cx_norm'))} conf={_fmt(obs.get('fast_score_final', obs.get('fast_raw_confidence')))} level={obs.get('fast_control_level') or obs.get('control_level') or 'NA'}",
@@ -121,6 +123,7 @@ def _process_one(processor: Any, pack: Dict[str, Any], frame_seq: int, mode_name
     frames = {
         "rgb": pack.get("rgb"),
         "depth": pack.get("depth"),
+        "depth_intrinsics": pack.get("depth_intrinsics"),
         "frame_capture_ts": capture_ts,
         "timestamp_ms": pack.get("timestamp_ms"),
     }

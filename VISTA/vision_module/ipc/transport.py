@@ -15,7 +15,8 @@ Logger = Optional[Callable[[Dict[str, Any]], None]]
 class JsonlClientSender:
     def __init__(self, mode: str = "disabled", tcp_host: str = "127.0.0.1", tcp_port: int = 0,
                  uds_path: str = "", reconnect_interval: float = 1.0, send_timeout: float = 1.0,
-                 name: str = "jsonl_sender", logger: Logger = None):
+                 name: str = "jsonl_sender", logger: Logger = None, queue_size: int = 5,
+                 latest_only: bool = False):
         self.mode = mode
         self.tcp_host = tcp_host
         self.tcp_port = int(tcp_port)
@@ -27,14 +28,22 @@ class JsonlClientSender:
         self._sock: Optional[socket.socket] = None
         self._lock = threading.Lock()
         self._last_warn_ts = 0.0
+        self._last_connect_ms = 0.0
         self.link_state = "DISCONNECTED"
         self.fail_count = 0
         self.last_send_ok_ts = 0.0
         self.last_send_fail_ts = 0.0
         self.last_enqueue_ts = 0.0
-        self._queue: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=5)
+        self.latest_only = bool(latest_only)
+        self._queue: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=max(1, int(queue_size)))
         self._stop_event = threading.Event()
         self._worker_thread: Optional[threading.Thread] = None
+        self.obs_replace_count = 0
+        self.queue_drop_oldest_count = 0
+        self.queue_drop_new_count = 0
+        self._last_queue_delay_ms = None
+        self._last_send_total_ms = None
+        self._last_summary_ts = 0.0
 
         if self.mode not in {"disabled", "tcp", "uds"}:
             raise ValueError(f"unsupported sender mode: {mode}")
@@ -57,15 +66,20 @@ class JsonlClientSender:
             self._sock = None
 
     def _make_socket(self) -> socket.socket:
+        start = time.perf_counter()
         if self.mode == "tcp":
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             sock.settimeout(self.send_timeout)
             sock.connect((self.tcp_host, self.tcp_port))
+            self._last_connect_ms = max(0.0, (time.perf_counter() - start) * 1000.0)
             return sock
         if self.mode == "uds":
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             sock.settimeout(self.send_timeout)
             sock.connect(self.uds_path)
+            self._last_connect_ms = max(0.0, (time.perf_counter() - start) * 1000.0)
             return sock
         raise RuntimeError("disabled mode does not create socket")
 
@@ -79,7 +93,13 @@ class JsonlClientSender:
             self.link_state = "CONNECTING"
             self._sock = self._make_socket()
             self.link_state = "CONNECTED"
-            self._log("info", "connected", transport=self.mode, recovered=self.fail_count > 0)
+            self._log(
+                "info",
+                "connected",
+                transport=self.mode,
+                recovered=self.fail_count > 0,
+                connect_ms=float(getattr(self, "_last_connect_ms", 0.0) or 0.0),
+            )
             return True
         except OSError as exc:
             now = time.time()
@@ -95,20 +115,53 @@ class JsonlClientSender:
         if self.mode == "disabled":
             self.link_state = "DISABLED"
             return False
-        if self._queue.full():
+        if self.latest_only:
+            replaced = 0
+            while True:
+                try:
+                    self._queue.get_nowait()
+                    replaced += 1
+                except queue.Empty:
+                    break
+            if replaced:
+                self.obs_replace_count += replaced
+                self.queue_drop_oldest_count += replaced
+                self._emit_summary_if_needed()
+        elif self._queue.full():
             try:
                 self._queue.get_nowait()
+                self.queue_drop_oldest_count += 1
                 self._log("warn", "queue_drop_oldest", queue_depth=self._queue.qsize())
             except queue.Empty:
                 pass
         try:
-            self._queue.put_nowait(payload)
             self.last_enqueue_ts = time.time()
+            payload["_ipc_enqueue_ts"] = self.last_enqueue_ts
+            self._queue.put_nowait(payload)
             self._log("info", "enqueue_ok", queue_depth=self._queue.qsize())
             return True
         except queue.Full:
+            self.queue_drop_new_count += 1
             self._log("warn", "queue_drop_new", queue_depth=self._queue.qsize())
             return False
+
+    def _emit_summary_if_needed(self, force: bool = False):
+        now = time.time()
+        if not force and (now - float(self._last_summary_ts or 0.0)) < 1.0:
+            return
+        self._last_summary_ts = now
+        self._log(
+            "info",
+            "sender_summary",
+            queue_depth=self._queue.qsize(),
+            queue_size=self._queue.maxsize,
+            latest_only=bool(self.latest_only),
+            obs_replace_count=int(self.obs_replace_count),
+            queue_drop_oldest_count=int(self.queue_drop_oldest_count),
+            queue_drop_new_count=int(self.queue_drop_new_count),
+            queue_delay_ms=self._last_queue_delay_ms,
+            send_total_ms=self._last_send_total_ms,
+        )
 
     def _send_loop(self):
         while not self._stop_event.is_set():
@@ -117,9 +170,28 @@ class JsonlClientSender:
             except queue.Empty:
                 continue
 
+            send_total_start = time.perf_counter()
+            enqueue_ts = 0.0
+            if isinstance(payload, dict):
+                try:
+                    enqueue_ts = float(payload.pop("_ipc_enqueue_ts", 0.0) or 0.0)
+                except Exception:
+                    enqueue_ts = 0.0
+            encode_start = time.perf_counter()
             line = json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+            encode_ms = max(0.0, (time.perf_counter() - encode_start) * 1000.0)
             data = line.encode("utf-8", errors="ignore")
-            self._log("info", "send_attempt", size=len(line), transport=self.mode)
+            queue_delay_ms = max(0.0, (time.time() - enqueue_ts) * 1000.0) if enqueue_ts > 0.0 else None
+            self._last_queue_delay_ms = queue_delay_ms
+            self._log(
+                "info",
+                "send_attempt",
+                size=len(line),
+                bytes=len(data),
+                transport=self.mode,
+                json_encode_ms=encode_ms,
+                queue_delay_ms=queue_delay_ms,
+            )
 
             for _ in range(2):
                 if self._stop_event.is_set():
@@ -132,11 +204,25 @@ class JsonlClientSender:
                 with self._lock:
                     try:
                         assert self._sock is not None
+                        write_start = time.perf_counter()
                         self._sock.sendall(data)
+                        send_ms = max(0.0, (time.perf_counter() - write_start) * 1000.0)
+                        total_ms = max(0.0, (time.perf_counter() - send_total_start) * 1000.0)
+                        self._last_send_total_ms = total_ms
                         self.fail_count = 0
                         self.last_send_ok_ts = time.time()
                         self.link_state = "CONNECTED"
-                        self._log("info", "send_ok")
+                        self._log(
+                            "info",
+                            "send_ok",
+                            bytes=len(data),
+                            send_ms=send_ms,
+                            send_total_ms=total_ms,
+                            queue_delay_ms=queue_delay_ms,
+                            json_encode_ms=encode_ms,
+                            connect_ms=float(getattr(self, "_last_connect_ms", 0.0) or 0.0),
+                        )
+                        self._emit_summary_if_needed()
                         break
                     except OSError as exc:
                         self.fail_count += 1
@@ -157,12 +243,19 @@ class JsonlClientSender:
             "last_enqueue_ts": self.last_enqueue_ts,
             "queue_depth": self._queue.qsize(),
             "queue_size": self._queue.maxsize,
+            "latest_only": bool(self.latest_only),
+            "obs_replace_count": int(self.obs_replace_count),
+            "queue_drop_oldest_count": int(self.queue_drop_oldest_count),
+            "queue_drop_new_count": int(self.queue_drop_new_count),
+            "queue_delay_ms": self._last_queue_delay_ms,
+            "send_total_ms": self._last_send_total_ms,
         }
 
     def close(self):
         self._stop_event.set()
         if self._worker_thread is not None:
             self._worker_thread.join(timeout=1.0)
+        self._emit_summary_if_needed(force=True)
         with self._lock:
             self._close()
 
@@ -282,16 +375,20 @@ class JsonlInboundServer:
             conn.settimeout(1.0)
             while not self._stop.is_set():
                 try:
+                    recv_start = time.perf_counter()
                     chunk = conn.recv(4096)
+                    recv_block_ms = max(0.0, (time.perf_counter() - recv_start) * 1000.0)
                 except socket.timeout:
                     continue
                 except OSError:
                     break
                 if not chunk:
                     break
+                chunk_recv_ts = time.time()
                 buffer += chunk
                 while b"\n" in buffer:
                     raw, buffer = buffer.split(b"\n", 1)
+                    parse_start = time.perf_counter()
                     line = raw.decode("utf-8", errors="ignore").strip()
                     if not line:
                         continue
@@ -301,7 +398,18 @@ class JsonlInboundServer:
                         self._log("warn", "invalid_json", peer=peer, error=str(exc), raw=line[:200])
                         continue
                     self.last_recv_ts = time.time()
-                    self._log("info", "recv_ok", peer=peer, msg_type=payload.get("type"))
+                    parse_ms = max(0.0, (time.perf_counter() - parse_start) * 1000.0)
+                    recv_to_queue_ms = max(0.0, (self.last_recv_ts - chunk_recv_ts) * 1000.0)
+                    self._log(
+                        "info",
+                        "recv_ok",
+                        peer=peer,
+                        msg_type=payload.get("type"),
+                        bytes=len(raw),
+                        recv_block_ms=recv_block_ms,
+                        json_parse_ms=parse_ms,
+                        recv_to_queue_ms=recv_to_queue_ms,
+                    )
                     self._queue.put({"peer": peer, "payload": payload, "recv_ts": self.last_recv_ts})
         finally:
             with self._client_lock:

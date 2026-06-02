@@ -87,6 +87,7 @@ def _profile_summary(profile: Any) -> Dict[str, Any]:
 def iter_bag_frames(bag_path: Path, max_frames: int) -> Iterator[Dict[str, Any]]:
     import numpy as np
     import pyrealsense2 as rs
+    from VISTA.vision_module.backend.depth_calibration import depth_intrinsics_from_rs_profile
 
     if not bag_path.exists():
         raise FileNotFoundError(f"bag file not found: {bag_path}")
@@ -98,6 +99,10 @@ def iter_bag_frames(bag_path: Path, max_frames: int) -> Iterator[Dict[str, Any]]
     device = profile.get_device()
     playback = device.as_playback()
     playback.set_real_time(False)
+    try:
+        depth_scale = float(device.first_depth_sensor().get_depth_scale())
+    except Exception:
+        depth_scale = 0.001
     streams = [_profile_summary(p) for p in profile.get_streams()]
     print(f"[BAG_TABLE_PLANE] opened bag={bag_path}")
     for item in streams:
@@ -123,11 +128,30 @@ def iter_bag_frames(bag_path: Path, max_frames: int) -> Iterator[Dict[str, Any]]
             color_frame = aligned.get_color_frame() or frames.get_color_frame()
             if not depth_frame:
                 continue
+            depth_intrinsics = None
+            try:
+                depth_intrinsics = depth_intrinsics_from_rs_profile(
+                    depth_frame.get_profile(),
+                    depth_scale=depth_scale,
+                    source="bag_profile",
+                )
+            except Exception:
+                depth_intrinsics = None
+            if depth_intrinsics is None:
+                try:
+                    depth_intrinsics = depth_intrinsics_from_rs_profile(
+                        depth_frame.profile,
+                        depth_scale=depth_scale,
+                        source="bag_profile",
+                    )
+                except Exception:
+                    depth_intrinsics = None
             yield {
                 "frame": frame_count - 1,
                 "timestamp_ms": float(frames.get_timestamp()),
                 "depth": np.asanyarray(depth_frame.get_data()),
                 "rgb": np.asanyarray(color_frame.get_data()) if color_frame else None,
+                "depth_intrinsics": depth_intrinsics.to_dict() if depth_intrinsics is not None else None,
             }
     finally:
         pipeline.stop()
@@ -166,6 +190,29 @@ TIMING_FIELDS = (
     "preview_render_ms",
     "preview_save_ms",
     "loop_total_ms",
+    "camera_frame_age_ms",
+    "camera_frame_interval_ms",
+    "camera_frames_hz",
+    "table_edge_worker_interval_ms",
+    "table_edge_no_new_frame_count",
+    "table_edge_process_interval_ms",
+    "table_edge_publish_interval_ms",
+    "table_edge_obs_hz",
+    "scheduler_read_ms",
+    "scheduler_publish_ms",
+    "fast_roi_extract_ms",
+    "fast_depth_valid_ms",
+    "fast_projection_ms",
+    "fast_robot_transform_ms",
+    "fast_height_filter_ms",
+    "fast_rep_select_ms",
+    "fast_front_cluster_fit_ms",
+    "fast_front_edge_ms",
+    "fast_local_band_ms",
+    "fast_background_protect_ms",
+    "fast_control_gate_ms",
+    "fast_debug_payload_ms",
+    "fast_total_ms",
 )
 
 
@@ -212,6 +259,8 @@ COMPACT_OBS_FIELDS = (
     "plane_residual_max",
     "plane_mask_status",
     "fast_fit_attempted",
+    "fast_debug_pixels_enabled",
+    "fast_debug_pixel_cap",
     "fast_raw_yaw_err_rad",
     "fast_raw_dist_err_m",
     "fast_raw_plane_cx_norm",
@@ -253,10 +302,14 @@ COMPACT_OBS_FIELDS = (
     "fast_edge_line_yaw_rad",
     "fast_edge_line_dist_m",
     "fast_edge_support_score",
+    "fast_front_edge_skipped",
+    "fast_front_edge_skip_reason",
     "fast_local_band_support_count",
     "fast_local_band_x_span_m",
     "fast_local_band_edge_support",
     "fast_local_band_residual_mean",
+    "fast_local_band_skipped",
+    "fast_local_band_skip_reason",
     "fast_background_blocked",
     "fast_near_stage_far_jump",
     "fast_selected_dist_source",
@@ -358,8 +411,22 @@ COMPACT_OBS_FIELDS = (
     "bag_update_interval_ms",
     "edge_update_interval_ms",
     "frame_age_ms",
+    "camera_frame_seq",
+    "camera_frame_age_ms",
+    "camera_frame_interval_ms",
+    "camera_frames_hz",
+    "table_edge_worker_interval_ms",
+    "table_edge_no_new_frame_count",
+    "table_edge_process_interval_ms",
+    "table_edge_publish_interval_ms",
+    "table_edge_obs_hz",
+    "scheduler_read_ms",
+    "scheduler_publish_ms",
     "depth_frame_fetch_ms",
     "latest_frame_lag_ms",
+    "preview_enabled",
+    "preview_layout",
+    "preview_skipped_reason",
     *TIMING_FIELDS,
     "payload_size_bytes",
     "point_count",
@@ -369,6 +436,17 @@ COMPACT_OBS_FIELDS = (
     "inlier_count",
     "edge_inlier_count",
     "target_dist_m",
+    "depth_shape",
+    "calib_width",
+    "calib_height",
+    "fx",
+    "fy",
+    "cx",
+    "cy",
+    "depth_scale",
+    "calib_source",
+    "calib_profile_info",
+    "calib_mismatch_warning",
     "plane_only_mode",
     "enable_crease_line",
     "table_geometry_score",
@@ -466,6 +544,7 @@ def _metrics_summary(
     control_levels = Counter(str(obs.get("control_level") or obs.get("fast_control_level") or "none") for obs in observations)
     distance_stages = Counter(str(obs.get("fast_distance_stage") or "unknown") for obs in observations)
     line_sources = Counter(str(obs.get("fast_line_source") or obs.get("fast_fit_line_source") or "none") for obs in observations)
+    front_edge_skip_reasons = Counter(str(obs.get("fast_front_edge_skip_reason") or "none") for obs in observations)
     timing = {field: _percentiles([obs.get(field) for obs in observations]) for field in TIMING_FIELDS}
     fast_score_keys = (
         "fast_score_inlier",
@@ -537,6 +616,10 @@ def _metrics_summary(
         "control_level": dict(sorted(control_levels.items())),
         "distance_stage": dict(sorted(distance_stages.items())),
         "line_source": dict(sorted(line_sources.items())),
+        "fast_front_edge_skipped_ratio": _ratio(observations, "fast_front_edge_skipped"),
+        "fast_front_edge_skip_reason": dict(sorted(front_edge_skip_reasons.items())),
+        "fast_front_edge_ms": timing.get("fast_front_edge_ms"),
+        "fast_local_band_ms": timing.get("fast_local_band_ms"),
         "background_blocked_count": int(sum(1 for obs in observations if bool(obs.get("fast_background_blocked")))),
         "near_stage_far_jump_count": int(sum(1 for obs in observations if bool(obs.get("fast_near_stage_far_jump")))),
         "plane_found_ratio": _ratio(observations, "plane_found"),
@@ -907,6 +990,7 @@ def main() -> None:
                 frames = {
                     "rgb": pack.get("rgb"),
                     "depth": pack.get("depth"),
+                    "depth_intrinsics": pack.get("depth_intrinsics"),
                     "frame_capture_ts": capture_ts,
                     "timestamp_ms": pack.get("timestamp_ms"),
                 }
@@ -929,6 +1013,9 @@ def main() -> None:
                     obs["edge_update_interval_ms"] = bag_update_interval_ms
                 obs_index = len(observations) + 1
                 can_save_more = preset.preview_max is None or preview_saved_count < int(preset.preview_max)
+                obs["preview_enabled"] = bool(preview_sink is not None and preview_dir is not None)
+                obs["preview_layout"] = "bag_table_plane_eval"
+                obs["preview_skipped_reason"] = ""
                 if (
                     preview_sink is not None
                     and preview_dir is not None
@@ -936,6 +1023,7 @@ def main() -> None:
                     and int(preset.preview_every or 0) > 0
                     and (obs_index % int(preset.preview_every)) == 0
                 ):
+                    obs["preview_skipped_reason"] = ""
                     preview_render_start = time.perf_counter()
                     canvas = _make_preview_canvas(preview_sink, pack.get("rgb"), pack.get("depth"), obs, frame_seq)
                     obs["preview_render_ms"] = (time.perf_counter() - preview_render_start) * 1000.0
@@ -950,7 +1038,19 @@ def main() -> None:
                         obs["preview_save_ms"] = (time.perf_counter() - preview_save_start) * 1000.0
                     except Exception as exc:
                         obs["preview_save_ms"] = 0.0
+                        obs["preview_skipped_reason"] = "preview_save_failed"
                         print(f"[BAG_TABLE_PLANE] preview_save_failed frame_seq={frame_seq} error={exc}")
+                else:
+                    obs["preview_render_ms"] = float(obs.get("preview_render_ms") or 0.0)
+                    obs["preview_save_ms"] = float(obs.get("preview_save_ms") or 0.0)
+                    if preview_sink is None or preview_dir is None:
+                        obs["preview_skipped_reason"] = "disabled"
+                    elif not can_save_more:
+                        obs["preview_skipped_reason"] = "preview_max_reached"
+                    elif int(preset.preview_every or 0) <= 0:
+                        obs["preview_skipped_reason"] = "preview_every_disabled"
+                    else:
+                        obs["preview_skipped_reason"] = "preview_interval_skip"
                 json_start = time.perf_counter()
                 clean_obs = _compact_obs(obs)
                 line = json.dumps(clean_obs, ensure_ascii=False, sort_keys=True)
@@ -971,6 +1071,7 @@ def main() -> None:
                     f"valid={int(bool(obs.get('valid_for_control') or obs.get('edge_valid')))} "
                     f"plane={int(bool(obs.get('plane_found')))} "
                     f"detector_mode={obs.get('detector_mode')} "
+                    f"calib_source={obs.get('calib_source')} depth_shape={obs.get('depth_shape')} "
                     f"roi_source={obs.get('roi_source')} roi={obs.get('plane_roi') or obs.get('depth_edge_roi')} "
                     f"process_ms={float(obs.get('process_ms') or 0.0):.1f} "
                     f"obs_total_age_ms={float(obs.get('obs_total_age_ms') or 0.0):.1f} "
