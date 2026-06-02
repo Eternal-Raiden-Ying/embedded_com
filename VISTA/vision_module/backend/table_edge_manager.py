@@ -660,7 +660,7 @@ class TableEdgeManager:
             "fast_roi_extract_ms": 0.0,
             "fast_depth_valid_ms": 0.0,
             "fast_projection_ms": 0.0,
-            "fast_robot_transform_ms": 0.0,
+            
             "fast_height_filter_ms": 0.0,
             "fast_rep_select_ms": 0.0,
             "fast_front_cluster_fit_ms": 0.0,
@@ -2154,7 +2154,6 @@ class TableEdgeManager:
             pitch_deg=pitch_deg,
             camera_height_m=camera_height_m,
         )
-        profile["fast_robot_transform_ms"] = self._ms_since(robot_transform_start)
         height_filter_start = time.perf_counter()
         robot_z_pct = self._finite_percentiles(z_robot)
         ground_like_count = int(np.sum((z_robot >= -0.04) & (z_robot <= 0.06)))

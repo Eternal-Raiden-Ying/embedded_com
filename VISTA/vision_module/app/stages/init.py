@@ -39,7 +39,7 @@ class InitStagePlan(BaseStagePlan):
         if mode == "INIT":
             plan = dict((getattr(tick_input, "snapshot", {}) or {}).get("plan") or {})
             remote = dict((plan.get("capabilities") or {}).get("remote") or {})
-            if not bool(remote.get("enabled", False)):
+            if not bool(remote.get("enabled", False)) or not remote.get("base_url"):
                 return StageOutput(
                     vision_obs=self.build_obs(
                         ctx,
