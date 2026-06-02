@@ -57,7 +57,7 @@ class VistaApp(BaseModule):
         remote_manager = RemoteManager(client=RemoteGraspClient(logger=self.child_logger("remote")),
                                        logger=self.child_logger("remote"))
         table_edge_manager = TableEdgeManager(cfg=CONFIG, logger=self.child_logger("table_edge"))
-        preview_manager = PreviewManager(sink=NullPreviewSink(), logger=self.child_logger("preview"))
+        preview_manager = PreviewManager(sink=NullPreviewSink(), logger=self.child_logger("preview"), cfg=CONFIG)
         self.supervisor = RuntimeSupervisor(
             scheduler=self.scheduler,
             camera_manager=camera_manager,

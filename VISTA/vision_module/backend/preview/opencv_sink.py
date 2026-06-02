@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os
 import math
 import time
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -34,13 +33,16 @@ class OpenCVPreviewSink(PreviewSink):
     def __init__(self, window_name: str = "VISTA Preview"):
         self.window_name = window_name
         self.window_id = f"{id(self):x}"
-        self.layout = os.getenv("VISTA_PREVIEW_LAYOUT", os.getenv("VISION_PREVIEW_LAYOUT", "rgb_depth_edge"))
-        self.scale = self._env_float("VISTA_PREVIEW_SCALE", self._env_float("VISION_PREVIEW_SCALE", 1.0))
-        self.canvas_w = self._env_int("VISTA_PREVIEW_WIDTH", 1280)
-        self.canvas_h = self._env_int("VISTA_PREVIEW_HEIGHT", 720)
-        self.show_rgb = self._env_bool("VISTA_PREVIEW_RGB_PANEL", self._env_bool("VISTA_PREVIEW_RGB", True))
-        self.show_depth = self._env_bool("VISTA_PREVIEW_DEPTH", True)
-        self.show_edge = self._env_bool("VISTA_PREVIEW_EDGE", True)
+        self.layout = "rgb_depth_edge"
+        self.scale = 1.0
+        self.canvas_w = 1280
+        self.canvas_h = 720
+        self.show_rgb = True
+        self.show_depth = True
+        self.show_edge = True
+        self.destroy_all_on_close = True
+        self.table_bbox_enabled = True
+        self.mock_table_bbox: Optional[str] = None
         self._supported_layouts = {"rgb_minimal", "rgb_depth_edge", "rgb_yolo_edge_overlay", "rgb_yolo_overlay", "rgb_hot_preview"}
         self._opened = False
         self._last_frame_ts = 0.0
@@ -48,26 +50,22 @@ class OpenCVPreviewSink(PreviewSink):
         self._fps = 0.0
         self._frame_count = 0
 
-    @staticmethod
-    def _env_int(name: str, default: int) -> int:
-        try:
-            return int(os.getenv(name, str(default)))
-        except (TypeError, ValueError):
-            return default
-
-    @staticmethod
-    def _env_float(name: str, default: float) -> float:
-        try:
-            return float(os.getenv(name, str(default)))
-        except (TypeError, ValueError):
-            return default
-
-    @staticmethod
-    def _env_bool(name: str, default: bool) -> bool:
-        raw = os.getenv(name)
-        if raw is None:
-            return bool(default)
-        return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+    def configure_display(self, **kwargs: Any) -> None:
+        """Accept display/table-bbox params pushed from RuntimeSupervisor (CONFIG)."""
+        for key in (
+            "layout",
+            "scale",
+            "canvas_w",
+            "canvas_h",
+            "show_rgb",
+            "show_depth",
+            "show_edge",
+            "destroy_all_on_close",
+            "table_bbox_enabled",
+            "mock_table_bbox",
+        ):
+            if key in kwargs:
+                setattr(self, key, kwargs[key])
 
     def open(self) -> None:
         """Prepare the dashboard window and sink-local resources."""
@@ -586,17 +584,17 @@ class OpenCVPreviewSink(PreviewSink):
             cv2.addWeighted(target, float(alpha), panel, 1.0 - float(alpha), 0, dst=panel)
 
     def _find_table_bbox(self, local: Dict[str, Any], rgb_shape: Any = None) -> Optional[List[int]]:
-        if not self._env_bool("VISTA_TABLE_BBOX_ENABLE", True):
+        if not self.table_bbox_enabled:
             return None
-        mock_raw = os.getenv("VISTA_MOCK_TABLE_BBOX")
-        mock = self._parse_roi(mock_raw)
-        if mock is not None:
-            return mock
-        if self._env_bool("VISTA_MOCK_TABLE_BBOX", False):
-            mock = self._mock_table_bbox(local.get("rgb_shape") or rgb_shape)
+        mock_raw = self.mock_table_bbox
+        if mock_raw:
+            mock = self._parse_roi(mock_raw)
             if mock is not None:
-                local = dict(local)
-                local["mock_table_bbox"] = mock
+                return mock
+            if str(mock_raw).strip().lower() in {"1", "true", "yes", "on"}:
+                mock = self._mock_table_bbox(local.get("rgb_shape") or rgb_shape)
+                if mock is not None:
+                    return mock
         if callable(_public_find_table_bbox):
             try:
                 roi = self._parse_roi(_public_find_table_bbox(local))
@@ -993,7 +991,7 @@ class OpenCVPreviewSink(PreviewSink):
             except Exception:
                 pass
             try:
-                if self._env_bool("VISTA_PREVIEW_DESTROY_ALL_ON_CLOSE", True):
+                if self.destroy_all_on_close:
                     cv2.destroyAllWindows()
             except Exception:
                 pass

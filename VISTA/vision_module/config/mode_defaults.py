@@ -1,17 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os
 from typing import Any, Dict, Optional
 
 from ..backend.mode_profiles import ModeProfile, PreviewProfile, RemoteProfile, TableEdgeProfile
-
-
-def _env_bool(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return bool(default)
-    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _as_camera_tuple(value: Any, default) -> tuple:
@@ -96,12 +88,7 @@ def _default_remote_profile(*, enabled: bool, require_depth: bool = False,
         kind=str(kind or "loop").strip().lower() or "loop",
         action=str(action or "").strip().lower(),
         max_retries=int(max_retries),
-        base_url=str(os.getenv("VISION_REMOTE_BASE_URL", "")).strip() or None,
         require_depth=bool(require_depth),
-        rgb_encoding=str(os.getenv("VISION_REMOTE_RGB_ENCODING", "jpeg")).strip().lower() or "jpeg",
-        depth_encoding=str(os.getenv("VISION_REMOTE_DEPTH_ENCODING", "png")).strip().lower() or "png",
-        rgb_quality=int(os.getenv("VISION_REMOTE_RGB_QUALITY", "90") or 90),
-        depth_compression=int(os.getenv("VISION_REMOTE_DEPTH_COMPRESSION", "3") or 3),
     )
 
 
@@ -239,6 +226,27 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
                 enabled=True,
                 detector_mode="fast_plane_only",
                 update_hz=5.0,
+                light_stride=4,
+                fast_plane_stride=4,
+                require_yolo_confirm=True,
+                static_roi_enabled=False,
+                camera_pitch_deg=15.0,
+                camera_height_m=0.70,
+                camera_roll_deg=0.0,
+                camera_yaw_deg=0.0,
+                table_height_m=0.40,
+                front_face_z_min_m=0.03,
+                front_face_z_max_m=0.43,
+                min_vertical_z_span_m=0.12,
+                min_vertical_support_points=3,
+                x_bin_width_m=0.04,
+                y_cluster_bin_m=0.04,
+                min_front_face_columns=3,
+                min_front_face_x_span_m=0.07,
+                front_cluster_gap_m=0.10,
+                max_yaw_abs_rad=0.75,
+                enable_yolo_in_plane_only=False,
+                yolo_table_min_conf=0.25,
             ),
             release_cooldown_s=2.0,
             metadata={
@@ -263,6 +271,27 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
                 enabled=True,
                 detector_mode="fast_plane_only",
                 update_hz=10.0,
+                light_stride=4,
+                fast_plane_stride=4,
+                require_yolo_confirm=True,
+                static_roi_enabled=False,
+                camera_pitch_deg=15.0,
+                camera_height_m=0.70,
+                camera_roll_deg=0.0,
+                camera_yaw_deg=0.0,
+                table_height_m=0.40,
+                front_face_z_min_m=0.03,
+                front_face_z_max_m=0.43,
+                min_vertical_z_span_m=0.12,
+                min_vertical_support_points=3,
+                x_bin_width_m=0.04,
+                y_cluster_bin_m=0.04,
+                min_front_face_columns=3,
+                min_front_face_x_span_m=0.07,
+                front_cluster_gap_m=0.10,
+                max_yaw_abs_rad=0.75,
+                enable_yolo_in_plane_only=False,
+                yolo_table_min_conf=0.25,
             ),
             release_cooldown_s=2.0,
             metadata={
@@ -400,6 +429,40 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
                 profile.table_edge.require_yolo_confirm = bool(te.get("require_yolo_confirm"))
             if "static_roi_enabled" in te:
                 profile.table_edge.static_roi_enabled = bool(te.get("static_roi_enabled"))
+            if "camera_pitch_deg" in te and te.get("camera_pitch_deg") is not None:
+                profile.table_edge.camera_pitch_deg = float(te.get("camera_pitch_deg"))
+            if "camera_height_m" in te and te.get("camera_height_m") is not None:
+                profile.table_edge.camera_height_m = float(te.get("camera_height_m"))
+            if "camera_roll_deg" in te and te.get("camera_roll_deg") is not None:
+                profile.table_edge.camera_roll_deg = float(te.get("camera_roll_deg"))
+            if "camera_yaw_deg" in te and te.get("camera_yaw_deg") is not None:
+                profile.table_edge.camera_yaw_deg = float(te.get("camera_yaw_deg"))
+            if "table_height_m" in te and te.get("table_height_m") is not None:
+                profile.table_edge.table_height_m = float(te.get("table_height_m"))
+            if "front_face_z_min_m" in te and te.get("front_face_z_min_m") is not None:
+                profile.table_edge.front_face_z_min_m = float(te.get("front_face_z_min_m"))
+            if "front_face_z_max_m" in te and te.get("front_face_z_max_m") is not None:
+                profile.table_edge.front_face_z_max_m = float(te.get("front_face_z_max_m"))
+            if "min_vertical_z_span_m" in te and te.get("min_vertical_z_span_m") is not None:
+                profile.table_edge.min_vertical_z_span_m = float(te.get("min_vertical_z_span_m"))
+            if "min_vertical_support_points" in te and te.get("min_vertical_support_points") is not None:
+                profile.table_edge.min_vertical_support_points = int(te.get("min_vertical_support_points"))
+            if "x_bin_width_m" in te and te.get("x_bin_width_m") is not None:
+                profile.table_edge.x_bin_width_m = float(te.get("x_bin_width_m"))
+            if "y_cluster_bin_m" in te and te.get("y_cluster_bin_m") is not None:
+                profile.table_edge.y_cluster_bin_m = float(te.get("y_cluster_bin_m"))
+            if "min_front_face_columns" in te and te.get("min_front_face_columns") is not None:
+                profile.table_edge.min_front_face_columns = int(te.get("min_front_face_columns"))
+            if "min_front_face_x_span_m" in te and te.get("min_front_face_x_span_m") is not None:
+                profile.table_edge.min_front_face_x_span_m = float(te.get("min_front_face_x_span_m"))
+            if "front_cluster_gap_m" in te and te.get("front_cluster_gap_m") is not None:
+                profile.table_edge.front_cluster_gap_m = float(te.get("front_cluster_gap_m"))
+            if "max_yaw_abs_rad" in te and te.get("max_yaw_abs_rad") is not None:
+                profile.table_edge.max_yaw_abs_rad = float(te.get("max_yaw_abs_rad"))
+            if "enable_yolo_in_plane_only" in te:
+                profile.table_edge.enable_yolo_in_plane_only = bool(te.get("enable_yolo_in_plane_only"))
+            if "yolo_table_min_conf" in te and te.get("yolo_table_min_conf") is not None:
+                profile.table_edge.yolo_table_min_conf = float(te.get("yolo_table_min_conf"))
 
         camera_overrides = dict(section.get("camera_overrides") or {})
         for camera_name in ("rgb", "depth", "grey"):

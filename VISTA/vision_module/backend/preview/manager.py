@@ -31,10 +31,12 @@ class PreviewManager:
         logger=None,
         capability_sink: Optional[Callable[[str, Dict[str, Any]], None]] = None,
         operator_console=None,
+        cfg=None,
     ):
         self.sink = sink
         self.logger = logger
         self._capability_sink = capability_sink
+        self.cfg = cfg
         self.operator_console = operator_console or (OperatorConsole() if OperatorConsole is not None else None)
         self.enabled = False
         self._scheduler = None
@@ -475,12 +477,35 @@ class PreviewManager:
             except Exception:
                 pass
         self.sink = sink
+        self._push_display_config(sink)
         self._emit("sink_changed", old_sink=old_name, new_sink=getattr(sink, "sink_name", "unknown"))
         if self.enabled and self.sink is not None:
             try:
                 self.sink.open()
             except Exception:
                 pass
+
+    def _push_display_config(self, sink: PreviewSink) -> None:
+        """Push global display config from CONFIG to an opencv sink."""
+        configurator = getattr(sink, "configure_display", None)
+        if not callable(configurator) or self.cfg is None:
+            return
+        try:
+            preview_cfg = self.cfg.preview
+            debug_cfg = self.cfg.debug
+            configurator(
+                scale=float(getattr(preview_cfg, "scale", 1.0) or 1.0),
+                canvas_w=int(getattr(preview_cfg, "canvas_w", 1280) or 1280),
+                canvas_h=int(getattr(preview_cfg, "canvas_h", 720) or 720),
+                show_rgb=bool(getattr(preview_cfg, "show_rgb", True)),
+                show_depth=bool(getattr(preview_cfg, "show_depth", True)),
+                show_edge=bool(getattr(preview_cfg, "show_edge", True)),
+                destroy_all_on_close=bool(getattr(preview_cfg, "destroy_all_on_close", True)),
+                table_bbox_enabled=bool(getattr(debug_cfg, "table_bbox_enabled", True)),
+                mock_table_bbox=str(getattr(debug_cfg, "mock_table_bbox", "") or "").strip() or None,
+            )
+        except Exception:
+            pass
 
     def enable(self) -> bool:
         """Enable preview output for the currently configured sink."""

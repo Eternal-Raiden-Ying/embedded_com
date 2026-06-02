@@ -137,40 +137,16 @@ class DebugConfig:
     table_det_enabled: bool = False
     table_det_min_conf: float = 0.25
     table_det_center_tol: float = 0.12
+    table_bbox_enabled: bool = True
+    mock_table_bbox: str = ""
 
 
 @dataclass
 class TableEdgeConfig:
+    """Global table-edge debug knobs (not mode-specific)."""
     roi_preset: str = ""
-    static_roi_enabled: bool = False
-    detector_mode: str = "full"
-    fast_plane_stride: int = 4
-    camera_pitch_deg: float = 30.0
-    camera_height_m: float = 0.60
-    camera_roll_deg: float = 0.0
-    camera_yaw_deg: float = 0.0
-    table_height_m: float = 0.40
-    front_face_z_min_m: float = 0.03
-    front_face_z_max_m: float = 0.43
-    min_vertical_z_span_m: float = 0.12
-    min_vertical_support_points: int = 3
-    x_bin_width_m: float = 0.04
-    y_cluster_bin_m: float = 0.04
-    min_front_face_columns: int = 3
-    min_front_face_x_span_m: float = 0.07
-    front_cluster_gap_m: float = 0.10
-    max_yaw_abs_rad: float = 0.75
-    target_hz: float = 10.0
-    update_hz: float = 10.0
-    preview_hz: float = 2.0
-    track_local_update_hz: float = 5.0
-    track_local_light_edge: bool = False
-    track_local_edge_stride: int = 4
-    require_yolo_table_confirm: bool = False
-    enable_yolo_in_plane_only: bool = False
-    yolo_table_min_conf: float = 0.25
-    save_debug_frames: bool = False
     profile_log_interval_s: float = 2.0
+    save_debug_frames: bool = False
 
 
 @dataclass
@@ -187,6 +163,13 @@ class PreviewConfig:
     show_edge_overlay_in_track_local: bool = True
     show_age_ms: bool = True
     clear_overlay_on_mode_switch: bool = True
+    scale: float = 1.0
+    canvas_w: int = 1280
+    canvas_h: int = 720
+    show_rgb: bool = True
+    show_depth: bool = True
+    show_edge: bool = True
+    destroy_all_on_close: bool = True
 
 
 @dataclass

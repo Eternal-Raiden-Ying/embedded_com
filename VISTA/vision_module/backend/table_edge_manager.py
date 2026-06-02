@@ -37,16 +37,35 @@ class TableEdgeManager:
         self._runtime_running = False
         self._worker_thread: Optional[threading.Thread] = None
         self._worker_stop = threading.Event()
-        table_edge_cfg = getattr(self.cfg, "table_edge", None)
-        edge_hz = float(getattr(table_edge_cfg, "update_hz", 10.0) or 10.0)
-        self._worker_interval_s = 1.0 / max(1.0, edge_hz)
-        self._light_stride = max(1, int(float(getattr(table_edge_cfg, "track_local_edge_stride", 4) or 4)))
-        self._detector_mode = self._normalize_detector_mode(getattr(table_edge_cfg, "detector_mode", "full"))
-        self._fast_plane_stride = max(1, int(float(getattr(table_edge_cfg, "fast_plane_stride", 4) or 4)))
+        self._detector_mode = "lightweight"
+        self._edge_update_hz = 5.0
+        self._worker_interval_s = 1.0 / max(1.0, self._edge_update_hz)
         self._default_interval_s = self._worker_interval_s
-        self._edge_update_hz = edge_hz
-        self._require_yolo_confirm = True  # default, overridden by configure
+        self._light_stride = 4
+        self._fast_plane_stride = 4
+        self._require_yolo_confirm = True
         self._static_roi_enabled = False
+        self._camera_pitch_deg = 15.0
+        self._camera_height_m = 0.70
+        self._camera_roll_deg = 0.0
+        self._camera_yaw_deg = 0.0
+        self._table_height_m = 0.40
+        self._front_face_z_min_m = 0.03
+        self._front_face_z_max_m = 0.43
+        self._min_vertical_z_span_m = 0.12
+        self._min_vertical_support_points = 3
+        self._x_bin_width_m = 0.04
+        self._y_cluster_bin_m = 0.04
+        self._min_front_face_columns = 3
+        self._min_front_face_x_span_m = 0.07
+        self._front_cluster_gap_m = 0.10
+        self._max_yaw_abs_rad = 0.75
+        self._enable_yolo_in_plane_only = False
+        self._yolo_table_min_conf = 0.25
+        # debug knobs — read from global config, not per-mode
+        table_edge_cfg = getattr(self.cfg, "table_edge", None)
+        self._profile_log_interval_s = float(getattr(table_edge_cfg, "profile_log_interval_s", 2.0) or 2.0)
+        self._save_debug_frames = bool(getattr(table_edge_cfg, "save_debug_frames", False))
         self._last_camera_generation = 0
         self._last_camera_seq = 0
         self._last_publish_ts = 0.0
@@ -169,7 +188,6 @@ class TableEdgeManager:
         self._edge_update_hz = float(payload.get("update_hz", self._edge_update_hz) or self._edge_update_hz)
         if self._edge_update_hz > 0:
             self._worker_interval_s = 1.0 / max(1.0, self._edge_update_hz)
-        # also handle new fields from TableEdgeProfile:
         if "light_stride" in payload:
             self._light_stride = max(1, int(payload.get("light_stride")))
         if "fast_plane_stride" in payload:
@@ -178,6 +196,40 @@ class TableEdgeManager:
             self._require_yolo_confirm = bool(payload.get("require_yolo_confirm"))
         if "static_roi_enabled" in payload:
             self._static_roi_enabled = bool(payload.get("static_roi_enabled"))
+        if "camera_pitch_deg" in payload:
+            self._camera_pitch_deg = float(payload.get("camera_pitch_deg"))
+        if "camera_height_m" in payload:
+            self._camera_height_m = float(payload.get("camera_height_m"))
+        if "camera_roll_deg" in payload:
+            self._camera_roll_deg = float(payload.get("camera_roll_deg"))
+        if "camera_yaw_deg" in payload:
+            self._camera_yaw_deg = float(payload.get("camera_yaw_deg"))
+        if "table_height_m" in payload:
+            self._table_height_m = float(payload.get("table_height_m"))
+        if "front_face_z_min_m" in payload:
+            self._front_face_z_min_m = float(payload.get("front_face_z_min_m"))
+        if "front_face_z_max_m" in payload:
+            self._front_face_z_max_m = float(payload.get("front_face_z_max_m"))
+        if "min_vertical_z_span_m" in payload:
+            self._min_vertical_z_span_m = float(payload.get("min_vertical_z_span_m"))
+        if "min_vertical_support_points" in payload:
+            self._min_vertical_support_points = max(1, int(payload.get("min_vertical_support_points")))
+        if "x_bin_width_m" in payload:
+            self._x_bin_width_m = float(payload.get("x_bin_width_m"))
+        if "y_cluster_bin_m" in payload:
+            self._y_cluster_bin_m = float(payload.get("y_cluster_bin_m"))
+        if "min_front_face_columns" in payload:
+            self._min_front_face_columns = max(2, int(payload.get("min_front_face_columns")))
+        if "min_front_face_x_span_m" in payload:
+            self._min_front_face_x_span_m = float(payload.get("min_front_face_x_span_m"))
+        if "front_cluster_gap_m" in payload:
+            self._front_cluster_gap_m = float(payload.get("front_cluster_gap_m"))
+        if "max_yaw_abs_rad" in payload:
+            self._max_yaw_abs_rad = float(payload.get("max_yaw_abs_rad"))
+        if "enable_yolo_in_plane_only" in payload:
+            self._enable_yolo_in_plane_only = bool(payload.get("enable_yolo_in_plane_only"))
+        if "yolo_table_min_conf" in payload:
+            self._yolo_table_min_conf = float(payload.get("yolo_table_min_conf"))
 
     @staticmethod
     def _pick_frame_capture_ts(frame_slot: Dict[str, Any], frames: Dict[str, Any]) -> float:
@@ -246,7 +298,7 @@ class TableEdgeManager:
         return out
 
     def _log_profile_if_due(self, payload: Dict[str, Any]) -> None:
-        interval_s = float(getattr(getattr(self.cfg, "table_edge", None), "profile_log_interval_s", 2.0) or 2.0)
+        interval_s = float(self._profile_log_interval_s)
         if interval_s <= 0.0:
             return
         now = time.time()
@@ -1076,10 +1128,9 @@ class TableEdgeManager:
         }
 
     def _yolo_table_confirmation(self, local: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        table_edge_cfg = getattr(self.cfg, "table_edge", None)
-        require_yolo = bool(getattr(table_edge_cfg, "require_yolo_table_confirm", True))
+        require_yolo = self._require_yolo_confirm
         plane_only = bool(getattr(self._detector_cfg, "plane_only_mode", False))
-        if plane_only and not bool(getattr(table_edge_cfg, "enable_yolo_in_plane_only", False)):
+        if plane_only and not self._enable_yolo_in_plane_only:
             require_yolo = False
         if not require_yolo:
             return {
@@ -1090,7 +1141,7 @@ class TableEdgeManager:
                 "yolo_gate_open": True,
             }
         local_payload = dict(local if local is not None else self._local_perception())
-        min_conf = float(getattr(table_edge_cfg, "yolo_table_min_conf", 0.25) or 0.25)
+        min_conf = float(self._yolo_table_min_conf)
         det = table_detection_debug(local_payload, local_payload.get("rgb_shape"), min_conf=min_conf)
         source = str(local_payload.get("table_roi_source") or "").strip()
         confirmed = bool(det.get("found")) and source == "yolo_table_bbox"
@@ -1132,7 +1183,7 @@ class TableEdgeManager:
         ]
 
     def _manual_static_roi_enabled(self) -> bool:
-        return bool(getattr(getattr(self.cfg, "table_edge", None), "static_roi_enabled", False))
+        return bool(self._static_roi_enabled)
 
     def _debug_roi_preset(self) -> str:
         return str(getattr(getattr(self.cfg, "table_edge", None), "roi_preset", "") or "").strip().lower()
@@ -1616,19 +1667,18 @@ class TableEdgeManager:
         v = (float(y0) + yy.astype(np.float32) * float(stride))
         x_c = (u - float(calib.cx)) * z / float(calib.fx)
         y_c = (v - float(calib.cy)) * z / float(calib.fy)
-        table_edge_cfg = getattr(self.cfg, "table_edge", None)
-        pitch_deg = float(getattr(table_edge_cfg, "camera_pitch_deg", 30.0) or 30.0)
-        camera_height_m = float(getattr(table_edge_cfg, "camera_height_m", 0.60) or 0.60)
-        table_height_m = float(getattr(table_edge_cfg, "table_height_m", 0.40) or 0.40)
-        front_face_z_min = float(getattr(table_edge_cfg, "front_face_z_min_m", 0.03) or 0.03)
-        front_face_z_max = float(getattr(table_edge_cfg, "front_face_z_max_m", 0.43) or 0.43)
-        min_vertical_z_span = float(getattr(table_edge_cfg, "min_vertical_z_span_m", 0.12) or 0.12)
-        min_vertical_support = max(1, int(float(getattr(table_edge_cfg, "min_vertical_support_points", 3) or 3)))
-        x_bin_width_m = float(getattr(table_edge_cfg, "x_bin_width_m", 0.04) or 0.04)
-        y_cluster_bin_m = float(getattr(table_edge_cfg, "y_cluster_bin_m", 0.04) or 0.04)
-        min_front_face_columns = max(2, int(float(getattr(table_edge_cfg, "min_front_face_columns", 3) or 3)))
-        min_front_face_x_span = float(getattr(table_edge_cfg, "min_front_face_x_span_m", 0.07) or 0.07)
-        max_yaw_cfg = float(getattr(table_edge_cfg, "max_yaw_abs_rad", 0.75) or 0.75)
+        pitch_deg = float(self._camera_pitch_deg)
+        camera_height_m = float(self._camera_height_m)
+        table_height_m = float(self._table_height_m)
+        front_face_z_min = float(self._front_face_z_min_m)
+        front_face_z_max = float(self._front_face_z_max_m)
+        min_vertical_z_span = float(self._min_vertical_z_span_m)
+        min_vertical_support = max(1, int(self._min_vertical_support_points))
+        x_bin_width_m = float(self._x_bin_width_m)
+        y_cluster_bin_m = float(self._y_cluster_bin_m)
+        min_front_face_columns = max(2, int(self._min_front_face_columns))
+        min_front_face_x_span = float(self._min_front_face_x_span_m)
+        max_yaw_cfg = float(self._max_yaw_abs_rad)
         x_robot, y_robot, z_robot = self._camera_points_to_robot(
             x_c,
             y_c,
@@ -1986,7 +2036,7 @@ class TableEdgeManager:
         support_x_span = float(np.max(support_x) - np.min(support_x)) if support_x.size > 1 else 0.0
         rep_x_span = float(np.max(x_t) - np.min(x_t)) if x_t.size > 1 else 0.0
         residual_threshold = max(0.035, float(getattr(cfg, "front_plane_max_residual_m", 0.035) if cfg is not None else 0.035) * 1.5)
-        front_cluster_gap_m = float(getattr(table_edge_cfg, "front_cluster_gap_m", 0.10) or 0.10)
+        front_cluster_gap_m = float(self._front_cluster_gap_m)
         try:
             cluster_fit = self._fit_fast_front_cluster_line(
                 x_t=x_t,

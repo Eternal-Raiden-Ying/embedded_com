@@ -21,7 +21,11 @@ except Exception:  # pragma: no cover
 
 
 def _console_mode(default: str = "operator") -> str:
-    mode = str(os.getenv("VISION_CONSOLE_MODE", default)).strip().lower()
+    try:
+        from ..config.board_config import CONFIG
+        mode = str(getattr(CONFIG.runtime, "console_mode", default) or default).strip().lower()
+    except Exception:
+        mode = default
     if mode == "concise":
         mode = "operator"
     return mode if mode in {"operator", "full", "silent"} else default
@@ -29,8 +33,9 @@ def _console_mode(default: str = "operator") -> str:
 
 def _summary_interval_s(default: float = 1.0) -> float:
     try:
-        return max(0.0, float(os.getenv("VISION_OPERATOR_SUMMARY_INTERVAL_S", str(default)) or default))
-    except (TypeError, ValueError):
+        from ..config.board_config import CONFIG
+        return max(0.0, float(getattr(CONFIG.runtime, "operator_summary_interval_s", default) or default))
+    except (TypeError, ValueError, Exception):
         return float(default)
 
 
