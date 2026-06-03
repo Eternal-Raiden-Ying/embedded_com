@@ -31,7 +31,7 @@ VISTA_MOCK_TABLE_BBOX="${VISTA_MOCK_TABLE_BBOX:-}"
 # dryrun：不连接小车，只打印将要发送到 UART 的实际控制信号。
 # full：连接小车串口，真实下发控制。
 # STACK_PROFILE="full"
-STACK_PROFILE="${STACK_PROFILE:-dryrun}"
+STACK_PROFILE="${STACK_PROFILE:-full}"
 
 # orchestrator 是否使用 sudo：auto / 0 / 1
 # full 模式通常需要 sudo 访问串口；dryrun 一般不需要。

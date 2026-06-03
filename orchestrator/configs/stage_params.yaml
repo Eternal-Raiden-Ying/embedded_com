@@ -9,6 +9,10 @@ final_lock:
   stop_margin_m: 0.05
   settle_ms: 500
   stable_frames: 5
+  required_ready_obs: 3
+  window_ms: 1000
+  max_consecutive_lost: 2
+  soft_stale_hold: true
   max_micro_adjust: 3
 
 table_docking:
@@ -41,7 +45,13 @@ controlled_approach:
 # - 想保守测试：整体乘以 0.5。
 # - 想激进测试：整体乘以 1.3，但不要超过当前 max 的安全上限。
 table_docking_motion:
-  pose_missing_safe_vx_mps: 0.010
+  approach_safe_vx_mps: 0.015
+  approach_max_vx_mps: 0.030
+  approach_yaw_deadband_rad: 0.08
+  approach_yaw_realign_rad: 0.12
+  approach_allow_wz: false
+  approach_allow_vy: false
+  pose_missing_safe_vx_mps: 0.015
   pose_missing_max_hold_s: 3.0
   coarse_align:
     vx_max_mps: 0.000
@@ -50,7 +60,7 @@ table_docking_motion:
     wz_min_radps: 0.020
     wz_max_radps: 0.060
   controlled_approach:
-    vx_min_mps: 0.008
+    vx_min_mps: 0.015
     vx_max_mps: 0.030
     vy_min_mps: 0.008
     vy_max_mps: 0.020

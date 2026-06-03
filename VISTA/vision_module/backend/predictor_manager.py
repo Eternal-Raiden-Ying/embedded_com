@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 import threading
 import time
 from threading import RLock
@@ -109,6 +110,7 @@ class PredictorManager:
         self._last_contract_error = ""
         self._last_contract_warning_count = 0
         self._last_table_det_ts = 0.0
+        self._last_infer_error = ""
 
     @staticmethod
     def _env_bool(name: str, default: bool = False) -> bool:
@@ -238,6 +240,8 @@ class PredictorManager:
         )
         if class_name_source != "profile":
             contract_warnings = list(contract_warnings) + [f"class_names_source={class_name_source}"]
+        if self._last_infer_error:
+            contract_warnings = list(contract_warnings) + [f"infer_error={self._last_infer_error}"]
         self._last_contract_ok = bool(contract_ok)
         self._last_contract_error = str(contract_error or "")
         self._last_contract_warning_count = int(len(contract_warnings))
@@ -258,6 +262,8 @@ class PredictorManager:
             "infer_boxes": normalized_boxes,
             "infer_masks": normalized_masks,
             "rgb_shape": rgb_shape,
+            "infer_error": str(self._last_infer_error or ""),
+            "no_boxes_reason": str(self._last_infer_error or ("no_boxes" if has_infer and not normalized_boxes else "")),
         }
 
     def set_inference_enabled(self, enable: bool) -> None:
@@ -355,11 +361,19 @@ class PredictorManager:
 
             boxes_list = list(payload.get("infer_boxes") or [])
             roi_input = {"infer_boxes": boxes_list, "rgb_shape": rgb_shape}
-            table_bbox = find_table_bbox(roi_input)
-            table_source = "yolo_table_bbox" if table_bbox is not None else "yolo_unavailable"
-            if table_bbox is not None:
-                roi_input["table_bbox"] = table_bbox
+            model_cfg = getattr(self.cfg, "model", None)
+            yolo26_enabled = bool(getattr(model_cfg, "enable_yolo26", False))
+            yolo_table_search_enabled = bool(getattr(model_cfg, "enable_yolo_table_search", False))
+            detected_table_bbox = find_table_bbox(roi_input)
+            table_bbox_detected = detected_table_bbox is not None
+            table_bbox_used_for_search = bool(yolo_table_search_enabled and table_bbox_detected)
+            table_bbox = detected_table_bbox if table_bbox_used_for_search else None
+            if table_bbox_used_for_search:
+                roi_input["table_bbox"] = detected_table_bbox
+                table_source = "yolo_table_bbox"
             else:
+                roi_input = {"rgb_shape": rgb_shape}
+                table_source = "yolo_table_search_disabled" if table_bbox_detected else "yolo_unavailable"
                 mock_bbox = self._mock_table_bbox(rgb_shape)
                 if mock_bbox is not None:
                     roi_input["mock_table_bbox"] = mock_bbox
@@ -375,13 +389,24 @@ class PredictorManager:
                 table_quadrant=roi_meta.get("table_quadrant"),
                 rgb_search_roi=roi_meta.get("rgb_search_roi"),
                 table_source=table_source,
+                yolo26_enabled=yolo26_enabled,
+                yolo_infer_running=bool(has_infer),
+                yolo_table_search_enabled=yolo_table_search_enabled,
+                table_bbox_detected=table_bbox_detected,
+                table_bbox_used_for_search=table_bbox_used_for_search,
             )
             payload.update(
                 {
                     "table_bbox": table_bbox_payload,
+                    "detected_table_bbox": detected_table_bbox,
                     "table_quadrant": roi_meta.get("table_quadrant"),
                     "rgb_search_roi": roi_meta.get("rgb_search_roi"),
                     "table_roi_source": table_source,
+                    "yolo26_enabled": yolo26_enabled,
+                    "yolo_infer_running": bool(has_infer),
+                    "yolo_table_search_enabled": yolo_table_search_enabled,
+                    "table_bbox_detected": table_bbox_detected,
+                    "table_bbox_used_for_search": table_bbox_used_for_search,
                     "table_direction_hint": table_detection_debug(payload, rgb_shape).get("direction"),
                 }
             )
@@ -399,6 +424,11 @@ class PredictorManager:
         table_quadrant: Any,
         rgb_search_roi: Any,
         table_source: str,
+        yolo26_enabled: bool,
+        yolo_infer_running: bool,
+        yolo_table_search_enabled: bool,
+        table_bbox_detected: bool,
+        table_bbox_used_for_search: bool,
     ) -> None:
         now = time.time()
         if now - self._last_summary_ts < 1.0:
@@ -417,7 +447,7 @@ class PredictorManager:
             except Exception:
                 continue
         self.log.info(
-            "local_perception summary | has_infer=%s boxes=%s class_ids=%s rgb_shape=%s table_bbox=%s table_quadrant=%s rgb_search_roi=%s table_roi_source=%s",
+            "local_perception summary | has_infer=%s boxes=%s class_ids=%s rgb_shape=%s table_bbox=%s table_quadrant=%s rgb_search_roi=%s table_roi_source=%s yolo26_enabled=%s yolo_infer_running=%s yolo_table_search_enabled=%s table_bbox_detected=%s table_bbox_used_for_search=%s",
             bool(has_infer),
             int(len(boxes_list or [])),
             class_ids,
@@ -426,6 +456,11 @@ class PredictorManager:
             table_quadrant,
             rgb_search_roi,
             table_source,
+            bool(yolo26_enabled),
+            bool(yolo_infer_running),
+            bool(yolo_table_search_enabled),
+            bool(table_bbox_detected),
+            bool(table_bbox_used_for_search),
         )
 
     def _log_table_detection_debug(self, payload: Dict[str, Any]) -> None:
@@ -495,12 +530,31 @@ class PredictorManager:
 
         predictor_type = self._predictor_type_for(profile)
         active_class_names = normalize_class_names(getattr(profile, "classes", None))
+        target_model = str(getattr(profile, "target_model", "") or "")
+        model_exists = bool(target_model and Path(target_model).is_file())
+        self.log.info(
+            "model load requested | name=%s predictor_type=%s backend=%s path=%s exists=%s class_count=%d classes=%s",
+            target,
+            predictor_type,
+            str(getattr(profile, "model_backend", "") or ""),
+            target_model or "n/a",
+            model_exists,
+            int(len(active_class_names)),
+            list(active_class_names[:12]),
+        )
         try:
             predictor_cls = self._predictor_class_for_profile(profile)
             predictor = predictor_cls(profile)
         except Exception as exc:
-            self.log.error("model load failed: %s | %s", target, exc)
-            self._emit("load_failed", target, error=str(exc))
+            self.log.error(
+                "model load failed | name=%s predictor_type=%s path=%s exists=%s error=%s",
+                target,
+                predictor_type,
+                target_model or "n/a",
+                model_exists,
+                exc,
+            )
+            self._emit("load_failed", target, error=str(exc), target_model=target_model, model_exists=model_exists)
             return False
 
         implementation = "mock" if type(predictor).__name__ == "MockPredictor" else str(self._backend_status.get("resolved_backend") or "real")
@@ -511,7 +565,15 @@ class PredictorManager:
             self._active_class_names = active_class_names
             self._active_implementation = implementation
             self._active_class_name_source = "profile"
-        self.log.info("model loaded: %s", target)
+        self.log.info(
+            "model loaded | name=%s predictor_type=%s implementation=%s class_count=%d class_source=%s target_model=%s",
+            target,
+            predictor_type,
+            implementation,
+            int(len(active_class_names)),
+            "profile" if active_class_names else "fallback_coco80",
+            target_model or "n/a",
+        )
         if predictor_type == "detect" and not active_class_names:
             self.log.warning("detect profile missing classes | model=%s fallback=coco80", target)
         self._emit(
@@ -551,7 +613,19 @@ class PredictorManager:
             predictor = self.predictor
             if predictor is None or not predictor.is_ready():
                 return [], []
-            return predictor.predict_frame(frame)
+            try:
+                boxes, masks = predictor.predict_frame(frame)
+                self._last_infer_error = ""
+                return boxes, masks
+            except Exception as exc:
+                self._last_infer_error = str(exc or "infer_failed")
+                self.log.error(
+                    "model inference failed | model=%s predictor_type=%s error=%s",
+                    self.active_model_name,
+                    self._active_predictor_type,
+                    self._last_infer_error,
+                )
+                return [], []
 
     def release_all(self) -> None:
         self.stop_runtime()
@@ -577,6 +651,7 @@ class PredictorManager:
                 "last_contract_ok": bool(self._last_contract_ok),
                 "last_contract_error": str(self._last_contract_error or ""),
                 "last_contract_warning_count": int(self._last_contract_warning_count),
+                "last_infer_error": str(self._last_infer_error or ""),
                 "backend_status": dict(self._backend_status or {}),
                 "last_publish_ts": float(self._last_publish_ts),
             }

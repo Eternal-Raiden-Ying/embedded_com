@@ -102,6 +102,11 @@ class RuntimeContext:
     table_dock_phase_since_mono: float = 0.0
     table_micro_adjust_count: int = 0
     table_stop_sent: bool = False
+    final_lock_ready_window: List[Dict[str, object]] = field(default_factory=list)
+    final_lock_last_obs_key: str = ""
+    final_lock_same_obs_reuse_count: int = 0
+    final_lock_consecutive_lost_count: int = 0
+    final_lock_last_transition_reason: str = ""
     approach_aligned_frames: int = 0
     target_found_frames: int = 0
     target_lost_frames: int = 0
@@ -150,6 +155,11 @@ class RuntimeContext:
         self.table_dock_phase_since_mono = 0.0
         self.table_micro_adjust_count = 0
         self.table_stop_sent = False
+        self.final_lock_ready_window.clear()
+        self.final_lock_last_obs_key = ""
+        self.final_lock_same_obs_reuse_count = 0
+        self.final_lock_consecutive_lost_count = 0
+        self.final_lock_last_transition_reason = ""
         self.approach_aligned_frames = 0
         self.target_found_frames = 0
         self.target_lost_frames = 0

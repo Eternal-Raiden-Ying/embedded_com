@@ -1542,6 +1542,7 @@ class TableEdgeManager:
             "frame_seq": int(frame_seq),
             "source": "vision_table_edge_manager",
             "reason": str(reason or ""),
+            "reject_reason": str(reason or ""),
             "target_dist_m": float(self._target_dist_m),
             "plane_only_mode": bool(getattr(self._detector_cfg, "plane_only_mode", False)),
             "enable_crease_line": bool(getattr(self._detector_cfg, "enable_crease_line", True)),
@@ -2503,6 +2504,7 @@ class TableEdgeManager:
         rep_x_span = float(np.max(x_t) - np.min(x_t)) if x_t.size > 1 else 0.0
         residual_threshold = max(0.035, float(getattr(cfg, "front_plane_max_residual_m", 0.035) if cfg is not None else 0.035) * 1.5)
         front_cluster_gap_m = float(self._front_cluster_gap_m)
+        front_cluster_start = time.perf_counter()
         try:
             cluster_fit = self._fit_fast_front_cluster_line(
                 x_t=x_t,
@@ -3405,6 +3407,45 @@ class TableEdgeManager:
             self._local_perception_override = prev_local
             self._runtime_status_override = prev_runtime
 
+    def _worker_error_result(
+        self,
+        frames: Any,
+        *,
+        frame_seq: int,
+        runtime_status: Optional[Dict[str, Any]] = None,
+        error: Exception,
+    ) -> Dict[str, Any]:
+        reason = f"table_edge_worker_error:{type(error).__name__}"
+        depth_frame = frames.get("depth") if isinstance(frames, dict) else None
+        roi_meta: Dict[str, Any] = {}
+        if isinstance(depth_frame, np.ndarray):
+            try:
+                roi_meta = self._select_roi(depth_frame)
+            except Exception:
+                roi_meta = {}
+        payload = self._default_result(
+            depth_valid=isinstance(depth_frame, np.ndarray),
+            reason=reason,
+            frame_seq=frame_seq,
+            roi_meta=roi_meta,
+        )
+        payload.update(self._detector_mode_payload())
+        payload.update(
+            {
+                "table_edge_worker_error": str(error),
+                "worker_error": str(error),
+                "reject_reason": reason,
+                "control_reject_reason": reason,
+                "source_mode": str((runtime_status or {}).get("mode") or "").strip().upper(),
+            }
+        )
+        if isinstance(depth_frame, np.ndarray):
+            try:
+                payload["depth_shape"] = [int(v) for v in depth_frame.shape[:2]]
+            except Exception:
+                pass
+        return payload
+
     def _worker_loop(self) -> None:
         while self._runtime_running and not self._worker_stop.is_set():
             loop_start = time.time()
@@ -3437,13 +3478,26 @@ class TableEdgeManager:
             if seq > self._last_camera_seq + 1 and self._last_camera_seq > 0:
                 self._dropped_frame_count += int(seq - self._last_camera_seq - 1)
             self._last_camera_seq = seq
-            payload = self.process_camera_frame(
-                frames,
-                frame_seq=seq,
-                frame_slot=frame_slot,
-                depth_frame_fetch_ms=self._last_depth_frame_fetch_ms,
-                count_dropped=False,
-            )
+            runtime_status = self._runtime_status()
+            runtime_mode = str(runtime_status.get("mode") or "").strip().upper()
+            try:
+                payload = self.process_camera_frame(
+                    frames,
+                    frame_seq=seq,
+                    frame_slot=frame_slot,
+                    runtime_status=runtime_status,
+                    source_mode=runtime_mode if runtime_mode else None,
+                    depth_frame_fetch_ms=self._last_depth_frame_fetch_ms,
+                    count_dropped=False,
+                )
+            except Exception as exc:
+                self.log.exception("table_edge_manager.loop detector failed | frame_seq=%s error=%s", seq, exc)
+                payload = self._worker_error_result(
+                    frames,
+                    frame_seq=seq,
+                    runtime_status=runtime_status,
+                    error=exc,
+                )
             self._emit_edge_debug(payload)
             self._log_profile_if_due(payload)
             self._publish_result("table_edge_obs", payload)

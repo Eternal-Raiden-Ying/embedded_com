@@ -12,6 +12,7 @@ from .data import coco80, grasping_coco20
 
 _HERE = Path(__file__).resolve()
 _DEFAULT_PROJECT_ROOT = str(_HERE.parents[2])
+_DEFAULT_STACK_ROOT = str(_HERE.parents[3])
 _DEFAULT_MODEL_ROOT = str(Path(_DEFAULT_PROJECT_ROOT) / "vision_module" / "model")
 _DEFAULT_DETECT_MODEL = (
     Path(_DEFAULT_MODEL_ROOT)
@@ -168,6 +169,10 @@ def _apply_vision_params(data: Dict[str, Any]) -> None:
 
     if model.get("active_model") is not None:
         CONFIG.model.active_model = str(model.get("active_model")).strip() or CONFIG.model.active_model
+    if "enable_yolo26" in model:
+        CONFIG.model.enable_yolo26 = bool(model.get("enable_yolo26"))
+    if "enable_yolo_table_search" in model:
+        CONFIG.model.enable_yolo_table_search = bool(model.get("enable_yolo_table_search"))
     profiles = dict(model.get("profiles") or {})
     for name, values in profiles.items():
         profile = CONFIG.model.profiles.get(str(name))
@@ -205,6 +210,12 @@ def _apply_vision_params(data: Dict[str, Any]) -> None:
             "roi_preset",
             "profile_log_interval_s",
             "save_debug_frames",
+            "target_hz",
+            "preview_hz",
+            "fast_debug_pixels",
+            "fast_debug_pixels_online",
+            "fast_debug_pixels_offline",
+            "fast_debug_pixel_cap",
         ),
     )
     if getattr(CONFIG.table_edge, "roi_preset", ""):
@@ -243,7 +254,7 @@ CONFIG = VisionServiceConfig()
 CONFIG.runtime.project_root = os.getenv("VISION_PROJECT_ROOT", _DEFAULT_PROJECT_ROOT)
 CONFIG.runtime.log_dir = f"{CONFIG.runtime.project_root}/logs"
 CONFIG.runtime.log_file = f"{CONFIG.runtime.log_dir}/vision.log"
-CONFIG.runtime.runs_dir = f"{CONFIG.runtime.project_root}/runs"
+CONFIG.runtime.runs_dir = os.getenv("VISION_RUNS_DIR", str(Path(_DEFAULT_STACK_ROOT) / "logs" / "runs"))
 CONFIG.runtime.pid_dir = f"{CONFIG.runtime.project_root}/pids"
 CONFIG.runtime.pid_file = f"{CONFIG.runtime.pid_dir}/vision.pid"
 CONFIG.runtime.vision_params_file = os.getenv(
@@ -307,6 +318,8 @@ grey.crop_h = 0
 
 # model config
 CONFIG.model.active_model = "yolo26s_detect"
+CONFIG.model.enable_yolo26 = True
+CONFIG.model.enable_yolo_table_search = False
 CONFIG.model.profiles["yolov7_detect"] = SingleModelConfig(
     target_model=str(_DEFAULT_DETECT_MODEL),
     width=640,

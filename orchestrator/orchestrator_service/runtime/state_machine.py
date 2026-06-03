@@ -588,6 +588,10 @@ class OrchestratorCore:
             "table_lock_frames": int(self.ctx.table_lock_frames),
             "final_lock_frames_to_arrive": int(self.cfg.final_lock_frames_to_arrive),
             "required_lock_count": int(self._required_lock_count()),
+            "final_lock_required_ready_obs": int(self._final_lock_required_ready_obs()),
+            "final_lock_window_ms": int(self._final_lock_window_ms()),
+            "final_lock_max_consecutive_lost": int(self._final_lock_max_consecutive_lost()),
+            "final_lock_soft_stale_hold": bool(getattr(self.cfg, "final_lock_soft_stale_hold", True)),
             "target_found_frames": int(self.ctx.target_found_frames),
             "target_found_frames_to_confirm": int(self.cfg.target_found_frames_to_confirm),
             "target_lost_frames": int(self.ctx.target_lost_frames),
@@ -1100,6 +1104,11 @@ class OrchestratorCore:
         if not self._table_visible(obs):
             return self._handle_table_loss("接近时桌边丢失，回到搜索", State.SEARCH_TABLE, "CONTROLLED_APPROACH_HOLD")
         self._reset_table_loss()
+        yaw_err = getattr(obs, "yaw_err_rad", None) if obs is not None else None
+        yaw_realign = abs(float(getattr(self.controller.car_cfg, "table_approach_yaw_realign_rad", 0.12) or 0.12))
+        if yaw_err is not None and abs(float(yaw_err)) > yaw_realign:
+            self._transition(State.COARSE_ALIGN, "approach yaw偏大，回到粗对齐")
+            return self.controller.fov_table_approach_cmd(obs, phase="PLANE_FINAL_LOCK", mode="COARSE_ALIGN")
         level = self._control_level(obs)
         if level == "none":
             return self.controller.stop_cmd("CONTROLLED_APPROACH")
@@ -1124,10 +1133,11 @@ class OrchestratorCore:
         obs = self._fresh_table_obs()
         if not self._table_visible(obs):
             stale_obs = self.ctx.last_table_obs if obs is None else obs
-            reason = str(self._final_lock_status(stale_obs if stale_obs is not None else obs, stable_count=self.ctx.table_lock_frames)["reason"])
-            if obs is None and self.ctx.last_table_obs is not None:
-                reason = "vision_stale"
-            self._log_final_lock_summary(obs, lock_ready=False, reason=reason, stable_count=self.ctx.table_lock_frames)
+            status = self._update_final_lock_count(stale_obs if stale_obs is not None else obs)
+            reason = str(status.get("reason") or "")
+            self._log_final_lock_summary(stale_obs if stale_obs is not None else obs, lock_ready=False, reason=reason, stable_count=self.ctx.table_lock_frames, status=status)
+            if str(status.get("lock_count_hold_reason") or ""):
+                return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_LOCK"), status)
             return self._handle_table_loss("最终锁边时桌边丢失，回到搜索", State.SEARCH_TABLE, "FINAL_LOCK_HOLD")
         self._reset_table_loss()
 
@@ -1140,11 +1150,14 @@ class OrchestratorCore:
                 reason=str(status["reason"]),
                 stable_count=self.ctx.table_lock_frames,
                 phase=phase,
+                status=status,
             )
             level = str(status.get("normalized_control_level") or self._control_level(obs))
             if not self._table_micro_adjust_enabled() and str(status.get("reason") or "") == "distance_too_far":
                 self._transition(State.CONTROLLED_APPROACH, "final_lock_distance_too_far_return_approach")
                 return self._table_approach_decision(obs, phase="PLANE_APPROACH")
+            if bool(status.get("final_lock_window_ready")):
+                return self._final_lock_arrived_decision(obs, status)
             if bool(status["lock_ready"]) or level == "stop" or bool(getattr(obs, "usable_for_stop", False)):
                 self.ctx.table_stop_sent = True
                 self._enter_table_dock_phase("STOP_AND_SETTLE", "[TABLE_DOCK][STOP] final lock/stop condition reached")
@@ -1175,7 +1188,10 @@ class OrchestratorCore:
                 reason=str(lock_status["reason"]),
                 stable_count=self.ctx.table_lock_frames,
                 phase=phase,
+                status=lock_status,
             )
+            if bool(lock_status.get("final_lock_window_ready")):
+                return self._final_lock_arrived_decision(obs, lock_status)
             if bool(lock_status["lock_ready"]):
                 self._log(
                     "info",
@@ -1221,6 +1237,41 @@ class OrchestratorCore:
             self.controller.stop_cmd("FINAL_LOCK"),
             self._final_lock_status(obs, stable_count=self.ctx.table_lock_frames),
         )
+
+    def _final_lock_arrived_decision(self, obs: TableEdgeObs, status: Dict[str, object]) -> MotionDecision:
+        status = dict(status or {})
+        status.update(
+            {
+                "final_lock_transition_reason": "final_lock_window_ready",
+                "final_lock_transition_block_reason": "",
+                "ready_obs_count": int(status.get("lock_ready_obs_count", 0) or 0),
+                "required_ready_obs": int(self._final_lock_required_ready_obs()),
+                "window_ms": int(self._final_lock_window_ms()),
+                "latest_yaw_err": getattr(obs, "yaw_err_rad", None),
+                "latest_dist_err": getattr(obs, "dist_err_m", None),
+                "latest_obs_age_ms": self._table_obs_age_ms(obs),
+            }
+        )
+        self.ctx.dock_retry_count = 0
+        self._capture_locked_edge(obs)
+        self.ctx.final_lock_last_transition_reason = "final_lock_window_ready"
+        self._log(
+            "info",
+            "[TABLE_DOCK][DONE] final_lock_window_ready "
+            f"ready_obs_count={status['ready_obs_count']}/{status['required_ready_obs']} "
+            f"window_ms={status['window_ms']} "
+            f"latest_yaw_err={status.get('latest_yaw_err')} "
+            f"latest_dist_err={status.get('latest_dist_err')} "
+            f"latest_obs_age_ms={status.get('latest_obs_age_ms')}",
+        )
+        if self._table_edge_only_test_enabled():
+            self._log("info", "[TABLE_EDGE_ONLY][DONE] table edge reached; stopping before target search")
+            self._transition(State.DONE, "final_lock_window_ready")
+            self._queue_tts("桌边停靠测试完成")
+            return self._annotate_final_lock_decision(self.controller.stop_cmd("DONE"), status)
+        self._transition(State.AT_TABLE_EDGE, "final_lock_window_ready")
+        self._queue_tts("已完成桌边停靠")
+        return self._annotate_final_lock_decision(self.controller.stop_cmd("AT_TABLE_EDGE"), status)
 
     def _tick_dock_retry(self) -> MotionDecision:
         if self._state_elapsed() < float(self.cfg.dock_retry_backoff_s):
@@ -2657,9 +2708,17 @@ class OrchestratorCore:
                     "dist_err_m": status.get("dist_err"),
                     "stable_lock_count": status.get("stable_lock_count"),
                     "required_lock_count": status.get("required_lock_count"),
+                    "lock_ready_obs_count": status.get("lock_ready_obs_count"),
+                    "window_ready_count": status.get("window_ready_count"),
+                    "required_ready_obs": status.get("required_ready_obs"),
+                    "final_lock_window_ms": status.get("final_lock_window_ms"),
+                    "same_obs_reuse_count": status.get("same_obs_reuse_count"),
+                    "consecutive_lost_count": status.get("consecutive_lost_count"),
                     "lock_count_inc_reason": status.get("lock_count_inc_reason"),
                     "lock_count_hold_reason": status.get("lock_count_hold_reason"),
                     "lock_count_reset_reason": status.get("lock_count_reset_reason"),
+                    "final_lock_transition_block_reason": status.get("final_lock_transition_block_reason"),
+                    "final_lock_transition_reason": status.get("final_lock_transition_reason"),
                 }
             )
         return decision
@@ -2738,39 +2797,169 @@ class OrchestratorCore:
     def _required_lock_count(self) -> int:
         return max(1, int(getattr(self.cfg, "table_stable_frames", self.cfg.final_lock_frames_to_arrive)))
 
+    def _final_lock_required_ready_obs(self) -> int:
+        return max(1, int(getattr(self.cfg, "final_lock_required_ready_obs", 3) or 3))
+
+    def _final_lock_window_ms(self) -> int:
+        return max(100, int(getattr(self.cfg, "final_lock_window_ms", 1000) or 1000))
+
+    def _final_lock_max_consecutive_lost(self) -> int:
+        return max(0, int(getattr(self.cfg, "final_lock_max_consecutive_lost", 2) or 2))
+
+    def _final_lock_obs_key(self, obs: Optional[TableEdgeObs]) -> str:
+        if obs is None:
+            return ""
+        obs_seq = getattr(obs, "obs_seq", None)
+        if obs_seq is not None:
+            return f"obs_seq:{obs_seq}"
+        return self._table_obs_key(obs)
+
+    def _prune_final_lock_window(self, now_mono: Optional[float] = None) -> None:
+        now = monotonic_ts() if now_mono is None else float(now_mono)
+        window_s = float(self._final_lock_window_ms()) / 1000.0
+        self.ctx.final_lock_ready_window = [
+            item
+            for item in list(self.ctx.final_lock_ready_window or [])
+            if now - float(item.get("mono_ts", now) or now) <= window_s
+        ]
+        self.ctx.table_lock_frames = len(self.ctx.final_lock_ready_window)
+
+    def _reset_final_lock_window(self, reason: str = "") -> None:
+        self.ctx.final_lock_ready_window.clear()
+        self.ctx.table_lock_frames = 0
+        self.ctx.final_lock_consecutive_lost_count = 0
+        if reason:
+            self.ctx.final_lock_last_transition_reason = str(reason)
+
+    def _final_lock_ready_jump_reason(self, obs: Optional[TableEdgeObs]) -> str:
+        if obs is None or not self.ctx.final_lock_ready_window:
+            return ""
+        last = self.ctx.final_lock_ready_window[-1]
+        yaw = getattr(obs, "yaw_err_rad", None)
+        dist = getattr(obs, "dist_err_m", None)
+        last_yaw = last.get("yaw_err")
+        last_dist = last.get("dist_err")
+        try:
+            yaw_jump_th = max(0.35, float(getattr(self.cfg, "edge_identity_yaw_mismatch_rad", 0.15) or 0.15) * 2.0)
+            if yaw is not None and last_yaw is not None and abs(float(yaw) - float(last_yaw)) > yaw_jump_th:
+                return "yaw_jump"
+        except Exception:
+            pass
+        try:
+            dist_jump_th = max(0.20, float(getattr(self.cfg, "edge_identity_dist_mismatch_m", 0.04) or 0.04) * 3.0)
+            if dist is not None and last_dist is not None and abs(float(dist) - float(last_dist)) > dist_jump_th:
+                return "dist_jump"
+        except Exception:
+            pass
+        return ""
+
     def _update_final_lock_count(self, obs: Optional[TableEdgeObs]) -> Dict[str, object]:
         status = self._final_lock_status(obs, stable_count=self.ctx.table_lock_frames)
-        if bool(status["lock_ready"]):
-            self.ctx.table_lock_frames += 1
-            status["stable_count"] = int(self.ctx.table_lock_frames)
-            status["stable_lock_count"] = int(self.ctx.table_lock_frames)
-            status["lock_count_inc_reason"] = "fresh_lock_ready"
-            status["lock_count_hold_reason"] = ""
-            status["lock_count_reset_reason"] = ""
-            status["lock_reset_reason"] = ""
-            return status
+        now = monotonic_ts()
+        self._prune_final_lock_window(now)
+        obs_key = self._final_lock_obs_key(obs)
+        new_obs = bool(obs_key and obs_key != self.ctx.final_lock_last_obs_key)
+        if obs_key:
+            if new_obs:
+                self.ctx.final_lock_same_obs_reuse_count = 0
+                self.ctx.final_lock_last_obs_key = obs_key
+            else:
+                self.ctx.final_lock_same_obs_reuse_count += 1
 
+        reason = str(status.get("reason") or "")
+        stale_reason = str(status.get("vision_stale_reason") or "")
+        reset_reason = str(status.get("lock_count_reset_reason") or stale_reason or reason or "lock_ready_false")
+        lost_like = reason in {"table_lost", "no_edge", "edge_invalid"} or reset_reason in {"table_lost", "no_edge", "edge_invalid"}
+        hard_reset = reset_reason in {"hard_stale", "obs_invalid", "temporal_jump", "no_recent_obs", "yaw_jump", "dist_jump", "age_over_limit"}
         hold_reason = str(status.get("lock_count_hold_reason") or "")
-        if hold_reason:
-            status["stable_count"] = int(self.ctx.table_lock_frames)
-            status["stable_lock_count"] = int(self.ctx.table_lock_frames)
+        if hold_reason == "soft_stale" and not bool(getattr(self.cfg, "final_lock_soft_stale_hold", True)):
+            hold_reason = ""
+
+        status["obs_seq"] = getattr(obs, "obs_seq", None) if obs is not None else None
+        status["same_obs_reuse_count"] = int(self.ctx.final_lock_same_obs_reuse_count)
+        status["required_ready_obs"] = int(self._final_lock_required_ready_obs())
+        status["final_lock_window_ms"] = int(self._final_lock_window_ms())
+        status["required_lock_count"] = int(self._final_lock_required_ready_obs())
+        status["legacy_required_lock_count"] = int(self._required_lock_count())
+
+        if bool(status["lock_ready"]):
+            jump_reason = self._final_lock_ready_jump_reason(obs)
+            if jump_reason:
+                self._reset_final_lock_window(jump_reason)
+                status["lock_ready"] = False
+                status["lock_count_inc_reason"] = ""
+                status["lock_count_hold_reason"] = ""
+                status["lock_count_reset_reason"] = jump_reason
+                status["lock_reset_reason"] = jump_reason
+            elif new_obs:
+                self.ctx.final_lock_consecutive_lost_count = 0
+                self.ctx.final_lock_ready_window.append(
+                    {
+                        "key": obs_key,
+                        "mono_ts": now,
+                        "obs_seq": getattr(obs, "obs_seq", None) if obs is not None else None,
+                        "yaw_err": getattr(obs, "yaw_err_rad", None) if obs is not None else None,
+                        "dist_err": getattr(obs, "dist_err_m", None) if obs is not None else None,
+                        "obs_age_ms": status.get("obs_age_ms"),
+                    }
+                )
+                self._prune_final_lock_window(now)
+                status["lock_count_inc_reason"] = "fresh_lock_ready"
+                status["lock_count_hold_reason"] = ""
+                status["lock_count_reset_reason"] = ""
+                status["lock_reset_reason"] = ""
+            else:
+                status["lock_count_inc_reason"] = ""
+                status["lock_count_hold_reason"] = "same_obs_reuse"
+                status["lock_count_reset_reason"] = ""
+                status["lock_reset_reason"] = ""
+        elif hold_reason:
             status["lock_count_inc_reason"] = ""
+            status["lock_count_hold_reason"] = hold_reason
             status["lock_count_reset_reason"] = ""
             status["lock_reset_reason"] = ""
-            return status
+        elif lost_like and not hard_reset:
+            if new_obs:
+                self.ctx.final_lock_consecutive_lost_count += 1
+            max_lost = self._final_lock_max_consecutive_lost()
+            if self.ctx.final_lock_consecutive_lost_count <= max_lost:
+                status["lock_count_inc_reason"] = ""
+                status["lock_count_hold_reason"] = f"{reason or reset_reason}_lost_hold"
+                status["lock_count_reset_reason"] = ""
+                status["lock_reset_reason"] = ""
+            else:
+                reset_reason = f"{reason or reset_reason}_lost_exceeded"
+                self._reset_final_lock_window(reset_reason)
+                status["lock_count_inc_reason"] = ""
+                status["lock_count_hold_reason"] = ""
+                status["lock_count_reset_reason"] = reset_reason
+                status["lock_reset_reason"] = reset_reason
+        else:
+            self._reset_final_lock_window(reset_reason)
+            status["lock_count_inc_reason"] = ""
+            status["lock_count_hold_reason"] = ""
+            status["lock_count_reset_reason"] = reset_reason
+            status["lock_reset_reason"] = reset_reason
 
-        reset_reason = str(status.get("lock_count_reset_reason") or status.get("vision_stale_reason") or status.get("reason") or "lock_ready_false")
-        self.ctx.table_lock_frames = 0
-        status["stable_count"] = 0
-        status["stable_lock_count"] = 0
-        status["lock_count_inc_reason"] = ""
-        status["lock_count_hold_reason"] = ""
-        status["lock_count_reset_reason"] = reset_reason
-        status["lock_reset_reason"] = reset_reason
+        ready_count = len(self.ctx.final_lock_ready_window)
+        window_ready = ready_count >= self._final_lock_required_ready_obs()
+        status["lock_ready_obs_count"] = int(ready_count)
+        status["window_ready_count"] = int(ready_count)
+        status["stable_count"] = int(ready_count)
+        status["stable_lock_count"] = int(ready_count)
+        status["consecutive_lost_count"] = int(self.ctx.final_lock_consecutive_lost_count)
+        status["final_lock_window_ready"] = bool(window_ready)
+        status["final_lock_transition_reason"] = "final_lock_window_ready" if window_ready else ""
+        status["final_lock_transition_block_reason"] = "" if window_ready else str(
+            status.get("lock_count_reset_reason")
+            or status.get("lock_count_hold_reason")
+            or reason
+            or "ready_obs_count_not_enough"
+        )
         return status
 
     def _final_lock_status(self, obs: Optional[TableEdgeObs], stable_count: int = 0) -> Dict[str, object]:
-        required_count = self._required_lock_count()
+        required_count = self._final_lock_required_ready_obs()
 
         def _status(
             *,
@@ -2817,6 +3006,14 @@ class OrchestratorCore:
                 "confidence_ok": bool(confidence_ok),
                 "stable_lock_count": int(stable_count),
                 "required_lock_count": int(required_count),
+                "required_ready_obs": int(required_count),
+                "final_lock_window_ms": int(self._final_lock_window_ms()),
+                "lock_ready_obs_count": int(stable_count),
+                "window_ready_count": int(stable_count),
+                "same_obs_reuse_count": int(self.ctx.final_lock_same_obs_reuse_count),
+                "consecutive_lost_count": int(self.ctx.final_lock_consecutive_lost_count),
+                "final_lock_transition_block_reason": "",
+                "final_lock_transition_reason": "",
                 "lock_count_inc_reason": str(lock_count_inc_reason or ("lock_ready" if bool(lock_ready) else "")),
                 "lock_count_hold_reason": hold_text,
                 "lock_count_reset_reason": reset_text,
@@ -2882,8 +3079,9 @@ class OrchestratorCore:
         reason: str,
         stable_count: int,
         phase: str = "",
+        status: Optional[Dict[str, object]] = None,
     ) -> None:
-        status = self._final_lock_status(obs, stable_count=stable_count)
+        status = dict(status or self._final_lock_status(obs, stable_count=stable_count))
         measured_distance = None
         target_distance = None
         if obs is not None:
@@ -2895,6 +3093,10 @@ class OrchestratorCore:
         reason_text = str(reason or status.get("reason") or "")
         should_emit = bool(
             reset_reason
+            or status.get("lock_count_hold_reason")
+            or status.get("lock_count_inc_reason")
+            or status.get("final_lock_transition_block_reason")
+            or status.get("final_lock_transition_reason")
             or "stale" in stale_reason
             or "stale" in reason_text
             or "lost" in reason_text
@@ -2905,6 +3107,8 @@ class OrchestratorCore:
         lines = [
             "FINAL_LOCK summary:",
             f"phase={phase or str(self.ctx.table_dock_phase or '').upper() or self.ctx.state.value}",
+            f"state={self.ctx.state.value}",
+            f"obs_seq={status.get('obs_seq')}",
             f"table_found={bool(obs.table_found) if obs is not None else False}",
             f"conf={float(obs.confidence or 0.0):.3f}" if obs is not None else "conf=0.000",
             f"yaw_err={obs.yaw_err_rad}" if obs is not None else "yaw_err=None",
@@ -2927,9 +3131,17 @@ class OrchestratorCore:
             f"stable_lock_count={int(stable_count)}",
             f"stable_count={int(stable_count)}",
             f"required_lock_count={int(status.get('required_lock_count', 0) or 0)}",
+            f"lock_ready_obs_count={int(status.get('lock_ready_obs_count', 0) or 0)}",
+            f"window_ready_count={int(status.get('window_ready_count', 0) or 0)}",
+            f"required_ready_obs={int(status.get('required_ready_obs', 0) or 0)}",
+            f"final_lock_window_ms={int(status.get('final_lock_window_ms', 0) or 0)}",
+            f"same_obs_reuse_count={int(status.get('same_obs_reuse_count', 0) or 0)}",
+            f"consecutive_lost_count={int(status.get('consecutive_lost_count', 0) or 0)}",
             f"lock_count_inc_reason={status.get('lock_count_inc_reason')}",
             f"lock_count_hold_reason={status.get('lock_count_hold_reason')}",
             f"lock_count_reset_reason={status.get('lock_count_reset_reason')}",
+            f"final_lock_transition_block_reason={status.get('final_lock_transition_block_reason')}",
+            f"final_lock_transition_reason={status.get('final_lock_transition_reason')}",
             f"vision_stale_reason={status.get('vision_stale_reason')}",
             f"lock_reset_reason={status.get('lock_reset_reason')}",
             f"lock_ready={bool(lock_ready)}",

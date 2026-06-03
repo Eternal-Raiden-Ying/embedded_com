@@ -334,18 +334,32 @@ class SearchStagePlan(BaseStagePlan):
         "FIND_TABLE": ("local_perception",),
     }
 
+    @staticmethod
+    def _mode_for_request(req: VisionReq, search_kind: str, default: str) -> str:
+        explicit = normalize_upper(req.mode_hint, "")
+        if explicit and not (
+            explicit == "FIND_OBJECT"
+            and search_kind in {"TABLE_EDGE", "EDGE_FOLLOW_TARGET", "TARGET_ON_EDGE"}
+        ):
+            return explicit
+        if search_kind == "TABLE_EDGE":
+            return "FIND_EDGE"
+        if search_kind in {"EDGE_FOLLOW_TARGET", "TARGET_ON_EDGE"}:
+            return "FIND_EDGE"
+        return normalize_upper(default, "FIND_OBJECT")
+
     def on_enter(self, req: VisionReq, ctx: StageContext) -> Optional[StageOutput]:
         super().on_enter(req, ctx)
         ctx.target_name = req.target or ctx.target_name
-        ctx.current_mode = normalize_upper(req.mode_hint, self.default_mode)
         ctx.interaction_id = None
         payload = req.payload if isinstance(req.payload, dict) else {}
         search_kind = normalize_upper(payload.get("search_kind", ""), "")
-        if search_kind not in {"TABLE_EDGE", "TARGET"}:
+        if search_kind not in {"TABLE_EDGE", "TARGET", "EDGE_FOLLOW_TARGET", "TARGET_ON_EDGE"}:
             return StageOutput(
                 vision_obs=self.build_obs(ctx, status="error", perception={}),
                 signals={"invalid_search_kind": True},
             )
+        ctx.current_mode = self._mode_for_request(req, search_kind, self.default_mode)
         ctx.stage_state["search_kind"] = search_kind
         ctx.stage_state["target_obs"] = _target_obs_from_payload(payload, ctx.target_name)
         ctx.stage_state["table_edge_obs"] = _table_edge_obs_from_payload(payload)
@@ -355,14 +369,14 @@ class SearchStagePlan(BaseStagePlan):
     def on_update(self, req: VisionReq, ctx: StageContext) -> Optional[StageOutput]:
         if req.target:
             ctx.target_name = req.target
-        ctx.current_mode = normalize_upper(req.mode_hint, self.default_mode)
         if isinstance(req.payload, dict):
             search_kind = normalize_upper(req.payload.get("search_kind", ""), "")
-            if search_kind not in {"TABLE_EDGE", "TARGET"}:
+            if search_kind not in {"TABLE_EDGE", "TARGET", "EDGE_FOLLOW_TARGET", "TARGET_ON_EDGE"}:
                 return StageOutput(
                     vision_obs=self.build_obs(ctx, status="error", perception={}),
                     signals={"invalid_search_kind": True},
                 )
+            ctx.current_mode = self._mode_for_request(req, search_kind, self.default_mode)
             ctx.stage_state["search_kind"] = search_kind
             _sync_edge_follow_payload(req, ctx)
             if _payload_has_target_obs(req.payload):
@@ -381,6 +395,18 @@ class SearchStagePlan(BaseStagePlan):
 
         if mode == "FIND_EDGE":
             local_perception = results.get("local_perception")
+            search_kind = normalize_upper(ctx.stage_state.get("search_kind", ""), "")
+            target_obs = None
+            target_source = ""
+            if search_kind in {"EDGE_FOLLOW_TARGET", "TARGET_ON_EDGE"}:
+                target_obs, target_source = resolve_stage_summary(
+                    results=results,
+                    stage_state=ctx.stage_state,
+                    state_key="target_obs",
+                    default_factory=lambda: _target_obs_from_payload(None, ctx.target_name),
+                    result_factory=lambda payload: _target_obs_from_results(payload, ctx.target_name),
+                )
+                ctx.stage_state["target_obs"] = dict(target_obs)
             table_edge_obs, table_edge_source = resolve_stage_summary(
                 results=results,
                 stage_state=ctx.stage_state,
@@ -396,19 +422,24 @@ class SearchStagePlan(BaseStagePlan):
                 source_mode=ctx.current_mode,
             )
             ctx.stage_state["table_edge_obs"] = dict(table_edge_obs)
+            perception = {"table_edge_obs": table_edge_obs}
+            if target_obs is not None:
+                perception["target_obs"] = target_obs
+            elif search_kind != "TABLE_EDGE":
+                perception["local_perception"] = local_perception
+            source_payload = {"table_edge_obs": table_edge_source}
+            if target_source:
+                source_payload["target_obs"] = target_source
             return StageOutput(
                 vision_obs=self.build_obs(
                     ctx,
                     status="RUNNING",
-                    perception={
-                        "table_edge_obs": table_edge_obs,
-                        "local_perception": local_perception,
-                    },
+                    perception=perception,
                 ),
                 snapshot={
                     "generation": int(tick_input.generation),
                     "result_keys": sorted(results.keys()),
-                    "source": {"table_edge_obs": table_edge_source},
+                    "source": source_payload,
                     "search_kind": ctx.stage_state.get("search_kind"),
                 },
             )

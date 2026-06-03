@@ -17,6 +17,15 @@ def _upper(value: Any, default: str = "IDLE") -> str:
     return text or default
 
 
+def _display_mode(value: Any, default: str = "IDLE") -> str:
+    mode = _upper(value, default)
+    return {
+        "FIND_EDGE": "TABLE_EDGE_PERCEPTION",
+        "FIND_OBJECT": "TRACK_LOCAL",
+        "FIND_TABLE": "YOLO_TABLE_SEARCH",
+    }.get(mode, mode)
+
+
 def _fmt_float(value: Any, default: float = 0.0, digits: int = 2, signed: bool = False) -> str:
     try:
         number = float(value)
@@ -47,7 +56,7 @@ def format_table_edge_summary(
     quadrant = edge.get("table_quadrant") or edge.get("quadrant") or edge.get("q") or "n/a"
     return (
         f"[VISTA] EDGE stage={_upper(status.get('stage') or edge.get('stage'))} "
-        f"mode={_upper(status.get('mode') or edge.get('mode'))} "
+        f"mode={_display_mode(status.get('mode') or edge.get('mode'))} "
         f"edge={int(found)} conf={_fmt_float(conf)} "
         f"yaw={_fmt_float(yaw, digits=3, signed=True)} dist={_fmt_float(dist, digits=3, signed=True)} "
         f"roi={_short(roi, limit=48)} q={_short(quadrant, limit=8)}"
@@ -72,7 +81,7 @@ def format_target_summary(
     cy = full_center.get("cy", full_center.get("y_norm", target.get("y_norm", target.get("cy_norm", target.get("cy", 0.0)))))
     return (
         f"[VISTA] TARGET stage={_upper(status.get('stage') or target.get('stage'))} "
-        f"mode={_upper(status.get('mode') or target.get('mode'))} "
+        f"mode={_display_mode(status.get('mode') or target.get('mode'))} "
         f"found={int(found)} cls={_short(cls, limit=32)} conf={_fmt_float(conf)} "
         f"cx={_fmt_float(cx)} cy={_fmt_float(cy)}"
     )
@@ -86,7 +95,7 @@ def format_runtime_summary(
     data.update({k: v for k, v in overrides.items() if v is not None})
     parts = [
         f"[VISTA] RUNTIME stage={_upper(data.get('stage'))}",
-        f"mode={_upper(data.get('mode'))}",
+        f"mode={_display_mode(data.get('mode'))}",
     ]
     if data.get("req_id"):
         parts.append(f"req={data.get('req_id')}")

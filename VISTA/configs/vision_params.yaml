@@ -75,6 +75,8 @@ camera:
 model:
   # 可选：yolov7_detect、yolo26s_detect、yolov8s_seg、yolo26s_seg、yolo26s_seg_qnn216。
   active_model: yolo26s_detect
+  enable_yolo26: true
+  enable_yolo_table_search: false
 
   profiles:
     yolov7_detect:

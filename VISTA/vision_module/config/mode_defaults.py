@@ -95,6 +95,12 @@ def _default_remote_profile(*, enabled: bool, require_depth: bool = False,
 def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) -> Dict[str, ModeProfile]:
     """Build the initial mode profile set for VISTA."""
     mode_cfg = dict(getattr(cfg, "mode_profiles", {}) or {})
+    model_cfg = getattr(cfg, "model", None)
+    yolo26_enabled = bool(getattr(model_cfg, "enable_yolo26", True))
+    yolo_table_search_enabled = bool(getattr(model_cfg, "enable_yolo_table_search", False))
+    requested_active_model = str(active_model or "").strip()
+    if not yolo26_enabled and requested_active_model.startswith("yolo26"):
+        active_model = "yolov7_detect"
 
     track_local_rgb = _camera_override_with_updates(
         cfg,
@@ -308,10 +314,10 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             name="FIND_TABLE",
             enabled_cameras=("rgb",),
             camera_overrides={"rgb": track_local_rgb},
-            predictor_enabled=True,
-            predictor_model=active_model,
+            predictor_enabled=bool(yolo_table_search_enabled),
+            predictor_model=active_model if yolo_table_search_enabled else None,
             remote=_default_remote_profile(enabled=False),
-            preview=preview_profile("FIND_TABLE", enabled=True),
+            preview=preview_profile("FIND_TABLE", enabled=bool(yolo_table_search_enabled)),
             table_edge=TableEdgeProfile(
                 enabled=False,
             ),
@@ -319,10 +325,11 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             metadata={
                 "contract": {
                     "cameras": ["rgb"],
-                    "predictor": "required",
+                    "predictor": "required" if yolo_table_search_enabled else "disabled_by_config",
                     "table_edge": "disabled",
                     "remote": "disabled",
                     "perception": ["target_obs"],
+                    "yolo_table_search_enabled": bool(yolo_table_search_enabled),
                 },
             },
         ),

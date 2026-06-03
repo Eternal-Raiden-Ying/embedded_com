@@ -141,11 +141,12 @@ def resolve_camera(requested: str, args: argparse.Namespace):
 
 def resolve_predictor(requested: str, args: argparse.Namespace):
     profile = make_model_profile(args)
+    predictor_type = getattr(args, "predictor_type", "detect") or "detect"
 
     def real_factory():
         if not args.model_path:
             raise RuntimeError("--model-path is required for real predictor")
-        predictor_cls = import_predictor_class("real")
+        predictor_cls = import_predictor_class("real", predictor_type=predictor_type)
         inst = predictor_cls(profile)
         if not inst.is_ready():
             safe_release(inst)

@@ -397,6 +397,15 @@ class RuntimeSupervisor:
             mode=mode_name,
             generation=int(generation),
             ok=bool(ok),
+            yolo26_enabled=bool(
+                str(((capabilities.get("predictor") or {}).get("model_name") or "")).strip().lower().startswith("yolo26")
+            ),
+            yolo_table_search_enabled=bool(mode_name == "FIND_TABLE" and (capabilities.get("predictor") or {}).get("enabled", False)),
+            current_vision_mode=mode_name,
+            current_preview_layout=str(
+                (((capabilities.get("preview") or {}).get("metadata") or {}).get("layout") or "")
+            ),
+            request_source="state_machine",
         )
         if not ok:
             self._log("runtime supervisor apply failed", mode=mode_name, generation=int(generation))

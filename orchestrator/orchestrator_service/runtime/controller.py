@@ -726,6 +726,13 @@ class MotionController:
         yaw_abs = abs(yaw_err)
         yaw_slow_th = abs(float(getattr(self.car_cfg, "table_yaw_slow_th_rad", 0.12) or 0.12))
         yaw_stop_th = max(yaw_slow_th + 1e-6, abs(float(getattr(self.car_cfg, "table_yaw_stop_th_rad", 0.45) or 0.45)))
+        approach_yaw_deadband = abs(float(getattr(self.car_cfg, "table_approach_yaw_deadband_rad", 0.08) or 0.08))
+        approach_yaw_realign = max(
+            approach_yaw_deadband + 1e-6,
+            abs(float(getattr(self.car_cfg, "table_approach_yaw_realign_rad", 0.12) or 0.12)),
+        )
+        approach_allow_wz = bool(getattr(self.car_cfg, "table_approach_allow_wz", False))
+        approach_allow_vy = bool(getattr(self.car_cfg, "table_approach_allow_vy", False))
         yaw_gate = 1.0
         if yaw_abs > yaw_slow_th:
             yaw_gate = self._clamp(1.0 - ((yaw_abs - yaw_slow_th) / max(1e-6, yaw_stop_th - yaw_slow_th)), 0.0, 1.0)
@@ -819,6 +826,22 @@ class MotionController:
         pose_missing_hold_s = max(0.0, float(getattr(self.car_cfg, "table_pose_missing_max_hold_s", 3.0) or 3.0))
         pose_missing_safe_vx_mps = abs(float(getattr(self.car_cfg, "table_pose_missing_safe_vx_mps", 0.010) or 0.010))
         pose_missing_safe_vx_norm = self._physical_to_norm("vx", pose_missing_safe_vx_mps)
+        approach_speed_mode = "profile"
+        approach_safe_vx_mps = abs(float(getattr(self.car_cfg, "table_approach_safe_vx_mps", pose_missing_safe_vx_mps) or pose_missing_safe_vx_mps))
+        approach_max_vx_mps = abs(float(getattr(self.car_cfg, "table_approach_max_vx_mps", 0.030) or 0.030))
+        if approach_max_vx_mps > 0.0:
+            approach_safe_vx_mps = min(approach_safe_vx_mps, approach_max_vx_mps)
+        approach_vx_norm = self._physical_to_norm("vx", approach_safe_vx_mps)
+        approach_edge_valid = bool(
+            obs is not None
+            and bool(getattr(obs, "edge_found", False))
+            and bool(getattr(obs, "valid_for_control", False) or getattr(obs, "usable_for_approach", False))
+            and str(getattr(obs, "reject_reason", "") or "").strip().lower() in {"", "none"}
+            and getattr(obs, "depth_valid", True) is not False
+        )
+        approach_hard_stale = bool(stale_level in {"hard_stale", "dead"})
+        approach_dist_needed = bool(dist_err > final_lock_dist_tol)
+        approach_mode_active = bool(mode == "CONTROLLED_APPROACH" and phase_name not in {"PLANE_ACQUIRE", "PLANE_STOP"})
         valid_for_safe_forward = bool(
             obs is not None
             and not pose_found
@@ -849,7 +872,55 @@ class MotionController:
                 forward_block_reason = "yaw_out_of_range"
             elif not bool(getattr(obs, "edge_found", False) and (getattr(obs, "valid_for_control", False) or getattr(obs, "usable_for_approach", False))):
                 forward_block_reason = "edge_invalid"
+
+        if approach_mode_active:
+            if approach_hard_stale:
+                vx = 0.0
+                vy = 0.0
+                wz = 0.0
+                forward_block_reason = "hard_stale"
+                approach_speed_mode = "blocked_hard_stale"
+            elif hard_guard or not approach_edge_valid:
+                vx = 0.0
+                vy = 0.0
+                wz = 0.0
+                forward_block_reason = "edge_invalid"
+                approach_speed_mode = "blocked_edge_invalid"
+            elif yaw_abs > approach_yaw_realign:
+                vx = 0.0
+                vy = 0.0
+                wz = 0.0
+                forward_block_reason = "yaw_need_realign"
+                approach_speed_mode = "blocked_yaw_need_realign"
+            elif not approach_dist_needed:
+                vx = 0.0
+                vy = 0.0
+                wz = 0.0
+                forward_block_reason = "arrived_or_near"
+                approach_speed_mode = "blocked_arrived_or_near"
+            else:
+                vx = approach_vx_norm
+                if not approach_allow_vy:
+                    vy = 0.0
+                if not approach_allow_wz:
+                    wz = 0.0
+                if yaw_abs <= approach_yaw_deadband:
+                    approach_speed_mode = "safe_straight"
+                else:
+                    approach_speed_mode = "safe_straight_yaw_watch"
+                    if not approach_allow_wz:
+                        wz = 0.0
+                forward_block_reason = "none"
+                pose_missing_safe_vx_active = bool(not pose_found)
+
         vx, vy, wz, speed_summary = self._apply_table_speed_profile(mode, phase_name, vx, vy, wz)
+        if approach_mode_active:
+            if not approach_allow_vy:
+                vy = 0.0
+                speed_summary["vy_mps"] = 0.0
+            if not approach_allow_wz:
+                wz = 0.0
+                speed_summary["wz_radps"] = 0.0
         if abs(vx) < self._physical_to_norm("vx", abs(float(getattr(self.car_cfg, "table_vx_deadband_mps", 0.004) or 0.004))):
             vx = 0.0
         if abs(vy) < self._physical_to_norm("vy", abs(float(getattr(self.car_cfg, "table_vy_deadband_mps", 0.003) or 0.003))):
@@ -864,6 +935,7 @@ class MotionController:
         summary.update(
             {
                 "table_approach_phase": phase_name,
+                "phase": phase_name,
                 "table_approach_reason": "plane_confirmed_table_front" if self._plane_stable(obs) else "plane_waiting",
                 "approach_source": "plane_only",
                 "view_source": view_source,
@@ -892,6 +964,16 @@ class MotionController:
                 "pose_missing_safe_vx_active": bool(pose_missing_safe_vx_active),
                 "pose_missing_safe_vx_mps": float(pose_missing_safe_vx_mps),
                 "pose_missing_max_hold_s": float(pose_missing_hold_s),
+                "edge_found": bool(getattr(obs, "edge_found", False)) if obs is not None else False,
+                "usable_for_approach": bool(getattr(obs, "usable_for_approach", False)) if obs is not None else False,
+                "valid_for_control": bool(getattr(obs, "valid_for_control", False)) if obs is not None else False,
+                "approach_allow_wz": bool(approach_allow_wz),
+                "approach_allow_vy": bool(approach_allow_vy),
+                "approach_speed_mode": str(approach_speed_mode),
+                "approach_safe_vx_mps": float(approach_safe_vx_mps),
+                "approach_max_vx_mps": float(approach_max_vx_mps),
+                "approach_yaw_deadband_rad": float(approach_yaw_deadband),
+                "approach_yaw_realign_rad": float(approach_yaw_realign),
                 "min_forward_dist_err_m": float(min_forward_dist),
                 "vx_norm_min": float(vx_min),
                 "vx_norm_max": float(vx_max),

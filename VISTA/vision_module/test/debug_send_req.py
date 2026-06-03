@@ -110,6 +110,32 @@ def show_last_interaction():
     )
 
 
+_MODE_SEARCH_KIND = {
+    "FIND_OBJECT":  "TARGET",       # needs local_perception + table_edge_obs
+    "FIND_EDGE":    "TABLE_EDGE",   # needs table_edge_obs only
+    "FIND_TABLE":   "TARGET",       # needs local_perception only
+    "MICRO_ADJUST": "TARGET",       # needs local_perception
+}
+
+
+def build_standalone_start(mode_hint: str, target: str = "bottle") -> dict:
+    """Start SEARCH stage with a custom mode_hint — standalone test without orchestrator.
+
+    Supported mode_hint values (must match registered mode profiles):
+      FIND_OBJECT   — YOLO detect + depth table edge + tracking
+      FIND_EDGE     — YOLO detect + depth table edge only (no tracking)
+      FIND_TABLE    — YOLO detect only (no depth)
+      MICRO_ADJUST  — YOLO detect + micro adjustment
+    """
+    search_kind = _MODE_SEARCH_KIND.get(mode_hint, "TARGET")
+    return build_req(
+        "START", "SEARCH",
+        mode_hint=mode_hint,
+        target=target,
+        payload={"search_kind": search_kind},
+    )
+
+
 def show_menu():
     print("VISTA Vision 调试发送器")
     print("1: 新协议 SEARCH bottle")
@@ -121,13 +147,19 @@ def show_menu():
     print("7: 新协议 IDLE/STOP")
     print("8: 查看最近 interaction_id")
     print("")
-    print("[NOTE] SEARCH bottle(found) 仅用于内部测试注入，不再作为主菜单协议入口。")
+    print("─ standalone mode test (no orchestrator) ─")
+    print("A: FIND_OBJECT  (YOLO + depth edge + track)")
+    print("B: FIND_EDGE    (YOLO + depth edge only)")
+    print("C: FIND_TABLE   (YOLO only)")
+    print("D: MICRO_ADJUST (YOLO + micro adjust)")
+    print("")
+    print("[NOTE] mode_hint 直接透传到 mode_controller，不依赖 orchestrator stage 逻辑。")
 
 
 if __name__ == "__main__":
     show_menu()
     while True:
-        choice = input("\n请选择指令 (1-8, q 退出): ").strip().lower()
+        choice = input("\n请选择指令 (1-8 A-D, q 退出): ").strip().lower()
         if choice == "1":
             send_payload(build_req("START", "SEARCH", target="bottle"))
         elif choice == "2":
@@ -150,5 +182,14 @@ if __name__ == "__main__":
             send_payload(build_req("STOP", "IDLE"))
         elif choice == "8":
             show_last_interaction()
+        elif choice == "a":
+            send_payload(build_standalone_start("FIND_OBJECT"))
+        elif choice == "b":
+            send_payload(build_standalone_start("FIND_EDGE"))
+        elif choice == "c":
+            send_payload(build_standalone_start("FIND_TABLE"))
+        elif choice == "d":
+            send_payload(build_standalone_start("MICRO_ADJUST"))
         elif choice == "q":
+            send_payload(build_req("STOP", "IDLE"))  # 先退出服务
             break

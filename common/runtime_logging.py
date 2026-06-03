@@ -475,9 +475,17 @@ def configure_stream_logger(
 
 
 class RunLogger:
-    def __init__(self, module_name: str, runs_root: str, stack_run_id: str = "", enable_text_events: bool = True):
+    def __init__(
+        self,
+        module_name: str,
+        runs_root: str,
+        stack_run_id: str = "",
+        enable_text_events: bool = True,
+        module_subdir: Optional[bool] = None,
+    ):
         self.module_name = str(module_name).strip()
         self.stack_run_id = str(stack_run_id).strip() or make_stack_run_id()
+        self._module_subdir = module_subdir
         self.run_dir = self._resolve_run_dir(runs_root)
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.max_jsonl_bytes = self._env_int("ROBOT_JSONL_MAX_BYTES", 64 * 1024 * 1024)
@@ -552,7 +560,8 @@ class RunLogger:
 
     def _resolve_run_dir(self, runs_root: str) -> Path:
         root = Path(runs_root)
-        if env_flag("ROBOT_RUN_MODULE_SUBDIRS", "0"):
+        use_module_subdir = env_flag("ROBOT_RUN_MODULE_SUBDIRS", "0") if self._module_subdir is None else bool(self._module_subdir)
+        if use_module_subdir:
             return root / self.stack_run_id / self._module_dir_name()
         return root / self.stack_run_id
 

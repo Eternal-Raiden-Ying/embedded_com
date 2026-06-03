@@ -58,17 +58,27 @@ class PreviewManager:
             "IDLE": "rgb_minimal",
             "FIND_EDGE": "rgb_depth_edge",
             "FIND_OBJECT": "rgb_yolo_edge_overlay",
+            "FIND_TABLE": "rgb_yolo_overlay",
             "MICRO_ADJUST": "rgb_minimal",
             "GRASP_REMOTE": "rgb_depth_edge",
             "IDLE_HOT": "rgb_hot_preview",
         }
-        self._supported_layouts = {"rgb_minimal", "rgb_depth_edge", "rgb_yolo_edge_overlay", "rgb_hot_preview"}
+        self._supported_layouts = {"rgb_minimal", "rgb_depth_edge", "rgb_yolo_edge_overlay", "rgb_yolo_overlay", "rgb_hot_preview"}
         self._debug_four_panel_in_track_local = False
         self._show_edge_overlay_in_track_local = True
         self._show_age_ms = True
         self._clear_overlay_on_mode_switch = True
         self._current_mode = "IDLE"
         self._current_layout = self._mode_layouts["IDLE"]
+
+    @staticmethod
+    def _display_mode(mode: Any) -> str:
+        value = str(mode or "IDLE").strip().upper() or "IDLE"
+        return {
+            "FIND_EDGE": "TABLE_EDGE_PERCEPTION",
+            "FIND_OBJECT": "TRACK_LOCAL",
+            "FIND_TABLE": "YOLO_TABLE_SEARCH",
+        }.get(value, value)
 
     def _emit_operator(self, key: str, line: str) -> None:
         if self.operator_console is None:
@@ -142,7 +152,7 @@ class PreviewManager:
                 f"preview:layout_switch:{old_mode}->{mode_name}:{old_layout}->{new_layout}",
                 (
                     "[VISTA] PREVIEW_LAYOUT_SWITCH "
-                    f"old_mode={old_mode} new_mode={mode_name} "
+                    f"old_mode={self._display_mode(old_mode)} new_mode={self._display_mode(mode_name)} "
                     f"old_layout={old_layout} new_layout={new_layout} reason={reason}"
                 ),
             )
@@ -166,7 +176,8 @@ class PreviewManager:
 
     def _table_edge_summary_line(self, status: Dict[str, Any], table_edge: Dict[str, Any]) -> str:
         if format_table_edge_summary is not None:
-            return format_table_edge_summary(status, table_edge)
+            line = format_table_edge_summary(status, table_edge)
+            return line.replace("mode=TABLE_EDGE_PERCEPTION", "mode=DEPTH_PERCEPTION alias=TABLE_EDGE_PERCEPTION")
         found = bool(table_edge.get("table_found", table_edge.get("found", False)))
         edge_found = bool(table_edge.get("edge_found", False))
         conf = float(table_edge.get("confidence", 0.0) or 0.0)
@@ -256,6 +267,17 @@ class PreviewManager:
         out.setdefault("matched_cls", target_obs.get("matched_cls"))
         out.setdefault("matched_conf", target_obs.get("matched_conf", target_obs.get("confidence")))
         out["fps"] = self._fps_snapshot()
+        return out
+
+    def _yolo_status_overlay(self, status: Dict[str, Any], local: Dict[str, Any], target_obs: Dict[str, Any]) -> Dict[str, Any]:
+        out = self._target_overlay(status, local, target_obs)
+        out.setdefault("found", False)
+        out.setdefault("reason", "no_boxes" if int(out.get("boxes_count", 0) or 0) <= 0 else "no_target_match")
+        out["has_infer"] = bool(local.get("has_infer", False))
+        out["contract_ok"] = bool(local.get("contract_ok", True))
+        out["contract_error"] = str(local.get("contract_error") or "")
+        out["model_name"] = local.get("model_name")
+        out["predictor_type"] = local.get("predictor_type")
         return out
 
     def _fps_snapshot(self) -> Optional[float]:
@@ -352,8 +374,10 @@ class PreviewManager:
                 preview_layout = "rgb_depth_edge"
             if preview_layout not in self._supported_layouts:
                 preview_layout = "rgb_minimal"
-            if mode == "FIND_OBJECT":
+            if mode in {"FIND_OBJECT", "FIND_TABLE"} or preview_layout in {"rgb_yolo_overlay", "rgb_yolo_edge_overlay"}:
                 target_obs = self._target_overlay(status, local, target_obs)
+                if mode != "FIND_OBJECT":
+                    target_obs = self._yolo_status_overlay(status, local, target_obs)
                 if self._show_age_ms:
                     target_obs["frame_age_ms"] = int(round(stale_age * 1000.0))
                 if infer_age is not None and self._show_age_ms:
@@ -395,7 +419,7 @@ class PreviewManager:
                 if reason:
                     lines.append(f"reason={reason[:42]}")
                 self._emit_operator("preview:table_edge_obs", self._table_edge_summary_line(status, table_edge))
-            if mode == "FIND_OBJECT" and not bool(local.get("has_infer", bool(local.get("infer_boxes")))):
+            if mode in {"FIND_OBJECT", "FIND_TABLE"} and not bool(local.get("has_infer", bool(local.get("infer_boxes")))):
                 self._emit_operator("preview:target_predictor_not_ready", f"[VISTA] WARN TARGET predictor_not_ready mode={mode}")
             if mode == "FIND_OBJECT" and bool(target_obs.get("class_not_supported")):
                 available = ",".join(str(v) for v in list(target_obs.get("available_classes") or [])[:16])
@@ -407,18 +431,31 @@ class PreviewManager:
                 self._emit_operator("preview:target_obs", self._target_summary_line(status, target_obs))
             if not target_obs:
                 lines.append("target_obs=unavailable")
-            if mode == "FIND_OBJECT":
+            if mode in {"FIND_EDGE", "FIND_OBJECT", "FIND_TABLE"}:
                 lines.append(f"preview_layout={preview_layout}")
-                lines.append(
-                    f"target_found={int(bool(target_obs.get('target_found', target_obs.get('found', False))))} "
-                    f"matched_cls={str(target_obs.get('matched_cls') or 'n/a')[:32]} "
-                    f"matched_conf={float(target_obs.get('matched_conf', target_obs.get('confidence', 0.0)) or 0.0):.2f} "
-                    f"best_cls={str(target_obs.get('best_cls') or 'n/a')[:32]} "
-                    f"best_conf={float(target_obs.get('best_conf', 0.0) or 0.0):.2f} "
-                    f"boxes_count={int(target_obs.get('boxes_count', local.get('box_count', 0)) or 0)} "
-                    f"frame_age_ms={int(round(stale_age * 1000.0)) if self._show_age_ms else -1} "
-                    f"infer_age_ms={int(round(infer_age * 1000.0)) if infer_age is not None and self._show_age_ms else -1}"
-                )
+                boxes_count = int(target_obs.get("boxes_count", local.get("box_count", 0)) or 0)
+                if boxes_count <= 0:
+                    reason = target_obs.get("reason") or local.get("infer_error") or local.get("no_boxes_reason") or "no_boxes"
+                    lines.append(f"yolo=no_boxes reason={reason}")
+                if mode == "FIND_EDGE":
+                    lines.append(
+                        f"yolo26_enabled={int(bool(local.get('yolo26_enabled', False)))} "
+                        f"yolo_infer_running={int(bool(local.get('yolo_infer_running', local.get('has_infer', False))))} "
+                        f"table_bbox_detected={int(bool(local.get('table_bbox_detected', False)))} "
+                        f"table_bbox_used_for_search={int(bool(local.get('table_bbox_used_for_search', False)))} "
+                        f"boxes_count={boxes_count}"
+                    )
+                else:
+                    lines.append(
+                        f"target_found={int(bool(target_obs.get('target_found', target_obs.get('found', False))))} "
+                        f"matched_cls={str(target_obs.get('matched_cls') or 'n/a')[:32]} "
+                        f"matched_conf={float(target_obs.get('matched_conf', target_obs.get('confidence', 0.0)) or 0.0):.2f} "
+                        f"best_cls={str(target_obs.get('best_cls') or 'n/a')[:32]} "
+                        f"best_conf={float(target_obs.get('best_conf', 0.0) or 0.0):.2f} "
+                        f"boxes_count={boxes_count} "
+                        f"frame_age_ms={int(round(stale_age * 1000.0)) if self._show_age_ms else -1} "
+                        f"infer_age_ms={int(round(infer_age * 1000.0)) if infer_age is not None and self._show_age_ms else -1}"
+                    )
             if stale_age >= self._stale_warn_s:
                 lines.append(f"frame_stale age={stale_age:.2f}s")
             try:

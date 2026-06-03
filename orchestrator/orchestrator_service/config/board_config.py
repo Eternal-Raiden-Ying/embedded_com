@@ -159,6 +159,16 @@ def _apply_stage_params(data: Dict[str, Any]) -> None:
     CONFIG.control.table_stop_margin_m = float(final_lock.get("stop_margin_m", CONFIG.control.table_stop_margin_m))
     CONFIG.control.table_settle_s = _ms_to_s(final_lock.get("settle_ms"), CONFIG.control.table_settle_s)
     CONFIG.control.table_stable_frames = int(final_lock.get("stable_frames", CONFIG.control.table_stable_frames))
+    CONFIG.control.final_lock_required_ready_obs = int(
+        final_lock.get("required_ready_obs", final_lock.get("required_ready_count", CONFIG.control.final_lock_required_ready_obs))
+    )
+    CONFIG.control.final_lock_window_ms = int(final_lock.get("window_ms", CONFIG.control.final_lock_window_ms))
+    CONFIG.control.final_lock_max_consecutive_lost = int(
+        final_lock.get("max_consecutive_lost", CONFIG.control.final_lock_max_consecutive_lost)
+    )
+    CONFIG.control.final_lock_soft_stale_hold = bool(
+        final_lock.get("soft_stale_hold", CONFIG.control.final_lock_soft_stale_hold)
+    )
     CONFIG.control.table_max_micro_adjust = int(final_lock.get("max_micro_adjust", CONFIG.control.table_max_micro_adjust))
     CONFIG.docking.min_confidence = float(final_lock.get("edge_conf_th", CONFIG.docking.min_confidence))
     CONFIG.control.final_lock_frames_to_arrive = _ms_to_frames(
@@ -210,6 +220,30 @@ def _apply_stage_params(data: Dict[str, Any]) -> None:
         CONFIG.car.table_pose_missing_safe_vx_mps = float(
             table_motion.get("pose_missing_safe_vx_mps", CONFIG.car.table_pose_missing_safe_vx_mps)
         )
+    if "approach_safe_vx_mps" in table_motion:
+        CONFIG.car.table_approach_safe_vx_mps = float(
+            table_motion.get("approach_safe_vx_mps", CONFIG.car.table_approach_safe_vx_mps)
+        )
+        if "pose_missing_safe_vx_mps" not in table_motion:
+            CONFIG.car.table_pose_missing_safe_vx_mps = CONFIG.car.table_approach_safe_vx_mps
+    if "approach_max_vx_mps" in table_motion:
+        CONFIG.car.table_approach_max_vx_mps = float(
+            table_motion.get("approach_max_vx_mps", CONFIG.car.table_approach_max_vx_mps)
+        )
+        if "vx_max_mps" not in controlled_motion:
+            CONFIG.car.table_controlled_vx_max_mps = CONFIG.car.table_approach_max_vx_mps
+    if "approach_yaw_deadband_rad" in table_motion:
+        CONFIG.car.table_approach_yaw_deadband_rad = float(
+            table_motion.get("approach_yaw_deadband_rad", CONFIG.car.table_approach_yaw_deadband_rad)
+        )
+    if "approach_yaw_realign_rad" in table_motion:
+        CONFIG.car.table_approach_yaw_realign_rad = float(
+            table_motion.get("approach_yaw_realign_rad", CONFIG.car.table_approach_yaw_realign_rad)
+        )
+    if "approach_allow_wz" in table_motion:
+        CONFIG.car.table_approach_allow_wz = bool(table_motion.get("approach_allow_wz", CONFIG.car.table_approach_allow_wz))
+    if "approach_allow_vy" in table_motion:
+        CONFIG.car.table_approach_allow_vy = bool(table_motion.get("approach_allow_vy", CONFIG.car.table_approach_allow_vy))
     if "pose_missing_max_hold_s" in table_motion:
         CONFIG.car.table_pose_missing_max_hold_s = float(
             table_motion.get("pose_missing_max_hold_s", CONFIG.car.table_pose_missing_max_hold_s)
@@ -558,6 +592,12 @@ CONFIG.car.table_controlled_vy_min_mps = _env_float("ORCH_TABLE_CONTROLLED_VY_MI
 CONFIG.car.table_controlled_vy_max_mps = _env_float("ORCH_TABLE_CONTROLLED_VY_MAX_MPS", CONFIG.car.table_controlled_vy_max_mps)
 CONFIG.car.table_controlled_wz_min_radps = _env_float("ORCH_TABLE_CONTROLLED_WZ_MIN_RADPS", CONFIG.car.table_controlled_wz_min_radps)
 CONFIG.car.table_controlled_wz_max_radps = _env_float("ORCH_TABLE_CONTROLLED_WZ_MAX_RADPS", CONFIG.car.table_controlled_wz_max_radps)
+CONFIG.car.table_approach_safe_vx_mps = _env_float("ORCH_TABLE_APPROACH_SAFE_VX_MPS", CONFIG.car.table_approach_safe_vx_mps)
+CONFIG.car.table_approach_max_vx_mps = _env_float("ORCH_TABLE_APPROACH_MAX_VX_MPS", CONFIG.car.table_approach_max_vx_mps)
+CONFIG.car.table_approach_yaw_deadband_rad = _env_float("ORCH_TABLE_APPROACH_YAW_DEADBAND_RAD", CONFIG.car.table_approach_yaw_deadband_rad)
+CONFIG.car.table_approach_yaw_realign_rad = _env_float("ORCH_TABLE_APPROACH_YAW_REALIGN_RAD", CONFIG.car.table_approach_yaw_realign_rad)
+CONFIG.car.table_approach_allow_wz = _env_bool("ORCH_TABLE_APPROACH_ALLOW_WZ", CONFIG.car.table_approach_allow_wz)
+CONFIG.car.table_approach_allow_vy = _env_bool("ORCH_TABLE_APPROACH_ALLOW_VY", CONFIG.car.table_approach_allow_vy)
 CONFIG.car.table_pose_missing_safe_vx_mps = _env_float("ORCH_TABLE_POSE_MISSING_SAFE_VX_MPS", CONFIG.car.table_pose_missing_safe_vx_mps)
 CONFIG.car.table_pose_missing_max_hold_s = _env_float("ORCH_TABLE_POSE_MISSING_MAX_HOLD_S", CONFIG.car.table_pose_missing_max_hold_s)
 CONFIG.car.table_final_lock_vx_min_mps = _env_float("ORCH_TABLE_FINAL_VX_MIN_MPS", CONFIG.car.table_final_lock_vx_min_mps)

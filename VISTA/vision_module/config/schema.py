@@ -9,7 +9,8 @@ from typing import Dict, Optional, Union
 _HERE = Path(__file__).resolve()
 _DEFAULT_PROJECT_ROOT = _HERE.parents[2]
 _DEFAULT_LOG_DIR = _DEFAULT_PROJECT_ROOT / "logs"
-_DEFAULT_RUNS_DIR = _DEFAULT_PROJECT_ROOT / "runs"
+_DEFAULT_STACK_ROOT = _HERE.parents[3]
+_DEFAULT_RUNS_DIR = _DEFAULT_STACK_ROOT / "logs" / "runs"
 _DEFAULT_PID_DIR = _DEFAULT_PROJECT_ROOT / "pids"
 
 
@@ -125,6 +126,8 @@ class SingleModelConfig:
 class ModelConfig:
     active_model: str = "yolov7_detect"
     profiles: Dict[str, SingleModelConfig] = field(default_factory=dict)
+    enable_yolo26: bool = True
+    enable_yolo_table_search: bool = False
 
 
 @dataclass
@@ -147,6 +150,12 @@ class TableEdgeConfig:
     roi_preset: str = ""
     profile_log_interval_s: float = 2.0
     save_debug_frames: bool = False
+    target_hz: float = 10.0
+    preview_hz: float = 2.0
+    fast_debug_pixels: bool = True
+    fast_debug_pixels_online: bool = False
+    fast_debug_pixels_offline: bool = True
+    fast_debug_pixel_cap: int = 300
 
 
 @dataclass

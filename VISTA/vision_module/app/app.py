@@ -41,11 +41,13 @@ class VistaApp(BaseModule):
         ensure_dir(CONFIG.runtime.log_dir)
         ensure_dir(CONFIG.runtime.runs_dir)
         ensure_dir(CONFIG.runtime.pid_dir)
+        vision_runs_root = Path(CONFIG.runtime.runs_dir)
         self.run_logger = RunLogger(
             "vision",
-            CONFIG.runtime.runs_dir,
+            str(vision_runs_root),
             CONFIG.runtime.stack_run_id,
             enable_text_events=False,
+            module_subdir=True,
         )
         self.operator_console = OperatorConsole(
             mode=CONFIG.runtime.console_mode,
@@ -194,6 +196,10 @@ class VistaApp(BaseModule):
                     "uds_path": CONFIG.obs_out.uds_path,
             },
             "structured_logs": self.log_paths,
+            "yolo26_enabled": bool(CONFIG.model.enable_yolo26),
+            "yolo_table_search_enabled": bool(CONFIG.model.enable_yolo_table_search),
+            "active_model": CONFIG.model.active_model,
+            "active_model_path": getattr(CONFIG.model.profiles.get(CONFIG.model.active_model), "target_model", ""),
         }
 
     def _current_event_context(self):

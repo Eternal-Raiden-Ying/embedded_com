@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import math
+import os
 import time
 from collections import deque
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -42,8 +43,8 @@ class OpenCVPreviewSink(PreviewSink):
         self.show_depth = True
         self.show_edge = True
         self.destroy_all_on_close = True
-        self.table_bbox_enabled = True
-        self.mock_table_bbox: Optional[str] = None
+        self.table_bbox_enabled = str(os.getenv("VISTA_TABLE_BBOX_ENABLE", "1")).strip().lower() in {"1", "true", "yes", "on"}
+        self.mock_table_bbox: Optional[str] = str(os.getenv("VISTA_MOCK_TABLE_BBOX", "") or "").strip() or None
         self.text_level = "compact"
         self.debug_points_enabled = False
         self.legend_level = "compact"
@@ -168,6 +169,8 @@ class OpenCVPreviewSink(PreviewSink):
             edge_metadata = dict(metadata)
             edge_metadata["preview_layout"] = layout
             edge_metadata["window_id"] = self.window_id
+            if mode == "FIND_EDGE":
+                edge_metadata["show_yolo_boxes"] = True
             rgb_panel = self._make_rgb_panel(frames.get("rgb") if frames else frame.image, edge_metadata, panel_size)
             depth_panel = self._make_depth_panel(frames.get("depth") if frames else frame.image, table_edge, panel_size)
             edge_panel = self._make_edge_panel(frames.get("depth") if frames else None, table_edge, panel_size)
@@ -235,7 +238,7 @@ class OpenCVPreviewSink(PreviewSink):
         target_name = str(target_obs.get("target") or metadata.get("target") or status.get("target") or "").strip()
         panel, scale, offset = self._fit_with_transform(self._to_bgr(image, prefer_rgb=False), size)
         self._title(panel, "RGB")
-        if mode == "FIND_OBJECT" or bool(metadata.get("show_yolo_boxes", False)):
+        if mode in {"FIND_OBJECT", "FIND_TABLE"} or bool(metadata.get("show_yolo_boxes", False)):
             self._draw_detection_boxes(panel, local, scale, offset, target_name)
         else:
             table_bbox = self._find_table_bbox(local, getattr(image, "shape", None))
@@ -260,6 +263,7 @@ class OpenCVPreviewSink(PreviewSink):
                 self._draw_roi(panel, target_obs.get("bbox"), scale, offset, f"target:{target_name or 'target'}", (0, 255, 80), dashed=False)
             else:
                 self._draw_roi(panel, target_obs.get("bbox"), scale, offset, "target_bbox", (90, 180, 255), dashed=False)
+        self._draw_table_edge_line_overlay(panel, dict(metadata.get("table_edge_obs") or {}), scale, offset)
         if metadata.get("frame_stale"):
             self._text_block(panel, [f"frame_stale age={float(metadata.get('frame_age_s') or 0.0):.2f}s"], (16, panel.shape[0] - 24), fg=(80, 210, 255))
         return panel
@@ -321,6 +325,9 @@ class OpenCVPreviewSink(PreviewSink):
         if not table_edge:
             self._corner_note(panel, "table_edge_obs unavailable", fg=(40, 220, 255))
             return panel
+        worker_error = str(table_edge.get("table_edge_worker_error") or table_edge.get("worker_error") or "").strip()
+        if worker_error:
+            self._corner_note(panel, f"worker_error={worker_error[:64]}", fg=(60, 120, 255))
         roi = table_edge.get("edge_roi") or table_edge.get("table_edge_roi") or table_edge.get("depth_edge_roi")
         if roi:
             self._draw_roi(panel, roi, scale, offset, "ROI", (80, 220, 255), dashed=True)
@@ -833,7 +840,54 @@ class OpenCVPreviewSink(PreviewSink):
                 self._draw_roi(panel, row[:4], scale, offset, label, color, dashed=False)
             except Exception:
                 continue
-        self._corner_note(panel, f"target={target_name or 'n/a'} boxes={len(boxes)}", fg=(0, 255, 80) if boxes else (80, 210, 255))
+        if boxes:
+            self._corner_note(panel, f"target={target_name or 'n/a'} boxes={len(boxes)}", fg=(0, 255, 80))
+        else:
+            reason = str(
+                local.get("infer_error")
+                or local.get("no_boxes_reason")
+                or local.get("contract_error")
+                or ("predictor_not_ready" if not local.get("has_infer") else "no_boxes")
+                or "no_boxes"
+            )
+            self._corner_note(panel, f"target={target_name or 'n/a'} boxes=0 reason={reason[:44]}", fg=(80, 210, 255))
+
+    def _draw_table_edge_line_overlay(
+        self,
+        panel: np.ndarray,
+        table_edge: Dict[str, Any],
+        scale: float,
+        offset: Tuple[int, int],
+    ) -> None:
+        if not table_edge:
+            return
+        worker_error = str(table_edge.get("table_edge_worker_error") or table_edge.get("worker_error") or "").strip()
+        roi = self._parse_roi(table_edge.get("edge_roi") or table_edge.get("table_edge_roi") or table_edge.get("depth_edge_roi"))
+        if roi is not None:
+            self._draw_roi(panel, roi, scale, offset, "edge_roi", YELLOW, dashed=True)
+        if worker_error:
+            self._corner_note(panel, f"worker_error={worker_error[:48]}", fg=(60, 120, 255))
+            return
+        k = self._as_float(table_edge.get("image_line_k"))
+        b = self._as_float(table_edge.get("image_line_b"))
+        if k is not None and b is not None:
+            h, w = panel.shape[:2]
+            ox, oy = offset
+            x_min = 0 if roi is None else roi[0]
+            x_max = int((w - ox) / max(1e-6, scale)) if roi is None else roi[2]
+            pts = []
+            for x in np.linspace(float(x_min), float(x_max), 24):
+                y = k * float(x) + b
+                px = int(round(ox + x * scale))
+                py = int(round(oy + y * scale))
+                if 0 <= px < w and 0 <= py < h:
+                    pts.append((px, py))
+            for p1, p2 in zip(pts[:-1], pts[1:]):
+                cv2.line(panel, p1, p2, YELLOW, 2, lineType=cv2.LINE_AA)
+        elif table_edge.get("edge_found"):
+            self._corner_note(panel, "edge line image projection unavailable", fg=YELLOW)
+        elif table_edge.get("reason") or table_edge.get("reject_reason"):
+            self._corner_note(panel, f"edge_missing reason={str(table_edge.get('reject_reason') or table_edge.get('reason'))[:48]}", fg=(80, 210, 255))
 
     def _dashed_rect(self, panel: np.ndarray, p1: Tuple[int, int], p2: Tuple[int, int], color, thickness: int) -> None:
         x1, y1 = p1
@@ -869,8 +923,21 @@ class OpenCVPreviewSink(PreviewSink):
         predictor = "enabled" if local.get("has_infer") else "disabled"
         table_bbox_status = "available" if self._find_table_bbox(local) is not None else "unavailable"
         table_quadrant = self._table_quadrant(local, {}) or table_edge.get("table_quadrant") or "n/a"
+        mode_display = {
+            "FIND_EDGE": "TABLE_EDGE_PERCEPTION",
+            "FIND_OBJECT": "TRACK_LOCAL",
+            "FIND_TABLE": "YOLO_TABLE_SEARCH",
+        }.get(str(status.get("mode") or "IDLE").strip().upper(), status.get("mode", "IDLE"))
         sections = [
+            ("TASK", [
+                f"stage={status.get('stage', 'IDLE')}",
+                f"mode={mode_display}",
+                f"preview_layout={metadata.get('preview_layout') or self.layout or 'rgb_minimal'}",
+                f"window_id={metadata.get('window_id') or self.window_id}",
+                f"epoch={status.get('epoch', 0)} req={status.get('req_id') or ''}",
+            ]),
             ("TABLE", [
+                f"worker_error={(table_edge.get('table_edge_worker_error') or table_edge.get('worker_error') or 'none')}",
                 f"found={self._boolish(table_edge.get('edge_found'))} control={self._boolish(table_edge.get('valid_for_control', table_edge.get('edge_valid')))} source={table_edge.get('final_pose_source') or table_edge.get('pose_source', 'n/a')}",
                 f"level={table_edge.get('control_level', 'none')} geom={self._fmt(table_edge.get('table_geometry_score'))} stable={table_edge.get('stable_count', 'n/a')}",
                 f"depth={self._fmt_depth_shape(table_edge.get('depth_shape'))} calib={table_edge.get('calib_source') or 'n/a'}",
@@ -887,12 +954,6 @@ class OpenCVPreviewSink(PreviewSink):
                 f"edge_roi={table_edge.get('edge_roi') or table_edge.get('table_edge_roi') or 'n/a'}",
                 f"table_bbox={table_bbox_status} table_quadrant={table_quadrant}",
                 f"roi_source={table_edge.get('roi_source') or 'n/a'}",
-            ]),
-            ("TASK", [
-                f"stage={status.get('stage', 'IDLE')}",
-                f"mode={status.get('mode', 'IDLE')}",
-                f"preview_layout={metadata.get('preview_layout') or self.layout or 'rgb_minimal'}",
-                f"epoch={status.get('epoch', 0)} req={status.get('req_id') or ''}",
             ]),
             ("TARGET", [
                 f"target={target_name}",
