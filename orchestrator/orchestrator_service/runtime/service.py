@@ -734,6 +734,14 @@ class OrchestratorService(BaseModule):
                 "jog_duration_ms": self.cfg.car.jog_duration_ms,
                 "stop_on_state_enter": self.cfg.car.stop_on_state_enter,
             },
+            "table_docking": {
+                "align_to_approach_yaw_rad": self.cfg.control.align_to_approach_yaw_rad,
+                "approach_to_align_yaw_rad": self.cfg.control.approach_to_align_yaw_rad,
+                "align_to_approach_stable_obs": self.cfg.control.align_to_approach_stable_obs,
+                "approach_to_align_stable_obs": self.cfg.control.approach_to_align_stable_obs,
+                "coarse_align_min_dwell_s": self.cfg.control.coarse_align_min_dwell_s,
+                "controlled_approach_min_dwell_s": self.cfg.control.controlled_approach_min_dwell_s,
+            },
             "table_docking_motion": {
                 "approach_safe_vx_mps": self.cfg.car.table_approach_safe_vx_mps,
                 "approach_max_vx_mps": self.cfg.car.table_approach_max_vx_mps,
@@ -751,12 +759,15 @@ class OrchestratorService(BaseModule):
                     "wz_max_radps": self.cfg.car.table_coarse_align_wz_max_radps,
                 },
                 "controlled_approach": {
+                    "vx_mps": self.cfg.car.table_approach_safe_vx_mps,
                     "vx_min_mps": self.cfg.car.table_controlled_vx_min_mps,
                     "vx_max_mps": self.cfg.car.table_controlled_vx_max_mps,
                     "vy_min_mps": self.cfg.car.table_controlled_vy_min_mps,
                     "vy_max_mps": self.cfg.car.table_controlled_vy_max_mps,
                     "wz_min_radps": self.cfg.car.table_controlled_wz_min_radps,
                     "wz_max_radps": self.cfg.car.table_controlled_wz_max_radps,
+                    "allow_vy": self.cfg.car.table_approach_allow_vy,
+                    "allow_wz": self.cfg.car.table_approach_allow_wz,
                 },
                 "final_lock": {
                     "vx_min_mps": self.cfg.car.table_final_lock_vx_min_mps,

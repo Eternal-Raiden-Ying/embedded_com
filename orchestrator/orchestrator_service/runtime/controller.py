@@ -618,6 +618,92 @@ class MotionController:
         self._last_table_vx, self._last_table_vy, self._last_table_wz = vx2, vy2, wz2
         return vx2, vy2, wz2
 
+    def _compose_coarse_align_cmd(
+        self,
+        obs: Optional[TableEdgeObs],
+        *,
+        phase: str = "",
+        reason: str = "coarse_align_yaw_only",
+    ) -> MotionDecision:
+        guard = self._stale_guard(obs)
+        stale_level = str(guard.get("stale_level") or "fresh")
+        yaw_err = float(obs.yaw_err_rad) if obs is not None and obs.yaw_err_rad is not None else 0.0
+        yaw_abs = abs(yaw_err)
+        deadband = abs(float(getattr(self.car_cfg, "table_approach_yaw_deadband_rad", 0.08) or 0.08))
+        edge_valid = bool(
+            obs is not None
+            and bool(getattr(obs, "edge_found", False))
+            and getattr(obs, "yaw_err_rad", None) is not None
+            and bool(
+                getattr(obs, "edge_valid", False)
+                or getattr(obs, "valid_for_control", False)
+                or getattr(obs, "usable_for_alignment", False)
+                or getattr(obs, "usable_for_approach", False)
+            )
+            and str(getattr(obs, "reject_reason", "") or "").strip().lower() in {"", "none"}
+            and getattr(obs, "depth_valid", True) is not False
+        )
+        forward_block_reason = "coarse_align_no_forward"
+        coarse_align_reason = "turn_yaw"
+        wz = 0.0
+        if stale_level != "fresh":
+            coarse_align_reason = stale_level
+        elif not edge_valid:
+            coarse_align_reason = "edge_invalid"
+        elif yaw_abs <= deadband:
+            coarse_align_reason = "yaw_deadband"
+        else:
+            sign = 1.0 if yaw_err * float(getattr(self.car_cfg, "table_plane_yaw_sign", 1.0)) >= 0.0 else -1.0
+            wz_min = abs(float(getattr(self.car_cfg, "table_coarse_align_wz_min_radps", 0.08) or 0.08))
+            wz_max = max(wz_min, abs(float(getattr(self.car_cfg, "table_coarse_align_wz_max_radps", 0.15) or 0.15)))
+            wz_radps = self._clamp(max(yaw_abs, wz_min), wz_min, wz_max)
+            wz = self._physical_to_norm("wz", sign * wz_radps)
+
+        vx, vy, wz, speed_summary = self._apply_table_speed_profile("COARSE_ALIGN", phase or "COARSE_ALIGN", 0.0, 0.0, wz)
+        vx = 0.0
+        vy = 0.0
+        speed_summary["vx_mps"] = 0.0
+        speed_summary["vy_mps"] = 0.0
+        cmd = self._cmd("COARSE_ALIGN", vx=vx, vy=vy, wz=wz)
+        summary = self._summary("COARSE_ALIGN", cmd, obs, reason=reason)
+        summary.update(
+            {
+                "table_approach_phase": phase or "PLANE_FINAL_LOCK",
+                "phase": phase or "PLANE_FINAL_LOCK",
+                "approach_source": "plane_only",
+                "yaw_err": float(yaw_err),
+                "yaw_err_rad": float(yaw_err),
+                "yaw_abs": float(yaw_abs),
+                "coarse_align_yaw_deadband_rad": float(deadband),
+                "coarse_align_reason": coarse_align_reason,
+                "coarse_align_only_yaw": True,
+                "edge_found": bool(getattr(obs, "edge_found", False)) if obs is not None else False,
+                "usable_for_approach": bool(getattr(obs, "usable_for_approach", False)) if obs is not None else False,
+                "valid_for_control": bool(getattr(obs, "valid_for_control", False)) if obs is not None else False,
+                "pose_found": bool(getattr(obs, "pose_found", False)) if obs is not None else False,
+                "obs_stale": bool(stale_level != "fresh"),
+                "stale_level": stale_level,
+                "forward_allowed": False,
+                "forward_block_reason": forward_block_reason,
+                "approach_allow_wz": True,
+                "approach_allow_vy": False,
+                "approach_speed_mode": "coarse_align_yaw_only",
+                "final_vx": 0.0,
+                "final_vy": 0.0,
+                "final_wz": float(wz),
+                "vx_norm": 0.0,
+                "vy_norm": 0.0,
+                "wz_norm": float(wz),
+            }
+        )
+        summary.update(speed_summary)
+        return MotionDecision(
+            cmd=cmd,
+            cx_norm_abs=yaw_abs,
+            distance_ratio=max(0.0, min(1.0, abs(float(getattr(obs, "dist_err_m", 0.0) or 0.0)))) if obs is not None else 0.0,
+            control_summary=summary,
+        )
+
     def _compose_fov_table_cmd(
         self,
         obs: Optional[TableEdgeObs],
@@ -629,6 +715,8 @@ class MotionController:
         base_wz: Optional[float] = None,
         reason: str = "fov_table_approach",
     ) -> MotionDecision:
+        if str(mode or "").strip().upper() == "COARSE_ALIGN":
+            return self._compose_coarse_align_cmd(obs, phase=phase, reason=reason)
         guard = self._stale_guard(obs)
         stale_level = str(guard.get("stale_level") or "fresh")
         view_err, view_source, view_reliable = self._get_view_error(obs)
@@ -839,7 +927,7 @@ class MotionController:
             and str(getattr(obs, "reject_reason", "") or "").strip().lower() in {"", "none"}
             and getattr(obs, "depth_valid", True) is not False
         )
-        approach_hard_stale = bool(stale_level in {"hard_stale", "dead"})
+        approach_stale = bool(stale_level != "fresh")
         approach_dist_needed = bool(dist_err > final_lock_dist_tol)
         approach_mode_active = bool(mode == "CONTROLLED_APPROACH" and phase_name not in {"PLANE_ACQUIRE", "PLANE_STOP"})
         valid_for_safe_forward = bool(
@@ -874,12 +962,12 @@ class MotionController:
                 forward_block_reason = "edge_invalid"
 
         if approach_mode_active:
-            if approach_hard_stale:
+            if approach_stale:
                 vx = 0.0
                 vy = 0.0
                 wz = 0.0
-                forward_block_reason = "hard_stale"
-                approach_speed_mode = "blocked_hard_stale"
+                forward_block_reason = "hard_stale" if stale_level in {"hard_stale", "dead"} else stale_level
+                approach_speed_mode = f"blocked_{forward_block_reason}"
             elif hard_guard or not approach_edge_valid:
                 vx = 0.0
                 vy = 0.0

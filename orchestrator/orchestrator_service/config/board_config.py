@@ -150,6 +150,24 @@ def _apply_stage_params(data: Dict[str, Any]) -> None:
     CONFIG.control.final_lock_enter_yaw_th_rad = float(
         table_docking.get("final_lock_enter_yaw_th_rad", CONFIG.control.final_lock_enter_yaw_th_rad)
     )
+    CONFIG.control.align_to_approach_yaw_rad = float(
+        table_docking.get("align_to_approach_yaw_rad", CONFIG.control.align_to_approach_yaw_rad)
+    )
+    CONFIG.control.approach_to_align_yaw_rad = float(
+        table_docking.get("approach_to_align_yaw_rad", CONFIG.control.approach_to_align_yaw_rad)
+    )
+    CONFIG.control.align_to_approach_stable_obs = int(
+        table_docking.get("align_to_approach_stable_obs", CONFIG.control.align_to_approach_stable_obs)
+    )
+    CONFIG.control.approach_to_align_stable_obs = int(
+        table_docking.get("approach_to_align_stable_obs", CONFIG.control.approach_to_align_stable_obs)
+    )
+    CONFIG.control.coarse_align_min_dwell_s = float(
+        table_docking.get("coarse_align_min_dwell_s", CONFIG.control.coarse_align_min_dwell_s)
+    )
+    CONFIG.control.controlled_approach_min_dwell_s = float(
+        table_docking.get("controlled_approach_min_dwell_s", CONFIG.control.controlled_approach_min_dwell_s)
+    )
 
     CONFIG.control.final_lock_yaw_tol_rad = float(final_lock.get("yaw_abs_th", CONFIG.control.final_lock_yaw_tol_rad))
     CONFIG.control.final_lock_dist_tol_m = float(final_lock.get("dist_abs_th_m", CONFIG.control.final_lock_dist_tol_m))
@@ -244,6 +262,18 @@ def _apply_stage_params(data: Dict[str, Any]) -> None:
         CONFIG.car.table_approach_allow_wz = bool(table_motion.get("approach_allow_wz", CONFIG.car.table_approach_allow_wz))
     if "approach_allow_vy" in table_motion:
         CONFIG.car.table_approach_allow_vy = bool(table_motion.get("approach_allow_vy", CONFIG.car.table_approach_allow_vy))
+    if "vx_mps" in controlled_motion:
+        CONFIG.car.table_approach_safe_vx_mps = float(
+            controlled_motion.get("vx_mps", CONFIG.car.table_approach_safe_vx_mps)
+        )
+        if "vx_min_mps" not in controlled_motion:
+            CONFIG.car.table_controlled_vx_min_mps = CONFIG.car.table_approach_safe_vx_mps
+        if "pose_missing_safe_vx_mps" not in table_motion:
+            CONFIG.car.table_pose_missing_safe_vx_mps = CONFIG.car.table_approach_safe_vx_mps
+    if "allow_wz" in controlled_motion:
+        CONFIG.car.table_approach_allow_wz = bool(controlled_motion.get("allow_wz", CONFIG.car.table_approach_allow_wz))
+    if "allow_vy" in controlled_motion:
+        CONFIG.car.table_approach_allow_vy = bool(controlled_motion.get("allow_vy", CONFIG.car.table_approach_allow_vy))
     if "pose_missing_max_hold_s" in table_motion:
         CONFIG.car.table_pose_missing_max_hold_s = float(
             table_motion.get("pose_missing_max_hold_s", CONFIG.car.table_pose_missing_max_hold_s)
@@ -441,6 +471,12 @@ CONFIG.control.table_approach_warmup_s = _env_float("ORCH_TABLE_APPROACH_WARMUP_
 CONFIG.control.table_approach_warmup_min_fresh_obs = _env_int("ORCH_TABLE_APPROACH_WARMUP_MIN_FRESH_OBS", CONFIG.control.table_approach_warmup_min_fresh_obs)
 CONFIG.control.coarse_align_frames_to_advance = _env_int("ORCH_COARSE_ALIGN_FRAMES", CONFIG.control.coarse_align_frames_to_advance)
 CONFIG.control.coarse_align_done_rad = _env_float("ORCH_COARSE_ALIGN_DONE_RAD", CONFIG.control.coarse_align_done_rad)
+CONFIG.control.align_to_approach_yaw_rad = _env_float("ORCH_ALIGN_TO_APPROACH_YAW_RAD", CONFIG.control.align_to_approach_yaw_rad)
+CONFIG.control.approach_to_align_yaw_rad = _env_float("ORCH_APPROACH_TO_ALIGN_YAW_RAD", CONFIG.control.approach_to_align_yaw_rad)
+CONFIG.control.align_to_approach_stable_obs = _env_int("ORCH_ALIGN_TO_APPROACH_STABLE_OBS", CONFIG.control.align_to_approach_stable_obs)
+CONFIG.control.approach_to_align_stable_obs = _env_int("ORCH_APPROACH_TO_ALIGN_STABLE_OBS", CONFIG.control.approach_to_align_stable_obs)
+CONFIG.control.coarse_align_min_dwell_s = _env_float("ORCH_COARSE_ALIGN_MIN_DWELL_S", CONFIG.control.coarse_align_min_dwell_s)
+CONFIG.control.controlled_approach_min_dwell_s = _env_float("ORCH_CONTROLLED_APPROACH_MIN_DWELL_S", CONFIG.control.controlled_approach_min_dwell_s)
 CONFIG.control.final_lock_frames_to_arrive = _env_int("ORCH_FINAL_LOCK_FRAMES", CONFIG.control.final_lock_frames_to_arrive)
 CONFIG.control.final_lock_yaw_tol_rad = _env_float("ORCH_FINAL_LOCK_YAW_TOL", CONFIG.control.final_lock_yaw_tol_rad)
 CONFIG.control.final_lock_dist_tol_m = _env_float("ORCH_FINAL_LOCK_DIST_TOL", CONFIG.control.final_lock_dist_tol_m)

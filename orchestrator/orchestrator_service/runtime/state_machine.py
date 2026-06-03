@@ -1040,7 +1040,7 @@ class OrchestratorCore:
         plane_ready = bool(has_min_fresh and self._table_visible(obs) and (level != "none" or self._table_plane_stable(obs)))
         if plane_ready:
             self.ctx.table_found_frames = max(int(self.ctx.table_found_frames), int(self.cfg.table_found_frames_to_approach))
-            if level == "approach":
+            if level == "approach" and self._yaw_ready_for_controlled_approach(obs):
                 self._transition(State.CONTROLLED_APPROACH, "warmup已有fresh plane obs，进入plane-only approach")
                 return self.controller.fov_table_approach_cmd(obs, phase="PLANE_APPROACH")
             if level == "stop":
@@ -1059,7 +1059,7 @@ class OrchestratorCore:
         if self._table_visible(obs) and (level != "none" or self._table_plane_stable(obs)):
             self.ctx.table_found_frames += 1
             if self.ctx.table_found_frames >= int(self.cfg.table_found_frames_to_approach):
-                if level == "approach":
+                if level == "approach" and self._yaw_ready_for_controlled_approach(obs):
                     self._transition(State.CONTROLLED_APPROACH, "plane_confirmed_table_front，plane_only_approach")
                     return self.controller.fov_table_approach_cmd(obs, phase="PLANE_APPROACH")
                 if level == "stop":
@@ -1082,38 +1082,60 @@ class OrchestratorCore:
         level = self._control_level(obs)
         if level == "none":
             return self.controller.stop_cmd("COARSE_ALIGN")
-        if level == "approach":
-            self._transition(State.CONTROLLED_APPROACH, "plane-only approach 可用，低速靠近")
-            return self.controller.fov_table_approach_cmd(obs, phase="PLANE_APPROACH")
         if level == "stop":
             return self._enter_final_lock_or_keep_approach(obs, "plane-only stop 可用，进入停车确认")
-        if self._coarse_aligned(obs):
-            self.ctx.approach_aligned_frames += 1
-            if self.ctx.approach_aligned_frames >= int(self.cfg.coarse_align_frames_to_advance):
+
+        pending_reason = ""
+        yaw_ready = self._yaw_ready_for_controlled_approach(obs)
+        if self._count_table_motion_hysteresis_obs(
+            obs,
+            ok=yaw_ready,
+            last_key_attr="align_hysteresis_last_obs_key",
+            count_attr="approach_aligned_frames",
+        ) >= self._align_to_approach_stable_obs():
+            dwell_s = self._state_elapsed()
+            min_dwell_s = self._coarse_align_min_dwell_s()
+            if dwell_s >= min_dwell_s:
                 self._transition(State.CONTROLLED_APPROACH, "plane yaw/dist稳定，开始plane-only接近")
                 return self.controller.fov_table_approach_cmd(obs, phase="PLANE_APPROACH")
+            pending_reason = f"align_to_approach_pending_min_dwell:{dwell_s:.2f}/{min_dwell_s:.2f}s"
+            self.ctx.table_motion_pending_transition_reason = pending_reason
         else:
-            self.ctx.approach_aligned_frames = 0
+            self.ctx.table_motion_pending_transition_reason = ""
         if self._state_elapsed() >= float(self.cfg.approach_timeout_s):
             return self._enter_dock_retry_or_next("粗对齐超时")
         self._maybe_resend_req(self._active_req_payload())
-        return self.controller.fov_table_approach_cmd(obs, phase="PLANE_FINAL_LOCK", mode="COARSE_ALIGN")
+        decision = self.controller.fov_table_approach_cmd(obs, phase="PLANE_FINAL_LOCK", mode="COARSE_ALIGN")
+        return self._annotate_table_motion_hysteresis(decision, pending_reason=pending_reason)
 
     def _tick_controlled_approach(self) -> MotionDecision:
         obs = self._fresh_table_obs()
         if not self._table_visible(obs):
             return self._handle_table_loss("接近时桌边丢失，回到搜索", State.SEARCH_TABLE, "CONTROLLED_APPROACH_HOLD")
         self._reset_table_loss()
-        yaw_err = getattr(obs, "yaw_err_rad", None) if obs is not None else None
-        yaw_realign = abs(float(getattr(self.controller.car_cfg, "table_approach_yaw_realign_rad", 0.12) or 0.12))
-        if yaw_err is not None and abs(float(yaw_err)) > yaw_realign:
-            self._transition(State.COARSE_ALIGN, "approach yaw偏大，回到粗对齐")
-            return self.controller.fov_table_approach_cmd(obs, phase="PLANE_FINAL_LOCK", mode="COARSE_ALIGN")
+        pending_reason = ""
+        yaw_needs_realign = self._yaw_needs_realign_from_approach(obs)
+        if self._count_table_motion_hysteresis_obs(
+            obs,
+            ok=yaw_needs_realign,
+            last_key_attr="approach_hysteresis_last_obs_key",
+            count_attr="approach_realign_frames",
+        ) >= self._approach_to_align_stable_obs():
+            dwell_s = self._state_elapsed()
+            min_dwell_s = self._controlled_approach_min_dwell_s()
+            if dwell_s >= min_dwell_s:
+                self._transition(State.COARSE_ALIGN, "approach yaw连续偏大，回到粗对齐")
+                return self.controller.fov_table_approach_cmd(obs, phase="PLANE_FINAL_LOCK", mode="COARSE_ALIGN")
+            pending_reason = f"approach_to_align_pending_min_dwell:{dwell_s:.2f}/{min_dwell_s:.2f}s"
+            self.ctx.table_motion_pending_transition_reason = pending_reason
+        else:
+            self.ctx.table_motion_pending_transition_reason = ""
         level = self._control_level(obs)
         if level == "none":
             return self.controller.stop_cmd("CONTROLLED_APPROACH")
         if level == "approach":
-            return self.controller.fov_table_approach_cmd(obs, phase="PLANE_APPROACH")
+            decision = self.controller.fov_table_approach_cmd(obs, phase="PLANE_APPROACH")
+            return self._annotate_table_motion_hysteresis(decision, pending_reason=pending_reason)
         if level == "stop":
             return self._enter_final_lock_or_keep_approach(obs, "plane-only stop 可用，进入最终停车")
         if self._edge_ready(obs):
@@ -1121,7 +1143,8 @@ class OrchestratorCore:
         if self._state_elapsed() >= float(self.cfg.approach_timeout_s):
             return self._enter_dock_retry_or_next("受控接近超时")
         self._maybe_resend_req(self._active_req_payload())
-        return self._table_approach_decision(obs, phase="PLANE_FINAL_LOCK")
+        decision = self._table_approach_decision(obs, phase="PLANE_FINAL_LOCK")
+        return self._annotate_table_motion_hysteresis(decision, pending_reason=pending_reason)
 
     def _tick_final_lock(self) -> MotionDecision:
         if not self._table_final_lock_enabled():
@@ -2548,6 +2571,73 @@ class OrchestratorCore:
             return "PLANE_FINAL_LOCK"
         return "PLANE_ACQUIRE"
 
+    def _align_to_approach_yaw_rad(self) -> float:
+        return max(0.0, float(getattr(self.cfg, "align_to_approach_yaw_rad", 0.08) or 0.08))
+
+    def _approach_to_align_yaw_rad(self) -> float:
+        align_yaw = self._align_to_approach_yaw_rad()
+        return max(align_yaw + 1e-6, float(getattr(self.cfg, "approach_to_align_yaw_rad", 0.16) or 0.16))
+
+    def _align_to_approach_stable_obs(self) -> int:
+        return max(1, int(getattr(self.cfg, "align_to_approach_stable_obs", 2) or 2))
+
+    def _approach_to_align_stable_obs(self) -> int:
+        return max(1, int(getattr(self.cfg, "approach_to_align_stable_obs", 2) or 2))
+
+    def _coarse_align_min_dwell_s(self) -> float:
+        return max(0.0, float(getattr(self.cfg, "coarse_align_min_dwell_s", 0.8) or 0.8))
+
+    def _controlled_approach_min_dwell_s(self) -> float:
+        return max(0.0, float(getattr(self.cfg, "controlled_approach_min_dwell_s", 0.8) or 0.8))
+
+    def _yaw_abs(self, obs: Optional[TableEdgeObs]) -> Optional[float]:
+        if obs is None or obs.yaw_err_rad is None:
+            return None
+        try:
+            return abs(float(obs.yaw_err_rad))
+        except Exception:
+            return None
+
+    def _yaw_ready_for_controlled_approach(self, obs: Optional[TableEdgeObs]) -> bool:
+        yaw_abs = self._yaw_abs(obs)
+        return bool(yaw_abs is not None and yaw_abs <= self._align_to_approach_yaw_rad())
+
+    def _yaw_needs_realign_from_approach(self, obs: Optional[TableEdgeObs]) -> bool:
+        yaw_abs = self._yaw_abs(obs)
+        return bool(yaw_abs is not None and yaw_abs >= self._approach_to_align_yaw_rad())
+
+    def _count_table_motion_hysteresis_obs(self, obs: Optional[TableEdgeObs], *, ok: bool, last_key_attr: str, count_attr: str) -> int:
+        obs_key = self._final_lock_obs_key(obs)
+        if not ok:
+            setattr(self.ctx, count_attr, 0)
+            if obs_key:
+                setattr(self.ctx, last_key_attr, obs_key)
+            return 0
+        if obs_key and obs_key != str(getattr(self.ctx, last_key_attr, "") or ""):
+            setattr(self.ctx, last_key_attr, obs_key)
+            setattr(self.ctx, count_attr, int(getattr(self.ctx, count_attr, 0) or 0) + 1)
+        return int(getattr(self.ctx, count_attr, 0) or 0)
+
+    def _annotate_table_motion_hysteresis(self, decision: MotionDecision, *, pending_reason: str = "") -> MotionDecision:
+        if decision.control_summary is None:
+            decision.control_summary = {}
+        summary = decision.control_summary
+        summary.update(
+            {
+                "align_to_approach_yaw_rad": float(self._align_to_approach_yaw_rad()),
+                "approach_to_align_yaw_rad": float(self._approach_to_align_yaw_rad()),
+                "align_to_approach_stable_obs": int(self._align_to_approach_stable_obs()),
+                "approach_to_align_stable_obs": int(self._approach_to_align_stable_obs()),
+                "coarse_align_min_dwell_s": float(self._coarse_align_min_dwell_s()),
+                "controlled_approach_min_dwell_s": float(self._controlled_approach_min_dwell_s()),
+                "state_dwell_s": float(self._state_elapsed()),
+                "approach_aligned_frames": int(self.ctx.approach_aligned_frames),
+                "approach_realign_frames": int(self.ctx.approach_realign_frames),
+                "table_motion_pending_transition_reason": str(pending_reason or self.ctx.table_motion_pending_transition_reason or ""),
+            }
+        )
+        return decision
+
     def _coarse_aligned(self, obs: Optional[TableEdgeObs]) -> bool:
         if obs is None:
             return False
@@ -2556,7 +2646,7 @@ class OrchestratorCore:
         if self._control_level(obs) == "stop":
             return True
         if obs.yaw_err_rad is not None:
-            return abs(float(obs.yaw_err_rad)) <= float(self.cfg.coarse_align_done_rad)
+            return abs(float(obs.yaw_err_rad)) <= self._align_to_approach_yaw_rad()
         if obs.table_cx_norm is not None:
             return abs(float(obs.table_cx_norm)) <= 0.12
         return False

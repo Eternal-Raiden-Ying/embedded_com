@@ -108,6 +108,10 @@ class RuntimeContext:
     final_lock_consecutive_lost_count: int = 0
     final_lock_last_transition_reason: str = ""
     approach_aligned_frames: int = 0
+    approach_realign_frames: int = 0
+    align_hysteresis_last_obs_key: str = ""
+    approach_hysteresis_last_obs_key: str = ""
+    table_motion_pending_transition_reason: str = ""
     target_found_frames: int = 0
     target_lost_frames: int = 0
     target_lock_frames: int = 0
@@ -161,6 +165,10 @@ class RuntimeContext:
         self.final_lock_consecutive_lost_count = 0
         self.final_lock_last_transition_reason = ""
         self.approach_aligned_frames = 0
+        self.approach_realign_frames = 0
+        self.align_hysteresis_last_obs_key = ""
+        self.approach_hysteresis_last_obs_key = ""
+        self.table_motion_pending_transition_reason = ""
         self.target_found_frames = 0
         self.target_lost_frames = 0
         self.target_lock_frames = 0

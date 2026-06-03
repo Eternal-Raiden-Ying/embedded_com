@@ -154,7 +154,7 @@ class FovTableApproachTest(unittest.TestCase):
         controller = _controller()
         obs = _obs(pose_found=False, dist_err_m=0.30, control_level="approach")
         decision = controller.fov_table_approach_cmd(obs)
-        self.assertAlmostEqual(decision.control_summary["vx_mps"], 0.015, places=3)
+        self.assertAlmostEqual(decision.control_summary["vx_mps"], 0.020, places=3)
         self.assertFalse(decision.control_summary["forward_allowed"])
         self.assertEqual(decision.control_summary["forward_block_reason"], "none")
         self.assertTrue(decision.control_summary["pose_missing_safe_vx_active"])
@@ -192,7 +192,7 @@ class FovTableApproachTest(unittest.TestCase):
         fov_decision = controller.fov_table_approach_cmd(fov_obs)
         self.assertTrue(0.0 < fov_decision.control_summary["fov_gate"] < 1.0)
         self.assertEqual(fov_decision.control_summary["approach_speed_mode"], "safe_straight")
-        self.assertAlmostEqual(fov_decision.control_summary["vx_mps"], 0.015, places=3)
+        self.assertAlmostEqual(fov_decision.control_summary["vx_mps"], 0.020, places=3)
 
     def test_stop_level_does_not_release_forward(self) -> None:
         controller = _controller()
@@ -206,13 +206,31 @@ class FovTableApproachTest(unittest.TestCase):
         decision = controller.search_table_cmd()
         self.assertLessEqual(abs(decision.cmd.wz_norm), 0.12)
 
-    def test_soft_stale_blocks_forward_only(self) -> None:
+    def test_soft_stale_blocks_forward(self) -> None:
         controller = _controller()
         obs = _obs(frame_capture_ts=now_ts() - 0.35)
         decision = controller.fov_table_approach_cmd(obs)
         self.assertEqual(decision.control_summary["stale_level"], "soft_stale")
-        self.assertGreater(decision.cmd.vx_norm, 0.0)
-        self.assertEqual(decision.control_summary["forward_block_reason"], "none")
+        self.assertEqual(decision.cmd.vx_norm, 0.0)
+        self.assertEqual(decision.control_summary["forward_block_reason"], "soft_stale")
+
+    def test_coarse_align_outputs_yaw_only_with_min_speed(self) -> None:
+        controller = _controller()
+        obs = _obs(control_level="alignment", yaw_err_rad=0.10, view_err_norm=0.30, plane_cx_norm=0.30)
+        decision = controller.fov_table_approach_cmd(obs, phase="PLANE_FINAL_LOCK", mode="COARSE_ALIGN")
+        self.assertEqual(decision.cmd.vx_norm, 0.0)
+        self.assertEqual(decision.cmd.vy_norm, 0.0)
+        self.assertGreater(abs(decision.control_summary["wz_radps"]), 0.0)
+        self.assertGreaterEqual(abs(decision.control_summary["wz_radps"]), 0.08)
+        self.assertLessEqual(abs(decision.control_summary["wz_radps"]), 0.15)
+        self.assertEqual(decision.control_summary["approach_speed_mode"], "coarse_align_yaw_only")
+
+    def test_coarse_align_yaw_deadband_stops_rotation(self) -> None:
+        controller = _controller()
+        obs = _obs(control_level="alignment", yaw_err_rad=0.02)
+        decision = controller.fov_table_approach_cmd(obs, phase="PLANE_FINAL_LOCK", mode="COARSE_ALIGN")
+        self.assertEqual((decision.cmd.vx_norm, decision.cmd.vy_norm, decision.cmd.wz_norm), (0.0, 0.0, 0.0))
+        self.assertEqual(decision.control_summary["coarse_align_reason"], "yaw_deadband")
 
     def test_hard_stale_outputs_hold(self) -> None:
         controller = _controller()
@@ -379,6 +397,57 @@ class FovTableApproachTest(unittest.TestCase):
         self.assertEqual(core.ctx.state, State.FINAL_LOCK)
         self.assertTrue(decision.control_summary["final_lock_enter_allowed"])
         self.assertEqual(decision.cmd.mode, "FINAL_LOCK")
+
+    def test_coarse_align_requires_stable_yaw_and_min_dwell_before_approach(self) -> None:
+        cfg = ControlThresholds()
+        cfg.align_to_approach_yaw_rad = 0.08
+        cfg.align_to_approach_stable_obs = 2
+        cfg.coarse_align_min_dwell_s = 0.8
+        core = OrchestratorCore(cfg, CarMotionConfig())
+        core.ctx.state = State.COARSE_ALIGN
+        core.ctx.state_enter_mono = time.monotonic() - 0.1
+
+        core.handle_table_obs(_obs(obs_seq=1, control_level="alignment", yaw_err_rad=0.02))
+        decision = core.tick()
+        self.assertEqual(core.ctx.state, State.COARSE_ALIGN)
+        self.assertEqual(decision.cmd.vx_norm, 0.0)
+
+        core.handle_table_obs(_obs(obs_seq=2, control_level="alignment", yaw_err_rad=0.02))
+        decision = core.tick()
+        self.assertEqual(core.ctx.state, State.COARSE_ALIGN)
+        self.assertIn("align_to_approach_pending_min_dwell", decision.control_summary["table_motion_pending_transition_reason"])
+
+        core.ctx.state_enter_mono = time.monotonic() - 1.0
+        core.handle_table_obs(_obs(obs_seq=3, control_level="alignment", yaw_err_rad=0.02))
+        decision = core.tick()
+        self.assertEqual(core.ctx.state, State.CONTROLLED_APPROACH)
+        self.assertEqual(decision.cmd.mode, "CONTROLLED_APPROACH")
+
+    def test_controlled_approach_requires_stable_yaw_and_min_dwell_before_realign(self) -> None:
+        cfg = ControlThresholds()
+        cfg.approach_to_align_yaw_rad = 0.16
+        cfg.approach_to_align_stable_obs = 2
+        cfg.controlled_approach_min_dwell_s = 0.8
+        core = OrchestratorCore(cfg, CarMotionConfig())
+        core.ctx.state = State.CONTROLLED_APPROACH
+        core.ctx.state_enter_mono = time.monotonic() - 0.1
+
+        core.handle_table_obs(_obs(obs_seq=1, control_level="approach", yaw_err_rad=0.20))
+        decision = core.tick()
+        self.assertEqual(core.ctx.state, State.CONTROLLED_APPROACH)
+        self.assertEqual(decision.cmd.vx_norm, 0.0)
+        self.assertEqual(decision.control_summary["forward_block_reason"], "yaw_need_realign")
+
+        core.handle_table_obs(_obs(obs_seq=2, control_level="approach", yaw_err_rad=0.20))
+        decision = core.tick()
+        self.assertEqual(core.ctx.state, State.CONTROLLED_APPROACH)
+        self.assertIn("approach_to_align_pending_min_dwell", decision.control_summary["table_motion_pending_transition_reason"])
+
+        core.ctx.state_enter_mono = time.monotonic() - 1.0
+        core.handle_table_obs(_obs(obs_seq=3, control_level="approach", yaw_err_rad=0.20))
+        decision = core.tick()
+        self.assertEqual(core.ctx.state, State.COARSE_ALIGN)
+        self.assertEqual(decision.cmd.mode, "COARSE_ALIGN")
 
     def test_missing_frame_capture_ts_falls_back_safely(self) -> None:
         controller = _controller()
