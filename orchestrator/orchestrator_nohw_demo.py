@@ -297,7 +297,7 @@ def send_home_obs(cfg, *, session_id: str, epoch: int, yaw: float, distance_m: f
 
 def run_demo(service, cfg) -> None:
     session_find = "sess_demo_find"
-    target = "cup"
+    target = "bottle"
 
     print("\n========== 场景 A：FIND -> SEARCH_TABLE ==========")
     send_task(cfg, intent="FIND", target=target, session_id=session_find, epoch=1)

@@ -88,7 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--task-port", type=int, default=9001)
     p.add_argument("--vision-host", default="127.0.0.1")
     p.add_argument("--vision-port", type=int, default=9002)
-    p.add_argument("--target", default="cup")
+    p.add_argument("--target", default="bottle")
     p.add_argument("--period", type=float, default=0.35)
     p.add_argument("--send-stop", action="store_true")
     return p

@@ -45,7 +45,7 @@ if __name__ == "__main__":
     elif kind == "target":
         obs = {
             "found": True,
-            "target": value_args[0] if value_args else "cup",
+            "target": value_args[0] if value_args else "bottle",
             "confidence": 0.88,
             "cx_norm": 0.03,
             "size_norm": 0.30,

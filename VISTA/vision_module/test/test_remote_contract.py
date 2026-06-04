@@ -35,7 +35,7 @@ from vision_module.backend.scheduler import Scheduler
 # test constants
 # ---------------------------------------------------------------------------
 
-_DEFAULT_CLASS_ID = 47  # apple (COCO80)
+_DEFAULT_CLASS_ID = 1  # apple (finetune yolo26s bgr15)
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _TEST_DATA_DIR = os.path.join(_HERE, "test_data")
@@ -358,7 +358,7 @@ class RemoteManagerContractTest(unittest.TestCase):
         )
         self.scheduler.publish_event(
             "remote_cmd",
-            {"op": "PREDICT", "request_id": "rr_1", "target": "cup", "class_id": 41, "need_depth": True},
+            {"op": "PREDICT", "request_id": "rr_1", "target": "bottle", "class_id": 4, "need_depth": True},
             generation=1,
         )
         payload = _wait_until(
@@ -396,7 +396,7 @@ class RemoteManagerContractTest(unittest.TestCase):
         )
         self.scheduler.publish_event(
             "remote_cmd",
-            {"op": "PREDICT", "request_id": "rr_enc", "target": "banana", "class_id": 46},
+            {"op": "PREDICT", "request_id": "rr_enc", "target": "banana", "class_id": 2},
             generation=1,
         )
         _wait_until(
@@ -414,9 +414,9 @@ class RemoteManagerContractTest(unittest.TestCase):
 
     def test_multipart_no_segmentation_surface(self):
         data, files = build_predict_multipart(
-            RemotePredictRequest(rgb_bytes=b"rgb", depth_bytes=b"depth", class_id=46)
+            RemotePredictRequest(rgb_bytes=b"rgb", depth_bytes=b"depth", class_id=2)
         )
-        self.assertEqual(data["class_id"], "46")
+        self.assertEqual(data["class_id"], "2")
         self.assertEqual(sorted(files.keys()), ["depth_file", "rgb_file"])
 
     # --- v1.2 schema validation ---
@@ -466,7 +466,7 @@ class RemoteManagerContractTest(unittest.TestCase):
         )
         self.scheduler.publish_event(
             "remote_cmd",
-            {"op": "PREDICT", "request_id": "rr_repo", "target": "bottle", "class_id": 39},
+            {"op": "PREDICT", "request_id": "rr_repo", "target": "bottle", "class_id": 4},
             generation=1,
         )
         payload = _wait_until(

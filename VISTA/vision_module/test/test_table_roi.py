@@ -67,6 +67,10 @@ class TableRoiTest(unittest.TestCase):
             [100, 120, 420, 360],
         )
         self.assertEqual(
+            find_table_bbox({"class_names": ["table1", "apple"], "infer_boxes": [[100, 120, 420, 360, 0.7, 0]]}),
+            [100, 120, 420, 360],
+        )
+        self.assertEqual(
             find_table_bbox({"infer_boxes": [[100, 120, 420, 360, 0.7, "bad", "desk"]]}),
             [100, 120, 420, 360],
         )

@@ -26,16 +26,15 @@ def _yolo26s_preprocess(image: np.ndarray, input_size: int = 640) -> Tuple[np.nd
     length = max(height, width)
     scale = length / float(input_size)
 
-    # Short-circuit: already square at target size — skip canvas + resize
+    # Short-circuit: already square at target size, skip canvas + resize.
     if height == width == input_size:
-        canvas = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        canvas = image
         if canvas.dtype != np.float32:
             canvas = canvas.astype(np.float32) / 255.0
         return canvas[None, :], scale
 
     canvas = np.zeros((length, length, 3), dtype=np.uint8)
     canvas[:height, :width] = image
-    canvas = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
     canvas = cv2.resize(canvas, (input_size, input_size), interpolation=cv2.INTER_LINEAR)
     return (canvas.astype(np.float32) / 255.0)[None, :], scale
 

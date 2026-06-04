@@ -6,8 +6,8 @@ from __future__ import annotations
 from typing import Any, Dict, Optional, Sequence, Tuple
 
 
-TABLE_CLASS_NAMES = {"table", "desk", "diningtable", "dining table"}
-TABLE_CLASS_IDS = {60}
+TABLE_CLASS_NAMES = {"table", "desk", "diningtable", "dining table", "table1"}
+TABLE_CLASS_IDS = {0, 60}
 
 
 def _parse_shape(shape: Any) -> Optional[Tuple[int, int]]:

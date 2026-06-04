@@ -86,15 +86,15 @@ class GraspStageRemoteFlowTest(unittest.TestCase):
             ts=time.time(),
             op="START",
             stage="GRASP",
-            target="cup",
-            payload={"remote_grasp": True, "need_depth": True, "class_id": 41},
+            target="bottle",
+            payload={"remote_grasp": True, "need_depth": True, "class_id": 4},
         )
         plan.on_enter(start_req, ctx)
 
         first_tick = plan.tick(
             StageTickInput(
                 ts=time.time(),
-                results={"local_perception": {"target_obs": {"found": True, "target": "cup"}}},
+                results={"local_perception": {"target_obs": {"found": True, "target": "bottle"}}},
             ),
             ctx,
         )
@@ -105,7 +105,7 @@ class GraspStageRemoteFlowTest(unittest.TestCase):
             ts=time.time(),
             op="RESPOND",
             stage="GRASP",
-            target="cup",
+            target="bottle",
             interaction_id=ctx.interaction_id,
             response={"decision": "ACCEPT"},
         )
@@ -209,14 +209,14 @@ class GraspStageRemoteFlowTest(unittest.TestCase):
             ts=time.time(),
             op="START",
             stage="GRASP",
-            target="cup",
-            payload={"remote_grasp": True, "need_depth": True, "class_id": 41},
+            target="bottle",
+            payload={"remote_grasp": True, "need_depth": True, "class_id": 4},
         )
         plan.on_enter(start_req, ctx)
         plan.tick(
             StageTickInput(
                 ts=time.time(),
-                results={"local_perception": {"target_obs": {"found": True, "target": "cup"}}},
+                results={"local_perception": {"target_obs": {"found": True, "target": "bottle"}}},
             ),
             ctx,
         )
@@ -224,7 +224,7 @@ class GraspStageRemoteFlowTest(unittest.TestCase):
             ts=time.time(),
             op="RESPOND",
             stage="GRASP",
-            target="cup",
+            target="bottle",
             interaction_id=ctx.interaction_id,
             response={"decision": "ACCEPT"},
         )

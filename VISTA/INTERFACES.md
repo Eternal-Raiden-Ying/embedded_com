@@ -251,7 +251,7 @@
   "payload": {
     "remote_grasp": true,
     "need_depth": true,
-    "class_id": 39
+    "class_id": 4
   }
 }
 ```

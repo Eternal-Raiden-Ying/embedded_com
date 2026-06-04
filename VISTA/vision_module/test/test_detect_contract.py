@@ -3,6 +3,7 @@
 
 import importlib
 import os
+import sys
 import time
 import unittest
 from types import SimpleNamespace
@@ -26,6 +27,30 @@ from vision_module.backend.scheduler import Scheduler
 from vision_module.utils.detect import compute_target_obs
 
 
+FINETUNE_CLASSES = (
+    "table1",
+    "apple",
+    "banana",
+    "basket",
+    "bottle",
+    "grape",
+    "key",
+    "kiwi fruit",
+    "lemon",
+    "mango",
+    "mouse",
+    "orange",
+    "peach",
+    "star fruit",
+    "strawberry",
+)
+
+
+def _import_yolo26_module():
+    sys.modules.setdefault("aidlite", SimpleNamespace())
+    return importlib.import_module("vision_module.backend.predictor.QNN_YOLO26_Detect_Predictor")
+
+
 class DetectClassVocabularyTest(unittest.TestCase):
     def test_compute_target_obs_prefers_model_class_names(self):
         boxes = [[20.0, 30.0, 180.0, 260.0, 0.92, 1.0]]
@@ -39,6 +64,17 @@ class DetectClassVocabularyTest(unittest.TestCase):
         self.assertEqual(obs["target"], "cup")
         self.assertEqual(obs["bbox"], [20, 30, 180, 260])
 
+    def test_board_config_uses_finetune_bgr15_model(self):
+        from vision_module.config.board_config import CONFIG
+
+        profile = CONFIG.model.profiles["yolo26s_detect"]
+        self.assertEqual(profile.class_num, 15)
+        self.assertEqual(tuple(profile.classes), FINETUNE_CLASSES)
+        self.assertTrue(profile.target_model.endswith(
+            "VISTA/vision_module/model/yolo26s/models/finetune/"
+            "yolo26s-cutoff-bgr_qcs6490_w8a8.qnn236.ctx.bin"
+        ))
+
     def test_detect_preprocess_preserves_bgr_channel_order(self):
         bgr = np.array([[[11, 22, 33]]], dtype=np.uint8)
         processed = preprocess_img(bgr, target_shape=(1, 1))
@@ -49,6 +85,28 @@ class DetectClassVocabularyTest(unittest.TestCase):
             rtol=1e-6,
             atol=1e-6,
         )
+
+    def test_yolo26_preprocess_preserves_bgr_channel_order(self):
+        module = _import_yolo26_module()
+        bgr = np.array([[[11, 22, 33]]], dtype=np.uint8)
+        processed, scale = module._yolo26s_preprocess(bgr, input_size=1)
+        self.assertEqual(processed.shape, (1, 1, 1, 3))
+        self.assertAlmostEqual(scale, 1.0)
+        np.testing.assert_allclose(
+            processed[0, 0, 0],
+            np.array([11.0, 22.0, 33.0], dtype=np.float32) / 255.0,
+            rtol=1e-6,
+            atol=1e-6,
+        )
+
+    def test_yolo26_merge_outputs_uses_finetune_class_num(self):
+        module = _import_yolo26_module()
+        bbox = np.zeros((1, 4, 8400), dtype=np.float32)
+        scores = np.zeros((1, 15, 8400), dtype=np.float32)
+        scores[0, 14, 3] = 0.91
+        merged = module._yolo26s_merge_outputs(bbox, scores, class_num=15)
+        self.assertEqual(merged.shape, (8400, 19))
+        self.assertAlmostEqual(float(merged[3, 18]), 0.91, places=6)
 
     def test_compute_target_obs_falls_back_to_coco80_when_class_names_missing(self):
         boxes = [[20.0, 30.0, 180.0, 260.0, 0.92, 41.0]]
@@ -61,6 +119,35 @@ class DetectClassVocabularyTest(unittest.TestCase):
         self.assertIsNotNone(obs)
         self.assertEqual(obs["target"], "cup")
         self.assertEqual(obs["bbox"], [20, 30, 180, 260])
+
+    def test_compute_target_obs_matches_finetune_targets_and_rejects_removed_aliases(self):
+        boxes = [
+            [20.0, 30.0, 180.0, 260.0, 0.92, 4.0],
+            [200.0, 40.0, 300.0, 180.0, 0.88, 6.0],
+        ]
+        bottle = compute_target_obs(
+            frame_shape=(640, 640, 3),
+            target="bottle",
+            det_pred=boxes,
+            class_names=FINETUNE_CLASSES,
+        )
+        key = compute_target_obs(
+            frame_shape=(640, 640, 3),
+            target="keys",
+            det_pred=boxes,
+            class_names=FINETUNE_CLASSES,
+        )
+        cup = compute_target_obs(
+            frame_shape=(640, 640, 3),
+            target="cup",
+            det_pred=boxes,
+            class_names=FINETUNE_CLASSES,
+        )
+        self.assertIsNotNone(bottle)
+        self.assertEqual(bottle["matched_cls"], "bottle")
+        self.assertIsNotNone(key)
+        self.assertEqual(key["matched_cls"], "key")
+        self.assertIsNone(cup)
 
     def test_compute_target_obs_matches_target_not_top1_box(self):
         boxes = [

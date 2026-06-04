@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ..config.data import ASR_VOCAB_MAP, COCO80_CLASSES, normalize_class_name, normalize_class_names
+from ..config.data import ASR_VOCAB_MAP, COCO80_CLASSES, normalize_class_name, normalize_class_names, normalize_vocab_map
 
 
 def _center_priority(x1, y1, x2, y2, w, h):

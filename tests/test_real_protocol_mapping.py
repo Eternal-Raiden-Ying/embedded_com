@@ -97,7 +97,7 @@ class RealProtocolMappingTest(unittest.TestCase):
         expected_intent: str,
         expected_target: str = "",
     ) -> None:
-        parsed = TaskCmd.from_dict(payload, set(service.cfg.backend.default_robot_id and {"apple", "banana", "bottle", "cup"}))
+        parsed = TaskCmd.from_dict(payload, set(service.cfg.backend.default_robot_id and {"apple", "banana", "bottle", "orange"}))
         self.assertEqual(parsed.intent, expected_intent)
         if expected_target:
             self.assertEqual(parsed.target, expected_target)
@@ -143,7 +143,7 @@ class RealProtocolMappingTest(unittest.TestCase):
         service = self._make_service()
         published = self._capture_status(service)
         gateway_ack = self._capture_gateway_ack(service)
-        service._handle_command_payload({"cmd": "fetch_object", "target": "orange", "session_id": "sess_4", "ts": time.time()})
+        service._handle_command_payload({"cmd": "fetch_object", "target": "cup", "session_id": "sess_4", "ts": time.time()})
         self.assertEqual(service.backend.payloads, [])
         self.assertEqual(published[-1]["state"], "error")
         self.assertEqual(gateway_ack[-1]["accepted"], False)

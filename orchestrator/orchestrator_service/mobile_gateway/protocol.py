@@ -21,7 +21,25 @@ SUPPORTED_COMMANDS: Set[str] = {
     "query_status",
 }
 
-SUPPORTED_TARGETS: Set[str] = {"apple", "banana", "bottle", "cup"}
+SUPPORTED_TARGETS: Set[str] = {
+    "apple",
+    "banana",
+    "basket",
+    "bottle",
+    "grape",
+    "key",
+    "keys",
+    "kiwi",
+    "kiwi fruit",
+    "lemon",
+    "mango",
+    "mouse",
+    "orange",
+    "peach",
+    "star fruit",
+    "starfruit",
+    "strawberry",
+}
 
 ERROR_CODES: Dict[str, int] = {
     "invalid_json": 1001,

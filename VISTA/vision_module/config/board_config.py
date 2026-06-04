@@ -8,7 +8,7 @@ from typing import Any, Dict
 from pathlib import Path
 
 from .schema import VisionServiceConfig, SingleModelConfig
-from .data import coco80, grasping_coco20
+from .data import coco80, finetune_yolo26s_bgr15, grasping_coco20
 
 _HERE = Path(__file__).resolve()
 _DEFAULT_PROJECT_ROOT = str(_HERE.parents[2])
@@ -375,16 +375,15 @@ CONFIG.model.profiles["yolo26s_detect"] = SingleModelConfig(
         Path(_DEFAULT_MODEL_ROOT)
         / "yolo26s"
         / "models"
-        / "QCS6490"
-        / "W8A8"
-        / "cutoff_yolo26s_qcs6490_w8a8.qnn236.ctx.bin"
+        / "finetune"
+        / "yolo26s-cutoff-bgr_qcs6490_w8a8.qnn236.ctx.bin"
     ),
     width=640,
     height=640,
     conf_thres=0.25,
     iou_thres=0.45,
-    class_num=80,
-    classes=coco80,
+    class_num=15,
+    classes=finetune_yolo26s_bgr15,
     predictor_type="detect26",
     model_backend="qnn",
 )

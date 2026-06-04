@@ -91,12 +91,12 @@ model:
       model_backend: qnn
 
     yolo26s_detect:
-      target_model: null
+      target_model: VISTA/vision_module/model/yolo26s/models/finetune/yolo26s-cutoff-bgr_qcs6490_w8a8.qnn236.ctx.bin
       width: 640
       height: 640
       conf_thres: 0.25
       iou_thres: 0.45
-      class_num: 80
+      class_num: 15
       predictor_type: detect26
       model_backend: qnn
 

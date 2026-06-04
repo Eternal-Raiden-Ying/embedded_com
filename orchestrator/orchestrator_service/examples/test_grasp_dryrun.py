@@ -74,7 +74,7 @@ def make_grasp_obs(
         "perception": {
             "target_obs": {
                 "found": True,
-                "target": "cup",
+                "target": "bottle",
                 "confidence": 0.88,
             }
         },
@@ -153,7 +153,7 @@ def main():
         # Jump to FREEZE_BASE (simulating completed search pipeline)
         print("--- Step 1: Setup context + jump to FREEZE_BASE ---")
         ctx.task_intent = "FIND"
-        ctx.active_target = "cup"
+        ctx.active_target = "bottle"
         ctx.active_session_id = "grasp_test"
         ctx.active_epoch = 1
         core._transition(State.FREEZE_BASE, "test: simulate search complete")
@@ -212,7 +212,7 @@ def main():
         # --- Reposition test ---
         print("\n--- Step 6: Reposition test ---")
         ctx.task_intent = "FIND"
-        ctx.active_target = "cup"
+        ctx.active_target = "bottle"
         ctx.active_session_id = "grasp_repo_test"
         ctx.active_epoch = 2
         core._transition(State.FREEZE_BASE, "test: reposition flow")
