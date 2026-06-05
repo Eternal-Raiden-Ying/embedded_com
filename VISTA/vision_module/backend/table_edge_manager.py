@@ -63,10 +63,16 @@ class TableEdgeManager:
         self._max_yaw_abs_rad = 0.75
         self._enable_yolo_in_plane_only = False
         self._yolo_table_min_conf = 0.25
+        self._fast_candidate_point_cap = 1800
+        self._fast_front_edge_col_step = 2
+        self._fast_front_edge_row_step = 2
         # debug knobs — read from global config, not per-mode
         table_edge_cfg = getattr(self.cfg, "table_edge", None)
         self._profile_log_interval_s = float(getattr(table_edge_cfg, "profile_log_interval_s", 2.0) or 2.0)
         self._save_debug_frames = bool(getattr(table_edge_cfg, "save_debug_frames", False))
+        self._fast_candidate_point_cap = max(0, int(getattr(table_edge_cfg, "fast_candidate_point_cap", self._fast_candidate_point_cap) or 0))
+        self._fast_front_edge_col_step = max(1, int(getattr(table_edge_cfg, "fast_front_edge_col_step", self._fast_front_edge_col_step) or 1))
+        self._fast_front_edge_row_step = max(1, int(getattr(table_edge_cfg, "fast_front_edge_row_step", self._fast_front_edge_row_step) or 1))
         self._last_camera_generation = 0
         self._last_camera_seq = 0
         self._last_camera_frame_capture_ts = 0.0
@@ -266,6 +272,12 @@ class TableEdgeManager:
             self._enable_yolo_in_plane_only = bool(payload.get("enable_yolo_in_plane_only"))
         if "yolo_table_min_conf" in payload:
             self._yolo_table_min_conf = float(payload.get("yolo_table_min_conf"))
+        if "fast_candidate_point_cap" in payload:
+            self._fast_candidate_point_cap = max(0, int(payload.get("fast_candidate_point_cap") or 0))
+        if "fast_front_edge_col_step" in payload:
+            self._fast_front_edge_col_step = max(1, int(payload.get("fast_front_edge_col_step") or 1))
+        if "fast_front_edge_row_step" in payload:
+            self._fast_front_edge_row_step = max(1, int(payload.get("fast_front_edge_row_step") or 1))
 
     @staticmethod
     def _pick_frame_capture_ts(frame_slot: Dict[str, Any], frames: Dict[str, Any]) -> float:
@@ -822,6 +834,8 @@ class TableEdgeManager:
             "fast_edge_line_yaw_rad": edge_cue.get("yaw") if int(edge_cue.get("inlier_count", 0) or 0) > 0 else None,
             "fast_edge_line_dist_m": edge_cue.get("dist") if int(edge_cue.get("inlier_count", 0) or 0) > 0 else None,
             "fast_edge_support_score": float(edge_cue.get("score", 0.0) or 0.0),
+            "fast_edge_col_step": int(edge_cue.get("col_step", self._fast_front_edge_col_step) or self._fast_front_edge_col_step),
+            "fast_edge_row_step": int(edge_cue.get("row_step", self._fast_front_edge_row_step) or self._fast_front_edge_row_step),
             "fast_edge_pixel_count": int(min(len(edge_draw_px), max(0, int(debug_cap)))) if debug_pixels_enabled else 0,
         }
         out.update(self._pixel_payload(
@@ -1099,7 +1113,9 @@ class TableEdgeManager:
         if h < 7 or w < 4:
             return {"count": 0, "inlier_count": 0, "score": 0.0}
         candidates = []
-        for col in range(0, w, 1):
+        col_step = max(1, int(self._fast_front_edge_col_step or 1))
+        row_step = max(1, int(self._fast_front_edge_row_step or 1))
+        for col in range(0, w, col_step):
             prof = arr[:, col]
             valid = np.isfinite(prof) & (prof > float(z_min)) & (prof < float(z_max))
             if int(valid.sum()) < 7:
@@ -1111,7 +1127,7 @@ class TableEdgeManager:
             filled[~valid] = np.interp(np.flatnonzero(~valid), finite_idx, prof[finite_idx]).astype(np.float32) if int((~valid).sum()) else filled[~valid]
             smooth = np.convolve(filled, np.asarray([0.25, 0.50, 0.25], dtype=np.float32), mode="same")
             best = None
-            for row in range(3, h - 3):
+            for row in range(3, h - 3, row_step):
                 if not bool(valid[row]):
                     continue
                 if not (smooth[row] < smooth[row - 1] and smooth[row] <= smooth[row + 1]):
@@ -1206,6 +1222,8 @@ class TableEdgeManager:
             "px": px.astype(np.int32, copy=False),
             "py": py.astype(np.int32, copy=False),
             "inlier": inlier.astype(bool, copy=False),
+            "col_step": int(col_step),
+            "row_step": int(row_step),
         }
 
     @staticmethod
@@ -2166,6 +2184,19 @@ class TableEdgeManager:
         height_z = z_robot[height_mask]
         height_px = (x0 + xx[height_mask].astype(np.int32) * int(stride)).astype(np.int32)
         height_py = (y0 + yy[height_mask].astype(np.int32) * int(stride)).astype(np.int32)
+        raw_candidate_count = int(candidate_count)
+        candidate_cap = max(0, int(self._fast_candidate_point_cap or 0))
+        if candidate_cap > 0 and candidate_count > candidate_cap:
+            cap_idx = np.linspace(0, candidate_count - 1, candidate_cap).astype(np.int32)
+            height_x = height_x[cap_idx]
+            height_y = height_y[cap_idx]
+            height_z = height_z[cap_idx]
+            height_px = height_px[cap_idx]
+            height_py = height_py[cap_idx]
+            candidate_count = int(candidate_cap)
+        profile["fast_candidate_raw_count"] = int(raw_candidate_count)
+        profile["fast_candidate_fit_count"] = int(candidate_count)
+        profile["fast_candidate_point_cap"] = int(candidate_cap)
         candidate_z_pct = self._finite_percentiles(height_z)
         candidate_x_span = float(np.max(height_x) - np.min(height_x)) if len(height_x) > 1 else 0.0
         profile["fast_height_filter_ms"] = self._ms_since(height_filter_start)
@@ -2219,8 +2250,10 @@ class TableEdgeManager:
                 "candidate_robot_z_p50": candidate_z_pct.get("p50"),
                 "candidate_robot_z_max": float(np.max(height_z)) if len(height_z) else None,
                 "fast_raw_sampled_point_count": sampled_count,
-                "fast_raw_candidate_count": candidate_count,
+                "fast_raw_candidate_count": raw_candidate_count,
                 "fast_candidate_point_count": candidate_count,
+                "fast_candidate_point_cap": int(candidate_cap),
+                "fast_candidate_downsampled": bool(raw_candidate_count > candidate_count),
                 "fast_candidate_x_span_m": candidate_x_span,
                 "fast_score_area": float(candidate_count) / float(max(1, sampled_count)),
                 "fast_score_coverage": float(candidate_count) / float(max(1, sampled_count)),
@@ -2383,7 +2416,9 @@ class TableEdgeManager:
                     "fast_selected_dist_source": "edge",
                     "fast_raw_confidence": float(edge_conf),
                     "fast_raw_inlier_count": int(edge_cue.get("inlier_count", 0) or 0),
-                    "fast_raw_candidate_count": int(candidate_count),
+                    "fast_raw_candidate_count": int(raw_candidate_count),
+                    "fast_candidate_point_cap": int(candidate_cap),
+                    "fast_candidate_downsampled": bool(raw_candidate_count > candidate_count),
                     "fast_raw_sampled_point_count": int(sampled_count),
                     "fast_raw_reject_reason": "front_line_weak",
                     "fast_gate_reject_reason": "front_line_weak",
@@ -2458,8 +2493,10 @@ class TableEdgeManager:
                 "fast_ground_like_count": ground_like_count,
                 "fast_table_height_like_count": table_height_like_count,
                 "fast_raw_sampled_point_count": sampled_count,
-                "fast_raw_candidate_count": candidate_count,
+                "fast_raw_candidate_count": raw_candidate_count,
                 "fast_candidate_point_count": candidate_count,
+                "fast_candidate_point_cap": int(candidate_cap),
+                "fast_candidate_downsampled": bool(raw_candidate_count > candidate_count),
                 "fast_support_point_count": support_total,
                 "fast_rep_count": rep_count,
                 "fast_rep_inlier_count": 0,
@@ -2555,8 +2592,10 @@ class TableEdgeManager:
                 "fast_camera_height_m": camera_height_m,
                 "fast_table_height_m": table_height_m,
                 "fast_raw_sampled_point_count": sampled_count,
-                "fast_raw_candidate_count": candidate_count,
+                "fast_raw_candidate_count": raw_candidate_count,
                 "fast_candidate_point_count": candidate_count,
+                "fast_candidate_point_cap": int(candidate_cap),
+                "fast_candidate_downsampled": bool(raw_candidate_count > candidate_count),
                 "fast_support_point_count": 0,
                 "fast_rep_count": rep_count,
                 "fast_rep_inlier_count": 0,
@@ -3065,7 +3104,9 @@ class TableEdgeManager:
             "fast_prev_dist_used": prev_dist_used,
             "fast_raw_confidence": float(confidence),
             "fast_raw_inlier_count": int(support_inlier_count),
-            "fast_raw_candidate_count": int(candidate_count),
+            "fast_raw_candidate_count": int(raw_candidate_count),
+            "fast_candidate_point_cap": int(candidate_cap),
+            "fast_candidate_downsampled": bool(raw_candidate_count > candidate_count),
             "fast_raw_sampled_point_count": int(sampled_count),
             "fast_raw_reject_reason": reject_reason or "none",
             "fast_gate_reject_reason": reject_reason or "none",

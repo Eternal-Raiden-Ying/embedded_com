@@ -156,6 +156,9 @@ class TableEdgeConfig:
     fast_debug_pixels_online: bool = False
     fast_debug_pixels_offline: bool = True
     fast_debug_pixel_cap: int = 300
+    fast_candidate_point_cap: int = 1800
+    fast_front_edge_col_step: int = 2
+    fast_front_edge_row_step: int = 2
 
 
 @dataclass

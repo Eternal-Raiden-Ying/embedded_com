@@ -216,6 +216,9 @@ def _apply_vision_params(data: Dict[str, Any]) -> None:
             "fast_debug_pixels_online",
             "fast_debug_pixels_offline",
             "fast_debug_pixel_cap",
+            "fast_candidate_point_cap",
+            "fast_front_edge_col_step",
+            "fast_front_edge_row_step",
         ),
     )
     if getattr(CONFIG.table_edge, "roi_preset", ""):

@@ -91,7 +91,7 @@ model:
       model_backend: qnn
 
     yolo26s_detect:
-      target_model: VISTA/vision_module/model/yolo26s/models/finetune/yolo26s-cutoff-bgr_qcs6490_w8a8.qnn236.ctx.bin
+      target_model: null
       width: 640
       height: 640
       conf_thres: 0.25
@@ -140,6 +140,9 @@ table_edge:
   # 调试开关（全局，不随 mode 切换）
   profile_log_interval_s: 2.0
   save_debug_frames: false
+  fast_candidate_point_cap: 1800
+  fast_front_edge_col_step: 2
+  fast_front_edge_row_step: 2
 
 preview:
   # 可选 layout 见 preview/manager 和 opencv_sink 支持项。
