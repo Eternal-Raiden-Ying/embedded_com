@@ -6,6 +6,7 @@ import os
 import sys
 import time
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -74,6 +75,7 @@ class DetectClassVocabularyTest(unittest.TestCase):
             "VISTA/vision_module/model/yolo26s/models/finetune/"
             "yolo26s-cutoff-bgr_qcs6490_w8a8.qnn236.ctx.bin"
         ))
+        self.assertTrue(Path(profile.target_model).is_file())
 
     def test_detect_preprocess_preserves_bgr_channel_order(self):
         bgr = np.array([[[11, 22, 33]]], dtype=np.uint8)
@@ -89,15 +91,270 @@ class DetectClassVocabularyTest(unittest.TestCase):
     def test_yolo26_preprocess_preserves_bgr_channel_order(self):
         module = _import_yolo26_module()
         bgr = np.array([[[11, 22, 33]]], dtype=np.uint8)
-        processed, scale = module._yolo26s_preprocess(bgr, input_size=1)
+        processed, meta = module._yolo26s_preprocess(bgr, input_size=1)
         self.assertEqual(processed.shape, (1, 1, 1, 3))
-        self.assertAlmostEqual(scale, 1.0)
+        self.assertAlmostEqual(meta["scale"], 1.0)
+        self.assertEqual(meta["draw_space"], "crop")
         np.testing.assert_allclose(
             processed[0, 0, 0],
             np.array([11.0, 22.0, 33.0], dtype=np.float32) / 255.0,
             rtol=1e-6,
             atol=1e-6,
         )
+
+    def test_yolo26_bbox_map_normalized_cxcywh(self):
+        module = _import_yolo26_module()
+        meta = {
+            "crop_w": 640,
+            "crop_h": 640,
+            "model_w": 640,
+            "model_h": 640,
+            "resize_scale": 1.0,
+            "pad_x": 0.0,
+            "pad_y": 0.0,
+            "draw_space": "crop",
+        }
+        mapped = module.map_bbox_from_model_to_image(
+            [0.5, 0.5, 0.5, 0.5],
+            model_input_shape=(640, 640),
+            preprocess_meta=meta,
+            draw_image_shape=(640, 640, 3),
+            output_format="cxcywh",
+            normalized=True,
+        )
+        np.testing.assert_allclose(mapped, np.array([160, 160, 480, 480], dtype=np.float32), atol=1e-5)
+
+    def test_yolo26_bbox_map_normalized_crop_basis_non_square_640x480(self):
+        module = _import_yolo26_module()
+        meta = {
+            "crop_w": 640,
+            "crop_h": 480,
+            "model_w": 640,
+            "model_h": 640,
+            "resize_scale": 1.0,
+            "pad_x": 0.0,
+            "pad_y": 0.0,
+            "draw_space": "crop",
+        }
+        mapped = module.map_bbox_from_model_to_image(
+            [0.5, 0.5, 0.5, 0.5],
+            model_input_shape=(640, 640),
+            preprocess_meta=meta,
+            draw_image_shape=(480, 640, 3),
+            output_format="cxcywh",
+            normalized=True,
+            normalized_basis="crop",
+        )
+        np.testing.assert_allclose(mapped, np.array([160, 120, 480, 360], dtype=np.float32), atol=1e-5)
+
+    def test_yolo26_bbox_map_normalized_crop_basis_non_square_640x360(self):
+        module = _import_yolo26_module()
+        meta = {
+            "crop_w": 640,
+            "crop_h": 360,
+            "model_w": 640,
+            "model_h": 640,
+            "resize_scale": 1.0,
+            "pad_x": 0.0,
+            "pad_y": 0.0,
+            "draw_space": "crop",
+        }
+        mapped = module.map_bbox_from_model_to_image(
+            [0.5, 0.5, 0.5, 0.5],
+            model_input_shape=(640, 640),
+            preprocess_meta=meta,
+            draw_image_shape=(360, 640, 3),
+            output_format="cxcywh",
+            normalized=True,
+            normalized_basis="crop",
+        )
+        np.testing.assert_allclose(mapped, np.array([160, 90, 480, 270], dtype=np.float32), atol=1e-5)
+
+    def test_yolo26_bbox_map_removes_letterbox_padding(self):
+        module = _import_yolo26_module()
+        meta = {
+            "crop_w": 640,
+            "crop_h": 480,
+            "model_w": 640,
+            "model_h": 640,
+            "resize_scale": 1.0,
+            "pad_x": 0.0,
+            "pad_y": 80.0,
+            "draw_space": "crop",
+        }
+        mapped = module.map_bbox_from_model_to_image(
+            [0.5, 0.5, 0.5, 0.5],
+            model_input_shape=(640, 640),
+            preprocess_meta=meta,
+            draw_image_shape=(480, 640, 3),
+            output_format="cxcywh",
+            normalized=True,
+        )
+        np.testing.assert_allclose(mapped, np.array([160, 80, 480, 400], dtype=np.float32), atol=1e-5)
+
+    def test_yolo26_bbox_map_crop_offset_only_for_full_frame(self):
+        module = _import_yolo26_module()
+        meta = {
+            "crop_x0": 100,
+            "crop_y0": 50,
+            "crop_w": 320,
+            "crop_h": 240,
+            "full_w": 800,
+            "full_h": 600,
+            "model_w": 640,
+            "model_h": 640,
+            "resize_scale": 2.0,
+            "pad_x": 0.0,
+            "pad_y": 0.0,
+        }
+        crop = module.map_bbox_from_model_to_image(
+            [160, 160, 480, 480],
+            model_input_shape=(640, 640),
+            preprocess_meta={**meta, "draw_space": "crop"},
+            draw_image_shape=(240, 320, 3),
+            output_format="xyxy",
+            normalized=False,
+            draw_space="crop",
+        )
+        full = module.map_bbox_from_model_to_image(
+            [160, 160, 480, 480],
+            model_input_shape=(640, 640),
+            preprocess_meta={**meta, "draw_space": "full_frame"},
+            draw_image_shape=(600, 800, 3),
+            output_format="xyxy",
+            normalized=False,
+            draw_space="full_frame",
+        )
+        np.testing.assert_allclose(crop, np.array([80, 80, 240, 240], dtype=np.float32), atol=1e-5)
+        np.testing.assert_allclose(full, np.array([180, 130, 340, 290], dtype=np.float32), atol=1e-5)
+
+    def test_yolo26_bbox_map_distinguishes_xyxy_and_cxcywh(self):
+        module = _import_yolo26_module()
+        meta = {
+            "crop_w": 640,
+            "crop_h": 640,
+            "model_w": 640,
+            "model_h": 640,
+            "resize_scale": 1.0,
+            "pad_x": 0.0,
+            "pad_y": 0.0,
+            "draw_space": "crop",
+        }
+        xyxy = module.map_bbox_from_model_to_image(
+            [160, 160, 480, 480],
+            model_input_shape=(640, 640),
+            preprocess_meta=meta,
+            draw_image_shape=(640, 640, 3),
+            output_format="xyxy",
+            normalized=False,
+        )
+        cxcywh = module.map_bbox_from_model_to_image(
+            [320, 320, 320, 320],
+            model_input_shape=(640, 640),
+            preprocess_meta=meta,
+            draw_image_shape=(640, 640, 3),
+            output_format="cxcywh",
+            normalized=False,
+        )
+        np.testing.assert_allclose(xyxy, cxcywh, atol=1e-5)
+
+    def test_yolo26_decode_modes_for_same_raw_bbox(self):
+        module = _import_yolo26_module()
+        meta = {
+            "crop_w": 640,
+            "crop_h": 480,
+            "model_w": 640,
+            "model_h": 640,
+            "resize_scale": 1.0,
+            "resize_scale_x": 1.0,
+            "resize_scale_y": 1.0,
+            "pad_x": 0.0,
+            "pad_y": 0.0,
+            "draw_space": "crop",
+        }
+        raw = [0.5, 0.5, 0.5, 0.5]
+        crop = module.decode_bbox_with_mode(raw, "cxcywh_norm_crop", (640, 640), meta, (480, 640, 3))
+        model = module.decode_bbox_with_mode(raw, "cxcywh_norm_model_square", (640, 640), meta, (480, 640, 3))
+        xyxy = module.decode_bbox_with_mode(raw, "xyxy_norm_crop", (640, 640), meta, (480, 640, 3))
+        xywh = module.decode_bbox_with_mode(raw, "xywh_norm_crop", (640, 640), meta, (480, 640, 3))
+        np.testing.assert_allclose(crop, np.array([160, 120, 480, 360], dtype=np.float32), atol=1e-5)
+        np.testing.assert_allclose(model, np.array([160, 160, 480, 480], dtype=np.float32), atol=1e-5)
+        np.testing.assert_allclose(xyxy, np.array([320, 240, 320, 240], dtype=np.float32), atol=1e-5)
+        np.testing.assert_allclose(xywh, np.array([320, 240, 640, 480], dtype=np.float32), atol=1e-5)
+
+    def test_yolo26_direct_resize_preprocess_inverse(self):
+        module = _import_yolo26_module()
+        image = np.zeros((480, 640, 3), dtype=np.uint8)
+        processed, meta = module._yolo26s_preprocess(image, input_size=640, preprocess_mode="direct_resize")
+        self.assertEqual(processed.shape, (1, 640, 640, 3))
+        self.assertEqual(meta["preprocess_mode"], "direct_resize")
+        self.assertAlmostEqual(meta["resize_scale_x"], 1.0)
+        self.assertAlmostEqual(meta["resize_scale_y"], 640.0 / 480.0)
+        mapped = module.decode_bbox_with_mode(
+            [160, 160, 480, 480],
+            "xyxy_pixel_model_square",
+            (640, 640),
+            meta,
+            (480, 640, 3),
+        )
+        np.testing.assert_allclose(mapped, np.array([160, 120, 480, 360], dtype=np.float32), atol=1e-5)
+
+    def test_yolo26_square_fill_top_left_preprocess_inverse(self):
+        module = _import_yolo26_module()
+        image = np.zeros((480, 640, 3), dtype=np.uint8)
+        processed, meta = module._yolo26s_preprocess(image, input_size=640, preprocess_mode="square_fill_top_left")
+        self.assertEqual(processed.shape, (1, 640, 640, 3))
+        self.assertEqual(meta["preprocess_mode"], "square_fill_top_left")
+        self.assertAlmostEqual(meta["resize_scale_x"], 1.0)
+        self.assertAlmostEqual(meta["resize_scale_y"], 1.0)
+        mapped = module.decode_bbox_with_mode(
+            [160, 160, 480, 480],
+            "xyxy_pixel_model_square",
+            (640, 640),
+            meta,
+            (480, 640, 3),
+        )
+        np.testing.assert_allclose(mapped, np.array([160, 160, 480, 480], dtype=np.float32), atol=1e-5)
+
+    def test_yolo26_unclipped_and_clipped_bbox_are_separate(self):
+        module = _import_yolo26_module()
+        meta = {
+            "crop_w": 640,
+            "crop_h": 480,
+            "model_w": 640,
+            "model_h": 640,
+            "resize_scale": 1.0,
+            "resize_scale_x": 1.0,
+            "resize_scale_y": 1.0,
+            "pad_x": 0.0,
+            "pad_y": 0.0,
+            "draw_space": "crop",
+        }
+        unclipped = module.decode_bbox_with_mode(
+            [-100, -50, 800, 700],
+            "xyxy_pixel_model_square",
+            (640, 640),
+            meta,
+            (480, 640, 3),
+            clip=False,
+        )
+        clipped = module.decode_bbox_with_mode(
+            [-100, -50, 800, 700],
+            "xyxy_pixel_model_square",
+            (640, 640),
+            meta,
+            (480, 640, 3),
+            clip=True,
+        )
+        np.testing.assert_allclose(unclipped, np.array([-100, -50, 800, 700], dtype=np.float32), atol=1e-5)
+        np.testing.assert_allclose(clipped, np.array([0, 0, 640, 480], dtype=np.float32), atol=1e-5)
+
+    def test_yolo26_clip_ratio_detects_out_of_frame_bbox(self):
+        module = _import_yolo26_module()
+        unclipped = np.array([-100, -50, 800, 700], dtype=np.float32)
+        clipped = np.array([0, 0, 640, 480], dtype=np.float32)
+        self.assertGreater(module._clip_ratio(unclipped, clipped, (480, 640, 3)), 0.0)
+        self.assertEqual(module._clip_ratio(clipped, clipped, (480, 640, 3)), 0.0)
 
     def test_yolo26_merge_outputs_uses_finetune_class_num(self):
         module = _import_yolo26_module()
@@ -351,6 +608,11 @@ class PredictorManagerContractTest(unittest.TestCase):
             self.assertIsInstance(payload["infer_boxes"][0], list)
             self.assertEqual(int(payload["infer_boxes"][0][5]), 1)
             self.assertIsInstance(payload["infer_masks"], list)
+            self.assertTrue(payload["yolo_has_infer"])
+            self.assertIsInstance(payload["yolo_infer_ms"], float)
+            self.assertGreaterEqual(payload["yolo_infer_ms"], 0.0)
+            self.assertIsInstance(payload["yolo_roi_ms"], float)
+            self.assertGreaterEqual(payload["yolo_roi_ms"], 0.0)
         finally:
             manager_module.QNN_YOLO_Detect_Predictor = original_cls
             manager.release_all()
