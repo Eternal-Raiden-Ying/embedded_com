@@ -863,8 +863,6 @@ class OpenCVPreviewSink(PreviewSink):
             return
         worker_error = str(table_edge.get("table_edge_worker_error") or table_edge.get("worker_error") or "").strip()
         roi = self._parse_roi(table_edge.get("edge_roi") or table_edge.get("table_edge_roi") or table_edge.get("depth_edge_roi"))
-        if roi is not None:
-            self._draw_roi(panel, roi, scale, offset, "edge_roi", YELLOW, dashed=True)
         if worker_error:
             self._corner_note(panel, f"worker_error={worker_error[:48]}", fg=(60, 120, 255))
             return
