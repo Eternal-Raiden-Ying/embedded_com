@@ -343,13 +343,20 @@ class PredictorManager:
             boxes: Any = []
             masks: Any = []
             has_infer = bool(self.inference_enabled and rgb is not None and self.is_ready())
+            infer_start = None
+            infer_ms = None
             if has_infer:
+                infer_start = time.perf_counter()
                 boxes, masks = self.predict_frame(rgb)
+                infer_ms = max(0.0, (time.perf_counter() - infer_start) * 1000.0)
 
             payload = self._build_local_perception_payload(rgb_shape, boxes, masks, has_infer)
             payload["obs_ts"] = time.time()
             payload["frame_seq"] = int(seq)
             payload["age_ms"] = 0.0
+            payload["yolo_infer_ms"] = infer_ms
+            payload["yolo_has_infer"] = bool(has_infer)
+            payload["yolo_frame_seq"] = int(seq)
             contract_error = str(payload.get("contract_error") or "")
             if contract_error:
                 self.log.warning(
@@ -360,6 +367,7 @@ class PredictorManager:
                 )
 
             boxes_list = list(payload.get("infer_boxes") or [])
+            roi_start = time.perf_counter()
             roi_input = {"infer_boxes": boxes_list, "rgb_shape": rgb_shape}
             model_cfg = getattr(self.cfg, "model", None)
             yolo26_enabled = bool(getattr(model_cfg, "enable_yolo26", False))
@@ -380,6 +388,7 @@ class PredictorManager:
                     table_bbox = find_table_bbox(roi_input)
                     table_source = "mock_table_bbox"
             roi_meta = build_table_roi(roi_input, rgb_shape, None)
+            payload["yolo_roi_ms"] = max(0.0, (time.perf_counter() - roi_start) * 1000.0)
             table_bbox_payload = roi_meta.get("table_bbox")
             self._log_local_summary(
                 boxes_list=boxes_list,

@@ -143,6 +143,7 @@ class VistaApp(BaseModule):
         self._last_periodic_log_ts: Dict[str, float] = {}
         self._system_metrics = SystemMetricsSampler("vision", interval_s=float(os.getenv("VISION_SYSTEM_METRICS_INTERVAL_S", "1.0") or 1.0))
         self._last_preview_timing_log_ts = 0.0
+        self._last_main_loop_ms = 0.0
         self._warn_deprecated_env()
 
     def _warn_deprecated_env(self):
@@ -159,6 +160,7 @@ class VistaApp(BaseModule):
         return self.stage_controller.context()
 
     def _config_dump(self):
+        min_send_interval_ms = self._send_interval_s() * 1000.0
         return {
             "stack_run_id": self.run_logger.stack_run_id,
             "project_root": CONFIG.runtime.project_root,
@@ -170,6 +172,7 @@ class VistaApp(BaseModule):
             "loop_hz": CONFIG.runtime.loop_hz,
             "send_hz": CONFIG.runtime.send_hz,
             "track_local_send_hz": CONFIG.runtime.track_local_send_hz,
+            "min_send_interval_ms": min_send_interval_ms,
             "camera_max_fps": CONFIG.camera.max_fps,
             "camera_stream_fps": {
                 name: getattr(stream, "fps", None)
@@ -327,6 +330,18 @@ class VistaApp(BaseModule):
         except (TypeError, ValueError):
             return None
 
+    def _perf_interval_s(self) -> float:
+        try:
+            return max(0.2, float(os.getenv("VISION_PERF_TIMING_INTERVAL_S", "1.0") or 1.0))
+        except Exception:
+            return 1.0
+
+    def _perf_slow_threshold_ms(self) -> float:
+        try:
+            return max(0.0, float(os.getenv("VISION_PERF_TIMING_SLOW_MS", "180.0") or 180.0))
+        except Exception:
+            return 180.0
+
     def _console_allows_event(self, event_name: str, level: str = "info", data=None) -> bool:
         if self.operator_console.mode == "silent":
             return False
@@ -428,6 +443,7 @@ class VistaApp(BaseModule):
 
     def _send_obs(self, out_payload):
         now = time.time()
+        min_send_interval_ms = self._send_interval_s() * 1000.0
         send_interval_ms = (
             max(0.0, (now - float(self._last_obs_out_send_ts)) * 1000.0)
             if float(self._last_obs_out_send_ts or 0.0) > 0.0
@@ -444,6 +460,7 @@ class VistaApp(BaseModule):
             edge_obs["obs_out_skip_reason"] = str(self._obs_out_skip_reason or "")
             edge_obs["send_hz_config"] = float(CONFIG.runtime.send_hz)
             edge_obs["track_local_send_hz_config"] = float(CONFIG.runtime.track_local_send_hz)
+            edge_obs["min_send_interval_ms"] = float(min_send_interval_ms)
         queued = self.obs_sender.send(out_payload)
         if not queued:
             self._obs_out_drop_or_skip_count += 1
@@ -542,6 +559,7 @@ class VistaApp(BaseModule):
     def _record_rate_sample(self, out_payload: Dict[str, Any], sent_ts: float) -> None:
         if str(out_payload.get("type") or "") != "vision_obs":
             return
+        self._record_perf_timing(out_payload, sent_ts)
         if str(out_payload.get("mode") or "").strip().upper() != "FIND_OBJECT":
             return
         perception = out_payload.get("perception")
@@ -680,6 +698,100 @@ class VistaApp(BaseModule):
             except Exception:
                 pass
 
+    def _record_perf_timing(self, out_payload: Dict[str, Any], sent_ts: float) -> None:
+        now = time.time()
+        perception = out_payload.get("perception") if isinstance(out_payload, dict) else None
+        edge_obs = perception.get("table_edge_obs") if isinstance(perception, dict) else None
+        local = None
+        try:
+            local = self.scheduler.read_result("local_perception", default=None)
+        except Exception:
+            local = None
+        if not isinstance(local, dict):
+            local = perception.get("local_perception") if isinstance(perception, dict) else None
+        if not isinstance(local, dict):
+            local = {}
+        preview_timing = self._preview_timing_snapshot()
+
+        yolo_infer_ms = self._float_or_none(local.get("yolo_infer_ms"))
+        yolo_roi_ms = self._float_or_none(local.get("yolo_roi_ms"))
+        edge_process_ms = self._float_or_none((edge_obs or {}).get("vision_process_ms")) if isinstance(edge_obs, dict) else None
+        obs_total_age_ms = self._float_or_none((edge_obs or {}).get("obs_total_age_ms")) if isinstance(edge_obs, dict) else None
+        edge_profile = (edge_obs or {}).get("edge_profile") if isinstance(edge_obs, dict) else None
+        edge_profile_ms = {}
+        if isinstance(edge_profile, dict):
+            edge_profile_ms = {
+                str(key): self._float_or_none(value)
+                for key, value in edge_profile.items()
+                if str(key).endswith("_ms") and self._float_or_none(value) is not None
+            }
+        obs_enqueue_ms = max(0.0, (now - float(sent_ts)) * 1000.0)
+        preview_total_ms = self._float_or_none(preview_timing.get("preview_total_ms_avg"))
+        main_loop_ms = self._float_or_none(getattr(self, "_last_main_loop_ms", None))
+        edge_frame_seq = (edge_obs or {}).get("camera_frame_seq") if isinstance(edge_obs, dict) else None
+        frame_seq = local.get("frame_seq") or edge_frame_seq
+
+        slow_threshold = self._perf_slow_threshold_ms()
+        slow = any(
+            value is not None and float(value) >= slow_threshold
+            for value in (yolo_infer_ms, edge_process_ms, obs_total_age_ms, main_loop_ms)
+        )
+        if not slow and not self._should_log_periodic("perf_timing", self._perf_interval_s(), now=now):
+            return
+
+        record = {
+            "ts": now,
+            "summary": not slow,
+            "slow": bool(slow),
+            "stage": out_payload.get("stage"),
+            "mode": out_payload.get("mode"),
+            "status": out_payload.get("status"),
+            "req_id": out_payload.get("req_id"),
+            "session_id": out_payload.get("session_id"),
+            "epoch": out_payload.get("epoch"),
+            "frame_seq": frame_seq,
+            "yolo": {
+                "enabled": bool(local.get("yolo_infer_running") or local.get("yolo_has_infer")),
+                "has_infer": bool(local.get("has_infer")),
+                "model_name": local.get("model_name"),
+                "predictor_type": local.get("predictor_type"),
+                "box_count": local.get("box_count"),
+                "infer_ms": yolo_infer_ms,
+                "roi_ms": yolo_roi_ms,
+                "infer_error": local.get("infer_error"),
+            },
+            "table_edge": {
+                "process_ms": edge_process_ms,
+                "latest_frame_lag_ms": (edge_obs or {}).get("latest_frame_lag_ms") if isinstance(edge_obs, dict) else None,
+                "obs_total_age_ms": obs_total_age_ms,
+                "scheduler_read_ms": (edge_obs or {}).get("scheduler_read_ms") if isinstance(edge_obs, dict) else None,
+                "scheduler_publish_ms": (edge_obs or {}).get("scheduler_publish_ms") if isinstance(edge_obs, dict) else None,
+                "detector_mode": (edge_obs or {}).get("detector_mode") if isinstance(edge_obs, dict) else None,
+                "process_path": (edge_obs or {}).get("edge_process_path") if isinstance(edge_obs, dict) else None,
+                "profile_ms": edge_profile_ms,
+            },
+            "ipc": {
+                "obs_enqueue_ms": obs_enqueue_ms,
+                "obs_out_send_interval_ms": (edge_obs or {}).get("obs_out_send_interval_ms") if isinstance(edge_obs, dict) else None,
+                "obs_out_send_hz": (edge_obs or {}).get("obs_out_send_hz") if isinstance(edge_obs, dict) else None,
+                "obs_out_drop_or_skip_count": int(self._obs_out_drop_or_skip_count),
+                "obs_out_skip_reason": str(self._obs_out_skip_reason or ""),
+                "req_in_hz": self._hz_for_samples(getattr(self, "_rate_ipc_rx_ts", ()), now),
+                "obs_out_tx_hz": self._hz_for_samples(getattr(self, "_rate_ipc_tx_ts", ()), now),
+                "obs_out_enqueue_hz": self._hz_for_samples(getattr(self, "_rate_ipc_enqueue_ts", ()), now),
+            },
+            "preview": {
+                "enabled": preview_timing.get("preview_enabled"),
+                "layout": preview_timing.get("preview_layout"),
+                "fps": preview_timing.get("preview_fps"),
+                "total_ms_avg": preview_total_ms,
+                "total_ms_p95": preview_timing.get("preview_total_ms_p95"),
+                "sample_count": preview_timing.get("sample_count"),
+            },
+            "main_loop_ms": main_loop_ms,
+        }
+        self.run_logger.write_jsonl("perf_timing", record)
+
     def _emit_rate_summary_if_needed(self, force: bool = False) -> None:
         if self._safe_mode_text(self._ctx().current_mode) != "FIND_OBJECT":
             return
@@ -738,6 +850,7 @@ class VistaApp(BaseModule):
             "obs_out_skip_reason": str(self._obs_out_skip_reason or ""),
             "send_hz_config": float(CONFIG.runtime.send_hz),
             "track_local_send_hz_config": float(CONFIG.runtime.track_local_send_hz),
+            "min_send_interval_ms": float(self._send_interval_s() * 1000.0),
             "camera_publish_hz_config": float(CONFIG.camera.max_fps),
             "table_edge_update_hz_config": None,  # per-mode
             "table_edge_track_local_update_hz_config": None,  # per-mode
@@ -874,7 +987,7 @@ class VistaApp(BaseModule):
 
     def _send_interval_s(self) -> float:
         send_hz = float(CONFIG.runtime.send_hz)
-        if self._safe_mode_text(self._ctx().current_mode) == "FIND_OBJECT":
+        if self._safe_mode_text(self._ctx().current_mode) in {"FIND_OBJECT", "FIND_EDGE"}:
             send_hz = max(send_hz, float(getattr(CONFIG.runtime, "track_local_send_hz", send_hz) or send_hz))
         return 1.0 / max(0.5, send_hz)
 
@@ -1143,6 +1256,7 @@ class VistaApp(BaseModule):
                 self._emit_heartbeat_if_needed()
                 self._emit_system_metrics_if_needed()
                 dt = time.time() - loop_start
+                self._last_main_loop_ms = max(0.0, dt * 1000.0)
                 if dt < target_frame_time:
                     time.sleep(target_frame_time - dt)
 
