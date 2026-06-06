@@ -10,7 +10,7 @@ class RemoteProfile:
     """Capability requirements for remote inference or grasp cooperation."""
 
     enabled: bool = False
-    base_url: Optional[str] = None
+    base_url: Optional[str] = "192.168.6.43"    # required to be updated
     command: str = "predict"
     require_depth: bool = False
     kind: str = "loop"       # "loop" | "task"

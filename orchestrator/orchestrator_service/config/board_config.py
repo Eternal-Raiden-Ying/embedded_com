@@ -141,6 +141,7 @@ def _apply_stage_params(data: Dict[str, Any]) -> None:
     target_locked = dict(data.get("target_locked") or {})
     table_docking = dict(data.get("table_docking") or {})
     table_motion = dict(data.get("table_docking_motion") or {})
+    yolo_table = dict(data.get("yolo_table") or {})
 
     CONFIG.control.enable_final_lock = bool(table_docking.get("enable_final_lock", CONFIG.control.enable_final_lock))
     CONFIG.control.enable_micro_adjust = bool(table_docking.get("enable_micro_adjust", CONFIG.control.enable_micro_adjust))
@@ -167,6 +168,30 @@ def _apply_stage_params(data: Dict[str, Any]) -> None:
     )
     CONFIG.control.controlled_approach_min_dwell_s = float(
         table_docking.get("controlled_approach_min_dwell_s", CONFIG.control.controlled_approach_min_dwell_s)
+    )
+    CONFIG.control.yolo_table_control_enable = bool(
+        yolo_table.get("yolo_table_control_enable", yolo_table.get("control_enable", CONFIG.control.yolo_table_control_enable))
+    )
+    CONFIG.control.yolo_table_edge_stable_frames = int(
+        yolo_table.get("yolo_table_edge_stable_frames", yolo_table.get("edge_stable_frames", CONFIG.control.yolo_table_edge_stable_frames))
+    )
+    CONFIG.control.yolo_table_near_dist_m = float(
+        yolo_table.get("yolo_table_near_dist_m", yolo_table.get("near_dist_m", CONFIG.control.yolo_table_near_dist_m))
+    )
+    CONFIG.control.yolo_table_blend_start_stable_frames = int(
+        yolo_table.get(
+            "yolo_table_blend_start_stable_frames",
+            yolo_table.get("blend_start_stable_frames", CONFIG.control.yolo_table_blend_start_stable_frames),
+        )
+    )
+    CONFIG.control.yolo_table_blend_yolo_weight = float(
+        yolo_table.get("yolo_table_blend_yolo_weight", yolo_table.get("blend_yolo_weight", CONFIG.control.yolo_table_blend_yolo_weight))
+    )
+    CONFIG.car.yolo_table_yaw_gain = float(
+        yolo_table.get("yolo_table_yaw_gain", yolo_table.get("yaw_gain", CONFIG.car.yolo_table_yaw_gain))
+    )
+    CONFIG.car.yolo_table_max_wz = float(
+        yolo_table.get("yolo_table_max_wz", yolo_table.get("max_wz", CONFIG.car.yolo_table_max_wz))
     )
 
     CONFIG.control.final_lock_yaw_tol_rad = float(final_lock.get("yaw_abs_th", CONFIG.control.final_lock_yaw_tol_rad))

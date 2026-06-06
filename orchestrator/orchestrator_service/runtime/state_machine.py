@@ -1072,6 +1072,8 @@ class OrchestratorCore:
             self.ctx.last_fail_reason = "搜索桌边超时"
             self._transition(State.NEXT_TABLE, self.ctx.last_fail_reason)
             return self.controller.next_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+        if bool(getattr(self.cfg, "yolo_table_control_enable", True)) and self._table_yolo_reliable(obs):
+            return self.controller.yolo_table_search_cmd(obs, turn_sign=self.ctx.relocate_turn_sign)
         return self.controller.search_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
 
     def _tick_coarse_align(self) -> MotionDecision:

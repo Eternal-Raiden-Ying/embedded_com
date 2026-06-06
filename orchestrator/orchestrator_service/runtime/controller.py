@@ -171,6 +171,10 @@ class MotionController:
             **timing,
             "table_confirmed_by_yolo": bool(getattr(obs, "table_confirmed_by_yolo", False)) if obs is not None else False,
             "yolo_reliable": bool(getattr(obs, "yolo_reliable", False)) if obs is not None else False,
+            "yolo_table_conf": (float(getattr(obs, "yolo_table_conf")) if obs is not None and getattr(obs, "yolo_table_conf", None) is not None else None),
+            "roi_source": str(getattr(obs, "roi_source", "") or "") if obs is not None else "",
+            "roi_reason": str(getattr(obs, "roi_reason", "") or "") if obs is not None else "",
+            "yolo_table_edge_stable_count": getattr(obs, "yolo_table_edge_stable_count", None) if obs is not None else None,
             "plane_cx_norm": (float(getattr(obs, "plane_cx_norm")) if obs is not None and getattr(obs, "plane_cx_norm", None) is not None else None),
             "plane_width_norm": (float(getattr(obs, "plane_width_norm")) if obs is not None and getattr(obs, "plane_width_norm", None) is not None else None),
             "plane_touch_left": bool(getattr(obs, "plane_touch_left", False)) if obs is not None else False,
@@ -247,6 +251,39 @@ class MotionController:
         wz = float(self.car_cfg.search_table_wz_norm) * (1.0 if int(turn_sign) >= 0 else -1.0)
         cmd = self._cmd("SEARCH_TABLE", wz=wz)
         return MotionDecision(cmd=cmd, cx_norm_abs=abs(wz), distance_ratio=1.0, control_summary=self._summary("SEARCH_TABLE", cmd, reason="search_table"))
+
+    def yolo_table_search_cmd(self, obs: Optional[TableEdgeObs], turn_sign: int = 1) -> MotionDecision:
+        if not bool(getattr(self.cfg, "yolo_table_control_enable", True)):
+            return self.search_table_cmd(turn_sign=turn_sign)
+        cx = self._clamp(float(getattr(obs, "table_cx_norm", 0.0) or 0.0), -1.0, 1.0)
+        gain = float(getattr(self.car_cfg, "yolo_table_yaw_gain", 0.4) or 0.4)
+        max_wz = abs(float(getattr(self.car_cfg, "yolo_table_max_wz", 0.12) or 0.12))
+        sign = float(getattr(self.car_cfg, "table_view_wz_sign", -1.0))
+        wz_raw = cx * gain * sign
+        wz = self._clamp(wz_raw, -max_wz, max_wz)
+        if abs(wz) < 0.02:
+            wz = 0.0
+        cmd = self._cmd("SEARCH_TABLE", wz=wz)
+        summary = self._summary("SEARCH_TABLE", cmd, obs, reason="yolo_table_far_guide")
+        summary.update(
+            {
+                "control_source": "yolo_only",
+                "approach_source": "yolo_table_bbox",
+                "bbox_cx_norm": float((cx + 1.0) * 0.5),
+                "target_offset": float(cx * 0.5),
+                "table_cx_norm_signed": float(cx),
+                "yolo_yaw_gain": float(gain),
+                "yolo_max_wz": float(max_wz),
+                "yolo_wz_raw": float(wz_raw),
+                "wz_sign_basis": "wz = table_cx_norm_signed * yolo_table_yaw_gain * table_view_wz_sign",
+                "table_view_wz_sign": float(sign),
+                "final_wz": float(wz),
+                "vx_norm": 0.0,
+                "vy_norm": 0.0,
+                "wz_norm": float(wz),
+            }
+        )
+        return MotionDecision(cmd=cmd, cx_norm_abs=abs(cx), distance_ratio=1.0, control_summary=summary)
 
     def next_table_cmd(self, turn_sign: int = 1) -> MotionDecision:
         return self.search_table_cmd(turn_sign=turn_sign)
@@ -646,6 +683,8 @@ class MotionController:
         forward_block_reason = "coarse_align_no_forward"
         coarse_align_reason = "turn_yaw"
         wz = 0.0
+        control_source = "edge_only"
+        yolo_blend_weight = 0.0
         if stale_level != "fresh":
             coarse_align_reason = stale_level
         elif not edge_valid:
@@ -659,6 +698,28 @@ class MotionController:
             wz_radps = self._clamp(max(yaw_abs, wz_min), wz_min, wz_max)
             wz = self._physical_to_norm("wz", sign * wz_radps)
 
+        yolo_control_enabled = bool(getattr(self.cfg, "yolo_table_control_enable", True))
+        stable_count = int(getattr(obs, "yolo_table_edge_stable_count", 0) or 0) if obs is not None else 0
+        blend_start = max(1, int(getattr(self.cfg, "yolo_table_blend_start_stable_frames", 5) or 5))
+        if yolo_control_enabled and self._yolo_reliable(obs) and getattr(obs, "table_cx_norm", None) is not None:
+            yolo_wz = self._clamp(
+                float(obs.table_cx_norm)
+                * float(getattr(self.car_cfg, "yolo_table_yaw_gain", 0.4) or 0.4)
+                * float(getattr(self.car_cfg, "table_view_wz_sign", -1.0)),
+                -abs(float(getattr(self.car_cfg, "yolo_table_max_wz", 0.12) or 0.12)),
+                abs(float(getattr(self.car_cfg, "yolo_table_max_wz", 0.12) or 0.12)),
+            )
+            if edge_valid and stable_count >= blend_start:
+                yolo_blend_weight = self._clamp(float(getattr(self.cfg, "yolo_table_blend_yolo_weight", 0.5) or 0.5), 0.0, 1.0)
+                wz = yolo_blend_weight * yolo_wz + (1.0 - yolo_blend_weight) * wz
+                control_source = "yolo_edge_blend"
+            elif not edge_valid:
+                wz = yolo_wz
+                control_source = "yolo_only"
+                coarse_align_reason = "yolo_table_edge_invalid"
+        elif not edge_valid:
+            control_source = "fallback"
+
         vx, vy, wz, speed_summary = self._apply_table_speed_profile("COARSE_ALIGN", phase or "COARSE_ALIGN", 0.0, 0.0, wz)
         vx = 0.0
         vy = 0.0
@@ -670,7 +731,12 @@ class MotionController:
             {
                 "table_approach_phase": phase or "PLANE_FINAL_LOCK",
                 "phase": phase or "PLANE_FINAL_LOCK",
-                "approach_source": "plane_only",
+                "approach_source": control_source,
+                "control_source": control_source,
+                "yolo_edge_blend_weight": float(yolo_blend_weight),
+                "yolo_table_control_enable": bool(yolo_control_enabled),
+                "yolo_table_edge_stable_count": int(stable_count),
+                "yolo_table_blend_start_stable_frames": int(blend_start),
                 "yaw_err": float(yaw_err),
                 "yaw_err_rad": float(yaw_err),
                 "yaw_abs": float(yaw_abs),
@@ -726,6 +792,15 @@ class MotionController:
         soft_th = abs(float(getattr(self.car_cfg, "table_fov_soft_th", 0.25) or 0.25))
         hard_th = abs(float(getattr(self.car_cfg, "table_fov_hard_th", 0.40) or 0.40))
         control_level = str(getattr(obs, "control_level", "none") or "none").strip().lower() if obs is not None else "none"
+        stable_count = int(getattr(obs, "yolo_table_edge_stable_count", 0) or 0) if obs is not None else 0
+        blend_start = max(1, int(getattr(self.cfg, "yolo_table_blend_start_stable_frames", 5) or 5))
+        yolo_control_enabled = bool(getattr(self.cfg, "yolo_table_control_enable", True))
+        near_measured = False
+        if obs is not None and obs.dist_err_m is not None:
+            try:
+                near_measured = (float(obs.target_dist_m or self.cfg.table_target_dist_m) + float(obs.dist_err_m)) <= float(getattr(self.cfg, "yolo_table_near_dist_m", 0.45) or 0.45)
+            except Exception:
+                near_measured = False
         pose_found = bool(getattr(obs, "pose_found", False)) if obs is not None else False
         plane_touch_left = bool(getattr(obs, "plane_touch_left", False)) if obs is not None else False
         plane_touch_right = bool(getattr(obs, "plane_touch_right", False)) if obs is not None else False
@@ -810,6 +885,27 @@ class MotionController:
                 -abs(float(getattr(self.car_cfg, "table_vy_max_norm", 0.02))),
                 abs(float(getattr(self.car_cfg, "table_vy_max_norm", 0.02))),
             )
+
+        control_source = "edge_only"
+        yolo_blend_weight = 0.0
+        if yolo_control_enabled and view_source == "yolo" and not self._plane_stable(obs):
+            control_source = "yolo_only"
+        elif yolo_control_enabled and view_source in {"yolo", "plane"} and stable_count >= blend_start and not near_measured:
+            control_source = "yolo_edge_blend"
+            yolo_blend_weight = self._clamp(float(getattr(self.cfg, "yolo_table_blend_yolo_weight", 0.5) or 0.5), 0.0, 1.0)
+            if getattr(obs, "table_cx_norm", None) is not None:
+                yolo_wz = self._clamp(
+                    float(obs.table_cx_norm)
+                    * float(getattr(self.car_cfg, "yolo_table_yaw_gain", 0.4) or 0.4)
+                    * float(getattr(self.car_cfg, "table_view_wz_sign", -1.0)),
+                    -abs(float(getattr(self.car_cfg, "yolo_table_max_wz", 0.12) or 0.12)),
+                    abs(float(getattr(self.car_cfg, "yolo_table_max_wz", 0.12) or 0.12)),
+                )
+                wz_from_view = yolo_blend_weight * yolo_wz + (1.0 - yolo_blend_weight) * wz_from_view
+        elif not view_reliable and not self._plane_stable(obs):
+            control_source = "fallback"
+        if near_measured and self._plane_stable(obs):
+            control_source = "edge_only"
 
         yaw_abs = abs(yaw_err)
         yaw_slow_th = abs(float(getattr(self.car_cfg, "table_yaw_slow_th_rad", 0.12) or 0.12))
@@ -1025,7 +1121,14 @@ class MotionController:
                 "table_approach_phase": phase_name,
                 "phase": phase_name,
                 "table_approach_reason": "plane_confirmed_table_front" if self._plane_stable(obs) else "plane_waiting",
-                "approach_source": "plane_only",
+                "approach_source": control_source,
+                "control_source": control_source,
+                "yolo_edge_blend_weight": float(yolo_blend_weight),
+                "yolo_table_control_enable": bool(yolo_control_enabled),
+                "yolo_table_edge_stable_count": int(stable_count),
+                "yolo_table_blend_start_stable_frames": int(blend_start),
+                "yolo_table_near_dist_m": float(getattr(self.cfg, "yolo_table_near_dist_m", 0.45) or 0.45),
+                "yolo_near_measured": bool(near_measured),
                 "view_source": view_source,
                 "view_err_norm": float(view_err),
                 "view_reliable": bool(obs_view_reliable),

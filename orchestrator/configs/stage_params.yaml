@@ -28,6 +28,15 @@ table_docking:
   coarse_align_min_dwell_s: 0.8
   controlled_approach_min_dwell_s: 0.8
 
+yolo_table:
+  yolo_table_control_enable: true
+  yolo_table_edge_stable_frames: 5
+  yolo_table_near_dist_m: 0.45
+  yolo_table_blend_start_stable_frames: 5
+  yolo_table_yaw_gain: 0.4
+  yolo_table_max_wz: 0.12
+  yolo_table_blend_yolo_weight: 0.5
+
 controlled_approach:
   target_dist_m: 0.015
   max_vx_norm: 0.28

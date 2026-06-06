@@ -137,6 +137,14 @@ debug:
 table_edge:
   # 可选：""、center_mid、center_lower、full_width_lower。
   roi_preset: center_lower
+  yolo_table_roi_enable: true
+  yolo_table_class_id: 0
+  yolo_table_conf_min: 0.25
+  yolo_table_roi_ema_alpha: 0.4
+  yolo_table_roi_min_area_ratio: 0.01
+  yolo_table_roi_max_area_ratio: 0.90
+  yolo_table_edge_stable_frames: 5
+  yolo_table_near_dist_m: 0.45
   # 调试开关（全局，不随 mode 切换）
   profile_log_interval_s: 2.0
   save_debug_frames: false

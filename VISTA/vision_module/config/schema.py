@@ -148,6 +148,14 @@ class DebugConfig:
 class TableEdgeConfig:
     """Global table-edge debug knobs (not mode-specific)."""
     roi_preset: str = ""
+    yolo_table_roi_enable: bool = True
+    yolo_table_class_id: int = 0
+    yolo_table_conf_min: float = 0.25
+    yolo_table_roi_ema_alpha: float = 0.4
+    yolo_table_roi_min_area_ratio: float = 0.01
+    yolo_table_roi_max_area_ratio: float = 0.90
+    yolo_table_edge_stable_frames: int = 5
+    yolo_table_near_dist_m: float = 0.45
     profile_log_interval_s: float = 2.0
     save_debug_frames: bool = False
     target_hz: float = 10.0

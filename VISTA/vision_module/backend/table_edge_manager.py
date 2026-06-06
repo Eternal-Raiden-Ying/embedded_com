@@ -112,6 +112,10 @@ class TableEdgeManager:
         self._last_valid_quadrant_ttl_s = 1.0
         self._last_valid_table_bbox = None
         self._last_valid_table_center_norm = None
+        self._yolo_table_roi_center_x_ema: Optional[float] = None
+        self._edge_stable_count = 0
+        self._edge_stability_prev: Dict[str, Any] = {}
+        self._last_measured_edge_dist_m: Optional[float] = None
         self._fast_temporal_state: Dict[str, Any] = {}
         self._load_detector()
 
@@ -1484,6 +1488,7 @@ class TableEdgeManager:
 
     def _attach_profile(self, payload: Dict[str, Any], profile: Dict[str, Any], *, path: str) -> Dict[str, Any]:
         out = dict(payload or {})
+        self._update_edge_stability(out)
         if out.get("fast_debug_pixels_enabled") is False:
             for key in (
                 "fast_sampled_pixels",
@@ -1523,6 +1528,34 @@ class TableEdgeManager:
                 out["edge_profile"][key] = out.get(key)
         out["edge_process_path"] = str(path or "")
         return out
+
+    def _update_edge_stability(self, payload: Dict[str, Any]) -> None:
+        cfg = getattr(self.cfg, "table_edge", None)
+        required = max(1, int(getattr(cfg, "yolo_table_edge_stable_frames", 5) or 5))
+        found = bool(payload.get("edge_found", False))
+        conf = float(payload.get("confidence") or payload.get("edge_conf") or 0.0)
+        yaw = payload.get("yaw_err_rad")
+        dist = payload.get("dist_err_m")
+        stable = False
+        if found and yaw is not None and dist is not None and conf >= float(getattr(cfg, "yolo_table_conf_min", 0.25) or 0.25):
+            prev = dict(self._edge_stability_prev or {})
+            try:
+                yaw_delta = abs(float(yaw) - float(prev.get("yaw", yaw)))
+                dist_delta = abs(float(dist) - float(prev.get("dist", dist)))
+            except Exception:
+                yaw_delta = 0.0
+                dist_delta = 0.0
+            stable = bool(yaw_delta <= 0.15 and dist_delta <= 0.08)
+        self._edge_stable_count = int(self._edge_stable_count + 1) if stable else (1 if found else 0)
+        self._edge_stability_prev = {"yaw": yaw, "dist": dist, "conf": conf, "found": found}
+        if dist is not None:
+            try:
+                self._last_measured_edge_dist_m = float(payload.get("target_dist_m") or self._target_dist_m) + float(dist)
+            except Exception:
+                self._last_measured_edge_dist_m = None
+        payload["edge_stable_count"] = int(self._edge_stable_count)
+        payload["edge_stable_required_frames"] = int(required)
+        payload["edge_stable_for_yolo_blend"] = bool(self._edge_stable_count >= required)
 
     def _default_result(
         self,
@@ -1600,22 +1633,16 @@ class TableEdgeManager:
         plane_only = bool(getattr(self._detector_cfg, "plane_only_mode", False))
         if plane_only and not self._enable_yolo_in_plane_only:
             require_yolo = False
-        if not require_yolo:
-            return {
-                "table_confirmed_by_yolo": False,
-                "yolo_table_conf": None,
-                "yolo_gate_reason": "not_required_plane_only",
-                "yolo_reliable": False,
-                "yolo_gate_open": True,
-            }
         local_payload = dict(local if local is not None else self._local_perception())
         min_conf = float(self._yolo_table_min_conf)
         det = table_detection_debug(local_payload, local_payload.get("rgb_shape"), min_conf=min_conf)
         source = str(local_payload.get("table_roi_source") or "").strip()
-        confirmed = bool(det.get("found")) and source == "yolo_table_bbox"
+        confirmed = bool(det.get("found")) and source in {"yolo_table_bbox", "yolo_table_search_disabled"}
         reason = "yolo_table_confirmed" if confirmed else str(det.get("reason") or "waiting_yolo_table_confirm")
         if source and source != "yolo_table_bbox":
             reason = f"table_source_{source}"
+        if not require_yolo and reason == "not_found_or_low_conf":
+            reason = "not_required_plane_only"
         bbox_metrics = self._bbox_view_metrics(det.get("bbox"), local_payload.get("rgb_shape"))
         bbox_conf = det.get("conf")
         yolo_reliable = bool(
@@ -1630,7 +1657,7 @@ class TableEdgeManager:
             "yolo_gate_reason": reason,
             "yolo_table_bbox": det.get("bbox"),
             "yolo_reliable": yolo_reliable,
-            "yolo_gate_open": bool(confirmed),
+            "yolo_gate_open": bool(confirmed or not require_yolo),
             "yolo_bbox_area_norm": bbox_metrics.get("area_norm"),
             "yolo_bbox_touch_left": bool(bbox_metrics.get("touch_left", False)),
             "yolo_bbox_touch_right": bool(bbox_metrics.get("touch_right", False)),
@@ -1728,6 +1755,30 @@ class TableEdgeManager:
         local = self._local_perception()
         manual_static = self._manual_static_roi_enabled()
         roi_preset = self._debug_roi_preset()
+        table_edge_cfg = getattr(self.cfg, "table_edge", None)
+        dynamic_enable = bool(getattr(table_edge_cfg, "yolo_table_roi_enable", True))
+        stable_required = max(1, int(getattr(table_edge_cfg, "yolo_table_edge_stable_frames", 5) or 5))
+        edge_stable = bool(self._edge_stable_count >= stable_required)
+        near_dist_m = float(getattr(table_edge_cfg, "yolo_table_near_dist_m", 0.45) or 0.45)
+        near_distance = bool(
+            edge_stable
+            and self._last_measured_edge_dist_m is not None
+            and float(self._last_measured_edge_dist_m) <= near_dist_m
+        )
+        smoothed_center_x = None
+        table_center = local.get("table_center_norm")
+        depth_hw = self._shape_hw(depth_shape)
+        if dynamic_enable and depth_hw is not None and isinstance(table_center, (list, tuple)) and table_center:
+            try:
+                raw_center_x = float(table_center[0]) * float(depth_hw[1])
+                alpha = max(0.0, min(1.0, float(getattr(table_edge_cfg, "yolo_table_roi_ema_alpha", 0.4) or 0.4)))
+                if self._yolo_table_roi_center_x_ema is None:
+                    self._yolo_table_roi_center_x_ema = raw_center_x
+                else:
+                    self._yolo_table_roi_center_x_ema = (1.0 - alpha) * self._yolo_table_roi_center_x_ema + alpha * raw_center_x
+                smoothed_center_x = self._yolo_table_roi_center_x_ema
+            except Exception:
+                smoothed_center_x = None
         last_age_s = None
         if self._last_valid_quadrant_ts:
             last_age_s = time.time() - float(self._last_valid_quadrant_ts or 0.0)
@@ -1743,14 +1794,30 @@ class TableEdgeManager:
             last_valid_ttl_s=self._last_valid_quadrant_ttl_s,
             manual_static=manual_static,
             roi_preset=roi_preset,
+            yolo_dynamic_enable=dynamic_enable,
+            yolo_table_class_id=int(getattr(table_edge_cfg, "yolo_table_class_id", 0) or 0),
+            yolo_table_conf_min=float(getattr(table_edge_cfg, "yolo_table_conf_min", self._yolo_table_min_conf) or self._yolo_table_min_conf),
+            yolo_min_area_ratio=float(getattr(table_edge_cfg, "yolo_table_roi_min_area_ratio", 0.01) or 0.01),
+            yolo_max_area_ratio=float(getattr(table_edge_cfg, "yolo_table_roi_max_area_ratio", 0.90) or 0.90),
+            smoothed_table_center_x=smoothed_center_x,
+            near_distance=near_distance,
+            edge_stable=edge_stable,
         )
         quadrant = roi_meta.get("table_quadrant")
         table_bbox = roi_meta.get("table_bbox")
-        if quadrant and roi_meta.get("roi_source") == "local_perception_table_bbox":
+        if quadrant and roi_meta.get("roi_source") in {"local_perception_table_bbox", "yolo_table_bbox"}:
             self._last_valid_quadrant = str(quadrant).strip().upper()
             self._last_valid_quadrant_ts = time.time()
             self._last_valid_table_bbox = table_bbox
             self._last_valid_table_center_norm = roi_meta.get("table_center_norm")
+        roi_meta["yolo_table_roi_enable"] = bool(dynamic_enable)
+        roi_meta["yolo_table_roi_ema_alpha"] = float(getattr(table_edge_cfg, "yolo_table_roi_ema_alpha", 0.4) or 0.4)
+        roi_meta["yolo_table_roi_center_x_ema"] = self._yolo_table_roi_center_x_ema
+        roi_meta["yolo_table_edge_stable_count"] = int(self._edge_stable_count)
+        roi_meta["yolo_table_edge_stable_required"] = int(stable_required)
+        roi_meta["yolo_table_near_distance"] = bool(near_distance)
+        roi_meta["yolo_table_near_dist_m"] = float(near_dist_m)
+        roi_meta["yolo_table_measured_edge_dist_m"] = self._last_measured_edge_dist_m
         return roi_meta
 
     def _roi_payload(self, roi_box=None, roi_meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -1780,6 +1847,30 @@ class TableEdgeManager:
             "locked_dist_err",
             "locked_edge_conf",
             "locked_obs_seq",
+        ):
+            if key in meta:
+                payload[key] = meta.get(key)
+        for key in (
+            "dynamic_roi",
+            "bbox_valid",
+            "bbox_reject_reason",
+            "yolo_bbox_area_ratio",
+            "yolo_table_conf",
+            "yolo_table_class_id",
+            "yolo_bbox_center_x",
+            "yolo_bbox_center_x_norm",
+            "yolo_roi_center_x",
+            "yolo_roi_center_x_norm",
+            "yolo_table_roi_enable",
+            "yolo_table_roi_ema_alpha",
+            "yolo_table_roi_center_x_ema",
+            "yolo_table_edge_stable_count",
+            "yolo_table_edge_stable_required",
+            "yolo_table_near_distance",
+            "yolo_table_near_dist_m",
+            "yolo_table_measured_edge_dist_m",
+            "edge_stability",
+            "distance_hint",
         ):
             if key in meta:
                 payload[key] = meta.get(key)
