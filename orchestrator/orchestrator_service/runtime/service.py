@@ -7,7 +7,7 @@ import signal
 import time
 import os
 from collections import deque
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..bridge.arm_protocol import encode_pose, parse_arm_response
 from common.console_presenter import DemoConsolePresenter
@@ -23,6 +23,7 @@ from ..ipc.protocol import (
     TableEdgeObs,
     TargetObs,
     TaskCmd,
+    CmdVel,
     VisionObsEnvelope,
     iter_vision_perception_payloads,
     make_task_ack,
@@ -119,6 +120,8 @@ class OrchestratorService(BaseModule):
         self._last_motion_adapter_log_key = ""
         self._last_motion_adapter_log_emit_ts = 0.0
         self._last_motion_tx_context: Dict[str, Any] = {}
+        self._last_valid_motion_cmd: Optional[Dict[str, Any]] = None
+        self._last_valid_motion_ts = 0.0
         self._last_edge_slide_trace_signature = None
         self._motion_seq = 0
         self._last_stm32_status_poll_ts = 0.0
@@ -916,10 +919,172 @@ class OrchestratorService(BaseModule):
             "lock_count_inc_reason",
             "lock_count_hold_reason",
             "lock_count_reset_reason",
+            "uart_emit_reason",
+            "last_valid_motion_cmd",
+            "last_valid_motion_age_ms",
+            "soft_stale_hold_active",
+            "zero_cmd_reason",
+            "original_cmd",
+            "effective_cmd",
         ):
             if context.get(key) is not None:
                 meta[key] = context.get(key)
         return meta
+
+    @staticmethod
+    def _cmd_has_motion(cmd: Any) -> bool:
+        try:
+            return any(
+                abs(float(getattr(cmd, key, 0.0) or 0.0)) > 1e-6
+                for key in ("vx_norm", "vy_norm", "wz_norm")
+            )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _cmd_dict(cmd: Any) -> Dict[str, Any]:
+        if hasattr(cmd, "to_dict"):
+            try:
+                return dict(cmd.to_dict())
+            except Exception:
+                pass
+        return {
+            "ts": float(getattr(cmd, "ts", time.time()) or time.time()),
+            "mode": str(getattr(cmd, "mode", "") or ""),
+            "vx_norm": float(getattr(cmd, "vx_norm", 0.0) or 0.0),
+            "vy_norm": float(getattr(cmd, "vy_norm", 0.0) or 0.0),
+            "wz_norm": float(getattr(cmd, "wz_norm", 0.0) or 0.0),
+            "hold_ms": int(getattr(cmd, "hold_ms", 0) or 0),
+            "brake": bool(getattr(cmd, "brake", False)),
+        }
+
+    def _last_valid_motion_age_ms(self, now: Optional[float] = None) -> Optional[float]:
+        if not self._last_valid_motion_cmd or self._last_valid_motion_ts <= 0.0:
+            return None
+        now = time.time() if now is None else float(now)
+        return max(0.0, (now - float(self._last_valid_motion_ts)) * 1000.0)
+
+    def _make_stop_cmd(self, now: float, hold_ms: int = 0) -> CmdVel:
+        return CmdVel(ts=float(now), mode="STOP", vx_norm=0.0, vy_norm=0.0, wz_norm=0.0, hold_ms=int(hold_ms), brake=True)
+
+    def _repeat_last_valid_motion_cmd(self, now: float) -> Optional[CmdVel]:
+        last = dict(self._last_valid_motion_cmd or {})
+        if not last:
+            return None
+        return CmdVel(
+            ts=float(now),
+            mode=str(last.get("mode") or "SEARCH"),
+            vx_norm=float(last.get("vx_norm", last.get("vx", 0.0)) or 0.0),
+            vy_norm=float(last.get("vy_norm", last.get("vy", 0.0)) or 0.0),
+            wz_norm=float(last.get("wz_norm", last.get("wz", 0.0)) or 0.0),
+            hold_ms=int(last.get("hold_ms", getattr(self.cfg.car, "cmd_hold_ms", 150)) or getattr(self.cfg.car, "cmd_hold_ms", 150)),
+            brake=False,
+        )
+
+    def _arbitrate_uart_motion_cmd(self, cmd: CmdVel, summary: Dict[str, Any]) -> Tuple[CmdVel, Dict[str, Any]]:
+        now = time.time()
+        state = str(getattr(self.core.ctx.state, "value", self.core.ctx.state) or "").strip().upper()
+        mode = str(getattr(cmd, "mode", "") or "").strip().upper()
+        control_source = str(summary.get("control_source") or "").strip().lower()
+        stale_level = str(summary.get("stale_level") or "").strip().lower()
+        stale_reason = str(summary.get("stale_guard_reason") or summary.get("reason") or "").strip().lower()
+        last_age_ms = self._last_valid_motion_age_ms(now)
+        hold_ms = max(0, int(getattr(self.cfg.car, "motion_hold_ms", getattr(self.cfg.car, "cmd_hold_ms", 150)) or 0))
+        hard_stale_stop_ms = max(0, int(getattr(self.cfg.car, "hard_stale_stop_ms", 800) or 800))
+        explicit_stop = bool(getattr(cmd, "brake", False) or mode in {"STOP", "IDLE", "DONE", "ERROR", "ERROR_RECOVERY"} or state in {"IDLE", "STOP"})
+        soft_stale_timed_out = bool(stale_level == "soft_stale" and last_age_ms is not None and last_age_ms >= float(hard_stale_stop_ms))
+        perception_dead = bool(
+            "perception_dead" in stale_reason
+            or "camera_dead" in stale_reason
+            or "vision_dead" in stale_reason
+            or "system_perception_dead" in stale_reason
+        )
+        search_allows_edge_stale = bool(
+            (state == "SEARCH_TABLE" or mode == "SEARCH_TABLE" or control_source == "local_rotate_search")
+            and not perception_dead
+            and not bool(summary.get("table_lost_search_timeout", False))
+        )
+        hard_stale_raw = bool(
+            stale_level in {"hard_stale", "dead"}
+            or "hard_stale" in stale_reason
+            or "dead" in stale_reason
+            or "perception_dead" in stale_reason
+            or soft_stale_timed_out
+        )
+        hard_stale = bool(hard_stale_raw and not search_allows_edge_stale)
+        has_new_valid_motion = bool(self._cmd_has_motion(cmd) and not explicit_stop and not hard_stale)
+        last_within_hold = bool(last_age_ms is not None and last_age_ms <= float(hold_ms))
+        soft_stale_within_hard_timeout = bool(
+            stale_level == "soft_stale"
+            and bool(getattr(self.cfg.car, "soft_stale_hold_enable", True))
+            and last_age_ms is not None
+            and last_age_ms <= float(hard_stale_stop_ms)
+        )
+        soft_stale_hold_active = bool(
+            stale_level == "soft_stale"
+            and bool(getattr(self.cfg.car, "soft_stale_hold_enable", True))
+            and (last_within_hold or soft_stale_within_hard_timeout)
+            and not has_new_valid_motion
+            and not explicit_stop
+        )
+        zero_cmd_reason = ""
+        emit_reason = "controller_update"
+        effective = cmd
+
+        if explicit_stop:
+            emit_reason = "explicit_stop"
+            zero_cmd_reason = "explicit_stop"
+            effective = self._make_stop_cmd(now, hold_ms=int(getattr(cmd, "hold_ms", self.cfg.car.cmd_hold_ms) or self.cfg.car.cmd_hold_ms))
+            self._last_valid_motion_cmd = None
+            self._last_valid_motion_ts = 0.0
+            last_age_ms = None
+        elif hard_stale:
+            emit_reason = "hard_stale_stop"
+            zero_cmd_reason = "soft_stale_timeout" if soft_stale_timed_out else (stale_level or "hard_stale")
+            effective = self._make_stop_cmd(now, hold_ms=int(getattr(cmd, "hold_ms", self.cfg.car.cmd_hold_ms) or self.cfg.car.cmd_hold_ms))
+            self._last_valid_motion_cmd = None
+            self._last_valid_motion_ts = 0.0
+            last_age_ms = None
+        elif has_new_valid_motion:
+            self._last_valid_motion_cmd = self._cmd_dict(cmd)
+            self._last_valid_motion_ts = now
+            last_age_ms = 0.0
+        elif last_within_hold or soft_stale_within_hard_timeout:
+            repeat = self._repeat_last_valid_motion_cmd(now)
+            if repeat is not None:
+                effective = repeat
+                emit_reason = "keepalive_repeat_last_valid"
+                soft_stale_hold_active = bool(stale_level == "soft_stale" and bool(getattr(self.cfg.car, "soft_stale_hold_enable", True)))
+            else:
+                emit_reason = "no_valid_cmd_stop"
+                zero_cmd_reason = "last_valid_unavailable"
+                effective = self._make_stop_cmd(now, hold_ms=int(getattr(cmd, "hold_ms", self.cfg.car.cmd_hold_ms) or self.cfg.car.cmd_hold_ms))
+        else:
+            emit_reason = "no_valid_cmd_stop"
+            zero_cmd_reason = "last_valid_expired" if self._last_valid_motion_cmd else "no_last_valid_motion"
+            effective = self._make_stop_cmd(now, hold_ms=int(getattr(cmd, "hold_ms", self.cfg.car.cmd_hold_ms) or self.cfg.car.cmd_hold_ms))
+            self._last_valid_motion_cmd = None
+            self._last_valid_motion_ts = 0.0
+            last_age_ms = None
+
+        return effective, {
+            "uart_emit_reason": emit_reason,
+            "last_valid_motion_cmd": dict(self._last_valid_motion_cmd or {}),
+            "last_valid_motion_age_ms": last_age_ms,
+            "soft_stale_hold_active": bool(soft_stale_hold_active),
+            "zero_cmd_reason": zero_cmd_reason,
+            "original_cmd": self._cmd_dict(cmd),
+            "effective_cmd": self._cmd_dict(effective),
+            "motion_hold_ms": int(hold_ms),
+            "hard_stale_stop_ms": int(hard_stale_stop_ms),
+            "soft_stale_hold_enable": bool(getattr(self.cfg.car, "soft_stale_hold_enable", True)),
+            "edge_stale_dead": bool(hard_stale_raw and not perception_dead),
+            "table_bbox_stale": bool(stale_level in {"hard_stale", "dead"} and not summary.get("yolo_table_control_valid", False)),
+            "perception_dead": bool(perception_dead),
+            "search_allows_edge_stale": bool(search_allows_edge_stale),
+            "search_table_stale_gate_bypass": bool(search_allows_edge_stale and hard_stale_raw),
+            "stale_gate_stop_source_state": state if hard_stale else "",
+        }
 
     def _render_uart_line(self, payload: Dict[str, Any]) -> str:
         raw = str(payload.get("raw", "")).strip("\n")
@@ -2525,20 +2690,21 @@ class OrchestratorService(BaseModule):
         cmd = decision.cmd
         self._emit_operator_control(decision)
         self._flush_state_traces(decision)
-        car_cmd = self.mapper.from_cmd_vel(cmd, cx_norm_abs=decision.cx_norm_abs, distance_ratio=decision.distance_ratio)
+        summary = dict(getattr(decision, "control_summary", None) or {})
+        effective_cmd, uart_arbitration = self._arbitrate_uart_motion_cmd(cmd, summary)
+        car_cmd = self.mapper.from_cmd_vel(effective_cmd, cx_norm_abs=decision.cx_norm_abs, distance_ratio=decision.distance_ratio)
         tx_meta = self._build_uart_tx_meta(car_cmd)
         reason = str(tx_meta.get("reason") or car_cmd.kind or "").strip()
-        velocity = self.motion_adapter.cmd_vel_to_velocity(cmd)
-        summary = dict(getattr(decision, "control_summary", None) or {})
+        velocity = self.motion_adapter.cmd_vel_to_velocity(effective_cmd)
         speed_profile = str(summary.get("speed_profile") or ("stop" if car_cmd.kind in {"stop", "brake"} else "search"))
         self._last_motion_tx_context = {
             "speed_profile": speed_profile,
             "speed_limit_reason": summary.get("speed_limit_reason") or "",
             "forward_block_reason": summary.get("forward_block_reason") or "",
             "table_approach_phase": summary.get("table_approach_phase") or "",
-            "vx_norm": float(getattr(cmd, "vx_norm", 0.0) or 0.0),
-            "vy_norm": float(getattr(cmd, "vy_norm", 0.0) or 0.0),
-            "wz_norm": float(getattr(cmd, "wz_norm", 0.0) or 0.0),
+            "vx_norm": float(getattr(effective_cmd, "vx_norm", 0.0) or 0.0),
+            "vy_norm": float(getattr(effective_cmd, "vy_norm", 0.0) or 0.0),
+            "wz_norm": float(getattr(effective_cmd, "wz_norm", 0.0) or 0.0),
             "vx_mps": float(velocity[0]),
             "vy_mps": float(velocity[1]),
             "wz_radps": float(velocity[2]),
@@ -2546,7 +2712,9 @@ class OrchestratorService(BaseModule):
             "vy_mps_per_norm": float(self.cfg.car.vy_mps_per_norm),
             "wz_radps_per_norm": float(self.cfg.car.wz_radps_per_norm),
         }
-        seq = self.motion_adapter.send_cmd_vel(cmd, reason=reason)
+        self._last_motion_tx_context.update(uart_arbitration)
+        tx_meta.update(uart_arbitration)
+        seq = self.motion_adapter.send_cmd_vel(effective_cmd, reason=reason)
         self.motion_status["last_seq"] = seq
         self.motion_status["jog_running"] = False
         car_record = {
@@ -2569,15 +2737,20 @@ class OrchestratorService(BaseModule):
             "speed_profile": speed_profile,
             "speed_limit_reason": self._last_motion_tx_context["speed_limit_reason"],
             "forward_block_reason": self._last_motion_tx_context["forward_block_reason"],
+            "uart_emit_reason": uart_arbitration.get("uart_emit_reason"),
+            "last_valid_motion_cmd": uart_arbitration.get("last_valid_motion_cmd"),
+            "last_valid_motion_age_ms": uart_arbitration.get("last_valid_motion_age_ms"),
+            "soft_stale_hold_active": uart_arbitration.get("soft_stale_hold_active"),
+            "zero_cmd_reason": uart_arbitration.get("zero_cmd_reason"),
             "vx_mps_per_norm": self.cfg.car.vx_mps_per_norm,
             "vy_mps_per_norm": self.cfg.car.vy_mps_per_norm,
             "wz_radps_per_norm": self.cfg.car.wz_radps_per_norm,
         }
         car_record.update({k: v for k, v in tx_meta.items() if v not in (None, "")})
         log_now = time.time()
-        motion_signature = self._motion_log_signature(cmd, car_cmd, reason)
+        motion_signature = self._motion_log_signature(effective_cmd, car_cmd, reason)
         if self._should_log_motion(motion_signature, now=log_now):
-            cmd_record = cmd.to_dict()
+            cmd_record = effective_cmd.to_dict()
             cmd_record.update(self._last_motion_tx_context)
             self.run_logger.write_jsonl("cmd_vel", cmd_record)
             self.run_logger.write_jsonl("car_cmd", car_record)

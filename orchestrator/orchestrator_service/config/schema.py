@@ -102,10 +102,16 @@ class ControlThresholds:
     table_settle_s: float = 0.50
     table_stable_frames: int = 5
     yolo_table_control_enable: bool = True
+    yolo_table_conf_min: float = 0.25
     yolo_table_edge_stable_frames: int = 5
     yolo_table_near_dist_m: float = 0.45
     yolo_table_blend_start_stable_frames: int = 5
     yolo_table_blend_yolo_weight: float = 0.5
+    yolo_table_lost_to_search_frames: int = 8
+    rotate_search_timeout_s: float = 10.0
+    rotate_require_edge_stable_frames: int = 5
+    rotate_yaw_threshold_rad: float = 0.20
+    yolo_edge_conflict_block_rotate: bool = True
     final_lock_required_ready_obs: int = 3
     final_lock_window_ms: int = 1000
     final_lock_max_consecutive_lost: int = 2
@@ -262,6 +268,8 @@ class CarMotionConfig:
     table_dist_kp_norm_per_m: float = 0.12
     yolo_table_yaw_gain: float = 0.4
     yolo_table_max_wz: float = 0.12
+    yolo_table_forward_vx: float = 0.015
+    yolo_table_assist_vx: float = 0.010
     table_view_wz_kp: float = 0.18
     table_view_vy_kp: float = 0.04
     table_view_recover_vy_norm: float = 0.008
@@ -294,6 +302,9 @@ class CarMotionConfig:
     send_period_ms: int = 100
     uart_keepalive_hz: float = 10.0
     min_uart_keepalive_hz: float = 7.0
+    motion_hold_ms: int = 400
+    hard_stale_stop_ms: int = 800
+    soft_stale_hold_enable: bool = True
     max_vx_norm: float = 1.0
     max_vy_norm: float = 1.0
     max_wz_norm: float = 1.0

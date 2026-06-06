@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import sys
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -462,6 +463,72 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         self.assertIn("[ORCH][SLIDE] mode=strong edge_valid=0", lines[0])
         self.assertIn("found=0", lines[0])
         self.assertIn("reason=safety_hold_no_edge", lines[0])
+
+    def test_edge_lost_but_yolo_valid_uses_yolo_assist(self) -> None:
+        cfg = OrchestratorConfig()
+        core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
+        core.ctx.state = State.CONTROLLED_APPROACH
+        core.handle_table_obs(
+            TableEdgeObs(
+                ts=now_ts(),
+                table_found=False,
+                edge_found=False,
+                edge_valid=False,
+                confidence=0.0,
+                table_confirmed_by_yolo=True,
+                yolo_reliable=True,
+                yolo_table_control_valid=True,
+                yolo_table_roi_valid=True,
+                table_cx_norm=0.30,
+                roi_source="yolo_table_lower_band",
+                roi_phase="near_yolo_assist",
+            )
+        )
+
+        decision = core.tick()
+
+        self.assertEqual(core.ctx.state, State.CONTROLLED_APPROACH)
+        self.assertEqual(decision.cmd.mode, "CONTROLLED_APPROACH")
+        self.assertEqual(decision.control_summary["control_source"], "yolo_assist")
+        self.assertTrue(decision.control_summary["edge_lost_but_yolo_valid"])
+        self.assertTrue(decision.control_summary["search_blocked_by_yolo_valid"])
+        self.assertEqual(decision.control_summary["roi_source"], "yolo_table_lower_band")
+        self.assertEqual(decision.control_summary["roi_phase"], "near_yolo_assist")
+
+    def test_uart_soft_stale_repeats_last_valid_motion(self) -> None:
+        svc = OrchestratorService.__new__(OrchestratorService)
+        svc.cfg = OrchestratorConfig()
+        svc.cfg.car.motion_hold_ms = 400
+        svc.cfg.car.soft_stale_hold_enable = True
+        svc.core = SimpleNamespace(ctx=SimpleNamespace(state=State.CONTROLLED_APPROACH))
+        svc._last_valid_motion_cmd = None
+        svc._last_valid_motion_ts = 0.0
+
+        moving = CmdVel(ts=now_ts(), mode="CONTROLLED_APPROACH", vx_norm=0.12, vy_norm=0.0, wz_norm=0.03, hold_ms=150)
+        effective, meta = svc._arbitrate_uart_motion_cmd(moving, {"stale_level": "fresh"})
+        self.assertEqual(meta["uart_emit_reason"], "controller_update")
+        self.assertAlmostEqual(effective.vx_norm, 0.12)
+
+        zero_soft_stale = CmdVel(ts=now_ts(), mode="CONTROLLED_APPROACH", vx_norm=0.0, vy_norm=0.0, wz_norm=0.0, hold_ms=150)
+        effective, meta = svc._arbitrate_uart_motion_cmd(zero_soft_stale, {"stale_level": "soft_stale"})
+        self.assertEqual(meta["uart_emit_reason"], "keepalive_repeat_last_valid")
+        self.assertTrue(meta["soft_stale_hold_active"])
+        self.assertAlmostEqual(effective.vx_norm, 0.12)
+        self.assertAlmostEqual(effective.wz_norm, 0.03)
+
+    def test_uart_hard_stale_stops_and_clears_last_valid_motion(self) -> None:
+        svc = OrchestratorService.__new__(OrchestratorService)
+        svc.cfg = OrchestratorConfig()
+        svc.core = SimpleNamespace(ctx=SimpleNamespace(state=State.CONTROLLED_APPROACH))
+        svc._last_valid_motion_cmd = {"mode": "CONTROLLED_APPROACH", "vx_norm": 0.12, "vy_norm": 0.0, "wz_norm": 0.03, "hold_ms": 150}
+        svc._last_valid_motion_ts = time.time()
+
+        zero_hard_stale = CmdVel(ts=now_ts(), mode="CONTROLLED_APPROACH", vx_norm=0.0, vy_norm=0.0, wz_norm=0.0, hold_ms=150)
+        effective, meta = svc._arbitrate_uart_motion_cmd(zero_hard_stale, {"stale_level": "hard_stale"})
+        self.assertEqual(meta["uart_emit_reason"], "hard_stale_stop")
+        self.assertEqual(meta["zero_cmd_reason"], "hard_stale")
+        self.assertTrue(effective.brake)
+        self.assertIsNone(svc._last_valid_motion_cmd)
 
     def test_state_transition_edge_slide_timeout_is_diagnostic(self) -> None:
         lines = []

@@ -3,6 +3,9 @@ car_cmd:
   uart_keepalive_hz: 10.0
   min_uart_keepalive_hz: 7.0
   hold_ms: 150
+  motion_hold_ms: 400
+  hard_stale_stop_ms: 800
+  soft_stale_hold_enable: true
   max_vx_norm: 1.0
   max_vy_norm: 1.0
   max_wz_norm: 1.0

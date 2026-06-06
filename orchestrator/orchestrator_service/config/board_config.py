@@ -172,6 +172,9 @@ def _apply_stage_params(data: Dict[str, Any]) -> None:
     CONFIG.control.yolo_table_control_enable = bool(
         yolo_table.get("yolo_table_control_enable", yolo_table.get("control_enable", CONFIG.control.yolo_table_control_enable))
     )
+    CONFIG.control.yolo_table_conf_min = float(
+        yolo_table.get("yolo_table_conf_min", yolo_table.get("conf_min", CONFIG.control.yolo_table_conf_min))
+    )
     CONFIG.control.yolo_table_edge_stable_frames = int(
         yolo_table.get("yolo_table_edge_stable_frames", yolo_table.get("edge_stable_frames", CONFIG.control.yolo_table_edge_stable_frames))
     )
@@ -187,11 +190,35 @@ def _apply_stage_params(data: Dict[str, Any]) -> None:
     CONFIG.control.yolo_table_blend_yolo_weight = float(
         yolo_table.get("yolo_table_blend_yolo_weight", yolo_table.get("blend_yolo_weight", CONFIG.control.yolo_table_blend_yolo_weight))
     )
+    CONFIG.control.yolo_table_lost_to_search_frames = int(
+        yolo_table.get("yolo_table_lost_to_search_frames", yolo_table.get("lost_to_search_frames", CONFIG.control.yolo_table_lost_to_search_frames))
+    )
+    CONFIG.control.rotate_search_timeout_s = float(
+        yolo_table.get("rotate_search_timeout_s", CONFIG.control.rotate_search_timeout_s)
+    )
+    CONFIG.control.rotate_require_edge_stable_frames = int(
+        yolo_table.get("rotate_require_edge_stable_frames", CONFIG.control.rotate_require_edge_stable_frames)
+    )
+    CONFIG.control.rotate_yaw_threshold_rad = float(
+        yolo_table.get("rotate_yaw_threshold_rad", CONFIG.control.rotate_yaw_threshold_rad)
+    )
+    CONFIG.control.yolo_edge_conflict_block_rotate = bool(
+        yolo_table.get("yolo_edge_conflict_block_rotate", CONFIG.control.yolo_edge_conflict_block_rotate)
+    )
     CONFIG.car.yolo_table_yaw_gain = float(
-        yolo_table.get("yolo_table_yaw_gain", yolo_table.get("yaw_gain", CONFIG.car.yolo_table_yaw_gain))
+        yolo_table.get("yolo_table_yaw_gain", yolo_table.get("yolo_yaw_gain", yolo_table.get("yaw_gain", CONFIG.car.yolo_table_yaw_gain)))
     )
     CONFIG.car.yolo_table_max_wz = float(
-        yolo_table.get("yolo_table_max_wz", yolo_table.get("max_wz", CONFIG.car.yolo_table_max_wz))
+        yolo_table.get("yolo_table_max_wz", yolo_table.get("yolo_max_wz", yolo_table.get("max_wz", CONFIG.car.yolo_table_max_wz)))
+    )
+    CONFIG.car.yolo_table_forward_vx = float(
+        yolo_table.get("yolo_table_forward_vx", yolo_table.get("yolo_forward_vx", CONFIG.car.yolo_table_forward_vx))
+    )
+    CONFIG.car.yolo_table_assist_vx = float(
+        yolo_table.get("yolo_table_assist_vx", yolo_table.get("yolo_assist_vx", yolo_table.get("assist_vx", CONFIG.car.yolo_table_assist_vx)))
+    )
+    CONFIG.car.search_table_wz_norm = float(
+        yolo_table.get("rotate_search_wz", yolo_table.get("search_table_wz_norm", CONFIG.car.search_table_wz_norm))
     )
 
     CONFIG.control.final_lock_yaw_tol_rad = float(final_lock.get("yaw_abs_th", CONFIG.control.final_lock_yaw_tol_rad))
@@ -425,6 +452,9 @@ def _apply_car_cmd_params(data: Dict[str, Any]) -> None:
         CONFIG.car.send_period_ms = int(round(1000.0 / max(1.0, float(CONFIG.car.uart_keepalive_hz))))
     CONFIG.runtime.tick_hz = max(float(CONFIG.runtime.tick_hz), float(CONFIG.car.uart_keepalive_hz))
     CONFIG.car.cmd_hold_ms = int(car_cmd.get("hold_ms", CONFIG.car.cmd_hold_ms))
+    CONFIG.car.motion_hold_ms = int(car_cmd.get("motion_hold_ms", CONFIG.car.motion_hold_ms))
+    CONFIG.car.hard_stale_stop_ms = int(car_cmd.get("hard_stale_stop_ms", CONFIG.car.hard_stale_stop_ms))
+    CONFIG.car.soft_stale_hold_enable = bool(car_cmd.get("soft_stale_hold_enable", CONFIG.car.soft_stale_hold_enable))
     CONFIG.car.max_vx_norm = float(car_cmd.get("max_vx_norm", CONFIG.car.max_vx_norm))
     CONFIG.car.max_vy_norm = float(car_cmd.get("max_vy_norm", CONFIG.car.max_vy_norm))
     CONFIG.car.max_wz_norm = float(car_cmd.get("max_wz_norm", CONFIG.car.max_wz_norm))
@@ -513,6 +543,11 @@ CONFIG.control.table_yaw_tol_rad = math.radians(_env_float("ORCH_TABLE_YAW_TOL_D
 CONFIG.control.table_stop_margin_m = _env_float("ORCH_TABLE_STOP_MARGIN_CM", CONFIG.control.table_stop_margin_m * 100.0) / 100.0
 CONFIG.control.table_settle_s = _env_float("ORCH_TABLE_SETTLE_MS", CONFIG.control.table_settle_s * 1000.0) / 1000.0
 CONFIG.control.table_stable_frames = _env_int("ORCH_TABLE_STABLE_FRAMES", CONFIG.control.table_stable_frames)
+CONFIG.control.yolo_table_conf_min = _env_float("ORCH_YOLO_TABLE_CONF_MIN", CONFIG.control.yolo_table_conf_min)
+CONFIG.control.rotate_search_timeout_s = _env_float("ORCH_ROTATE_SEARCH_TIMEOUT_S", CONFIG.control.rotate_search_timeout_s)
+CONFIG.control.rotate_require_edge_stable_frames = _env_int("ORCH_ROTATE_REQUIRE_EDGE_STABLE_FRAMES", CONFIG.control.rotate_require_edge_stable_frames)
+CONFIG.control.rotate_yaw_threshold_rad = _env_float("ORCH_ROTATE_YAW_THRESHOLD_RAD", CONFIG.control.rotate_yaw_threshold_rad)
+CONFIG.control.yolo_edge_conflict_block_rotate = _env_bool("ORCH_YOLO_EDGE_CONFLICT_BLOCK_ROTATE", CONFIG.control.yolo_edge_conflict_block_rotate)
 CONFIG.control.table_max_micro_adjust = _env_int("ORCH_TABLE_MAX_MICRO_ADJUST", CONFIG.control.table_max_micro_adjust)
 CONFIG.control.enable_final_lock = _env_bool("ORCH_TABLE_ENABLE_FINAL_LOCK", CONFIG.control.enable_final_lock)
 CONFIG.control.enable_micro_adjust = _env_bool("ORCH_TABLE_ENABLE_MICRO_ADJUST", CONFIG.control.enable_micro_adjust)
@@ -628,6 +663,9 @@ CONFIG.car.relocate_turn_wz_norm = _env_float("ORCH_RELOCATE_WZ", CONFIG.car.rel
 CONFIG.car.avoid_turn_norm = _env_float("ORCH_AVOID_TURN_WZ", CONFIG.car.avoid_turn_norm)
 CONFIG.car.avoid_reverse_vx_norm = _env_float("ORCH_AVOID_REVERSE_VX", CONFIG.car.avoid_reverse_vx_norm)
 CONFIG.car.cmd_hold_ms = _env_int("ORCH_CMD_HOLD_MS", CONFIG.car.cmd_hold_ms)
+CONFIG.car.motion_hold_ms = _env_int("ORCH_MOTION_HOLD_MS", CONFIG.car.motion_hold_ms)
+CONFIG.car.hard_stale_stop_ms = _env_int("ORCH_HARD_STALE_STOP_MS", CONFIG.car.hard_stale_stop_ms)
+CONFIG.car.soft_stale_hold_enable = _env_bool("ORCH_SOFT_STALE_HOLD_ENABLE", CONFIG.car.soft_stale_hold_enable)
 CONFIG.car.send_period_ms = _env_int("ORCH_CAR_SEND_PERIOD_MS", CONFIG.car.send_period_ms)
 if CONFIG.car.send_period_ms > 0 and "ORCH_UART_KEEPALIVE_HZ" not in os.environ:
     CONFIG.car.uart_keepalive_hz = 1000.0 / float(CONFIG.car.send_period_ms)
