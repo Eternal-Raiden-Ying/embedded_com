@@ -149,6 +149,58 @@ def _shift_roi_center_x(roi: Sequence[int], center_x: float, image_shape: Any) -
     return _clip_bbox([new_x1, y1, new_x1 + roi_w, y2], image_shape)
 
 
+def _bbox_touch_flags(bbox: Sequence[int], image_shape: Any, edge_margin_norm: float = 0.03) -> Dict[str, bool]:
+    shape = _parse_shape(image_shape)
+    parsed = _parse_bbox(bbox)
+    if shape is None or parsed is None:
+        return {
+            "table_bbox_touch_left": False,
+            "table_bbox_touch_right": False,
+            "table_bbox_touch_bottom": False,
+        }
+    height, width = shape
+    x1, y1, x2, y2 = _clip_bbox(parsed, image_shape)
+    margin_x = max(1.0, float(width) * float(edge_margin_norm))
+    margin_y = max(1.0, float(height) * float(edge_margin_norm))
+    return {
+        "table_bbox_touch_left": bool(float(x1) <= margin_x),
+        "table_bbox_touch_right": bool(float(x2) >= float(width) - margin_x),
+        "table_bbox_touch_bottom": bool(float(y2) >= float(height) - margin_y),
+    }
+
+
+def _follow_table_lower_band_roi(
+    static_roi: Sequence[int],
+    center_x: float,
+    bbox: Sequence[int],
+    image_shape: Any,
+    bbox_shape: Any,
+    *,
+    bottom_align: bool = False,
+) -> Optional[list[int]]:
+    shape = _parse_shape(image_shape)
+    bbox_hw = _parse_shape(bbox_shape)
+    parsed_roi = _parse_bbox(static_roi)
+    parsed_bbox = _parse_bbox(bbox)
+    if shape is None or bbox_hw is None or parsed_roi is None or parsed_bbox is None:
+        return None
+    height, width = shape
+    bbox_h, bbox_w = bbox_hw
+    roi_w = max(1, int(parsed_roi[2]) - int(parsed_roi[0]))
+    roi_h = max(1, int(parsed_roi[3]) - int(parsed_roi[1]))
+    x1, y1, x2, y2 = [float(v) for v in parsed_bbox[:4]]
+    y1 = max(0.0, min(float(bbox_h), y1))
+    y2 = max(0.0, min(float(bbox_h), y2))
+    if y2 < y1:
+        y1, y2 = y2, y1
+    bbox_bottom_depth = (y2 / max(1.0, float(bbox_h))) * float(height)
+    bbox_lower_center_depth = ((y1 + (y2 - y1) * 0.75) / max(1.0, float(bbox_h))) * float(height)
+    center_y = bbox_bottom_depth - float(roi_h) * 0.5 if bottom_align else bbox_lower_center_depth
+    new_x1 = int(round(max(0.0, min(float(width), float(center_x))) - roi_w * 0.5))
+    new_y1 = int(round(center_y - roi_h * 0.5))
+    return _clip_bbox([new_x1, new_y1, new_x1 + roi_w, new_y1 + roi_h], image_shape)
+
+
 def compute_dynamic_table_roi_from_yolo_bbox(
     image_shape: Any,
     table_bbox_xyxy: Any,
@@ -167,6 +219,7 @@ def compute_dynamic_table_roi_from_yolo_bbox(
     max_area_ratio: float = 0.90,
     smoothed_center_x: Any = None,
     bbox_image_shape: Any = None,
+    yolo_near_bottom_norm: float = 0.60,
 ) -> Dict[str, Any]:
     """Return a center-following ROI that preserves the current static ROI size."""
     static_roi = normalize_table_bbox(current_static_roi, image_shape)
@@ -180,15 +233,6 @@ def compute_dynamic_table_roi_from_yolo_bbox(
         }
 
     mode_text = str(mode or "").strip().lower()
-    if mode_text in {"near", "near_distance", "edge_only"}:
-        return {
-            "dynamic_roi": static_roi,
-            "roi_source": "static_bottom_near",
-            "roi_reason": "near_distance_prefers_bottom_roi",
-            "bbox_valid": False,
-            "bbox_reject_reason": "near_distance",
-        }
-
     bbox_shape = bbox_image_shape or image_shape
     bbox = normalize_table_bbox(table_bbox_xyxy, bbox_shape)
     if bbox is None:
@@ -214,6 +258,19 @@ def compute_dynamic_table_roi_from_yolo_bbox(
     else:
         reason = ""
     area_ratio = _bbox_area_ratio(bbox, bbox_shape)
+    touch = _bbox_touch_flags(bbox, bbox_shape)
+    touch_bottom = bool(touch.get("table_bbox_touch_bottom", False))
+    touch_left = bool(touch.get("table_bbox_touch_left", False))
+    touch_right = bool(touch.get("table_bbox_touch_right", False))
+    bbox_shape_hw = _parse_shape(bbox_shape)
+    bbox_h = bbox_shape_hw[0] if bbox_shape_hw is not None else 0
+    try:
+        bbox_y1_norm = max(0.0, min(1.0, float(bbox[1]) / max(1.0, float(bbox_h))))
+        bbox_y2_norm = max(0.0, min(1.0, float(bbox[3]) / max(1.0, float(bbox_h))))
+    except Exception:
+        bbox_y1_norm = None
+        bbox_y2_norm = None
+    bbox_bottom_norm = bbox_y2_norm
     if not reason and (area_ratio is None or area_ratio < float(min_area_ratio)):
         reason = "bbox_area_too_small"
     if not reason and area_ratio is not None and area_ratio > float(max_area_ratio):
@@ -227,6 +284,13 @@ def compute_dynamic_table_roi_from_yolo_bbox(
             "bbox_reject_reason": reason,
             "yolo_bbox_area_ratio": area_ratio,
             "yolo_table_conf": score,
+            **touch,
+            "table_bbox_boundary_allowed": False,
+            "yolo_table_roi_valid": False,
+            "bbox_y1_norm": bbox_y1_norm,
+            "bbox_y2_norm": bbox_y2_norm,
+            "bbox_bottom_norm": bbox_bottom_norm,
+            "bbox_touch_bottom": touch_bottom,
         }
 
     shape = _parse_shape(image_shape)
@@ -240,15 +304,53 @@ def compute_dynamic_table_roi_from_yolo_bbox(
         center_x = float(smoothed_center_x) if smoothed_center_x is not None else raw_target_center_x
     except (TypeError, ValueError):
         center_x = raw_target_center_x
-    roi = _shift_roi_center_x(static_roi, center_x, image_shape) or static_roi
+    bottom_threshold = max(0.0, min(1.0, float(yolo_near_bottom_norm)))
+    bottom_band_near = bool(bbox_bottom_norm is not None and float(bbox_bottom_norm) >= bottom_threshold)
+    edge_lost_yolo = bool(mode_text in {"edge_lost_yolo", "edge_lost_yolo_assist", "near_yolo_assist"})
+    near_or_bottom = bool(mode_text in {"near", "near_distance"} or edge_lost_yolo or touch_bottom or bottom_band_near)
+    if near_or_bottom:
+        roi = _follow_table_lower_band_roi(
+            static_roi,
+            center_x,
+            bbox,
+            image_shape,
+            bbox_shape,
+            bottom_align=touch_bottom,
+        ) or static_roi
+        roi_source = "yolo_table_lower_band"
+        roi_reason = "table_bbox_lower_band_follow" if not touch_bottom else "table_bbox_touch_bottom_lower_band"
+        if edge_lost_yolo or mode_text in {"near", "near_distance"}:
+            roi_phase = "near_yolo_assist"
+        elif bottom_band_near:
+            roi_phase = "far_yolo_guided"
+        else:
+            roi_phase = "edge_fusion" if str(edge_stability or "").lower() == "stable" else "far_yolo_guided"
+        roi_y_strategy = "bbox_bottom" if touch_bottom else "bbox_lower_band"
+    else:
+        roi = _shift_roi_center_x(static_roi, center_x, image_shape) or static_roi
+        roi_source = "yolo_table_bbox"
+        roi_reason = "table_bbox_center_follow"
+        roi_phase = "edge_fusion" if str(edge_stability or "").lower() == "stable" else "far_yolo_guided"
+        roi_y_strategy = "static_center_lower"
+    roi_center_y = ((float(roi[1]) + float(roi[3])) * 0.5) if roi is not None else None
     return {
         "dynamic_roi": roi,
-        "roi_source": "yolo_table_bbox",
-        "roi_reason": "table_bbox_center_follow",
+        "roi_source": roi_source,
+        "roi_reason": roi_reason,
+        "roi_phase": roi_phase,
         "bbox_valid": True,
         "bbox_reject_reason": "",
         "yolo_bbox_area_ratio": area_ratio,
         "yolo_table_conf": score,
+        **touch,
+        "table_bbox_boundary_allowed": bool(touch_left or touch_right or touch_bottom),
+        "yolo_table_roi_valid": True,
+        "bbox_y1_norm": bbox_y1_norm,
+        "bbox_y2_norm": bbox_y2_norm,
+        "bbox_bottom_norm": bbox_bottom_norm,
+        "bbox_touch_bottom": touch_bottom,
+        "roi_center_y_from_yolo": roi_center_y if near_or_bottom else None,
+        "roi_y_strategy": roi_y_strategy,
         "yolo_table_class_id": int(table_class_id),
         "yolo_bbox_center_x": raw_center_x,
         "yolo_bbox_center_x_norm": raw_center_norm,
@@ -281,6 +383,7 @@ def choose_depth_roi(
     yolo_max_area_ratio: float = 0.90,
     smoothed_table_center_x: Any = None,
     near_distance: bool = False,
+    yolo_near_bottom_norm: float = 0.60,
     edge_stable: bool = False,
 ) -> Dict[str, Any]:
     """Choose table-edge ROI from current detection, recent history, or static fallback."""
@@ -303,7 +406,11 @@ def choose_depth_roi(
         depth_edge_roi = fallback_roi
         roi_source = "manual_static"
         roi_reason = "manual_static_roi_enabled"
-    elif yolo_dynamic_enable and fallback_roi is not None:
+    elif preset_roi is not None and not yolo_dynamic_enable:
+        depth_edge_roi = preset_roi
+        roi_source = f"preset:{preset_name}"
+        roi_reason = "debug_roi_preset"
+    elif yolo_dynamic_enable and fallback_roi is not None and table_bbox is not None:
         det = table_detection_debug(local, resolved_rgb_shape, min_conf=yolo_table_conf_min)
         dyn = compute_dynamic_table_roi_from_yolo_bbox(
             depth_shape,
@@ -319,10 +426,15 @@ def choose_depth_roi(
             max_area_ratio=yolo_max_area_ratio,
             smoothed_center_x=smoothed_table_center_x,
             bbox_image_shape=resolved_rgb_shape,
+            yolo_near_bottom_norm=yolo_near_bottom_norm,
         )
         depth_edge_roi = dyn.get("dynamic_roi") or fallback_roi
         roi_source = str(dyn.get("roi_source") or "static_bottom")
         roi_reason = str(dyn.get("roi_reason") or "")
+        if not bool(dyn.get("bbox_valid", False)) and preset_roi is not None:
+            depth_edge_roi = preset_roi
+            roi_source = f"preset:{preset_name}"
+            roi_reason = "debug_roi_preset"
     elif quadrant is not None and table_bbox is not None:
         depth_edge_roi = quadrant_to_depth_roi(quadrant, depth_shape, fallback_roi)
         rgb_hw = _parse_shape(resolved_rgb_shape)
@@ -342,6 +454,9 @@ def choose_depth_roi(
             roi_reason = "table_bbox_lost_using_history"
         else:
             depth_edge_roi = fallback_roi
+            if preset_roi is not None:
+                roi_source = f"preset:{preset_name}"
+                roi_reason = "debug_roi_preset"
 
     return {
         "table_bbox": table_bbox,
@@ -355,5 +470,6 @@ def choose_depth_roi(
         "roi_reason": roi_reason,
         "roi_preset": preset_name if preset_roi is not None else None,
         "roi_format": "xyxy",
+        "roi_phase": "static_fallback",
         **(dyn if "dyn" in locals() and isinstance(dyn, dict) else {}),
     }

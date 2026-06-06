@@ -33,19 +33,19 @@ camera:
   rgb:
     # RGB 摄像头设备号。A1 上常见是 "6"，必要时按 /dev/video* 调整。
     source: "6"
-    in_w: 1280
-    in_h: 720
+    in_w: 640 #1280
+    in_h: 360 #720
     out_w: 640
-    out_h: 640
+    out_h: 360 #640
     in_format: YUY2
     format: BGR
     fps: 30
 
     # 默认 RGB crop。桌子在画面偏左/偏右/偏下时，优先先调 mode_profiles 里的模式 crop。
-    crop_x: 280
+    crop_x: 0 #280
     crop_y: 0
-    crop_w: 720
-    crop_h: 720
+    crop_w: 0 #720
+    crop_h: 0 #720
 
     auto_exposure: true
     exposure: null
@@ -145,6 +145,7 @@ table_edge:
   yolo_table_roi_max_area_ratio: 0.90
   yolo_table_edge_stable_frames: 5
   yolo_table_near_dist_m: 0.45
+  yolo_table_near_bottom_norm: 0.60
   # 调试开关（全局，不随 mode 切换）
   profile_log_interval_s: 2.0
   save_debug_frames: false

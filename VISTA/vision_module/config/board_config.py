@@ -216,6 +216,7 @@ def _apply_vision_params(data: Dict[str, Any]) -> None:
             "yolo_table_roi_max_area_ratio",
             "yolo_table_edge_stable_frames",
             "yolo_table_near_dist_m",
+            "yolo_table_near_bottom_norm",
             "profile_log_interval_s",
             "save_debug_frames",
             "target_hz",

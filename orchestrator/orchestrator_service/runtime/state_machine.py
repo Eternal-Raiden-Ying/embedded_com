@@ -1055,6 +1055,27 @@ class OrchestratorCore:
     def _tick_search_table(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
         obs = self._fresh_table_obs()
+        local_search_active = bool(
+            self.ctx.prev_state in TABLE_APPROACH_STATES
+            and ("丢失" in str(self.ctx.last_enter_reason or "") or "lost" in str(self.ctx.last_enter_reason or "").lower())
+        )
+        local_search_elapsed_s = self._state_elapsed() if local_search_active else 0.0
+        local_search_timeout_s = max(0.0, float(getattr(self.cfg, "rotate_search_timeout_s", 10.0) or 10.0))
+        if local_search_active and local_search_elapsed_s >= local_search_timeout_s:
+            self.ctx.last_fail_reason = "table_lost_search_timeout"
+            self._enter_error_recovery(self.ctx.last_fail_reason, tts_text="桌边丢失搜索超时，已停车", interrupt_tts=True)
+            decision = self.controller.stop_cmd("ERROR_RECOVERY", brake=True)
+            decision.control_summary.update(
+                {
+                    "control_source": "search_failed_stop",
+                    "table_lost_search_active": True,
+                    "table_lost_search_elapsed_s": float(local_search_elapsed_s),
+                    "table_lost_search_timeout": True,
+                    "stop_source_state": "SEARCH_TABLE",
+                    "stop_reason": self.ctx.last_fail_reason,
+                }
+            )
+            return decision
         level = self._control_level(obs)
         if self._table_visible(obs) and (level != "none" or self._table_plane_stable(obs)):
             self.ctx.table_found_frames += 1
@@ -1073,8 +1094,29 @@ class OrchestratorCore:
             self._transition(State.NEXT_TABLE, self.ctx.last_fail_reason)
             return self.controller.next_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
         if bool(getattr(self.cfg, "yolo_table_control_enable", True)) and self._table_yolo_reliable(obs):
-            return self.controller.yolo_table_search_cmd(obs, turn_sign=self.ctx.relocate_turn_sign)
-        return self.controller.search_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+            decision = self.controller.yolo_table_search_cmd(
+                obs,
+                turn_sign=self.ctx.relocate_turn_sign,
+                reason="yolo_table_bbox_forward",
+                control_source="yolo_forward",
+            )
+            decision.control_summary["search_blocked_by_yolo_valid"] = True
+            decision.control_summary["yolo_valid_prevent_search_fallback"] = True
+            decision.control_summary["table_lost_search_active"] = bool(local_search_active)
+            decision.control_summary["table_lost_search_elapsed_s"] = float(local_search_elapsed_s)
+            decision.control_summary["table_lost_search_timeout"] = False
+            return decision
+        decision = self.controller.search_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+        decision.control_summary.update(
+            {
+                "control_source": "local_rotate_search",
+                "table_lost_search_active": bool(local_search_active),
+                "table_lost_search_elapsed_s": float(local_search_elapsed_s),
+                "table_lost_search_timeout": False,
+                "search_table_stale_gate_bypass": True,
+            }
+        )
+        return decision
 
     def _tick_coarse_align(self) -> MotionDecision:
         obs = self._fresh_table_obs()
@@ -1083,6 +1125,8 @@ class OrchestratorCore:
         self._reset_table_loss()
         level = self._control_level(obs)
         if level == "none":
+            if self._table_yolo_reliable(obs):
+                return self.controller.yolo_table_assist_cmd(obs, "COARSE_ALIGN", reason="edge_lost_yolo_assist")
             return self.controller.stop_cmd("COARSE_ALIGN")
         if level == "stop":
             return self._enter_final_lock_or_keep_approach(obs, "plane-only stop 可用，进入停车确认")
@@ -1126,6 +1170,23 @@ class OrchestratorCore:
             dwell_s = self._state_elapsed()
             min_dwell_s = self._controlled_approach_min_dwell_s()
             if dwell_s >= min_dwell_s:
+                if self._table_yolo_reliable(obs):
+                    rotate_gate = self.controller._rotate_gate(obs)
+                    if not bool(rotate_gate.get("allow_rotate", False)):
+                        decision = self.controller.yolo_table_assist_cmd(
+                            obs,
+                            "CONTROLLED_APPROACH",
+                            reason="yolo_valid_prevent_coarse_align",
+                        )
+                        decision.control_summary.update(rotate_gate)
+                        decision.control_summary.update(
+                            {
+                                "search_blocked_by_yolo_valid": True,
+                                "yolo_valid_prevent_search_fallback": True,
+                                "control_source": "yolo_assist",
+                            }
+                        )
+                        return self._annotate_table_motion_hysteresis(decision, pending_reason="rotate_gate_blocked_realign")
                 self._transition(State.COARSE_ALIGN, "approach yaw连续偏大，回到粗对齐")
                 return self.controller.fov_table_approach_cmd(obs, phase="PLANE_FINAL_LOCK", mode="COARSE_ALIGN")
             pending_reason = f"approach_to_align_pending_min_dwell:{dwell_s:.2f}/{min_dwell_s:.2f}s"
@@ -1134,6 +1195,8 @@ class OrchestratorCore:
             self.ctx.table_motion_pending_transition_reason = ""
         level = self._control_level(obs)
         if level == "none":
+            if self._table_yolo_reliable(obs):
+                return self.controller.yolo_table_assist_cmd(obs, "CONTROLLED_APPROACH", reason="edge_lost_yolo_assist")
             return self.controller.stop_cmd("CONTROLLED_APPROACH")
         if level == "approach":
             decision = self.controller.fov_table_approach_cmd(obs, phase="PLANE_APPROACH")
@@ -2547,6 +2610,15 @@ class OrchestratorCore:
     def _table_yolo_reliable(self, obs: Optional[TableEdgeObs]) -> bool:
         if obs is None:
             return False
+        conf = getattr(obs, "yolo_table_conf", None)
+        if conf is not None:
+            try:
+                if float(conf) < float(getattr(self.cfg, "yolo_table_conf_min", 0.25) or 0.25):
+                    return False
+            except Exception:
+                pass
+        if hasattr(obs, "yolo_table_control_valid") and bool(getattr(obs, "yolo_table_control_valid", False)):
+            return True
         if hasattr(obs, "yolo_reliable"):
             return bool(getattr(obs, "yolo_reliable", False))
         return bool(getattr(obs, "table_confirmed_by_yolo", False)) and getattr(obs, "table_cx_norm", None) is not None
@@ -3516,13 +3588,36 @@ class OrchestratorCore:
     def _handle_table_loss(self, reason: str, fallback_state: State, hold_mode: str) -> MotionDecision:
         self.ctx.table_lost_frames += 1
         self._start_loss_timer("table_loss_since_mono")
-        lost_frames_ok = self.ctx.table_lost_frames >= int(self.cfg.table_lost_frames_to_reacquire)
+        required_lost_frames = int(self.cfg.table_lost_frames_to_reacquire)
+        if fallback_state == State.SEARCH_TABLE and bool(getattr(self.cfg, "yolo_table_control_enable", True)):
+            required_lost_frames = max(
+                required_lost_frames,
+                int(getattr(self.cfg, "yolo_table_lost_to_search_frames", required_lost_frames) or required_lost_frames),
+            )
+        lost_frames_ok = self.ctx.table_lost_frames >= required_lost_frames
         lost_hold_ok = self._loss_elapsed(self.ctx.table_loss_since_mono) >= float(self.cfg.table_loss_hold_s)
         min_dwell_ok = self._state_elapsed() >= float(self.cfg.approach_min_dwell_s)
         if lost_frames_ok and lost_hold_ok and min_dwell_ok:
             self._transition(fallback_state, reason)
-            return self.controller.search_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
-        return self.controller.stop_cmd(hold_mode)
+            decision = self.controller.search_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+            if fallback_state == State.SEARCH_TABLE:
+                decision.control_summary.update(
+                    {
+                        "control_source": "local_rotate_search",
+                        "table_lost_search_active": True,
+                        "table_lost_search_elapsed_s": 0.0,
+                        "table_lost_search_timeout": False,
+                        "search_table_stale_gate_bypass": True,
+                    }
+                )
+            return decision
+        decision = self.controller.stop_cmd(hold_mode)
+        decision.control_summary["yolo_table_lost_to_search_frames"] = int(required_lost_frames)
+        decision.control_summary["search_blocked_by_yolo_valid"] = False
+        decision.control_summary["yolo_lost_frames_before_search"] = int(self.ctx.table_lost_frames)
+        decision.control_summary["table_lost_search_active"] = False
+        decision.control_summary["table_lost_search_timeout"] = False
+        return decision
 
     def _enter_dock_retry_or_next(self, reason: str) -> MotionDecision:
         self.ctx.last_fail_reason = reason

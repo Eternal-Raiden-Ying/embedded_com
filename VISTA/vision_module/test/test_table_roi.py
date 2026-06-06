@@ -161,6 +161,36 @@ class TableRoiTest(unittest.TestCase):
         self.assertEqual(preset["roi_preset"], "center_lower")
         self.assertEqual(preset["depth_edge_roi"], [160, 240, 480, 408])
 
+    def test_yolo_dynamic_roi_uses_lower_band_when_bbox_touches_bottom(self):
+        roi = choose_depth_roi(
+            {
+                "rgb_shape": (640, 640, 3),
+                "class_names": ["table1"],
+                "infer_boxes": [[250, 410, 610, 640, 0.86, 0]],
+            },
+            depth_shape=(480, 640),
+            fallback_depth_roi=[160, 240, 480, 408],
+            yolo_dynamic_enable=True,
+            yolo_table_class_id=0,
+            near_distance=True,
+        )
+        self.assertTrue(roi["bbox_valid"])
+        self.assertTrue(roi["yolo_table_roi_valid"])
+        self.assertTrue(roi["table_bbox_touch_bottom"])
+        self.assertTrue(roi["table_bbox_boundary_allowed"])
+        self.assertEqual(roi["roi_source"], "yolo_table_lower_band")
+        self.assertEqual(roi["roi_phase"], "near_yolo_assist")
+        self.assertNotEqual(roi["depth_edge_roi"], [160, 240, 480, 408])
+        self.assertGreaterEqual(roi["depth_edge_roi"][1], 300)
+
+    def test_table_bbox_touch_boundary_remains_reliable_for_yolo_control(self):
+        metrics = TableEdgeManager._bbox_view_metrics([0, 380, 640, 640], (640, 640, 3))
+        self.assertTrue(metrics["touch_left"])
+        self.assertTrue(metrics["touch_right"])
+        self.assertTrue(metrics["touch_bottom"])
+        self.assertTrue(metrics["boundary_allowed"])
+        self.assertTrue(metrics["reliable"])
+
     def test_diagnostics_summary_formatters_are_short_lines(self):
         edge = format_table_edge_summary(
             {"stage": "SEARCH", "mode": "FIND_EDGE"},
@@ -214,9 +244,11 @@ class TableEdgeManagerDynamicRoiTest(unittest.TestCase):
         self.assertEqual(roi["table_bbox"], [400, 380, 620, 620])
         self.assertEqual(roi["table_center_norm"], [0.796875, 0.78125])
         self.assertEqual(roi["table_quadrant"], "RB")
-        self.assertEqual(roi["depth_edge_roi"], [320, 240, 640, 480])
-        self.assertEqual(roi["roi_source"], "local_perception_table_bbox")
-        self.assertEqual(roi["roi_reason"], "table_bbox_detected")
+        self.assertEqual(roi["depth_edge_roi"], [460, 20, 560, 120])
+        self.assertEqual(roi["roi_source"], "yolo_table_bbox")
+        self.assertEqual(roi["roi_reason"], "table_bbox_center_follow")
+        self.assertTrue(roi["bbox_valid"])
+        self.assertTrue(roi["yolo_table_roi_valid"])
 
     def test_missing_bbox_uses_last_valid_quadrant(self):
         self.scheduler.local = {

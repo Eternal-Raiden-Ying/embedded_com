@@ -567,7 +567,7 @@ class TableEdgeManager:
         shape: Any,
         *,
         edge_margin_norm: float = 0.03,
-        max_reliable_area: float = 0.65,
+        max_reliable_area: float = 0.90,
     ) -> Dict[str, Any]:
         hw = cls._shape_hw(shape)
         if not isinstance(bbox, (list, tuple)) or len(bbox) < 4 or hw is None:
@@ -579,6 +579,7 @@ class TableEdgeManager:
                 "touch_top": False,
                 "touch_bottom": False,
                 "touch_boundary": False,
+                "boundary_allowed": False,
                 "reliable": False,
             }
         h, w = hw
@@ -593,6 +594,7 @@ class TableEdgeManager:
                 "touch_top": False,
                 "touch_bottom": False,
                 "touch_boundary": False,
+                "boundary_allowed": False,
                 "reliable": False,
             }
         x0, x1 = sorted((max(0.0, min(float(w), x0)), max(0.0, min(float(w), x1))))
@@ -616,7 +618,8 @@ class TableEdgeManager:
             "touch_top": bool(touch_top),
             "touch_bottom": bool(touch_bottom),
             "touch_boundary": touch_boundary,
-            "reliable": bool(area > 0.0 and area <= float(max_reliable_area) and not touch_boundary),
+            "boundary_allowed": bool(touch_left or touch_right or touch_bottom),
+            "reliable": bool(area > 0.0 and area <= float(max_reliable_area)),
         }
 
     @classmethod
@@ -1606,7 +1609,15 @@ class TableEdgeManager:
             "yolo_bbox_area_norm": None,
             "yolo_bbox_touch_left": False,
             "yolo_bbox_touch_right": False,
+            "yolo_bbox_touch_bottom": False,
             "yolo_bbox_touch_boundary": False,
+            "table_bbox_touch_left": False,
+            "table_bbox_touch_right": False,
+            "table_bbox_touch_bottom": False,
+            "table_bbox_boundary_allowed": False,
+            "yolo_table_control_valid": False,
+            "yolo_table_roi_valid": False,
+            "roi_phase": "static_bottom_fallback",
             "plane_cx_norm": None,
             "plane_width_norm": None,
             "plane_area_ratio": None,
@@ -1661,7 +1672,13 @@ class TableEdgeManager:
             "yolo_bbox_area_norm": bbox_metrics.get("area_norm"),
             "yolo_bbox_touch_left": bool(bbox_metrics.get("touch_left", False)),
             "yolo_bbox_touch_right": bool(bbox_metrics.get("touch_right", False)),
+            "yolo_bbox_touch_bottom": bool(bbox_metrics.get("touch_bottom", False)),
             "yolo_bbox_touch_boundary": bool(bbox_metrics.get("touch_boundary", False)),
+            "table_bbox_touch_left": bool(bbox_metrics.get("touch_left", False)),
+            "table_bbox_touch_right": bool(bbox_metrics.get("touch_right", False)),
+            "table_bbox_touch_bottom": bool(bbox_metrics.get("touch_bottom", False)),
+            "table_bbox_boundary_allowed": bool(bbox_metrics.get("boundary_allowed", False)),
+            "yolo_table_control_valid": bool(yolo_reliable),
             "table_cx_norm": bbox_metrics.get("cx_norm"),
             "table_size_norm": bbox_metrics.get("area_norm"),
         }
@@ -1761,8 +1778,7 @@ class TableEdgeManager:
         edge_stable = bool(self._edge_stable_count >= stable_required)
         near_dist_m = float(getattr(table_edge_cfg, "yolo_table_near_dist_m", 0.45) or 0.45)
         near_distance = bool(
-            edge_stable
-            and self._last_measured_edge_dist_m is not None
+            self._last_measured_edge_dist_m is not None
             and float(self._last_measured_edge_dist_m) <= near_dist_m
         )
         smoothed_center_x = None
@@ -1801,11 +1817,12 @@ class TableEdgeManager:
             yolo_max_area_ratio=float(getattr(table_edge_cfg, "yolo_table_roi_max_area_ratio", 0.90) or 0.90),
             smoothed_table_center_x=smoothed_center_x,
             near_distance=near_distance,
+            yolo_near_bottom_norm=float(getattr(table_edge_cfg, "yolo_table_near_bottom_norm", 0.60) or 0.60),
             edge_stable=edge_stable,
         )
         quadrant = roi_meta.get("table_quadrant")
         table_bbox = roi_meta.get("table_bbox")
-        if quadrant and roi_meta.get("roi_source") in {"local_perception_table_bbox", "yolo_table_bbox"}:
+        if quadrant and roi_meta.get("roi_source") in {"local_perception_table_bbox", "yolo_table_bbox", "yolo_table_lower_band"}:
             self._last_valid_quadrant = str(quadrant).strip().upper()
             self._last_valid_quadrant_ts = time.time()
             self._last_valid_table_bbox = table_bbox
@@ -1861,6 +1878,12 @@ class TableEdgeManager:
             "yolo_bbox_center_x_norm",
             "yolo_roi_center_x",
             "yolo_roi_center_x_norm",
+            "table_bbox_touch_left",
+            "table_bbox_touch_right",
+            "table_bbox_touch_bottom",
+            "table_bbox_boundary_allowed",
+            "yolo_table_roi_valid",
+            "roi_phase",
             "yolo_table_roi_enable",
             "yolo_table_roi_ema_alpha",
             "yolo_table_roi_center_x_ema",
@@ -1869,6 +1892,12 @@ class TableEdgeManager:
             "yolo_table_near_distance",
             "yolo_table_near_dist_m",
             "yolo_table_measured_edge_dist_m",
+            "bbox_y1_norm",
+            "bbox_y2_norm",
+            "bbox_bottom_norm",
+            "bbox_touch_bottom",
+            "roi_center_y_from_yolo",
+            "roi_y_strategy",
             "edge_stability",
             "distance_hint",
         ):
