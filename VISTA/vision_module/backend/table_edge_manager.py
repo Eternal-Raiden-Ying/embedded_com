@@ -397,13 +397,20 @@ class TableEdgeManager:
         out.setdefault("edge_valid", bool(out.get("edge_geometry_valid", False)))
         out.setdefault("yaw_err", out.get("yaw_err_rad"))
         out.setdefault("dist_err", out.get("dist_err_m"))
-        if not bool(out.get("table_bbox_found", False)):
+        table_control_available = bool(
+            out.get("table_bbox_control_valid", out.get("table_bbox_current_found", out.get("table_bbox_found", False)))
+            or out.get("table_bbox_xyxy") is not None
+            or out.get("table_bbox") is not None
+        )
+        if not table_control_available:
             for key in ("depth_edge_roi", "table_edge_roi", "edge_roi", "plane_roi"):
                 out[key] = None
             out["roi_source"] = "disabled_no_table_bbox"
             out["roi_phase"] = "disabled_no_table_bbox"
             out["table_bbox_current_found"] = False
             out["table_bbox_control_valid"] = False
+            out["table_bbox_hold_active"] = False
+            out["table_bbox_hold_age_frames"] = 0
             out["edge_control_allowed"] = False
             out["docking_enabled_by_yolo"] = False
             out["edge_trusted"] = False
@@ -425,6 +432,10 @@ class TableEdgeManager:
             edge_stable_required_frames=max(1, int(getattr(cfg, "yolo_table_edge_stable_frames", 5) if cfg is not None else 5)),
             edge_trusted_min_conf=float(getattr(cfg, "edge_trusted_min_conf", 0.60) if cfg is not None else 0.60),
             edge_trusted_max_residual=max_residual if max_residual > 0.0 else None,
+            edge_trusted_min_support_count=int(getattr(cfg, "edge_trusted_min_support_count", 0) if cfg is not None else 0),
+            edge_trusted_min_inlier_count=int(getattr(cfg, "edge_trusted_min_inlier_count", 0) if cfg is not None else 0),
+            edge_trusted_min_x_span_m=float(getattr(cfg, "edge_trusted_min_x_span_m", 0.0) if cfg is not None else 0.0),
+            edge_trusted_max_background_penalty=(float(getattr(cfg, "edge_trusted_max_background_penalty", 0.0)) if cfg is not None and float(getattr(cfg, "edge_trusted_max_background_penalty", 0.0) or 0.0) > 0.0 else None),
         )
         return out
 
@@ -1569,6 +1580,10 @@ class TableEdgeManager:
             edge_stable_required_frames=max(1, int(getattr(cfg, "yolo_table_edge_stable_frames", 5) if cfg is not None else 5)),
             edge_trusted_min_conf=float(getattr(cfg, "edge_trusted_min_conf", 0.60) if cfg is not None else 0.60),
             edge_trusted_max_residual=max_residual if max_residual > 0.0 else None,
+            edge_trusted_min_support_count=int(getattr(cfg, "edge_trusted_min_support_count", 0) if cfg is not None else 0),
+            edge_trusted_min_inlier_count=int(getattr(cfg, "edge_trusted_min_inlier_count", 0) if cfg is not None else 0),
+            edge_trusted_min_x_span_m=float(getattr(cfg, "edge_trusted_min_x_span_m", 0.0) if cfg is not None else 0.0),
+            edge_trusted_max_background_penalty=(float(getattr(cfg, "edge_trusted_max_background_penalty", 0.0)) if cfg is not None and float(getattr(cfg, "edge_trusted_max_background_penalty", 0.0) or 0.0) > 0.0 else None),
         )
         return out
 
@@ -1893,10 +1908,17 @@ class TableEdgeManager:
             yolo_roi_anchor=str(getattr(table_edge_cfg, "yolo_table_roi_anchor", "center") or "center"),
             yolo_roi_lower_ratio=float(getattr(table_edge_cfg, "yolo_table_roi_lower_ratio", 0.75) or 0.75),
             yolo_roi_use_rgb_depth_mapping=bool(getattr(table_edge_cfg, "yolo_table_roi_use_rgb_depth_mapping", True)),
+            yolo_roi_mode=str(getattr(table_edge_cfg, "yolo_table_roi_mode", "bbox_expand") or "bbox_expand"),
+            yolo_roi_expand_x_ratio=float(getattr(table_edge_cfg, "yolo_table_roi_expand_x_ratio", 0.10) or 0.10),
+            yolo_roi_expand_y_ratio=float(getattr(table_edge_cfg, "yolo_table_roi_expand_y_ratio", 0.10) or 0.10),
+            yolo_roi_min_w=int(getattr(table_edge_cfg, "yolo_table_roi_min_w", 120) or 120),
+            yolo_roi_min_h=int(getattr(table_edge_cfg, "yolo_table_roi_min_h", 80) or 80),
+            yolo_roi_max_w_ratio=float(getattr(table_edge_cfg, "yolo_table_roi_max_w_ratio", 0.95) or 0.95),
+            yolo_roi_max_h_ratio=float(getattr(table_edge_cfg, "yolo_table_roi_max_h_ratio", 0.95) or 0.95),
         )
         quadrant = roi_meta.get("table_quadrant")
         table_bbox = roi_meta.get("table_bbox")
-        if quadrant and roi_meta.get("roi_source") in {"local_perception_table_bbox", "yolo_table_bbox", "yolo_table_mapped_center"}:
+        if quadrant and roi_meta.get("roi_source") in {"local_perception_table_bbox", "yolo_table_bbox", "yolo_table_mapped_center", "yolo_table_bbox_mapped"}:
             self._last_valid_quadrant = str(quadrant).strip().upper()
             self._last_valid_quadrant_ts = time.time()
             self._last_valid_table_bbox = table_bbox
@@ -1906,6 +1928,13 @@ class TableEdgeManager:
         roi_meta["yolo_table_roi_anchor"] = str(getattr(table_edge_cfg, "yolo_table_roi_anchor", "center") or "center")
         roi_meta["yolo_table_roi_lower_ratio"] = float(getattr(table_edge_cfg, "yolo_table_roi_lower_ratio", 0.75) or 0.75)
         roi_meta["yolo_table_roi_use_rgb_depth_mapping"] = bool(getattr(table_edge_cfg, "yolo_table_roi_use_rgb_depth_mapping", True))
+        roi_meta["yolo_table_roi_mode"] = str(getattr(table_edge_cfg, "yolo_table_roi_mode", "bbox_expand") or "bbox_expand")
+        roi_meta["yolo_table_roi_expand_x_ratio"] = float(getattr(table_edge_cfg, "yolo_table_roi_expand_x_ratio", 0.10) or 0.10)
+        roi_meta["yolo_table_roi_expand_y_ratio"] = float(getattr(table_edge_cfg, "yolo_table_roi_expand_y_ratio", 0.10) or 0.10)
+        roi_meta["yolo_table_roi_min_w"] = int(getattr(table_edge_cfg, "yolo_table_roi_min_w", 120) or 120)
+        roi_meta["yolo_table_roi_min_h"] = int(getattr(table_edge_cfg, "yolo_table_roi_min_h", 80) or 80)
+        roi_meta["yolo_table_roi_max_w_ratio"] = float(getattr(table_edge_cfg, "yolo_table_roi_max_w_ratio", 0.95) or 0.95)
+        roi_meta["yolo_table_roi_max_h_ratio"] = float(getattr(table_edge_cfg, "yolo_table_roi_max_h_ratio", 0.95) or 0.95)
         roi_meta["yolo_table_roi_center_x_ema"] = self._yolo_table_roi_center_x_ema
         roi_meta["yolo_table_edge_stable_count"] = int(self._edge_stable_count)
         roi_meta["yolo_table_edge_stable_required"] = int(stable_required)
@@ -1966,6 +1995,13 @@ class TableEdgeManager:
             "yolo_table_roi_anchor",
             "yolo_table_roi_lower_ratio",
             "yolo_table_roi_use_rgb_depth_mapping",
+            "yolo_table_roi_mode",
+            "yolo_table_roi_expand_x_ratio",
+            "yolo_table_roi_expand_y_ratio",
+            "yolo_table_roi_min_w",
+            "yolo_table_roi_min_h",
+            "yolo_table_roi_max_w_ratio",
+            "yolo_table_roi_max_h_ratio",
             "yolo_table_roi_center_x_ema",
             "yolo_table_edge_stable_count",
             "yolo_table_edge_stable_required",
@@ -1986,6 +2022,12 @@ class TableEdgeManager:
             "table_bbox_rgb_center",
             "table_bbox_rgb_center_norm",
             "mapped_depth_center",
+            "mapped_depth_bbox_xyxy",
+            "yolo_table_roi_mode",
+            "roi_expand_x_ratio",
+            "roi_expand_y_ratio",
+            "roi_min_w",
+            "roi_min_h",
             "roi_anchor",
             "roi_mapping_mode",
             "roi_clamped",

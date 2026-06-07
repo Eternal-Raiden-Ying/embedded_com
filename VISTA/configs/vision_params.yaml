@@ -144,6 +144,13 @@ table_edge:
   yolo_table_roi_anchor: center
   yolo_table_roi_lower_ratio: 0.75
   yolo_table_roi_use_rgb_depth_mapping: true
+  yolo_table_roi_mode: bbox_expand
+  yolo_table_roi_expand_x_ratio: 0.10
+  yolo_table_roi_expand_y_ratio: 0.10
+  yolo_table_roi_min_w: 120
+  yolo_table_roi_min_h: 80
+  yolo_table_roi_max_w_ratio: 0.95
+  yolo_table_roi_max_h_ratio: 0.95
   yolo_table_roi_min_area_ratio: 0.01
   yolo_table_roi_max_area_ratio: 0.90
   yolo_table_edge_stable_frames: 5
@@ -151,6 +158,8 @@ table_edge:
   edge_trusted_max_residual: 0.0  # <=0 disables residual gate
   edge_trusted_min_support_count: 0
   edge_trusted_min_inlier_count: 0
+  edge_trusted_min_x_span_m: 0.0
+  edge_trusted_max_background_penalty: 0.0  # <=0 disables background penalty gate
   yolo_table_near_dist_m: 0.45
   yolo_table_near_bottom_norm: 0.60
   # 调试开关（全局，不随 mode 切换）

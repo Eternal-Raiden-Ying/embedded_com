@@ -31,7 +31,7 @@ callers, but new control code should use the names below.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import Any, Dict, Optional
 
 
@@ -56,6 +56,9 @@ class TablePerceptionSemantics:
     edge_residual_raw: Optional[float] = None
     edge_support_count: Optional[int] = None
     edge_inlier_count: Optional[int] = None
+    edge_x_span_m: Optional[float] = None
+    edge_background_penalty: Optional[float] = None
+    edge_quality: Dict[str, Any] = field(default_factory=dict)
     edge_trust_reason: str = ""
     edge_reject_for_control_reason: str = ""
 
@@ -126,16 +129,17 @@ def table_bbox_current_found(obs: Any) -> bool:
     """Current-frame table bbox existence. Confidence is deliberately ignored."""
     if obs is None:
         return False
-    if bool(getattr(obs, "table_bbox_current_found", False)):
-        return True
-    if bool(getattr(obs, "table_bbox_found", False)):
-        return True
+    explicit = getattr(obs, "table_bbox_current_found", None)
     bbox = (
         getattr(obs, "table_bbox_xyxy", None)
         or getattr(obs, "table_bbox", None)
         or getattr(obs, "yolo_table_bbox", None)
         or getattr(obs, "detected_table_bbox", None)
     )
+    if explicit is not None:
+        return bool(explicit) or _list_bbox(bbox) is not None
+    if bool(getattr(obs, "table_bbox_found", False)):
+        return True
     return _list_bbox(bbox) is not None
 
 
@@ -198,36 +202,45 @@ def build_table_perception_semantics(
     stable_required = max(1, stable_required)
     edge_stable = bool(edge_geometry_valid and stable_count >= stable_required)
 
+    raw_quality = getattr(obs, "edge_quality", None) if obs is not None else None
+    edge_quality = dict(raw_quality or {}) if isinstance(raw_quality, dict) else {}
+
+    def quality_or_attr(key: str, *attrs: str) -> Any:
+        if key in edge_quality:
+            return edge_quality.get(key)
+        if obs is None:
+            return None
+        for attr in attrs:
+            if hasattr(obs, attr):
+                return getattr(obs, attr)
+        return None
+
     conf = None
-    if obs is not None:
-        for name in ("edge_conf", "confidence", "fast_line_score", "fast_edge_consistency_score"):
-            conf = _float_or_none(getattr(obs, name, None))
-            if conf is not None:
-                break
+    for value in (quality_or_attr("edge_conf", "edge_conf", "confidence"), quality_or_attr("line_score", "fast_line_score"), quality_or_attr("edge_consistency_score", "fast_edge_consistency_score")):
+        conf = _float_or_none(value)
+        if conf is not None:
+            break
     min_conf = _float_or_none(getattr(cfg, "edge_trusted_min_conf", None) if cfg is not None else None)
     if min_conf is None:
         min_conf = _float_or_none(getattr(cfg, "edge_follow_min_edge_conf", None) if cfg is not None else None)
 
     residual = None
-    if obs is not None:
-        for name in ("line_residual", "residual", "fast_residual_mean", "fast_residual_p90"):
-            residual = _float_or_none(getattr(obs, name, None))
-            if residual is not None:
-                break
+    for value in (quality_or_attr("residual_mean", "line_residual", "residual", "fast_residual_mean"), quality_or_attr("residual_p90", "fast_residual_p90")):
+        residual = _float_or_none(value)
+        if residual is not None:
+            break
     max_residual = _float_or_none(getattr(cfg, "edge_trusted_max_residual", None) if cfg is not None else None)
 
-    support_count = None
-    if obs is not None:
-        for name in ("fast_support_point_count", "support_point_count", "support_count"):
-            support_count = _int_or_none(getattr(obs, name, None))
-            if support_count is not None:
-                break
-    inlier_count = None
-    if obs is not None:
-        for name in ("fast_rep_inlier_count", "inlier_count", "fast_inlier_count"):
-            inlier_count = _int_or_none(getattr(obs, name, None))
-            if inlier_count is not None:
-                break
+    support_count = _int_or_none(quality_or_attr("support_count", "fast_support_point_count", "support_point_count", "support_count"))
+    inlier_count = _int_or_none(quality_or_attr("inlier_count", "fast_rep_inlier_count", "inlier_count", "fast_inlier_count"))
+    x_span_m = _float_or_none(quality_or_attr("x_span_m", "fast_fit_inlier_x_span_m", "fast_edge_x_span_m"))
+    background_penalty = _float_or_none(quality_or_attr("background_penalty", "fast_background_penalty"))
+    min_support = _int_or_none(getattr(cfg, "edge_trusted_min_support_count", None) if cfg is not None else None) or 0
+    min_inlier = _int_or_none(getattr(cfg, "edge_trusted_min_inlier_count", None) if cfg is not None else None) or 0
+    min_x_span = _float_or_none(getattr(cfg, "edge_trusted_min_x_span_m", None) if cfg is not None else None) or 0.0
+    max_background = _float_or_none(getattr(cfg, "edge_trusted_max_background_penalty", None) if cfg is not None else None)
+    if max_background is not None and max_background <= 0.0:
+        max_background = None
 
     if not control_valid:
         edge_trusted = False
@@ -253,6 +266,22 @@ def build_table_perception_semantics(
         edge_trusted = False
         reason = ""
         reject = f"edge_residual_high:{residual:.3f}>{float(max_residual):.3f}"
+    elif int(min_support) > 0 and (support_count is None or int(support_count) < int(min_support)):
+        edge_trusted = False
+        reason = ""
+        reject = f"support_low:{int(support_count or 0)}<{int(min_support)}"
+    elif int(min_inlier) > 0 and (inlier_count is None or int(inlier_count) < int(min_inlier)):
+        edge_trusted = False
+        reason = ""
+        reject = f"inlier_low:{int(inlier_count or 0)}<{int(min_inlier)}"
+    elif float(min_x_span) > 0.0 and x_span_m is not None and float(x_span_m) < float(min_x_span):
+        edge_trusted = False
+        reason = ""
+        reject = f"x_span_low:{float(x_span_m):.3f}<{float(min_x_span):.3f}"
+    elif max_background is not None and background_penalty is not None and float(background_penalty) > float(max_background):
+        edge_trusted = False
+        reason = ""
+        reject = f"background_penalty_high:{float(background_penalty):.3f}>{float(max_background):.3f}"
     else:
         edge_trusted = True
         reason = "table_bbox_and_stable_quality_edge"
@@ -275,6 +304,9 @@ def build_table_perception_semantics(
         edge_residual_raw=residual,
         edge_support_count=support_count,
         edge_inlier_count=inlier_count,
+        edge_x_span_m=x_span_m,
+        edge_background_penalty=background_penalty,
+        edge_quality=edge_quality,
         edge_trust_reason=reason,
         edge_reject_for_control_reason=reject,
         stale_level=str(stale_level or ""),
