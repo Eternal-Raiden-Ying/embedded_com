@@ -113,6 +113,8 @@ class TableEdgeManager:
         self._last_valid_quadrant_ttl_s = 1.0
         self._last_valid_table_bbox = None
         self._last_valid_table_center_norm = None
+        self._last_valid_depth_roi = None
+        self._last_valid_table_bbox_hold_frames = 0
         self._yolo_table_roi_center_x_ema: Optional[float] = None
         self._edge_stable_count = 0
         self._edge_stability_prev: Dict[str, Any] = {}
@@ -1915,14 +1917,39 @@ class TableEdgeManager:
             yolo_roi_min_h=int(getattr(table_edge_cfg, "yolo_table_roi_min_h", 80) or 80),
             yolo_roi_max_w_ratio=float(getattr(table_edge_cfg, "yolo_table_roi_max_w_ratio", 0.95) or 0.95),
             yolo_roi_max_h_ratio=float(getattr(table_edge_cfg, "yolo_table_roi_max_h_ratio", 0.95) or 0.95),
+            yolo_roi_scale_x=float(getattr(table_edge_cfg, "yolo_table_roi_scale_x", 1.0) or 1.0),
+            yolo_roi_scale_y=float(getattr(table_edge_cfg, "yolo_table_roi_scale_y", 1.0) or 1.0),
+            rgb_to_depth_view_rect_norm=getattr(table_edge_cfg, "rgb_to_depth_view_rect_norm", None),
+            last_valid_depth_roi=self._last_valid_depth_roi,
+            yolo_table_bbox_hold_enable=bool(getattr(table_edge_cfg, "yolo_table_bbox_hold_enable", True)),
+            yolo_table_bbox_hold_frames=int(getattr(table_edge_cfg, "yolo_table_bbox_hold_frames", 8) or 8),
+            table_bbox_hold_age_frames=int(self._last_valid_table_bbox_hold_frames or 0),
+            yolo_table_roi_hold_enable=bool(getattr(table_edge_cfg, "yolo_table_roi_hold_enable", True)),
         )
         quadrant = roi_meta.get("table_quadrant")
         table_bbox = roi_meta.get("table_bbox")
-        if quadrant and roi_meta.get("roi_source") in {"local_perception_table_bbox", "yolo_table_bbox", "yolo_table_mapped_center", "yolo_table_bbox_mapped"}:
-            self._last_valid_quadrant = str(quadrant).strip().upper()
+        roi_source_text = str(roi_meta.get("roi_source") or "")
+        current_table_bbox_found = bool(roi_meta.get("table_bbox_current_found", False))
+        if not current_table_bbox_found and table_bbox is not None and roi_source_text != "yolo_table_bbox_hold":
+            current_table_bbox_found = roi_source_text in {"local_perception_table_bbox", "yolo_table_bbox", "yolo_table_mapped_center", "yolo_table_bbox_mapped"}
+        if current_table_bbox_found and roi_source_text in {"local_perception_table_bbox", "yolo_table_bbox", "yolo_table_mapped_center", "yolo_table_bbox_mapped"}:
+            self._last_valid_quadrant = str(quadrant).strip().upper() if quadrant else self._last_valid_quadrant
             self._last_valid_quadrant_ts = time.time()
             self._last_valid_table_bbox = table_bbox
             self._last_valid_table_center_norm = roi_meta.get("table_center_norm")
+            self._last_valid_depth_roi = roi_meta.get("table_edge_roi") or roi_meta.get("depth_edge_roi")
+            self._last_valid_table_bbox_hold_frames = 0
+        elif roi_source_text == "yolo_table_bbox_hold":
+            self._last_valid_table_bbox_hold_frames = int(self._last_valid_table_bbox_hold_frames or 0) + 1
+        else:
+            self._last_valid_table_bbox_hold_frames = int(self._last_valid_table_bbox_hold_frames or 0) + 1
+        roi_meta["table_bbox_current_found"] = bool(current_table_bbox_found)
+        roi_meta["table_bbox_control_valid"] = bool(current_table_bbox_found or roi_source_text == "yolo_table_bbox_hold")
+        roi_meta["table_bbox_hold_active"] = bool(roi_source_text == "yolo_table_bbox_hold")
+        roi_meta["table_bbox_hold_age_frames"] = int(self._last_valid_table_bbox_hold_frames if roi_source_text == "yolo_table_bbox_hold" else 0)
+        roi_meta["roi_hold_active"] = bool(roi_source_text == "yolo_table_bbox_hold")
+        roi_meta["roi_hold_age_frames"] = int(self._last_valid_table_bbox_hold_frames if roi_source_text == "yolo_table_bbox_hold" else 0)
+        roi_meta["last_valid_table_edge_roi"] = self._last_valid_depth_roi
         roi_meta["yolo_table_roi_enable"] = bool(dynamic_enable)
         roi_meta["yolo_table_roi_ema_alpha"] = float(getattr(table_edge_cfg, "yolo_table_roi_ema_alpha", 0.4) or 0.4)
         roi_meta["yolo_table_roi_anchor"] = str(getattr(table_edge_cfg, "yolo_table_roi_anchor", "center") or "center")
@@ -1935,6 +1962,12 @@ class TableEdgeManager:
         roi_meta["yolo_table_roi_min_h"] = int(getattr(table_edge_cfg, "yolo_table_roi_min_h", 80) or 80)
         roi_meta["yolo_table_roi_max_w_ratio"] = float(getattr(table_edge_cfg, "yolo_table_roi_max_w_ratio", 0.95) or 0.95)
         roi_meta["yolo_table_roi_max_h_ratio"] = float(getattr(table_edge_cfg, "yolo_table_roi_max_h_ratio", 0.95) or 0.95)
+        roi_meta["yolo_table_roi_scale_x"] = float(getattr(table_edge_cfg, "yolo_table_roi_scale_x", 1.0) or 1.0)
+        roi_meta["yolo_table_roi_scale_y"] = float(getattr(table_edge_cfg, "yolo_table_roi_scale_y", 1.0) or 1.0)
+        roi_meta["rgb_to_depth_view_rect_norm"] = getattr(table_edge_cfg, "rgb_to_depth_view_rect_norm", None)
+        roi_meta["yolo_table_bbox_hold_enable"] = bool(getattr(table_edge_cfg, "yolo_table_bbox_hold_enable", True))
+        roi_meta["yolo_table_bbox_hold_frames"] = int(getattr(table_edge_cfg, "yolo_table_bbox_hold_frames", 8) or 8)
+        roi_meta["yolo_table_roi_hold_enable"] = bool(getattr(table_edge_cfg, "yolo_table_roi_hold_enable", True))
         roi_meta["yolo_table_roi_center_x_ema"] = self._yolo_table_roi_center_x_ema
         roi_meta["yolo_table_edge_stable_count"] = int(self._edge_stable_count)
         roi_meta["yolo_table_edge_stable_required"] = int(stable_required)
@@ -2002,6 +2035,20 @@ class TableEdgeManager:
             "yolo_table_roi_min_h",
             "yolo_table_roi_max_w_ratio",
             "yolo_table_roi_max_h_ratio",
+            "yolo_table_roi_scale_x",
+            "yolo_table_roi_scale_y",
+            "rgb_to_depth_view_rect_norm",
+            "rgb_to_depth_view_rect_used",
+            "yolo_table_bbox_hold_enable",
+            "yolo_table_bbox_hold_frames",
+            "yolo_table_roi_hold_enable",
+            "table_bbox_current_found",
+            "table_bbox_control_valid",
+            "table_bbox_hold_active",
+            "table_bbox_hold_age_frames",
+            "roi_hold_active",
+            "roi_hold_age_frames",
+            "last_valid_table_edge_roi",
             "yolo_table_roi_center_x_ema",
             "yolo_table_edge_stable_count",
             "yolo_table_edge_stable_required",
@@ -2022,12 +2069,16 @@ class TableEdgeManager:
             "table_bbox_rgb_center",
             "table_bbox_rgb_center_norm",
             "mapped_depth_center",
+            "mapped_depth_bbox_unclipped_xyxy",
             "mapped_depth_bbox_xyxy",
             "yolo_table_roi_mode",
             "roi_expand_x_ratio",
             "roi_expand_y_ratio",
             "roi_min_w",
             "roi_min_h",
+            "roi_scale_x",
+            "roi_scale_y",
+            "roi_center_x_smoothed",
             "roi_anchor",
             "roi_mapping_mode",
             "roi_clamped",

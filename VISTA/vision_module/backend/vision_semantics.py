@@ -106,13 +106,17 @@ def local_table_bbox_semantics(payload: Dict[str, Any], *, rgb_shape: Any = None
         or payload.get("mock_table_bbox")
     )
     bbox = _bbox_xyxy(raw_bbox)
-    current_found = bbox is not None
+    explicit_current_found = payload.get("table_bbox_current_found", None)
+    if explicit_current_found is None:
+        current_found = bbox is not None
+    else:
+        current_found = bool(explicit_current_found)
 
     explicit_control_valid = payload.get("table_bbox_control_valid", None)
     hold_active = bool(payload.get("table_bbox_hold_active", False))
     hold_age = _to_int(payload.get("table_bbox_hold_age_frames")) or 0
     if explicit_control_valid is None:
-        control_valid = bool(current_found or hold_active)
+        control_valid = bool(current_found or hold_active or (bbox is not None and not current_found))
     else:
         control_valid = bool(explicit_control_valid)
     if current_found:

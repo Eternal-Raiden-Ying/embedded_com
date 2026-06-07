@@ -185,11 +185,19 @@ def _apply_stage_params(data: Dict[str, Any]) -> None:
         yolo_table.get("edge_trusted_min_conf", CONFIG.control.edge_trusted_min_conf)
     )
     CONFIG.control.edge_trusted_max_residual = float(
-        yolo_table.get("edge_trusted_max_residual",
-            "edge_trusted_min_support_count",
-            "edge_trusted_min_inlier_count",
-            "edge_trusted_min_x_span_m",
-            "edge_trusted_max_background_penalty", CONFIG.control.edge_trusted_max_residual)
+        yolo_table.get("edge_trusted_max_residual", CONFIG.control.edge_trusted_max_residual)
+    )
+    CONFIG.control.edge_trusted_min_support_count = int(
+        yolo_table.get("edge_trusted_min_support_count", CONFIG.control.edge_trusted_min_support_count)
+    )
+    CONFIG.control.edge_trusted_min_inlier_count = int(
+        yolo_table.get("edge_trusted_min_inlier_count", CONFIG.control.edge_trusted_min_inlier_count)
+    )
+    CONFIG.control.edge_trusted_min_x_span_m = float(
+        yolo_table.get("edge_trusted_min_x_span_m", CONFIG.control.edge_trusted_min_x_span_m)
+    )
+    CONFIG.control.edge_trusted_max_background_penalty = float(
+        yolo_table.get("edge_trusted_max_background_penalty", CONFIG.control.edge_trusted_max_background_penalty)
     )
     CONFIG.control.yolo_table_near_dist_m = float(
         yolo_table.get("yolo_table_near_dist_m", yolo_table.get("near_dist_m", CONFIG.control.yolo_table_near_dist_m))

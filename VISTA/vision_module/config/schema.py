@@ -156,14 +156,26 @@ class TableEdgeConfig:
     yolo_table_roi_lower_ratio: float = 0.75
     yolo_table_roi_use_rgb_depth_mapping: bool = True
     yolo_table_roi_mode: str = "bbox_expand"
-    yolo_table_roi_expand_x_ratio: float = 0.10
-    yolo_table_roi_expand_y_ratio: float = 0.10
-    yolo_table_roi_min_w: int = 120
-    yolo_table_roi_min_h: int = 80
+    # bbox-size driven ROI tuning.  Scale < 1.0 deliberately shrinks the
+    # mapped YOLO bbox around its center; this is the primary knob for ROI size.
+    yolo_table_roi_expand_x_ratio: float = 0.0
+    yolo_table_roi_expand_y_ratio: float = 0.0
+    yolo_table_roi_scale_x: float = 0.50
+    yolo_table_roi_scale_y: float = 0.50
+    yolo_table_roi_min_w: int = 60
+    yolo_table_roi_min_h: int = 40
     yolo_table_roi_max_w_ratio: float = 0.95
     yolo_table_roi_max_h_ratio: float = 0.95
-    yolo_table_roi_min_area_ratio: float = 0.01
-    yolo_table_roi_max_area_ratio: float = 0.90
+    # RGB-output normalized rectangle corresponding to the full depth FOV.
+    # Use [0,0,1,1] when RGB/depth FOVs already match; use e.g.
+    # [0.12,0.0,0.88,1.0] when depth is the central sub-view of RGB.
+    rgb_to_depth_view_rect_norm: tuple = (0.0, 0.0, 1.0, 1.0)
+    yolo_table_bbox_hold_enable: bool = True
+    yolo_table_bbox_hold_frames: int = 8
+    yolo_table_roi_hold_enable: bool = True
+    # Compatibility only; existence/control should no longer rely on area gates.
+    yolo_table_roi_min_area_ratio: float = 0.0
+    yolo_table_roi_max_area_ratio: float = 1.0
     yolo_table_edge_stable_frames: int = 5
     edge_trusted_min_conf: float = 0.60
     edge_trusted_max_residual: float = 0.0  # <=0 disables residual gate
