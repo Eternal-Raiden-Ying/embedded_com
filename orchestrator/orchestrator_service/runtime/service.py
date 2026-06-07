@@ -1000,7 +1000,7 @@ class OrchestratorService(BaseModule):
             or "system_perception_dead" in stale_reason
         )
         yolo_allows_edge_stale = bool(
-            control_source in {"yolo_forward", "yolo_assist"}
+            control_source in {"yolo_forward"}
             and bool(summary.get("yolo_table_control_valid", False))
             and not perception_dead
         )

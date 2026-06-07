@@ -158,6 +158,10 @@ class TableEdgeConfig:
     yolo_table_roi_min_area_ratio: float = 0.01
     yolo_table_roi_max_area_ratio: float = 0.90
     yolo_table_edge_stable_frames: int = 5
+    edge_trusted_min_conf: float = 0.60
+    edge_trusted_max_residual: float = 0.0  # <=0 disables residual gate
+    edge_trusted_min_support_count: int = 0
+    edge_trusted_min_inlier_count: int = 0
     yolo_table_near_dist_m: float = 0.45
     yolo_table_near_bottom_norm: float = 0.60
     profile_log_interval_s: float = 2.0

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Control authority arbitration primitives for table approach.
+"""Control-authority arbitration for table approach.
 
-The state machine should decide coarse task phases; this module decides which
-source is allowed to own the motion command for the current table approach tick.
+This module owns the vocabulary of table-control sources.  It keeps the state
+machine from reintroducing ambiguous legacy control-source names.
 """
 
 from __future__ import annotations
@@ -12,6 +12,17 @@ from dataclasses import dataclass, asdict
 from typing import Any, Dict
 
 from .perception_semantics import TablePerceptionSemantics
+
+
+VALID_CONTROL_SOURCES = {
+    "yolo_forward",
+    "edge_adjust",
+    "local_rotate_search",
+    "final_lock",
+    "search_failed_stop",
+    "explicit_stop",
+    "stop",
+}
 
 
 @dataclass(frozen=True)
@@ -28,14 +39,55 @@ class ControlAuthority:
         return asdict(self)
 
 
+def normalize_control_source(source: str) -> str:
+    source = str(source or "").strip().lower()
+    legacy_map = {
+        "edge_only": "edge_adjust",
+        "search_fallback": "local_rotate_search",
+    }
+    source = legacy_map.get(source, source)
+    return source if source in VALID_CONTROL_SOURCES else "stop"
+
+
 def decide_table_control_authority(state: str, sem: TablePerceptionSemantics, cfg: Any = None) -> ControlAuthority:
+    """Return the owner of the current table-approach motion command.
+
+    Current policy:
+    - final states own final-lock / stop decisions.
+    - if table bbox is control-valid and edge is trusted, edge_adjust may own
+      posture correction.
+    - if table bbox is control-valid but edge is not trusted, yolo_forward owns
+      straight forward motion.
+    - without table bbox, edge/docking is not allowed to control; use local
+      rotate search.
+    """
     state = str(state or "").upper().strip()
     if state in {"FINAL_LOCK", "AT_TABLE_EDGE"}:
         return ControlAuthority("final_lock", "final_lock", False, False, reason="final_lock_state")
-    if sem.table_bbox_found:
-        if sem.edge_trusted and state == "COARSE_ALIGN":
-            return ControlAuthority("edge_adjust", "posture_adjust", False, True, reason="edge_trusted_for_rotation")
-        # Current first-priority strategy: table bbox is a forward permit.
-        # Edge can be logged while untrusted, but it cannot steal motion authority.
-        return ControlAuthority("yolo_forward", "forward", True, False, reason="table_bbox_found_default_forward", rotate_block_reason="yolo_forward_owns_control")
-    return ControlAuthority("local_rotate_search", "search", False, True, reason="table_bbox_missing_local_search", forward_block_reason="table_bbox_unavailable")
+
+    if sem.table_bbox_control_valid:
+        if sem.edge_trusted:
+            return ControlAuthority(
+                "edge_adjust",
+                "posture_adjust",
+                allow_forward=True,
+                allow_rotate=True,
+                reason="edge_trusted",
+            )
+        return ControlAuthority(
+            "yolo_forward",
+            "forward",
+            allow_forward=True,
+            allow_rotate=False,
+            reason="table_bbox_control_valid_edge_not_trusted",
+            rotate_block_reason=sem.edge_reject_for_control_reason or "edge_not_trusted",
+        )
+
+    return ControlAuthority(
+        "local_rotate_search",
+        "search",
+        allow_forward=False,
+        allow_rotate=True,
+        reason="table_bbox_unavailable",
+        forward_block_reason="table_bbox_unavailable",
+    )

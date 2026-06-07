@@ -1,18 +1,32 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Perception semantic normalization for table docking control.
+"""Control-facing perception semantics for table docking.
 
-This module intentionally contains no motion generation.  It converts the raw
-TableEdgeObs payload into stable control-facing semantic flags:
+This module is deliberately small and declarative.  It does not generate motion.
+It normalizes raw TableEdgeObs fields into a clean contract consumed by the
+control authority layer.
 
-- table_bbox_found: YOLO/table detector found a table bbox.  Confidence is not
-  used as a gate in the current strategy.
-- edge_valid: a local geometric edge exists in the current ROI.
-- edge_stable: edge_valid has been stable for enough consecutive observations.
-- edge_trusted: edge information is allowed to participate in posture control.
+Naming rules used from control-refactor-v2 onward:
 
-The ROI correctness / RGB-depth mapping problem belongs to the vision/ROI layer.
-The control layer only consumes this semantic contract.
+- table_bbox_current_found:
+    Current frame has a table bbox from YOLO/table detector.
+- table_bbox_control_valid:
+    Control is allowed to treat table bbox as available.  This may later include
+    hold / memory, but in the current implementation it is equivalent to current
+    bbox existence unless upstream explicitly supplies a valid hold flag.
+- edge_detected:
+    Fast edge / docking perception saw a candidate geometric structure.
+- edge_geometry_valid:
+    Single-frame geometric result passed the perception-level validity checks.
+    This is not control permission.
+- edge_stable:
+    edge_geometry_valid has persisted for enough frames.
+- edge_trusted:
+    edge_stable plus basic quality gates; only this may enter posture control.
+
+Deprecated aliases such as edge_valid / yolo_reliable are intentionally not part
+of this dataclass.  They may still be exported as compatibility logs by older
+callers, but new control code should use the names below.
 """
 
 from __future__ import annotations
@@ -23,20 +37,29 @@ from typing import Any, Dict, Optional
 
 @dataclass(frozen=True)
 class TablePerceptionSemantics:
-    table_bbox_found: bool = False
+    # YOLO/table bbox semantics
+    table_bbox_current_found: bool = False
+    table_bbox_control_valid: bool = False
+    table_bbox_hold_active: bool = False
+    table_bbox_hold_age_frames: int = 0
     table_bbox_xyxy: Optional[list] = None
     table_bbox_conf_raw: Optional[float] = None
     table_bbox_conf_used_for_gate: bool = False
 
+    # Edge / docking perception semantics
     edge_detected: bool = False
-    edge_valid: bool = False
+    edge_geometry_valid: bool = False
     edge_stable: bool = False
     edge_trusted: bool = False
-
     edge_stable_count: int = 0
+    edge_conf_raw: Optional[float] = None
+    edge_residual_raw: Optional[float] = None
+    edge_support_count: Optional[int] = None
+    edge_inlier_count: Optional[int] = None
     edge_trust_reason: str = ""
     edge_reject_for_control_reason: str = ""
 
+    # Timing / freshness semantics
     stale_level: str = ""
     stale_source: str = ""
 
@@ -56,96 +79,176 @@ def _float_or_none(v: Any) -> Optional[float]:
     return out
 
 
-def table_bbox_found(obs: Any) -> bool:
-    """YOLO/table bbox existence gate.  Confidence is deliberately ignored."""
+def _int_or_none(v: Any) -> Optional[int]:
+    try:
+        if v is None:
+            return None
+        return int(v)
+    except Exception:
+        return None
+
+
+def _list_bbox(v: Any) -> Optional[list]:
+    if isinstance(v, list) and len(v) >= 4:
+        return v[:4]
+    if isinstance(v, tuple) and len(v) >= 4:
+        return list(v[:4])
+    return None
+
+
+def table_bbox_current_found(obs: Any) -> bool:
+    """Current-frame table bbox existence. Confidence is deliberately ignored."""
     if obs is None:
         return False
+    if bool(getattr(obs, "table_bbox_current_found", False)):
+        return True
     if bool(getattr(obs, "table_bbox_found", False)):
         return True
-    bbox = getattr(obs, "table_bbox_xyxy", None) or getattr(obs, "yolo_table_bbox", None)
-    if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
-        return True
-    if bool(getattr(obs, "yolo_table_control_valid", False)):
-        return True
-    # Backward-compatible fallback for older vision payloads.
-    return bool(getattr(obs, "table_confirmed_by_yolo", False)) and getattr(obs, "table_cx_norm", None) is not None
+    bbox = (
+        getattr(obs, "table_bbox_xyxy", None)
+        or getattr(obs, "table_bbox", None)
+        or getattr(obs, "yolo_table_bbox", None)
+        or getattr(obs, "detected_table_bbox", None)
+    )
+    return _list_bbox(bbox) is not None
 
 
-def build_table_perception_semantics(obs: Any, cfg: Any = None, *, stale_level: str = "", stale_source: str = "") -> TablePerceptionSemantics:
-    bbox_found = table_bbox_found(obs)
+# Backward-compatible import name used by older controller code.
+def table_bbox_found(obs: Any) -> bool:
+    return table_bbox_current_found(obs)
+
+
+def build_table_perception_semantics(
+    obs: Any,
+    cfg: Any = None,
+    *,
+    stale_level: str = "",
+    stale_source: str = "",
+) -> TablePerceptionSemantics:
+    current_found = table_bbox_current_found(obs)
+
     bbox = None
-    bbox_val = getattr(obs, "table_bbox_xyxy", None) if obs is not None else None
-    if isinstance(bbox_val, list):
-        bbox = bbox_val
-    elif isinstance(bbox_val, tuple):
-        bbox = list(bbox_val)
+    if obs is not None:
+        for name in ("table_bbox_xyxy", "table_bbox", "yolo_table_bbox", "detected_table_bbox"):
+            bbox = _list_bbox(getattr(obs, name, None))
+            if bbox is not None:
+                break
 
-    edge_detected = bool(getattr(obs, "edge_found", False)) if obs is not None else False
-    raw_edge_valid = getattr(obs, "edge_valid", None) if obs is not None else None
-    if raw_edge_valid is None:
-        edge_valid = edge_detected
-    else:
-        edge_valid = bool(raw_edge_valid)
-    # Geometry must have a table bbox context before it can affect control.
-    edge_valid = bool(bbox_found and edge_detected and edge_valid)
+    # Control-valid is explicit if upstream provides it; otherwise current bbox
+    # is the only gate. Confidence is not used.
+    explicit_control_valid = bool(getattr(obs, "table_bbox_control_valid", False)) if obs is not None else False
+    legacy_control_valid = bool(getattr(obs, "yolo_table_control_valid", False)) if obs is not None else False
+    control_valid = bool(current_found or explicit_control_valid or legacy_control_valid)
 
-    stable_count = int(getattr(obs, "yolo_table_edge_stable_count", 0) or 0) if obs is not None else 0
+    hold_active = bool(getattr(obs, "table_bbox_hold_active", False)) if obs is not None else False
+    if not current_found and control_valid:
+        hold_active = True
+    hold_age = _int_or_none(getattr(obs, "table_bbox_hold_age_frames", None) if obs is not None else None)
+    if hold_age is None:
+        hold_age = 0
+
+    edge_detected = bool(getattr(obs, "edge_detected", getattr(obs, "edge_found", False))) if obs is not None else False
+
+    raw_geom = None
+    if obs is not None:
+        for name in ("edge_geometry_valid", "edge_valid", "valid_for_control", "usable_for_approach", "usable_for_alignment"):
+            if hasattr(obs, name):
+                raw_geom = bool(getattr(obs, name))
+                if raw_geom:
+                    break
+    edge_geometry_valid = bool(control_valid and edge_detected and bool(raw_geom if raw_geom is not None else edge_detected))
+
+    stable_count = 0
+    if obs is not None:
+        for name in ("edge_stable_count", "yolo_table_edge_stable_count", "stable_count"):
+            val = _int_or_none(getattr(obs, name, None))
+            if val is not None:
+                stable_count = val
+                break
     stable_required = int(
         getattr(cfg, "edge_trusted_stable_frames", getattr(cfg, "yolo_table_edge_stable_frames", 5))
         if cfg is not None else 5
     )
     stable_required = max(1, stable_required)
-    edge_stable = bool(edge_valid and stable_count >= stable_required)
+    edge_stable = bool(edge_geometry_valid and stable_count >= stable_required)
 
-    conf = _float_or_none(getattr(obs, "edge_conf", None) if obs is not None else None)
-    if conf is None:
-        conf = _float_or_none(getattr(obs, "confidence", None) if obs is not None else None)
+    conf = None
+    if obs is not None:
+        for name in ("edge_conf", "confidence", "fast_line_score", "fast_edge_consistency_score"):
+            conf = _float_or_none(getattr(obs, name, None))
+            if conf is not None:
+                break
     min_conf = _float_or_none(getattr(cfg, "edge_trusted_min_conf", None) if cfg is not None else None)
     if min_conf is None:
         min_conf = _float_or_none(getattr(cfg, "edge_follow_min_edge_conf", None) if cfg is not None else None)
-    if min_conf is None:
-        min_conf = 0.0
 
-    residual = _float_or_none(getattr(obs, "line_residual", None) if obs is not None else None)
-    if residual is None:
-        residual = _float_or_none(getattr(obs, "residual", None) if obs is not None else None)
+    residual = None
+    if obs is not None:
+        for name in ("line_residual", "residual", "fast_residual_mean", "fast_residual_p90"):
+            residual = _float_or_none(getattr(obs, name, None))
+            if residual is not None:
+                break
     max_residual = _float_or_none(getattr(cfg, "edge_trusted_max_residual", None) if cfg is not None else None)
 
-    if not bbox_found:
+    support_count = None
+    if obs is not None:
+        for name in ("fast_support_point_count", "support_point_count", "support_count"):
+            support_count = _int_or_none(getattr(obs, name, None))
+            if support_count is not None:
+                break
+    inlier_count = None
+    if obs is not None:
+        for name in ("fast_rep_inlier_count", "inlier_count", "fast_inlier_count"):
+            inlier_count = _int_or_none(getattr(obs, name, None))
+            if inlier_count is not None:
+                break
+
+    if not control_valid:
         edge_trusted = False
         reason = ""
         reject = "table_bbox_unavailable"
-    elif not edge_valid:
+    elif not edge_detected:
         edge_trusted = False
         reason = ""
-        reject = "edge_invalid"
+        reject = "edge_not_detected"
+    elif not edge_geometry_valid:
+        edge_trusted = False
+        reason = ""
+        reject = "edge_geometry_invalid"
     elif not edge_stable:
         edge_trusted = False
         reason = ""
         reject = f"edge_not_stable:{stable_count}/{stable_required}"
-    elif conf is not None and conf < float(min_conf):
+    elif min_conf is not None and conf is not None and conf < float(min_conf):
         edge_trusted = False
         reason = ""
         reject = f"edge_conf_low:{conf:.3f}<{float(min_conf):.3f}"
-    elif max_residual is not None and residual is not None and residual > max_residual:
+    elif max_residual is not None and residual is not None and residual > float(max_residual):
         edge_trusted = False
         reason = ""
-        reject = f"line_residual_high:{residual:.3f}>{max_residual:.3f}"
+        reject = f"edge_residual_high:{residual:.3f}>{float(max_residual):.3f}"
     else:
         edge_trusted = True
-        reason = "table_bbox_and_stable_edge"
+        reason = "table_bbox_and_stable_quality_edge"
         reject = ""
 
     return TablePerceptionSemantics(
-        table_bbox_found=bool(bbox_found),
+        table_bbox_current_found=bool(current_found),
+        table_bbox_control_valid=bool(control_valid),
+        table_bbox_hold_active=bool(hold_active),
+        table_bbox_hold_age_frames=int(hold_age),
         table_bbox_xyxy=bbox,
         table_bbox_conf_raw=_float_or_none(getattr(obs, "table_bbox_conf_raw", getattr(obs, "yolo_table_conf", None)) if obs is not None else None),
         table_bbox_conf_used_for_gate=False,
         edge_detected=bool(edge_detected),
-        edge_valid=bool(edge_valid),
+        edge_geometry_valid=bool(edge_geometry_valid),
         edge_stable=bool(edge_stable),
         edge_trusted=bool(edge_trusted),
         edge_stable_count=int(stable_count),
+        edge_conf_raw=conf,
+        edge_residual_raw=residual,
+        edge_support_count=support_count,
+        edge_inlier_count=inlier_count,
         edge_trust_reason=reason,
         edge_reject_for_control_reason=reject,
         stale_level=str(stale_level or ""),

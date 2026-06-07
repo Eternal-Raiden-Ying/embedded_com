@@ -22,6 +22,7 @@ from .predictor.base import IPredictor
 from ..config.data import COCO80_CLASSES, normalize_class_names
 from ..config.schema import VisionServiceConfig
 from ..utils.table_roi import build_table_roi, find_table_bbox, table_detection_debug
+from .vision_semantics import local_table_bbox_semantics
 
 
 CapabilitySink = Optional[Callable[[str, str, Dict[str, Any]], None]]
@@ -385,13 +386,17 @@ class PredictorManager:
             detected_table_bbox = find_table_bbox(roi_input)
             table_bbox_detected = detected_table_bbox is not None
             table_bbox_used_for_search = bool(yolo_table_search_enabled and table_bbox_detected)
-            table_bbox = detected_table_bbox if table_bbox_used_for_search else None
-            if table_bbox_used_for_search:
+            # Canonical semantics: table bbox existence is independent of the
+            # older RGB-search switch.  The switch may still decide whether the
+            # bbox is used for an RGB search ROI, but it must not hide table
+            # existence from downstream control/ROI logic.
+            table_bbox = detected_table_bbox
+            if table_bbox_detected:
                 roi_input["table_bbox"] = detected_table_bbox
                 table_source = "yolo_table_bbox"
             else:
                 roi_input = {"rgb_shape": rgb_shape}
-                table_source = "yolo_table_search_disabled" if table_bbox_detected else "yolo_unavailable"
+                table_source = "yolo_unavailable"
                 mock_bbox = self._mock_table_bbox(rgb_shape)
                 if mock_bbox is not None:
                     roi_input["mock_table_bbox"] = mock_bbox
@@ -414,9 +419,20 @@ class PredictorManager:
                 table_bbox_detected=table_bbox_detected,
                 table_bbox_used_for_search=table_bbox_used_for_search,
             )
+            table_semantics = local_table_bbox_semantics(
+                {
+                    **payload,
+                    "table_bbox": table_bbox_payload,
+                    "detected_table_bbox": detected_table_bbox,
+                    "table_bbox_source": table_source,
+                },
+                rgb_shape=rgb_shape,
+            )
             payload.update(
                 {
-                    "table_bbox": table_bbox_payload,
+                    # Legacy aliases retained, but canonical fields below are
+                    # the preferred interface for downstream modules.
+                    "table_bbox": table_semantics.get("table_bbox_xyxy"),
                     "detected_table_bbox": detected_table_bbox,
                     "table_quadrant": roi_meta.get("table_quadrant"),
                     "rgb_search_roi": roi_meta.get("rgb_search_roi"),
@@ -424,9 +440,10 @@ class PredictorManager:
                     "yolo26_enabled": yolo26_enabled,
                     "yolo_infer_running": bool(has_infer),
                     "yolo_table_search_enabled": yolo_table_search_enabled,
-                    "table_bbox_detected": table_bbox_detected,
+                    "table_bbox_detected": bool(table_semantics.get("table_bbox_current_found")),
                     "table_bbox_used_for_search": table_bbox_used_for_search,
                     "table_direction_hint": table_detection_debug(payload, rgb_shape).get("direction"),
+                    **table_semantics,
                 }
             )
             self._log_table_detection_debug(payload)

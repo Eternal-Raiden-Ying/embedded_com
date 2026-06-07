@@ -190,15 +190,6 @@ def _apply_stage_params(data: Dict[str, Any]) -> None:
     CONFIG.control.yolo_table_near_dist_m = float(
         yolo_table.get("yolo_table_near_dist_m", yolo_table.get("near_dist_m", CONFIG.control.yolo_table_near_dist_m))
     )
-    CONFIG.control.yolo_table_blend_start_stable_frames = int(
-        yolo_table.get(
-            "yolo_table_blend_start_stable_frames",
-            yolo_table.get("blend_start_stable_frames", CONFIG.control.yolo_table_blend_start_stable_frames),
-        )
-    )
-    CONFIG.control.yolo_table_blend_yolo_weight = float(
-        yolo_table.get("yolo_table_blend_yolo_weight", yolo_table.get("blend_yolo_weight", CONFIG.control.yolo_table_blend_yolo_weight))
-    )
     CONFIG.control.yolo_table_lost_to_search_frames = int(
         yolo_table.get("yolo_table_lost_to_search_frames", yolo_table.get("lost_to_search_frames", CONFIG.control.yolo_table_lost_to_search_frames))
     )
@@ -222,9 +213,6 @@ def _apply_stage_params(data: Dict[str, Any]) -> None:
     )
     CONFIG.car.yolo_table_forward_vx = float(
         yolo_table.get("yolo_table_forward_vx", yolo_table.get("yolo_forward_vx", CONFIG.car.yolo_table_forward_vx))
-    )
-    CONFIG.car.yolo_table_assist_vx = float(
-        yolo_table.get("yolo_table_assist_vx", yolo_table.get("yolo_assist_vx", yolo_table.get("assist_vx", CONFIG.car.yolo_table_assist_vx)))
     )
     CONFIG.car.search_table_wz_norm = float(
         yolo_table.get("rotate_search_wz", yolo_table.get("search_table_wz_norm", CONFIG.car.search_table_wz_norm))
@@ -553,7 +541,6 @@ CONFIG.control.table_stop_margin_m = _env_float("ORCH_TABLE_STOP_MARGIN_CM", CON
 CONFIG.control.table_settle_s = _env_float("ORCH_TABLE_SETTLE_MS", CONFIG.control.table_settle_s * 1000.0) / 1000.0
 CONFIG.control.table_stable_frames = _env_int("ORCH_TABLE_STABLE_FRAMES", CONFIG.control.table_stable_frames)
 CONFIG.control.yolo_table_conf_min = _env_float("ORCH_YOLO_TABLE_CONF_MIN", CONFIG.control.yolo_table_conf_min)
-CONFIG.control.yolo_table_area_gate_for_docking = _env_float("ORCH_YOLO_TABLE_AREA_GATE_FOR_DOCKING", CONFIG.control.yolo_table_area_gate_for_docking)
 CONFIG.control.rotate_search_timeout_s = _env_float("ORCH_ROTATE_SEARCH_TIMEOUT_S", CONFIG.control.rotate_search_timeout_s)
 CONFIG.control.rotate_require_edge_stable_frames = _env_int("ORCH_ROTATE_REQUIRE_EDGE_STABLE_FRAMES", CONFIG.control.rotate_require_edge_stable_frames)
 CONFIG.control.rotate_yaw_threshold_rad = _env_float("ORCH_ROTATE_YAW_THRESHOLD_RAD", CONFIG.control.rotate_yaw_threshold_rad)

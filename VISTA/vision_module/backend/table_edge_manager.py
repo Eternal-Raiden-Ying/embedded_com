@@ -14,6 +14,7 @@ import numpy as np
 
 from .depth_calibration import DepthIntrinsics, depth_intrinsics_from_dict
 from .table_edge_roi import choose_depth_roi
+from .vision_semantics import standardize_table_edge_payload
 from ..config.schema import VisionServiceConfig
 from ..utils.table_roi import table_detection_debug
 
@@ -391,7 +392,9 @@ class TableEdgeManager:
         out.setdefault("seq", out.get("frame_seq", out.get("frame_id")))
         out.setdefault("frame_id", out.get("frame_seq", out.get("seq")))
         out.setdefault("edge_conf", out.get("confidence"))
-        out.setdefault("edge_valid", bool(out.get("edge_found", False)) and not unavailable)
+        out.setdefault("edge_detected", bool(out.get("edge_found", False)))
+        out.setdefault("edge_geometry_valid", bool(out.get("edge_found", False)) and not unavailable)
+        out.setdefault("edge_valid", bool(out.get("edge_geometry_valid", False)))
         out.setdefault("yaw_err", out.get("yaw_err_rad"))
         out.setdefault("dist_err", out.get("dist_err_m"))
         if not bool(out.get("table_bbox_found", False)):
@@ -399,13 +402,30 @@ class TableEdgeManager:
                 out[key] = None
             out["roi_source"] = "disabled_no_table_bbox"
             out["roi_phase"] = "disabled_no_table_bbox"
+            out["table_bbox_current_found"] = False
+            out["table_bbox_control_valid"] = False
             out["edge_control_allowed"] = False
             out["docking_enabled_by_yolo"] = False
+            out["edge_trusted"] = False
+            out["valid_for_control"] = False
             out["edge_control_block_reason"] = out.get("edge_control_block_reason") or "table_bbox_unavailable"
+            out["edge_reject_for_control_reason"] = out.get("edge_reject_for_control_reason") or "table_bbox_unavailable"
         # Compatibility aliases retained for the state machine and legacy logs while
         # table plane fields become the canonical semantics.
         if out.get("plane_roi") is None and out.get("depth_edge_roi") is not None:
             out["plane_roi"] = out.get("depth_edge_roi")
+        cfg = getattr(self.cfg, "table_edge", None)
+        max_residual = getattr(cfg, "edge_trusted_max_residual", 0.0) if cfg is not None else 0.0
+        try:
+            max_residual = float(max_residual or 0.0)
+        except Exception:
+            max_residual = 0.0
+        out = standardize_table_edge_payload(
+            out,
+            edge_stable_required_frames=max(1, int(getattr(cfg, "yolo_table_edge_stable_frames", 5) if cfg is not None else 5)),
+            edge_trusted_min_conf=float(getattr(cfg, "edge_trusted_min_conf", 0.60) if cfg is not None else 0.60),
+            edge_trusted_max_residual=max_residual if max_residual > 0.0 else None,
+        )
         return out
 
     def _log_profile_if_due(self, payload: Dict[str, Any]) -> None:
@@ -1538,6 +1558,18 @@ class TableEdgeManager:
             if key in out:
                 out["edge_profile"][key] = out.get(key)
         out["edge_process_path"] = str(path or "")
+        cfg = getattr(self.cfg, "table_edge", None)
+        max_residual = getattr(cfg, "edge_trusted_max_residual", 0.0) if cfg is not None else 0.0
+        try:
+            max_residual = float(max_residual or 0.0)
+        except Exception:
+            max_residual = 0.0
+        out = standardize_table_edge_payload(
+            out,
+            edge_stable_required_frames=max(1, int(getattr(cfg, "yolo_table_edge_stable_frames", 5) if cfg is not None else 5)),
+            edge_trusted_min_conf=float(getattr(cfg, "edge_trusted_min_conf", 0.60) if cfg is not None else 0.60),
+            edge_trusted_max_residual=max_residual if max_residual > 0.0 else None,
+        )
         return out
 
     def _update_edge_stability(self, payload: Dict[str, Any]) -> None:
@@ -1587,7 +1619,14 @@ class TableEdgeManager:
         return {
             "table_found": False,
             "edge_found": False,
+            "edge_detected": False,
+            "edge_geometry_valid": False,
             "edge_valid": False,
+            "edge_stable": False,
+            "edge_trusted": False,
+            "edge_quality": {},
+            "edge_trust_reason": "",
+            "edge_reject_for_control_reason": str(reason or ""),
             "confidence": 0.0,
             "edge_conf": 0.0,
             "yaw_err_rad": None,
@@ -1610,8 +1649,11 @@ class TableEdgeManager:
             "enable_crease_line": bool(getattr(self._detector_cfg, "enable_crease_line", True)),
             **self._detector_mode_payload(),
             "table_confirmed_by_yolo": False,
+            "table_bbox_current_found": False,
+            "table_bbox_control_valid": False,
             "table_bbox_found": False,
             "table_bbox_xyxy": None,
+            "table_bbox_source": "none",
             "table_bbox_area_ratio": None,
             "table_bbox_conf_raw": None,
             "table_bbox_conf_used_for_gate": False,
@@ -1678,8 +1720,11 @@ class TableEdgeManager:
             gate_open = False
         return {
             "table_confirmed_by_yolo": confirmed,
+            "table_bbox_current_found": bool(bbox_found),
+            "table_bbox_control_valid": bool(bbox_found),
             "table_bbox_found": bool(bbox_found),
             "table_bbox_xyxy": table_bbox,
+            "table_bbox_source": "yolo_table_bbox" if bbox_found else (source or "none"),
             "table_bbox_area_ratio": bbox_metrics.get("area_norm"),
             "table_bbox_conf_raw": bbox_conf,
             "table_bbox_conf_used_for_gate": False,
@@ -2046,7 +2091,9 @@ class TableEdgeManager:
         payload = {
             "table_found": bool(table_points > 0),
             "edge_found": edge_found,
-            "edge_valid": valid_for_control,
+            "edge_detected": bool(edge_found),
+            "edge_geometry_valid": bool(edge_found),
+            "edge_valid": bool(edge_found),
             "valid_for_control": valid_for_control,
             "confidence": edge_conf,
             "edge_conf": edge_conf,
@@ -3190,7 +3237,9 @@ class TableEdgeManager:
         payload = {
             "table_found": bool(candidate_count > 0),
             "edge_found": bool(edge_found),
-            "edge_valid": valid_for_control,
+            "edge_detected": bool(edge_found),
+            "edge_geometry_valid": bool(edge_found),
+            "edge_valid": bool(edge_found),
             "valid_for_control": valid_for_control,
             "confidence": float(confidence if edge_found else 0.0),
             "edge_conf": float(confidence if edge_found else 0.0),
@@ -3489,7 +3538,10 @@ class TableEdgeManager:
         payload = {
             "table_found": bool(table_count > 0),
             "edge_found": edge_found,
-            "edge_valid": edge_found,
+            "edge_detected": bool(edge_found),
+            "edge_geometry_valid": bool(edge_found),
+            "edge_valid": bool(edge_found),
+            "valid_for_control": bool(edge_found),
             "confidence": float(edge_conf),
             "edge_conf": float(edge_conf),
             "yaw_err_rad": float(yaw_err) if edge_found else None,

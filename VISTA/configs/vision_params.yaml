@@ -147,6 +147,10 @@ table_edge:
   yolo_table_roi_min_area_ratio: 0.01
   yolo_table_roi_max_area_ratio: 0.90
   yolo_table_edge_stable_frames: 5
+  edge_trusted_min_conf: 0.60
+  edge_trusted_max_residual: 0.0  # <=0 disables residual gate
+  edge_trusted_min_support_count: 0
+  edge_trusted_min_inlier_count: 0
   yolo_table_near_dist_m: 0.45
   yolo_table_near_bottom_norm: 0.60
   # 调试开关（全局，不随 mode 切换）
