@@ -107,6 +107,10 @@ class ControlThresholds:
     edge_trusted_stable_frames: int = 5
     edge_trusted_min_conf: float = 0.60
     edge_trusted_max_residual: float = 0.05
+    edge_trusted_min_support_count: int = 0
+    edge_trusted_min_inlier_count: int = 0
+    edge_trusted_min_x_span_m: float = 0.0
+    edge_trusted_max_background_penalty: float = 0.0
     yolo_table_near_dist_m: float = 0.45
     yolo_table_lost_to_search_frames: int = 8
     rotate_search_timeout_s: float = 10.0

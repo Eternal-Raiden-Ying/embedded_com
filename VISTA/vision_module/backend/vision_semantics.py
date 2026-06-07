@@ -88,66 +88,133 @@ def _bbox_conf(bbox: Any) -> Optional[float]:
 
 
 def local_table_bbox_semantics(payload: Dict[str, Any], *, rgb_shape: Any = None) -> Dict[str, Any]:
-    """Return canonical table-bbox fields for local_perception payloads.
+    """Return canonical table-bbox fields for local_perception/table-edge payloads.
 
-    Confidence is reported but not used as a table validity gate.  The current
-    design uses table-bbox existence as the high-level direction/ROI signal.
+    Field contract:
+    - table_bbox_current_found: the current frame truly contains a table bbox.
+    - table_bbox_control_valid: control may use a bbox; this can be true via hold/history.
+    - table_bbox_hold_active: control_valid is maintained by history rather than current detection.
+
+    Confidence is reported but never used as the table-bbox existence gate.
     """
     rgb_shape = rgb_shape if rgb_shape is not None else payload.get("rgb_shape")
-    bbox = (
+    raw_bbox = (
         payload.get("table_bbox_xyxy")
-        or payload.get("detected_table_bbox")
         or payload.get("table_bbox")
+        or payload.get("detected_table_bbox")
         or payload.get("yolo_table_bbox")
+        or payload.get("mock_table_bbox")
     )
-    bbox = _bbox_xyxy(bbox)
-    found = bbox is not None
+    bbox = _bbox_xyxy(raw_bbox)
+    current_found = bbox is not None
+
+    explicit_control_valid = payload.get("table_bbox_control_valid", None)
+    hold_active = bool(payload.get("table_bbox_hold_active", False))
+    hold_age = _to_int(payload.get("table_bbox_hold_age_frames")) or 0
+    if explicit_control_valid is None:
+        control_valid = bool(current_found or hold_active)
+    else:
+        control_valid = bool(explicit_control_valid)
+    if current_found:
+        hold_active = False
+        hold_age = 0
+    elif control_valid:
+        hold_active = True
+
     metrics = bbox_metrics(bbox, rgb_shape)
     conf_raw = payload.get("table_bbox_conf_raw")
     if conf_raw is None:
-        conf_raw = _bbox_conf(payload.get("detected_table_bbox") or payload.get("table_bbox") or bbox)
-    source = "yolo_table_bbox" if found else str(payload.get("table_bbox_source") or payload.get("table_roi_source") or "none")
+        conf_raw = _bbox_conf(payload.get("detected_table_bbox") or payload.get("table_bbox") or payload.get("table_bbox_xyxy") or bbox)
+    source = str(payload.get("table_bbox_source") or payload.get("table_roi_source") or "")
+    if current_found:
+        source = source if source and source not in {"fallback", "none", "yolo_unavailable"} else "yolo_table_bbox"
+    elif control_valid:
+        source = source or "table_bbox_hold"
+    else:
+        source = source or "none"
+
+    invalid_reason = "" if control_valid else str(payload.get("table_bbox_invalid_reason") or payload.get("yolo_invalid_reason") or "table_bbox_unavailable")
     return {
-        "table_bbox_current_found": bool(found),
-        "table_bbox_control_valid": bool(found),
+        "table_bbox_current_found": bool(current_found),
+        "table_bbox_control_valid": bool(control_valid),
+        "table_bbox_hold_active": bool(hold_active),
+        "table_bbox_hold_age_frames": int(hold_age),
         "table_bbox_xyxy": bbox,
         "table_bbox_source": source,
+        "table_bbox_invalid_reason": invalid_reason,
         "table_bbox_conf_raw": conf_raw,
         "table_bbox_conf_used_for_gate": False,
         "table_bbox_area_ratio": metrics.get("area_ratio"),
         "table_bbox_center": metrics.get("center"),
         "table_bbox_center_norm": metrics.get("center_norm"),
-        # Compatibility aliases for legacy code and logs.
-        "table_bbox_found": bool(found),
-        "table_bbox_detected": bool(found),
-        "yolo_table_control_valid": bool(found),
-        "table_confirmed_by_yolo": bool(found),
-        "yolo_valid_reason": "table_bbox_found" if found else "",
-        "yolo_invalid_reason": "" if found else "table_bbox_unavailable",
-        "docking_enabled_by_yolo": bool(found),
-        "edge_control_allowed": bool(found),
-        "edge_control_block_reason": "" if found else "table_bbox_unavailable",
+        # Compatibility aliases for legacy code and logs. New code should use
+        # the canonical fields above.
+        "table_bbox_found": bool(current_found),
+        "table_bbox_detected": bool(current_found),
+        "yolo_table_control_valid": bool(control_valid),
+        "table_confirmed_by_yolo": bool(current_found),
+        "yolo_valid_reason": "table_bbox_current_found" if current_found else ("table_bbox_hold" if control_valid else ""),
+        "yolo_invalid_reason": invalid_reason,
+        "docking_enabled_by_yolo": bool(control_valid),
+        # This means only that table bbox permits edge to be considered; final
+        # edge_control_allowed is overwritten by standardize_table_edge_payload
+        # and follows edge_trusted.
+        "edge_control_allowed": False,
+        "edge_control_block_reason": "" if control_valid else "table_bbox_unavailable",
     }
 
-
 def edge_quality_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Collect fast/full edge quality features into a single dictionary."""
+    """Collect fast/full edge quality features into a single dictionary.
+
+    This dictionary is the only place where geometric quality fields are grouped.
+    Control code should avoid reading scattered fast_* names directly.
+    """
+    residual_mean = payload.get("fast_residual_mean")
+    if residual_mean is None:
+        residual_mean = payload.get("line_residual")
+    if residual_mean is None:
+        residual_mean = payload.get("residual")
+    if residual_mean is None:
+        residual_mean = payload.get("plane_residual_mean")
+    if residual_mean is None:
+        residual_mean = payload.get("fast_edge_residual")
+
+    inlier_count = payload.get("fast_rep_inlier_count")
+    if inlier_count is None:
+        inlier_count = payload.get("fast_edge_inlier_count")
+    if inlier_count is None:
+        inlier_count = payload.get("edge_inlier_count")
+    if inlier_count is None:
+        inlier_count = payload.get("inlier_count")
+
+    support_count = payload.get("fast_support_point_count")
+    if support_count is None:
+        support_count = payload.get("support_point_count")
+    if support_count is None:
+        support_count = payload.get("support_count")
+
+    x_span = payload.get("fast_fit_inlier_x_span_m")
+    if x_span is None:
+        x_span = payload.get("fast_edge_x_span_m")
+    if x_span is None:
+        x_span = payload.get("plane_x_span_m")
+
     return {
         "edge_conf": _to_float(payload.get("edge_conf", payload.get("confidence"))),
-        "residual_mean": _to_float(payload.get("fast_residual_mean", payload.get("plane_residual_mean", payload.get("fast_edge_residual")))),
+        "residual_mean": _to_float(residual_mean),
         "residual_p90": _to_float(payload.get("fast_residual_p90")),
         "residual_max": _to_float(payload.get("fast_residual_max", payload.get("plane_residual_max"))),
         "candidate_count": _to_int(payload.get("fast_candidate_point_count", payload.get("candidate_count"))) or 0,
-        "support_count": _to_int(payload.get("fast_support_point_count", payload.get("support_point_count"))) or 0,
-        "inlier_count": _to_int(payload.get("fast_rep_inlier_count", payload.get("fast_edge_inlier_count", payload.get("edge_inlier_count", payload.get("inlier_count"))))) or 0,
-        "x_span_m": _to_float(payload.get("fast_fit_inlier_x_span_m", payload.get("fast_edge_x_span_m", payload.get("plane_x_span_m")))),
+        "support_count": _to_int(support_count) or 0,
+        "inlier_count": _to_int(inlier_count) or 0,
+        "x_span_m": _to_float(x_span),
         "line_score": _to_float(payload.get("fast_line_score")),
         "frontness_score": _to_float(payload.get("fast_frontness_score")),
         "edge_consistency_score": _to_float(payload.get("fast_edge_consistency_score")),
+        "selected_cluster_score": _to_float(payload.get("fast_selected_cluster_score")),
         "background_penalty": _to_float(payload.get("fast_background_penalty")),
         "reject_reason": str(payload.get("reject_reason") or payload.get("reason") or ""),
     }
-
 
 def standardize_table_edge_payload(
     payload: Dict[str, Any],
@@ -155,43 +222,48 @@ def standardize_table_edge_payload(
     edge_stable_required_frames: int = 5,
     edge_trusted_min_conf: float = 0.60,
     edge_trusted_max_residual: Optional[float] = None,
+    edge_trusted_min_support_count: int = 0,
+    edge_trusted_min_inlier_count: int = 0,
+    edge_trusted_min_x_span_m: float = 0.0,
+    edge_trusted_max_background_penalty: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Add canonical table/edge semantic fields to a table_edge_obs payload.
 
     Important semantic split:
-    - edge_detected: the algorithm found a geometric edge candidate.
-    - edge_geometry_valid: single-frame geometric result exists and depth is available.
-    - edge_stable: valid edge persisted for enough frames.
-    - edge_trusted: stable edge is allowed to be consumed by control.
+    - edge_detected: the algorithm found a candidate geometric edge.
+    - edge_geometry_valid: a single-frame geometric result exists in the current ROI.
+    - edge_stable: the result persisted for enough frames.
+    - edge_trusted: edge_stable plus quality gates, allowed for posture control.
     """
     out = dict(payload or {})
     table_sem = local_table_bbox_semantics(out, rgb_shape=out.get("rgb_shape"))
-    # Do not overwrite a more specific bbox supplied by table-edge ROI logic, but
-    # do fill canonical fields and aliases consistently.
-    if out.get("table_bbox_xyxy") is not None:
-        table_sem = local_table_bbox_semantics({**out, "detected_table_bbox": out.get("table_bbox_xyxy")}, rgb_shape=out.get("rgb_shape"))
-    out.update({k: v for k, v in table_sem.items() if k not in out or out.get(k) in (None, "")})
-    # Ensure aliases are consistent even if legacy fields were already present.
-    out["table_bbox_current_found"] = bool(out.get("table_bbox_current_found", out.get("table_bbox_found", False)))
-    out["table_bbox_control_valid"] = bool(out.get("table_bbox_control_valid", out.get("table_bbox_current_found", False)))
-    out["table_bbox_found"] = bool(out["table_bbox_current_found"])
-    out["yolo_table_control_valid"] = bool(out["table_bbox_control_valid"])
-    out["table_bbox_conf_used_for_gate"] = False
+    out.update(table_sem)
 
     unavailable = bool(out.get("edge_obs_unavailable", False))
     edge_detected = bool(out.get("edge_detected", out.get("edge_found", False)))
-    edge_geometry_valid = bool(edge_detected and not unavailable)
+    # If the legacy payload already says edge_geometry_valid, respect it; otherwise
+    # edge detection + usable depth is the perception-level validity.
+    if "edge_geometry_valid" in payload:
+        edge_geometry_valid = bool(payload.get("edge_geometry_valid")) and not unavailable
+    else:
+        edge_geometry_valid = bool(edge_detected and not unavailable)
+
     quality = edge_quality_from_payload(out)
     edge_conf = quality.get("edge_conf")
     residual = quality.get("residual_mean")
+    support_count = int(quality.get("support_count") or 0)
+    inlier_count = int(quality.get("inlier_count") or 0)
+    x_span_m = quality.get("x_span_m")
+    background_penalty = quality.get("background_penalty")
     stable_count = _to_int(out.get("edge_stable_count")) or 0
     stable_required = max(1, int(edge_stable_required_frames or 1))
     edge_stable = bool(edge_geometry_valid and stable_count >= stable_required)
 
-    trust_reasons = []
     reject_reasons = []
     if not bool(out.get("table_bbox_control_valid", False)):
         reject_reasons.append("table_bbox_unavailable")
+    if not edge_detected:
+        reject_reasons.append("edge_not_detected")
     if not edge_geometry_valid:
         reject_reasons.append("edge_geometry_invalid")
     if not edge_stable:
@@ -200,10 +272,18 @@ def standardize_table_edge_payload(
         reject_reasons.append(f"edge_conf_low:{edge_conf:.3f}<{float(edge_trusted_min_conf):.3f}")
     if edge_trusted_max_residual is not None and residual is not None and residual > float(edge_trusted_max_residual):
         reject_reasons.append(f"edge_residual_high:{residual:.4f}>{float(edge_trusted_max_residual):.4f}")
+    if int(edge_trusted_min_support_count or 0) > 0 and support_count < int(edge_trusted_min_support_count):
+        reject_reasons.append(f"support_low:{support_count}<{int(edge_trusted_min_support_count)}")
+    if int(edge_trusted_min_inlier_count or 0) > 0 and inlier_count < int(edge_trusted_min_inlier_count):
+        reject_reasons.append(f"inlier_low:{inlier_count}<{int(edge_trusted_min_inlier_count)}")
+    if float(edge_trusted_min_x_span_m or 0.0) > 0.0 and x_span_m is not None and float(x_span_m) < float(edge_trusted_min_x_span_m):
+        reject_reasons.append(f"x_span_low:{float(x_span_m):.3f}<{float(edge_trusted_min_x_span_m):.3f}")
+    if edge_trusted_max_background_penalty is not None and background_penalty is not None and float(background_penalty) > float(edge_trusted_max_background_penalty):
+        reject_reasons.append(f"background_penalty_high:{float(background_penalty):.3f}>{float(edge_trusted_max_background_penalty):.3f}")
 
     edge_trusted = bool(not reject_reasons)
-    if edge_trusted:
-        trust_reasons.append("table_bbox_and_stable_quality_edge")
+    edge_trust_reason = "table_bbox_and_stable_quality_edge" if edge_trusted else ""
+    block_reason = "" if edge_trusted else ";".join(reject_reasons)
 
     out.update(
         {
@@ -212,16 +292,21 @@ def standardize_table_edge_payload(
             "edge_stable": bool(edge_stable),
             "edge_trusted": bool(edge_trusted),
             "edge_quality": quality,
-            "edge_trust_reason": ";".join(trust_reasons),
-            "edge_reject_for_control_reason": ";".join(reject_reasons),
+            "edge_trust_reason": edge_trust_reason,
+            "edge_reject_for_control_reason": block_reason,
             "edge_stable_required_frames": int(stable_required),
-            # Compatibility aliases.  `edge_valid` now means geometric validity;
-            # `valid_for_control` is stricter and follows edge_trusted.
+            "edge_trusted_min_conf": float(edge_trusted_min_conf),
+            "edge_trusted_min_support_count": int(edge_trusted_min_support_count or 0),
+            "edge_trusted_min_inlier_count": int(edge_trusted_min_inlier_count or 0),
+            "edge_trusted_min_x_span_m": float(edge_trusted_min_x_span_m or 0.0),
+            # Compatibility aliases. `edge_valid` now means geometric validity;
+            # `valid_for_control` and `edge_control_allowed` follow edge_trusted.
             "edge_valid": bool(edge_geometry_valid),
             "valid_for_control": bool(edge_trusted),
             "edge_control_allowed": bool(edge_trusted),
             "docking_enabled_by_yolo": bool(out.get("table_bbox_control_valid", False)),
-            "edge_control_block_reason": "" if edge_trusted else ";".join(reject_reasons),
+            "edge_control_block_reason": block_reason,
         }
     )
     return out
+

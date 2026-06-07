@@ -155,6 +155,13 @@ class TableEdgeConfig:
     yolo_table_roi_anchor: str = "center"
     yolo_table_roi_lower_ratio: float = 0.75
     yolo_table_roi_use_rgb_depth_mapping: bool = True
+    yolo_table_roi_mode: str = "bbox_expand"
+    yolo_table_roi_expand_x_ratio: float = 0.10
+    yolo_table_roi_expand_y_ratio: float = 0.10
+    yolo_table_roi_min_w: int = 120
+    yolo_table_roi_min_h: int = 80
+    yolo_table_roi_max_w_ratio: float = 0.95
+    yolo_table_roi_max_h_ratio: float = 0.95
     yolo_table_roi_min_area_ratio: float = 0.01
     yolo_table_roi_max_area_ratio: float = 0.90
     yolo_table_edge_stable_frames: int = 5
@@ -162,6 +169,8 @@ class TableEdgeConfig:
     edge_trusted_max_residual: float = 0.0  # <=0 disables residual gate
     edge_trusted_min_support_count: int = 0
     edge_trusted_min_inlier_count: int = 0
+    edge_trusted_min_x_span_m: float = 0.0
+    edge_trusted_max_background_penalty: float = 0.0  # <=0 disables background penalty gate
     yolo_table_near_dist_m: float = 0.45
     yolo_table_near_bottom_norm: float = 0.60
     profile_log_interval_s: float = 2.0

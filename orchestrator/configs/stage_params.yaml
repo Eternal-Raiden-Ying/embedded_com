@@ -35,6 +35,10 @@ yolo_table:
   edge_trusted_stable_frames: 5
   edge_trusted_min_conf: 0.60
   edge_trusted_max_residual: 0.05
+  edge_trusted_min_support_count: 0
+  edge_trusted_min_inlier_count: 0
+  edge_trusted_min_x_span_m: 0.0
+  edge_trusted_max_background_penalty: 0.0
   yolo_table_near_dist_m: 0.45
   yolo_forward_vx: 0.015
   yolo_yaw_gain: 0.20
