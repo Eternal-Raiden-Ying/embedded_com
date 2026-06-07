@@ -662,7 +662,7 @@ class MotionController:
         yaw_th = abs(float(getattr(self.cfg, "rotate_yaw_threshold_rad", 0.20) or 0.20))
         yaw_over = bool(abs(yaw_err) >= yaw_th)
         allow = bool(sem.edge_trusted and yaw_over)
-        if not sem.table_bbox_found:
+        if not sem.table_bbox_control_valid:
             reason = "table_bbox_unavailable"
         elif not sem.edge_trusted:
             reason = sem.edge_reject_for_control_reason or "edge_not_trusted"
@@ -672,7 +672,7 @@ class MotionController:
             reason = ""
         yolo_view_err = self._yolo_view_err_norm(obs)
         return {
-            "docking_enabled_by_yolo": bool(sem.table_bbox_found),
+            "docking_enabled_by_yolo": bool(sem.table_bbox_control_valid),
             "edge_control_allowed": bool(sem.edge_trusted),
             "edge_control_block_reason": "" if sem.edge_trusted else (sem.edge_reject_for_control_reason or "edge_not_trusted"),
             "allow_rotate": bool(allow),
@@ -687,7 +687,7 @@ class MotionController:
             "yolo_edge_yaw_conflict": False,
             "yolo_edge_conflict_block_rotate": bool(getattr(self.cfg, "yolo_edge_conflict_block_rotate", True)),
             "edge_detected": bool(sem.edge_detected),
-            "edge_valid": bool(sem.edge_valid),
+            "edge_valid": bool(sem.edge_geometry_valid),
             "edge_stable": bool(sem.edge_stable),
             "edge_trusted": bool(sem.edge_trusted),
             "edge_trust_reason": sem.edge_trust_reason,

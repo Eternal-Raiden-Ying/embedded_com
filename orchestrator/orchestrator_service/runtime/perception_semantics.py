@@ -63,8 +63,34 @@ class TablePerceptionSemantics:
     stale_level: str = ""
     stale_source: str = ""
 
+    @property
+    def table_bbox_found(self) -> bool:
+        """Backward-compatible alias for legacy controller code.
+
+        New code should use table_bbox_current_found for the current-frame
+        detector result, or table_bbox_control_valid for the control-facing
+        availability gate.  This alias intentionally maps to current-frame
+        existence to avoid silently treating hold/memory as a fresh detection.
+        """
+        return bool(self.table_bbox_current_found)
+
+    @property
+    def yolo_table_control_valid(self) -> bool:
+        """Backward-compatible alias for control-facing table bbox validity."""
+        return bool(self.table_bbox_control_valid)
+
+    @property
+    def edge_valid(self) -> bool:
+        """Backward-compatible alias for perception-level edge geometry validity."""
+        return bool(self.edge_geometry_valid)
+
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        out = asdict(self)
+        # Compatibility fields are exported explicitly for older logs/tools.
+        out["table_bbox_found"] = bool(self.table_bbox_current_found)
+        out["yolo_table_control_valid"] = bool(self.table_bbox_control_valid)
+        out["edge_valid"] = bool(self.edge_geometry_valid)
+        return out
 
 
 def _float_or_none(v: Any) -> Optional[float]:
