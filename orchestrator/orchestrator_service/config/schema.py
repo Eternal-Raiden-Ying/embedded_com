@@ -103,8 +103,12 @@ class ControlThresholds:
     table_stable_frames: int = 5
     yolo_table_control_enable: bool = True
     yolo_table_conf_min: float = 0.25
+    # Deprecated: bbox area is diagnostic only and no longer gates docking control.
     yolo_table_area_gate_for_docking: float = 0.40
     yolo_table_edge_stable_frames: int = 5
+    edge_trusted_stable_frames: int = 5
+    edge_trusted_min_conf: float = 0.60
+    edge_trusted_max_residual: float = 0.05
     yolo_table_near_dist_m: float = 0.45
     yolo_table_blend_start_stable_frames: int = 5
     yolo_table_blend_yolo_weight: float = 0.5

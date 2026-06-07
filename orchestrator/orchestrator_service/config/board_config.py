@@ -175,14 +175,17 @@ def _apply_stage_params(data: Dict[str, Any]) -> None:
     CONFIG.control.yolo_table_conf_min = float(
         yolo_table.get("yolo_table_conf_min", yolo_table.get("conf_min", CONFIG.control.yolo_table_conf_min))
     )
-    CONFIG.control.yolo_table_area_gate_for_docking = float(
-        yolo_table.get(
-            "yolo_table_area_gate_for_docking",
-            yolo_table.get("area_gate_for_docking", CONFIG.control.yolo_table_area_gate_for_docking),
-        )
-    )
     CONFIG.control.yolo_table_edge_stable_frames = int(
         yolo_table.get("yolo_table_edge_stable_frames", yolo_table.get("edge_stable_frames", CONFIG.control.yolo_table_edge_stable_frames))
+    )
+    CONFIG.control.edge_trusted_stable_frames = int(
+        yolo_table.get("edge_trusted_stable_frames", CONFIG.control.edge_trusted_stable_frames)
+    )
+    CONFIG.control.edge_trusted_min_conf = float(
+        yolo_table.get("edge_trusted_min_conf", CONFIG.control.edge_trusted_min_conf)
+    )
+    CONFIG.control.edge_trusted_max_residual = float(
+        yolo_table.get("edge_trusted_max_residual", CONFIG.control.edge_trusted_max_residual)
     )
     CONFIG.control.yolo_table_near_dist_m = float(
         yolo_table.get("yolo_table_near_dist_m", yolo_table.get("near_dist_m", CONFIG.control.yolo_table_near_dist_m))

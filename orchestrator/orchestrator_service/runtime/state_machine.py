@@ -27,6 +27,7 @@ from ..utils.target_utils import target_to_class_id
 from .common import monotonic_ts
 from .context import RuntimeContext, State
 from .controller import MotionController, MotionDecision
+from .control_authority import decide_table_control_authority
 
 
 _GRASP_RESPOND_TIMEOUT_S = 5.0
@@ -1037,6 +1038,14 @@ class OrchestratorCore:
 
         has_min_fresh = self.ctx.table_approach_warmup_fresh_obs_count >= min_fresh
         level = self._control_level(obs)
+        if bool(getattr(self.cfg, "yolo_table_control_enable", True)) and self._table_yolo_reliable(obs):
+            self._transition(State.CONTROLLED_APPROACH, "warmup结束，table bbox found，进入YOLO默认前进")
+            return self.controller.yolo_table_search_cmd(
+                obs,
+                mode="CONTROLLED_APPROACH",
+                reason="warmup_table_bbox_found_default_forward",
+                control_source="yolo_forward",
+            )
         plane_ready = bool(has_min_fresh and self._table_visible(obs) and (level != "none" or self._table_plane_stable(obs)))
         if plane_ready:
             self.ctx.table_found_frames = max(int(self.ctx.table_found_frames), int(self.cfg.table_found_frames_to_approach))
@@ -1077,7 +1086,22 @@ class OrchestratorCore:
             )
             return decision
         level = self._control_level(obs)
-        if self._table_visible(obs) and (level != "none" or self._table_plane_stable(obs)):
+        if bool(getattr(self.cfg, "yolo_table_control_enable", True)) and self._table_yolo_reliable(obs):
+            self._transition(State.CONTROLLED_APPROACH, "table bbox found，YOLO默认前进")
+            decision = self.controller.yolo_table_search_cmd(
+                obs,
+                turn_sign=self.ctx.relocate_turn_sign,
+                mode="CONTROLLED_APPROACH",
+                reason="table_bbox_found_default_forward",
+                control_source="yolo_forward",
+            )
+            decision.control_summary["search_blocked_by_yolo_valid"] = True
+            decision.control_summary["yolo_valid_prevent_search_fallback"] = True
+            decision.control_summary["table_lost_search_active"] = bool(local_search_active)
+            decision.control_summary["table_lost_search_elapsed_s"] = float(local_search_elapsed_s)
+            decision.control_summary["table_lost_search_timeout"] = False
+            return decision
+        if self._table_visible(obs) and self._table_plane_stable(obs):
             self.ctx.table_found_frames += 1
             if self.ctx.table_found_frames >= int(self.cfg.table_found_frames_to_approach):
                 if level == "approach" and self._yaw_ready_for_controlled_approach(obs):
@@ -1093,19 +1117,6 @@ class OrchestratorCore:
             self.ctx.last_fail_reason = "搜索桌边超时"
             self._transition(State.NEXT_TABLE, self.ctx.last_fail_reason)
             return self.controller.next_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
-        if bool(getattr(self.cfg, "yolo_table_control_enable", True)) and self._table_yolo_reliable(obs):
-            decision = self.controller.yolo_table_search_cmd(
-                obs,
-                turn_sign=self.ctx.relocate_turn_sign,
-                reason="yolo_table_bbox_forward",
-                control_source="yolo_forward",
-            )
-            decision.control_summary["search_blocked_by_yolo_valid"] = True
-            decision.control_summary["yolo_valid_prevent_search_fallback"] = True
-            decision.control_summary["table_lost_search_active"] = bool(local_search_active)
-            decision.control_summary["table_lost_search_elapsed_s"] = float(local_search_elapsed_s)
-            decision.control_summary["table_lost_search_timeout"] = False
-            return decision
         decision = self.controller.search_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
         decision.control_summary.update(
             {
@@ -1123,6 +1134,14 @@ class OrchestratorCore:
         if not self._table_visible(obs):
             return self._handle_table_loss("桌边丢失，回到搜索", State.SEARCH_TABLE, "COARSE_ALIGN_HOLD")
         self._reset_table_loss()
+        if self._table_yolo_reliable(obs) and not self.controller._edge_trusted(obs):
+            self._transition(State.CONTROLLED_APPROACH, "COARSE_ALIGN被阻止：table bbox存在但edge未trusted，回到YOLO默认前进")
+            return self.controller.yolo_table_search_cmd(
+                obs,
+                mode="CONTROLLED_APPROACH",
+                reason="coarse_align_blocked_edge_not_trusted",
+                control_source="yolo_forward",
+            )
         level = self._control_level(obs)
         if level == "none":
             if self._table_yolo_reliable(obs):
@@ -1159,6 +1178,13 @@ class OrchestratorCore:
         if not self._table_visible(obs):
             return self._handle_table_loss("接近时桌边丢失，回到搜索", State.SEARCH_TABLE, "CONTROLLED_APPROACH_HOLD")
         self._reset_table_loss()
+        if self._table_yolo_reliable(obs) and not self.controller._edge_trusted(obs):
+            return self.controller.yolo_table_search_cmd(
+                obs,
+                mode="CONTROLLED_APPROACH",
+                reason="controlled_approach_edge_not_trusted_yolo_forward",
+                control_source="yolo_forward",
+            )
         pending_reason = ""
         yaw_needs_realign = self._yaw_needs_realign_from_approach(obs)
         if self._count_table_motion_hysteresis_obs(
@@ -2622,16 +2648,10 @@ class OrchestratorCore:
         return bool(getattr(obs, "table_confirmed_by_yolo", False)) and getattr(obs, "table_cx_norm", None) is not None
 
     def _table_plane_stable(self, obs: Optional[TableEdgeObs]) -> bool:
-        if not self._table_yolo_reliable(obs):
-            return False
-        if obs is None or obs.yaw_err_rad is None or obs.dist_err_m is None:
-            return False
-        if bool(getattr(obs, "usable_for_approach", False)):
-            return True
-        if bool(getattr(obs, "usable_for_alignment", False)) or bool(getattr(obs, "usable_for_stop", False)):
-            return True
-        level = self._control_level(obs)
-        return level in {"approach", "alignment", "stop"} or bool(getattr(obs, "edge_found", False))
+        # Geometry can be stable from the detector perspective, but it is only
+        # allowed to affect table approach state transitions when it is trusted
+        # under the new perception semantics.
+        return bool(self.controller._edge_trusted(obs))
 
     def _table_approach_phase(self, obs: Optional[TableEdgeObs]) -> str:
         level = self._control_level(obs)

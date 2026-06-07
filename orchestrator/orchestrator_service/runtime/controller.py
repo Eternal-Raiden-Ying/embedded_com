@@ -9,6 +9,7 @@ from ..config.schema import CarMotionConfig, ControlThresholds
 from ..control.docking_controller import DockingController
 from ..control.types import DockingControlConfig, EdgeControlObservation
 from ..ipc.protocol import ArmCommand, CmdVel, HomeTagObs, TableEdgeObs, TargetObs, now_ts
+from .perception_semantics import build_table_perception_semantics, table_bbox_found as semantic_table_bbox_found
 
 
 @dataclass
@@ -316,8 +317,12 @@ class MotionController:
         assist_vx = 0.0
         if source_name == "yolo_forward":
             assist_vx = max(0.0, float(getattr(self.car_cfg, "yolo_table_forward_vx", 0.015) or 0.015))
+            wz = 0.0
         elif source_name == "yolo_assist":
             assist_vx = max(0.0, float(getattr(self.car_cfg, "yolo_table_assist_vx", 0.010) or 0.010))
+            # YOLO assist is still forward-safe in this first control refactor.
+            # Posture correction is reserved for edge_adjust / trusted edge.
+            wz = 0.0
         cmd = self._cmd(mode_name, vx=assist_vx, wz=wz)
         summary = self._summary(mode_name, cmd, obs, reason=reason)
         summary.update(
@@ -339,8 +344,11 @@ class MotionController:
                 "vx_norm": float(assist_vx),
                 "vy_norm": 0.0,
                 "wz_norm": float(wz),
+                "control_intent": "forward",
+                "allow_forward": bool(assist_vx > 0.0),
                 "allow_rotate": False,
-                "rotate_block_reason": "yolo_bbox_forward_default",
+                "forward_block_reason": "" if assist_vx > 0.0 else "yolo_vx_zero",
+                "rotate_block_reason": "yolo_forward_owns_control",
                 "yolo_view_err_norm": float(cx),
                 "edge_yaw_err_rad": float(getattr(obs, "yaw_err_rad", 0.0) or 0.0) if obs is not None else 0.0,
                 "yolo_edge_yaw_conflict": False,
@@ -541,24 +549,19 @@ class MotionController:
             return True
         return bool(getattr(obs, "edge_found", False)) and bool(getattr(obs, "edge_valid", True))
 
+    def _table_semantics(self, obs: Optional[TableEdgeObs], *, stale_level: str = "", stale_source: str = ""):
+        return build_table_perception_semantics(obs, self.cfg, stale_level=stale_level, stale_source=stale_source)
+
     def _table_bbox_found(self, obs: Optional[TableEdgeObs]) -> bool:
-        if obs is None:
-            return False
-        if bool(getattr(obs, "table_bbox_found", False)):
-            return True
-        bbox = getattr(obs, "table_bbox_xyxy", None) or getattr(obs, "yolo_table_bbox", None)
-        return isinstance(bbox, (list, tuple)) and len(bbox) >= 4
+        return semantic_table_bbox_found(obs)
+
+    def _edge_trusted(self, obs: Optional[TableEdgeObs]) -> bool:
+        return bool(self._table_semantics(obs).edge_trusted)
 
     def _yolo_reliable(self, obs: Optional[TableEdgeObs]) -> bool:
-        if obs is None:
-            return False
-        if self._table_bbox_found(obs):
-            return True
-        if hasattr(obs, "yolo_table_control_valid") and bool(getattr(obs, "yolo_table_control_valid", False)):
-            return True
-        if hasattr(obs, "yolo_reliable"):
-            return bool(getattr(obs, "yolo_reliable", False))
-        return bool(getattr(obs, "table_confirmed_by_yolo", False)) and obs.table_cx_norm is not None
+        # Current strategy deliberately treats table bbox existence as the only
+        # table control gate. Confidence is logged but not used as a control gate.
+        return self._table_bbox_found(obs)
 
     def _yolo_view_err_norm(self, obs: Optional[TableEdgeObs]) -> float:
         if obs is None:
@@ -574,6 +577,7 @@ class MotionController:
         return 0.0
 
     def _yolo_table_bbox_area_ratio(self, obs: Optional[TableEdgeObs]) -> float:
+        # Diagnostic only.  It must not participate in control authority.
         if obs is None:
             return 0.0
         for name in ("table_bbox_area_ratio", "yolo_bbox_area_norm", "table_size_norm"):
@@ -587,87 +591,65 @@ class MotionController:
         return 0.0
 
     def _yolo_area_gate_fields(self, obs: Optional[TableEdgeObs]) -> Dict[str, Any]:
-        area = self._yolo_table_bbox_area_ratio(obs)
-        bbox_found = self._table_bbox_found(obs)
+        # Deprecated name retained for log/backward compatibility only.
+        # The old 0.40 bbox area gate is no longer used for control.
+        sem = self._table_semantics(obs)
         return {
-            "yolo_table_bbox_area_ratio": float(area),
-            "docking_allowed_by_yolo_area": bool(bbox_found),
+            "yolo_table_bbox_area_ratio": float(self._yolo_table_bbox_area_ratio(obs)),
+            "docking_allowed_by_yolo_area": False,
             "docking_blocked_by_yolo_area": False,
-            "docking_enabled_by_yolo": bool(bbox_found),
-            "edge_control_allowed": bool(bbox_found),
-            "edge_control_block_reason": "" if bbox_found else "table_bbox_unavailable",
+            "docking_enabled_by_yolo": bool(sem.table_bbox_found),
+            "edge_control_allowed": bool(sem.edge_trusted),
+            "edge_control_block_reason": "" if sem.edge_trusted else sem.edge_reject_for_control_reason,
+            "table_bbox_found": bool(sem.table_bbox_found),
+            "table_bbox_xyxy": sem.table_bbox_xyxy,
+            "table_bbox_conf_raw": sem.table_bbox_conf_raw,
+            "table_bbox_conf_used_for_gate": False,
+            "yolo_table_control_valid": bool(sem.table_bbox_found),
+            "edge_detected": bool(sem.edge_detected),
+            "edge_valid": bool(sem.edge_valid),
+            "edge_stable": bool(sem.edge_stable),
+            "edge_trusted": bool(sem.edge_trusted),
+            "edge_trust_reason": sem.edge_trust_reason,
+            "edge_reject_for_control_reason": sem.edge_reject_for_control_reason,
         }
 
     def _rotate_gate(self, obs: Optional[TableEdgeObs], edge_yaw_cmd: float = 0.0) -> Dict[str, Any]:
-        area_fields = self._yolo_area_gate_fields(obs)
-        if not bool(area_fields.get("edge_control_allowed", False)):
-            return {
-                **area_fields,
-                "allow_rotate": False,
-                "rotate_block_reason": "table_bbox_unavailable",
-                "rotate_require_edge_stable_frames": int(max(1, int(getattr(self.cfg, "rotate_require_edge_stable_frames", 5) or 5))),
-                "rotate_yaw_threshold_rad": float(abs(float(getattr(self.cfg, "rotate_yaw_threshold_rad", 0.20) or 0.20))),
-                "edge_stable_for_rotate": False,
-                "roi_trusted_for_rotate": False,
-                "yaw_over_rotate_threshold": False,
-                "yolo_view_err_norm": float(self._yolo_view_err_norm(obs)),
-                "edge_yaw_err_rad": float(getattr(obs, "yaw_err_rad", 0.0) or 0.0) if obs is not None else 0.0,
-                "yolo_edge_yaw_conflict": False,
-                "yolo_edge_conflict_block_rotate": bool(getattr(self.cfg, "yolo_edge_conflict_block_rotate", True)),
-            }
+        sem = self._table_semantics(obs)
         yaw_err = float(getattr(obs, "yaw_err_rad", 0.0) or 0.0) if obs is not None else 0.0
-        yaw_abs = abs(yaw_err)
-        stable_count = int(getattr(obs, "yolo_table_edge_stable_count", 0) or 0) if obs is not None else 0
-        required_stable = max(1, int(getattr(self.cfg, "rotate_require_edge_stable_frames", 5) or 5))
         yaw_th = abs(float(getattr(self.cfg, "rotate_yaw_threshold_rad", 0.20) or 0.20))
-        edge_stable = bool(stable_count >= required_stable)
-        roi_trusted = bool(
-            obs is not None
-            and (
-                bool(getattr(obs, "yolo_table_roi_valid", False))
-                or bool(getattr(obs, "valid_for_control", False))
-                or bool(getattr(obs, "usable_for_alignment", False))
-                or bool(getattr(obs, "usable_for_approach", False))
-            )
-            and getattr(obs, "depth_valid", True) is not False
-        )
-        yaw_over = bool(yaw_abs >= yaw_th)
-        yolo_view_err = self._yolo_view_err_norm(obs)
-        yolo_cmd = 0.0
-        if self._yolo_reliable(obs):
-            yolo_cmd = self._clamp(
-                yolo_view_err
-                * float(getattr(self.car_cfg, "yolo_table_yaw_gain", 0.20) or 0.20)
-                * float(getattr(self.car_cfg, "table_view_wz_sign", -1.0)),
-                -abs(float(getattr(self.car_cfg, "yolo_table_max_wz", 0.06) or 0.06)),
-                abs(float(getattr(self.car_cfg, "yolo_table_max_wz", 0.06) or 0.06)),
-            )
-        edge_cmd = float(edge_yaw_cmd)
-        if abs(edge_cmd) <= 1e-9 and abs(yaw_err) > 0.0:
-            edge_cmd = yaw_err * float(getattr(self.car_cfg, "table_plane_yaw_sign", 1.0))
-        conflict = bool(abs(yolo_cmd) > 1e-6 and abs(edge_cmd) > 1e-6 and (yolo_cmd > 0.0) != (edge_cmd > 0.0))
-        allow = bool(edge_stable and roi_trusted and yaw_over)
-        if not edge_stable:
-            reason = "edge_not_stable"
-        elif not roi_trusted:
-            reason = "roi_untrusted"
+        yaw_over = bool(abs(yaw_err) >= yaw_th)
+        allow = bool(sem.edge_trusted and yaw_over)
+        if not sem.table_bbox_found:
+            reason = "table_bbox_unavailable"
+        elif not sem.edge_trusted:
+            reason = sem.edge_reject_for_control_reason or "edge_not_trusted"
         elif not yaw_over:
             reason = "yaw_below_threshold"
         else:
-            reason = "allowed"
+            reason = ""
+        yolo_view_err = self._yolo_view_err_norm(obs)
         return {
-            **area_fields,
+            "docking_enabled_by_yolo": bool(sem.table_bbox_found),
+            "edge_control_allowed": bool(sem.edge_trusted),
+            "edge_control_block_reason": "" if sem.edge_trusted else (sem.edge_reject_for_control_reason or "edge_not_trusted"),
             "allow_rotate": bool(allow),
-            "rotate_block_reason": "" if allow else reason,
-            "rotate_require_edge_stable_frames": int(required_stable),
+            "rotate_block_reason": reason,
+            "rotate_require_edge_stable_frames": int(max(1, int(getattr(self.cfg, "rotate_require_edge_stable_frames", 5) or 5))),
             "rotate_yaw_threshold_rad": float(yaw_th),
-            "edge_stable_for_rotate": bool(edge_stable),
-            "roi_trusted_for_rotate": bool(roi_trusted),
+            "edge_stable_for_rotate": bool(sem.edge_stable),
+            "roi_trusted_for_rotate": bool(sem.edge_trusted),
             "yaw_over_rotate_threshold": bool(yaw_over),
             "yolo_view_err_norm": float(yolo_view_err),
             "edge_yaw_err_rad": float(yaw_err),
-            "yolo_edge_yaw_conflict": bool(conflict),
+            "yolo_edge_yaw_conflict": False,
             "yolo_edge_conflict_block_rotate": bool(getattr(self.cfg, "yolo_edge_conflict_block_rotate", True)),
+            "edge_detected": bool(sem.edge_detected),
+            "edge_valid": bool(sem.edge_valid),
+            "edge_stable": bool(sem.edge_stable),
+            "edge_trusted": bool(sem.edge_trusted),
+            "edge_trust_reason": sem.edge_trust_reason,
+            "edge_reject_for_control_reason": sem.edge_reject_for_control_reason,
         }
 
     def _table_approach_phase(self, obs: Optional[TableEdgeObs], requested: str = "") -> str:
@@ -861,6 +843,13 @@ class MotionController:
         phase: str = "",
         reason: str = "coarse_align_yaw_only",
     ) -> MotionDecision:
+        if self._table_bbox_found(obs) and not self._edge_trusted(obs):
+            return self.yolo_table_search_cmd(
+                obs,
+                mode="CONTROLLED_APPROACH",
+                reason="coarse_align_blocked_edge_not_trusted",
+                control_source="yolo_forward",
+            )
         guard = self._stale_guard(obs)
         stale_level = str(guard.get("stale_level") or "fresh")
         yaw_err = float(obs.yaw_err_rad) if obs is not None and obs.yaw_err_rad is not None else 0.0
@@ -1502,6 +1491,13 @@ class MotionController:
         return self._from_docking_cmd("FINAL_LOCK", obs, fallback_forward=True)
 
     def fov_table_approach_cmd(self, obs: Optional[TableEdgeObs], phase: str = "", mode: str = "CONTROLLED_APPROACH") -> MotionDecision:
+        if self._table_bbox_found(obs) and not self._edge_trusted(obs):
+            return self.yolo_table_search_cmd(
+                obs,
+                mode="CONTROLLED_APPROACH",
+                reason="table_bbox_found_edge_not_trusted_default_forward",
+                control_source="yolo_forward",
+            )
         return self._compose_fov_table_cmd(obs, mode, phase=phase, reason="fov_table_approach")
 
     def plane_approach_cmd(self, obs: Optional[TableEdgeObs], mode: str = "CONTROLLED_APPROACH", reason: str = "plane_approach") -> MotionDecision:
