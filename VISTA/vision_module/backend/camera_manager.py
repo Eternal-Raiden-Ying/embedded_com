@@ -245,6 +245,7 @@ class CameraManager:
         self._shared_rgbd: Optional[_SharedRealSenseRgbdSession] = None
         self._shared_rgbd_signature = None
         self._shared_rgbd_cycle_bundle: Optional[Dict[str, Any]] = None
+        self._last_shape_log_key = ""
 
     @staticmethod
     def _shared_rgbd_enabled() -> bool:
@@ -325,6 +326,53 @@ class CameraManager:
         if name in {"ir", "grey"}:
             return IRCamera(**params)
         return ColorCamera(**params)
+
+    @staticmethod
+    def _shape_hw_from_frame(frame: Any) -> Optional[list[int]]:
+        shape = getattr(frame, "shape", None)
+        if not isinstance(shape, tuple) or len(shape) < 2:
+            return None
+        try:
+            h = int(shape[0])
+            w = int(shape[1])
+        except Exception:
+            return None
+        if h <= 0 or w <= 0:
+            return None
+        return [h, w]
+
+    @staticmethod
+    def _rgb_config_meta(params: Dict[str, Any]) -> Dict[str, Any]:
+        values = dict(params or {})
+        try:
+            in_w = int(values.get("in_w") or 0)
+            in_h = int(values.get("in_h") or 0)
+        except Exception:
+            in_w, in_h = 0, 0
+        try:
+            out_w = int(values.get("out_w") or in_w or 0)
+            out_h = int(values.get("out_h") or in_h or 0)
+        except Exception:
+            out_w, out_h = in_w, in_h
+        try:
+            crop_x = int(values.get("crop_x") or 0)
+            crop_y = int(values.get("crop_y") or 0)
+            crop_w = int(values.get("crop_w") or 0)
+            crop_h = int(values.get("crop_h") or 0)
+        except Exception:
+            crop_x, crop_y, crop_w, crop_h = 0, 0, 0, 0
+        if crop_w <= 0:
+            crop_w = in_w
+        if crop_h <= 0:
+            crop_h = in_h
+        crop_x = max(0, crop_x)
+        crop_y = max(0, crop_y)
+        return {
+            "rgb_native_shape": [in_h, in_w] if in_w > 0 and in_h > 0 else None,
+            "rgb_crop_rect": [crop_x, crop_y, crop_w, crop_h],
+            "rgb_output_shape_config": [out_h, out_w] if out_w > 0 and out_h > 0 else None,
+            "rgb_config_source": "vision_params.yaml+mode_profile" if values else "default",
+        }
 
     def bind_runtime(self, scheduler, generation_getter=None) -> None:
         self._scheduler = scheduler
@@ -408,6 +456,28 @@ class CameraManager:
                     rgb_shape = tuple(int(v) for v in rgb.shape)
                 except Exception:
                     rgb_shape = None
+            depth_shape_actual = self._shape_hw_from_frame(frame_bundle.get("depth"))
+            rgb_shape_actual = list(rgb_shape[:2]) if isinstance(rgb_shape, tuple) and len(rgb_shape) >= 2 else None
+            rgb_meta = self._rgb_config_meta(self._params.get("rgb") or {})
+            frame_bundle.update(rgb_meta)
+            frame_bundle["rgb_output_shape_actual"] = rgb_shape_actual
+            frame_bundle["depth_shape_actual"] = depth_shape_actual
+            log_key = (
+                f"{rgb_meta.get('rgb_native_shape')}|{rgb_meta.get('rgb_crop_rect')}|"
+                f"{rgb_meta.get('rgb_output_shape_config')}|{rgb_shape_actual}|{depth_shape_actual}|"
+                f"{rgb_meta.get('rgb_config_source')}"
+            )
+            if log_key != self._last_shape_log_key:
+                self._last_shape_log_key = log_key
+                self.log.info(
+                    "camera shape config | rgb_native_shape=%s rgb_crop_rect=%s rgb_output_shape_config=%s rgb_output_shape_actual=%s depth_shape_actual=%s rgb_config_source=%s",
+                    rgb_meta.get("rgb_native_shape"),
+                    rgb_meta.get("rgb_crop_rect"),
+                    rgb_meta.get("rgb_output_shape_config"),
+                    rgb_shape_actual,
+                    depth_shape_actual,
+                    rgb_meta.get("rgb_config_source"),
+                )
             self._publish_result("camera_frames", frame_bundle)
             self._publish_result(
                 "frame_meta",
@@ -415,6 +485,10 @@ class CameraManager:
                     "has_frames": True,
                     "cameras": camera_names,
                     "rgb_shape": rgb_shape,
+                    "rgb_shape_actual": rgb_shape_actual,
+                    "rgb_output_shape_actual": rgb_shape_actual,
+                    "depth_shape_actual": depth_shape_actual,
+                    **rgb_meta,
                     "frame_seq": int(self._last_frame_seq),
                     "camera_frame_seq": int(self._last_frame_seq),
                     "camera_frame_ts_ms": int(round(frame_capture_ts * 1000.0)),

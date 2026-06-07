@@ -999,6 +999,11 @@ class OrchestratorService(BaseModule):
             or "vision_dead" in stale_reason
             or "system_perception_dead" in stale_reason
         )
+        yolo_allows_edge_stale = bool(
+            control_source in {"yolo_forward", "yolo_assist"}
+            and bool(summary.get("yolo_table_control_valid", False))
+            and not perception_dead
+        )
         search_allows_edge_stale = bool(
             (state == "SEARCH_TABLE" or mode == "SEARCH_TABLE" or control_source == "local_rotate_search")
             and not perception_dead
@@ -1011,7 +1016,13 @@ class OrchestratorService(BaseModule):
             or "perception_dead" in stale_reason
             or soft_stale_timed_out
         )
-        hard_stale = bool(hard_stale_raw and not search_allows_edge_stale)
+        hard_stale = bool(hard_stale_raw and not search_allows_edge_stale and not yolo_allows_edge_stale)
+        if perception_dead:
+            stale_source = "vision"
+        elif stale_level or stale_reason:
+            stale_source = "edge" if bool(summary.get("yolo_table_control_valid", False)) else "table"
+        else:
+            stale_source = ""
         has_new_valid_motion = bool(self._cmd_has_motion(cmd) and not explicit_stop and not hard_stale)
         last_within_hold = bool(last_age_ms is not None and last_age_ms <= float(hold_ms))
         soft_stale_within_hard_timeout = bool(
@@ -1081,6 +1092,8 @@ class OrchestratorService(BaseModule):
             "edge_stale_dead": bool(hard_stale_raw and not perception_dead),
             "table_bbox_stale": bool(stale_level in {"hard_stale", "dead"} and not summary.get("yolo_table_control_valid", False)),
             "perception_dead": bool(perception_dead),
+            "stale_source": stale_source,
+            "yolo_allows_edge_stale": bool(yolo_allows_edge_stale),
             "search_allows_edge_stale": bool(search_allows_edge_stale),
             "search_table_stale_gate_bypass": bool(search_allows_edge_stale and hard_stale_raw),
             "stale_gate_stop_source_state": state if hard_stale else "",

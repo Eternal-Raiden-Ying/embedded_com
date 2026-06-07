@@ -83,6 +83,50 @@ def _pick_optional_dict(payload: Dict[str, Any], *keys: str) -> Optional[Dict[st
     return None
 
 
+def _pick_optional_bbox(payload: Dict[str, Any], *keys: str) -> Optional[list]:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, dict):
+            value = value.get("bbox") or value.get("xyxy") or value.get("box")
+        if not isinstance(value, (list, tuple)) or len(value) < 4:
+            continue
+        try:
+            x1, y1, x2, y2 = [int(round(float(v))) for v in value[:4]]
+        except Exception:
+            continue
+        if x2 <= x1 or y2 <= y1:
+            continue
+        return [x1, y1, x2, y2]
+    return None
+
+
+def _pick_bbox_area_ratio(payload: Dict[str, Any]) -> Optional[float]:
+    direct = _pick_optional_float(payload, "table_bbox_area_ratio", "yolo_bbox_area_norm", "table_bbox_area_norm", "yolo_table_bbox_area_ratio")
+    if direct is not None:
+        return max(0.0, min(1.0, float(direct)))
+    bbox = _pick_optional_dict(payload, "table_bbox", "yolo_bbox", "bbox")
+    bbox_list = _pick_optional_bbox(payload, "table_bbox_xyxy", "yolo_table_bbox", "table_bbox", "yolo_bbox", "bbox")
+    if bbox_list is not None:
+        x1, y1, x2, y2 = [float(v) for v in bbox_list[:4]]
+    elif bbox:
+        x1 = _pick_optional_float(bbox, "x1", "left")
+        y1 = _pick_optional_float(bbox, "y1", "top")
+        x2 = _pick_optional_float(bbox, "x2", "right")
+        y2 = _pick_optional_float(bbox, "y2", "bottom")
+    else:
+        return None
+    rgb_w = _pick_optional_float(payload, "rgb_w", "rgb_width", "image_w", "image_width", "frame_w", "frame_width")
+    rgb_h = _pick_optional_float(payload, "rgb_h", "rgb_height", "image_h", "image_height", "frame_h", "frame_height")
+    shape = payload.get("rgb_shape")
+    if (rgb_w is None or rgb_h is None) and isinstance(shape, (list, tuple)) and len(shape) >= 2:
+        rgb_h = _pick_optional_float({"h": shape[0]}, "h")
+        rgb_w = _pick_optional_float({"w": shape[1]}, "w")
+    if None in (x1, y1, x2, y2, rgb_w, rgb_h) or float(rgb_w or 0.0) <= 0.0 or float(rgb_h or 0.0) <= 0.0:
+        return None
+    area = max(0.0, float(x2) - float(x1)) * max(0.0, float(y2) - float(y1))
+    return max(0.0, min(1.0, area / (float(rgb_w) * float(rgb_h))))
+
+
 def _compact(value: Any) -> Any:
     if isinstance(value, dict):
         out: Dict[str, Any] = {}
@@ -372,7 +416,17 @@ class TableEdgeObs:
     view_reliable: bool = False
     fov_guard_active: bool = False
     fov_guard_reason: Optional[str] = None
+    table_bbox_found: bool = False
+    table_bbox_xyxy: Optional[list] = None
+    table_bbox_area_ratio: Optional[float] = None
+    table_bbox_conf_raw: Optional[float] = None
+    table_bbox_conf_used_for_gate: bool = False
     yolo_reliable: bool = False
+    yolo_valid_reason: Optional[str] = None
+    yolo_invalid_reason: Optional[str] = None
+    docking_enabled_by_yolo: bool = False
+    edge_control_allowed: bool = False
+    edge_control_block_reason: Optional[str] = None
     yolo_bbox_area_norm: Optional[float] = None
     yolo_bbox_touch_left: bool = False
     yolo_bbox_touch_right: bool = False
@@ -517,8 +571,18 @@ class TableEdgeObs:
             view_reliable=bool(payload.get("view_reliable", False)),
             fov_guard_active=bool(payload.get("fov_guard_active", False)),
             fov_guard_reason=_pick_optional_str(payload, "fov_guard_reason"),
-            yolo_reliable=bool(payload.get("yolo_reliable", False)),
-            yolo_bbox_area_norm=_pick_optional_float(payload, "yolo_bbox_area_norm", "table_bbox_area_norm"),
+            table_bbox_found=bool(payload.get("table_bbox_found", _pick_optional_bbox(payload, "table_bbox_xyxy", "yolo_table_bbox", "table_bbox", "detected_table_bbox") is not None)),
+            table_bbox_xyxy=_pick_optional_bbox(payload, "table_bbox_xyxy", "yolo_table_bbox", "table_bbox", "detected_table_bbox"),
+            table_bbox_area_ratio=_pick_bbox_area_ratio(payload),
+            table_bbox_conf_raw=_pick_optional_float(payload, "table_bbox_conf_raw", "yolo_table_conf"),
+            table_bbox_conf_used_for_gate=bool(payload.get("table_bbox_conf_used_for_gate", False)),
+            yolo_reliable=bool(payload.get("yolo_reliable", payload.get("table_bbox_found", _pick_optional_bbox(payload, "table_bbox_xyxy", "yolo_table_bbox", "table_bbox", "detected_table_bbox") is not None))),
+            yolo_valid_reason=_pick_optional_str(payload, "yolo_valid_reason"),
+            yolo_invalid_reason=_pick_optional_str(payload, "yolo_invalid_reason"),
+            docking_enabled_by_yolo=bool(payload.get("docking_enabled_by_yolo", payload.get("table_bbox_found", _pick_optional_bbox(payload, "table_bbox_xyxy", "yolo_table_bbox", "table_bbox", "detected_table_bbox") is not None))),
+            edge_control_allowed=bool(payload.get("edge_control_allowed", payload.get("table_bbox_found", _pick_optional_bbox(payload, "table_bbox_xyxy", "yolo_table_bbox", "table_bbox", "detected_table_bbox") is not None))),
+            edge_control_block_reason=_pick_optional_str(payload, "edge_control_block_reason"),
+            yolo_bbox_area_norm=_pick_bbox_area_ratio(payload),
             yolo_bbox_touch_left=bool(payload.get("yolo_bbox_touch_left", False)),
             yolo_bbox_touch_right=bool(payload.get("yolo_bbox_touch_right", False)),
             yolo_bbox_touch_bottom=bool(payload.get("yolo_bbox_touch_bottom", False)),
@@ -527,7 +591,7 @@ class TableEdgeObs:
             table_bbox_touch_right=bool(payload.get("table_bbox_touch_right", payload.get("yolo_bbox_touch_right", False))),
             table_bbox_touch_bottom=bool(payload.get("table_bbox_touch_bottom", payload.get("yolo_bbox_touch_bottom", False))),
             table_bbox_boundary_allowed=bool(payload.get("table_bbox_boundary_allowed", False)),
-            yolo_table_control_valid=bool(payload.get("yolo_table_control_valid", payload.get("yolo_reliable", False))),
+            yolo_table_control_valid=bool(payload.get("yolo_table_control_valid", payload.get("table_bbox_found", _pick_optional_bbox(payload, "table_bbox_xyxy", "yolo_table_bbox", "table_bbox", "detected_table_bbox") is not None or payload.get("yolo_reliable", False)))),
             yolo_table_roi_valid=bool(payload.get("yolo_table_roi_valid", False)),
             yolo_gate_open=bool(payload.get("yolo_gate_open", False)),
             yolo_table_conf=_pick_optional_float(payload, "yolo_table_conf"),

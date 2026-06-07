@@ -169,6 +169,131 @@ def _bbox_touch_flags(bbox: Sequence[int], image_shape: Any, edge_margin_norm: f
     }
 
 
+def _roi_from_center(center_x: float, center_y: float, roi_width: int, roi_height: int, image_shape: Any) -> Optional[list[int]]:
+    shape = _parse_shape(image_shape)
+    if shape is None:
+        return None
+    height, width = shape
+    cx = max(0.0, min(float(width), float(center_x)))
+    cy = max(0.0, min(float(height), float(center_y)))
+    x1 = int(round(cx - float(max(1, int(roi_width))) * 0.5))
+    y1 = int(round(cy - float(max(1, int(roi_height))) * 0.5))
+    return _clip_bbox([x1, y1, x1 + int(roi_width), y1 + int(roi_height)], image_shape)
+
+
+def _crop_rect_for_mapping(rgb_native_shape: Any, rgb_crop_rect: Any) -> Optional[list[float]]:
+    native = _parse_shape(rgb_native_shape)
+    if native is None:
+        return None
+    native_h, native_w = native
+    rect = rgb_crop_rect
+    if isinstance(rect, str):
+        rect = [part.strip() for part in rect.replace(";", ",").split(",")]
+    if not isinstance(rect, (list, tuple)) or len(rect) < 4:
+        return [0.0, 0.0, float(native_w), float(native_h)]
+    try:
+        x = float(rect[0])
+        y = float(rect[1])
+        w = float(rect[2])
+        h = float(rect[3])
+    except (TypeError, ValueError):
+        return [0.0, 0.0, float(native_w), float(native_h)]
+    if w <= 0.0:
+        w = float(native_w)
+    if h <= 0.0:
+        h = float(native_h)
+    x = max(0.0, min(float(native_w), x))
+    y = max(0.0, min(float(native_h), y))
+    w = max(1.0, min(float(native_w) - x, w))
+    h = max(1.0, min(float(native_h) - y, h))
+    return [x, y, w, h]
+
+
+def map_rgb_bbox_to_depth_roi(
+    bbox_rgb_xyxy: Any,
+    rgb_output_shape: Any,
+    rgb_native_shape: Any,
+    rgb_crop_rect: Any,
+    depth_shape: Any,
+    roi_width: Any,
+    roi_height: Any,
+    *,
+    roi_anchor: str = "center",
+    lower_ratio: float = 0.75,
+    use_rgb_depth_mapping: bool = True,
+) -> Tuple[Optional[list[int]], Dict[str, Any]]:
+    """Map a YOLO bbox from RGB output coordinates into a depth-frame ROI."""
+    bbox = normalize_table_bbox(bbox_rgb_xyxy, rgb_output_shape)
+    rgb_out_hw = _parse_shape(rgb_output_shape)
+    depth_hw = _parse_shape(depth_shape)
+    if bbox is None or rgb_out_hw is None or depth_hw is None:
+        return None, {
+            "roi_mapping_mode": "unavailable",
+            "roi_clamped": False,
+            "table_bbox_rgb_xyxy": bbox,
+        }
+    rgb_out_h, rgb_out_w = rgb_out_hw
+    depth_h, depth_w = depth_hw
+    try:
+        rw = int(round(float(roi_width)))
+        rh = int(round(float(roi_height)))
+    except Exception:
+        rw, rh = 1, 1
+    rw = max(1, rw)
+    rh = max(1, rh)
+    x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
+    anchor = str(roi_anchor or "center").strip().lower()
+    if anchor not in {"center", "lower_center"}:
+        anchor = "center"
+    try:
+        ratio = max(0.0, min(1.0, float(lower_ratio)))
+    except Exception:
+        ratio = 0.75
+    cx_out = (x1 + x2) * 0.5
+    cy_out = (y1 + y2) * 0.5 if anchor == "center" else y1 + (y2 - y1) * ratio
+    cx_norm_out = max(0.0, min(1.0, cx_out / max(1.0, float(rgb_out_w))))
+    cy_norm_out = max(0.0, min(1.0, cy_out / max(1.0, float(rgb_out_h))))
+
+    mapping_mode = "rgb_output_norm_to_depth"
+    native_norm_x = cx_norm_out
+    native_norm_y = cy_norm_out
+    crop_rect = _crop_rect_for_mapping(rgb_native_shape, rgb_crop_rect)
+    native_hw = _parse_shape(rgb_native_shape)
+    if bool(use_rgb_depth_mapping) and crop_rect is not None and native_hw is not None:
+        native_h, native_w = native_hw
+        crop_x, crop_y, crop_w, crop_h = crop_rect
+        native_x = crop_x + cx_norm_out * crop_w
+        native_y = crop_y + cy_norm_out * crop_h
+        native_norm_x = max(0.0, min(1.0, native_x / max(1.0, float(native_w))))
+        native_norm_y = max(0.0, min(1.0, native_y / max(1.0, float(native_h))))
+        mapping_mode = "rgb_output_crop_native_norm_to_depth"
+
+    depth_cx = native_norm_x * float(depth_w)
+    depth_cy = native_norm_y * float(depth_h)
+    unclamped = [
+        int(round(depth_cx - float(rw) * 0.5)),
+        int(round(depth_cy - float(rh) * 0.5)),
+        int(round(depth_cx + float(rw) * 0.5)),
+        int(round(depth_cy + float(rh) * 0.5)),
+    ]
+    roi = _roi_from_center(depth_cx, depth_cy, rw, rh, depth_shape)
+    debug = {
+        "rgb_shape": list(rgb_output_shape[:2]) if isinstance(rgb_output_shape, (list, tuple)) and len(rgb_output_shape) >= 2 else rgb_output_shape,
+        "depth_shape": list(depth_shape[:2]) if isinstance(depth_shape, (list, tuple)) and len(depth_shape) >= 2 else depth_shape,
+        "rgb_native_shape": list(rgb_native_shape[:2]) if isinstance(rgb_native_shape, (list, tuple)) and len(rgb_native_shape) >= 2 else rgb_native_shape,
+        "rgb_crop_rect": [int(round(v)) for v in crop_rect] if crop_rect is not None else rgb_crop_rect,
+        "table_bbox_rgb_xyxy": [int(v) for v in bbox],
+        "table_bbox_rgb_center": [float(cx_out), float(cy_out)],
+        "table_bbox_rgb_center_norm": [float(cx_norm_out), float(cy_norm_out)],
+        "mapped_depth_center": [float(depth_cx), float(depth_cy)],
+        "table_edge_roi": roi,
+        "roi_anchor": anchor,
+        "roi_mapping_mode": mapping_mode,
+        "roi_clamped": bool(roi != unclamped),
+    }
+    return roi, debug
+
+
 def _follow_table_lower_band_roi(
     static_roi: Sequence[int],
     center_x: float,
@@ -220,6 +345,11 @@ def compute_dynamic_table_roi_from_yolo_bbox(
     smoothed_center_x: Any = None,
     bbox_image_shape: Any = None,
     yolo_near_bottom_norm: float = 0.60,
+    rgb_native_shape: Any = None,
+    rgb_crop_rect: Any = None,
+    roi_anchor: str = "center",
+    roi_lower_ratio: float = 0.75,
+    use_rgb_depth_mapping: bool = True,
 ) -> Dict[str, Any]:
     """Return a center-following ROI that preserves the current static ROI size."""
     static_roi = normalize_table_bbox(current_static_roi, image_shape)
@@ -238,7 +368,7 @@ def compute_dynamic_table_roi_from_yolo_bbox(
     if bbox is None:
         return {
             "dynamic_roi": static_roi,
-            "roi_source": "static_bottom",
+            "roi_source": "static_no_yolo_fallback",
             "roi_reason": "table_bbox_unavailable",
             "bbox_valid": False,
             "bbox_reject_reason": "table_bbox_unavailable",
@@ -278,7 +408,7 @@ def compute_dynamic_table_roi_from_yolo_bbox(
     if reason:
         return {
             "dynamic_roi": static_roi,
-            "roi_source": "static_bottom",
+            "roi_source": "static_no_yolo_fallback",
             "roi_reason": reason,
             "bbox_valid": False,
             "bbox_reject_reason": reason,
@@ -297,41 +427,43 @@ def compute_dynamic_table_roi_from_yolo_bbox(
     bbox_hw = _parse_shape(bbox_shape)
     height, width = shape if shape is not None else (0, 0)
     bbox_width = bbox_hw[1] if bbox_hw is not None else width
+    bbox_height = bbox_hw[0] if bbox_hw is not None else height
     raw_center_x = (float(bbox[0]) + float(bbox[2])) * 0.5
+    raw_center_y = (float(bbox[1]) + float(bbox[3])) * 0.5
     raw_center_norm = raw_center_x / max(1.0, float(bbox_width))
-    raw_target_center_x = raw_center_norm * max(1.0, float(width))
-    try:
-        center_x = float(smoothed_center_x) if smoothed_center_x is not None else raw_target_center_x
-    except (TypeError, ValueError):
-        center_x = raw_target_center_x
-    bottom_threshold = max(0.0, min(1.0, float(yolo_near_bottom_norm)))
-    bottom_band_near = bool(bbox_bottom_norm is not None and float(bbox_bottom_norm) >= bottom_threshold)
-    edge_lost_yolo = bool(mode_text in {"edge_lost_yolo", "edge_lost_yolo_assist", "near_yolo_assist"})
-    near_or_bottom = bool(mode_text in {"near", "near_distance"} or edge_lost_yolo or touch_bottom or bottom_band_near)
-    if near_or_bottom:
-        roi = _follow_table_lower_band_roi(
-            static_roi,
-            center_x,
-            bbox,
-            image_shape,
-            bbox_shape,
-            bottom_align=touch_bottom,
-        ) or static_roi
-        roi_source = "yolo_table_lower_band"
-        roi_reason = "table_bbox_lower_band_follow" if not touch_bottom else "table_bbox_touch_bottom_lower_band"
-        if edge_lost_yolo or mode_text in {"near", "near_distance"}:
-            roi_phase = "near_yolo_assist"
-        elif bottom_band_near:
-            roi_phase = "far_yolo_guided"
-        else:
-            roi_phase = "edge_fusion" if str(edge_stability or "").lower() == "stable" else "far_yolo_guided"
-        roi_y_strategy = "bbox_bottom" if touch_bottom else "bbox_lower_band"
-    else:
-        roi = _shift_roi_center_x(static_roi, center_x, image_shape) or static_roi
-        roi_source = "yolo_table_bbox"
-        roi_reason = "table_bbox_center_follow"
-        roi_phase = "edge_fusion" if str(edge_stability or "").lower() == "stable" else "far_yolo_guided"
-        roi_y_strategy = "static_center_lower"
+    raw_center_y_norm = raw_center_y / max(1.0, float(bbox_height))
+    roi_w = int(roi_width) if roi_width is not None else int(static_roi[2] - static_roi[0])
+    roi_h = int(roi_height) if roi_height is not None else int(static_roi[3] - static_roi[1])
+    roi, mapping_debug = map_rgb_bbox_to_depth_roi(
+        bbox,
+        bbox_shape,
+        rgb_native_shape,
+        rgb_crop_rect,
+        image_shape,
+        roi_w,
+        roi_h,
+        roi_anchor=roi_anchor,
+        lower_ratio=roi_lower_ratio,
+        use_rgb_depth_mapping=use_rgb_depth_mapping,
+    )
+    roi = roi or static_roi
+    if smoothed_center_x is not None and shape is not None:
+        try:
+            center_y = (float(roi[1]) + float(roi[3])) * 0.5
+            roi = _roi_from_center(float(smoothed_center_x), center_y, roi_w, roi_h, image_shape) or roi
+            mapping_debug["mapped_depth_center"] = [
+                float((float(roi[0]) + float(roi[2])) * 0.5),
+                float(center_y),
+            ]
+            mapping_debug["table_edge_roi"] = roi
+        except Exception:
+            pass
+    roi_source = "yolo_table_mapped_center"
+    roi_reason = "table_bbox_rgb_depth_mapped_center_follow"
+    roi_phase = "edge_fusion" if str(edge_stability or "").lower() == "stable" else "far_yolo_guided"
+    if mode_text in {"near", "near_distance", "edge_lost_yolo", "edge_lost_yolo_assist", "near_yolo_assist"}:
+        roi_phase = "near_yolo_assist"
+    roi_y_strategy = "bbox_lower_center" if str(roi_anchor or "").strip().lower() == "lower_center" else "bbox_center"
     roi_center_y = ((float(roi[1]) + float(roi[3])) * 0.5) if roi is not None else None
     return {
         "dynamic_roi": roi,
@@ -349,11 +481,14 @@ def compute_dynamic_table_roi_from_yolo_bbox(
         "bbox_y2_norm": bbox_y2_norm,
         "bbox_bottom_norm": bbox_bottom_norm,
         "bbox_touch_bottom": touch_bottom,
-        "roi_center_y_from_yolo": roi_center_y if near_or_bottom else None,
+        "roi_center_y_from_yolo": roi_center_y,
         "roi_y_strategy": roi_y_strategy,
+        **mapping_debug,
         "yolo_table_class_id": int(table_class_id),
         "yolo_bbox_center_x": raw_center_x,
         "yolo_bbox_center_x_norm": raw_center_norm,
+        "yolo_bbox_center_y": raw_center_y,
+        "yolo_bbox_center_y_norm": raw_center_y_norm,
         "yolo_roi_center_x": (float(roi[0]) + float(roi[2])) * 0.5,
         "yolo_roi_center_x_norm": ((float(roi[0]) + float(roi[2])) * 0.5) / max(1.0, float(width)),
         "edge_stability": edge_stability,
@@ -385,6 +520,11 @@ def choose_depth_roi(
     near_distance: bool = False,
     yolo_near_bottom_norm: float = 0.60,
     edge_stable: bool = False,
+    rgb_native_shape: Any = None,
+    rgb_crop_rect: Any = None,
+    yolo_roi_anchor: str = "center",
+    yolo_roi_lower_ratio: float = 0.75,
+    yolo_roi_use_rgb_depth_mapping: bool = True,
 ) -> Dict[str, Any]:
     """Choose table-edge ROI from current detection, recent history, or static fallback."""
     local = dict(local_perception or {}) if isinstance(local_perception, dict) else {}
@@ -411,7 +551,7 @@ def choose_depth_roi(
         roi_source = f"preset:{preset_name}"
         roi_reason = "debug_roi_preset"
     elif yolo_dynamic_enable and fallback_roi is not None and table_bbox is not None:
-        det = table_detection_debug(local, resolved_rgb_shape, min_conf=yolo_table_conf_min)
+        det = table_detection_debug(local, resolved_rgb_shape, min_conf=-1.0)
         dyn = compute_dynamic_table_roi_from_yolo_bbox(
             depth_shape,
             table_bbox,
@@ -419,17 +559,22 @@ def choose_depth_roi(
             mode="near" if near_distance else "",
             edge_stability="stable" if edge_stable else "unstable",
             bbox_score=det.get("conf"),
-            class_id=yolo_table_class_id if det.get("found") else None,
+            class_id=None,
             table_class_id=yolo_table_class_id,
-            conf_min=yolo_table_conf_min,
+            conf_min=-1.0,
             min_area_ratio=yolo_min_area_ratio,
             max_area_ratio=yolo_max_area_ratio,
             smoothed_center_x=smoothed_table_center_x,
             bbox_image_shape=resolved_rgb_shape,
             yolo_near_bottom_norm=yolo_near_bottom_norm,
+            rgb_native_shape=rgb_native_shape or local.get("rgb_native_shape"),
+            rgb_crop_rect=rgb_crop_rect or local.get("rgb_crop_rect"),
+            roi_anchor=yolo_roi_anchor,
+            roi_lower_ratio=yolo_roi_lower_ratio,
+            use_rgb_depth_mapping=yolo_roi_use_rgb_depth_mapping,
         )
         depth_edge_roi = dyn.get("dynamic_roi") or fallback_roi
-        roi_source = str(dyn.get("roi_source") or "static_bottom")
+        roi_source = str(dyn.get("roi_source") or "static_no_yolo_fallback")
         roi_reason = str(dyn.get("roi_reason") or "")
         if not bool(dyn.get("bbox_valid", False)) and preset_roi is not None:
             depth_edge_roi = preset_roi
@@ -457,6 +602,12 @@ def choose_depth_roi(
             if preset_roi is not None:
                 roi_source = f"preset:{preset_name}"
                 roi_reason = "debug_roi_preset"
+            elif table_bbox is None:
+                roi_source = "static_no_yolo_fallback"
+                roi_reason = "table_bbox_unavailable"
+            else:
+                roi_source = "static_far_fallback"
+                roi_reason = roi_reason or "static_depth_roi_fallback"
 
     return {
         "table_bbox": table_bbox,

@@ -302,6 +302,18 @@ class OpenCVPreviewSink(PreviewSink):
             roi = table_edge.get(name)
             if roi:
                 self._draw_roi(panel, roi, scale, offset, name, color, dashed=(name != "depth_edge_roi"))
+        self._draw_pixel_points_transformed(panel, table_edge.get("fast_sampled_pixels"), scale, offset, (80, 80, 120), radius=1, alpha=0.35)
+        self._draw_pixel_points_transformed(panel, table_edge.get("fast_candidate_pixels"), scale, offset, (0, 220, 255), radius=1, alpha=0.78)
+        self._draw_pixel_points_transformed(panel, table_edge.get("fast_edge_pixels"), scale, offset, (255, 190, 40), radius=2, alpha=0.95)
+        self._draw_pixel_points_transformed(panel, table_edge.get("fast_support_pixels"), scale, offset, (255, 235, 80), radius=1, alpha=0.72)
+        self._draw_pixel_points_transformed(panel, table_edge.get("fast_inlier_pixels"), scale, offset, (40, 255, 80), radius=3, alpha=0.95)
+        self._draw_pixel_points_transformed(panel, table_edge.get("front_plane_candidate_pixels"), scale, offset, (40, 220, 70), radius=2, alpha=0.55)
+        if self.debug_points_enabled:
+            self._draw_pixel_points_transformed(panel, table_edge.get("fast_background_pixels"), scale, offset, (120, 160, 255), radius=3, alpha=0.85, marker="cross")
+            self._draw_pixel_points_transformed(panel, table_edge.get("fast_weak_pixels"), scale, offset, (210, 80, 210), radius=3, alpha=0.85, marker="cross")
+            self._draw_pixel_points_transformed(panel, table_edge.get("fast_outlier_pixels"), scale, offset, (40, 40, 255), radius=4, alpha=0.90, marker="cross")
+        if table_edge.get("fast_candidate_pixels") or table_edge.get("fast_edge_pixels") or table_edge.get("fast_support_pixels"):
+            self._draw_fast_legend(panel)
         valid = self._valid_depth(image)
         if np.any(valid):
             vals = image[valid].astype(np.float32)
@@ -675,6 +687,40 @@ class OpenCVPreviewSink(PreviewSink):
             try:
                 x = int(round(float(item[0])))
                 y = int(round(float(item[1])))
+            except Exception:
+                continue
+            if 0 <= x < w and 0 <= y < h:
+                if marker == "cross":
+                    cv2.drawMarker(target, (x, y), color, cv2.MARKER_TILTED_CROSS, max(5, int(radius) * 3), 1, line_type=cv2.LINE_AA)
+                else:
+                    cv2.circle(target, (x, y), int(radius), color, -1, lineType=cv2.LINE_AA)
+        if alpha < 1.0:
+            cv2.addWeighted(target, float(alpha), panel, 1.0 - float(alpha), 0, dst=panel)
+        self._add_timing("preview_draw_points_ms", (time.perf_counter() - start) * 1000.0)
+
+    def _draw_pixel_points_transformed(
+        self,
+        panel: np.ndarray,
+        points: Any,
+        scale: float,
+        offset: Tuple[int, int],
+        color: Tuple[int, int, int],
+        radius: int = 1,
+        alpha: float = 1.0,
+        marker: str = "circle",
+    ) -> None:
+        start = time.perf_counter()
+        if not isinstance(points, (list, tuple)):
+            return
+        h, w = panel.shape[:2]
+        ox, oy = int(offset[0]), int(offset[1])
+        target = panel if alpha >= 1.0 else panel.copy()
+        for item in points[:2000]:
+            if not isinstance(item, (list, tuple)) or len(item) < 2:
+                continue
+            try:
+                x = int(round(float(item[0]) * float(scale))) + ox
+                y = int(round(float(item[1]) * float(scale))) + oy
             except Exception:
                 continue
             if 0 <= x < w and 0 <= y < h:

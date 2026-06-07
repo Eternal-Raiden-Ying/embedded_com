@@ -357,6 +357,16 @@ class PredictorManager:
             payload["yolo_infer_ms"] = infer_ms
             payload["yolo_has_infer"] = bool(has_infer)
             payload["yolo_frame_seq"] = int(seq)
+            for key in (
+                "rgb_native_shape",
+                "rgb_crop_rect",
+                "rgb_output_shape_config",
+                "rgb_output_shape_actual",
+                "depth_shape_actual",
+                "rgb_config_source",
+            ):
+                if key in frames:
+                    payload[key] = frames.get(key)
             contract_error = str(payload.get("contract_error") or "")
             if contract_error:
                 self.log.warning(

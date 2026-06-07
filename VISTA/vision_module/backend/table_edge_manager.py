@@ -394,6 +394,14 @@ class TableEdgeManager:
         out.setdefault("edge_valid", bool(out.get("edge_found", False)) and not unavailable)
         out.setdefault("yaw_err", out.get("yaw_err_rad"))
         out.setdefault("dist_err", out.get("dist_err_m"))
+        if not bool(out.get("table_bbox_found", False)):
+            for key in ("depth_edge_roi", "table_edge_roi", "edge_roi", "plane_roi"):
+                out[key] = None
+            out["roi_source"] = "disabled_no_table_bbox"
+            out["roi_phase"] = "disabled_no_table_bbox"
+            out["edge_control_allowed"] = False
+            out["docking_enabled_by_yolo"] = False
+            out["edge_control_block_reason"] = out.get("edge_control_block_reason") or "table_bbox_unavailable"
         # Compatibility aliases retained for the state machine and legacy logs while
         # table plane fields become the canonical semantics.
         if out.get("plane_roi") is None and out.get("depth_edge_roi") is not None:
@@ -1602,10 +1610,20 @@ class TableEdgeManager:
             "enable_crease_line": bool(getattr(self._detector_cfg, "enable_crease_line", True)),
             **self._detector_mode_payload(),
             "table_confirmed_by_yolo": False,
+            "table_bbox_found": False,
+            "table_bbox_xyxy": None,
+            "table_bbox_area_ratio": None,
+            "table_bbox_conf_raw": None,
+            "table_bbox_conf_used_for_gate": False,
             "yolo_table_conf": None,
             "yolo_gate_reason": str(reason or ""),
             "yolo_reliable": False,
             "yolo_gate_open": False,
+            "yolo_valid_reason": "",
+            "yolo_invalid_reason": str(reason or ""),
+            "docking_enabled_by_yolo": False,
+            "edge_control_allowed": False,
+            "edge_control_block_reason": str(reason or "table_bbox_unavailable"),
             "yolo_bbox_area_norm": None,
             "yolo_bbox_touch_left": False,
             "yolo_bbox_touch_right": False,
@@ -1642,33 +1660,39 @@ class TableEdgeManager:
     def _yolo_table_confirmation(self, local: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         require_yolo = self._require_yolo_confirm
         plane_only = bool(getattr(self._detector_cfg, "plane_only_mode", False))
-        if plane_only and not self._enable_yolo_in_plane_only:
-            require_yolo = False
         local_payload = dict(local if local is not None else self._local_perception())
         min_conf = float(self._yolo_table_min_conf)
+        table_bbox = table_detection_debug(local_payload, local_payload.get("rgb_shape"), min_conf=-1.0).get("bbox")
         det = table_detection_debug(local_payload, local_payload.get("rgb_shape"), min_conf=min_conf)
         source = str(local_payload.get("table_roi_source") or "").strip()
-        confirmed = bool(det.get("found")) and source in {"yolo_table_bbox", "yolo_table_search_disabled"}
-        reason = "yolo_table_confirmed" if confirmed else str(det.get("reason") or "waiting_yolo_table_confirm")
-        if source and source != "yolo_table_bbox":
+        bbox_found = table_bbox is not None
+        confirmed = bool(bbox_found)
+        reason = "table_bbox_found" if bbox_found else "table_bbox_unavailable"
+        if not bbox_found and source:
             reason = f"table_source_{source}"
-        if not require_yolo and reason == "not_found_or_low_conf":
-            reason = "not_required_plane_only"
-        bbox_metrics = self._bbox_view_metrics(det.get("bbox"), local_payload.get("rgb_shape"))
+        bbox_metrics = self._bbox_view_metrics(table_bbox, local_payload.get("rgb_shape"))
         bbox_conf = det.get("conf")
-        yolo_reliable = bool(
-            confirmed
-            and bbox_metrics.get("reliable", False)
-            and bbox_conf is not None
-            and float(bbox_conf) >= min_conf
-        )
+        yolo_reliable = bool(confirmed)
+        gate_open = bool(confirmed)
+        if not gate_open and not require_yolo and plane_only and self._enable_yolo_in_plane_only:
+            gate_open = False
         return {
             "table_confirmed_by_yolo": confirmed,
-            "yolo_table_conf": det.get("conf"),
+            "table_bbox_found": bool(bbox_found),
+            "table_bbox_xyxy": table_bbox,
+            "table_bbox_area_ratio": bbox_metrics.get("area_norm"),
+            "table_bbox_conf_raw": bbox_conf,
+            "table_bbox_conf_used_for_gate": False,
+            "yolo_table_conf": bbox_conf,
             "yolo_gate_reason": reason,
-            "yolo_table_bbox": det.get("bbox"),
+            "yolo_table_bbox": table_bbox,
             "yolo_reliable": yolo_reliable,
-            "yolo_gate_open": bool(confirmed or not require_yolo),
+            "yolo_gate_open": bool(gate_open),
+            "yolo_valid_reason": "table_bbox_found" if bbox_found else "",
+            "yolo_invalid_reason": "" if bbox_found else reason,
+            "docking_enabled_by_yolo": bool(bbox_found),
+            "edge_control_allowed": bool(bbox_found),
+            "edge_control_block_reason": "" if bbox_found else "table_bbox_unavailable",
             "yolo_bbox_area_norm": bbox_metrics.get("area_norm"),
             "yolo_bbox_touch_left": bool(bbox_metrics.get("touch_left", False)),
             "yolo_bbox_touch_right": bool(bbox_metrics.get("touch_right", False)),
@@ -1678,7 +1702,7 @@ class TableEdgeManager:
             "table_bbox_touch_right": bool(bbox_metrics.get("touch_right", False)),
             "table_bbox_touch_bottom": bool(bbox_metrics.get("touch_bottom", False)),
             "table_bbox_boundary_allowed": bool(bbox_metrics.get("boundary_allowed", False)),
-            "yolo_table_control_valid": bool(yolo_reliable),
+            "yolo_table_control_valid": bool(bbox_found),
             "table_cx_norm": bbox_metrics.get("cx_norm"),
             "table_size_norm": bbox_metrics.get("area_norm"),
         }
@@ -1819,16 +1843,24 @@ class TableEdgeManager:
             near_distance=near_distance,
             yolo_near_bottom_norm=float(getattr(table_edge_cfg, "yolo_table_near_bottom_norm", 0.60) or 0.60),
             edge_stable=edge_stable,
+            rgb_native_shape=local.get("rgb_native_shape"),
+            rgb_crop_rect=local.get("rgb_crop_rect"),
+            yolo_roi_anchor=str(getattr(table_edge_cfg, "yolo_table_roi_anchor", "center") or "center"),
+            yolo_roi_lower_ratio=float(getattr(table_edge_cfg, "yolo_table_roi_lower_ratio", 0.75) or 0.75),
+            yolo_roi_use_rgb_depth_mapping=bool(getattr(table_edge_cfg, "yolo_table_roi_use_rgb_depth_mapping", True)),
         )
         quadrant = roi_meta.get("table_quadrant")
         table_bbox = roi_meta.get("table_bbox")
-        if quadrant and roi_meta.get("roi_source") in {"local_perception_table_bbox", "yolo_table_bbox", "yolo_table_lower_band"}:
+        if quadrant and roi_meta.get("roi_source") in {"local_perception_table_bbox", "yolo_table_bbox", "yolo_table_mapped_center"}:
             self._last_valid_quadrant = str(quadrant).strip().upper()
             self._last_valid_quadrant_ts = time.time()
             self._last_valid_table_bbox = table_bbox
             self._last_valid_table_center_norm = roi_meta.get("table_center_norm")
         roi_meta["yolo_table_roi_enable"] = bool(dynamic_enable)
         roi_meta["yolo_table_roi_ema_alpha"] = float(getattr(table_edge_cfg, "yolo_table_roi_ema_alpha", 0.4) or 0.4)
+        roi_meta["yolo_table_roi_anchor"] = str(getattr(table_edge_cfg, "yolo_table_roi_anchor", "center") or "center")
+        roi_meta["yolo_table_roi_lower_ratio"] = float(getattr(table_edge_cfg, "yolo_table_roi_lower_ratio", 0.75) or 0.75)
+        roi_meta["yolo_table_roi_use_rgb_depth_mapping"] = bool(getattr(table_edge_cfg, "yolo_table_roi_use_rgb_depth_mapping", True))
         roi_meta["yolo_table_roi_center_x_ema"] = self._yolo_table_roi_center_x_ema
         roi_meta["yolo_table_edge_stable_count"] = int(self._edge_stable_count)
         roi_meta["yolo_table_edge_stable_required"] = int(stable_required)
@@ -1886,6 +1918,9 @@ class TableEdgeManager:
             "roi_phase",
             "yolo_table_roi_enable",
             "yolo_table_roi_ema_alpha",
+            "yolo_table_roi_anchor",
+            "yolo_table_roi_lower_ratio",
+            "yolo_table_roi_use_rgb_depth_mapping",
             "yolo_table_roi_center_x_ema",
             "yolo_table_edge_stable_count",
             "yolo_table_edge_stable_required",
@@ -1898,6 +1933,19 @@ class TableEdgeManager:
             "bbox_touch_bottom",
             "roi_center_y_from_yolo",
             "roi_y_strategy",
+            "rgb_shape",
+            "depth_shape",
+            "rgb_native_shape",
+            "rgb_crop_rect",
+            "table_bbox_rgb_xyxy",
+            "table_bbox_rgb_center",
+            "table_bbox_rgb_center_norm",
+            "mapped_depth_center",
+            "roi_anchor",
+            "roi_mapping_mode",
+            "roi_clamped",
+            "yolo_bbox_center_y",
+            "yolo_bbox_center_y_norm",
             "edge_stability",
             "distance_hint",
         ):

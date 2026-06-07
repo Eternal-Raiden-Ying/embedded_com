@@ -103,6 +103,7 @@ class ControlThresholds:
     table_stable_frames: int = 5
     yolo_table_control_enable: bool = True
     yolo_table_conf_min: float = 0.25
+    yolo_table_area_gate_for_docking: float = 0.40
     yolo_table_edge_stable_frames: int = 5
     yolo_table_near_dist_m: float = 0.45
     yolo_table_blend_start_stable_frames: int = 5
@@ -266,8 +267,8 @@ class CarMotionConfig:
     table_wz_view_max_norm: float = 0.05
     table_wz_plane_max_norm: float = 0.06
     table_dist_kp_norm_per_m: float = 0.12
-    yolo_table_yaw_gain: float = 0.4
-    yolo_table_max_wz: float = 0.12
+    yolo_table_yaw_gain: float = 0.20
+    yolo_table_max_wz: float = 0.06
     yolo_table_forward_vx: float = 0.015
     yolo_table_assist_vx: float = 0.010
     table_view_wz_kp: float = 0.18

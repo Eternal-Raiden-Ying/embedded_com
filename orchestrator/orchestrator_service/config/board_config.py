@@ -175,6 +175,12 @@ def _apply_stage_params(data: Dict[str, Any]) -> None:
     CONFIG.control.yolo_table_conf_min = float(
         yolo_table.get("yolo_table_conf_min", yolo_table.get("conf_min", CONFIG.control.yolo_table_conf_min))
     )
+    CONFIG.control.yolo_table_area_gate_for_docking = float(
+        yolo_table.get(
+            "yolo_table_area_gate_for_docking",
+            yolo_table.get("area_gate_for_docking", CONFIG.control.yolo_table_area_gate_for_docking),
+        )
+    )
     CONFIG.control.yolo_table_edge_stable_frames = int(
         yolo_table.get("yolo_table_edge_stable_frames", yolo_table.get("edge_stable_frames", CONFIG.control.yolo_table_edge_stable_frames))
     )
@@ -544,6 +550,7 @@ CONFIG.control.table_stop_margin_m = _env_float("ORCH_TABLE_STOP_MARGIN_CM", CON
 CONFIG.control.table_settle_s = _env_float("ORCH_TABLE_SETTLE_MS", CONFIG.control.table_settle_s * 1000.0) / 1000.0
 CONFIG.control.table_stable_frames = _env_int("ORCH_TABLE_STABLE_FRAMES", CONFIG.control.table_stable_frames)
 CONFIG.control.yolo_table_conf_min = _env_float("ORCH_YOLO_TABLE_CONF_MIN", CONFIG.control.yolo_table_conf_min)
+CONFIG.control.yolo_table_area_gate_for_docking = _env_float("ORCH_YOLO_TABLE_AREA_GATE_FOR_DOCKING", CONFIG.control.yolo_table_area_gate_for_docking)
 CONFIG.control.rotate_search_timeout_s = _env_float("ORCH_ROTATE_SEARCH_TIMEOUT_S", CONFIG.control.rotate_search_timeout_s)
 CONFIG.control.rotate_require_edge_stable_frames = _env_int("ORCH_ROTATE_REQUIRE_EDGE_STABLE_FRAMES", CONFIG.control.rotate_require_edge_stable_frames)
 CONFIG.control.rotate_yaw_threshold_rad = _env_float("ORCH_ROTATE_YAW_THRESHOLD_RAD", CONFIG.control.rotate_yaw_threshold_rad)

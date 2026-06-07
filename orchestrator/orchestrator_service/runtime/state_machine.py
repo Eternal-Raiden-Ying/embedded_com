@@ -2367,7 +2367,7 @@ class OrchestratorCore:
         self.ctx.table_loss_since_mono = 0.0
 
     def _table_visible(self, obs: Optional[TableEdgeObs]) -> bool:
-        return bool(obs is not None and (obs.table_found or self._table_plane_stable(obs) or self._table_yolo_reliable(obs)))
+        return bool(obs is not None and self._table_yolo_reliable(obs) and (obs.table_found or self._table_plane_stable(obs) or self._table_yolo_reliable(obs)))
 
     @staticmethod
     def _median(values: List[float]) -> Optional[float]:
@@ -2610,13 +2610,11 @@ class OrchestratorCore:
     def _table_yolo_reliable(self, obs: Optional[TableEdgeObs]) -> bool:
         if obs is None:
             return False
-        conf = getattr(obs, "yolo_table_conf", None)
-        if conf is not None:
-            try:
-                if float(conf) < float(getattr(self.cfg, "yolo_table_conf_min", 0.25) or 0.25):
-                    return False
-            except Exception:
-                pass
+        if bool(getattr(obs, "table_bbox_found", False)):
+            return True
+        bbox = getattr(obs, "table_bbox_xyxy", None)
+        if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+            return True
         if hasattr(obs, "yolo_table_control_valid") and bool(getattr(obs, "yolo_table_control_valid", False)):
             return True
         if hasattr(obs, "yolo_reliable"):
@@ -2624,6 +2622,8 @@ class OrchestratorCore:
         return bool(getattr(obs, "table_confirmed_by_yolo", False)) and getattr(obs, "table_cx_norm", None) is not None
 
     def _table_plane_stable(self, obs: Optional[TableEdgeObs]) -> bool:
+        if not self._table_yolo_reliable(obs):
+            return False
         if obs is None or obs.yaw_err_rad is None or obs.dist_err_m is None:
             return False
         if bool(getattr(obs, "usable_for_approach", False)):

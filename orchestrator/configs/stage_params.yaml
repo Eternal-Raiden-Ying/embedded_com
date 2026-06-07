@@ -31,13 +31,14 @@ table_docking:
 yolo_table:
   yolo_table_control_enable: true
   yolo_table_conf_min: 0.25
+  yolo_table_area_gate_for_docking: 0.40
   yolo_table_edge_stable_frames: 5
   yolo_table_near_dist_m: 0.45
   yolo_table_blend_start_stable_frames: 5
   yolo_forward_vx: 0.015
   yolo_assist_vx: 0.010
-  yolo_yaw_gain: 0.25
-  yolo_max_wz: 0.08
+  yolo_yaw_gain: 0.20
+  yolo_max_wz: 0.06
   yolo_table_blend_yolo_weight: 0.5
   yolo_table_lost_to_search_frames: 8
   rotate_search_wz: 0.10

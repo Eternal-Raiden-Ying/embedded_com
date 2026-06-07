@@ -152,6 +152,9 @@ class TableEdgeConfig:
     yolo_table_class_id: int = 0
     yolo_table_conf_min: float = 0.25
     yolo_table_roi_ema_alpha: float = 0.4
+    yolo_table_roi_anchor: str = "center"
+    yolo_table_roi_lower_ratio: float = 0.75
+    yolo_table_roi_use_rgb_depth_mapping: bool = True
     yolo_table_roi_min_area_ratio: float = 0.01
     yolo_table_roi_max_area_ratio: float = 0.90
     yolo_table_edge_stable_frames: int = 5

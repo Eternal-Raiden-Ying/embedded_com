@@ -141,6 +141,9 @@ table_edge:
   yolo_table_class_id: 0
   yolo_table_conf_min: 0.25
   yolo_table_roi_ema_alpha: 0.4
+  yolo_table_roi_anchor: center
+  yolo_table_roi_lower_ratio: 0.75
+  yolo_table_roi_use_rgb_depth_mapping: true
   yolo_table_roi_min_area_ratio: 0.01
   yolo_table_roi_max_area_ratio: 0.90
   yolo_table_edge_stable_frames: 5
@@ -208,10 +211,6 @@ mode_profiles:
         yolo_table_min_conf: 0.25
       rgb:
         fps: 24
-        crop_x: 280
-        crop_y: 0
-        crop_w: 720
-        crop_h: 720
 
     FIND_EDGE:
       enabled_cameras: [rgb, depth]
@@ -242,10 +241,6 @@ mode_profiles:
         yolo_table_min_conf: 0.25
       rgb:
         fps: 24
-        crop_x: 280
-        crop_y: 0
-        crop_w: 720
-        crop_h: 720
 
     FIND_TABLE:
       enabled_cameras: [rgb]
@@ -256,10 +251,6 @@ mode_profiles:
       release_cooldown_s: 2.0
       rgb:
         fps: 24
-        crop_x: 280
-        crop_y: 0
-        crop_w: 720
-        crop_h: 720
 
     MICRO_ADJUST:
       enabled_cameras: [rgb]
@@ -270,10 +261,6 @@ mode_profiles:
       release_cooldown_s: 2.0
       rgb:
         fps: 30
-        crop_x: 320
-        crop_y: 40
-        crop_w: 640
-        crop_h: 640
 
     GRASP_REMOTE:
       enabled_cameras: [rgb, depth]
@@ -284,10 +271,6 @@ mode_profiles:
       release_cooldown_s: 3.0
       rgb:
         fps: 15
-        crop_x: 280
-        crop_y: 0
-        crop_w: 720
-        crop_h: 720
 
     IDLE_HOT:
       enabled_cameras: [rgb]
@@ -298,10 +281,6 @@ mode_profiles:
       release_cooldown_s: 5.0
       rgb:
         fps: 10
-        crop_x: 280
-        crop_y: 0
-        crop_w: 720
-        crop_h: 720
 
 ipc:
   req_in:
