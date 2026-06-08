@@ -144,7 +144,7 @@ table_edge:
   yolo_table_roi_mode: centered_bbox_scale
   # ROI大小只由这两个比例控制：<1 缩小，>1 放大，围绕bbox中心缩放。
   yolo_table_roi_scale_x: 0.50
-  yolo_table_roi_scale_y: 0.50
+  yolo_table_roi_scale_y: 0.80
   # RGB-depth视野映射：默认认为RGB/Depth中心重合，RGB覆盖Depth中心75%。
   rgb_depth_mapping_mode: centered_scale
   rgb_fov_in_depth_scale_x: 0.75

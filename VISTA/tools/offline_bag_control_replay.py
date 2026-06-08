@@ -106,6 +106,17 @@ def _to_float(value: Any) -> Optional[float]:
     return out
 
 
+def _num_field(obj_dict: Dict[str, Any], obj: Any, name: str, default: float = 0.0) -> float:
+    """Read an absolute-speed field from a CmdVel-like object."""
+    value = obj_dict.get(name, None)
+    if value is None:
+        value = getattr(obj, name, default)
+    try:
+        return float(value or 0.0)
+    except Exception:
+        return float(default)
+
+
 def _counter(rows: Iterable[Dict[str, Any]], key: str, default: str = "none") -> Dict[str, int]:
     return dict(sorted(Counter(str(row.get(key) or default) for row in rows).items()))
 
@@ -164,9 +175,9 @@ def _cmd_to_row(frame_id: int, ts: float, cmd: Any, summary: Dict[str, Any]) -> 
         "frame_id": int(frame_id),
         "timestamp": float(ts),
         "mode": str(cmd_dict.get("mode", getattr(cmd, "mode", "")) or ""),
-        "vx_norm": float(cmd_dict.get("vx_norm", getattr(cmd, "vx_norm", 0.0)) or 0.0),
-        "vy_norm": float(cmd_dict.get("vy_norm", getattr(cmd, "vy_norm", 0.0)) or 0.0),
-        "wz_norm": float(cmd_dict.get("wz_norm", getattr(cmd, "wz_norm", 0.0)) or 0.0),
+        "vx_mps": _num_field(cmd_dict, cmd, "vx_mps"),
+        "vy_mps": _num_field(cmd_dict, cmd, "vy_mps"),
+        "wz_radps": _num_field(cmd_dict, cmd, "wz_radps"),
         "hold_ms": int(cmd_dict.get("hold_ms", getattr(cmd, "hold_ms", 0)) or 0),
         "brake": bool(cmd_dict.get("brake", getattr(cmd, "brake", False))),
         "reason": str(summary.get("reason") or summary.get("lock_reason") or ""),
@@ -177,20 +188,18 @@ def _cmd_to_row(frame_id: int, ts: float, cmd: Any, summary: Dict[str, Any]) -> 
 
 def _car_to_row(frame_id: int, ts: float, car_cmd: Any, velocity: Tuple[float, float, float], reason: str) -> Dict[str, Any]:
     raw_line = str(getattr(car_cmd, "raw_line", "") or "")
+    vx_mps, vy_mps, wz_radps = float(velocity[0]), float(velocity[1]), float(velocity[2])
     return {
         "frame_id": int(frame_id),
         "timestamp": float(ts),
         "mode": str(getattr(car_cmd, "mode", "") or ""),
         "kind": str(getattr(car_cmd, "kind", "") or ""),
-        "vx_norm": float(getattr(car_cmd, "vx_norm", 0.0) or 0.0),
-        "vy_norm": float(getattr(car_cmd, "vy_norm", 0.0) or 0.0),
-        "wz_norm": float(getattr(car_cmd, "wz_norm", 0.0) or 0.0),
+        "vx_mps": vx_mps,
+        "vy_mps": vy_mps,
+        "wz_radps": wz_radps,
         "hold_ms": int(getattr(car_cmd, "hold_ms", 0) or 0),
         "brake": bool(getattr(car_cmd, "brake", False)),
-        "vx_mps": float(velocity[0]),
-        "vy_mps": float(velocity[1]),
-        "wz_radps": float(velocity[2]),
-        "raw": "STOP" if str(getattr(car_cmd, "kind", "")) in {"stop", "brake"} else f"V {velocity[0]:.3f} {velocity[1]:.3f} {velocity[2]:.3f}",
+        "raw": "STOP" if str(getattr(car_cmd, "kind", "")) in {"stop", "brake"} else f"V {vx_mps:.3f} {vy_mps:.3f} {wz_radps:.3f}",
         "legacy_raw": raw_line.rstrip("\r\n"),
         "reason": str(reason or ""),
         "dry_run": True,
@@ -268,15 +277,44 @@ def _build_local_perception(predictor: Any, frames: Dict[str, Any], frame_seq: i
 
 
 def _trace_row(frame_id: int, ts: float, rgb: Any, depth: Any, local: Dict[str, Any], obs: Dict[str, Any], control: Dict[str, Any]) -> Dict[str, Any]:
-    bbox = obs.get("yolo_table_bbox") or local.get("table_bbox") or local.get("detected_table_bbox")
+    bbox = (
+        obs.get("table_bbox_xyxy")
+        or obs.get("yolo_table_bbox")
+        or local.get("table_bbox_xyxy")
+        or local.get("detected_table_bbox")
+        or local.get("table_bbox")
+    )
     rgb_shape = _shape(rgb) or local.get("rgb_shape")
-    bbox_found = bool(obs.get("table_bbox_found", bool(bbox)))
+    table_bbox_current_found = bool(
+        obs.get("table_bbox_current_found", obs.get("table_bbox_detected", obs.get("table_bbox_found", bool(bbox))))
+    )
+    table_bbox_control_valid = bool(
+        obs.get("table_bbox_control_valid", table_bbox_current_found)
+    )
+    edge_detected = bool(obs.get("edge_detected", obs.get("edge_found", False)))
+    edge_geometry_valid = bool(obs.get("edge_geometry_valid", obs.get("edge_valid", False)))
+    edge_stable = bool(obs.get("edge_stable", bool(obs.get("yolo_table_edge_stable_count", 0))))
+    edge_trusted = bool(obs.get("edge_trusted", obs.get("valid_for_control", False)))
+    edge_quality = obs.get("edge_quality") or {
+        "edge_conf": obs.get("edge_conf"),
+        "residual_mean": obs.get("fast_residual_mean", obs.get("residual_mean")),
+        "residual_p90": obs.get("fast_residual_p90", obs.get("residual_p90")),
+        "support_count": obs.get("fast_support_point_count", obs.get("support_count")),
+        "inlier_count": obs.get("fast_rep_inlier_count", obs.get("inlier_count")),
+        "x_span_m": obs.get("fast_fit_inlier_x_span_m", obs.get("x_span_m")),
+        "background_penalty": obs.get("fast_background_penalty", obs.get("background_penalty")),
+    }
     return {
         "frame_id": int(frame_id),
         "timestamp": float(ts),
         "rgb_shape": _shape(rgb),
         "depth_shape": _shape(depth) or obs.get("depth_shape"),
-        "table_bbox_found": bbox_found,
+        "table_bbox_current_found": table_bbox_current_found,
+        "table_bbox_control_valid": table_bbox_control_valid,
+        "table_bbox_hold_active": bool(obs.get("table_bbox_hold_active", False)),
+        "table_bbox_hold_age_frames": int(obs.get("table_bbox_hold_age_frames", 0) or 0),
+        "table_bbox_source": obs.get("table_bbox_source") or obs.get("roi_source") or local.get("table_roi_source"),
+        "table_bbox_invalid_reason": obs.get("table_bbox_invalid_reason") or obs.get("yolo_invalid_reason"),
         "table_bbox_conf": obs.get("yolo_table_conf"),
         "table_bbox_conf_raw": obs.get("table_bbox_conf_raw", obs.get("yolo_table_conf")),
         "table_bbox_conf_used_for_gate": bool(obs.get("table_bbox_conf_used_for_gate", False)),
@@ -286,20 +324,17 @@ def _trace_row(frame_id: int, ts: float, rgb: Any, depth: Any, local: Dict[str, 
         "dynamic_roi": obs.get("depth_edge_roi") or obs.get("table_edge_roi") or obs.get("edge_roi"),
         "roi_source": obs.get("roi_source"),
         "roi_phase": obs.get("roi_phase"),
-        "roi_anchor": obs.get("yolo_table_roi_anchor"),
         "mapped_depth_center": obs.get("mapped_depth_center"),
-        "edge_found": bool(obs.get("edge_found")),
-        "edge_valid": bool(obs.get("edge_valid")),
+        "mapped_depth_bbox_xyxy": obs.get("mapped_depth_bbox_xyxy") or obs.get("mapped_depth_bbox"),
+        "edge_detected": edge_detected,
+        "edge_geometry_valid": edge_geometry_valid,
+        "edge_stable": edge_stable,
+        "edge_trusted": edge_trusted,
+        "edge_quality": edge_quality,
         "edge_yaw_err_rad": obs.get("yaw_err_rad", obs.get("yaw_err")),
         "edge_dist_m": obs.get("dist_err_m", obs.get("dist_err")),
-        "edge_reject_reason": obs.get("reject_reason") or obs.get("fast_gate_reject_reason") or obs.get("reason"),
-        "edge_stable_count": obs.get("yolo_table_edge_stable_count"),
-        "yolo_table_control_valid": bool(obs.get("yolo_table_control_valid")),
-        "yolo_valid_reason": obs.get("yolo_valid_reason"),
-        "yolo_invalid_reason": obs.get("yolo_invalid_reason"),
-        "docking_enabled_by_yolo": bool(control.get("docking_enabled_by_yolo", obs.get("docking_enabled_by_yolo", False))),
-        "docking_allowed_by_yolo_area": bool(control.get("docking_allowed_by_yolo_area")),
-        "docking_blocked_by_yolo_area": bool(control.get("docking_blocked_by_yolo_area")),
+        "edge_reject_reason": obs.get("edge_reject_for_control_reason") or obs.get("reject_reason") or obs.get("fast_gate_reject_reason") or obs.get("reason"),
+        "edge_stable_count": obs.get("edge_stable_count", obs.get("yolo_table_edge_stable_count")),
         "edge_control_allowed": bool(control.get("edge_control_allowed", obs.get("edge_control_allowed", False))),
         "edge_control_block_reason": control.get("edge_control_block_reason", obs.get("edge_control_block_reason")),
         "allow_rotate": bool(control.get("allow_rotate")),
@@ -309,9 +344,10 @@ def _trace_row(frame_id: int, ts: float, rgb: Any, depth: Any, local: Dict[str, 
         "next_state": control.get("next_state"),
         "state_transition_reason": control.get("state_transition_reason"),
         "control_source": control.get("control_source"),
-        "vx_cmd": control.get("vx_norm", control.get("final_vx")),
-        "vy_cmd": control.get("vy_norm", control.get("final_vy")),
-        "wz_cmd": control.get("wz_norm", control.get("final_wz")),
+        "control_intent": control.get("control_intent"),
+        "vx_cmd": control.get("vx_mps", control.get("final_vx_mps", control.get("final_vx"))),
+        "vy_cmd": control.get("vy_mps", control.get("final_vy_mps", control.get("final_vy"))),
+        "wz_cmd": control.get("wz_radps", control.get("final_wz_radps", control.get("final_wz"))),
         "cmd_raw": control.get("cmd_raw"),
         "zero_cmd_reason": control.get("zero_cmd_reason"),
         "forward_block_reason": control.get("forward_block_reason"),
@@ -365,7 +401,7 @@ def _make_preview_canvas(sink: Any, rgb: Any, depth: Any, obs: Dict[str, Any], l
     lines = [
         f"frame={frame_id}",
         f"state={control.get('state')} source={control.get('control_source')}",
-        f"vx={float(control.get('vx_norm') or 0.0):.3f} wz={float(control.get('wz_norm') or 0.0):.3f}",
+        f"vx={float(control.get('vx_mps') or control.get('final_vx_mps') or control.get('final_vx') or 0.0):.3f} wz={float(control.get('wz_radps') or control.get('final_wz_radps') or control.get('final_wz') or 0.0):.3f}",
         f"allow_rotate={int(bool(control.get('allow_rotate')))} block={control.get('rotate_block_reason') or ''}",
         f"roi={table_edge.get('roi_source')} edge={int(bool(table_edge.get('edge_found')))} valid={int(bool(table_edge.get('edge_valid')))}",
         f"reject={table_edge.get('reject_reason') or table_edge.get('fast_gate_reject_reason') or table_edge.get('reason') or ''}",
@@ -468,7 +504,12 @@ def _write_contact_sheet(image_paths: Sequence[Path], output_path: Path, *, thum
 SUMMARY_COLUMNS = (
     "frame_id",
     "timestamp",
-    "table_bbox_found",
+    "table_bbox_current_found",
+    "table_bbox_control_valid",
+    "table_bbox_hold_active",
+    "table_bbox_hold_age_frames",
+    "table_bbox_source",
+    "table_bbox_invalid_reason",
     "table_bbox_conf",
     "table_bbox_conf_raw",
     "table_bbox_conf_used_for_gate",
@@ -476,18 +517,16 @@ SUMMARY_COLUMNS = (
     "roi_source",
     "roi_phase",
     "dynamic_roi",
-    "edge_found",
-    "edge_valid",
+    "mapped_depth_bbox_xyxy",
+    "edge_detected",
+    "edge_geometry_valid",
+    "edge_stable",
+    "edge_trusted",
+    "edge_quality",
     "edge_yaw_err_rad",
     "edge_dist_m",
     "edge_reject_reason",
     "edge_stable_count",
-    "yolo_table_control_valid",
-    "yolo_valid_reason",
-    "yolo_invalid_reason",
-    "docking_enabled_by_yolo",
-    "docking_allowed_by_yolo_area",
-    "docking_blocked_by_yolo_area",
     "edge_control_allowed",
     "edge_control_block_reason",
     "allow_rotate",
@@ -497,6 +536,7 @@ SUMMARY_COLUMNS = (
     "next_state",
     "state_transition_reason",
     "control_source",
+    "control_intent",
     "vx_cmd",
     "vy_cmd",
     "wz_cmd",
@@ -519,11 +559,13 @@ def _write_summary_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
 
 def _summary_stats(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     total = len(rows)
-    yolo_valid = [r for r in rows if bool(r.get("table_bbox_found") or r.get("yolo_table_control_valid"))]
-    yolo_far = [r for r in yolo_valid if (_to_float(r.get("table_bbox_area_ratio")) or 0.0) < 0.40]
-    no_forward = [r for r in yolo_valid if abs(float(r.get("vx_cmd") or 0.0)) <= 1e-9]
-    far_with_wz = [r for r in yolo_far if abs(float(r.get("wz_cmd") or 0.0)) > 1e-9]
-    far_bad_state = [r for r in yolo_far if str(r.get("state") or "") in {"COARSE_ALIGN", "SEARCH_TABLE"}]
+    table_current = [r for r in rows if bool(r.get("table_bbox_current_found"))]
+    table_control = [r for r in rows if bool(r.get("table_bbox_control_valid"))]
+    no_forward = [r for r in table_control if abs(float(r.get("vx_cmd") or 0.0)) <= 1e-9]
+    wz_without_trusted_edge = [
+        r for r in table_control
+        if abs(float(r.get("wz_cmd") or 0.0)) > 1e-9 and not bool(r.get("edge_trusted"))
+    ]
     cmd_stop = [r for r in rows if str(r.get("state") or "") in {"STOP", "IDLE", "DONE", "ERROR_RECOVERY"}]
     cmd_v0 = [r for r in rows if str(r.get("state") or "") not in {"STOP", "IDLE", "DONE", "ERROR_RECOVERY"} and abs(float(r.get("vx_cmd") or 0.0)) <= 1e-9 and abs(float(r.get("vy_cmd") or 0.0)) <= 1e-9 and abs(float(r.get("wz_cmd") or 0.0)) <= 1e-9]
     cmd_v = [r for r in rows if abs(float(r.get("vx_cmd") or 0.0)) > 1e-9 or abs(float(r.get("vy_cmd") or 0.0)) > 1e-9 or abs(float(r.get("wz_cmd") or 0.0)) > 1e-9]
@@ -539,17 +581,23 @@ def _summary_stats(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
                 pass
     return {
         "frames": total,
-        "yolo_valid_frames": len(yolo_valid),
-        "table_bbox_found_but_yolo_control_invalid_frames": int(sum(1 for r in rows if bool(r.get("table_bbox_found")) and not bool(r.get("yolo_table_control_valid")))),
-        "yolo_valid_no_forward_frames": len(no_forward),
-        "table_bbox_found_zero_cmd_frames": int(sum(1 for r in rows if bool(r.get("table_bbox_found")) and abs(float(r.get("vx_cmd") or 0.0)) <= 1e-9 and abs(float(r.get("wz_cmd") or 0.0)) <= 1e-9)),
-        "yolo_valid_area_lt_0_40_with_wz_frames": len(far_with_wz),
-        "yolo_valid_area_lt_0_40_in_coarse_or_search_frames": len(far_bad_state),
-        "table_bbox_missing_but_edge_control_allowed_frames": int(sum(1 for r in rows if not bool(r.get("table_bbox_found")) and bool(r.get("edge_control_allowed")))),
-        "coarse_align_stop_frames": int(sum(1 for r in rows if str(r.get("state") or "") == "COARSE_ALIGN" and abs(float(r.get("vx_cmd") or 0.0)) <= 1e-9 and abs(float(r.get("vy_cmd") or 0.0)) <= 1e-9 and abs(float(r.get("wz_cmd") or 0.0)) <= 1e-9)),
+        "table_bbox_current_found_frames": len(table_current),
+        "table_bbox_control_valid_frames": len(table_control),
+        "table_bbox_current_missing_but_control_valid_frames": int(sum(1 for r in rows if not bool(r.get("table_bbox_current_found")) and bool(r.get("table_bbox_control_valid")))),
+        "table_bbox_current_found_but_control_invalid_frames": int(sum(1 for r in rows if bool(r.get("table_bbox_current_found")) and not bool(r.get("table_bbox_control_valid")))),
+        "table_control_valid_no_forward_frames": len(no_forward),
+        "table_control_valid_zero_cmd_frames": int(sum(1 for r in table_control if abs(float(r.get("vx_cmd") or 0.0)) <= 1e-9 and abs(float(r.get("vy_cmd") or 0.0)) <= 1e-9 and abs(float(r.get("wz_cmd") or 0.0)) <= 1e-9)),
+        "table_control_valid_wz_without_edge_trusted_frames": len(wz_without_trusted_edge),
+        "table_control_missing_but_edge_control_allowed_frames": int(sum(1 for r in rows if not bool(r.get("table_bbox_control_valid")) and bool(r.get("edge_control_allowed")))),
+        "edge_geometry_valid_frames": int(sum(1 for r in rows if bool(r.get("edge_geometry_valid")))),
+        "edge_stable_frames": int(sum(1 for r in rows if bool(r.get("edge_stable")))),
+        "edge_trusted_frames": int(sum(1 for r in rows if bool(r.get("edge_trusted")))),
+        "edge_geometry_valid_but_not_trusted_frames": int(sum(1 for r in rows if bool(r.get("edge_geometry_valid")) and not bool(r.get("edge_trusted")))),
+        "coarse_align_zero_cmd_frames": int(sum(1 for r in rows if str(r.get("state") or "") == "COARSE_ALIGN" and abs(float(r.get("vx_cmd") or 0.0)) <= 1e-9 and abs(float(r.get("vy_cmd") or 0.0)) <= 1e-9 and abs(float(r.get("wz_cmd") or 0.0)) <= 1e-9)),
         "allow_rotate_true_frames": int(sum(1 for r in rows if bool(r.get("allow_rotate")))),
         "rotate_block_reason": _counter(rows, "rotate_block_reason", "none"),
         "control_source": _counter(rows, "control_source", "none"),
+        "control_intent": _counter(rows, "control_intent", "none"),
         "forward_block_reason": _counter(rows, "forward_block_reason", "none"),
         "cmd_distribution": {"STOP": len(cmd_stop), "V0": len(cmd_v0), "V_nonzero": len(cmd_v)},
         "yolo_edge_yaw_conflict_frames": int(sum(1 for r in rows if bool(r.get("yolo_edge_yaw_conflict")))),
@@ -566,14 +614,19 @@ def _write_summary_md(path: Path, stats: Dict[str, Any], out_dir: Path) -> None:
         "",
         f"- output_dir: `{out_dir}`",
         f"- frames: {stats.get('frames')}",
-        f"- yolo_valid_frames: {stats.get('yolo_valid_frames')}",
-        f"- table_bbox_found_but_yolo_control_invalid_frames: {stats.get('table_bbox_found_but_yolo_control_invalid_frames')}",
-        f"- yolo_valid_no_forward_frames: {stats.get('yolo_valid_no_forward_frames')}",
-        f"- table_bbox_found_zero_cmd_frames: {stats.get('table_bbox_found_zero_cmd_frames')}",
-        f"- yolo_valid_area_lt_0_40_with_wz_frames: {stats.get('yolo_valid_area_lt_0_40_with_wz_frames')}",
-        f"- yolo_valid_area_lt_0_40_in_COARSE_ALIGN_or_SEARCH_TABLE_frames: {stats.get('yolo_valid_area_lt_0_40_in_coarse_or_search_frames')}",
-        f"- table_bbox_missing_but_edge_control_allowed_frames: {stats.get('table_bbox_missing_but_edge_control_allowed_frames')}",
-        f"- coarse_align_stop_frames: {stats.get('coarse_align_stop_frames')}",
+        f"- table_bbox_current_found_frames: {stats.get('table_bbox_current_found_frames')}",
+        f"- table_bbox_control_valid_frames: {stats.get('table_bbox_control_valid_frames')}",
+        f"- table_bbox_current_missing_but_control_valid_frames: {stats.get('table_bbox_current_missing_but_control_valid_frames')}",
+        f"- table_bbox_current_found_but_control_invalid_frames: {stats.get('table_bbox_current_found_but_control_invalid_frames')}",
+        f"- table_control_valid_no_forward_frames: {stats.get('table_control_valid_no_forward_frames')}",
+        f"- table_control_valid_zero_cmd_frames: {stats.get('table_control_valid_zero_cmd_frames')}",
+        f"- table_control_valid_wz_without_edge_trusted_frames: {stats.get('table_control_valid_wz_without_edge_trusted_frames')}",
+        f"- table_control_missing_but_edge_control_allowed_frames: {stats.get('table_control_missing_but_edge_control_allowed_frames')}",
+        f"- edge_geometry_valid_frames: {stats.get('edge_geometry_valid_frames')}",
+        f"- edge_stable_frames: {stats.get('edge_stable_frames')}",
+        f"- edge_trusted_frames: {stats.get('edge_trusted_frames')}",
+        f"- edge_geometry_valid_but_not_trusted_frames: {stats.get('edge_geometry_valid_but_not_trusted_frames')}",
+        f"- coarse_align_zero_cmd_frames: {stats.get('coarse_align_zero_cmd_frames')}",
         f"- allow_rotate_true_frames: {stats.get('allow_rotate_true_frames')}",
         f"- yolo_edge_yaw_conflict_frames: {stats.get('yolo_edge_yaw_conflict_frames')}",
         f"- cmd_distribution: `{json.dumps(stats.get('cmd_distribution'), ensure_ascii=False, sort_keys=True)}`",
@@ -585,6 +638,7 @@ def _write_summary_md(path: Path, stats: Dict[str, Any], out_dir: Path) -> None:
         "",
         f"- rotate_block_reason: `{json.dumps(stats.get('rotate_block_reason'), ensure_ascii=False, sort_keys=True)}`",
         f"- control_source: `{json.dumps(stats.get('control_source'), ensure_ascii=False, sort_keys=True)}`",
+        f"- control_intent: `{json.dumps(stats.get('control_intent'), ensure_ascii=False, sort_keys=True)}`",
         f"- forward_block_reason: `{json.dumps(stats.get('forward_block_reason'), ensure_ascii=False, sort_keys=True)}`",
         f"- edge_reject_reason: `{json.dumps(stats.get('edge_reject_reason'), ensure_ascii=False, sort_keys=True)}`",
     ]
@@ -633,12 +687,8 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     _configure_offline_core(core)
     core.handle_task_cmd(TaskCmd(ts=time.time(), intent="FIND", confidence=1.0, target="offline_table", cmd_id="offline_cmd", session_id="offline_bag", epoch=1, source="offline"))
     mapper = SimpleCarMapper(orch_cfg.car)
-    motion_adapter = Stm32MotionAdapter(
-        uart=None,
-        vx_scale=float(orch_cfg.car.vx_mps_per_norm),
-        vy_scale=float(orch_cfg.car.vy_mps_per_norm),
-        wz_scale=float(orch_cfg.car.wz_radps_per_norm),
-    )
+    # Current motion stack uses absolute-speed CmdVel values directly.
+    motion_adapter = Stm32MotionAdapter(uart=None)
     preview_sink = OpenCVPreviewSink("Offline Bag Control Replay")
     preview_paths: List[Path] = []
     rows: List[Dict[str, Any]] = []
@@ -733,19 +783,17 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                     "vx_mps": float(velocity[0]),
                     "vy_mps": float(velocity[1]),
                     "wz_radps": float(velocity[2]),
-                    "vx_mps_per_norm": float(orch_cfg.car.vx_mps_per_norm),
-                    "vy_mps_per_norm": float(orch_cfg.car.vy_mps_per_norm),
-                    "wz_radps_per_norm": float(orch_cfg.car.wz_radps_per_norm),
+                    "absolute_speed_units": True,
                 })
                 reason = str(summary.get("reason") or summary.get("lock_reason") or getattr(car_cmd, "kind", "") or "")
                 car_row = _car_to_row(frame_seq, capture_ts, car_cmd, velocity, reason)
                 summary["cmd_raw"] = car_row["raw"]
-                if abs(float(cmd_row["vx_norm"])) <= 1e-9 and abs(float(cmd_row["vy_norm"])) <= 1e-9 and abs(float(cmd_row["wz_norm"])) <= 1e-9:
+                if abs(float(cmd_row["vx_mps"])) <= 1e-9 and abs(float(cmd_row["vy_mps"])) <= 1e-9 and abs(float(cmd_row["wz_radps"])) <= 1e-9:
                     summary["zero_cmd_reason"] = str(summary.get("forward_block_reason") or summary.get("reason") or "zero_cmd")
                 summary.update({
-                    "vx_norm": cmd_row["vx_norm"],
-                    "vy_norm": cmd_row["vy_norm"],
-                    "wz_norm": cmd_row["wz_norm"],
+                    "vx_mps": cmd_row["vx_mps"],
+                    "vy_mps": cmd_row["vy_mps"],
+                    "wz_radps": cmd_row["wz_radps"],
                 })
 
                 trace = _trace_row(frame_seq, capture_ts, pack.get("rgb"), pack.get("depth"), local, obs_clean, summary)
@@ -756,7 +804,10 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                 yolo_w.write({
                     "frame_id": frame_seq,
                     "timestamp": capture_ts,
-                    "table_bbox_found": trace["table_bbox_found"],
+                    "table_bbox_current_found": trace["table_bbox_current_found"],
+                    "table_bbox_control_valid": trace["table_bbox_control_valid"],
+                    "table_bbox_hold_active": trace["table_bbox_hold_active"],
+                    "table_bbox_hold_age_frames": trace["table_bbox_hold_age_frames"],
                     "table_bbox_conf": trace["table_bbox_conf"],
                     "table_bbox_conf_raw": trace["table_bbox_conf_raw"],
                     "table_bbox_conf_used_for_gate": trace["table_bbox_conf_used_for_gate"],
@@ -766,9 +817,8 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                     "infer_box_count": int(local.get("box_count") or 0),
                     "yolo_infer_ms": local.get("yolo_infer_ms"),
                     "table_roi_source": local.get("table_roi_source"),
-                    "yolo_table_control_valid": trace["yolo_table_control_valid"],
-                    "yolo_valid_reason": trace["yolo_valid_reason"],
-                    "yolo_invalid_reason": trace["yolo_invalid_reason"],
+                    "table_bbox_source": trace["table_bbox_source"],
+                    "table_bbox_invalid_reason": trace["table_bbox_invalid_reason"],
                 })
                 roi_w.write({
                     "frame_id": frame_seq,
@@ -776,10 +826,12 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                     "dynamic_roi": trace["dynamic_roi"],
                     "roi_source": trace["roi_source"],
                     "roi_phase": trace["roi_phase"],
-                    "roi_anchor": trace["roi_anchor"],
                     "mapped_depth_center": trace["mapped_depth_center"],
+                    "mapped_depth_bbox_xyxy": trace["mapped_depth_bbox_xyxy"],
                     "table_bbox_xyxy": trace["table_bbox_xyxy"],
                     "yolo_table_roi_valid": obs_clean.get("yolo_table_roi_valid"),
+                    "table_bbox_hold_active": trace["table_bbox_hold_active"],
+                    "table_bbox_hold_age_frames": trace["table_bbox_hold_age_frames"],
                 })
                 ctrl_w.write({**summary, "frame_id": frame_seq, "timestamp": capture_ts, "state_block": state_block})
                 cmd_w.write(cmd_row)
@@ -798,10 +850,10 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
 
                 print(
                     "[OFFLINE_BAG_CONTROL] "
-                    f"frame={frame_seq} bbox={int(bool(trace['table_bbox_found']))} "
-                    f"edge={int(bool(trace['edge_found']))}/{int(bool(trace['edge_valid']))} "
+                    f"frame={frame_seq} bbox={int(bool(trace['table_bbox_current_found']))}/{int(bool(trace['table_bbox_control_valid']))} "
+                    f"edge={int(bool(trace['edge_detected']))}/{int(bool(trace['edge_geometry_valid']))}/{int(bool(trace['edge_trusted']))} "
                     f"state={summary.get('state')} next={summary.get('next_state')} "
-                    f"src={summary.get('control_source')} vx={cmd_row['vx_norm']:.3f} wz={cmd_row['wz_norm']:.3f}"
+                    f"src={summary.get('control_source')} vx={cmd_row['vx_mps']:.3f} wz={cmd_row['wz_radps']:.3f}"
                 )
     finally:
         edge_processor.release_all()
