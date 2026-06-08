@@ -209,35 +209,17 @@ def _crop_rect_for_mapping(rgb_native_shape: Any, rgb_crop_rect: Any) -> Optiona
     return [x, y, w, h]
 
 
-def _parse_rect_norm(value: Any) -> Optional[list[float]]:
-    """Parse [x1,y1,x2,y2] normalized rectangle.
 
-    The rectangle is defined in RGB output normalized coordinates and denotes
-    the RGB sub-view that corresponds to the full depth frame.  This is useful
-    when RGB and depth have the same aspect ratio but different FOVs.  Example:
-    [0.12, 0.0, 0.88, 1.0] means the depth camera covers the central 76% of
-    the RGB view horizontally.
-    """
-    if value in (None, "", "none", "None"):
-        return None
-    if isinstance(value, str):
-        value = [part.strip() for part in value.replace(";", ",").split(",")]
-    if not isinstance(value, (list, tuple)) or len(value) < 4:
-        return None
+def _safe_float(value: Any, default: float = 0.0, *, lo: Optional[float] = None, hi: Optional[float] = None) -> float:
     try:
-        x1, y1, x2, y2 = [float(v) for v in value[:4]]
-    except (TypeError, ValueError):
-        return None
-    x1, x2 = sorted((x1, x2))
-    y1, y2 = sorted((y1, y2))
-    if x2 - x1 <= 1e-6 or y2 - y1 <= 1e-6:
-        return None
-    # Allow small over/under-shoot for manual FOV calibration, but keep sane.
-    x1 = max(-1.0, min(2.0, x1))
-    y1 = max(-1.0, min(2.0, y1))
-    x2 = max(-1.0, min(2.0, x2))
-    y2 = max(-1.0, min(2.0, y2))
-    return [x1, y1, x2, y2]
+        v = float(value)
+    except Exception:
+        v = float(default)
+    if lo is not None:
+        v = max(float(lo), v)
+    if hi is not None:
+        v = min(float(hi), v)
+    return v
 
 
 def map_rgb_bbox_to_depth_roi(
@@ -249,32 +231,34 @@ def map_rgb_bbox_to_depth_roi(
     roi_width: Any,
     roi_height: Any,
     *,
-    roi_anchor: str = "center",
-    lower_ratio: float = 0.75,
     use_rgb_depth_mapping: bool = True,
-    roi_mode: str = "bbox_expand",
-    expand_x_ratio: float = 0.0,
-    expand_y_ratio: float = 0.0,
-    scale_x: float = 1.0,
-    scale_y: float = 1.0,
-    min_w: int = 60,
-    min_h: int = 40,
-    max_w_ratio: float = 0.95,
-    max_h_ratio: float = 0.95,
-    rgb_to_depth_view_rect_norm: Any = None,
+    scale_x: float = 0.50,
+    scale_y: float = 0.50,
+    rgb_depth_mapping_mode: str = "centered_scale",
+    rgb_fov_in_depth_scale_x: float = 0.75,
+    rgb_fov_in_depth_scale_y: float = 0.75,
+    rgb_depth_center_offset_x: float = 0.0,
+    rgb_depth_center_offset_y: float = 0.0,
+    **_compat: Any,
 ) -> Tuple[Optional[list[int]], Dict[str, Any]]:
-    """Map a YOLO bbox from RGB output coordinates into a depth-frame ROI.
+    """Map a YOLO table bbox from RGB output coordinates into a depth ROI.
 
-    Modes:
-    - fixed_center_follow: legacy fixed-size ROI following bbox center.
-    - bbox_full: mapped bbox itself.
-    - bbox_expand: mapped bbox expanded by margin, then scaled around center.
-    - bbox_lower_band: lower part of mapped bbox, expanded/scaled/clamped.
+    The ROI model is intentionally simple and centered:
 
-    `rgb_to_depth_view_rect_norm` handles RGB/depth FOV mismatch.  It is a
-    normalized rectangle in the RGB output image that corresponds to the full
-    depth frame.  If RGB has a wider FOV than depth, set it to the central RGB
-    region covered by depth, for example [0.12, 0.0, 0.88, 1.0].
+    1. Convert RGB bbox points to normalized RGB output coordinates.
+    2. Map normalized RGB coordinates to normalized depth coordinates.
+       The default `centered_scale` mapping assumes RGB and depth centers match,
+       but RGB only covers a centered sub-FOV of depth:
+
+           depth_norm = 0.5 + offset + (rgb_norm - 0.5) * rgb_fov_in_depth_scale
+
+       For example, scale=0.75 means the full RGB image corresponds to the
+       central 75% of the depth FOV.  Use scale=1.0 when FOVs match.
+    3. Use the mapped bbox center as ROI center.
+    4. Set ROI width/height = mapped_bbox_width/height * scale_x/scale_y.
+
+    There is deliberately no expand/boundary-extension/min-size user logic here;
+    `scale_x` and `scale_y` are the only ROI-size knobs.
     """
     bbox = normalize_table_bbox(bbox_rgb_xyxy, rgb_output_shape)
     rgb_out_hw = _parse_shape(rgb_output_shape)
@@ -285,154 +269,83 @@ def map_rgb_bbox_to_depth_roi(
             "roi_clamped": False,
             "table_bbox_rgb_xyxy": bbox,
             "mapped_depth_bbox_xyxy": None,
-            "yolo_table_roi_mode": str(roi_mode or ""),
         }
+
     rgb_out_h, rgb_out_w = rgb_out_hw
     depth_h, depth_w = depth_hw
     x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
 
-    crop_rect = _crop_rect_for_mapping(rgb_native_shape, rgb_crop_rect)
-    native_hw = _parse_shape(rgb_native_shape)
-    view_rect = _parse_rect_norm(rgb_to_depth_view_rect_norm)
-    mapping_mode = "rgb_output_norm_to_depth"
+    roi_scale_x = _safe_float(scale_x, 0.50, lo=0.05, hi=2.0)
+    roi_scale_y = _safe_float(scale_y, 0.50, lo=0.05, hi=2.0)
+    fov_scale_x = _safe_float(rgb_fov_in_depth_scale_x, 0.75, lo=0.05, hi=2.0)
+    fov_scale_y = _safe_float(rgb_fov_in_depth_scale_y, 0.75, lo=0.05, hi=2.0)
+    center_off_x = _safe_float(rgb_depth_center_offset_x, 0.0, lo=-1.0, hi=1.0)
+    center_off_y = _safe_float(rgb_depth_center_offset_y, 0.0, lo=-1.0, hi=1.0)
+    mapping_mode = str(rgb_depth_mapping_mode or "centered_scale").strip().lower()
+    if mapping_mode not in {"centered_scale", "identity"}:
+        mapping_mode = "centered_scale"
 
-    def _safe_scale(value: Any, default: float = 1.0) -> float:
-        try:
-            v = float(value)
-        except Exception:
-            return default
-        if v <= 0.0:
-            return default
-        return max(0.05, min(2.0, v))
+    def map_point(px: float, py: float) -> tuple[float, float, float, float, float, float]:
+        rgb_norm_x = max(0.0, min(1.0, px / max(1.0, float(rgb_out_w))))
+        rgb_norm_y = max(0.0, min(1.0, py / max(1.0, float(rgb_out_h))))
+        if bool(use_rgb_depth_mapping) and mapping_mode == "centered_scale":
+            depth_norm_x = 0.5 + center_off_x + (rgb_norm_x - 0.5) * fov_scale_x
+            depth_norm_y = 0.5 + center_off_y + (rgb_norm_y - 0.5) * fov_scale_y
+        else:
+            depth_norm_x = rgb_norm_x
+            depth_norm_y = rgb_norm_y
+        return (
+            depth_norm_x * float(depth_w),
+            depth_norm_y * float(depth_h),
+            rgb_norm_x,
+            rgb_norm_y,
+            depth_norm_x,
+            depth_norm_y,
+        )
 
-    scale_x_f = _safe_scale(scale_x, 1.0)
-    scale_y_f = _safe_scale(scale_y, 1.0)
-
-    def map_point(px: float, py: float) -> tuple[float, float, float, float]:
-        px_norm_out = max(0.0, min(1.0, px / max(1.0, float(rgb_out_w))))
-        py_norm_out = max(0.0, min(1.0, py / max(1.0, float(rgb_out_h))))
-        if bool(use_rgb_depth_mapping) and view_rect is not None:
-            vx1, vy1, vx2, vy2 = view_rect
-            depth_norm_x = (px_norm_out - vx1) / max(1e-6, vx2 - vx1)
-            depth_norm_y = (py_norm_out - vy1) / max(1e-6, vy2 - vy1)
-            return depth_norm_x * float(depth_w), depth_norm_y * float(depth_h), px_norm_out, py_norm_out
-
-        native_norm_x = px_norm_out
-        native_norm_y = py_norm_out
-        if bool(use_rgb_depth_mapping) and crop_rect is not None and native_hw is not None:
-            native_h, native_w = native_hw
-            crop_x, crop_y, crop_w, crop_h = crop_rect
-            native_x = crop_x + px_norm_out * crop_w
-            native_y = crop_y + py_norm_out * crop_h
-            native_norm_x = max(0.0, min(1.0, native_x / max(1.0, float(native_w))))
-            native_norm_y = max(0.0, min(1.0, native_y / max(1.0, float(native_h))))
-        return native_norm_x * float(depth_w), native_norm_y * float(depth_h), px_norm_out, py_norm_out
-
-    d1x, d1y, _, _ = map_point(x1, y1)
-    d2x, d2y, _, _ = map_point(x2, y2)
+    d1x, d1y, _, _, _, _ = map_point(x1, y1)
+    d2x, d2y, _, _, _, _ = map_point(x2, y2)
     dx1, dx2 = sorted((d1x, d2x))
     dy1, dy2 = sorted((d1y, d2y))
     mapped_bbox_unclipped = [int(round(dx1)), int(round(dy1)), int(round(dx2)), int(round(dy2))]
     mapped_bbox = _clip_bbox(mapped_bbox_unclipped, depth_shape)
-    if bool(use_rgb_depth_mapping) and view_rect is not None:
-        mapping_mode = "rgb_output_depth_view_rect_to_depth"
-    elif bool(use_rgb_depth_mapping) and crop_rect is not None and native_hw is not None:
-        mapping_mode = "rgb_output_crop_native_norm_to_depth"
 
     cx_out = (x1 + x2) * 0.5
     cy_out = (y1 + y2) * 0.5
-    cx_norm_out = max(0.0, min(1.0, cx_out / max(1.0, float(rgb_out_w))))
-    cy_norm_out = max(0.0, min(1.0, cy_out / max(1.0, float(rgb_out_h))))
-    depth_cx = (dx1 + dx2) * 0.5
-    depth_cy = (dy1 + dy2) * 0.5
+    depth_cx, depth_cy, cx_norm_out, cy_norm_out, depth_cx_norm, depth_cy_norm = map_point(cx_out, cy_out)
 
-    mode = str(roi_mode or "bbox_expand").strip().lower()
-    if mode not in {"fixed_center_follow", "bbox_full", "bbox_expand", "bbox_lower_band"}:
-        mode = "bbox_expand"
-    try:
-        legacy_w = max(1, int(round(float(roi_width))))
-        legacy_h = max(1, int(round(float(roi_height))))
-    except Exception:
-        legacy_w, legacy_h = 1, 1
-
-    if mode == "fixed_center_follow":
-        anchor = str(roi_anchor or "center").strip().lower()
-        if anchor not in {"center", "lower_center"}:
-            anchor = "center"
-        try:
-            ratio = max(0.0, min(1.0, float(lower_ratio)))
-        except Exception:
-            ratio = 0.75
-        if anchor == "lower_center":
-            _, depth_cy, _, cy_norm_out = map_point(cx_out, y1 + (y2 - y1) * ratio)
-        unclamped = [
-            int(round(depth_cx - float(legacy_w) * 0.5)),
-            int(round(depth_cy - float(legacy_h) * 0.5)),
-            int(round(depth_cx + float(legacy_w) * 0.5)),
-            int(round(depth_cy + float(legacy_h) * 0.5)),
-        ]
-        roi = _roi_from_center(depth_cx, depth_cy, legacy_w, legacy_h, depth_shape)
-    else:
-        bx1, by1, bx2, by2 = dx1, dy1, dx2, dy2
-        if mode == "bbox_lower_band":
-            try:
-                ratio = max(0.05, min(1.0, float(lower_ratio)))
-            except Exception:
-                ratio = 0.75
-            h = max(1.0, by2 - by1)
-            by1 = by2 - h * ratio
-        bw0 = max(1.0, bx2 - bx1)
-        bh0 = max(1.0, by2 - by1)
-        try:
-            ex = max(0.0, float(expand_x_ratio)) * bw0
-            ey = max(0.0, float(expand_y_ratio)) * bh0
-        except Exception:
-            ex, ey = 0.0, 0.0
-        if mode == "bbox_full":
-            ex, ey = 0.0, 0.0
-        bx1 -= ex
-        bx2 += ex
-        by1 -= ey
-        by2 += ey
-        cx = (bx1 + bx2) * 0.5
-        cy = (by1 + by2) * 0.5
-        bw = max(1.0, (bx2 - bx1) * scale_x_f)
-        bh = max(1.0, (by2 - by1) * scale_y_f)
-        min_wi = max(1, int(min_w or 1))
-        min_hi = max(1, int(min_h or 1))
-        bw = max(float(min_wi), bw)
-        bh = max(float(min_hi), bh)
-        max_w = max(1.0, float(depth_w) * max(0.01, min(1.0, float(max_w_ratio or 0.95))))
-        max_h = max(1.0, float(depth_h) * max(0.01, min(1.0, float(max_h_ratio or 0.95))))
-        bw = min(bw, max_w)
-        bh = min(bh, max_h)
-        unclamped = [int(round(cx - bw * 0.5)), int(round(cy - bh * 0.5)), int(round(cx + bw * 0.5)), int(round(cy + bh * 0.5))]
-        roi = _clip_bbox(unclamped, depth_shape)
+    mapped_w = max(1.0, dx2 - dx1)
+    mapped_h = max(1.0, dy2 - dy1)
+    roi_w = max(1.0, mapped_w * roi_scale_x)
+    roi_h = max(1.0, mapped_h * roi_scale_y)
+    unclamped = [
+        int(round(depth_cx - roi_w * 0.5)),
+        int(round(depth_cy - roi_h * 0.5)),
+        int(round(depth_cx + roi_w * 0.5)),
+        int(round(depth_cy + roi_h * 0.5)),
+    ]
+    roi = _clip_bbox(unclamped, depth_shape)
 
     debug = {
         "rgb_shape": list(rgb_output_shape[:2]) if isinstance(rgb_output_shape, (list, tuple)) and len(rgb_output_shape) >= 2 else rgb_output_shape,
         "depth_shape": list(depth_shape[:2]) if isinstance(depth_shape, (list, tuple)) and len(depth_shape) >= 2 else depth_shape,
-        "rgb_native_shape": list(rgb_native_shape[:2]) if isinstance(rgb_native_shape, (list, tuple)) and len(rgb_native_shape) >= 2 else rgb_native_shape,
-        "rgb_crop_rect": [int(round(v)) for v in crop_rect] if crop_rect is not None else rgb_crop_rect,
-        "rgb_to_depth_view_rect_norm": view_rect,
-        "rgb_to_depth_view_rect_used": bool(view_rect is not None),
         "table_bbox_rgb_xyxy": [int(v) for v in bbox],
         "table_bbox_rgb_center": [float(cx_out), float(cy_out)],
         "table_bbox_rgb_center_norm": [float(cx_norm_out), float(cy_norm_out)],
         "mapped_depth_center": [float(depth_cx), float(depth_cy)],
+        "mapped_depth_center_norm": [float(depth_cx_norm), float(depth_cy_norm)],
         "mapped_depth_bbox_unclipped_xyxy": mapped_bbox_unclipped,
         "mapped_depth_bbox_xyxy": mapped_bbox,
         "table_edge_roi": roi,
-        "roi_anchor": str(roi_anchor or "center").strip().lower(),
-        "roi_mapping_mode": mapping_mode,
-        "yolo_table_roi_mode": mode,
+        "roi_mapping_mode": "rgb_depth_centered_scale" if bool(use_rgb_depth_mapping) and mapping_mode == "centered_scale" else "rgb_depth_identity",
         "roi_clamped": bool(roi != unclamped),
-        "roi_expand_x_ratio": float(expand_x_ratio or 0.0),
-        "roi_expand_y_ratio": float(expand_y_ratio or 0.0),
-        "roi_scale_x": float(scale_x_f),
-        "roi_scale_y": float(scale_y_f),
-        "roi_min_w": int(min_w or 0),
-        "roi_min_h": int(min_h or 0),
+        "roi_scale_x": float(roi_scale_x),
+        "roi_scale_y": float(roi_scale_y),
+        "rgb_depth_mapping_mode": mapping_mode,
+        "rgb_fov_in_depth_scale_x": float(fov_scale_x),
+        "rgb_fov_in_depth_scale_y": float(fov_scale_y),
+        "rgb_depth_center_offset_x": float(center_off_x),
+        "rgb_depth_center_offset_y": float(center_off_y),
     }
     return roi, debug
 
@@ -482,26 +395,21 @@ def compute_dynamic_table_roi_from_yolo_bbox(
     class_id: Any = None,
     table_class_id: int = 0,
     conf_min: float = 0.25,
-    min_area_ratio: float = 0.01,
-    max_area_ratio: float = 0.90,
     smoothed_center_x: Any = None,
     bbox_image_shape: Any = None,
     yolo_near_bottom_norm: float = 0.60,
     rgb_native_shape: Any = None,
     rgb_crop_rect: Any = None,
-    roi_anchor: str = "center",
-    roi_lower_ratio: float = 0.75,
     use_rgb_depth_mapping: bool = True,
-    roi_mode: str = "bbox_expand",
-    roi_expand_x_ratio: float = 0.10,
-    roi_expand_y_ratio: float = 0.10,
-    roi_min_w: int = 120,
-    roi_min_h: int = 80,
-    roi_max_w_ratio: float = 0.95,
-    roi_max_h_ratio: float = 0.95,
-    roi_scale_x: float = 1.0,
-    roi_scale_y: float = 1.0,
-    rgb_to_depth_view_rect_norm: Any = None,
+    roi_mode: str = "centered_bbox_scale",
+    roi_scale_x: float = 0.50,
+    roi_scale_y: float = 0.50,
+    rgb_depth_mapping_mode: str = "centered_scale",
+    rgb_fov_in_depth_scale_x: float = 0.75,
+    rgb_fov_in_depth_scale_y: float = 0.75,
+    rgb_depth_center_offset_x: float = 0.0,
+    rgb_depth_center_offset_y: float = 0.0,
+    **_compat: Any,
 ) -> Dict[str, Any]:
     """Return a center-following ROI that preserves the current static ROI size."""
     static_roi = normalize_table_bbox(current_static_roi, image_shape)
@@ -553,10 +461,6 @@ def compute_dynamic_table_roi_from_yolo_bbox(
         bbox_y1_norm = None
         bbox_y2_norm = None
     bbox_bottom_norm = bbox_y2_norm
-    if not reason and (area_ratio is None or area_ratio < float(min_area_ratio)):
-        reason = "bbox_area_too_small"
-    if not reason and area_ratio is not None and area_ratio > float(max_area_ratio):
-        reason = "bbox_area_too_large"
     if reason:
         return {
             "dynamic_roi": static_roi,
@@ -594,19 +498,14 @@ def compute_dynamic_table_roi_from_yolo_bbox(
         image_shape,
         roi_w,
         roi_h,
-        roi_anchor=roi_anchor,
-        lower_ratio=roi_lower_ratio,
         use_rgb_depth_mapping=use_rgb_depth_mapping,
-        roi_mode=roi_mode,
-        expand_x_ratio=roi_expand_x_ratio,
-        expand_y_ratio=roi_expand_y_ratio,
-        min_w=roi_min_w,
-        min_h=roi_min_h,
-        max_w_ratio=roi_max_w_ratio,
-        max_h_ratio=roi_max_h_ratio,
         scale_x=roi_scale_x,
         scale_y=roi_scale_y,
-        rgb_to_depth_view_rect_norm=rgb_to_depth_view_rect_norm,
+        rgb_depth_mapping_mode=rgb_depth_mapping_mode,
+        rgb_fov_in_depth_scale_x=rgb_fov_in_depth_scale_x,
+        rgb_fov_in_depth_scale_y=rgb_fov_in_depth_scale_y,
+        rgb_depth_center_offset_x=rgb_depth_center_offset_x,
+        rgb_depth_center_offset_y=rgb_depth_center_offset_y,
     )
     roi = roi or static_roi
     if smoothed_center_x is not None and shape is not None:
@@ -631,7 +530,7 @@ def compute_dynamic_table_roi_from_yolo_bbox(
     roi_phase = "edge_fusion" if str(edge_stability or "").lower() == "stable" else "far_yolo_guided"
     if mode_text in {"near", "near_distance", "edge_lost_yolo", "edge_lost_yolo_assist", "near_yolo_assist"}:
         roi_phase = "near_yolo_assist"
-    roi_y_strategy = "bbox_lower_center" if str(roi_anchor or "").strip().lower() == "lower_center" else "bbox_center"
+    roi_y_strategy = "bbox_center"
     roi_center_y = ((float(roi[1]) + float(roi[3])) * 0.5) if roi is not None else None
     return {
         "dynamic_roi": roi,
@@ -682,27 +581,21 @@ def choose_depth_roi(
     yolo_dynamic_enable: bool = False,
     yolo_table_class_id: int = 0,
     yolo_table_conf_min: float = 0.25,
-    yolo_min_area_ratio: float = 0.01,
-    yolo_max_area_ratio: float = 0.90,
     smoothed_table_center_x: Any = None,
     near_distance: bool = False,
     yolo_near_bottom_norm: float = 0.60,
     edge_stable: bool = False,
     rgb_native_shape: Any = None,
     rgb_crop_rect: Any = None,
-    yolo_roi_anchor: str = "center",
-    yolo_roi_lower_ratio: float = 0.75,
     yolo_roi_use_rgb_depth_mapping: bool = True,
-    yolo_roi_mode: str = "bbox_expand",
-    yolo_roi_expand_x_ratio: float = 0.10,
-    yolo_roi_expand_y_ratio: float = 0.10,
-    yolo_roi_min_w: int = 120,
-    yolo_roi_min_h: int = 80,
-    yolo_roi_max_w_ratio: float = 0.95,
-    yolo_roi_max_h_ratio: float = 0.95,
-    yolo_roi_scale_x: float = 1.0,
-    yolo_roi_scale_y: float = 1.0,
-    rgb_to_depth_view_rect_norm: Any = None,
+    yolo_roi_mode: str = "centered_bbox_scale",
+    yolo_roi_scale_x: float = 0.50,
+    yolo_roi_scale_y: float = 0.50,
+    rgb_depth_mapping_mode: str = "centered_scale",
+    rgb_fov_in_depth_scale_x: float = 0.75,
+    rgb_fov_in_depth_scale_y: float = 0.75,
+    rgb_depth_center_offset_x: float = 0.0,
+    rgb_depth_center_offset_y: float = 0.0,
     last_valid_depth_roi: Any = None,
     yolo_table_bbox_hold_enable: bool = True,
     yolo_table_bbox_hold_frames: int = 8,
@@ -745,26 +638,20 @@ def choose_depth_roi(
             class_id=None,
             table_class_id=yolo_table_class_id,
             conf_min=-1.0,
-            min_area_ratio=yolo_min_area_ratio,
-            max_area_ratio=yolo_max_area_ratio,
             smoothed_center_x=smoothed_table_center_x,
             bbox_image_shape=resolved_rgb_shape,
             yolo_near_bottom_norm=yolo_near_bottom_norm,
             rgb_native_shape=rgb_native_shape or local.get("rgb_native_shape"),
             rgb_crop_rect=rgb_crop_rect or local.get("rgb_crop_rect"),
-            roi_anchor=yolo_roi_anchor,
-            roi_lower_ratio=yolo_roi_lower_ratio,
             use_rgb_depth_mapping=yolo_roi_use_rgb_depth_mapping,
             roi_mode=yolo_roi_mode,
-            roi_expand_x_ratio=yolo_roi_expand_x_ratio,
-            roi_expand_y_ratio=yolo_roi_expand_y_ratio,
-            roi_min_w=yolo_roi_min_w,
-            roi_min_h=yolo_roi_min_h,
-            roi_max_w_ratio=yolo_roi_max_w_ratio,
-            roi_max_h_ratio=yolo_roi_max_h_ratio,
             roi_scale_x=yolo_roi_scale_x,
             roi_scale_y=yolo_roi_scale_y,
-            rgb_to_depth_view_rect_norm=rgb_to_depth_view_rect_norm,
+            rgb_depth_mapping_mode=rgb_depth_mapping_mode,
+            rgb_fov_in_depth_scale_x=rgb_fov_in_depth_scale_x,
+            rgb_fov_in_depth_scale_y=rgb_fov_in_depth_scale_y,
+            rgb_depth_center_offset_x=rgb_depth_center_offset_x,
+            rgb_depth_center_offset_y=rgb_depth_center_offset_y,
         )
         depth_edge_roi = dyn.get("dynamic_roi") or fallback_roi
         roi_source = str(dyn.get("roi_source") or "static_no_yolo_fallback")
@@ -781,12 +668,23 @@ def choose_depth_roi(
         and int(table_bbox_hold_age_frames or 0) < max(1, int(yolo_table_bbox_hold_frames or 1))
         and normalize_table_bbox(last_valid_depth_roi, depth_shape) is not None
     ):
+        # Short-term hold: keep the last YOLO-driven depth ROI steady when YOLO
+        # drops for a few frames.  This prevents the ROI from jumping to a
+        # quadrant/static fallback during momentary detector loss.
         depth_edge_roi = normalize_table_bbox(last_valid_depth_roi, depth_shape)
         table_bbox = normalize_table_bbox(last_valid_table_bbox, resolved_rgb_shape)
         table_center = last_valid_table_center_norm
         quadrant = _normalize_quadrant(last_valid_quadrant)
         roi_source = "yolo_table_bbox_hold"
-        roi_reason = "table_bbox_lost_hold_last_roi"
+        roi_reason = "table_bbox_lost_short_hold_last_yolo_roi"
+    elif yolo_dynamic_enable and table_bbox is None:
+        # Hold expired or no previous YOLO ROI: do not fall back to a static or
+        # quadrant ROI for docking.  With no table bbox, the higher-level system
+        # should enter/search table mode instead of trusting edge geometry.
+        depth_edge_roi = None
+        rgb_search_roi = None
+        roi_source = "disabled_no_table_bbox"
+        roi_reason = "table_bbox_lost_hold_expired"
     elif quadrant is not None and table_bbox is not None:
         depth_edge_roi = quadrant_to_depth_roi(quadrant, depth_shape, fallback_roi)
         rgb_hw = _parse_shape(resolved_rgb_shape)
@@ -795,26 +693,16 @@ def choose_depth_roi(
         roi_source = "local_perception_table_bbox"
         roi_reason = "table_bbox_detected"
     else:
-        age_ok = last_valid_age_s is not None and float(last_valid_age_s) <= float(last_valid_ttl_s)
-        history_quadrant = _normalize_quadrant(last_valid_quadrant)
-        if history_quadrant and age_ok:
-            quadrant = history_quadrant
-            table_bbox = normalize_table_bbox(last_valid_table_bbox, resolved_rgb_shape)
-            table_center = last_valid_table_center_norm
-            depth_edge_roi = quadrant_to_depth_roi(quadrant, depth_shape, fallback_roi)
-            roi_source = "last_valid_table_bbox"
-            roi_reason = "table_bbox_lost_using_history"
+        depth_edge_roi = fallback_roi
+        if preset_roi is not None:
+            roi_source = f"preset:{preset_name}"
+            roi_reason = "debug_roi_preset"
+        elif table_bbox is None:
+            roi_source = "static_no_yolo_fallback"
+            roi_reason = "table_bbox_unavailable"
         else:
-            depth_edge_roi = fallback_roi
-            if preset_roi is not None:
-                roi_source = f"preset:{preset_name}"
-                roi_reason = "debug_roi_preset"
-            elif table_bbox is None:
-                roi_source = "static_no_yolo_fallback"
-                roi_reason = "table_bbox_unavailable"
-            else:
-                roi_source = "static_far_fallback"
-                roi_reason = roi_reason or "static_depth_roi_fallback"
+            roi_source = "static_far_fallback"
+            roi_reason = roi_reason or "static_depth_roi_fallback"
 
     return {
         "table_bbox": table_bbox,
@@ -841,6 +729,10 @@ def choose_depth_roi(
         "yolo_table_roi_hold_enable": bool(yolo_table_roi_hold_enable),
         "yolo_table_roi_scale_x": float(yolo_roi_scale_x or 1.0),
         "yolo_table_roi_scale_y": float(yolo_roi_scale_y or 1.0),
-        "rgb_to_depth_view_rect_norm": _parse_rect_norm(rgb_to_depth_view_rect_norm),
+        "rgb_depth_mapping_mode": str(rgb_depth_mapping_mode or "centered_scale"),
+        "rgb_fov_in_depth_scale_x": float(rgb_fov_in_depth_scale_x or 0.75),
+        "rgb_fov_in_depth_scale_y": float(rgb_fov_in_depth_scale_y or 0.75),
+        "rgb_depth_center_offset_x": float(rgb_depth_center_offset_x or 0.0),
+        "rgb_depth_center_offset_y": float(rgb_depth_center_offset_y or 0.0),
         **(dyn if "dyn" in locals() and isinstance(dyn, dict) else {}),
     }

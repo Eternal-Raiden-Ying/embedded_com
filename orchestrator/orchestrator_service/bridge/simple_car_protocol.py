@@ -102,9 +102,9 @@ class SimpleCarCommand:
     raw_line: str
     kind: str
     mode: str
-    vx_norm: float = 0.0
-    vy_norm: float = 0.0
-    wz_norm: float = 0.0
+    vx_mps: float = 0.0
+    vy_mps: float = 0.0
+    wz_radps: float = 0.0
     hold_ms: int = 0
     brake: bool = False
 
@@ -140,9 +140,9 @@ class SimpleCarMapper:
     def from_cmd_vel(self, cmd: CmdVel, cx_norm_abs: Optional[float] = None, distance_ratio: Optional[float] = None) -> SimpleCarCommand:
         del cx_norm_abs, distance_ratio
         mode = normalize_wire_mode(cmd.mode or "IDLE")
-        vx = self._clamp_abs(float(cmd.vx_norm), getattr(self.cfg, "max_vx_norm", 1.0))
-        vy = self._clamp_abs(float(cmd.vy_norm), getattr(self.cfg, "max_vy_norm", 1.0))
-        wz = self._clamp_abs(float(cmd.wz_norm), getattr(self.cfg, "max_wz_norm", 1.0))
+        vx = self._clamp_abs(float(cmd.vx_mps), getattr(self.cfg, "max_vx_mps", 1.0))
+        vy = self._clamp_abs(float(cmd.vy_mps), getattr(self.cfg, "max_vy_mps", 1.0))
+        wz = self._clamp_abs(float(cmd.wz_radps), getattr(self.cfg, "max_wz_radps", 1.0))
         hold_ms = int(max(0, int(getattr(cmd, "hold_ms", self.cfg.cmd_hold_ms))))
         brake = bool(getattr(cmd, "brake", False))
         prefix = self._mode_prefix(mode)
@@ -167,9 +167,9 @@ class SimpleCarMapper:
             raw_line=prefix + f"V {self._fmt(vx)} {self._fmt(vy)} {self._fmt(wz)}\r\n",
             kind="cmd_vel",
             mode=mode,
-            vx_norm=vx,
-            vy_norm=vy,
-            wz_norm=wz,
+            vx_mps=vx,
+            vy_mps=vy,
+            wz_radps=wz,
             hold_ms=hold_ms,
         )
 

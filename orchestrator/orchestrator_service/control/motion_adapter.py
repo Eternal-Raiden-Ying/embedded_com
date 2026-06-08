@@ -6,9 +6,9 @@ import time
 from typing import Any, Callable, Dict, Optional, Tuple
 
 
-SAFE_DEFAULT_VX_MPS_PER_NORM = 0.30
-SAFE_DEFAULT_VY_MPS_PER_NORM = 0.30
-SAFE_DEFAULT_WZ_RADPS_PER_NORM = 1.00
+SAFE_DEFAULT_MAX_VX_MPS = 0.30
+SAFE_DEFAULT_MAX_VY_MPS = 0.30
+SAFE_DEFAULT_MAX_WZ_RADPS = 1.00
 
 
 class Stm32MotionAdapter:
@@ -25,9 +25,9 @@ class Stm32MotionAdapter:
         logger: Optional[Callable[[str], None]] = None,
         tx_meta_factory: Optional[Callable[[str, int, str], Dict[str, Any]]] = None,
         wheel_speed_limit: int = 100,
-        vx_scale: float = SAFE_DEFAULT_VX_MPS_PER_NORM,
-        vy_scale: float = SAFE_DEFAULT_VY_MPS_PER_NORM,
-        wz_scale: float = SAFE_DEFAULT_WZ_RADPS_PER_NORM,
+        max_vx_mps: float = SAFE_DEFAULT_MAX_VX_MPS,
+        max_vy_mps: float = SAFE_DEFAULT_MAX_VY_MPS,
+        max_wz_radps: float = SAFE_DEFAULT_MAX_WZ_RADPS,
         jog_forward_speed: float = 0.02,
         jog_turn_speed: float = 0.05,
         jog_duration_ms: int = 100,
@@ -36,9 +36,9 @@ class Stm32MotionAdapter:
         self.uart = uart
         self.logger = logger
         self.tx_meta_factory = tx_meta_factory
-        self.vx_scale = self._coerce_axis_scale(vx_scale, SAFE_DEFAULT_VX_MPS_PER_NORM)
-        self.vy_scale = self._coerce_axis_scale(vy_scale, SAFE_DEFAULT_VY_MPS_PER_NORM)
-        self.wz_scale = self._coerce_axis_scale(wz_scale, SAFE_DEFAULT_WZ_RADPS_PER_NORM)
+        self.max_vx_mps = self._coerce_axis_limit(max_vx_mps, SAFE_DEFAULT_MAX_VX_MPS)
+        self.max_vy_mps = self._coerce_axis_limit(max_vy_mps, SAFE_DEFAULT_MAX_VY_MPS)
+        self.max_wz_radps = self._coerce_axis_limit(max_wz_radps, SAFE_DEFAULT_MAX_WZ_RADPS)
         self.jog_forward_speed = self._coerce_micro_speed(jog_forward_speed, 0.02)
         self.jog_turn_speed = self._coerce_micro_speed(jog_turn_speed, 0.05)
         self.jog_duration_ms = self._clamp_int(jog_duration_ms, 60, 500)
@@ -67,7 +67,7 @@ class Stm32MotionAdapter:
         return number
 
     @staticmethod
-    def _coerce_axis_scale(value: Any, default: float) -> float:
+    def _coerce_axis_limit(value: Any, default: float) -> float:
         try:
             number = abs(float(value))
         except Exception:
@@ -131,18 +131,18 @@ class Stm32MotionAdapter:
     def _cmd_is_stop(cmd: Any) -> bool:
         mode = str(getattr(cmd, "mode", "") or "").strip().upper()
         brake = bool(getattr(cmd, "brake", False))
-        vx = abs(float(getattr(cmd, "vx_norm", 0.0) or 0.0))
-        vy = abs(float(getattr(cmd, "vy_norm", 0.0) or 0.0))
-        wz = abs(float(getattr(cmd, "wz_norm", 0.0) or 0.0))
+        vx = abs(float(getattr(cmd, "vx_mps", 0.0) or 0.0))
+        vy = abs(float(getattr(cmd, "vy_mps", 0.0) or 0.0))
+        wz = abs(float(getattr(cmd, "wz_radps", 0.0) or 0.0))
         return brake or (mode in {"STOP", "IDLE", "DONE", "ERROR_RECOVERY"} and vx < 1e-6 and vy < 1e-6 and wz < 1e-6)
 
     def cmd_vel_to_velocity(self, cmd: Any) -> Tuple[float, float, float]:
-        vx_norm = self._clamp_float(getattr(cmd, "vx_norm", 0.0), -1.0, 1.0)
-        vy_norm = self._clamp_float(getattr(cmd, "vy_norm", 0.0), -1.0, 1.0)
-        wz_norm = self._clamp_float(getattr(cmd, "wz_norm", 0.0), -1.0, 1.0)
-        vx = self._clamp_float(vx_norm * self.vx_scale, -self.vx_scale, self.vx_scale)
-        vy = self._clamp_float(vy_norm * self.vy_scale, -self.vy_scale, self.vy_scale)
-        wz = self._clamp_float(wz_norm * self.wz_scale, -self.wz_scale, self.wz_scale)
+        vx_mps = self._clamp_float(getattr(cmd, "vx_mps", 0.0), -1.0, 1.0)
+        vy_mps = self._clamp_float(getattr(cmd, "vy_mps", 0.0), -1.0, 1.0)
+        wz_radps = self._clamp_float(getattr(cmd, "wz_radps", 0.0), -1.0, 1.0)
+        vx = self._clamp_float(vx_mps, -self.max_vx_mps, self.max_vx_mps)
+        vy = self._clamp_float(vy_mps, -self.max_vy_mps, self.max_vy_mps)
+        wz = self._clamp_float(wz_radps, -self.max_wz_radps, self.max_wz_radps)
         return vx, vy, wz
 
     def _mode_prefix(self, wire_mode: str) -> str:
@@ -157,9 +157,9 @@ class Stm32MotionAdapter:
     def set_velocity(self, vx_mps: Any, vy_mps: Any, wz_radps: Any, mode: str = "SEARCH", reason: str = "") -> int:
         seq = self._next_seq()
         wire_mode = self.wire_mode_for_mode(mode)
-        vx = self._clamp_float(vx_mps, -self.vx_scale, self.vx_scale)
-        vy = self._clamp_float(vy_mps, -self.vy_scale, self.vy_scale)
-        wz = self._clamp_float(wz_radps, -self.wz_scale, self.wz_scale)
+        vx = self._clamp_float(vx_mps, -self.max_vx_mps, self.max_vx_mps)
+        vy = self._clamp_float(vy_mps, -self.max_vy_mps, self.max_vy_mps)
+        wz = self._clamp_float(wz_radps, -self.max_wz_radps, self.max_wz_radps)
         if wire_mode not in {"SEARCH", "RETURN"}:
             self._log(f"[MOTION][MODE] seq={seq} mode={wire_mode} reason={reason}")
             self.uart.send_mode(wire_mode, tx_meta=self._meta("mode", seq, reason, wire_mode=wire_mode))

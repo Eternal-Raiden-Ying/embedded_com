@@ -75,7 +75,7 @@ def send_target_obs(host: str, port: int, target: str, found: bool, cx_norm: flo
                 "cx_norm": cx_norm,
                 "size_norm": size_norm,
                 "bbox": [100, 80, 180, 200],
-                "vy_norm": vy,
+                "vy_mps": vy,
             }
         )
     send("tcp", host, port, payload)

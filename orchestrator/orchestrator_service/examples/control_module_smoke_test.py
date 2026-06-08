@@ -29,7 +29,7 @@ from orchestrator_service.ipc.protocol import CmdVel
 
 def main():
     mapper = SimpleCarMapper(CarMotionConfig())
-    cmd = CmdVel(ts=0.0, mode="CONTROLLED_APPROACH", vx_norm=0.12, vy_norm=-0.05, wz_norm=0.18, hold_ms=150)
+    cmd = CmdVel(ts=0.0, mode="CONTROLLED_APPROACH", vx_mps=0.12, vy_mps=-0.05, wz_radps=0.18, hold_ms=150)
     car_cmd = mapper.from_cmd_vel(cmd)
     raw = car_cmd.raw_line.strip().splitlines()
     if "MODE SEARCH" not in raw:

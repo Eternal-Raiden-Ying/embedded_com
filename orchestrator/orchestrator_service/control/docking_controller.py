@@ -131,7 +131,7 @@ class DockingController:
 
         if mode == "COARSE_ALIGN":
             wz = self.yaw_pid.update(yaw_err, dt)
-            cmd = self._limit_cmd(0.0, 0.0, wz, max_vx=0.0, max_vy=0.0, max_wz=self.cfg.coarse_max_wz_norm, dt=dt)
+            cmd = self._limit_cmd(0.0, 0.0, wz, max_vx=0.0, max_vy=0.0, max_wz=self.cfg.coarse_max_wz_radps, dt=dt)
             cmd.mode = mode
             cmd.pose_locked = pose_locked
             return cmd
@@ -151,9 +151,9 @@ class DockingController:
                 vx,
                 vy,
                 wz,
-                max_vx=self.cfg.approach_max_vx_norm,
-                max_vy=self.cfg.approach_max_vy_norm,
-                max_wz=self.cfg.approach_max_wz_norm,
+                max_vx=self.cfg.approach_max_vx_mps,
+                max_vy=self.cfg.approach_max_vy_mps,
+                max_wz=self.cfg.approach_max_wz_radps,
                 dt=dt,
             )
             cmd.mode = mode
@@ -170,9 +170,9 @@ class DockingController:
                 vx,
                 vy,
                 wz,
-                max_vx=self.cfg.final_max_vx_norm,
-                max_vy=self.cfg.final_max_vy_norm,
-                max_wz=self.cfg.final_max_wz_norm,
+                max_vx=self.cfg.final_max_vx_mps,
+                max_vy=self.cfg.final_max_vy_mps,
+                max_wz=self.cfg.final_max_wz_radps,
                 dt=dt,
             )
             cmd.mode = mode

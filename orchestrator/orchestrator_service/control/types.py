@@ -33,13 +33,13 @@ class DockingControlConfig:
     precise_lateral_tol_m: float = 0.015
     precise_stable_s: float = 0.50
 
-    coarse_max_wz_norm: float = 0.45
-    approach_max_vx_norm: float = 0.28
-    approach_max_vy_norm: float = 0.18
-    approach_max_wz_norm: float = 0.32
-    final_max_vx_norm: float = 0.12
-    final_max_vy_norm: float = 0.12
-    final_max_wz_norm: float = 0.18
+    coarse_max_wz_radps: float = 0.45
+    approach_max_vx_mps: float = 0.28
+    approach_max_vy_mps: float = 0.18
+    approach_max_wz_radps: float = 0.32
+    final_max_vx_mps: float = 0.12
+    final_max_vy_mps: float = 0.12
+    final_max_wz_radps: float = 0.18
 
     vx_slew_per_s: float = 0.80
     vy_slew_per_s: float = 0.80

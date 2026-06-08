@@ -1,5 +1,8 @@
+# Stage-level behavior and absolute-speed motion parameters.
+# All motion values in this file are physical units:
+#   vx/vy: m/s, wz: rad/s. There are no normalized speed parameters.
+
 final_lock:
-  # SC171 table docking defaults. Override per run with ORCH_TABLE_* env vars.
   yaw_abs_th: 0.25
   dist_abs_th_m: 0.05
   edge_conf_th: 0.55
@@ -16,7 +19,6 @@ final_lock:
   max_micro_adjust: 3
 
 table_docking:
-  # Normal staged docking: allow FINAL_LOCK, but keep jog/micro-adjust disabled by default.
   enable_final_lock: true
   enable_micro_adjust: false
   final_lock_enter_dist_th_m: 0.08
@@ -40,38 +42,33 @@ yolo_table:
   edge_trusted_min_x_span_m: 0.0
   edge_trusted_max_background_penalty: 0.0
   yolo_table_near_dist_m: 0.45
-  yolo_forward_vx: 0.015
+  yolo_forward_vx_mps: 0.015
   yolo_yaw_gain: 0.20
-  yolo_max_wz: 0.06
+  yolo_max_wz_radps: 0.06
   yolo_table_lost_to_search_frames: 8
-  rotate_search_wz: 0.10
+  rotate_search_wz_radps: 0.10
   rotate_search_timeout_s: 10.0
   rotate_require_edge_stable_frames: 5
   rotate_yaw_threshold_rad: 0.20
   yolo_edge_conflict_block_rotate: true
 
+# Perception/docking PID thresholds. Speeds here are physical caps, not normalized values.
 controlled_approach:
   target_dist_m: 0.015
-  max_vx_norm: 0.28
-  max_wz_norm: 0.32
+  max_vx_mps: 0.035
+  max_wz_radps: 0.150
   dist_kp: 1.4
   yaw_kp: 1.8
   fov_soft_th: 0.25
   fov_hard_th: 0.40
-  stage_a_wz_norm: 0.04
-  stage_b_vx_max_norm: 0.03
-  stage_c_vx_max_norm: 0.03
-  view_vy_max_norm: 0.01
-  view_wz_max_norm: 0.05
-  plane_wz_max_norm: 0.06
+  stage_a_wz_radps: 0.080
+  stage_b_vx_max_mps: 0.020
+  stage_c_vx_max_mps: 0.035
+  view_vy_max_mps: 0.000
+  view_wz_max_radps: 0.000
+  plane_wz_max_radps: 0.150
 
-# 如何快速调整桌边靠近速度:
-# - 想让小车前进更快：改 table_docking_motion.controlled_approach.vx_max_mps / vx_min_mps。
-# - 想让最终停车更稳：降低 table_docking_motion.final_lock.vx_max_mps / wz_max_radps。
-# - 想让对齐更快：提高 table_docking_motion.coarse_align.wz_max_radps 和 vy_max_mps。
-# - 想减少抖动：增大 deadband 或降低 min speed。
-# - 想保守测试：整体乘以 0.5。
-# - 想激进测试：整体乘以 1.3，但不要超过当前 max 的安全上限。
+# Motion profiles used by table approach / align / final lock.
 table_docking_motion:
   approach_safe_vx_mps: 0.020
   approach_max_vx_mps: 0.035
@@ -110,10 +107,10 @@ table_docking_motion:
     wz_radps: 0.006
 
 edge_slide_search:
-  slide_vy_norm: 0.14
-  weak_slide_vy_norm: 0.05
-  max_vx_correction_norm: 0.08
-  max_wz_correction_norm: 0.18
+  slide_vy_mps: 0.010
+  weak_slide_vy_mps: 0.006
+  max_vx_correction_mps: 0.008
+  max_wz_correction_radps: 0.080
   dist_kp: 1.0
   yaw_kp: 1.0
   strong_edge_conf_track_local: 0.35

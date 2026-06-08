@@ -1574,10 +1574,10 @@ class OrchestratorCore:
             return self.controller.target_track_cmd(target_obs)
         direction = self._edge_slide_direction()
         quality_mode = str(quality.get("mode") or "strong")
-        vy_norm = None
+        vy_mps = None
         reason = "edge_slide"
         if quality_mode == "weak":
-            vy_norm = float(getattr(self.controller.car_cfg, "edge_slide_weak_vy_norm", 0.05) or 0.05)
+            vy_mps = float(getattr(self.controller.car_cfg, "edge_slide_weak_vy_mps", 0.05) or 0.05)
             reason = "weak_edge_slide"
         else:
             self._reset_table_loss()
@@ -1585,7 +1585,7 @@ class OrchestratorCore:
             self._segment_elapsed(self.cfg.edge_slide_segment_s),
             direction_sign=direction,
             edge_obs=edge_obs,
-            vy_norm=vy_norm,
+            vy_mps=vy_mps,
             reason=reason,
         )
         return self._annotate_edge_slide_decision(decision, quality, fallback_decision="slide")
@@ -1629,15 +1629,15 @@ class OrchestratorCore:
             {
                 "edge_quality_mode": quality.get("mode"),
                 "stop_reason": stop_reason or summary.get("stop_reason") or "",
-                "slide_vy_norm": float(getattr(self.controller.car_cfg, "edge_slide_vy_norm", 0.0) or 0.0),
-                "weak_slide_vy_norm": float(getattr(self.controller.car_cfg, "edge_slide_weak_vy_norm", 0.0) or 0.0),
-                "final_vx": float(cmd.vx_norm),
-                "final_vy": float(cmd.vy_norm),
-                "final_wz": float(cmd.wz_norm),
+                "slide_vy_mps": float(getattr(self.controller.car_cfg, "edge_slide_vy_mps", 0.0) or 0.0),
+                "weak_slide_vy_mps": float(getattr(self.controller.car_cfg, "edge_slide_weak_vy_mps", 0.0) or 0.0),
+                "final_vx": float(cmd.vx_mps),
+                "final_vy": float(cmd.vy_mps),
+                "final_wz": float(cmd.wz_radps),
                 "pause_elapsed_ms": int(round(max(0.0, float(pause_elapsed_s or 0.0)) * 1000.0)),
                 "recover_elapsed_ms": int(round(max(0.0, float(recover_elapsed_s or 0.0)) * 1000.0)),
                 "fallback_candidate_state": quality.get("fallback_candidate_state", self._edge_slide_fallback_state().value),
-                "fallback_decision": fallback_decision or ("none" if abs(float(cmd.vy_norm or 0.0)) > 0.0 else "hold"),
+                "fallback_decision": fallback_decision or ("none" if abs(float(cmd.vy_mps or 0.0)) > 0.0 else "hold"),
                 "severity": quality.get("severity"),
                 "recoverable": quality.get("recoverable"),
                 "dist_tolerance_m": quality.get("dist_tolerance_m"),
@@ -1646,9 +1646,9 @@ class OrchestratorCore:
             }
         )
         if "vx_from_dist" not in summary:
-            summary["vx_from_dist"] = float(cmd.vx_norm)
+            summary["vx_from_dist"] = float(cmd.vx_mps)
         if "wz_from_yaw" not in summary:
-            summary["wz_from_yaw"] = float(cmd.wz_norm)
+            summary["wz_from_yaw"] = float(cmd.wz_radps)
         decision.control_summary = summary
         return decision
 
@@ -2607,9 +2607,9 @@ class OrchestratorCore:
             "handoff_samples_count": len(self.ctx.slide_ref_samples),
             "handoff_valid_samples_count": len(self.ctx.slide_ref_samples),
             "edge_identity_ok": identity_ok,
-            "slide_vy_norm": float(getattr(self.controller.car_cfg, "edge_slide_vy_norm", 0.14) or 0.14),
-            "weak_slide_vy": float(getattr(self.controller.car_cfg, "edge_slide_weak_vy_norm", 0.05) or 0.05),
-            "weak_slide_vy_norm": float(getattr(self.controller.car_cfg, "edge_slide_weak_vy_norm", 0.05) or 0.05),
+            "slide_vy_mps": float(getattr(self.controller.car_cfg, "edge_slide_vy_mps", 0.14) or 0.14),
+            "weak_slide_vy": float(getattr(self.controller.car_cfg, "edge_slide_weak_vy_mps", 0.05) or 0.05),
+            "weak_slide_vy_mps": float(getattr(self.controller.car_cfg, "edge_slide_weak_vy_mps", 0.05) or 0.05),
             "fallback_candidate_state": self._edge_slide_fallback_state().value,
             "fallback_suppressed_reason": "fresh_geometry_stable" if mode in {"weak", "strong"} else "",
         }
@@ -3590,7 +3590,7 @@ class OrchestratorCore:
     def _obs_has_motion(self, obs: Optional[TargetObs]) -> bool:
         if obs is None:
             return False
-        return obs.vx_norm is not None or obs.vy_norm is not None or obs.wz_norm is not None
+        return obs.vx_mps is not None or obs.vy_mps is not None or obs.wz_radps is not None
 
     def _edge_slide_direction(self) -> int:
         segment_s = max(0.2, float(self.cfg.edge_slide_segment_s))

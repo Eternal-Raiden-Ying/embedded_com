@@ -149,9 +149,9 @@ class OrchestratorService(BaseModule):
             logger=self._motion_operator_emit,
             tx_meta_factory=self._build_stm32_motion_tx_meta,
             wheel_speed_limit=cfg.car.stm32_wheel_speed_limit,
-            vx_scale=cfg.car.vx_mps_per_norm,
-            vy_scale=cfg.car.vy_mps_per_norm,
-            wz_scale=cfg.car.wz_radps_per_norm,
+            max_vx_mps=cfg.car.max_vx_mps,
+            max_vy_mps=cfg.car.max_vy_mps,
+            max_wz_radps=cfg.car.max_wz_radps,
             jog_forward_speed=cfg.car.jog_forward_speed,
             jog_turn_speed=cfg.car.jog_turn_speed,
             jog_duration_ms=cfg.car.jog_duration_ms,
@@ -569,9 +569,9 @@ class OrchestratorService(BaseModule):
         return (
             str(getattr(car_cmd, "mode", cmd_payload.get("mode", "")) or ""),
             str(getattr(car_cmd, "kind", cmd_payload.get("kind", "")) or ""),
-            self._motion_float_sig(getattr(cmd, "vx_norm", cmd_payload.get("vx", cmd_payload.get("vx_norm", 0.0)))),
-            self._motion_float_sig(getattr(cmd, "vy_norm", cmd_payload.get("vy", cmd_payload.get("vy_norm", 0.0)))),
-            self._motion_float_sig(getattr(cmd, "wz_norm", cmd_payload.get("wz", cmd_payload.get("wz_norm", 0.0)))),
+            self._motion_float_sig(getattr(cmd, "vx_mps", cmd_payload.get("vx", cmd_payload.get("vx_mps", 0.0)))),
+            self._motion_float_sig(getattr(cmd, "vy_mps", cmd_payload.get("vy", cmd_payload.get("vy_mps", 0.0)))),
+            self._motion_float_sig(getattr(cmd, "wz_radps", cmd_payload.get("wz", cmd_payload.get("wz_radps", 0.0)))),
             bool(getattr(cmd, "stop", cmd_payload.get("stop", False))),
             bool(getattr(car_cmd, "brake", False)),
             str(reason or ""),
@@ -722,16 +722,13 @@ class OrchestratorService(BaseModule):
                 "uart_keepalive_hz": self.cfg.car.uart_keepalive_hz,
                 "min_uart_keepalive_hz": self.cfg.car.min_uart_keepalive_hz,
                 "hold_ms": self.cfg.car.cmd_hold_ms,
-                "max_vx_norm": self.cfg.car.max_vx_norm,
-                "max_vy_norm": self.cfg.car.max_vy_norm,
-                "max_wz_norm": self.cfg.car.max_wz_norm,
+                "max_vx_mps": self.cfg.car.max_vx_mps,
+                "max_vy_mps": self.cfg.car.max_vy_mps,
+                "max_wz_radps": self.cfg.car.max_wz_radps,
                 "stm32_wheel_speed_limit": self.cfg.car.stm32_wheel_speed_limit,
                 "stm32_vx_scale": self.cfg.car.stm32_vx_scale,
                 "stm32_vy_scale": self.cfg.car.stm32_vy_scale,
                 "stm32_wz_scale": self.cfg.car.stm32_wz_scale,
-                "vx_mps_per_norm": self.cfg.car.vx_mps_per_norm,
-                "vy_mps_per_norm": self.cfg.car.vy_mps_per_norm,
-                "wz_radps_per_norm": self.cfg.car.wz_radps_per_norm,
                 "jog_forward_speed": self.cfg.car.jog_forward_speed,
                 "jog_turn_speed": self.cfg.car.jog_turn_speed,
                 "jog_duration_ms": self.cfg.car.jog_duration_ms,
@@ -789,9 +786,9 @@ class OrchestratorService(BaseModule):
             "docking": {
                 "min_confidence": self.cfg.docking.min_confidence,
                 "enable_lateral_control": self.cfg.docking.enable_lateral_control,
-                "approach_max_vx_norm": self.cfg.docking.approach_max_vx_norm,
-                "approach_max_vy_norm": self.cfg.docking.approach_max_vy_norm,
-                "approach_max_wz_norm": self.cfg.docking.approach_max_wz_norm,
+                "approach_max_vx_mps": self.cfg.docking.approach_max_vx_mps,
+                "approach_max_vy_mps": self.cfg.docking.approach_max_vy_mps,
+                "approach_max_wz_radps": self.cfg.docking.approach_max_wz_radps,
             },
             "task_cmd_in": {
                 "transport": self.cfg.task_cmd_in.transport,
@@ -893,15 +890,12 @@ class OrchestratorService(BaseModule):
             "speed_profile",
             "speed_limit_reason",
             "forward_block_reason",
-            "vx_norm",
-            "vy_norm",
-            "wz_norm",
             "vx_mps",
             "vy_mps",
             "wz_radps",
-            "vx_mps_per_norm",
-            "vy_mps_per_norm",
-            "wz_radps_per_norm",
+            "vx_mps",
+            "vy_mps",
+            "wz_radps",
             "table_approach_phase",
             "final_lock_enabled",
             "micro_adjust_enabled",
@@ -936,7 +930,7 @@ class OrchestratorService(BaseModule):
         try:
             return any(
                 abs(float(getattr(cmd, key, 0.0) or 0.0)) > 1e-6
-                for key in ("vx_norm", "vy_norm", "wz_norm")
+                for key in ("vx_mps", "vy_mps", "wz_radps")
             )
         except Exception:
             return False
@@ -951,9 +945,9 @@ class OrchestratorService(BaseModule):
         return {
             "ts": float(getattr(cmd, "ts", time.time()) or time.time()),
             "mode": str(getattr(cmd, "mode", "") or ""),
-            "vx_norm": float(getattr(cmd, "vx_norm", 0.0) or 0.0),
-            "vy_norm": float(getattr(cmd, "vy_norm", 0.0) or 0.0),
-            "wz_norm": float(getattr(cmd, "wz_norm", 0.0) or 0.0),
+            "vx_mps": float(getattr(cmd, "vx_mps", 0.0) or 0.0),
+            "vy_mps": float(getattr(cmd, "vy_mps", 0.0) or 0.0),
+            "wz_radps": float(getattr(cmd, "wz_radps", 0.0) or 0.0),
             "hold_ms": int(getattr(cmd, "hold_ms", 0) or 0),
             "brake": bool(getattr(cmd, "brake", False)),
         }
@@ -965,7 +959,7 @@ class OrchestratorService(BaseModule):
         return max(0.0, (now - float(self._last_valid_motion_ts)) * 1000.0)
 
     def _make_stop_cmd(self, now: float, hold_ms: int = 0) -> CmdVel:
-        return CmdVel(ts=float(now), mode="STOP", vx_norm=0.0, vy_norm=0.0, wz_norm=0.0, hold_ms=int(hold_ms), brake=True)
+        return CmdVel(ts=float(now), mode="STOP", vx_mps=0.0, vy_mps=0.0, wz_radps=0.0, hold_ms=int(hold_ms), brake=True)
 
     def _repeat_last_valid_motion_cmd(self, now: float) -> Optional[CmdVel]:
         last = dict(self._last_valid_motion_cmd or {})
@@ -974,9 +968,9 @@ class OrchestratorService(BaseModule):
         return CmdVel(
             ts=float(now),
             mode=str(last.get("mode") or "SEARCH"),
-            vx_norm=float(last.get("vx_norm", last.get("vx", 0.0)) or 0.0),
-            vy_norm=float(last.get("vy_norm", last.get("vy", 0.0)) or 0.0),
-            wz_norm=float(last.get("wz_norm", last.get("wz", 0.0)) or 0.0),
+            vx_mps=float(last.get("vx_mps", last.get("vx", 0.0)) or 0.0),
+            vy_mps=float(last.get("vy_mps", last.get("vy", 0.0)) or 0.0),
+            wz_radps=float(last.get("wz_radps", last.get("wz", 0.0)) or 0.0),
             hold_ms=int(last.get("hold_ms", getattr(self.cfg.car, "cmd_hold_ms", 150)) or getattr(self.cfg.car, "cmd_hold_ms", 150)),
             brake=False,
         )
@@ -1164,9 +1158,9 @@ class OrchestratorService(BaseModule):
         if uart_kind == "vel":
             base = (
                 f"[ORCH] CAR_VEL "
-                f"vx={self._fmt_float(payload.get('actual_vx_norm', payload.get('vx_norm', 0.0)))} "
-                f"vy={self._fmt_float(payload.get('actual_vy_norm', payload.get('vy_norm', 0.0)))} "
-                f"wz={self._fmt_float(payload.get('actual_wz_norm', payload.get('wz_norm', 0.0)))}"
+                f"vx={self._fmt_float(payload.get('actual_vx_mps', payload.get('vx_mps', 0.0)))} "
+                f"vy={self._fmt_float(payload.get('actual_vy_mps', payload.get('vy_mps', 0.0)))} "
+                f"wz={self._fmt_float(payload.get('actual_wz_radps', payload.get('wz_radps', 0.0)))}"
             )
             if "actual_hold_ms" in payload or "hold_ms" in payload:
                 base += f" hold={int(payload.get('actual_hold_ms', payload.get('hold_ms', 0)) or 0)}ms"
@@ -1184,12 +1178,12 @@ class OrchestratorService(BaseModule):
                 f"state={payload.get('state', payload.get('mode', 'SEARCH'))} "
                 f"phase={payload.get('table_approach_phase', 'n/a')} "
                 f"profile={profile} "
-                f"vx_norm={self._fmt_float(payload.get('vx_norm', 0.0))} "
-                f"vy_norm={self._fmt_float(payload.get('vy_norm', 0.0))} "
-                f"wz_norm={self._fmt_float(payload.get('wz_norm', 0.0))} "
-                f"vx_mps={self._fmt_float(payload.get('vx_mps', payload.get('actual_vx_norm', 0.0)))} "
-                f"vy_mps={self._fmt_float(payload.get('vy_mps', payload.get('actual_vy_norm', 0.0)))} "
-                f"wz_radps={self._fmt_float(payload.get('wz_radps', payload.get('actual_wz_norm', 0.0)))} "
+                f"vx_mps={self._fmt_float(payload.get('vx_mps', 0.0))} "
+                f"vy_mps={self._fmt_float(payload.get('vy_mps', 0.0))} "
+                f"wz_radps={self._fmt_float(payload.get('wz_radps', 0.0))} "
+                f"vx_mps={self._fmt_float(payload.get('vx_mps', payload.get('actual_vx_mps', 0.0)))} "
+                f"vy_mps={self._fmt_float(payload.get('vy_mps', payload.get('actual_vy_mps', 0.0)))} "
+                f"wz_radps={self._fmt_float(payload.get('wz_radps', payload.get('actual_wz_radps', 0.0)))} "
                 f"limit={limit_reason} "
                 f"block={block_reason or 'none'} "
                 f"final_lock={str(payload.get('final_lock_enabled', 'n/a')).lower()} "
@@ -1221,9 +1215,9 @@ class OrchestratorService(BaseModule):
             return f"[ORCH] CAR_STOP mode={mode}"
         return (
             f"[ORCH] CAR_VEL "
-            f"vx={self._fmt_float(payload.get('vx_norm', 0.0))} "
-            f"vy={self._fmt_float(payload.get('vy_norm', 0.0))} "
-            f"wz={self._fmt_float(payload.get('wz_norm', 0.0))} "
+            f"vx={self._fmt_float(payload.get('vx_mps', 0.0))} "
+            f"vy={self._fmt_float(payload.get('vy_mps', 0.0))} "
+            f"wz={self._fmt_float(payload.get('wz_radps', 0.0))} "
             f"hold={int(payload.get('hold_ms', 0) or 0)}ms"
         )
 
@@ -1248,7 +1242,7 @@ class OrchestratorService(BaseModule):
             return True
         if str(payload.get("kind", "")) != str(last.get("kind", "")):
             return True
-        for key in ("vx_norm", "vy_norm", "wz_norm", "actual_vx_norm", "actual_vy_norm", "actual_wz_norm"):
+        for key in ("vx_mps", "vy_mps", "wz_radps", "actual_vx_mps", "actual_vy_mps", "actual_wz_radps"):
             try:
                 if abs(float(payload.get(key, 0.0) or 0.0) - float(last.get(key, 0.0) or 0.0)) > 0.005:
                     return True
@@ -1306,9 +1300,9 @@ class OrchestratorService(BaseModule):
             elif upper == "V" and len(parts) >= 4:
                 item["uart_kind"] = "vel"
                 try:
-                    item["actual_vx_norm"] = float(parts[1])
-                    item["actual_vy_norm"] = float(parts[2])
-                    item["actual_wz_norm"] = float(parts[3])
+                    item["actual_vx_mps"] = float(parts[1])
+                    item["actual_vy_mps"] = float(parts[2])
+                    item["actual_wz_radps"] = float(parts[3])
                     item["vx_mps"] = float(parts[1])
                     item["vy_mps"] = float(parts[2])
                     item["wz_radps"] = float(parts[3])
@@ -1317,9 +1311,9 @@ class OrchestratorService(BaseModule):
             elif upper == "VEL" and len(parts) >= 5:
                 item["uart_kind"] = "vel"
                 try:
-                    item["actual_vx_norm"] = float(parts[1])
-                    item["actual_vy_norm"] = float(parts[2])
-                    item["actual_wz_norm"] = float(parts[3])
+                    item["actual_vx_mps"] = float(parts[1])
+                    item["actual_vy_mps"] = float(parts[2])
+                    item["actual_wz_radps"] = float(parts[3])
                     item["actual_hold_ms"] = int(float(parts[4]))
                 except Exception:
                     pass
@@ -1342,9 +1336,9 @@ class OrchestratorService(BaseModule):
         return out
 
     def _emit_no_vel_if_needed(self, payload: Dict[str, Any], actual_payloads: List[Dict[str, Any]]) -> None:
-        expected_vx = float(payload.get("vx_norm", 0.0) or 0.0)
-        expected_vy = float(payload.get("vy_norm", 0.0) or 0.0)
-        expected_wz = float(payload.get("wz_norm", 0.0) or 0.0)
+        expected_vx = float(payload.get("vx_mps", 0.0) or 0.0)
+        expected_vy = float(payload.get("vy_mps", 0.0) or 0.0)
+        expected_wz = float(payload.get("wz_radps", 0.0) or 0.0)
         expects_vel = any(abs(v) > 1e-9 for v in (expected_vx, expected_vy, expected_wz)) or str(payload.get("kind")) == "cmd_vel"
         has_vel = any(str(item.get("uart_kind")) == "vel" for item in actual_payloads)
         if expects_vel and not has_vel:
@@ -1471,7 +1465,7 @@ class OrchestratorService(BaseModule):
             f"dist={self.cfg.control.final_lock_dist_tol_m:.3f} "
             f"stable_frames={int(self.cfg.control.final_lock_frames_to_arrive)} "
             f"edge_conf={self.cfg.docking.min_confidence:.2f} "
-            f"slide_vy={self.cfg.car.edge_slide_vy_norm:.2f}"
+            f"slide_vy={self.cfg.car.edge_slide_vy_mps:.2f}"
         )
         self.uart.start()
         self.task_server.start()
@@ -2197,7 +2191,7 @@ class OrchestratorService(BaseModule):
         summary = dict(getattr(decision, "control_summary", None) or {})
         cmd = decision.cmd
         summary.setdefault("state", self.core.ctx.state.value)
-        summary.setdefault("cmd", {"vx": cmd.vx_norm, "vy": cmd.vy_norm, "wz": cmd.wz_norm, "hold_ms": cmd.hold_ms})
+        summary.setdefault("cmd", {"vx": cmd.vx_mps, "vy": cmd.vy_mps, "wz": cmd.wz_radps, "hold_ms": cmd.hold_ms})
         block = self.core.export_state_block()
         for key in (
             "edge_found",
@@ -2308,8 +2302,8 @@ class OrchestratorService(BaseModule):
             summary["full_vs_light_dist_offset"] = edge_quality.get("full_vs_light_dist_offset", block.get("full_vs_light_dist_offset"))
             summary["edge_identity_ok"] = edge_quality.get("edge_identity_ok")
             summary["weak_slide_vy"] = edge_quality.get("weak_slide_vy")
-            summary["slide_vy_norm"] = summary.get("slide_vy_norm", edge_quality.get("slide_vy_norm"))
-            summary["weak_slide_vy_norm"] = summary.get("weak_slide_vy_norm", edge_quality.get("weak_slide_vy_norm", edge_quality.get("weak_slide_vy")))
+            summary["slide_vy_mps"] = summary.get("slide_vy_mps", edge_quality.get("slide_vy_mps"))
+            summary["weak_slide_vy_mps"] = summary.get("weak_slide_vy_mps", edge_quality.get("weak_slide_vy_mps", edge_quality.get("weak_slide_vy")))
             summary["pause_elapsed_ms"] = summary.get("pause_elapsed_ms", edge_quality.get("pause_elapsed_ms"))
             summary["recover_elapsed_ms"] = summary.get("recover_elapsed_ms", edge_quality.get("recover_elapsed_ms"))
             summary["fallback_candidate_state"] = summary.get("fallback_candidate_state") or edge_quality.get("fallback_candidate_state")
@@ -2335,11 +2329,11 @@ class OrchestratorService(BaseModule):
         vy_mps = summary.get("vy_mps")
         wz_radps = summary.get("wz_radps")
         if vx_mps is None:
-            vx_mps = float(cmd.get("vx", 0.0) or 0.0) * float(self.cfg.car.vx_mps_per_norm)
+            vx_mps = float(cmd.get("vx", 0.0) or 0.0)
         if vy_mps is None:
-            vy_mps = float(cmd.get("vy", 0.0) or 0.0) * float(self.cfg.car.vy_mps_per_norm)
+            vy_mps = float(cmd.get("vy", 0.0) or 0.0)
         if wz_radps is None:
-            wz_radps = float(cmd.get("wz", 0.0) or 0.0) * float(self.cfg.car.wz_radps_per_norm)
+            wz_radps = float(cmd.get("wz", 0.0) or 0.0)
         base = (
             f"state={state} edge={int(bool(summary.get('edge_found')))} "
             f"conf={self._fmt_float(summary.get('confidence'), 2, signed=False)} "
@@ -2351,7 +2345,7 @@ class OrchestratorService(BaseModule):
             f"stale={summary.get('stale_level') or 'n/a'} "
             f"lock={int(bool(summary.get('lock_ready')))} reason={reason} "
             f"profile={speed_profile} limit={speed_limit} block={forward_block} "
-            f"cmd vx_norm={self._fmt_float(cmd.get('vx'))} vy_norm={self._fmt_float(cmd.get('vy'))} wz_norm={self._fmt_float(cmd.get('wz'))} "
+            f"cmd vx_mps={self._fmt_float(cmd.get('vx'))} vy_mps={self._fmt_float(cmd.get('vy'))} wz_radps={self._fmt_float(cmd.get('wz'))} "
             f"vx_mps={self._fmt_float(vx_mps)} vy_mps={self._fmt_float(vy_mps)} wz_radps={self._fmt_float(wz_radps)}"
         )
         if state == "FINAL_LOCK":
@@ -2368,7 +2362,7 @@ class OrchestratorService(BaseModule):
                 f"stale={summary.get('stale_level') or 'n/a'} "
                 f"ready={int(bool(summary.get('lock_ready')))} reason={reason} "
                 f"profile={speed_profile} limit={speed_limit} block={forward_block} "
-                f"cmd vx_norm={self._fmt_float(cmd.get('vx'))} vy_norm={self._fmt_float(cmd.get('vy'))} wz_norm={self._fmt_float(cmd.get('wz'))} "
+                f"cmd vx_mps={self._fmt_float(cmd.get('vx'))} vy_mps={self._fmt_float(cmd.get('vy'))} wz_radps={self._fmt_float(cmd.get('wz'))} "
                 f"vx_mps={self._fmt_float(vx_mps)} vy_mps={self._fmt_float(vy_mps)} wz_radps={self._fmt_float(wz_radps)}"
             )
         if state == "EDGE_SLIDE_SEARCH":
@@ -2715,15 +2709,12 @@ class OrchestratorService(BaseModule):
             "speed_limit_reason": summary.get("speed_limit_reason") or "",
             "forward_block_reason": summary.get("forward_block_reason") or "",
             "table_approach_phase": summary.get("table_approach_phase") or "",
-            "vx_norm": float(getattr(effective_cmd, "vx_norm", 0.0) or 0.0),
-            "vy_norm": float(getattr(effective_cmd, "vy_norm", 0.0) or 0.0),
-            "wz_norm": float(getattr(effective_cmd, "wz_norm", 0.0) or 0.0),
+            "vx_mps": float(getattr(effective_cmd, "vx_mps", 0.0) or 0.0),
+            "vy_mps": float(getattr(effective_cmd, "vy_mps", 0.0) or 0.0),
+            "wz_radps": float(getattr(effective_cmd, "wz_radps", 0.0) or 0.0),
             "vx_mps": float(velocity[0]),
             "vy_mps": float(velocity[1]),
             "wz_radps": float(velocity[2]),
-            "vx_mps_per_norm": float(self.cfg.car.vx_mps_per_norm),
-            "vy_mps_per_norm": float(self.cfg.car.vy_mps_per_norm),
-            "wz_radps_per_norm": float(self.cfg.car.wz_radps_per_norm),
         }
         self._last_motion_tx_context.update(uart_arbitration)
         tx_meta.update(uart_arbitration)
@@ -2734,9 +2725,9 @@ class OrchestratorService(BaseModule):
             "ts": time.time(),
             "mode": car_cmd.mode,
             "kind": car_cmd.kind,
-            "vx_norm": car_cmd.vx_norm,
-            "vy_norm": car_cmd.vy_norm,
-            "wz_norm": car_cmd.wz_norm,
+            "vx_mps": car_cmd.vx_mps,
+            "vy_mps": car_cmd.vy_mps,
+            "wz_radps": car_cmd.wz_radps,
             "hold_ms": car_cmd.hold_ms,
             "brake": car_cmd.brake,
             "stm32_seq": seq,
@@ -2755,9 +2746,6 @@ class OrchestratorService(BaseModule):
             "last_valid_motion_age_ms": uart_arbitration.get("last_valid_motion_age_ms"),
             "soft_stale_hold_active": uart_arbitration.get("soft_stale_hold_active"),
             "zero_cmd_reason": uart_arbitration.get("zero_cmd_reason"),
-            "vx_mps_per_norm": self.cfg.car.vx_mps_per_norm,
-            "vy_mps_per_norm": self.cfg.car.vy_mps_per_norm,
-            "wz_radps_per_norm": self.cfg.car.wz_radps_per_norm,
         }
         car_record.update({k: v for k, v in tx_meta.items() if v not in (None, "")})
         log_now = time.time()
@@ -2885,13 +2873,13 @@ class OrchestratorService(BaseModule):
             "weak_slide_vy": (self.core.ctx.last_edge_quality or {}).get("weak_slide_vy"),
             "control_reason": reason,
             "stop_reason": decision_summary.get("stop_reason") or (self.core.ctx.last_edge_quality or {}).get("reason") or "",
-            "slide_vy_norm": decision_summary.get("slide_vy_norm", (self.core.ctx.last_edge_quality or {}).get("slide_vy_norm")),
-            "weak_slide_vy_norm": decision_summary.get("weak_slide_vy_norm", (self.core.ctx.last_edge_quality or {}).get("weak_slide_vy_norm")),
+            "slide_vy_mps": decision_summary.get("slide_vy_mps", (self.core.ctx.last_edge_quality or {}).get("slide_vy_mps")),
+            "weak_slide_vy_mps": decision_summary.get("weak_slide_vy_mps", (self.core.ctx.last_edge_quality or {}).get("weak_slide_vy_mps")),
             "vx_from_dist": decision_summary.get("vx_from_dist"),
             "wz_from_yaw": decision_summary.get("wz_from_yaw"),
-            "final_vx": decision_summary.get("final_vx", float(cmd.vx_norm)),
-            "final_vy": decision_summary.get("final_vy", float(cmd.vy_norm)),
-            "final_wz": decision_summary.get("final_wz", float(cmd.wz_norm)),
+            "final_vx": decision_summary.get("final_vx", float(cmd.vx_mps)),
+            "final_vy": decision_summary.get("final_vy", float(cmd.vy_mps)),
+            "final_wz": decision_summary.get("final_wz", float(cmd.wz_radps)),
             "pause_elapsed_ms": decision_summary.get("pause_elapsed_ms", (self.core.ctx.last_edge_quality or {}).get("pause_elapsed_ms")),
             "recover_elapsed_ms": decision_summary.get("recover_elapsed_ms", (self.core.ctx.last_edge_quality or {}).get("recover_elapsed_ms")),
             "fallback_candidate_state": decision_summary.get("fallback_candidate_state", (self.core.ctx.last_edge_quality or {}).get("fallback_candidate_state")),
@@ -2912,9 +2900,9 @@ class OrchestratorService(BaseModule):
             "target_cls": matched_cls,
             "best_cls": getattr(target_obs, "best_cls", None) if target_obs is not None else None,
             "best_conf": getattr(target_obs, "best_conf", None) if target_obs is not None else None,
-            "vx": float(cmd.vx_norm),
-            "vy": float(cmd.vy_norm),
-            "wz": float(cmd.wz_norm),
+            "vx": float(cmd.vx_mps),
+            "vy": float(cmd.vy_mps),
+            "wz": float(cmd.wz_radps),
             "fallback_reason": reason,
             "edge_loss_elapsed_s": self.core._loss_elapsed(self.core.ctx.table_loss_since_mono),
             "keep_dist_tolerance_m": float(self.cfg.control.edge_slide_dist_tolerance_m),
@@ -2924,9 +2912,9 @@ class OrchestratorService(BaseModule):
         }
         trace_signature = (
             reason,
-            self._motion_float_sig(cmd.vx_norm),
-            self._motion_float_sig(cmd.vy_norm),
-            self._motion_float_sig(cmd.wz_norm),
+            self._motion_float_sig(cmd.vx_mps),
+            self._motion_float_sig(cmd.vy_mps),
+            self._motion_float_sig(cmd.wz_radps),
             bool(edge_is_stale),
             bool(edge_obs is None or not edge_valid),
             record.get("fallback_decision"),
@@ -2955,9 +2943,9 @@ class OrchestratorService(BaseModule):
             return
         cmd = decision.cmd
         planned_cmd = {
-            "vx": float(cmd.vx_norm),
-            "vy": float(cmd.vy_norm),
-            "wz": float(cmd.wz_norm),
+            "vx": float(cmd.vx_mps),
+            "vy": float(cmd.vy_mps),
+            "wz": float(cmd.wz_radps),
         }
         for trace in reset_traces:
             trace["planned_cmd"] = planned_cmd

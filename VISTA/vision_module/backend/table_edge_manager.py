@@ -1867,20 +1867,10 @@ class TableEdgeManager:
             self._last_measured_edge_dist_m is not None
             and float(self._last_measured_edge_dist_m) <= near_dist_m
         )
+        # Keep ROI mapping directly tied to the current/held bbox center.
+        # EMA center smoothing was removed to make the ROI geometry easier to
+        # reason about and tune from preview/logs.
         smoothed_center_x = None
-        table_center = local.get("table_center_norm")
-        depth_hw = self._shape_hw(depth_shape)
-        if dynamic_enable and depth_hw is not None and isinstance(table_center, (list, tuple)) and table_center:
-            try:
-                raw_center_x = float(table_center[0]) * float(depth_hw[1])
-                alpha = max(0.0, min(1.0, float(getattr(table_edge_cfg, "yolo_table_roi_ema_alpha", 0.4) or 0.4)))
-                if self._yolo_table_roi_center_x_ema is None:
-                    self._yolo_table_roi_center_x_ema = raw_center_x
-                else:
-                    self._yolo_table_roi_center_x_ema = (1.0 - alpha) * self._yolo_table_roi_center_x_ema + alpha * raw_center_x
-                smoothed_center_x = self._yolo_table_roi_center_x_ema
-            except Exception:
-                smoothed_center_x = None
         last_age_s = None
         if self._last_valid_quadrant_ts:
             last_age_s = time.time() - float(self._last_valid_quadrant_ts or 0.0)
@@ -1899,27 +1889,21 @@ class TableEdgeManager:
             yolo_dynamic_enable=dynamic_enable,
             yolo_table_class_id=int(getattr(table_edge_cfg, "yolo_table_class_id", 0) or 0),
             yolo_table_conf_min=float(getattr(table_edge_cfg, "yolo_table_conf_min", self._yolo_table_min_conf) or self._yolo_table_min_conf),
-            yolo_min_area_ratio=float(getattr(table_edge_cfg, "yolo_table_roi_min_area_ratio", 0.01) or 0.01),
-            yolo_max_area_ratio=float(getattr(table_edge_cfg, "yolo_table_roi_max_area_ratio", 0.90) or 0.90),
             smoothed_table_center_x=smoothed_center_x,
             near_distance=near_distance,
             yolo_near_bottom_norm=float(getattr(table_edge_cfg, "yolo_table_near_bottom_norm", 0.60) or 0.60),
             edge_stable=edge_stable,
             rgb_native_shape=local.get("rgb_native_shape"),
             rgb_crop_rect=local.get("rgb_crop_rect"),
-            yolo_roi_anchor=str(getattr(table_edge_cfg, "yolo_table_roi_anchor", "center") or "center"),
-            yolo_roi_lower_ratio=float(getattr(table_edge_cfg, "yolo_table_roi_lower_ratio", 0.75) or 0.75),
             yolo_roi_use_rgb_depth_mapping=bool(getattr(table_edge_cfg, "yolo_table_roi_use_rgb_depth_mapping", True)),
-            yolo_roi_mode=str(getattr(table_edge_cfg, "yolo_table_roi_mode", "bbox_expand") or "bbox_expand"),
-            yolo_roi_expand_x_ratio=float(getattr(table_edge_cfg, "yolo_table_roi_expand_x_ratio", 0.10) or 0.10),
-            yolo_roi_expand_y_ratio=float(getattr(table_edge_cfg, "yolo_table_roi_expand_y_ratio", 0.10) or 0.10),
-            yolo_roi_min_w=int(getattr(table_edge_cfg, "yolo_table_roi_min_w", 120) or 120),
-            yolo_roi_min_h=int(getattr(table_edge_cfg, "yolo_table_roi_min_h", 80) or 80),
-            yolo_roi_max_w_ratio=float(getattr(table_edge_cfg, "yolo_table_roi_max_w_ratio", 0.95) or 0.95),
-            yolo_roi_max_h_ratio=float(getattr(table_edge_cfg, "yolo_table_roi_max_h_ratio", 0.95) or 0.95),
-            yolo_roi_scale_x=float(getattr(table_edge_cfg, "yolo_table_roi_scale_x", 1.0) or 1.0),
-            yolo_roi_scale_y=float(getattr(table_edge_cfg, "yolo_table_roi_scale_y", 1.0) or 1.0),
-            rgb_to_depth_view_rect_norm=getattr(table_edge_cfg, "rgb_to_depth_view_rect_norm", None),
+            yolo_roi_mode=str(getattr(table_edge_cfg, "yolo_table_roi_mode", "centered_bbox_scale") or "centered_bbox_scale"),
+            yolo_roi_scale_x=float(getattr(table_edge_cfg, "yolo_table_roi_scale_x", 0.50) or 0.50),
+            yolo_roi_scale_y=float(getattr(table_edge_cfg, "yolo_table_roi_scale_y", 0.50) or 0.50),
+            rgb_depth_mapping_mode=str(getattr(table_edge_cfg, "rgb_depth_mapping_mode", "centered_scale") or "centered_scale"),
+            rgb_fov_in_depth_scale_x=float(getattr(table_edge_cfg, "rgb_fov_in_depth_scale_x", 0.75) or 0.75),
+            rgb_fov_in_depth_scale_y=float(getattr(table_edge_cfg, "rgb_fov_in_depth_scale_y", 0.75) or 0.75),
+            rgb_depth_center_offset_x=float(getattr(table_edge_cfg, "rgb_depth_center_offset_x", 0.0) or 0.0),
+            rgb_depth_center_offset_y=float(getattr(table_edge_cfg, "rgb_depth_center_offset_y", 0.0) or 0.0),
             last_valid_depth_roi=self._last_valid_depth_roi,
             yolo_table_bbox_hold_enable=bool(getattr(table_edge_cfg, "yolo_table_bbox_hold_enable", True)),
             yolo_table_bbox_hold_frames=int(getattr(table_edge_cfg, "yolo_table_bbox_hold_frames", 8) or 8),
@@ -1951,20 +1935,15 @@ class TableEdgeManager:
         roi_meta["roi_hold_age_frames"] = int(self._last_valid_table_bbox_hold_frames if roi_source_text == "yolo_table_bbox_hold" else 0)
         roi_meta["last_valid_table_edge_roi"] = self._last_valid_depth_roi
         roi_meta["yolo_table_roi_enable"] = bool(dynamic_enable)
-        roi_meta["yolo_table_roi_ema_alpha"] = float(getattr(table_edge_cfg, "yolo_table_roi_ema_alpha", 0.4) or 0.4)
-        roi_meta["yolo_table_roi_anchor"] = str(getattr(table_edge_cfg, "yolo_table_roi_anchor", "center") or "center")
-        roi_meta["yolo_table_roi_lower_ratio"] = float(getattr(table_edge_cfg, "yolo_table_roi_lower_ratio", 0.75) or 0.75)
         roi_meta["yolo_table_roi_use_rgb_depth_mapping"] = bool(getattr(table_edge_cfg, "yolo_table_roi_use_rgb_depth_mapping", True))
-        roi_meta["yolo_table_roi_mode"] = str(getattr(table_edge_cfg, "yolo_table_roi_mode", "bbox_expand") or "bbox_expand")
-        roi_meta["yolo_table_roi_expand_x_ratio"] = float(getattr(table_edge_cfg, "yolo_table_roi_expand_x_ratio", 0.10) or 0.10)
-        roi_meta["yolo_table_roi_expand_y_ratio"] = float(getattr(table_edge_cfg, "yolo_table_roi_expand_y_ratio", 0.10) or 0.10)
-        roi_meta["yolo_table_roi_min_w"] = int(getattr(table_edge_cfg, "yolo_table_roi_min_w", 120) or 120)
-        roi_meta["yolo_table_roi_min_h"] = int(getattr(table_edge_cfg, "yolo_table_roi_min_h", 80) or 80)
-        roi_meta["yolo_table_roi_max_w_ratio"] = float(getattr(table_edge_cfg, "yolo_table_roi_max_w_ratio", 0.95) or 0.95)
-        roi_meta["yolo_table_roi_max_h_ratio"] = float(getattr(table_edge_cfg, "yolo_table_roi_max_h_ratio", 0.95) or 0.95)
-        roi_meta["yolo_table_roi_scale_x"] = float(getattr(table_edge_cfg, "yolo_table_roi_scale_x", 1.0) or 1.0)
-        roi_meta["yolo_table_roi_scale_y"] = float(getattr(table_edge_cfg, "yolo_table_roi_scale_y", 1.0) or 1.0)
-        roi_meta["rgb_to_depth_view_rect_norm"] = getattr(table_edge_cfg, "rgb_to_depth_view_rect_norm", None)
+        roi_meta["yolo_table_roi_mode"] = str(getattr(table_edge_cfg, "yolo_table_roi_mode", "centered_bbox_scale") or "centered_bbox_scale")
+        roi_meta["yolo_table_roi_scale_x"] = float(getattr(table_edge_cfg, "yolo_table_roi_scale_x", 0.50) or 0.50)
+        roi_meta["yolo_table_roi_scale_y"] = float(getattr(table_edge_cfg, "yolo_table_roi_scale_y", 0.50) or 0.50)
+        roi_meta["rgb_depth_mapping_mode"] = str(getattr(table_edge_cfg, "rgb_depth_mapping_mode", "centered_scale") or "centered_scale")
+        roi_meta["rgb_fov_in_depth_scale_x"] = float(getattr(table_edge_cfg, "rgb_fov_in_depth_scale_x", 0.75) or 0.75)
+        roi_meta["rgb_fov_in_depth_scale_y"] = float(getattr(table_edge_cfg, "rgb_fov_in_depth_scale_y", 0.75) or 0.75)
+        roi_meta["rgb_depth_center_offset_x"] = float(getattr(table_edge_cfg, "rgb_depth_center_offset_x", 0.0) or 0.0)
+        roi_meta["rgb_depth_center_offset_y"] = float(getattr(table_edge_cfg, "rgb_depth_center_offset_y", 0.0) or 0.0)
         roi_meta["yolo_table_bbox_hold_enable"] = bool(getattr(table_edge_cfg, "yolo_table_bbox_hold_enable", True))
         roi_meta["yolo_table_bbox_hold_frames"] = int(getattr(table_edge_cfg, "yolo_table_bbox_hold_frames", 8) or 8)
         roi_meta["yolo_table_roi_hold_enable"] = bool(getattr(table_edge_cfg, "yolo_table_roi_hold_enable", True))
@@ -2024,21 +2003,10 @@ class TableEdgeManager:
             "yolo_table_roi_valid",
             "roi_phase",
             "yolo_table_roi_enable",
-            "yolo_table_roi_ema_alpha",
-            "yolo_table_roi_anchor",
-            "yolo_table_roi_lower_ratio",
             "yolo_table_roi_use_rgb_depth_mapping",
             "yolo_table_roi_mode",
-            "yolo_table_roi_expand_x_ratio",
-            "yolo_table_roi_expand_y_ratio",
-            "yolo_table_roi_min_w",
-            "yolo_table_roi_min_h",
-            "yolo_table_roi_max_w_ratio",
-            "yolo_table_roi_max_h_ratio",
             "yolo_table_roi_scale_x",
             "yolo_table_roi_scale_y",
-            "rgb_to_depth_view_rect_norm",
-            "rgb_to_depth_view_rect_used",
             "yolo_table_bbox_hold_enable",
             "yolo_table_bbox_hold_frames",
             "yolo_table_roi_hold_enable",
@@ -2049,7 +2017,6 @@ class TableEdgeManager:
             "roi_hold_active",
             "roi_hold_age_frames",
             "last_valid_table_edge_roi",
-            "yolo_table_roi_center_x_ema",
             "yolo_table_edge_stable_count",
             "yolo_table_edge_stable_required",
             "yolo_table_near_distance",
@@ -2063,8 +2030,6 @@ class TableEdgeManager:
             "roi_y_strategy",
             "rgb_shape",
             "depth_shape",
-            "rgb_native_shape",
-            "rgb_crop_rect",
             "table_bbox_rgb_xyxy",
             "table_bbox_rgb_center",
             "table_bbox_rgb_center_norm",
@@ -2072,14 +2037,14 @@ class TableEdgeManager:
             "mapped_depth_bbox_unclipped_xyxy",
             "mapped_depth_bbox_xyxy",
             "yolo_table_roi_mode",
-            "roi_expand_x_ratio",
-            "roi_expand_y_ratio",
-            "roi_min_w",
-            "roi_min_h",
             "roi_scale_x",
             "roi_scale_y",
-            "roi_center_x_smoothed",
-            "roi_anchor",
+            "rgb_depth_mapping_mode",
+            "rgb_fov_in_depth_scale_x",
+            "rgb_fov_in_depth_scale_y",
+            "rgb_depth_center_offset_x",
+            "rgb_depth_center_offset_y",
+            "mapped_depth_center_norm",
             "roi_mapping_mode",
             "roi_clamped",
             "yolo_bbox_center_y",

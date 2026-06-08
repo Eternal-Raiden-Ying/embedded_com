@@ -179,11 +179,11 @@ def main() -> None:
             "size_norm": args.size,
         }
         if args.vx is not None:
-            obs["vx_norm"] = args.vx
+            obs["vx_mps"] = args.vx
         if args.vy is not None:
-            obs["vy_norm"] = args.vy
+            obs["vy_mps"] = args.vy
         if args.wz is not None:
-            obs["wz_norm"] = args.wz
+            obs["wz_radps"] = args.wz
         payload = {**base, "type": "target_obs", **obs} if args.legacy else wrap_vision_obs(
             base,
             "target_obs",
@@ -260,7 +260,7 @@ def main() -> None:
             }
             obs = {
                 "found": False,
-                "vy_norm": vy,
+                "vy_mps": vy,
             }
             payload = {**base, "type": "target_obs", **obs} if args.legacy else wrap_vision_obs(
                 base,

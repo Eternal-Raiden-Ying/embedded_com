@@ -679,9 +679,9 @@ class TargetObs:
     req_id: Optional[str] = None
     session_id: Optional[str] = None
     epoch: int = 0
-    vx_norm: Optional[float] = None
-    vy_norm: Optional[float] = None
-    wz_norm: Optional[float] = None
+    vx_mps: Optional[float] = None
+    vy_mps: Optional[float] = None
+    wz_radps: Optional[float] = None
     obstacle_flag: bool = False
     best_turn_dir: Optional[str] = None
     obstacle_distance_m: Optional[float] = None
@@ -734,9 +734,9 @@ class TargetObs:
             req_id=_pick_optional_str(payload, "req_id"),
             session_id=_pick_optional_str(payload, "session_id", "task_id"),
             epoch=int(payload.get("epoch", 0) or 0),
-            vx_norm=_pick_optional_float(payload, "vx_norm", "vx", "v_norm", "linear_norm"),
-            vy_norm=_pick_optional_float(payload, "vy_norm", "vy", "lateral_norm"),
-            wz_norm=_pick_optional_float(payload, "wz_norm", "wz", "omega_norm", "angular_norm"),
+            vx_mps=_pick_optional_float(payload, "vx_mps", "vx", "v_norm", "linear_norm"),
+            vy_mps=_pick_optional_float(payload, "vy_mps", "vy", "lateral_norm"),
+            wz_radps=_pick_optional_float(payload, "wz_radps", "wz", "omega_norm", "angular_norm"),
             obstacle_flag=bool(payload.get("obstacle_flag", payload.get("obstacle", False))),
             best_turn_dir=_pick_optional_str(payload, "best_turn_dir", "avoid_dir"),
             obstacle_distance_m=_pick_optional_float(payload, "obstacle_distance_m", "obstacle_distance", "front_obstacle_m"),
@@ -757,9 +757,9 @@ class HomeTagObs:
     req_id: Optional[str] = None
     session_id: Optional[str] = None
     epoch: int = 0
-    vx_norm: Optional[float] = None
-    vy_norm: Optional[float] = None
-    wz_norm: Optional[float] = None
+    vx_mps: Optional[float] = None
+    vy_mps: Optional[float] = None
+    wz_radps: Optional[float] = None
     obstacle_flag: bool = False
     best_turn_dir: Optional[str] = None
     obstacle_distance_m: Optional[float] = None
@@ -776,9 +776,9 @@ class HomeTagObs:
             req_id=_pick_optional_str(payload, "req_id"),
             session_id=_pick_optional_str(payload, "session_id", "task_id"),
             epoch=int(payload.get("epoch", 0) or 0),
-            vx_norm=_pick_optional_float(payload, "vx_norm", "vx", "v_norm", "linear_norm"),
-            vy_norm=_pick_optional_float(payload, "vy_norm", "vy", "lateral_norm"),
-            wz_norm=_pick_optional_float(payload, "wz_norm", "wz", "omega_norm", "angular_norm"),
+            vx_mps=_pick_optional_float(payload, "vx_mps", "vx", "v_norm", "linear_norm"),
+            vy_mps=_pick_optional_float(payload, "vy_mps", "vy", "lateral_norm"),
+            wz_radps=_pick_optional_float(payload, "wz_radps", "wz", "omega_norm", "angular_norm"),
             obstacle_flag=bool(payload.get("obstacle_flag", payload.get("obstacle", False))),
             best_turn_dir=_pick_optional_str(payload, "best_turn_dir", "avoid_dir"),
             obstacle_distance_m=_pick_optional_float(payload, "obstacle_distance_m", "obstacle_distance", "front_obstacle_m"),
@@ -838,9 +838,9 @@ class CarState:
 class CmdVel:
     ts: float
     mode: str
-    vx_norm: float = 0.0
-    vy_norm: float = 0.0
-    wz_norm: float = 0.0
+    vx_mps: float = 0.0
+    vy_mps: float = 0.0
+    wz_radps: float = 0.0
     hold_ms: int = 150
     brake: bool = False
 
@@ -848,12 +848,12 @@ class CmdVel:
         return {
             "ts": float(self.ts),
             "mode": self.mode,
-            "vx_norm": float(self.vx_norm),
-            "vy_norm": float(self.vy_norm),
-            "wz_norm": float(self.wz_norm),
-            "vx": float(self.vx_norm),
-            "vy": float(self.vy_norm),
-            "wz": float(self.wz_norm),
+            "vx_mps": float(self.vx_mps),
+            "vy_mps": float(self.vy_mps),
+            "wz_radps": float(self.wz_radps),
+            "vx": float(self.vx_mps),
+            "vy": float(self.vy_mps),
+            "wz": float(self.wz_radps),
             "hold_ms": int(self.hold_ms),
             "brake": bool(self.brake),
         }
