@@ -181,6 +181,38 @@ def _roi_from_center(center_x: float, center_y: float, roi_width: int, roi_heigh
     return _clip_bbox([x1, y1, x1 + int(roi_width), y1 + int(roi_height)], image_shape)
 
 
+
+
+def _extend_roi_to_depth_boundaries(
+    roi: Any,
+    depth_shape: Any,
+    *,
+    touch_left: bool = False,
+    touch_right: bool = False,
+    touch_bottom: bool = False,
+) -> Optional[list[int]]:
+    """Extend ROI outward to depth-frame boundaries for RGB-boundary table bboxes.
+
+    This is intentionally simple: when the table bbox touches an RGB boundary,
+    the corresponding side of the depth ROI is extended to the depth image
+    boundary.  The opposite side remains unchanged.
+    """
+    parsed = _parse_bbox(roi)
+    shape = _parse_shape(depth_shape)
+    if parsed is None or shape is None:
+        return None
+    height, width = shape
+    x1, y1, x2, y2 = [int(v) for v in parsed[:4]]
+    if bool(touch_left):
+        x1 = 0
+    if bool(touch_right):
+        x2 = int(width)
+    if bool(touch_bottom):
+        y2 = int(height)
+    extended = _clip_bbox([x1, y1, x2, y2], depth_shape)
+    return extended if extended != parsed else None
+
+
 def _crop_rect_for_mapping(rgb_native_shape: Any, rgb_crop_rect: Any) -> Optional[list[float]]:
     native = _parse_shape(rgb_native_shape)
     if native is None:
@@ -239,6 +271,8 @@ def map_rgb_bbox_to_depth_roi(
     rgb_fov_in_depth_scale_y: float = 0.75,
     rgb_depth_center_offset_x: float = 0.0,
     rgb_depth_center_offset_y: float = 0.0,
+    boundary_extend_enable: bool = True,
+    boundary_margin_norm: float = 0.03,
     **_compat: Any,
 ) -> Tuple[Optional[list[int]], Dict[str, Any]]:
     """Map a YOLO table bbox from RGB output coordinates into a depth ROI.
@@ -409,6 +443,8 @@ def compute_dynamic_table_roi_from_yolo_bbox(
     rgb_fov_in_depth_scale_y: float = 0.75,
     rgb_depth_center_offset_x: float = 0.0,
     rgb_depth_center_offset_y: float = 0.0,
+    boundary_extend_enable: bool = True,
+    boundary_margin_norm: float = 0.03,
     **_compat: Any,
 ) -> Dict[str, Any]:
     """Return a center-following ROI that preserves the current static ROI size."""
@@ -448,7 +484,7 @@ def compute_dynamic_table_roi_from_yolo_bbox(
     else:
         reason = ""
     area_ratio = _bbox_area_ratio(bbox, bbox_shape)
-    touch = _bbox_touch_flags(bbox, bbox_shape)
+    touch = _bbox_touch_flags(bbox, bbox_shape, edge_margin_norm=_safe_float(boundary_margin_norm, 0.03, lo=0.0, hi=0.25))
     touch_bottom = bool(touch.get("table_bbox_touch_bottom", False))
     touch_left = bool(touch.get("table_bbox_touch_left", False))
     touch_right = bool(touch.get("table_bbox_touch_right", False))
@@ -525,6 +561,21 @@ def compute_dynamic_table_roi_from_yolo_bbox(
             mapping_debug["roi_center_x_smoothed"] = True
         except Exception:
             pass
+    boundary_extended_roi = _extend_roi_to_depth_boundaries(
+        roi,
+        image_shape,
+        touch_left=touch_left,
+        touch_right=touch_right,
+        touch_bottom=touch_bottom,
+    ) if bool(boundary_extend_enable) else None
+    boundary_axes = []
+    if touch_left:
+        boundary_axes.append("left")
+    if touch_right:
+        boundary_axes.append("right")
+    if touch_bottom:
+        boundary_axes.append("bottom")
+
     roi_source = "yolo_table_bbox_mapped"
     roi_reason = "table_bbox_rgb_depth_mapped_bbox_size_driven"
     roi_phase = "edge_fusion" if str(edge_stability or "").lower() == "stable" else "far_yolo_guided"
@@ -543,6 +594,11 @@ def compute_dynamic_table_roi_from_yolo_bbox(
         "yolo_table_conf": score,
         **touch,
         "table_bbox_boundary_allowed": bool(touch_left or touch_right or touch_bottom),
+        "boundary_extend_enabled": bool(boundary_extend_enable),
+        "boundary_extend_candidate": bool(boundary_extended_roi is not None),
+        "boundary_extended_roi": boundary_extended_roi,
+        "boundary_extend_touch_axes": boundary_axes,
+        "boundary_margin_norm": float(_safe_float(boundary_margin_norm, 0.03, lo=0.0, hi=0.25)),
         "yolo_table_roi_valid": True,
         "bbox_y1_norm": bbox_y1_norm,
         "bbox_y2_norm": bbox_y2_norm,
@@ -596,6 +652,8 @@ def choose_depth_roi(
     rgb_fov_in_depth_scale_y: float = 0.75,
     rgb_depth_center_offset_x: float = 0.0,
     rgb_depth_center_offset_y: float = 0.0,
+    yolo_table_roi_boundary_extend_enable: bool = True,
+    yolo_table_roi_boundary_margin_norm: float = 0.03,
     last_valid_depth_roi: Any = None,
     yolo_table_bbox_hold_enable: bool = True,
     yolo_table_bbox_hold_frames: int = 8,
@@ -652,6 +710,8 @@ def choose_depth_roi(
             rgb_fov_in_depth_scale_y=rgb_fov_in_depth_scale_y,
             rgb_depth_center_offset_x=rgb_depth_center_offset_x,
             rgb_depth_center_offset_y=rgb_depth_center_offset_y,
+            boundary_extend_enable=yolo_table_roi_boundary_extend_enable,
+            boundary_margin_norm=yolo_table_roi_boundary_margin_norm,
         )
         depth_edge_roi = dyn.get("dynamic_roi") or fallback_roi
         roi_source = str(dyn.get("roi_source") or "static_no_yolo_fallback")
@@ -734,5 +794,7 @@ def choose_depth_roi(
         "rgb_fov_in_depth_scale_y": float(rgb_fov_in_depth_scale_y or 0.75),
         "rgb_depth_center_offset_x": float(rgb_depth_center_offset_x or 0.0),
         "rgb_depth_center_offset_y": float(rgb_depth_center_offset_y or 0.0),
+        "yolo_table_roi_boundary_extend_enable": bool(yolo_table_roi_boundary_extend_enable),
+        "yolo_table_roi_boundary_margin_norm": float(yolo_table_roi_boundary_margin_norm or 0.0),
         **(dyn if "dyn" in locals() and isinstance(dyn, dict) else {}),
     }

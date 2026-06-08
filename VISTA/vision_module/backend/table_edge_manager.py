@@ -115,6 +115,8 @@ class TableEdgeManager:
         self._last_valid_table_center_norm = None
         self._last_valid_depth_roi = None
         self._last_valid_table_bbox_hold_frames = 0
+        self._force_depth_roi_once: Optional[list[int]] = None
+        self._force_depth_roi_reason_once = ""
         self._yolo_table_roi_center_x_ema: Optional[float] = None
         self._edge_stable_count = 0
         self._edge_stability_prev: Dict[str, Any] = {}
@@ -1904,19 +1906,38 @@ class TableEdgeManager:
             rgb_fov_in_depth_scale_y=float(getattr(table_edge_cfg, "rgb_fov_in_depth_scale_y", 0.75) or 0.75),
             rgb_depth_center_offset_x=float(getattr(table_edge_cfg, "rgb_depth_center_offset_x", 0.0) or 0.0),
             rgb_depth_center_offset_y=float(getattr(table_edge_cfg, "rgb_depth_center_offset_y", 0.0) or 0.0),
+            yolo_table_roi_boundary_extend_enable=bool(getattr(table_edge_cfg, "yolo_table_roi_boundary_extend_enable", True)),
+            yolo_table_roi_boundary_margin_norm=float(getattr(table_edge_cfg, "yolo_table_roi_boundary_margin_norm", 0.03) or 0.03),
             last_valid_depth_roi=self._last_valid_depth_roi,
             yolo_table_bbox_hold_enable=bool(getattr(table_edge_cfg, "yolo_table_bbox_hold_enable", True)),
             yolo_table_bbox_hold_frames=int(getattr(table_edge_cfg, "yolo_table_bbox_hold_frames", 8) or 8),
             table_bbox_hold_age_frames=int(self._last_valid_table_bbox_hold_frames or 0),
             yolo_table_roi_hold_enable=bool(getattr(table_edge_cfg, "yolo_table_roi_hold_enable", True)),
         )
+        force_roi = getattr(self, "_force_depth_roi_once", None)
+        if force_roi is not None:
+            try:
+                force_roi_list = [int(v) for v in force_roi[:4]]
+                primary_roi = roi_meta.get("depth_edge_roi") or roi_meta.get("table_edge_roi") or roi_meta.get("edge_roi")
+                roi_meta["primary_depth_edge_roi"] = primary_roi
+                roi_meta["depth_edge_roi"] = force_roi_list
+                roi_meta["table_edge_roi"] = force_roi_list
+                roi_meta["edge_roi"] = force_roi_list
+                roi_meta["dynamic_roi"] = force_roi_list
+                roi_meta["roi_source"] = "yolo_table_bbox_boundary_extend"
+                roi_meta["roi_reason"] = str(getattr(self, "_force_depth_roi_reason_once", "") or "boundary_extend_after_primary_edge_missing")
+                roi_meta["boundary_extend_active"] = True
+                roi_meta["boundary_extend_retry_used"] = True
+            except Exception:
+                pass
+
         quadrant = roi_meta.get("table_quadrant")
         table_bbox = roi_meta.get("table_bbox")
         roi_source_text = str(roi_meta.get("roi_source") or "")
         current_table_bbox_found = bool(roi_meta.get("table_bbox_current_found", False))
         if not current_table_bbox_found and table_bbox is not None and roi_source_text != "yolo_table_bbox_hold":
-            current_table_bbox_found = roi_source_text in {"local_perception_table_bbox", "yolo_table_bbox", "yolo_table_mapped_center", "yolo_table_bbox_mapped"}
-        if current_table_bbox_found and roi_source_text in {"local_perception_table_bbox", "yolo_table_bbox", "yolo_table_mapped_center", "yolo_table_bbox_mapped"}:
+            current_table_bbox_found = roi_source_text in {"local_perception_table_bbox", "yolo_table_bbox", "yolo_table_mapped_center", "yolo_table_bbox_mapped", "yolo_table_bbox_boundary_extend"}
+        if current_table_bbox_found and roi_source_text in {"local_perception_table_bbox", "yolo_table_bbox", "yolo_table_mapped_center", "yolo_table_bbox_mapped", "yolo_table_bbox_boundary_extend"}:
             self._last_valid_quadrant = str(quadrant).strip().upper() if quadrant else self._last_valid_quadrant
             self._last_valid_quadrant_ts = time.time()
             self._last_valid_table_bbox = table_bbox
@@ -1944,6 +1965,8 @@ class TableEdgeManager:
         roi_meta["rgb_fov_in_depth_scale_y"] = float(getattr(table_edge_cfg, "rgb_fov_in_depth_scale_y", 0.75) or 0.75)
         roi_meta["rgb_depth_center_offset_x"] = float(getattr(table_edge_cfg, "rgb_depth_center_offset_x", 0.0) or 0.0)
         roi_meta["rgb_depth_center_offset_y"] = float(getattr(table_edge_cfg, "rgb_depth_center_offset_y", 0.0) or 0.0)
+        roi_meta["yolo_table_roi_boundary_extend_enable"] = bool(getattr(table_edge_cfg, "yolo_table_roi_boundary_extend_enable", True))
+        roi_meta["yolo_table_roi_boundary_margin_norm"] = float(getattr(table_edge_cfg, "yolo_table_roi_boundary_margin_norm", 0.03) or 0.03)
         roi_meta["yolo_table_bbox_hold_enable"] = bool(getattr(table_edge_cfg, "yolo_table_bbox_hold_enable", True))
         roi_meta["yolo_table_bbox_hold_frames"] = int(getattr(table_edge_cfg, "yolo_table_bbox_hold_frames", 8) or 8)
         roi_meta["yolo_table_roi_hold_enable"] = bool(getattr(table_edge_cfg, "yolo_table_roi_hold_enable", True))
@@ -2045,6 +2068,16 @@ class TableEdgeManager:
             "rgb_depth_center_offset_x",
             "rgb_depth_center_offset_y",
             "mapped_depth_center_norm",
+            "primary_depth_edge_roi",
+            "boundary_extend_enabled",
+            "boundary_extend_candidate",
+            "boundary_extended_roi",
+            "boundary_extend_touch_axes",
+            "boundary_extend_active",
+            "boundary_extend_retry_used",
+            "boundary_margin_norm",
+            "yolo_table_roi_boundary_extend_enable",
+            "yolo_table_roi_boundary_margin_norm",
             "roi_mapping_mode",
             "roi_clamped",
             "yolo_bbox_center_y",
@@ -2263,6 +2296,46 @@ class TableEdgeManager:
         return self._attach_profile(payload, profile, path="full")
 
     def _process_depth_fast_plane_only(self, depth_frame: np.ndarray, frame_seq: int) -> Dict[str, Any]:
+        """Run fast-plane detector, then retry once with boundary-extended ROI if needed.
+
+        The normal path uses the small bbox-scaled ROI.  If that path fails to
+        find edge geometry and the YOLO table bbox touches RGB left/right/bottom,
+        the ROI helper provides a boundary-extended ROI.  Only then do we pay for
+        a second fast pass.
+        """
+        self._force_depth_roi_once = None
+        self._force_depth_roi_reason_once = ""
+        primary = self._process_depth_fast_plane_only_once(depth_frame, frame_seq)
+        primary_edge_ok = bool(primary.get("edge_found") or primary.get("edge_geometry_valid") or primary.get("edge_valid"))
+        ext_roi = primary.get("boundary_extended_roi")
+        can_retry = (
+            not primary_edge_ok
+            and bool(primary.get("boundary_extend_candidate"))
+            and isinstance(ext_roi, (list, tuple))
+            and len(ext_roi) >= 4
+        )
+        if not can_retry:
+            primary["boundary_extend_retry_used"] = False
+            return primary
+
+        try:
+            self._force_depth_roi_once = [int(v) for v in ext_roi[:4]]
+            self._force_depth_roi_reason_once = "boundary_extend_after_primary_edge_missing"
+            retry = self._process_depth_fast_plane_only_once(depth_frame, frame_seq)
+        finally:
+            self._force_depth_roi_once = None
+            self._force_depth_roi_reason_once = ""
+
+        retry.update({
+            "boundary_extend_retry_used": True,
+            "boundary_extend_retry_selected": True,
+            "boundary_extend_primary_edge_found": bool(primary_edge_ok),
+            "boundary_extend_primary_reason": primary.get("reject_reason") or primary.get("reason") or primary.get("fast_gate_reject_reason"),
+            "boundary_extend_primary_roi": primary.get("depth_edge_roi") or primary.get("table_edge_roi") or primary.get("edge_roi"),
+        })
+        return retry
+
+    def _process_depth_fast_plane_only_once(self, depth_frame: np.ndarray, frame_seq: int) -> Dict[str, Any]:
         total_start = time.perf_counter()
         profile = self._profile_template()
         profile["depth_frame_fetch_ms"] = float(self._last_depth_frame_fetch_ms)

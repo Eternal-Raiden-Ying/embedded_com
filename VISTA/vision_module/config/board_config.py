@@ -223,6 +223,8 @@ def _apply_vision_params(data: Dict[str, Any]) -> None:
             "yolo_table_bbox_hold_enable",
             "yolo_table_bbox_hold_frames",
             "yolo_table_roi_hold_enable",
+            "yolo_table_roi_boundary_extend_enable",
+            "yolo_table_roi_boundary_margin_norm",
             "yolo_table_edge_stable_frames",
             "yolo_table_near_dist_m",
             "yolo_table_near_bottom_norm",

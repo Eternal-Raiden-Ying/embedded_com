@@ -167,6 +167,11 @@ class TableEdgeConfig:
     yolo_table_bbox_hold_enable: bool = True
     yolo_table_bbox_hold_frames: int = 8
     yolo_table_roi_hold_enable: bool = True
+    # Boundary extension is a second-pass ROI fallback: when the normal small
+    # YOLO ROI fails to find an edge and the RGB bbox touches left/right/bottom,
+    # extend only the touched ROI side to the depth-frame boundary.
+    yolo_table_roi_boundary_extend_enable: bool = True
+    yolo_table_roi_boundary_margin_norm: float = 0.03
     yolo_table_edge_stable_frames: int = 5
     edge_trusted_min_conf: float = 0.60
     edge_trusted_max_residual: float = 0.0  # <=0 disables residual gate
