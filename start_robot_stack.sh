@@ -20,7 +20,8 @@ STACK_ROOT="$SCRIPT_DIR"
 # =========================
 VISION_ROOT="${VISION_ROOT:-$STACK_ROOT/VISTA}"
 ORCH_ROOT="${ORCH_ROOT:-$STACK_ROOT/orchestrator}"
-GATEWAY_CONFIG="${GATEWAY_CONFIG:-$STACK_ROOT/configs/mobile_gateway.mqtt.yaml}"
+SYSTEM_CONFIG_FILE="${SYSTEM_CONFIG_FILE:-$STACK_ROOT/configs/system_config.yaml}"
+GATEWAY_CONFIG="${GATEWAY_CONFIG:-$SYSTEM_CONFIG_FILE}"
 VISION_LD_PRELOAD="${VISION_LD_PRELOAD:-/lib/aarch64-linux-gnu/libGLdispatch.so.0}"
 VISTA_TABLE_BBOX_ENABLE="${VISTA_TABLE_BBOX_ENABLE:-0}"
 VISTA_TABLE_MODEL="${VISTA_TABLE_MODEL:-yolov7_detect}"
@@ -286,6 +287,7 @@ show_banner() {
   printf '%btable bbox%b     : enable=%s model=%s mock=%s preview_rgb=%s\n' \
     "$C_BOLD" "$C_RESET" "$VISTA_TABLE_BBOX_ENABLE" "$VISTA_TABLE_MODEL" "${VISTA_MOCK_TABLE_BBOX:-<none>}" "$VISTA_PREVIEW_RGB"
   printf '%borch root%b      : %s\n' "$C_BOLD" "$C_RESET" "$ORCH_ROOT"
+  printf '%bsystem config%b  : %s\n' "$C_BOLD" "$C_RESET" "$SYSTEM_CONFIG_FILE"
   printf '%bgateway config%b : %s\n' "$C_BOLD" "$C_RESET" "$GATEWAY_CONFIG"
   printf '%bready timeout%b  : %ss\n' "$C_BOLD" "$C_RESET" "$READY_TIMEOUT_S"
   printf '%buart device%b    : %s @ %s\n' "$C_BOLD" "$C_RESET" "$UART_DEV" "$UART_BAUDRATE"
@@ -453,6 +455,8 @@ start_vision_bg() {
   cmd=$(cat <<CMD
 set -euo pipefail
 cd "$VISION_ROOT"
+export PYTHONPATH="$STACK_ROOT:$VISION_ROOT\${PYTHONPATH:+:\$PYTHONPATH}"
+export SYSTEM_CONFIG_FILE="$SYSTEM_CONFIG_FILE"
 export PYTHONUNBUFFERED="$PYTHONUNBUFFERED"
 export ROBOT_CONSOLE_COLOR=never
 export ROBOT_CONSOLE_LEVEL="$ROBOT_CONSOLE_LEVEL"
@@ -495,6 +499,8 @@ start_orch_bg() {
   cmd=$(cat <<CMD
 set -euo pipefail
 cd "$ORCH_ROOT"
+export PYTHONPATH="$STACK_ROOT:$ORCH_ROOT\${PYTHONPATH:+:\$PYTHONPATH}"
+export SYSTEM_CONFIG_FILE="$SYSTEM_CONFIG_FILE"
 export PYTHONUNBUFFERED="$PYTHONUNBUFFERED"
 export ROBOT_CONSOLE_COLOR=never
 export ROBOT_RUN_MODULE_SUBDIRS=1
@@ -543,12 +549,13 @@ start_gateway_bg() {
   cmd=$(cat <<CMD
 set -euo pipefail
 cd "$STACK_ROOT"
+export PYTHONPATH="$STACK_ROOT:$ORCH_ROOT\${PYTHONPATH:+:\$PYTHONPATH}"
+export SYSTEM_CONFIG_FILE="$SYSTEM_CONFIG_FILE"
 export PYTHONUNBUFFERED="$PYTHONUNBUFFERED"
 export ROBOT_CONSOLE_COLOR=never
 export ROBOT_RUN_MODULE_SUBDIRS=1
 export STACK_RUN_ID="$STACK_RUN_ID"
 unset FORCE_COLOR
-export PYTHONPATH="$ORCH_ROOT"
 export ROBOT_CONSOLE_LEVEL="$ROBOT_CONSOLE_LEVEL"
 export MOBILE_GATEWAY_LOG_ENABLED="$(gateway_logs_enabled && echo 1 || echo 0)"
 export MOBILE_GATEWAY_STATUS_STDOUT="$(gateway_logs_enabled && echo 1 || echo 0)"
