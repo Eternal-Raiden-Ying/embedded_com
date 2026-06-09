@@ -12,14 +12,11 @@ from .common import monotonic_ts
 
 class State(str, Enum):
     IDLE = "IDLE"
-    TABLE_APPROACH_WARMUP = "TABLE_APPROACH_WARMUP"
     SEARCH_TABLE = "SEARCH_TABLE"
     YOLO_ACQUIRE_ALIGN = "YOLO_ACQUIRE_ALIGN"
     YOLO_APPROACH = "YOLO_APPROACH"
-    COARSE_ALIGN = "COARSE_ALIGN"
-    CONTROLLED_APPROACH = "CONTROLLED_APPROACH"
-    FINAL_LOCK = "FINAL_LOCK"
-    DOCK_RETRY = "DOCK_RETRY"
+    EDGE_ADJUST = "EDGE_ADJUST"
+    FINAL_SLOW_STOP = "FINAL_SLOW_STOP"
     AT_TABLE_EDGE = "AT_TABLE_EDGE"
     SEARCH_TARGET_INIT = "SEARCH_TARGET_INIT"
     EDGE_SLIDE_SEARCH = "EDGE_SLIDE_SEARCH"
@@ -29,12 +26,13 @@ class State(str, Enum):
     GRASP = "GRASP"
     LEAVE_EDGE = "LEAVE_EDGE"
     RELOCATE_TO_EDGE = "RELOCATE_TO_EDGE"
-    REACQUIRE_EDGE = "REACQUIRE_EDGE"
+    REACQUIRE_TABLE = "REACQUIRE_TABLE"
     NEXT_TABLE = "NEXT_TABLE"
     AVOID_OBSTACLE = "AVOID_OBSTACLE"
     RETURN_HOME = "RETURN_HOME"
     ERROR_RECOVERY = "ERROR_RECOVERY"
     DONE = "DONE"
+    NO_PROGRESS_RECOVERY = "NO_PROGRESS_RECOVERY"
 
 
 @dataclass
@@ -134,7 +132,7 @@ class RuntimeContext:
     tag_arrived_frames: int = 0
     avoid_clear_frames: int = 0
     avoid_retry_count: int = 0
-    dock_retry_count: int = 0
+    no_progress_recovery_count: int = 0
     edge_slide_relock_attempts: int = 0
 
     table_loss_since_mono: float = 0.0
@@ -272,7 +270,7 @@ class RuntimeContext:
         self.last_enter_reason = ""
         self.table_cycle_count = 0
         self.avoid_retry_count = 0
-        self.dock_retry_count = 0
+        self.no_progress_recovery_count = 0
         self.edge_slide_relock_attempts = 0
         self.vision_req_fail_streak = 0
         self.task_slide_entries_count = 0

@@ -43,14 +43,13 @@ MOVING_STATES = {
     State.SEARCH_TABLE,
     State.YOLO_ACQUIRE_ALIGN,
     State.YOLO_APPROACH,
-    State.COARSE_ALIGN,
-    State.CONTROLLED_APPROACH,
-    State.FINAL_LOCK,
-    State.DOCK_RETRY,
+    State.EDGE_ADJUST,
+    State.FINAL_SLOW_STOP,
+    State.NO_PROGRESS_RECOVERY,
     State.EDGE_SLIDE_SEARCH,
     State.LEAVE_EDGE,
     State.RELOCATE_TO_EDGE,
-    State.REACQUIRE_EDGE,
+    State.REACQUIRE_TABLE,
     State.NEXT_TABLE,
     State.RETURN_HOME,
     State.AVOID_OBSTACLE,
@@ -59,14 +58,12 @@ MOVING_STATES = {
 
 
 TABLE_VISION_STATES = {
-    State.TABLE_APPROACH_WARMUP,
     State.SEARCH_TABLE,
     State.YOLO_ACQUIRE_ALIGN,
     State.YOLO_APPROACH,
-    State.COARSE_ALIGN,
-    State.CONTROLLED_APPROACH,
-    State.FINAL_LOCK,
-    State.REACQUIRE_EDGE,
+    State.EDGE_ADJUST,
+    State.FINAL_SLOW_STOP,
+    State.REACQUIRE_TABLE,
 }
 
 
@@ -80,13 +77,11 @@ TARGET_VISION_STATES = {
 
 
 TABLE_APPROACH_STATES = {
-    State.TABLE_APPROACH_WARMUP,
     State.SEARCH_TABLE,
     State.YOLO_ACQUIRE_ALIGN,
     State.YOLO_APPROACH,
-    State.COARSE_ALIGN,
-    State.CONTROLLED_APPROACH,
-    State.FINAL_LOCK,
+    State.EDGE_ADJUST,
+    State.FINAL_SLOW_STOP,
 }
 
 
@@ -1059,7 +1054,7 @@ class OrchestratorCore:
         self.ctx.active_session_id = cmd.session_id
         self.ctx.active_epoch = cmd.epoch
         self.ctx.task_start_wall_ts = time.time()
-        self._transition(State.TABLE_APPROACH_WARMUP, f"开始桌边任务，视觉warmup，目标 {target}")
+        self._transition(State.SEARCH_TABLE, f"开始桌边任务，进入桌边搜索，目标 {target}")
         self._queue_tts(f"开始寻找 {target}")
 
     def _start_return_task(self, cmd: TaskCmd):
