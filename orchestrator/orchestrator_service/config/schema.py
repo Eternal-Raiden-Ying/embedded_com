@@ -130,6 +130,12 @@ class ControlThresholds:
     dock_retry_limit: int = 2
     dock_retry_backoff_s: float = 0.60
 
+    # Depth safety thresholds
+    near_slow_depth_m: float = 0.40
+    near_stop_depth_m: float = 0.25
+    near_slow_max_vx_mps: float = 0.010
+    near_slow_max_wz_radps: float = 0.04
+
     search_target_init_hold_s: float = 0.25
     target_found_frames_to_confirm: int = 3
     target_confirm_conf_th: float = 0.30

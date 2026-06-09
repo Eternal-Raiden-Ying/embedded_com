@@ -400,6 +400,8 @@ class TableEdgeObs:
     yaw_err_rad: Optional[float] = None
     dist_err_m: Optional[float] = None
     lateral_err_m: Optional[float] = None
+    depth_p10: Optional[float] = None
+    close_depth_ratio: Optional[float] = None
     edge_angle_rad: Optional[float] = None
     edge_k: Optional[float] = None
     edge_b: Optional[float] = None
@@ -555,6 +557,8 @@ class TableEdgeObs:
             yaw_err_rad=_pick_optional_float(payload, "yaw_err_rad", "yaw_err", "edge_yaw_err_rad", "yaw_error_rad"),
             dist_err_m=_pick_optional_float(payload, "dist_err_m", "dist_err", "edge_dist_err_m", "distance_error_m", "table_edge_distance_m", "edge_distance_m"),
             lateral_err_m=_pick_optional_float(payload, "lateral_err_m", "edge_lateral_err_m", "lateral_error_m"),
+            depth_p10=_pick_optional_float(payload, "depth_p10"),
+            close_depth_ratio=_pick_optional_float(payload, "close_depth_ratio"),
             edge_angle_rad=_pick_optional_float(payload, "edge_angle_rad"),
             edge_k=_pick_optional_float(payload, "edge_k"),
             edge_b=_pick_optional_float(payload, "edge_b"),

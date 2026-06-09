@@ -3690,9 +3690,30 @@ class TableEdgeManager:
         finally:
             self._processing_busy = False
         vision_done_ts = time.time()
+        
+        # Compute pure depth safety metrics
+        depth_p10 = None
+        close_depth_ratio = None
+        if isinstance(depth, np.ndarray) and depth.ndim == 2 and depth.size > 0:
+            H, W = depth.shape
+            y_start = int(H * 0.6)
+            x_start = int(W * 0.1)
+            x_end = int(W * 0.9)
+            safety_roi = depth[y_start:, x_start:x_end]
+            depth_scale = float(getattr(frame_calib, "depth_scale", 0.001) or 0.001)
+            safety_roi_m = safety_roi.astype(np.float32) * depth_scale
+            valid_mask = safety_roi_m > 0.01
+            valid_depths = safety_roi_m[valid_mask]
+            if valid_depths.size > 0:
+                depth_p10 = float(np.percentile(valid_depths, 10))
+                close_depth_ratio = float(np.sum(valid_depths < 0.40) / valid_depths.size)
+
         if isinstance(payload, dict):
             payload["obs_seq"] = int(self._last_obs_seq)
             payload["camera_frame_seq"] = int(seq)
+            payload["depth_p10"] = depth_p10
+            payload["close_depth_ratio"] = close_depth_ratio
+
         self._processed_frame_count += 1
         self._last_process_ms = max(0.0, (vision_done_ts - vision_start_ts) * 1000.0)
         try:

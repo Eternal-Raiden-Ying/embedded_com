@@ -266,32 +266,34 @@ class OrchestratorCore:
     def tick(self) -> MotionDecision:
         safety_override = self._check_safety_interlock()
         if safety_override is not None:
-            return safety_override
-        dispatch = {
-            State.IDLE: self._tick_idle,
-            State.TABLE_APPROACH_WARMUP: self._tick_table_approach_warmup,
-            State.SEARCH_TABLE: self._tick_search_table,
-            State.COARSE_ALIGN: self._tick_coarse_align,
-            State.CONTROLLED_APPROACH: self._tick_controlled_approach,
-            State.FINAL_LOCK: self._tick_final_lock,
-            State.DOCK_RETRY: self._tick_dock_retry,
-            State.AT_TABLE_EDGE: self._tick_at_table_edge,
-            State.SEARCH_TARGET_INIT: self._tick_search_target_init,
-            State.EDGE_SLIDE_SEARCH: self._tick_edge_slide_search,
-            State.TARGET_CONFIRM: self._tick_target_confirm,
-            State.TARGET_LOCKED: self._tick_target_locked,
-            State.FREEZE_BASE: self._tick_freeze_base,
-            State.LEAVE_EDGE: self._tick_leave_edge,
-            State.RELOCATE_TO_EDGE: self._tick_relocate_to_edge,
-            State.REACQUIRE_EDGE: self._tick_reacquire_edge,
-            State.NEXT_TABLE: self._tick_next_table,
-            State.AVOID_OBSTACLE: self._tick_avoid_obstacle,
-            State.RETURN_HOME: self._tick_return_home,
-            State.ERROR_RECOVERY: self._tick_error_recovery,
-            State.DONE: self._tick_done,
-            State.GRASP: self._tick_grasp,
-        }
-        return dispatch.get(self.ctx.state, self._tick_idle)()
+            decision = safety_override
+        else:
+            dispatch = {
+                State.IDLE: self._tick_idle,
+                State.TABLE_APPROACH_WARMUP: self._tick_table_approach_warmup,
+                State.SEARCH_TABLE: self._tick_search_table,
+                State.COARSE_ALIGN: self._tick_coarse_align,
+                State.CONTROLLED_APPROACH: self._tick_controlled_approach,
+                State.FINAL_LOCK: self._tick_final_lock,
+                State.DOCK_RETRY: self._tick_dock_retry,
+                State.AT_TABLE_EDGE: self._tick_at_table_edge,
+                State.SEARCH_TARGET_INIT: self._tick_search_target_init,
+                State.EDGE_SLIDE_SEARCH: self._tick_edge_slide_search,
+                State.TARGET_CONFIRM: self._tick_target_confirm,
+                State.TARGET_LOCKED: self._tick_target_locked,
+                State.FREEZE_BASE: self._tick_freeze_base,
+                State.LEAVE_EDGE: self._tick_leave_edge,
+                State.RELOCATE_TO_EDGE: self._tick_relocate_to_edge,
+                State.REACQUIRE_EDGE: self._tick_reacquire_edge,
+                State.NEXT_TABLE: self._tick_next_table,
+                State.AVOID_OBSTACLE: self._tick_avoid_obstacle,
+                State.RETURN_HOME: self._tick_return_home,
+                State.ERROR_RECOVERY: self._tick_error_recovery,
+                State.DONE: self._tick_done,
+                State.GRASP: self._tick_grasp,
+            }
+            decision = dispatch.get(self.ctx.state, self._tick_idle)()
+        return self._apply_depth_safety_logic(decision)
 
     def export_state_block(self) -> Dict:
         table_obs = self.ctx.last_table_obs
@@ -3763,3 +3765,23 @@ class OrchestratorCore:
             self._queue_tts("前方有障碍，开始避障")
             return self.controller.stop_cmd("AVOID_OBSTACLE", brake=True)
         return None
+
+    def _apply_depth_safety_logic(self, decision: MotionDecision) -> MotionDecision:
+        obs = self._fresh_table_obs()
+        if obs is not None and obs.depth_p10 is not None:
+            depth_p10 = obs.depth_p10
+            if depth_p10 < self.cfg.near_stop_depth_m:
+                if decision.cmd.vx_mps > 0 or (decision.cmd.vx_mps == 0 and abs(decision.cmd.wz_radps) > 0):
+                    decision.cmd.vx_mps = 0.0
+                    decision.cmd.wz_radps = 0.0
+                    self._log("warn", f"Depth safety stop triggered: depth_p10={depth_p10:.3f}m < {self.cfg.near_stop_depth_m:.3f}m")
+            elif depth_p10 < self.cfg.near_slow_depth_m:
+                max_vx = self.cfg.near_slow_max_vx_mps
+                max_wz = self.cfg.near_slow_max_wz_radps
+                if decision.cmd.vx_mps > max_vx:
+                    decision.cmd.vx_mps = max_vx
+                if abs(decision.cmd.wz_radps) > max_wz:
+                    sign = 1.0 if decision.cmd.wz_radps >= 0 else -1.0
+                    decision.cmd.wz_radps = sign * max_wz
+                self._log("info", f"Depth safety slowdown active: depth_p10={depth_p10:.3f}m. Limited to vx={decision.cmd.vx_mps:.3f}, wz={decision.cmd.wz_radps:.3f}")
+        return decision

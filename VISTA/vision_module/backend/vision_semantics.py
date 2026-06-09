@@ -128,6 +128,10 @@ class TableEdgeObservation:
     target_dist_m: Optional[float] = None
     dist_err: Optional[float] = None
 
+    # Depth safety stop metrics
+    depth_p10: Optional[float] = None
+    close_depth_ratio: Optional[float] = None
+
     # 未明确声明的动态字段
     extra_fields: dict[str, Any] = field(default_factory=dict)
 
