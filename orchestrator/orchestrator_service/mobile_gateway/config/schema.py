@@ -13,10 +13,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[4]
 
 @dataclass
 class GatewayEndpoint:
-    transport: str = "tcp"
-    host: str = "127.0.0.1"
-    port: int = 0
-    uds_path: str = ""
+    transport: str = "uds"
+    ipc_socket_path: str = ""
     send_mode: str = "oneshot"
     async_enabled: bool = False
     async_queue_size: int = 64
@@ -102,28 +100,20 @@ class MobileGatewayConfig:
     backend: GatewayBackendConfig = field(default_factory=GatewayBackendConfig)
     mqtt: MqttAdapterConfig = field(default_factory=MqttAdapterConfig)
     command_in: GatewayEndpoint = field(default_factory=lambda: GatewayEndpoint(
-        transport="tcp",
-        host="127.0.0.1",
-        port=9101,
-        uds_path="/tmp/robot_stack/mobile_gateway_cmd.sock",
+        transport="uds",
+        ipc_socket_path="/tmp/robot_stack/mobile_gateway_cmd.sock",
     ))
     status_out: GatewayEndpoint = field(default_factory=lambda: GatewayEndpoint(
         transport="disabled",
-        host="127.0.0.1",
-        port=9102,
-        uds_path="/tmp/robot_stack/mobile_gateway_status.sock",
+        ipc_socket_path="/tmp/robot_stack/mobile_gateway_status.sock",
         send_mode="oneshot",
     ))
     orchestrator_task_cmd_out: GatewayEndpoint = field(default_factory=lambda: GatewayEndpoint(
-        transport="tcp",
-        host="127.0.0.1",
-        port=9001,
-        uds_path="/tmp/robot_stack/task_cmd.sock",
+        transport="uds",
+        ipc_socket_path="/tmp/robot_stack/task_cmd.sock",
         send_mode="oneshot",
     ))
     orchestrator_task_ack_in: GatewayEndpoint = field(default_factory=lambda: GatewayEndpoint(
         transport="disabled",
-        host="127.0.0.1",
-        port=9103,
-        uds_path="/tmp/robot_stack/mobile_gateway_ack.sock",
+        ipc_socket_path="/tmp/robot_stack/mobile_gateway_ack.sock",
     ))

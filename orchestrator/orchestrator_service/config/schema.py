@@ -16,10 +16,8 @@ _DEFAULT_PID_DIR = _DEFAULT_PROJECT_ROOT / "pids"
 
 @dataclass
 class SocketEndpoint:
-    transport: str = "tcp"
-    host: str = "127.0.0.1"
-    port: int = 0
-    uds_path: str = ""
+    transport: str = "uds"
+    ipc_socket_path: str = ""
     send_mode: str = "persistent"
     async_enabled: bool = False
     async_queue_size: int = 64
@@ -335,37 +333,27 @@ class OrchestratorConfig:
     car: CarMotionConfig = field(default_factory=CarMotionConfig)
     docking: DockingControlConfig = field(default_factory=DockingControlConfig)
     task_cmd_in: SocketEndpoint = field(default_factory=lambda: SocketEndpoint(
-        transport="tcp",
-        host="127.0.0.1",
-        port=9001,
-        uds_path="/tmp/robot_stack/task_cmd.sock",
+        transport="uds",
+        ipc_socket_path="/tmp/robot_stack/task_cmd.sock",
     ))
     task_ack_out: SocketEndpoint = field(default_factory=lambda: SocketEndpoint(
-        transport="tcp",
-        host="127.0.0.1",
-        port=9012,
-        uds_path="/tmp/robot_stack/task_ack.sock",
+        transport="uds",
+        ipc_socket_path="/tmp/robot_stack/task_ack.sock",
         send_mode="oneshot",
     ))
     vision_obs_in: SocketEndpoint = field(default_factory=lambda: SocketEndpoint(
-        transport="tcp",
-        host="127.0.0.1",
-        port=9002,
-        uds_path="/tmp/robot_stack/vision_obs.sock",
+        transport="uds",
+        ipc_socket_path="/tmp/robot_stack/vision_obs.sock",
     ))
     vision_req_out: SocketEndpoint = field(default_factory=lambda: SocketEndpoint(
-        transport="tcp",
-        host="127.0.0.1",
-        port=9003,
-        uds_path="/tmp/robot_stack/vision_req.sock",
+        transport="uds",
+        ipc_socket_path="/tmp/robot_stack/vision_req.sock",
         send_mode="oneshot",
         async_enabled=True,
     ))
     tts_event_out: SocketEndpoint = field(default_factory=lambda: SocketEndpoint(
         transport="disabled",
-        host="127.0.0.1",
-        port=9011,
-        uds_path="/tmp/robot_stack/tts_event.sock",
+        ipc_socket_path="/tmp/robot_stack/tts_event.sock",
         async_enabled=True,
     ))
     frozen_targets: Dict[str, List[str]] = field(default_factory=lambda: {

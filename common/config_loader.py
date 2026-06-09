@@ -189,9 +189,7 @@ def apply_env_overrides(config: SystemGlobalConfig) -> None:
 
     # Online Edge Output
     _set_from_env(config.online_edge.output, "transport", "EDGE_OUT_TRANSPORT", str)
-    _set_from_env(config.online_edge.output, "host", "EDGE_OUT_HOST", str)
-    _set_from_env(config.online_edge.output, "port", "EDGE_OUT_PORT", int)
-    _set_from_env(config.online_edge.output, "uds_path", "EDGE_OUT_UDS", str)
+    _set_from_env(config.online_edge.output, "ipc_socket_path", "EDGE_OUT_SOCKET_PATH", str)
     _set_from_env(config.online_edge.output, "send_interval_s", "EDGE_OUT_PERIOD_S", float)
 
     # Online Edge Camera

@@ -167,15 +167,11 @@ vision:
     destroy_all_on_close: true # Close all OpenCV windows on exit
   mode_profiles: {} # Parameter adjustments per execution mode
   req_in:
-    transport: "tcp" # Incoming IPC channel mode
-    host: "127.0.0.1" # Host address
-    port: 0 # Port number
-    uds_path: "" # Socket file path
+    transport: "uds" # Incoming IPC channel mode
+    ipc_socket_path: "" # Socket file path
   obs_out:
-    transport: "tcp" # Outgoing IPC channel mode
-    host: "127.0.0.1" # Host address
-    port: 0 # Port number
-    uds_path: "" # Socket file path
+    transport: "uds" # Outgoing IPC channel mode
+    ipc_socket_path: "" # Socket file path
 
 ### === Orchestrator Configuration === ###
 orchestrator:
@@ -506,33 +502,23 @@ orchestrator:
       deadband: 0.004 # Control deadband
       min_abs_output: 0.04 # Minimum starting output speed
   task_cmd_in:
-    transport: "tcp" # Task cmd input channel mode
-    host: "127.0.0.1" # Host address
-    port: 9001 # Port number
-    uds_path: "/tmp/robot_stack/task_cmd.sock" # Socket file path
+    transport: "uds" # Task cmd input channel mode
+    ipc_socket_path: "/tmp/robot_stack/task_cmd.sock" # Socket file path
   task_ack_out:
-    transport: "tcp" # Task ack output channel mode
-    host: "127.0.0.1" # Host address
-    port: 9012 # Port number
-    uds_path: "/tmp/robot_stack/task_ack.sock" # Socket file path
+    transport: "uds" # Task ack output channel mode
+    ipc_socket_path: "/tmp/robot_stack/task_ack.sock" # Socket file path
     send_mode: "oneshot" # Socket persistence mode
   vision_obs_in:
-    transport: "tcp" # Vision observations input channel mode
-    host: "127.0.0.1" # Host address
-    port: 9002 # Port number
-    uds_path: "/tmp/robot_stack/vision_obs.sock" # Socket file path
+    transport: "uds" # Vision observations input channel mode
+    ipc_socket_path: "/tmp/robot_stack/vision_obs.sock" # Socket file path
   vision_req_out:
-    transport: "tcp" # Vision requests output channel mode
-    host: "127.0.0.1" # Host address
-    port: 9003 # Port number
-    uds_path: "/tmp/robot_stack/vision_req.sock" # Socket file path
+    transport: "uds" # Vision requests output channel mode
+    ipc_socket_path: "/tmp/robot_stack/vision_req.sock" # Socket file path
     send_mode: "oneshot" # Socket persistence mode
     async_enabled: true # Enable async socket operations
   tts_event_out:
     transport: "disabled" # Audio TTS event output channel mode
-    host: "127.0.0.1" # Host address
-    port: 9011 # Port number
-    uds_path: "/tmp/robot_stack/tts_event.sock" # Socket file path
+    ipc_socket_path: "/tmp/robot_stack/tts_event.sock" # Socket file path
     async_enabled: true # Enable async socket operations
   frozen_targets:
     bottle: ["瓶子", "水瓶", "饮料瓶"]
@@ -616,27 +602,19 @@ gateway:
       status: "robot/sc171_car_01/status" # Status topic path
       heartbeat: "robot/sc171_car_01/heartbeat" # Heartbeat topic path
   command_in:
-    transport: "tcp" # Gateway incoming command IPC mode
-    host: "127.0.0.1" # Host address
-    port: 9101 # Port number
-    uds_path: "/tmp/robot_stack/mobile_gateway_cmd.sock" # Socket file path
+    transport: "uds" # Gateway incoming command IPC mode
+    ipc_socket_path: "/tmp/robot_stack/mobile_gateway_cmd.sock" # Socket file path
   status_out:
     transport: "disabled" # Gateway outgoing status IPC mode
-    host: "127.0.0.1" # Host address
-    port: 9102 # Port number
-    uds_path: "/tmp/robot_stack/mobile_gateway_status.sock" # Socket file path
+    ipc_socket_path: "/tmp/robot_stack/mobile_gateway_status.sock" # Socket file path
     send_mode: "oneshot" # Socket persistence mode
   orchestrator_task_cmd_out:
-    transport: "tcp" # Gateway outgoing orchestrator command IPC mode
-    host: "127.0.0.1" # Host address
-    port: 9001 # Port number
-    uds_path: "/tmp/robot_stack/task_cmd.sock" # Socket file path
+    transport: "uds" # Gateway outgoing orchestrator command IPC mode
+    ipc_socket_path: "/tmp/robot_stack/task_cmd.sock" # Socket file path
     send_mode: "oneshot" # Socket persistence mode
   orchestrator_task_ack_in:
     transport: "disabled" # Gateway incoming orchestrator ack IPC mode
-    host: "127.0.0.1" # Host address
-    port: 9103 # Port number
-    uds_path: "/tmp/robot_stack/mobile_gateway_ack.sock" # Socket file path
+    ipc_socket_path: "/tmp/robot_stack/mobile_gateway_ack.sock" # Socket file path
 
 ### === Online Edge Detector Configuration === ###
 online_edge:

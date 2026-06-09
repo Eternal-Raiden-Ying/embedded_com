@@ -23,8 +23,7 @@ class GatewayMappingTest(unittest.TestCase):
         cfg.backend.mode = "mock"
         cfg.runtime.status_stdout = False
         cfg.status_out.transport = "disabled"
-        cfg.command_in.port = 19401
-        cfg.command_in.uds_path = "/tmp/robot_stack/test_gateway_mapping_cmd.sock"
+        cfg.command_in.ipc_socket_path = "/tmp/robot_stack/test_gateway_mapping_cmd.sock"
         return MobileGatewayService(cfg)
 
     def test_stop_promotes_paused_template(self) -> None:

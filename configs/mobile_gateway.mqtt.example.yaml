@@ -34,16 +34,12 @@ mqtt:
     heartbeat: "robot/v1/SC171/heartbeat"
 
 orchestrator:
-  task_cmd_host: "127.0.0.1"
-  task_cmd_port: 9001
-  task_ack_host: "127.0.0.1"
-  task_ack_port: 9012
+  task_cmd_socket_path: "/tmp/robot_stack/task_cmd.sock"
+  task_ack_socket_path: "/tmp/robot_stack/task_ack.sock"
   state_blocks_path: ""
   state_block_log_mode: "summary"  # summary / full / disabled
   state_block_log_period_s: 1.0
 
 mobile_gateway:
-  cmd_in_host: "127.0.0.1"
-  cmd_in_port: 9101
-  status_out_host: "127.0.0.1"
-  status_out_port: 9102
+  cmd_in_socket_path: "/tmp/robot_stack/mobile_gateway_cmd.sock"
+  status_out_socket_path: "/tmp/robot_stack/mobile_gateway_status.sock"

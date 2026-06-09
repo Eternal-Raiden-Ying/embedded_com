@@ -47,10 +47,8 @@ class RuntimeConfig:
 
 @dataclass
 class IPCConfig:
-    transport: str = "tcp"  # tcp / uds / disabled
-    host: str = "127.0.0.1"
-    port: int = 0
-    uds_path: str = ""
+    transport: str = "uds"  # uds / disabled
+    ipc_socket_path: str = ""
 
 
 @dataclass

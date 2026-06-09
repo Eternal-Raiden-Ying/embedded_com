@@ -301,12 +301,8 @@ mode_profiles:
 
 ipc:
   req_in:
-    transport: tcp
-    host: 127.0.0.1
-    port: 9003
-    uds_path: /tmp/robot_stack/vision_req.sock
+    transport: uds
+    ipc_socket_path: /tmp/robot_stack/vision_req.sock
   obs_out:
-    transport: tcp
-    host: 127.0.0.1
-    port: 9002
-    uds_path: /tmp/robot_stack/vision_obs.sock
+    transport: uds
+    ipc_socket_path: /tmp/robot_stack/vision_obs.sock

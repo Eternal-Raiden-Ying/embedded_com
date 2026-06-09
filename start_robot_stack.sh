@@ -57,11 +57,11 @@ GATEWAY_SUMMARY_PATTERN='gateway online|mqtt connected|mqtt disconnected|cmd rec
 VISION_SUMMARY_PATTERN='SERVICE_READY|vision runtime started|mode switched|camera enabled|model loaded|vision_obs|vision_req|target_obs|table_edge_obs|FAILED|ERROR'
 LOG_TAIL_N="${LOG_TAIL_N:-80}"
 
-# TCP/UDS 端口配置
+# TCP/UDS 端口与 Socket 配置
 STACK_PORTS="${STACK_PORTS:-9001 9002 9003 9011 9012 9101 9102}"
 STACK_SOCK_DIR="${STACK_SOCK_DIR:-/tmp/robot_stack}"
-VISION_READY_PORTS="${VISION_READY_PORTS:-9003}"
-ORCH_READY_PORTS="${ORCH_READY_PORTS:-9001 9002}"
+VISION_READY_SOCKETS="${VISION_READY_SOCKETS:-/tmp/robot_stack/vision_req.sock}"
+ORCH_READY_SOCKETS="${ORCH_READY_SOCKETS:-/tmp/robot_stack/task_cmd.sock /tmp/robot_stack/vision_obs.sock}"
 GATEWAY_READY_PATTERN="${GATEWAY_READY_PATTERN:-gateway online|SERVICE_READY|mqtt connected|mqtt disabled}"
 
 # 额外等待（秒）
@@ -517,14 +517,10 @@ export ORCH_SERIAL_PORT="$UART_DEV"
 export ORCH_SERIAL_BAUDRATE="$UART_BAUDRATE"
 export ORCH_TTS_EVENT_OUT_TRANSPORT="$ORCH_TTS_EVENT_OUT_TRANSPORT"
 export ORCH_DRY_RUN_ECHO_STDOUT="$ORCH_DRY_RUN_ECHO_STDOUT"
-export ORCH_TASK_CMD_IN_HOST="127.0.0.1"
-export ORCH_TASK_CMD_IN_PORT="9001"
-export ORCH_TASK_ACK_OUT_HOST="127.0.0.1"
-export ORCH_TASK_ACK_OUT_PORT="9012"
-export ORCH_VISION_OBS_IN_HOST="127.0.0.1"
-export ORCH_VISION_OBS_IN_PORT="9002"
-export ORCH_VISION_REQ_OUT_HOST="127.0.0.1"
-export ORCH_VISION_REQ_OUT_PORT="9003"
+export ORCH_TASK_CMD_IN_SOCKET_PATH="/tmp/robot_stack/task_cmd.sock"
+export ORCH_TASK_ACK_OUT_SOCKET_PATH="/tmp/robot_stack/task_ack.sock"
+export ORCH_VISION_OBS_IN_SOCKET_PATH="/tmp/robot_stack/vision_obs.sock"
+export ORCH_VISION_REQ_OUT_SOCKET_PATH="/tmp/robot_stack/vision_req.sock"
 exec stdbuf -oL -eL /usr/bin/python3 -m orchestrator_service.app.main
 CMD
 )
@@ -564,10 +560,8 @@ export MOBILE_GATEWAY_LOG_FILE="$(gateway_logs_enabled && echo "$GATEWAY_LOG_DIR
 export MOBILE_GATEWAY_RUNS_DIR="$STACK_RUNS_ROOT"
 export MOBILE_GATEWAY_ORCH_RUNS_DIR="$STACK_RUNS_ROOT"
 export MOBILE_GATEWAY_ORCH_STATE_BLOCKS_PATH="$STACK_RUN_DIR/orchestrator/state_blocks.jsonl"
-export MOBILE_GATEWAY_ORCH_TASK_CMD_HOST="127.0.0.1"
-export MOBILE_GATEWAY_ORCH_TASK_CMD_PORT="9001"
-export MOBILE_GATEWAY_ORCH_TASK_ACK_HOST="127.0.0.1"
-export MOBILE_GATEWAY_ORCH_TASK_ACK_PORT="9012"
+export MOBILE_GATEWAY_ORCH_TASK_CMD_SOCKET_PATH="/tmp/robot_stack/task_cmd.sock"
+export MOBILE_GATEWAY_ORCH_TASK_ACK_SOCKET_PATH="/tmp/robot_stack/task_ack.sock"
 exec stdbuf -oL -eL /usr/bin/python3 -m orchestrator_service.mobile_gateway.runtime.service --config "$GATEWAY_CONFIG"
 CMD
 )
@@ -585,6 +579,52 @@ is_port_listening() {
     return $?
   fi
   (echo > "/dev/tcp/127.0.0.1/$port") >/dev/null 2>&1
+}
+
+wait_for_sockets() {
+  local name="$1" sockets_str="$2" timeout_s="$3" extra_s="$4"
+  local start_ts now_ts all_ok s pid_file use_sudo
+  start_ts=$(date +%s)
+  while true; do
+    all_ok=1
+    for s in $sockets_str; do
+      if [[ ! -S "$s" ]]; then
+        all_ok=0
+        break
+      fi
+    done
+    if [[ "$all_ok" == "1" ]]; then
+      [[ "$extra_s" -gt 0 ]] && sleep "$extra_s"
+      pid_file=""
+      use_sudo=0
+      case "$name" in
+        vision)
+          pid_file="$VISION_PID_FILE"
+          ;;
+        orchestrator)
+          pid_file="$ORCH_PID_FILE"
+          if orch_use_sudo_effective; then
+            use_sudo=1
+          fi
+          ;;
+        mobile_gateway)
+          pid_file="$GATEWAY_PID_FILE"
+          ;;
+      esac
+      if [[ -n "$pid_file" ]] && ! pid_alive "$pid_file" "$use_sudo"; then
+        mark err "$name ready-check 失败：Socket 曾经可用，但进程已退出"
+        return 1
+      fi
+      mark ok "$name ready  sockets=[$sockets_str]"
+      return 0
+    fi
+    now_ts=$(date +%s)
+    if (( now_ts - start_ts >= timeout_s )); then
+      mark err "$name ready-check 超时  sockets=[$sockets_str]"
+      return 1
+    fi
+    sleep 0.5
+  done
 }
 
 wait_for_ports() {
@@ -826,14 +866,14 @@ start_stack() {
   stop_all || true
 
   start_vision_bg
-  if ! wait_for_ports "vision" "$VISION_READY_PORTS" "$READY_TIMEOUT_S" "$VISION_READY_EXTRA_S"; then
+  if ! wait_for_sockets "vision" "$VISION_READY_SOCKETS" "$READY_TIMEOUT_S" "$VISION_READY_EXTRA_S"; then
     tail_last_logs_on_failure "vision" "$VISION_LOG_FILE"
     stop_all || true
     exit 1
   fi
 
   start_orch_bg
-  if ! wait_for_ports "orchestrator" "$ORCH_READY_PORTS" "$READY_TIMEOUT_S" "$ORCH_READY_EXTRA_S"; then
+  if ! wait_for_sockets "orchestrator" "$ORCH_READY_SOCKETS" "$READY_TIMEOUT_S" "$ORCH_READY_EXTRA_S"; then
     tail_last_logs_on_failure "orchestrator" "$ORCH_LOG_FILE"
     stop_all || true
     exit 1

@@ -313,30 +313,34 @@ class RealProtocolMappingTest(unittest.TestCase):
 
     def test_orchestrator_tcp_config_enables_ack_listener(self) -> None:
         config_obj = {
-            "robot_id": "SC171",
-            "backend": "orchestrator_tcp",
-            "runtime": {
-                "mode": "debug",
-                "heartbeat_log_interval_s": 12,
-                "suppress_heartbeat_success_log": False,
-                "enable_raw_mqtt_debug": True,
-                "enable_legacy_command_compat": False,
-                "cmd_dedup_cache_size": 32,
-            },
-            "orchestrator": {
-                "task_cmd_host": "127.0.0.1",
-                "task_cmd_port": 9001,
-                "task_ack_host": "127.0.0.1",
-                "task_ack_port": 9012,
-            },
+            "gateway": {
+                "backend": {
+                    "mode": "orchestrator_tcp",
+                },
+                "runtime": {
+                    "mode": "debug",
+                    "heartbeat_log_interval_s": 12,
+                    "suppress_heartbeat_success_log": False,
+                    "enable_raw_mqtt_debug": True,
+                    "enable_legacy_command_compat": False,
+                    "cmd_dedup_cache_size": 32,
+                },
+                "orchestrator_task_cmd_out": {
+                    "transport": "uds",
+                    "ipc_socket_path": "/tmp/robot_stack/task_cmd.sock",
+                },
+                "orchestrator_task_ack_in": {
+                    "transport": "uds",
+                    "ipc_socket_path": "/tmp/robot_stack/mobile_gateway_ack.sock",
+                },
+            }
         }
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as fp:
             json.dump(config_obj, fp)
             path = fp.name
         cfg = build_config(config_file=path)
-        self.assertEqual(cfg.orchestrator_task_ack_in.transport, "tcp")
-        self.assertEqual(cfg.orchestrator_task_ack_in.host, "127.0.0.1")
-        self.assertEqual(cfg.orchestrator_task_ack_in.port, 9012)
+        self.assertEqual(cfg.orchestrator_task_ack_in.transport, "uds")
+        self.assertEqual(cfg.orchestrator_task_ack_in.ipc_socket_path, "/tmp/robot_stack/mobile_gateway_ack.sock")
         self.assertEqual(cfg.runtime.mode, "debug")
         self.assertEqual(cfg.runtime.heartbeat_log_interval_s, 12.0)
         self.assertEqual(cfg.runtime.enable_raw_mqtt_debug, True)

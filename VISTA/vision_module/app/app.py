@@ -81,17 +81,13 @@ class VistaApp(BaseModule):
         self.mode_controller.register_profiles(build_default_mode_profiles(CONFIG.model.active_model, CONFIG).values())
         self.req_server = JsonlInboundServer(
             mode=CONFIG.req_in.transport,
-            tcp_host=CONFIG.req_in.host,
-            tcp_port=CONFIG.req_in.port,
-            uds_path=CONFIG.req_in.uds_path,
+            uds_path=CONFIG.req_in.ipc_socket_path,
             name="req_in",
             logger=self._log_ipc_event,
         )
         self.obs_sender = JsonlClientSender(
             mode=CONFIG.obs_out.transport,
-            tcp_host=CONFIG.obs_out.host,
-            tcp_port=CONFIG.obs_out.port,
-            uds_path=CONFIG.obs_out.uds_path,
+            uds_path=CONFIG.obs_out.ipc_socket_path,
             name="obs_out",
             logger=self._log_ipc_event,
             queue_size=1,
@@ -188,15 +184,11 @@ class VistaApp(BaseModule):
             "heartbeat_interval_s": CONFIG.runtime.heartbeat_interval_s,
             "req_in": {
                 "transport": CONFIG.req_in.transport,
-                "host": CONFIG.req_in.host,
-                "port": CONFIG.req_in.port,
-                "uds_path": CONFIG.req_in.uds_path,
+                "ipc_socket_path": CONFIG.req_in.ipc_socket_path,
             },
             "obs_out": {
                 "transport": CONFIG.obs_out.transport,
-                "host": CONFIG.obs_out.host,
-                "port": CONFIG.obs_out.port,
-                    "uds_path": CONFIG.obs_out.uds_path,
+                "ipc_socket_path": CONFIG.obs_out.ipc_socket_path,
             },
             "structured_logs": self.log_paths,
             "yolo26_enabled": bool(CONFIG.model.enable_yolo26),

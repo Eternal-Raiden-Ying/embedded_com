@@ -56,10 +56,8 @@ _GRASPING_COCO20 = (
 @dataclass
 class SocketEndpoint:
     """Socket communication endpoint configuration."""
-    transport: str = "tcp"  # tcp / uds / disabled
-    host: str = "127.0.0.1"
-    port: int = 0
-    uds_path: str = ""
+    transport: str = "uds"  # tcp / uds / disabled
+    ipc_socket_path: str = ""
     send_mode: str = "persistent"  # persistent / oneshot
     async_enabled: bool = False
     async_queue_size: int = 64
@@ -105,10 +103,8 @@ class VisionRuntimeConfig:
 @dataclass
 class IPCConfig:
     """IPC transport configurations for incoming and outgoing data."""
-    transport: str = "tcp"
-    host: str = "127.0.0.1"
-    port: int = 0
-    uds_path: str = ""
+    transport: str = "uds"
+    ipc_socket_path: str = ""
 
 
 @dataclass
@@ -756,19 +752,19 @@ class OrchestratorConfig:
     car: CarMotionConfig = field(default_factory=CarMotionConfig)
     docking: DockingControlConfig = field(default_factory=DockingControlConfig)
     task_cmd_in: SocketEndpoint = field(default_factory=lambda: SocketEndpoint(
-        transport="tcp", host="127.0.0.1", port=9001, uds_path="/tmp/robot_stack/task_cmd.sock",
+        transport="uds", ipc_socket_path="/tmp/robot_stack/task_cmd.sock",
     ))
     task_ack_out: SocketEndpoint = field(default_factory=lambda: SocketEndpoint(
-        transport="tcp", host="127.0.0.1", port=9012, uds_path="/tmp/robot_stack/task_ack.sock", send_mode="oneshot",
+        transport="uds", ipc_socket_path="/tmp/robot_stack/task_ack.sock", send_mode="oneshot",
     ))
     vision_obs_in: SocketEndpoint = field(default_factory=lambda: SocketEndpoint(
-        transport="tcp", host="127.0.0.1", port=9002, uds_path="/tmp/robot_stack/vision_obs.sock",
+        transport="uds", ipc_socket_path="/tmp/robot_stack/vision_obs.sock",
     ))
     vision_req_out: SocketEndpoint = field(default_factory=lambda: SocketEndpoint(
-        transport="tcp", host="127.0.0.1", port=9003, uds_path="/tmp/robot_stack/vision_req.sock", send_mode="oneshot", async_enabled=True,
+        transport="uds", ipc_socket_path="/tmp/robot_stack/vision_req.sock", send_mode="oneshot", async_enabled=True,
     ))
     tts_event_out: SocketEndpoint = field(default_factory=lambda: SocketEndpoint(
-        transport="disabled", host="127.0.0.1", port=9011, uds_path="/tmp/robot_stack/tts_event.sock", async_enabled=True,
+        transport="disabled", ipc_socket_path="/tmp/robot_stack/tts_event.sock", async_enabled=True,
     ))
     frozen_targets: Dict[str, List[str]] = field(default_factory=lambda: {
         "bottle": ["瓶子", "水瓶", "饮料瓶"],
@@ -797,10 +793,8 @@ class OrchestratorConfig:
 
 @dataclass
 class GatewayEndpoint:
-    transport: str = "tcp"
-    host: str = "127.0.0.1"
-    port: int = 0
-    uds_path: str = ""
+    transport: str = "uds"
+    ipc_socket_path: str = ""
     send_mode: str = "oneshot"
     async_enabled: bool = False
     async_queue_size: int = 64
@@ -887,16 +881,16 @@ class MobileGatewayConfig:
     backend: GatewayBackendConfig = field(default_factory=GatewayBackendConfig)
     mqtt: MqttAdapterConfig = field(default_factory=MqttAdapterConfig)
     command_in: GatewayEndpoint = field(default_factory=lambda: GatewayEndpoint(
-        transport="tcp", host="127.0.0.1", port=9101, uds_path="/tmp/robot_stack/mobile_gateway_cmd.sock",
+        transport="uds", ipc_socket_path="/tmp/robot_stack/mobile_gateway_cmd.sock",
     ))
     status_out: GatewayEndpoint = field(default_factory=lambda: GatewayEndpoint(
-        transport="disabled", host="127.0.0.1", port=9102, uds_path="/tmp/robot_stack/mobile_gateway_status.sock", send_mode="oneshot",
+        transport="disabled", ipc_socket_path="/tmp/robot_stack/mobile_gateway_status.sock", send_mode="oneshot",
     ))
     orchestrator_task_cmd_out: GatewayEndpoint = field(default_factory=lambda: GatewayEndpoint(
-        transport="tcp", host="127.0.0.1", port=9001, uds_path="/tmp/robot_stack/task_cmd.sock", send_mode="oneshot",
+        transport="uds", ipc_socket_path="/tmp/robot_stack/task_cmd.sock", send_mode="oneshot",
     ))
     orchestrator_task_ack_in: GatewayEndpoint = field(default_factory=lambda: GatewayEndpoint(
-        transport="disabled", host="127.0.0.1", port=9103, uds_path="/tmp/robot_stack/mobile_gateway_ack.sock",
+        transport="disabled", ipc_socket_path="/tmp/robot_stack/mobile_gateway_ack.sock",
     ))
 
 
@@ -924,9 +918,7 @@ class OnlineEdgeRuntimeConfig:
 @dataclass
 class OutputConfig:
     transport: str = "disabled"
-    host: str = "127.0.0.1"
-    port: int = 9102
-    uds_path: str = "/tmp/robot_stack/table_edge_obs.sock"
+    ipc_socket_path: str = "/tmp/robot_stack/table_edge_obs.sock"
     send_interval_s: float = 0.20
 
 
