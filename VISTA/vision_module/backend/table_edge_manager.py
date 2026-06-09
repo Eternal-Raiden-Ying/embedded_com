@@ -126,6 +126,7 @@ class TableEdgeManager:
         self._last_measured_edge_dist_m: Optional[float] = None
         self._fast_temporal_state: Dict[str, Any] = {}
         self._load_detector()
+        self._precompute_rays()
         self.docking_strategy = TableDockingStrategy()
 
     @staticmethod
@@ -178,6 +179,43 @@ class TableEdgeManager:
             self._fallback_calib = None
             self._detector_error = str(exc or "detector_unavailable")
             self._emit("load_failed", error=self._detector_error)
+
+    def _precompute_rays(self, force_h: int = None, force_w: int = None) -> None:
+        calib = self._fallback_calib or (self._detector.calib if self._detector is not None else None)
+        if calib is None:
+            w = force_w if force_w is not None else 424
+            h = force_h if force_h is not None else 240
+            fx = float(w)
+            fy = float(w)
+            cx = float(w) / 2.0
+            cy = float(h) / 2.0
+        else:
+            w = force_w if force_w is not None else int(calib.width)
+            h = force_h if force_h is not None else int(calib.height)
+            fx = float(calib.fx)
+            fy = float(calib.fy)
+            cx = float(calib.cx)
+            cy = float(calib.cy)
+            if force_w is not None and force_w != int(calib.width):
+                scale_x = float(force_w) / float(calib.width)
+                fx *= scale_x
+                cx *= scale_x
+            if force_h is not None and force_h != int(calib.height):
+                scale_y = float(force_h) / float(calib.height)
+                fy *= scale_y
+                cy *= scale_y
+
+        pitch_deg = float(self._camera_pitch_deg)
+        theta = math.radians(pitch_deg)
+        cos_t, sin_t = math.cos(theta), math.sin(theta)
+
+        grid_x, grid_y = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
+        rx = (grid_x - cx) / fx
+        ry = (grid_y - cy) / fy
+
+        self._ray_x = rx
+        self._ray_y = cos_t - ry * sin_t
+        self._ray_z = sin_t + ry * cos_t
 
     def bind_runtime(self, scheduler, generation_getter=None) -> None:
         self._scheduler = scheduler
@@ -255,6 +293,7 @@ class TableEdgeManager:
             self._static_roi_enabled = bool(payload.get("static_roi_enabled"))
         if "camera_pitch_deg" in payload:
             self._camera_pitch_deg = float(payload.get("camera_pitch_deg"))
+            self._precompute_rays()
         if "camera_height_m" in payload:
             self._camera_height_m = float(payload.get("camera_height_m"))
         if "camera_roll_deg" in payload:
@@ -1170,17 +1209,12 @@ class TableEdgeManager:
         depths = np.asarray([g[3] for g in group], dtype=np.float32)
         px = (float(x0) + cols * float(stride)).astype(np.int32)
         py = (float(y0) + rows * float(stride)).astype(np.int32)
-        u = px.astype(np.float32)
-        v = py.astype(np.float32)
-        x_c = (u - float(calib.cx)) * depths / float(calib.fx)
-        y_c = (v - float(calib.cy)) * depths / float(calib.fy)
-        x_r, y_r, z_r = camera_points_to_robot(
-            x_c,
-            y_c,
-            depths,
-            pitch_deg=pitch_deg,
-            camera_height_m=camera_height_m,
-        )
+        ray_x_candidates = self._ray_x[py, px]
+        ray_y_candidates = self._ray_y[py, px]
+        ray_z_candidates = self._ray_z[py, px]
+        x_r = ray_x_candidates * depths
+        y_r = ray_y_candidates * depths
+        z_r = float(camera_height_m) - ray_z_candidates * depths
         try:
             k, b = weighted_line_fit(x_r, y_r, np.ones_like(x_r, dtype=np.float32))
             residual = np.abs(y_r - (float(k) * x_r + float(b)))
@@ -2330,6 +2364,10 @@ class TableEdgeManager:
         except Exception:
             roi_box = tuple(int(v) for v in self._static_roi() or (0, 0, depth_frame.shape[1], depth_frame.shape[0]))
         x0, y0, x1, y1 = [int(v) for v in roi_box]
+        h_frame, w_frame = depth_frame.shape[:2]
+        if not hasattr(self, "_ray_x") or self._ray_x.shape != (h_frame, w_frame):
+            self._precompute_rays(force_h=h_frame, force_w=w_frame)
+
         stride = max(1, int(self._fast_plane_stride))
         depth_roi = depth_frame[y0:y1:stride, x0:x1:stride]
         depth_stride = max(1, int(self._depth_stride))
@@ -2446,11 +2484,6 @@ class TableEdgeManager:
         select_start = time.perf_counter()
         projection_start = time.perf_counter()
         z = depth_m[valid_mask]
-        calib = self._detector.calib
-        u = (float(x0) + xx.astype(np.float32) * float(stride))
-        v = (float(y0) + yy.astype(np.float32) * float(stride))
-        x_c = (u - float(calib.cx)) * z / float(calib.fx)
-        y_c = (v - float(calib.cy)) * z / float(calib.fy)
         pitch_deg = float(self._camera_pitch_deg)
         camera_height_m = float(self._camera_height_m)
         table_height_m = float(self._table_height_m)
@@ -2463,13 +2496,14 @@ class TableEdgeManager:
         min_front_face_columns = max(2, int(self._min_front_face_columns))
         min_front_face_x_span = float(self._min_front_face_x_span_m)
         max_yaw_cfg = float(self._max_yaw_abs_rad)
-        x_robot, y_robot, z_robot = camera_points_to_robot(
-            x_c,
-            y_c,
-            z,
-            pitch_deg=pitch_deg,
-            camera_height_m=camera_height_m,
-        )
+
+        ray_x_roi = self._ray_x[y0:y1:stride, x0:x1:stride]
+        ray_y_roi = self._ray_y[y0:y1:stride, x0:x1:stride]
+        ray_z_roi = self._ray_z[y0:y1:stride, x0:x1:stride]
+
+        x_robot = ray_x_roi[valid_mask] * z
+        y_robot = ray_y_roi[valid_mask] * z
+        z_robot = camera_height_m - ray_z_roi[valid_mask] * z
         height_filter_start = time.perf_counter()
         robot_z_pct = finite_percentiles(z_robot)
         ground_like_count = int(np.sum((z_robot >= -0.04) & (z_robot <= 0.06)))
