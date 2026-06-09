@@ -1029,88 +1029,168 @@ class TableEdgeManager:
         n = int(min(len(x_arr), len(y_arr), len(z_arr), len(px_arr), len(py_arr)))
         if n <= 0:
             return {"count": 0}
+
         x_arr, y_arr, z_arr, px_arr, py_arr = x_arr[:n], y_arr[:n], z_arr[:n], px_arr[:n], py_arr[:n]
         x_bins = np.floor(x_arr / max(1e-6, float(x_bin_width_m))).astype(np.int32)
-        reps = []
-        x_order = np.argsort(x_bins, kind="mergesort")
-        x_bins_sorted = x_bins[x_order]
-        x_change = np.flatnonzero(np.diff(x_bins_sorted)) + 1
-        x_starts = np.concatenate((np.asarray([0], dtype=np.int32), x_change.astype(np.int32, copy=False)))
-        x_ends = np.concatenate((x_change.astype(np.int32, copy=False), np.asarray([len(x_bins_sorted)], dtype=np.int32)))
+        y_bins = np.floor(y_arr / max(1e-6, float(y_cluster_bin_m))).astype(np.int32)
+
+        # Sort points by x_bins and y_bins using np.lexsort
+        sort_idx = np.lexsort((y_bins, x_bins))
+        x_sorted = x_arr[sort_idx]
+        y_sorted = y_arr[sort_idx]
+        z_sorted = z_arr[sort_idx]
+        px_sorted = px_arr[sort_idx]
+        py_sorted = py_arr[sort_idx]
+        xb_sorted = x_bins[sort_idx]
+        yb_sorted = y_bins[sort_idx]
+
+        # Find unique cells (xb, yb)
+        cell_changes = np.flatnonzero((xb_sorted[:-1] != xb_sorted[1:]) | (yb_sorted[:-1] != yb_sorted[1:]))
+        cell_starts = np.concatenate(([0], cell_changes + 1))
+        
+        unique_xb = xb_sorted[cell_starts]
+        unique_yb = yb_sorted[cell_starts]
+
         y_radius_bins = max(1, int(math.ceil(0.08 / max(1e-6, float(y_cluster_bin_m)))))
-        for start, end in zip(x_starts, x_ends):
-            if int(end - start) < int(min_support_points):
-                continue
-            idxs = x_order[int(start):int(end)]
-            y_bins = np.floor(y_arr[idxs] / max(1e-6, float(y_cluster_bin_m))).astype(np.int32)
-            y_order = np.argsort(y_bins, kind="mergesort")
-            y_bins_sorted = y_bins[y_order]
-            idxs_sorted = idxs[y_order]
-            best = None
-            for yb in np.unique(y_bins_sorted):
-                left = int(np.searchsorted(y_bins_sorted, int(yb) - y_radius_bins, side="left"))
-                right = int(np.searchsorted(y_bins_sorted, int(yb) + y_radius_bins, side="right"))
-                local = idxs_sorted[left:right]
-                support = int(len(local))
-                if support < int(min_support_points):
-                    continue
-                local_z = z_arr[local]
-                z_span = float(np.max(local_z) - np.min(local_z)) if support > 1 else 0.0
-                if z_span < float(min_z_span_m):
-                    continue
-                local_y = y_arr[local]
-                y_spread = self._fast_quantile_span(local_y) if support > 2 else 0.0
-                if y_spread > max(0.16, float(y_cluster_bin_m) * float(2 * y_radius_bins + 1)):
-                    continue
-                local_x = x_arr[local]
-                local_px = px_arr[local]
-                local_py = py_arr[local]
-                score = float(support) * float(z_span) / max(0.04, y_spread + 0.02)
-                item = {
-                    "score": score,
-                    "support": support,
-                    "z_span": z_span,
-                    "x": self._fast_median_value(local_x),
-                    "y": self._fast_median_value(local_y),
-                    "z": self._fast_median_value(local_z),
-                    "px": int(self._fast_median_value(local_px)),
-                    "py": int(self._fast_median_value(local_py)),
-                    "y_spread": y_spread,
-                    "support_px": local_px.astype(np.int32, copy=False),
-                    "support_py": local_py.astype(np.int32, copy=False),
-                    "support_x": local_x.astype(np.float32, copy=False),
-                    "support_y": local_y.astype(np.float32, copy=False),
-                    "support_z": local_z.astype(np.float32, copy=False),
-                }
-                if best is None or item["score"] > best["score"]:
-                    best = item
-            if best is not None:
-                reps.append(best)
-        if not reps:
+
+        # Compute globally sorted yb index using unique scaling per column
+        yb_global = yb_sorted.astype(np.int64) + xb_sorted.astype(np.int64) * 1000000
+        lower_vals = (unique_yb.astype(np.int64) - y_radius_bins) + unique_xb.astype(np.int64) * 1000000
+        upper_vals = (unique_yb.astype(np.int64) + y_radius_bins) + unique_xb.astype(np.int64) * 1000000
+
+        left_idxs = np.searchsorted(yb_global, lower_vals, side='left')
+        right_idxs = np.searchsorted(yb_global, upper_vals, side='right')
+        support = right_idxs - left_idxs
+
+        # Filter cells with minimum support points
+        valid_cell_mask = support >= min_support_points
+        if not np.any(valid_cell_mask):
             return {"count": 0}
-        reps.sort(key=lambda item: item["x"])
-        support_rep_index = [
-            np.full(len(r["support_px"]), idx, dtype=np.int32)
-            for idx, r in enumerate(reps)
-            if len(r["support_px"]) > 0
-        ]
+
+        unique_xb = unique_xb[valid_cell_mask]
+        unique_yb = unique_yb[valid_cell_mask]
+        left_idxs = left_idxs[valid_cell_mask]
+        right_idxs = right_idxs[valid_cell_mask]
+        support = right_idxs - left_idxs
+
+        # Generate flattened indices for all elements in all valid cells
+        cell_ids = np.repeat(np.arange(len(support)), support)
+        starts = np.cumsum(np.concatenate(([0], support[:-1])))
+        pt_indices = np.repeat(left_idxs, support) + (np.arange(len(cell_ids)) - np.repeat(starts, support))
+
+        z_flat = z_sorted[pt_indices]
+        y_flat = y_sorted[pt_indices]
+
+        # Compute z_span
+        cell_max_z = np.maximum.reduceat(z_flat, starts)
+        cell_min_z = np.minimum.reduceat(z_flat, starts)
+        z_span = cell_max_z - cell_min_z
+
+        # Compute y_spread (10% to 90% quantile span)
+        sort_y_idx = np.lexsort((y_flat, cell_ids))
+        y_flat_sorted = y_flat[sort_y_idx]
+
+        lo_offsets = np.round(0.10 * (support - 1)).astype(np.int32)
+        lo_offsets = np.clip(lo_offsets, 0, support - 1)
+        hi_offsets = np.round(0.90 * (support - 1)).astype(np.int32)
+        hi_offsets = np.clip(hi_offsets, 0, support - 1)
+
+        y_spread = y_flat_sorted[starts + hi_offsets] - y_flat_sorted[starts + lo_offsets]
+        y_spread = np.where(support > 2, y_spread, 0.0)
+
+        # Apply z_span and y_spread criteria
+        z_span_ok = z_span >= min_z_span_m
+        y_spread_ok = y_spread <= max(0.16, float(y_cluster_bin_m) * float(2 * y_radius_bins + 1))
+        valid_rep_mask = z_span_ok & y_spread_ok
+        if not np.any(valid_rep_mask):
+            return {"count": 0}
+
+        # Keep only valid representatives
+        unique_xb = unique_xb[valid_rep_mask]
+        unique_yb = unique_yb[valid_rep_mask]
+        left_idxs = left_idxs[valid_rep_mask]
+        right_idxs = right_idxs[valid_rep_mask]
+        support = support[valid_rep_mask]
+        z_span = z_span[valid_rep_mask]
+        y_spread = y_spread[valid_rep_mask]
+
+        # Regenerate flattened indices for valid representatives
+        cell_ids = np.repeat(np.arange(len(support)), support)
+        starts = np.cumsum(np.concatenate(([0], support[:-1])))
+        pt_indices = np.repeat(left_idxs, support) + (np.arange(len(cell_ids)) - np.repeat(starts, support))
+
+        x_flat = x_sorted[pt_indices]
+        y_flat = y_sorted[pt_indices]
+        z_flat = z_sorted[pt_indices]
+        px_flat = px_sorted[pt_indices]
+        py_flat = py_sorted[pt_indices]
+
+        # Compute medians of x, y, z, px, py
+        def compute_grouped_median(flat_val):
+            sort_idx = np.lexsort((flat_val, cell_ids))
+            sorted_val = flat_val[sort_idx]
+            mid = support // 2
+            odd_mask = (support % 2) == 1
+            median_odd = sorted_val[starts + mid]
+            val_mid = sorted_val[starts + mid]
+            val_mid_prev = sorted_val[starts + np.clip(mid - 1, 0, None)]
+            median_even = (val_mid + val_mid_prev) * 0.5
+            return np.where(odd_mask, median_odd, median_even)
+
+        medians_x = compute_grouped_median(x_flat)
+        medians_y = compute_grouped_median(y_flat)
+        medians_z = compute_grouped_median(z_flat)
+        medians_px = compute_grouped_median(px_flat).astype(np.int32)
+        medians_py = compute_grouped_median(py_flat).astype(np.int32)
+
+        # Compute scores
+        score = support.astype(np.float32) * z_span / np.maximum(0.04, y_spread + 0.02)
+
+        # For each unique column, select the cell with the highest score
+        best_sort_idx = np.lexsort((score, unique_xb))
+        unique_xb_sorted = unique_xb[best_sort_idx]
+        col_changes = np.flatnonzero(unique_xb_sorted[:-1] != unique_xb_sorted[1:])
+        best_cell_indices = best_sort_idx[np.concatenate((col_changes, [len(unique_xb_sorted) - 1]))]
+
+        # Sort the final selected cells by x in ascending order
+        final_x = medians_x[best_cell_indices]
+        x_sort_idx = np.argsort(final_x)
+        final_cell_indices = best_cell_indices[x_sort_idx]
+
+        # Extract final sorted values
+        out_x = medians_x[final_cell_indices]
+        out_y = medians_y[final_cell_indices]
+        out_z = medians_z[final_cell_indices]
+        out_px = medians_px[final_cell_indices]
+        out_py = medians_py[final_cell_indices]
+        out_support = support[final_cell_indices]
+        out_z_span = z_span[final_cell_indices]
+        out_y_spread = y_spread[final_cell_indices]
+
+        # Regenerate flattened indices for final selected cells to build support arrays
+        final_left_idxs = left_idxs[final_cell_indices]
+        final_support = support[final_cell_indices]
+        final_cell_ids = np.repeat(np.arange(len(final_support)), final_support)
+        final_starts = np.cumsum(np.concatenate(([0], final_support[:-1])))
+        final_pt_indices = np.repeat(final_left_idxs, final_support) + (np.arange(len(final_cell_ids)) - np.repeat(final_starts, final_support))
+
         return {
-            "count": int(len(reps)),
-            "x": np.asarray([r["x"] for r in reps], dtype=np.float32),
-            "y": np.asarray([r["y"] for r in reps], dtype=np.float32),
-            "z": np.asarray([r["z"] for r in reps], dtype=np.float32),
-            "px": np.asarray([r["px"] for r in reps], dtype=np.int32),
-            "py": np.asarray([r["py"] for r in reps], dtype=np.int32),
-            "support": np.asarray([r["support"] for r in reps], dtype=np.int32),
-            "z_span": np.asarray([r["z_span"] for r in reps], dtype=np.float32),
-            "y_spread": np.asarray([r["y_spread"] for r in reps], dtype=np.float32),
-            "support_total": int(sum(int(r["support"]) for r in reps)),
-            "support_px": np.concatenate([r["support_px"] for r in reps]).astype(np.int32, copy=False),
-            "support_py": np.concatenate([r["support_py"] for r in reps]).astype(np.int32, copy=False),
-            "support_x": np.concatenate([r["support_x"] for r in reps]).astype(np.float32, copy=False),
-            "support_y": np.concatenate([r["support_y"] for r in reps]).astype(np.float32, copy=False),
-            "support_z": np.concatenate([r["support_z"] for r in reps]).astype(np.float32, copy=False),
-            "support_rep_index": np.concatenate(support_rep_index).astype(np.int32, copy=False) if support_rep_index else np.asarray([], dtype=np.int32),
+            "count": int(len(final_cell_indices)),
+            "x": out_x.astype(np.float32, copy=False),
+            "y": out_y.astype(np.float32, copy=False),
+            "z": out_z.astype(np.float32, copy=False),
+            "px": out_px.astype(np.int32, copy=False),
+            "py": out_py.astype(np.int32, copy=False),
+            "support": out_support.astype(np.int32, copy=False),
+            "z_span": out_z_span.astype(np.float32, copy=False),
+            "y_spread": out_y_spread.astype(np.float32, copy=False),
+            "support_total": int(np.sum(out_support)),
+            "support_px": px_sorted[final_pt_indices].astype(np.int32, copy=False),
+            "support_py": py_sorted[final_pt_indices].astype(np.int32, copy=False),
+            "support_x": x_sorted[final_pt_indices].astype(np.float32, copy=False),
+            "support_y": y_sorted[final_pt_indices].astype(np.float32, copy=False),
+            "support_z": z_sorted[final_pt_indices].astype(np.float32, copy=False),
+            "support_rep_index": final_cell_ids.astype(np.int32, copy=False),
         }
 
 
