@@ -5,6 +5,8 @@ import time
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, Optional
 
+import msgpack
+
 
 def now_ts() -> float:
     return time.time()
@@ -198,3 +200,11 @@ class VisionObs:
 
     def to_dict(self) -> Dict[str, Any]:
         return _compact(asdict(self))
+
+
+def pack_msg(payload: Dict[str, Any]) -> bytes:
+    return msgpack.packb(payload, use_bin_type=True)
+
+
+def unpack_msg(data: bytes) -> Dict[str, Any]:
+    return msgpack.unpackb(data, raw=False)

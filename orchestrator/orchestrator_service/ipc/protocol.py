@@ -6,6 +6,8 @@ import uuid
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Set
 
+import msgpack
+
 ALLOWED_INTENTS: Set[str] = {"FIND", "RETURN", "STOP"}
 ALLOWED_VISTA_OPS: Set[str] = {"START", "UPDATE", "RESPOND", "STOP"}
 ALLOWED_VISTA_STAGES: Set[str] = {"SEARCH", "GRASP", "RETURN", "IDLE"}
@@ -998,3 +1000,11 @@ def make_tts_event(text: str, source: str = "orchestrator", interrupt: bool = Fa
     if not text:
         raise ProtocolError("tts_event.text 不能为空")
     return {"ts": now_ts(), "type": "tts_event", "text": text, "source": source, "interrupt": bool(interrupt)}
+
+
+def pack_msg(payload: Dict[str, Any]) -> bytes:
+    return msgpack.packb(payload, use_bin_type=True)
+
+
+def unpack_msg(data: bytes) -> Dict[str, Any]:
+    return msgpack.unpackb(data, raw=False)
