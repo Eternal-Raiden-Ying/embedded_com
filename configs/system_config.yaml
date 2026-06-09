@@ -69,7 +69,7 @@ vision:
         enable: false # IR stream enabled status
     max_fps: 30 # System wide camera frame rate limit
   model:
-    active_model: "yolov7_detect" # YOLO model identifier currently active
+    active_model: "yolo26s_detect" # YOLO model identifier currently active
     profiles: {} # Predefined YOLO profiling targets
     enable_yolo26: true # Enable YOLO26 custom detector
     enable_yolo_table_search: false # Enable YOLO based table search task

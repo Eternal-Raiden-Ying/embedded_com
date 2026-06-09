@@ -186,7 +186,7 @@ class SingleModelConfig:
 
 @dataclass
 class ModelConfig:
-    active_model: str = "yolov7_detect"
+    active_model: str = "yolo26s_detect"
     profiles: Dict[str, SingleModelConfig] = field(default_factory=lambda: {
         "yolov7_detect": SingleModelConfig(
             target_model=str(_DEFAULT_DETECT_MODEL),

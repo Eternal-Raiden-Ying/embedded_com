@@ -102,6 +102,9 @@ def apply_env_overrides(config: SystemGlobalConfig) -> None:
     _set_from_env(config.vision.runtime, "vision_params_file", "VISION_PARAMS_FILE", str)
     _set_from_env(config.vision.runtime, "stack_run_id", "STACK_RUN_ID", str)
 
+    # Vision Model
+    _set_from_env(config.vision.model, "active_model", "VISTA_TABLE_MODEL", str)
+
     # Orchestrator Runtime
     _set_from_env(config.orchestrator.runtime, "project_root", "ORCH_PROJECT_ROOT", str)
     _set_from_env(config.orchestrator.runtime, "log_dir", "ORCH_LOG_DIR", str)
@@ -292,17 +295,14 @@ def load_global_config(config_path: str = None) -> SystemGlobalConfig:
     """Load the global configuration structure.
     
     Priority Rules:
-    1. Values in YAML file take highest priority.
-    2. Fallback to environment variable overrides.
+    1. Environment variable overrides take highest priority.
+    2. Values in YAML file override schema defaults.
     3. Fallback to schema defaults (defined in schema.py).
     """
     # 1. Instantiate default configurations from schema
     config = SystemGlobalConfig()
 
-    # 2. Apply environment variable overrides initially (lower priority than YAML)
-    apply_env_overrides(config)
-
-    # 3. Locate system config YAML file path
+    # 2. Locate system config YAML file path
     default_yaml_path = Path(__file__).resolve().parents[1] / "configs" / "system_config.yaml"
     env_config_path = os.getenv("SYSTEM_CONFIG_FILE")
     
@@ -314,7 +314,7 @@ def load_global_config(config_path: str = None) -> SystemGlobalConfig:
     else:
         target_path = default_yaml_path
 
-    # 4. Load YAML and merge it into the config (highest priority)
+    # 3. Load YAML and merge it into the config
     if target_path and target_path.is_file():
         yaml_data = load_yaml_file(target_path)
         merge_dict_into_dataclass(config, yaml_data)
@@ -322,6 +322,9 @@ def load_global_config(config_path: str = None) -> SystemGlobalConfig:
         # Track loaded config files in vision runtime
         if str(target_path) not in config.vision.runtime.loaded_config_files:
             config.vision.runtime.loaded_config_files.append(str(target_path))
+
+    # 4. Apply environment variable overrides (highest priority)
+    apply_env_overrides(config)
 
     # Synchronize orchestrator speed configs
     sync_orchestrator_config(config)
