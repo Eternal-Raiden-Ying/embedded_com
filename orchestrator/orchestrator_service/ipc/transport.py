@@ -6,8 +6,13 @@ import queue
 import socket
 import threading
 import time
+
+if not hasattr(socket, "AF_UNIX"):
+    socket.AF_UNIX = 9999
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+
+from .protocol import pack_msg, unpack_msg
 
 Logger = Optional[Callable[[Dict[str, Any]], None]]
 ResultCallback = Optional[Callable[[Dict[str, Any]], None]]
@@ -53,19 +58,15 @@ class JsonlClientSender:
             self._sock = None
 
     def _make_socket(self) -> socket.socket:
-        if self.mode == "tcp":
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-            sock.settimeout(self.send_timeout)
-            sock.connect((self.tcp_host, self.tcp_port))
-            return sock
-        if self.mode == "uds":
-            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            sock.settimeout(self.send_timeout)
-            sock.connect(self.uds_path)
-            return sock
-        raise RuntimeError("disabled mode does not create socket")
+        if self.mode == "disabled":
+            raise RuntimeError("disabled mode does not create socket")
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(self.send_timeout)
+        path_str = self.uds_path
+        if not path_str and self.tcp_port:
+            path_str = f"/tmp/robot_ipc_{self.tcp_port}.sock"
+        sock.connect(path_str)
+        return sock
 
     def _ensure_connected(self) -> bool:
         if self.mode == "disabled":
@@ -94,16 +95,17 @@ class JsonlClientSender:
         if self.mode == "disabled":
             self.link_state = "DISABLED"
             return False
-        line = json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+        packed = pack_msg(payload)
+        data = len(packed).to_bytes(4, byteorder="big") + packed
         with self._lock:
-            self._log("info", "send_attempt", size=len(line), transport=self.mode)
+            self._log("info", "send_attempt", size=len(packed), transport=self.mode)
             for _ in range(2):
                 if not self._ensure_connected():
                     time.sleep(self.reconnect_interval)
                     continue
                 try:
                     assert self._sock is not None
-                    self._sock.sendall(line.encode("utf-8", errors="ignore"))
+                    self._sock.sendall(data)
                     self.fail_count = 0
                     self.last_send_ok_ts = time.time()
                     self.link_state = "CONNECTED"
@@ -293,17 +295,18 @@ class JsonlInboundServer:
             self.logger(payload)
 
     def _bind_socket(self) -> socket.socket:
-        if self.mode == "tcp":
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind((self.tcp_host, self.tcp_port))
-        else:
-            path = Path(self.uds_path)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            if path.exists():
+        path_str = self.uds_path
+        if not path_str and self.tcp_port:
+            path_str = f"/tmp/robot_ipc_{self.tcp_port}.sock"
+        path = Path(path_str)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            try:
                 path.unlink()
-            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            sock.bind(str(path))
+            except Exception:
+                pass
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.bind(str(path))
         sock.listen(4)
         sock.settimeout(1.0)
         return sock
@@ -331,8 +334,11 @@ class JsonlInboundServer:
             self._accept_thread.join(timeout=1.5)
         for th in self._client_threads:
             th.join(timeout=0.5)
-        if self.mode == "uds" and self.uds_path:
-            path = Path(self.uds_path)
+        path_str = self.uds_path
+        if not path_str and self.tcp_port:
+            path_str = f"/tmp/robot_ipc_{self.tcp_port}.sock"
+        if path_str:
+            path = Path(path_str)
             if path.exists():
                 try:
                     path.unlink()
@@ -380,26 +386,31 @@ class JsonlInboundServer:
     def _client_loop(self, conn: socket.socket, peer: str):
         with conn:
             conn.settimeout(1.0)
-            file_obj = conn.makefile("r", encoding="utf-8", newline="\n")
+            buffer = b""
             while not self._stop.is_set():
                 try:
-                    line = file_obj.readline()
+                    chunk = conn.recv(4096)
                 except socket.timeout:
                     continue
                 except Exception:
                     break
-                if not line:
+                if not chunk:
                     self._log("warn", "peer_closed", peer=peer)
                     break
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    payload = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    self.invalid_json_count += 1
-                    self._log("warn", "invalid_json", peer=peer, error=str(exc), raw=line[:200], invalid_json_count=self.invalid_json_count)
-                    continue
-                self.last_recv_ts = time.time()
-                self.total_recv_count += 1
-                self._queue.put({"peer": peer, "payload": payload, "recv_ts": self.last_recv_ts})
+                buffer += chunk
+                while len(buffer) >= 4:
+                    msg_len = int.from_bytes(buffer[:4], byteorder="big")
+                    if len(buffer) >= 4 + msg_len:
+                        raw = buffer[4:4+msg_len]
+                        buffer = buffer[4+msg_len:]
+                        try:
+                            payload = unpack_msg(raw)
+                        except Exception as exc:
+                            self.invalid_json_count += 1
+                            self._log("warn", "invalid_msgpack", peer=peer, error=str(exc), raw=raw[:200], invalid_json_count=self.invalid_json_count)
+                            continue
+                        self.last_recv_ts = time.time()
+                        self.total_recv_count += 1
+                        self._queue.put({"peer": peer, "payload": payload, "recv_ts": self.last_recv_ts})
+                    else:
+                        break
