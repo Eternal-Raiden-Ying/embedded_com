@@ -498,6 +498,9 @@ class OrchestratorCore:
         self._log("info", f"状态切换 {old_state.value} -> {new_state.value} ({reason})")
         self.ctx.prev_state = old_state
         self.ctx.state = new_state
+        if new_state in {State.YOLO_APPROACH, State.COARSE_ALIGN, State.CONTROLLED_APPROACH, State.FINAL_LOCK}:
+            self.ctx.min_dist_seen = 999.0
+            self.ctx.dist_progress_last_refreshed_mono = monotonic_ts()
         self.ctx.state_enter_mono = monotonic_ts()
         self.ctx.state_enter_wall_ts = time.time()
         self.ctx.last_enter_reason = reason
@@ -1151,6 +1154,25 @@ class OrchestratorCore:
         self.ctx.current_search_direction_reason = search_dir
         return turn_sign, search_src, search_dir
 
+    def _check_approach_progress(self, obs: Optional[TableEdgeObs]) -> bool:
+        if obs is None or obs.dist_err_m is None:
+            self.ctx.dist_progress_last_refreshed_mono = monotonic_ts()
+            return False
+
+        curr_dist = float(obs.target_dist_m or self.cfg.table_target_dist_m) + float(obs.dist_err_m)
+        now = monotonic_ts()
+
+        if curr_dist < self.ctx.min_dist_seen - 0.002:
+            self.ctx.min_dist_seen = curr_dist
+            self.ctx.dist_progress_last_refreshed_mono = now
+            self._log("info", f"Approach progress refreshed: min_dist_seen={self.ctx.min_dist_seen:.4f}m")
+        else:
+            elapsed_ms = (now - self.ctx.dist_progress_last_refreshed_mono) * 1000.0
+            if elapsed_ms >= self.cfg.progress_window_ms:
+                self._log("warn", f"Approach progress timeout: distance did not decrease by 2mm for {elapsed_ms:.1f}ms. Min dist seen: {self.ctx.min_dist_seen:.4f}m, current: {curr_dist:.4f}m")
+                return True
+        return False
+
     def _get_bbox_center_x_norm(self, obs: Optional[TableEdgeObs]) -> float:
         if obs is not None:
             if getattr(obs, "yolo_bbox_center_x_norm", None) is not None:
@@ -1200,6 +1222,8 @@ class OrchestratorCore:
         if not self._table_yolo_reliable(obs):
             self._transition(State.SEARCH_TABLE, "YOLO_APPROACH lost table bbox, enter SEARCH")
             return self._tick_search_table()
+        if self._check_approach_progress(obs):
+            return self._enter_dock_retry_or_next("YOLO接近无进展超时")
         if self.controller._edge_trusted(obs):
             self._transition(State.COARSE_ALIGN, "YOLO_APPROACH table edge trusted, transition to COARSE_ALIGN")
             return self._tick_coarse_align()
@@ -1307,8 +1331,8 @@ class OrchestratorCore:
             self.ctx.table_motion_pending_transition_reason = pending_reason
         else:
             self.ctx.table_motion_pending_transition_reason = ""
-        if self._state_elapsed() >= float(self.cfg.approach_timeout_s):
-            return self._enter_dock_retry_or_next("粗对齐超时")
+        if self._check_approach_progress(obs):
+            return self._enter_dock_retry_or_next("粗对齐无进展超时")
         self._maybe_resend_req(self._active_req_payload())
         decision = self.controller.fov_table_approach_cmd(obs, phase="PLANE_FINAL_LOCK", mode="COARSE_ALIGN")
         return self._annotate_table_motion_hysteresis(decision, pending_reason=pending_reason)
@@ -1374,8 +1398,8 @@ class OrchestratorCore:
             return self._enter_final_lock_or_keep_approach(obs, "plane-only stop 可用，进入最终停车")
         if self._edge_ready(obs):
             return self._enter_final_lock_or_keep_approach(obs, "进入最终锁边")
-        if self._state_elapsed() >= float(self.cfg.approach_timeout_s):
-            return self._enter_dock_retry_or_next("受控接近超时")
+        if self._check_approach_progress(obs):
+            return self._enter_dock_retry_or_next("受控接近无进展超时")
         self._maybe_resend_req(self._active_req_payload())
         decision = self._table_approach_decision(obs, phase="PLANE_FINAL_LOCK")
         return self._annotate_table_motion_hysteresis(decision, pending_reason=pending_reason)
@@ -1439,9 +1463,9 @@ class OrchestratorCore:
                 self._enter_table_dock_phase("STOP_AND_SETTLE", "[TABLE_DOCK][STOP] final lock/stop condition reached")
                 self._log("info", "[TABLE_DOCK][SETTLE] begin after STOP")
                 return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_LOCK"), status)
-            if self._state_elapsed() >= float(self.cfg.approach_timeout_s):
+            if self._check_approach_progress(obs):
                 if not is_holding:
-                    return self._enter_dock_retry_or_next(f"最终锁边超时:{status['reason']}")
+                    return self._enter_dock_retry_or_next(f"最终锁边无进展超时:{status['reason']}")
             self._maybe_resend_req(self._active_req_payload())
             if level == "none":
                 return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_LOCK"), status)
@@ -1506,11 +1530,11 @@ class OrchestratorCore:
             if decision is not None:
                 return decision
 
-        if self._state_elapsed() >= float(self.cfg.approach_timeout_s):
+        if self._check_approach_progress(obs):
             if not is_holding:
                 status = self._final_lock_status(obs, stable_count=self.ctx.table_lock_frames)
                 self._log_final_lock_summary(obs, lock_ready=False, reason=str(status["reason"]), stable_count=self.ctx.table_lock_frames)
-                return self._enter_dock_retry_or_next(f"最终锁边超时:{status['reason']}")
+                return self._enter_dock_retry_or_next(f"最终锁边无进展超时:{status['reason']}")
         self._maybe_resend_req(self._active_req_payload())
         return self._annotate_final_lock_decision(
             self.controller.stop_cmd("FINAL_LOCK"),
