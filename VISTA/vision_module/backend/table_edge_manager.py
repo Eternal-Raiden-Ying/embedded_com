@@ -6,6 +6,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import math
+import queue
 import threading
 import time
 from pathlib import Path
@@ -128,6 +129,8 @@ class TableEdgeManager:
         self._load_detector()
         self._precompute_rays()
         self.docking_strategy = TableDockingStrategy()
+        self._queue = queue.Queue(maxsize=2)
+        self._consumer_thread: Optional[threading.Thread] = None
 
     @staticmethod
     def _normalize_detector_mode(value: Any) -> str:
@@ -227,8 +230,15 @@ class TableEdgeManager:
             return
         self._runtime_running = True
         self._worker_stop.clear()
+        while not self._queue.empty():
+            try:
+                self._queue.get_nowait()
+            except Exception:
+                break
         self._worker_thread = threading.Thread(target=self._worker_loop, name="table_edge_manager.loop", daemon=True)
         self._worker_thread.start()
+        self._consumer_thread = threading.Thread(target=self._consumer_loop, name="table_edge_manager.consumer", daemon=True)
+        self._consumer_thread.start()
 
     def stop_runtime(self) -> None:
         self._runtime_running = False
@@ -237,6 +247,19 @@ class TableEdgeManager:
         if thread is not None and thread.is_alive():
             thread.join(timeout=1.0)
         self._worker_thread = None
+        try:
+            self._queue.put_nowait(None)
+        except Exception:
+            pass
+        consumer = getattr(self, "_consumer_thread", None)
+        if consumer is not None and consumer.is_alive():
+            consumer.join(timeout=1.0)
+        self._consumer_thread = None
+        while not self._queue.empty():
+            try:
+                self._queue.get_nowait()
+            except Exception:
+                break
 
     def _publish_result(self, route: str, payload: Any) -> None:
         scheduler = self._scheduler
@@ -3751,11 +3774,53 @@ class TableEdgeManager:
         depth_frame_fetch_ms: float = 0.0,
         count_dropped: bool = True,
     ) -> Dict[str, Any]:
-        """Process one RGB/depth frame pack through the online table-plane path.
+        if not self._runtime_running:
+            return self._process_camera_frame_sync(
+                frames,
+                frame_seq=frame_seq,
+                frame_slot=frame_slot,
+                local_perception=local_perception,
+                runtime_status=runtime_status,
+                source_mode=source_mode,
+                depth_frame_fetch_ms=depth_frame_fetch_ms,
+                count_dropped=count_dropped,
+            )
+        item = {
+            "frames": frames,
+            "frame_seq": frame_seq,
+            "frame_slot": frame_slot,
+            "local_perception": local_perception,
+            "runtime_status": runtime_status,
+            "source_mode": source_mode,
+            "depth_frame_fetch_ms": depth_frame_fetch_ms,
+            "count_dropped": count_dropped,
+        }
+        try:
+            self._queue.put_nowait(item)
+        except queue.Full:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._queue.put_nowait(item)
+            except queue.Full:
+                pass
+        return {"status": "queued", "frame_seq": frame_seq}
 
-        The emitted type and legacy field aliases stay `table_edge_obs` for current
-        state-machine compatibility; plane_* fields carry the unified semantics.
-        """
+    def _process_camera_frame_sync(
+        self,
+        frames: Dict[str, Any],
+        *,
+        frame_seq: int,
+        frame_slot: Optional[Dict[str, Any]] = None,
+        local_perception: Optional[Dict[str, Any]] = None,
+        runtime_status: Optional[Dict[str, Any]] = None,
+        source_mode: Optional[str] = None,
+        depth_frame_fetch_ms: float = 0.0,
+        count_dropped: bool = True,
+    ) -> Dict[str, Any]:
+        """Process one RGB/depth frame pack through the online table-plane path."""
         if not isinstance(frames, dict):
             frames = {}
         seq = int(frame_seq)
@@ -3925,7 +3990,7 @@ class TableEdgeManager:
             runtime_status = self._runtime_status()
             runtime_mode = str(runtime_status.get("mode") or "").strip().upper()
             try:
-                payload = self.process_camera_frame(
+                self.process_camera_frame(
                     frames,
                     frame_seq=seq,
                     frame_slot=frame_slot,
@@ -3935,18 +4000,41 @@ class TableEdgeManager:
                     count_dropped=False,
                 )
             except Exception as exc:
-                self.log.exception("table_edge_manager.loop detector failed | frame_seq=%s error=%s", seq, exc)
+                self.log.exception("table_edge_manager.loop producer queue put failed | frame_seq=%s error=%s", seq, exc)
+            elapsed_s = max(0.0, time.time() - loop_start)
+            self._worker_stop.wait(timeout=max(0.0, interval_s - elapsed_s))
+
+    def _consumer_loop(self) -> None:
+        while self._runtime_running:
+            try:
+                item = self._queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if item is None:
+                break
+            try:
+                payload = self._process_camera_frame_sync(
+                    item["frames"],
+                    frame_seq=item["frame_seq"],
+                    frame_slot=item["frame_slot"],
+                    local_perception=item["local_perception"],
+                    runtime_status=item["runtime_status"],
+                    source_mode=item["source_mode"],
+                    depth_frame_fetch_ms=item["depth_frame_fetch_ms"],
+                    count_dropped=item["count_dropped"],
+                )
+            except Exception as exc:
+                self.log.exception("table_edge_manager.consumer loop detector failed | frame_seq=%s error=%s", item["frame_seq"], exc)
                 payload = self._worker_error_result(
-                    frames,
-                    frame_seq=seq,
-                    runtime_status=runtime_status,
+                    item["frames"],
+                    frame_seq=item["frame_seq"],
+                    runtime_status=item["runtime_status"],
                     error=exc,
                 )
             self._emit_edge_debug(payload)
             self._log_profile_if_due(payload)
             self._publish_result("table_edge_obs", payload)
-            elapsed_s = max(0.0, time.time() - loop_start)
-            self._worker_stop.wait(timeout=max(0.0, interval_s - elapsed_s))
+            self._queue.task_done()
 
     def _emit_edge_debug(self, payload: Dict[str, Any]) -> None:
         debug_cfg = self.cfg.debug
