@@ -44,6 +44,7 @@ class TableEdgeProfile:
     update_hz: float = 5.0
     light_stride: int = 4
     fast_plane_stride: int = 4
+    depth_stride: int = 2
     require_yolo_confirm: bool = True
     static_roi_enabled: bool = False
     # fast_plane_only geometry

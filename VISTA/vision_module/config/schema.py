@@ -190,6 +190,7 @@ class TableEdgeConfig:
     fast_candidate_point_cap: int = 1800
     fast_front_edge_col_step: int = 2
     fast_front_edge_row_step: int = 2
+    depth_stride: int = 2
 
 
 @dataclass

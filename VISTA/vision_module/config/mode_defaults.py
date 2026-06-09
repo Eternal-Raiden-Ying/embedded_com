@@ -202,6 +202,7 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
                 update_hz=5.0,
                 light_stride=4,
                 fast_plane_stride=4,
+                depth_stride=2,
                 require_yolo_confirm=True,
                 static_roi_enabled=False,
                 camera_pitch_deg=15.0,
@@ -247,6 +248,7 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
                 update_hz=10.0,
                 light_stride=4,
                 fast_plane_stride=4,
+                depth_stride=2,
                 require_yolo_confirm=True,
                 static_roi_enabled=False,
                 camera_pitch_deg=15.0,
@@ -400,6 +402,8 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
                 profile.table_edge.light_stride = int(te.get("light_stride"))
             if "fast_plane_stride" in te and te.get("fast_plane_stride") is not None:
                 profile.table_edge.fast_plane_stride = int(te.get("fast_plane_stride"))
+            if "depth_stride" in te and te.get("depth_stride") is not None:
+                profile.table_edge.depth_stride = int(te.get("depth_stride"))
             if "require_yolo_confirm" in te:
                 profile.table_edge.require_yolo_confirm = bool(te.get("require_yolo_confirm"))
             if "static_roi_enabled" in te:

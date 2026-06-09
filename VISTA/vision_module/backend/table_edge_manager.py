@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import math
 import threading
@@ -51,6 +52,7 @@ class TableEdgeManager:
         self._default_interval_s = self._worker_interval_s
         self._light_stride = table_edge_cfg.light_stride
         self._fast_plane_stride = table_edge_cfg.fast_plane_stride
+        self._depth_stride = table_edge_cfg.depth_stride
         self._require_yolo_confirm = table_edge_cfg.require_yolo_confirm
         self._static_roi_enabled = table_edge_cfg.static_roi_enabled
         self._camera_pitch_deg = table_edge_cfg.camera_pitch_deg
@@ -245,6 +247,8 @@ class TableEdgeManager:
             self._light_stride = max(1, int(payload.get("light_stride")))
         if "fast_plane_stride" in payload:
             self._fast_plane_stride = max(1, int(payload.get("fast_plane_stride")))
+        if "depth_stride" in payload:
+            self._depth_stride = max(1, int(payload.get("depth_stride")))
         if "require_yolo_confirm" in payload:
             self._require_yolo_confirm = bool(payload.get("require_yolo_confirm"))
         if "static_roi_enabled" in payload:
@@ -740,6 +744,7 @@ class TableEdgeManager:
         return {
             "detector_mode": str(self._detector_mode),
             "fast_plane_stride": int(self._fast_plane_stride),
+            "depth_stride": int(self._depth_stride),
         }
 
     @staticmethod
@@ -2327,6 +2332,9 @@ class TableEdgeManager:
         x0, y0, x1, y1 = [int(v) for v in roi_box]
         stride = max(1, int(self._fast_plane_stride))
         depth_roi = depth_frame[y0:y1:stride, x0:x1:stride]
+        depth_stride = max(1, int(self._depth_stride))
+        depth_roi = depth_roi[::depth_stride, ::depth_stride]
+        stride = stride * depth_stride
         profile["fast_roi_extract_ms"] = self._ms_since(roi_start)
         profile["roi_extract_ms"] = float(profile["fast_roi_extract_ms"])
         profile["roi_crop_ms"] = float(profile["fast_roi_extract_ms"])
@@ -3870,4 +3878,5 @@ class TableEdgeManager:
             "edge_update_hz": self._edge_update_hz,
             "detector_mode": str(self._detector_mode),
             "fast_plane_stride": int(self._fast_plane_stride),
+            "depth_stride": int(self._depth_stride),
         }

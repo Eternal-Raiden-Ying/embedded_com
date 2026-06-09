@@ -123,6 +123,7 @@ vision:
     fast_candidate_point_cap: 1800 # Cap input raw points
     fast_front_edge_col_step: 2 # Column stride for edge search
     fast_front_edge_row_step: 2 # Row stride for edge search
+    depth_stride: 2 # Column and row downsample stride for fast plane depth map
     detector_mode: "lightweight" # Perception process mode: lightweight, full, fast_plane_only
     update_hz: 5.0 # Perception thread loop frequency
     light_stride: 4 # Processing step for lightweight mode
