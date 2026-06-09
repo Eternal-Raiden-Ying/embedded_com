@@ -487,11 +487,13 @@ class OrchestratorService(BaseModule):
         target = getattr(self.core.ctx, "active_target", "") or "target"
         if new_state == "SEARCH_TABLE":
             self.demo_console.table_phase("searching")
-        elif new_state == "COARSE_ALIGN":
-            self.demo_console.table_phase("aligning")
-        elif new_state == "CONTROLLED_APPROACH":
-            self.demo_console.table_phase("approaching")
-        elif new_state == "FINAL_LOCK":
+        elif new_state == "EDGE_ADJUST":
+            phase = getattr(self.core.ctx, "table_dock_phase", "aligning")
+            if phase == "aligning":
+                self.demo_console.table_phase("aligning")
+            else:
+                self.demo_console.table_phase("approaching")
+        elif new_state == "FINAL_SLOW_STOP":
             self.demo_console.table_phase("final_locking")
             if "edge_distance_out_of_tolerance" in str(reason or ""):
                 self.demo_console.recover("edge distance out of range, re-locking table edge")
@@ -2312,8 +2314,8 @@ class OrchestratorService(BaseModule):
             summary["fallback_reason"] = summary.get("reason") or self.core.ctx.last_fail_reason or ""
             summary["control_reason"] = summary.get("reason") or ""
             summary["edge_loss_elapsed_s"] = self.core._loss_elapsed(self.core.ctx.table_loss_since_mono)
-        if block.get("lock_reason") and str(summary.get("state")) in {"CONTROLLED_APPROACH", "FINAL_LOCK", "COARSE_ALIGN"}:
-            summary["reason"] = block.get("lock_reason")
+        if block.get("stop_reason") and str(summary.get("state")) in {"EDGE_ADJUST", "FINAL_SLOW_STOP"}:
+            summary["reason"] = block.get("stop_reason")
         else:
             summary.setdefault("reason", summary.get("lock_reason") or self.core.ctx.last_enter_reason or "")
         return summary
@@ -2348,7 +2350,7 @@ class OrchestratorService(BaseModule):
             f"cmd vx_mps={self._fmt_float(cmd.get('vx'))} vy_mps={self._fmt_float(cmd.get('vy'))} wz_radps={self._fmt_float(cmd.get('wz'))} "
             f"vx_mps={self._fmt_float(vx_mps)} vy_mps={self._fmt_float(vy_mps)} wz_radps={self._fmt_float(wz_radps)}"
         )
-        if state == "FINAL_LOCK":
+        if state == "FINAL_SLOW_STOP":
             stable = int(self.core.ctx.table_lock_frames)
             needed = int(self.cfg.control.final_lock_frames_to_arrive)
             return (
@@ -2466,7 +2468,7 @@ class OrchestratorService(BaseModule):
         if state in {"IDLE", "DONE", "ERROR_RECOVERY"} and not self.operator_console.full:
             return
         line = self._operator_control_line(summary)
-        key = "lock" if state == "FINAL_LOCK" else ("slide" if state == "EDGE_SLIDE_SEARCH" else "ctrl")
+        key = "lock" if state == "FINAL_SLOW_STOP" else ("slide" if state == "EDGE_SLIDE_SEARCH" else "ctrl")
         period_s = 5.0
         self.operator_console.emit_rate_limited(key, line, period_s)
         self._emit_target_obs_missing_warning()
@@ -2778,7 +2780,7 @@ class OrchestratorService(BaseModule):
         self.motion_status["jog_running"] = True
         self.run_logger.write_jsonl("car_cmd", {
             "ts": time.time(),
-            "mode": str(getattr(cmd, "mode", "FINAL_LOCK") or "FINAL_LOCK"),
+            "mode": str(getattr(cmd, "mode", "FINAL_SLOW_STOP") or "FINAL_SLOW_STOP"),
             "kind": "stm32_jog",
             "jog_action": jog_action,
             "stm32_seq": seq,

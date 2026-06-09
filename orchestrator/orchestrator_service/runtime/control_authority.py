@@ -19,6 +19,7 @@ VALID_CONTROL_SOURCES = {
     "edge_adjust",
     "local_rotate_search",
     "final_lock",
+    "final_slow_stop",
     "search_failed_stop",
     "explicit_stop",
     "stop",
@@ -62,8 +63,8 @@ def decide_table_control_authority(state: str, sem: TablePerceptionSemantics, cf
       rotate search.
     """
     state = str(state or "").upper().strip()
-    if state in {"FINAL_LOCK", "AT_TABLE_EDGE"}:
-        return ControlAuthority("final_lock", "final_lock", False, False, reason="final_lock_state")
+    if state in {"FINAL_SLOW_STOP", "AT_TABLE_EDGE"}:
+        return ControlAuthority("final_slow_stop", "final_slow_stop", False, False, reason="final_slow_stop_state")
 
     if sem.table_bbox_control_valid:
         if sem.edge_trusted:

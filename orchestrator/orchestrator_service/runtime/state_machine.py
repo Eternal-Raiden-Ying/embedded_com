@@ -271,14 +271,12 @@ class OrchestratorCore:
         else:
             dispatch = {
                 State.IDLE: self._tick_idle,
-                State.TABLE_APPROACH_WARMUP: self._tick_table_approach_warmup,
                 State.SEARCH_TABLE: self._tick_search_table,
                 State.YOLO_ACQUIRE_ALIGN: self._tick_yolo_acquire_align,
                 State.YOLO_APPROACH: self._tick_yolo_approach,
-                State.COARSE_ALIGN: self._tick_coarse_align,
-                State.CONTROLLED_APPROACH: self._tick_controlled_approach,
-                State.FINAL_LOCK: self._tick_final_lock,
-                State.DOCK_RETRY: self._tick_dock_retry,
+                State.EDGE_ADJUST: self._tick_edge_adjust,
+                State.FINAL_SLOW_STOP: self._tick_final_slow_stop,
+                State.NO_PROGRESS_RECOVERY: self._tick_no_progress_recovery,
                 State.AT_TABLE_EDGE: self._tick_at_table_edge,
                 State.SEARCH_TARGET_INIT: self._tick_search_target_init,
                 State.EDGE_SLIDE_SEARCH: self._tick_edge_slide_search,
@@ -287,7 +285,7 @@ class OrchestratorCore:
                 State.FREEZE_BASE: self._tick_freeze_base,
                 State.LEAVE_EDGE: self._tick_leave_edge,
                 State.RELOCATE_TO_EDGE: self._tick_relocate_to_edge,
-                State.REACQUIRE_EDGE: self._tick_reacquire_edge,
+                State.REACQUIRE_TABLE: self._tick_reacquire_table,
                 State.NEXT_TABLE: self._tick_next_table,
                 State.AVOID_OBSTACLE: self._tick_avoid_obstacle,
                 State.RETURN_HOME: self._tick_return_home,
@@ -296,187 +294,36 @@ class OrchestratorCore:
                 State.GRASP: self._tick_grasp,
             }
             decision = dispatch.get(self.ctx.state, self._tick_idle)()
-        return self._apply_depth_safety_logic(decision)
+        decision = self._apply_soft_interception_and_safety(decision)
+        self.last_decision = decision
+        return decision
 
     def export_state_block(self) -> Dict:
         table_obs = self.ctx.last_table_obs
-        target_obs = self.ctx.last_target_obs
-        lock_status = self._final_lock_status(table_obs, stable_count=self.ctx.table_lock_frames)
-        target_window = self._target_window_stats()
+        from .perception_semantics import build_table_perception_semantics
+        sem = build_table_perception_semantics(table_obs, self.cfg)
+
+        decision = getattr(self, "last_decision", None)
+        summary = decision.control_summary if decision is not None else None
+        if summary is None:
+            summary = {}
+
         return {
             "ts": time.time(),
             "state": self.ctx.state.value,
-            "prev_state": self.ctx.prev_state.value if self.ctx.prev_state else "",
-            "resume_state": self.ctx.resume_state.value if self.ctx.resume_state else "",
-            "task_intent": self.ctx.task_intent,
-            "active_target": self.ctx.active_target,
-            "session_id": self.ctx.active_session_id,
-            "epoch": self.ctx.active_epoch,
-            "req_id": self.ctx.active_req_id,
-            "vision_stage": self.ctx.active_vision_stage,
-            "vision_mode": self.ctx.active_vision_mode,
-            "current_edge_id": self.ctx.current_edge_id,
-            "edge_visit_index": self.ctx.edge_visit_index,
-            "edge_transition_count": self.ctx.edge_transition_count,
-            "table_cycle_count": self.ctx.table_cycle_count,
-            "last_enter_reason": self.ctx.last_enter_reason,
-            "last_fail_reason": self.ctx.last_fail_reason,
-            "last_safety_reason": self.ctx.last_safety_reason,
-            "vision_req_fail_streak": self.ctx.vision_req_fail_streak,
-            "table_found_frames": self.ctx.table_found_frames,
-            "table_lost_frames": self.ctx.table_lost_frames,
-            "table_lock_frames": self.ctx.table_lock_frames,
-            "table_approach_warmup_active": self.ctx.state == State.TABLE_APPROACH_WARMUP,
-            "yolo_acquire_align_active": self.ctx.state == State.YOLO_ACQUIRE_ALIGN,
-            "warmup_elapsed_s": self._state_elapsed() if self.ctx.state == State.TABLE_APPROACH_WARMUP else 0.0,
-            "warmup_plane_seen_count": int(self.ctx.table_approach_warmup_plane_seen_count),
-            "warmup_fresh_obs_count": int(self.ctx.table_approach_warmup_fresh_obs_count),
-            "warmup_reason": "waiting_for_initial_vision" if self.ctx.state == State.TABLE_APPROACH_WARMUP else "",
-            "table_dock_phase": str(self.ctx.table_dock_phase or ""),
-            "table_micro_adjust_count": int(self.ctx.table_micro_adjust_count),
-            "approach_aligned_frames": self.ctx.approach_aligned_frames,
-            "target_found_frames": self.ctx.target_found_frames,
-            "target_lost_frames": self.ctx.target_lost_frames,
-            "target_lock_frames": self.ctx.target_lock_frames,
-            "target_stable_ms": self._target_stable_ms(),
-            "center_jitter": float(self.ctx.target_last_center_jitter),
-            "target_window_found_ratio": target_window.get("found_ratio"),
-            "target_conf_median": target_window.get("conf_median"),
-            "target_conf_max": target_window.get("conf_max"),
-            "bbox_valid_ratio": target_window.get("bbox_valid_ratio"),
-            "target_window_latest_matched_cls": target_window.get("latest_matched_cls"),
-            "target_window_latest_matched_conf": target_window.get("latest_matched_conf"),
-            "lost_reason": self.ctx.target_last_lost_reason,
-            "tag_lost_frames": self.ctx.tag_lost_frames,
-            "tag_arrived_frames": self.ctx.tag_arrived_frames,
-            "dock_retry_count": self.ctx.dock_retry_count,
-            "edge_slide_relock_attempts": self.ctx.edge_slide_relock_attempts,
-            "avoid_retry_count": self.ctx.avoid_retry_count,
-            "table_loss_elapsed_s": self._loss_elapsed(self.ctx.table_loss_since_mono),
-            "target_loss_elapsed_s": self._loss_elapsed(self.ctx.target_loss_since_mono),
-            "tag_loss_elapsed_s": self._loss_elapsed(self.ctx.tag_loss_since_mono),
-            "has_table_edge_obs": table_obs is not None,
-            "has_target_obs": target_obs is not None,
-            "lock_ready": bool(lock_status["lock_ready"]),
-            "lock_reason": str(lock_status["reason"]),
-            "final_lock_debug": dict(lock_status),
-            "final_lock_yaw_ok": bool(lock_status.get("yaw_ok", False)),
-            "final_lock_dist_ok": bool(lock_status.get("dist_ok", False)),
-            "final_lock_age_ok": bool(lock_status.get("age_ok", False)),
-            "final_lock_confidence_ok": bool(lock_status.get("confidence_ok", False)),
-            "stable_lock_count": int(lock_status.get("stable_lock_count", self.ctx.table_lock_frames) or 0),
-            "required_lock_count": int(lock_status.get("required_lock_count", self._required_lock_count()) or 0),
-            "lock_count_inc_reason": str(lock_status.get("lock_count_inc_reason", "") or ""),
-            "lock_count_hold_reason": str(lock_status.get("lock_count_hold_reason", "") or ""),
-            "lock_count_reset_reason": str(lock_status.get("lock_count_reset_reason", "") or ""),
-            "lock_reset_reason": str(lock_status.get("lock_reset_reason", "") or ""),
-            "vision_stale_reason": str(lock_status.get("vision_stale_reason", "") or ""),
-            "table_found": bool(table_obs.table_found) if table_obs is not None else False,
-            "edge_found": bool(table_obs.edge_found) if table_obs is not None else False,
-            "edge_valid": bool(getattr(table_obs, "edge_valid", table_obs.edge_found)) if table_obs is not None else False,
-            "valid_for_control": bool(getattr(table_obs, "valid_for_control", False)) if table_obs is not None else False,
-            "raw_control_level": self._raw_control_level(table_obs),
-            "normalized_control_level": self._control_level(table_obs),
-            "control_level": self._control_level(table_obs),
-            "reject_reason": getattr(table_obs, "reject_reason", None) if table_obs is not None else None,
-            "control_reject_reason": getattr(table_obs, "control_reject_reason", None) if table_obs is not None else None,
-            "usable_for_approach": bool(getattr(table_obs, "usable_for_approach", False)) if table_obs is not None else False,
-            "usable_for_alignment": bool(getattr(table_obs, "usable_for_alignment", False)) if table_obs is not None else False,
-            "usable_for_stop": bool(getattr(table_obs, "usable_for_stop", False)) if table_obs is not None else False,
-            "pose_found": bool(getattr(table_obs, "pose_found", False)) if table_obs is not None else False,
-            "table_confirmed_by_yolo": bool(getattr(table_obs, "table_confirmed_by_yolo", False)) if table_obs is not None else False,
-            "yolo_gate_open": bool(getattr(table_obs, "yolo_gate_open", False)) if table_obs is not None else False,
-            "table_approach_phase": self._table_approach_phase(table_obs),
-            "view_source": getattr(table_obs, "view_source", None) if table_obs is not None else None,
-            "view_err_norm": getattr(table_obs, "view_err_norm", None) if table_obs is not None else None,
-            "view_reliable": bool(getattr(table_obs, "view_reliable", False)) if table_obs is not None else False,
-            "fov_guard_active": bool(getattr(table_obs, "fov_guard_active", False)) if table_obs is not None else False,
-            "fov_guard_reason": str(getattr(table_obs, "fov_guard_reason", "") or "") if table_obs is not None else "",
-            "yolo_reliable": bool(getattr(table_obs, "yolo_reliable", False)) if table_obs is not None else False,
-            "plane_cx_norm": getattr(table_obs, "plane_cx_norm", None) if table_obs is not None else None,
-            "plane_width_norm": getattr(table_obs, "plane_width_norm", None) if table_obs is not None else None,
-            "plane_touch_left": bool(getattr(table_obs, "plane_touch_left", False)) if table_obs is not None else False,
-            "plane_touch_right": bool(getattr(table_obs, "plane_touch_right", False)) if table_obs is not None else False,
-            "confidence": table_obs.confidence if table_obs is not None else None,
-            "edge_conf": getattr(table_obs, "edge_conf", table_obs.confidence) if table_obs is not None else None,
-            "yaw_err_rad": table_obs.yaw_err_rad if table_obs is not None else None,
-            "dist_err_m": table_obs.dist_err_m if table_obs is not None else None,
-            "target_dist_m": table_obs.target_dist_m if table_obs is not None else None,
-            "table_edge_obs_ts": table_obs.obs_ts if table_obs is not None else None,
-            "table_edge_obs_age_ms": self._table_obs_age_ms(table_obs),
-            "obs_total_age_ms": self._table_obs_age_ms(table_obs),
-            "vision_process_ms": getattr(table_obs, "vision_process_ms", getattr(table_obs, "edge_process_ms", None)) if table_obs is not None else None,
-            "control_loop_age_ms": self._table_control_loop_age_ms(table_obs),
-            "stale_level": self._table_obs_stale_level(table_obs),
-            "stale_guard_active": self._table_obs_stale_level(table_obs) != "fresh",
-            "stale_guard_reason": self._table_obs_stale_reason(table_obs),
-            "table_edge_obs_frame_id": table_obs.frame_id if table_obs is not None else None,
-            "table_edge_obs_seq": table_obs.seq if table_obs is not None else None,
-            "obs_seq": table_obs.obs_seq if table_obs is not None else None,
-            "camera_frame_seq": table_obs.camera_frame_seq if table_obs is not None else None,
-            "camera_frame_ts_ms": table_obs.camera_frame_ts_ms if table_obs is not None else None,
-            "vision_process_start_ts_ms": table_obs.vision_process_start_ts_ms if table_obs is not None else None,
-            "vision_process_end_ts_ms": table_obs.vision_process_end_ts_ms if table_obs is not None else None,
-            "vision_publish_ts_ms": table_obs.vision_publish_ts_ms if table_obs is not None else None,
-            "obs_out_send_ts_ms": table_obs.obs_out_send_ts_ms if table_obs is not None else None,
-            "orchestrator_recv_ts_ms": table_obs.orchestrator_recv_ts_ms if table_obs is not None else None,
-            "state_machine_consume_ts_ms": table_obs.state_machine_consume_ts_ms if table_obs is not None else None,
-            "cmd_publish_ts_ms": table_obs.cmd_publish_ts_ms if table_obs is not None else None,
-            "edge_update_interval_ms": table_obs.edge_update_interval_ms if table_obs is not None else None,
-            "edge_process_ms": table_obs.edge_process_ms if table_obs is not None else None,
-            "camera_frame_interval_ms": table_obs.camera_frame_interval_ms if table_obs is not None else None,
-            "camera_frame_hz": table_obs.camera_frame_hz if table_obs is not None else None,
-            "vision_process_interval_ms": table_obs.vision_process_interval_ms if table_obs is not None else None,
-            "vision_publish_interval_ms": table_obs.vision_publish_interval_ms if table_obs is not None else None,
-            "obs_out_send_interval_ms": table_obs.obs_out_send_interval_ms if table_obs is not None else None,
-            "obs_out_send_hz": table_obs.obs_out_send_hz if table_obs is not None else None,
-            "table_edge_obs_recv_interval_ms": table_obs.table_edge_obs_recv_interval_ms if table_obs is not None else None,
-            "orchestrator_recv_interval_ms": table_obs.orchestrator_recv_interval_ms if table_obs is not None else None,
-            "table_edge_obs_recv_hz": table_obs.table_edge_obs_recv_hz if table_obs is not None else None,
-            "state_machine_tick_interval_ms": table_obs.state_machine_tick_interval_ms if table_obs is not None else None,
-            "state_machine_consume_interval_ms": table_obs.state_machine_consume_interval_ms if table_obs is not None else None,
-            "same_obs_reuse_count": table_obs.same_obs_reuse_count if table_obs is not None else None,
-            "obs_seq_gap": table_obs.obs_seq_gap if table_obs is not None else None,
-            "obs_age_at_consume_ms": table_obs.obs_age_at_consume_ms if table_obs is not None else None,
-            "vision_publish_to_orch_recv_ms": table_obs.vision_publish_to_orch_recv_ms if table_obs is not None else None,
-            "orch_recv_to_state_consume_ms": table_obs.orch_recv_to_state_consume_ms if table_obs is not None else None,
-            "table_edge_obs_source_mode": table_obs.source_mode if table_obs is not None else None,
-            "edge_obs_is_stale": self._edge_obs_is_stale(table_obs),
-            "edge_follow_stale": self._edge_obs_is_stale(table_obs) if self.ctx.state == State.EDGE_SLIDE_SEARCH else False,
-            "locked_edge_conf": self.ctx.locked_edge_conf,
-            "locked_yaw_err": self.ctx.locked_yaw_err,
-            "locked_dist_err": self.ctx.locked_dist_err,
-            "locked_roi": self.ctx.locked_roi,
-            "locked_obs_seq": self.ctx.locked_obs_seq,
-            "handoff_state": self.ctx.handoff_state,
-            "handoff_samples_count": len(self.ctx.slide_ref_samples),
-            "handoff_valid_samples_count": len(self.ctx.slide_ref_samples),
-            "slide_ref_ready": bool(self.ctx.slide_ref_ready),
-            "slide_ref_yaw_err": self.ctx.slide_ref_yaw_err,
-            "slide_ref_dist_err": self.ctx.slide_ref_dist_err,
-            "slide_ref_edge_conf": self.ctx.slide_ref_edge_conf,
-            "slide_ref_roi": self.ctx.slide_ref_roi,
-            "slide_ref_seq": self.ctx.slide_ref_seq,
-            "full_locked_yaw_err": self.ctx.locked_yaw_err,
-            "full_locked_dist_err": self.ctx.locked_dist_err,
-            "full_vs_light_yaw_offset": self._full_vs_light_yaw_offset(),
-            "full_vs_light_dist_offset": self._full_vs_light_dist_offset(),
-            "edge_quality": dict(self.ctx.last_edge_quality or {}),
-            "task_result": "success" if self.ctx.state == State.DONE and not self.ctx.last_fail_reason else ("failed" if self.ctx.state == State.ERROR_RECOVERY else ""),
-            "task_total_time_s": max(0.0, time.time() - float(self.ctx.task_start_wall_ts or time.time())) if self.ctx.task_start_wall_ts else 0.0,
-            "edge_retries": int(self.ctx.dock_retry_count + self.ctx.edge_transition_count),
-            "slide_entries": int(self.ctx.task_slide_entries_count),
-            "target_confirm_count": int(self.ctx.task_target_confirm_count),
-            "target_locked_count": int(self.ctx.task_target_locked_count),
-            "last_matched_cls": target_obs.matched_cls if target_obs is not None else None,
-            "last_matched_conf": target_obs.matched_conf if target_obs is not None else None,
-            "last_edge_conf": table_obs.confidence if table_obs is not None else None,
-            "warnings": list(self.ctx.task_warning_history),
-            "last_side": self.ctx.last_table_side,
-            "memory_age": f"{(monotonic_ts() - self.ctx.last_table_seen_ts):.2f}s" if self.ctx.last_table_seen_ts > 0 else "0.00s",
-            "search_src": getattr(self.ctx, "current_search_direction_source", "default"),
-            "search_dir": getattr(self.ctx, "current_search_direction_reason", "no_memory"),
+            "control_source": summary.get("control_source") or "stop",
+            "control_intent": summary.get("control_intent") or "stop",
+            "table_bbox_current_found": bool(sem.table_bbox_current_found),
+            "table_bbox_control_valid": bool(sem.table_bbox_control_valid),
+            "edge_geometry_valid": bool(sem.edge_geometry_valid),
+            "edge_trusted": bool(sem.edge_trusted),
+            "allow_forward": bool(summary.get("allow_forward", False)),
+            "allow_rotate": bool(summary.get("allow_rotate", False)),
+            "forward_block_reason": str(summary.get("forward_block_reason") or ""),
+            "rotate_block_reason": str(summary.get("rotate_block_reason") or ""),
+            "stop_reason": str(summary.get("stop_reason") or ""),
         }
+
 
     def _transition(self, new_state: State, reason: str):
         old_state = self.ctx.state
@@ -493,7 +340,7 @@ class OrchestratorCore:
         self._log("info", f"状态切换 {old_state.value} -> {new_state.value} ({reason})")
         self.ctx.prev_state = old_state
         self.ctx.state = new_state
-        if new_state in {State.YOLO_APPROACH, State.COARSE_ALIGN, State.CONTROLLED_APPROACH, State.FINAL_LOCK}:
+        if new_state in {State.YOLO_APPROACH, State.EDGE_ADJUST, State.FINAL_SLOW_STOP}:
             self.ctx.min_dist_seen = 999.0
             self.ctx.dist_progress_last_refreshed_mono = monotonic_ts()
         self.ctx.state_enter_mono = monotonic_ts()
@@ -612,9 +459,9 @@ class OrchestratorCore:
     def _transition_stable_ms(self, old_state: State) -> int:
         if old_state == State.SEARCH_TABLE:
             return self._frames_to_ms(self.ctx.table_found_frames)
-        if old_state == State.COARSE_ALIGN:
+        if old_state == State.EDGE_ADJUST:
             return self._frames_to_ms(self.ctx.approach_aligned_frames)
-        if old_state == State.FINAL_LOCK:
+        if old_state == State.FINAL_SLOW_STOP:
             return self._frames_to_ms(self.ctx.table_lock_frames)
         if old_state in {State.TARGET_CONFIRM, State.TARGET_LOCKED}:
             return self._target_stable_ms()
@@ -678,69 +525,33 @@ class OrchestratorCore:
 
     def _build_transition_snapshot(self, old_state: State, new_state: State, reason: str) -> Dict[str, Any]:
         table_obs = self.ctx.last_table_obs
-        target_obs = self.ctx.last_target_obs
-        car_state = self.ctx.last_car_state
-        edge_quality = dict(self.ctx.last_edge_quality or {})
-        target_window = self._target_window_stats()
+        from .perception_semantics import build_table_perception_semantics
+        sem = build_table_perception_semantics(table_obs, self.cfg)
+
+        decision = getattr(self, "last_decision", None)
+        summary = decision.control_summary if decision is not None else None
+        if summary is None:
+            summary = {}
+
         return {
+            "ts": time.time(),
+            "state": new_state.value,
+            "control_source": summary.get("control_source") or "stop",
+            "control_intent": summary.get("control_intent") or "stop",
+            "table_bbox_current_found": bool(sem.table_bbox_current_found),
+            "table_bbox_control_valid": bool(sem.table_bbox_control_valid),
+            "edge_geometry_valid": bool(sem.edge_geometry_valid),
+            "edge_trusted": bool(sem.edge_trusted),
+            "allow_forward": bool(summary.get("allow_forward", False)),
+            "allow_rotate": bool(summary.get("allow_rotate", False)),
+            "forward_block_reason": str(summary.get("forward_block_reason") or ""),
+            "rotate_block_reason": str(summary.get("rotate_block_reason") or ""),
+            "stop_reason": str(summary.get("stop_reason") or ""),
             "event": "state_transition",
             "previous_state": old_state.value,
             "next_state": new_state.value,
             "reason": str(reason or ""),
-            "target": self.ctx.active_target,
-            "session_id": self.ctx.active_session_id,
-            "epoch": self.ctx.active_epoch,
-            "req_id": self.ctx.active_req_id,
-            "edge_id": self.ctx.current_edge_id,
-            "edge_conf": self._float_or_none(table_obs.confidence if table_obs is not None else None),
-            "yaw_err": self._float_or_none(table_obs.yaw_err_rad if table_obs is not None else None),
-            "dist_err": self._float_or_none(table_obs.dist_err_m if table_obs is not None else None),
-            "edge_obs_age_ms": self._table_obs_age_ms(table_obs),
-            "edge_obs_is_stale": self._edge_obs_is_stale(table_obs),
-            **self._handoff_trace_fields(),
-            "yaw_delta_from_slide_ref": edge_quality.get("yaw_delta_from_slide_ref"),
-            "dist_delta_from_slide_ref": edge_quality.get("dist_delta_from_slide_ref"),
-            "edge_identity_basis": edge_quality.get("edge_identity_basis"),
-            "stable_ms": self._transition_stable_ms(old_state),
-            "lost_ms": self._transition_lost_ms(old_state),
-            "table_approach_warmup_active": old_state == State.TABLE_APPROACH_WARMUP,
-            "warmup_elapsed_s": self._state_elapsed() if old_state == State.TABLE_APPROACH_WARMUP else 0.0,
-            "warmup_plane_seen_count": int(self.ctx.table_approach_warmup_plane_seen_count),
-            "warmup_fresh_obs_count": int(self.ctx.table_approach_warmup_fresh_obs_count),
-            "warmup_reason": "waiting_for_initial_vision" if old_state == State.TABLE_APPROACH_WARMUP else "",
-            "target_found": bool(target_obs.found) if target_obs is not None else None,
-            "target_conf": self._float_or_none(target_obs.confidence if target_obs is not None else None),
-            "target_cls": (target_obs.matched_cls or target_obs.target if target_obs is not None else None),
-            "matched_cls": (target_obs.matched_cls if target_obs is not None else None),
-            "matched_conf": self._float_or_none(target_obs.matched_conf if target_obs is not None else None),
-            "best_cls": (target_obs.best_cls if target_obs is not None else None),
-            "best_conf": self._float_or_none(target_obs.best_conf if target_obs is not None else None),
-            "target_center": self._target_center(target_obs),
-            "matched_center": self._target_center(target_obs),
-            "matched_center_full_norm": self._target_center_full_norm(target_obs),
-            "matched_center_offset_norm": self._target_center_offset_norm(target_obs),
-            "bbox_valid": target_obs.bbox_valid if target_obs is not None else None,
-            "bbox_invalid_reason": target_obs.bbox_invalid_reason if target_obs is not None else None,
-            "target_window_found_ratio": target_window.get("found_ratio"),
-            "target_conf_median": target_window.get("conf_median"),
-            "target_conf_max": target_window.get("conf_max"),
-            "bbox_valid_ratio": target_window.get("bbox_valid_ratio"),
-            "target_window_latest_matched_cls": target_window.get("latest_matched_cls"),
-            "target_window_latest_matched_conf": target_window.get("latest_matched_conf"),
-            "found_frames": int(self.ctx.target_found_frames),
-            "lost_frames": int(self.ctx.target_lost_frames),
-            "confirm_elapsed_ms": int(round(self._state_elapsed() * 1000.0)) if old_state == State.TARGET_CONFIRM else 0,
-            "lock_elapsed_ms": int(round(self._state_elapsed() * 1000.0)) if old_state == State.TARGET_LOCKED else 0,
-            "lost_hold_ms": self._transition_lost_ms(old_state),
-            "lock_decision_reason": str(self.ctx.target_last_transition_reason or ""),
-            "unlock_reason": str(self.ctx.target_last_lost_reason or "") if new_state == State.EDGE_SLIDE_SEARCH else "",
-            "target_stable_ms": self._target_stable_ms(),
-            "center_jitter": float(self.ctx.target_last_center_jitter),
-            "lost_reason": str(self.ctx.target_last_lost_reason or ""),
             "transition_reason": str(reason or ""),
-            "car_mode": car_state.mode if car_state is not None else None,
-            "planned_cmd": {"vx": None, "vy": None, "wz": None},
-            "condition": self._transition_condition_snapshot(old_state, new_state),
         }
 
     def _on_enter_state(self, state: State):
@@ -752,15 +563,10 @@ class OrchestratorCore:
             return
         if state == State.SEARCH_TARGET_INIT:
             self._reset_slide_ref_handoff()
-        if state == State.TABLE_APPROACH_WARMUP:
-            self.ctx.table_approach_warmup_fresh_obs_count = 0
-            self.ctx.table_approach_warmup_plane_seen_count = 0
-            self.ctx.table_approach_warmup_last_obs_key = ""
-            self.ctx.table_found_frames = 0
         if state == State.SEARCH_TABLE:
             self.reset_edge_tracking("enter_search_table")
             self.reset_target_tracking("enter_search_table")
-        elif state in {State.DOCK_RETRY, State.LEAVE_EDGE, State.NEXT_TABLE}:
+        elif state in {State.NO_PROGRESS_RECOVERY, State.LEAVE_EDGE, State.NEXT_TABLE}:
             reason = f"enter_{state.value.lower()}"
             self.reset_edge_tracking(reason)
             self.reset_target_tracking(reason)
@@ -1070,52 +876,6 @@ class OrchestratorCore:
     def _tick_idle(self) -> MotionDecision:
         return self.controller.stop_cmd("IDLE")
 
-    def _tick_table_approach_warmup(self) -> MotionDecision:
-        self._maybe_resend_req(self._active_req_payload())
-        obs = self._fresh_table_obs()
-        obs_key = self._table_obs_key(obs)
-        if obs is not None and obs_key and obs_key != self.ctx.table_approach_warmup_last_obs_key:
-            self.ctx.table_approach_warmup_last_obs_key = obs_key
-            self.ctx.table_approach_warmup_fresh_obs_count += 1
-            if self._table_visible(obs) and (self._control_level(obs) != "none" or self._table_plane_stable(obs)):
-                self.ctx.table_approach_warmup_plane_seen_count += 1
-
-        elapsed_s = self._state_elapsed()
-        warmup_s = max(0.0, float(getattr(self.cfg, "table_approach_warmup_s", 2.0) or 0.0))
-        min_fresh = max(0, int(getattr(self.cfg, "table_approach_warmup_min_fresh_obs", 1) or 0))
-        if elapsed_s < warmup_s:
-            return self.controller.stop_cmd("TABLE_APPROACH_WARMUP")
-
-        has_min_fresh = self.ctx.table_approach_warmup_fresh_obs_count >= min_fresh
-        level = self._control_level(obs)
-        if bool(getattr(self.cfg, "yolo_table_control_enable", True)) and self._table_yolo_reliable(obs):
-            self._transition(State.CONTROLLED_APPROACH, "warmup结束，table bbox found，进入YOLO默认前进")
-            return self.controller.yolo_table_search_cmd(
-                obs,
-                mode="CONTROLLED_APPROACH",
-                reason="warmup_table_bbox_found_default_forward",
-                control_source="yolo_forward",
-            )
-        # Control refactor v2: edge/docking may not start table approach without table bbox semantics.
-        plane_ready = bool(
-            has_min_fresh
-            and self._table_yolo_reliable(obs)
-            and self.controller._edge_trusted(obs)
-            and (level != "none" or self._table_plane_stable(obs))
-        )
-        if plane_ready:
-            self.ctx.table_found_frames = max(int(self.ctx.table_found_frames), int(self.cfg.table_found_frames_to_approach))
-            if level == "approach" and self._yaw_ready_for_controlled_approach(obs):
-                self._transition(State.CONTROLLED_APPROACH, "warmup已有fresh plane obs，进入plane-only approach")
-                return self.controller.fov_table_approach_cmd(obs, phase="PLANE_APPROACH")
-            if level == "stop":
-                return self._enter_final_lock_or_keep_approach(obs, "warmup已有fresh stop obs，进入最终停车")
-            self._transition(State.COARSE_ALIGN, "warmup已有fresh plane obs，进入plane yaw/dist对齐")
-            return self.controller.fov_table_approach_cmd(obs, phase="PLANE_FINAL_LOCK", mode="COARSE_ALIGN")
-
-        self.ctx.table_found_frames = 0
-        self._transition(State.SEARCH_TABLE, "warmup未获得稳定plane obs，进入搜索")
-        return self.controller.stop_cmd("TABLE_APPROACH_WARMUP")
 
     def _get_memory_search_params(self) -> Tuple[int, str, str]:
         turn_sign = self.ctx.relocate_turn_sign
@@ -1218,10 +978,10 @@ class OrchestratorCore:
             self._transition(State.SEARCH_TABLE, "YOLO_APPROACH lost table bbox, enter SEARCH")
             return self._tick_search_table()
         if self._check_approach_progress(obs):
-            return self._enter_dock_retry_or_next("YOLO接近无进展超时")
+            return self._enter_no_progress_recovery_or_next("YOLO接近无进展超时")
         if self.controller._edge_trusted(obs):
-            self._transition(State.COARSE_ALIGN, "YOLO_APPROACH table edge trusted, transition to COARSE_ALIGN")
-            return self._tick_coarse_align()
+            self._transition(State.EDGE_ADJUST, "YOLO_APPROACH table edge trusted, transition to EDGE_ADJUST")
+            return self._tick_edge_adjust()
             
         decision = self.controller.yolo_table_search_cmd(
             obs,
@@ -1284,122 +1044,79 @@ class OrchestratorCore:
         )
         return decision
 
-    def _tick_coarse_align(self) -> MotionDecision:
-        obs = self._fresh_table_obs()
-        if not self._table_yolo_reliable(obs):
-            self._transition(State.SEARCH_TABLE, "COARSE_ALIGN未检测到table bbox，进入本地旋转搜索")
-            return self.controller.search_table_cmd(*self._get_memory_search_params())
-        self._reset_table_loss()
-        if self._table_yolo_reliable(obs) and not self.controller._edge_trusted(obs):
-            self._transition(State.YOLO_APPROACH, "COARSE_ALIGN被阻止：table bbox存在但edge未trusted，回到YOLO默认前进")
-            return self.controller.yolo_table_search_cmd(
-                obs,
-                mode="YOLO_APPROACH",
-                reason="coarse_align_blocked_edge_not_trusted",
-                control_source="yolo_forward",
-            )
-        level = self._control_level(obs)
-        if level == "none":
-            return self.controller.yolo_table_search_cmd(
-                obs,
-                mode="CONTROLLED_APPROACH",
-                reason="coarse_align_level_none_yolo_forward",
-                control_source="yolo_forward",
-            )
-        if level == "stop":
-            return self._enter_final_lock_or_keep_approach(obs, "plane-only stop 可用，进入停车确认")
-
-        pending_reason = ""
-        yaw_ready = self._yaw_ready_for_controlled_approach(obs)
-        if self._count_table_motion_hysteresis_obs(
-            obs,
-            ok=yaw_ready,
-            last_key_attr="align_hysteresis_last_obs_key",
-            count_attr="approach_aligned_frames",
-        ) >= self._align_to_approach_stable_obs():
-            dwell_s = self._state_elapsed()
-            min_dwell_s = self._coarse_align_min_dwell_s()
-            if dwell_s >= min_dwell_s:
-                self._transition(State.CONTROLLED_APPROACH, "plane yaw/dist稳定，开始plane-only接近")
-                return self.controller.fov_table_approach_cmd(obs, phase="PLANE_APPROACH")
-            pending_reason = f"align_to_approach_pending_min_dwell:{dwell_s:.2f}/{min_dwell_s:.2f}s"
-            self.ctx.table_motion_pending_transition_reason = pending_reason
-        else:
-            self.ctx.table_motion_pending_transition_reason = ""
-        if self._check_approach_progress(obs):
-            return self._enter_dock_retry_or_next("粗对齐无进展超时")
+    def _tick_edge_adjust(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
-        decision = self.controller.fov_table_approach_cmd(obs, phase="PLANE_FINAL_LOCK", mode="COARSE_ALIGN")
-        return self._annotate_table_motion_hysteresis(decision, pending_reason=pending_reason)
-
-    def _tick_controlled_approach(self) -> MotionDecision:
         obs = self._fresh_table_obs()
         if not self._table_yolo_reliable(obs):
-            self._transition(State.SEARCH_TABLE, "CONTROLLED_APPROACH未检测到table bbox，进入本地旋转搜索")
+            self._transition(State.SEARCH_TABLE, "EDGE_ADJUST未检测到table bbox，进入本地旋转搜索")
             return self.controller.search_table_cmd(*self._get_memory_search_params())
         self._reset_table_loss()
         if self._table_yolo_reliable(obs) and not self.controller._edge_trusted(obs):
-            self._transition(State.YOLO_APPROACH, "CONTROLLED_APPROACH table edge not trusted, fallback to YOLO_APPROACH")
+            self._transition(State.YOLO_APPROACH, "EDGE_ADJUST被阻止：table bbox存在但edge未trusted，回到YOLO默认前进")
             return self.controller.yolo_table_search_cmd(
                 obs,
                 mode="YOLO_APPROACH",
-                reason="controlled_approach_edge_not_trusted_yolo_forward",
+                reason="edge_adjust_blocked_edge_not_trusted",
                 control_source="yolo_forward",
             )
-        pending_reason = ""
-        yaw_needs_realign = self._yaw_needs_realign_from_approach(obs)
-        if self._count_table_motion_hysteresis_obs(
-            obs,
-            ok=yaw_needs_realign,
-            last_key_attr="approach_hysteresis_last_obs_key",
-            count_attr="approach_realign_frames",
-        ) >= self._approach_to_align_stable_obs():
-            dwell_s = self._state_elapsed()
-            min_dwell_s = self._controlled_approach_min_dwell_s()
-            if dwell_s >= min_dwell_s:
-                if self._table_yolo_reliable(obs):
-                    rotate_gate = self.controller._rotate_gate(obs)
-                    if not bool(rotate_gate.get("allow_rotate", False)):
-                        decision = self.controller.yolo_table_search_cmd(
-                            obs,
-                            mode="CONTROLLED_APPROACH",
-                            reason="table_bbox_valid_prevent_coarse_align",
-                            control_source="yolo_forward",
-                        )
-                        decision.control_summary.update(rotate_gate)
-                        decision.control_summary.update(
-                            {
-                                "search_blocked_by_yolo_valid": True,
-                                "yolo_valid_prevent_search_fallback": True,
-                                "control_source": "yolo_forward",
-                            }
-                        )
-                        return self._annotate_table_motion_hysteresis(decision, pending_reason="rotate_gate_blocked_realign")
-                self._transition(State.COARSE_ALIGN, "approach yaw连续偏大，回到粗对齐")
-                return self.controller.fov_table_approach_cmd(obs, phase="PLANE_FINAL_LOCK", mode="COARSE_ALIGN")
-            pending_reason = f"approach_to_align_pending_min_dwell:{dwell_s:.2f}/{min_dwell_s:.2f}s"
-            self.ctx.table_motion_pending_transition_reason = pending_reason
-        else:
-            self.ctx.table_motion_pending_transition_reason = ""
         level = self._control_level(obs)
         if level == "none":
             if self._table_yolo_reliable(obs):
-                return self.controller.yolo_table_search_cmd(obs, mode="CONTROLLED_APPROACH", reason="edge_lost_yolo_forward", control_source="yolo_forward")
-            return self.controller.stop_cmd("CONTROLLED_APPROACH")
-        if level == "approach":
-            decision = self.controller.fov_table_approach_cmd(obs, phase="PLANE_APPROACH")
-            return self._annotate_table_motion_hysteresis(decision, pending_reason=pending_reason)
-        if level == "stop":
-            return self._enter_final_lock_or_keep_approach(obs, "plane-only stop 可用，进入最终停车")
-        if self._edge_ready(obs):
-            return self._enter_final_lock_or_keep_approach(obs, "进入最终锁边")
-        if self._check_approach_progress(obs):
-            return self._enter_dock_retry_or_next("受控接近无进展超时")
-        self._maybe_resend_req(self._active_req_payload())
-        decision = self._table_approach_decision(obs, phase="PLANE_FINAL_LOCK")
-        return self._annotate_table_motion_hysteresis(decision, pending_reason=pending_reason)
+                return self.controller.yolo_table_search_cmd(
+                    obs,
+                    mode="EDGE_ADJUST",
+                    reason="edge_adjust_level_none_yolo_forward",
+                    control_source="yolo_forward",
+                )
+            return self.controller.stop_cmd("EDGE_ADJUST")
+        if level == "stop" or self._edge_ready(obs):
+            return self._enter_final_slow_stop_or_keep_approach(obs, "满足最终停车条件，进入慢速停车")
 
-    def _tick_final_lock(self) -> MotionDecision:
+        if not self.ctx.table_dock_phase:
+            self.ctx.table_dock_phase = "aligning"
+
+        yaw_ready = self._yaw_ready_for_controlled_approach(obs)
+        yaw_needs_realign = self._yaw_needs_realign_from_approach(obs)
+
+        if self.ctx.table_dock_phase == "aligning":
+            if self._count_table_motion_hysteresis_obs(
+                obs,
+                ok=yaw_ready,
+                last_key_attr="align_hysteresis_last_obs_key",
+                count_attr="approach_aligned_frames",
+            ) >= self._align_to_approach_stable_obs():
+                self.ctx.table_dock_phase = "approaching"
+                self.ctx.approach_realign_frames = 0
+                self.ctx.table_motion_pending_transition_reason = ""
+            else:
+                self.ctx.table_motion_pending_transition_reason = "align_to_approach_pending"
+        elif self.ctx.table_dock_phase == "approaching":
+            if self._count_table_motion_hysteresis_obs(
+                obs,
+                ok=yaw_needs_realign,
+                last_key_attr="approach_hysteresis_last_obs_key",
+                count_attr="approach_realign_frames",
+            ) >= self._approach_to_align_stable_obs():
+                self.ctx.table_dock_phase = "aligning"
+                self.ctx.approach_aligned_frames = 0
+                self.ctx.table_motion_pending_transition_reason = ""
+            else:
+                self.ctx.table_motion_pending_transition_reason = "approach_to_align_pending"
+
+        if self._check_approach_progress(obs):
+            return self._enter_no_progress_recovery_or_next("微调阶段无进展超时")
+
+        pending_reason = self.ctx.table_motion_pending_transition_reason
+
+        if self.ctx.table_dock_phase == "aligning":
+            decision = self.controller.fov_table_approach_cmd(obs, phase="PLANE_FINAL_LOCK", mode="COARSE_ALIGN")
+            decision.control_summary["control_intent"] = "coarse_edge_adjust"
+        else:
+            decision = self._table_approach_decision(obs, phase="PLANE_APPROACH")
+            decision.control_summary["control_intent"] = "edge_parallel"
+        return decision
+
+    def _tick_final_slow_stop(self) -> MotionDecision:
         elapsed_ms = self._state_elapsed() * 1000.0
         is_holding = elapsed_ms < self.cfg.final_lock_min_hold_ms
 
@@ -1407,10 +1124,10 @@ class OrchestratorCore:
             if is_holding:
                 obs = self._fresh_table_obs()
                 status = self._final_lock_status(obs, stable_count=self.ctx.table_lock_frames)
-                return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_LOCK"), status)
+                return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_SLOW_STOP"), status)
             obs = self._fresh_table_obs()
             if self._table_visible(obs):
-                self._transition(State.CONTROLLED_APPROACH, "final_lock disabled，回到受控接近")
+                self._transition(State.EDGE_ADJUST, "final_lock disabled，回到微调状态")
                 return self._table_approach_decision(obs, phase="PLANE_APPROACH", stop_ready_ignored=True)
             return self._handle_table_loss("final_lock disabled 且桌边丢失，回到搜索", State.SEARCH_TABLE, "FINAL_LOCK_DISABLED_HOLD")
 
@@ -1424,14 +1141,14 @@ class OrchestratorCore:
             loss_ms = self._loss_elapsed(self.ctx.table_loss_since_mono) * 1000.0
             
             if is_holding or loss_ms < self.cfg.final_lock_lost_timeout_ms:
-                return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_LOCK"), status)
+                return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_SLOW_STOP"), status)
                 
             self.ctx.table_lost_frames += 1
             reason = str(status.get("reason") or "")
             self._log_final_lock_summary(stale_obs if stale_obs is not None else obs, lock_ready=False, reason=reason, stable_count=self.ctx.table_lock_frames, status=status)
             if str(status.get("lock_count_hold_reason") or ""):
-                return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_LOCK"), status)
-            return self._handle_table_loss("最终锁边时桌边丢失，回到搜索", State.SEARCH_TABLE, "FINAL_LOCK_HOLD")
+                return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_SLOW_STOP"), status)
+            return self._handle_table_loss("最终停车时桌边丢失，回到搜索", State.SEARCH_TABLE, "FINAL_LOCK_HOLD")
 
         self._reset_table_loss()
 
@@ -1449,7 +1166,7 @@ class OrchestratorCore:
             level = str(status.get("normalized_control_level") or self._control_level(obs))
             if not self._table_micro_adjust_enabled() and str(status.get("reason") or "") == "distance_too_far":
                 if not is_holding:
-                    self._transition(State.CONTROLLED_APPROACH, "final_lock_distance_too_far_return_approach")
+                    self._transition(State.EDGE_ADJUST, "final_lock_distance_too_far_return_adjust")
                     return self._table_approach_decision(obs, phase="PLANE_APPROACH")
             if bool(status.get("final_lock_window_ready")):
                 return self._final_lock_arrived_decision(obs, status)
@@ -1457,24 +1174,24 @@ class OrchestratorCore:
                 self.ctx.table_stop_sent = True
                 self._enter_table_dock_phase("STOP_AND_SETTLE", "[TABLE_DOCK][STOP] final lock/stop condition reached")
                 self._log("info", "[TABLE_DOCK][SETTLE] begin after STOP")
-                return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_LOCK"), status)
+                return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_SLOW_STOP"), status)
             if self._check_approach_progress(obs):
                 if not is_holding:
-                    return self._enter_dock_retry_or_next(f"最终锁边无进展超时:{status['reason']}")
+                    return self._enter_no_progress_recovery_or_next(f"最终慢速停车无进展超时:{status['reason']}")
             self._maybe_resend_req(self._active_req_payload())
             if level == "none":
-                return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_LOCK"), status)
+                return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_SLOW_STOP"), status)
             if level == "approach":
-                return self.controller.plane_approach_cmd(obs, mode="FINAL_LOCK", reason="plane_final_approach")
+                return self.controller.plane_approach_cmd(obs, mode="FINAL_SLOW_STOP", reason="plane_final_approach")
             if level == "stop":
-                return self.controller.fov_table_approach_cmd(obs, phase="PLANE_STOP", mode="FINAL_LOCK")
-            return self.controller.fov_table_approach_cmd(obs, phase="PLANE_FINAL_LOCK", mode="FINAL_LOCK")
+                return self.controller.fov_table_approach_cmd(obs, phase="PLANE_STOP", mode="FINAL_SLOW_STOP")
+            return self.controller.fov_table_approach_cmd(obs, phase="PLANE_FINAL_LOCK", mode="FINAL_SLOW_STOP")
 
         if phase == "STOP_AND_SETTLE":
             settle_s = max(0.0, float(getattr(self.cfg, "table_settle_s", 0.30)))
             if monotonic_ts() - float(self.ctx.table_dock_phase_since_mono or 0.0) < settle_s:
                 return self._annotate_final_lock_decision(
-                    self.controller.stop_cmd("FINAL_LOCK"),
+                    self.controller.stop_cmd("FINAL_SLOW_STOP"),
                     self._final_lock_status(obs, stable_count=self.ctx.table_lock_frames),
                 )
             lock_status = self._update_final_lock_count(obs)
@@ -1496,7 +1213,7 @@ class OrchestratorCore:
                     f"dist_err={obs.dist_err_m} yaw_err={obs.yaw_err_rad}",
                 )
                 if self.ctx.table_lock_frames >= self._required_lock_count():
-                    self.ctx.dock_retry_count = 0
+                    self.ctx.no_progress_recovery_count = 0
                     self._capture_locked_edge(obs)
                     self._log("info", "[TABLE_DOCK][DONE] stable final lock confirmed")
                     if self._table_edge_only_test_enabled():
@@ -1507,15 +1224,15 @@ class OrchestratorCore:
                     self._transition(State.AT_TABLE_EDGE, "lock_ready")
                     self._queue_tts("已完成桌边停靠")
                     return self._annotate_final_lock_decision(self.controller.stop_cmd("AT_TABLE_EDGE"), lock_status)
-                return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_LOCK"), lock_status)
+                return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_SLOW_STOP"), lock_status)
 
             hold_reason = str(lock_status.get("lock_count_hold_reason") or "")
             if hold_reason:
-                return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_LOCK"), lock_status)
+                return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_SLOW_STOP"), lock_status)
 
             if not self._table_micro_adjust_enabled() and str(lock_status.get("reason") or "") == "distance_too_far":
                 if not is_holding:
-                    self._transition(State.CONTROLLED_APPROACH, "final_lock_distance_too_far_return_approach")
+                    self._transition(State.EDGE_ADJUST, "final_lock_distance_too_far_return_adjust")
                     return self._table_approach_decision(obs, phase="PLANE_APPROACH")
 
             self._enter_table_dock_phase("MICRO_ADJUST", f"[TABLE_DOCK][SETTLE] done reason={lock_status['reason']}")
@@ -1529,10 +1246,10 @@ class OrchestratorCore:
             if not is_holding:
                 status = self._final_lock_status(obs, stable_count=self.ctx.table_lock_frames)
                 self._log_final_lock_summary(obs, lock_ready=False, reason=str(status["reason"]), stable_count=self.ctx.table_lock_frames)
-                return self._enter_dock_retry_or_next(f"最终锁边无进展超时:{status['reason']}")
+                return self._enter_no_progress_recovery_or_next(f"最终停靠无进展超时:{status['reason']}")
         self._maybe_resend_req(self._active_req_payload())
         return self._annotate_final_lock_decision(
-            self.controller.stop_cmd("FINAL_LOCK"),
+            self.controller.stop_cmd("FINAL_SLOW_STOP"),
             self._final_lock_status(obs, stable_count=self.ctx.table_lock_frames),
         )
 
@@ -1550,7 +1267,7 @@ class OrchestratorCore:
                 "latest_obs_age_ms": self._table_obs_age_ms(obs),
             }
         )
-        self.ctx.dock_retry_count = 0
+        self.ctx.no_progress_recovery_count = 0
         self._capture_locked_edge(obs)
         self.ctx.final_lock_last_transition_reason = "final_lock_window_ready"
         self._log(
@@ -1571,7 +1288,7 @@ class OrchestratorCore:
         self._queue_tts("已完成桌边停靠")
         return self._annotate_final_lock_decision(self.controller.stop_cmd("AT_TABLE_EDGE"), status)
 
-    def _tick_dock_retry(self) -> MotionDecision:
+    def _tick_no_progress_recovery(self) -> MotionDecision:
         if self._state_elapsed() < float(self.cfg.dock_retry_backoff_s):
             return self.controller.leave_edge_cmd()
         self._transition(State.SEARCH_TABLE, "停靠重试完成，重新搜索桌边")
@@ -1605,9 +1322,9 @@ class OrchestratorCore:
             self.ctx.handoff_state = "collecting" if self._state_elapsed() < max_s or not enough_samples else "waiting_valid_light_edge"
             if self._state_elapsed() >= float(getattr(self.cfg, "reacquire_timeout_s", 8.0) or 8.0):
                 if not self._table_final_lock_enabled():
-                    self._transition(State.CONTROLLED_APPROACH, "slide_ref_handoff_timeout final_lock disabled")
+                    self._transition(State.EDGE_ADJUST, "slide_ref_handoff_timeout final_lock disabled")
                     return self._table_approach_decision(edge_obs, phase="PLANE_APPROACH", stop_ready_ignored=True)
-                self._transition(State.FINAL_LOCK, "slide_ref_handoff_timeout")
+                self._transition(State.FINAL_SLOW_STOP, "slide_ref_handoff_timeout")
                 return self.controller.final_lock_cmd(edge_obs)
             return self.controller.stop_cmd("SEARCH_TARGET_INIT")
         if self._state_elapsed() < min_s:
@@ -1773,26 +1490,26 @@ class OrchestratorCore:
 
     def _edge_slide_fallback_state(self) -> State:
         if not self._table_final_lock_enabled():
-            return State.CONTROLLED_APPROACH
+            return State.EDGE_ADJUST
         raw = str(getattr(self.cfg, "edge_slide_fallback_state", "") or "").strip().upper()
         direct = bool(getattr(self.cfg, "edge_slide_direct_fallback_to_controlled_approach", False))
-        if direct and raw == State.CONTROLLED_APPROACH.value:
-            return State.CONTROLLED_APPROACH
-        return State.FINAL_LOCK
+        if direct and raw in {"CONTROLLED_APPROACH", "EDGE_ADJUST"}:
+            return State.EDGE_ADJUST
+        return State.FINAL_SLOW_STOP
 
     def _edge_slide_stale_fallback_state(self) -> State:
         if not self._table_final_lock_enabled():
-            return State.CONTROLLED_APPROACH
+            return State.EDGE_ADJUST
         raw = str(getattr(self.cfg, "edge_follow_stale_fallback_state", "") or "").strip().upper()
         direct = bool(getattr(self.cfg, "edge_slide_direct_fallback_to_controlled_approach", False))
-        if direct and raw == State.CONTROLLED_APPROACH.value:
-            return State.CONTROLLED_APPROACH
-        return State.FINAL_LOCK
+        if direct and raw in {"CONTROLLED_APPROACH", "EDGE_ADJUST"}:
+            return State.EDGE_ADJUST
+        return State.FINAL_SLOW_STOP
 
     def _edge_slide_fallback_cmd(self, state: State, edge_obs: Optional[TableEdgeObs]) -> MotionDecision:
-        if state == State.FINAL_LOCK:
-            return self.controller.final_lock_cmd(edge_obs)
-        return self.controller.controlled_approach_cmd(edge_obs)
+        if state == State.FINAL_SLOW_STOP:
+            return self.controller.fov_table_approach_cmd(edge_obs, phase="PLANE_FINAL_LOCK", mode="FINAL_SLOW_STOP")
+        return self.controller.fov_table_approach_cmd(edge_obs, phase="PLANE_APPROACH", mode="EDGE_ADJUST")
 
     def _annotate_edge_slide_decision(
         self,
@@ -2230,17 +1947,17 @@ class OrchestratorCore:
     def _tick_relocate_to_edge(self) -> MotionDecision:
         if self._state_elapsed() < float(self.cfg.relocate_turn_s):
             return self.controller.relocate_cmd(turn_sign=self.ctx.relocate_turn_sign)
-        self._transition(State.REACQUIRE_EDGE, f"开始重捕获边 {self.ctx.current_edge_id}")
+        self._transition(State.REACQUIRE_TABLE, f"开始重捕获边 {self.ctx.current_edge_id}")
         return self.controller.search_table_cmd(*self._get_memory_search_params())
 
-    def _tick_reacquire_edge(self) -> MotionDecision:
+    def _tick_reacquire_table(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
         obs = self._fresh_table_obs()
         if self._table_visible(obs):
             self.ctx.table_found_frames += 1
             if self.ctx.table_found_frames >= int(self.cfg.table_found_frames_to_approach):
-                self._transition(State.COARSE_ALIGN, f"已重捕获边 {self.ctx.current_edge_id}")
-                return self.controller.fov_table_approach_cmd(obs, phase="PLANE_FINAL_LOCK", mode="COARSE_ALIGN")
+                self._transition(State.EDGE_ADJUST, f"已重捕获边 {self.ctx.current_edge_id}")
+                return self._tick_edge_adjust()
         else:
             self.ctx.table_found_frames = 0
         if self._state_elapsed() >= float(self.cfg.reacquire_timeout_s):
@@ -3037,7 +2754,7 @@ class OrchestratorCore:
         obs: Optional[TableEdgeObs],
         *,
         phase: str = "PLANE_APPROACH",
-        mode: str = "CONTROLLED_APPROACH",
+        mode: str = "EDGE_ADJUST",
         stop_ready_ignored: bool = False,
     ) -> MotionDecision:
         decision = self.controller.fov_table_approach_cmd(obs, phase=phase, mode=mode)
@@ -3051,18 +2768,18 @@ class OrchestratorCore:
             )
         return decision
 
-    def _enter_final_lock_or_keep_approach(self, obs: Optional[TableEdgeObs], reason: str) -> MotionDecision:
+    def _enter_final_slow_stop_or_keep_approach(self, obs: Optional[TableEdgeObs], reason: str) -> MotionDecision:
         enter_status = self._final_lock_enter_status(obs)
         if bool(enter_status.get("final_lock_enter_allowed")):
-            self._transition(State.FINAL_LOCK, reason)
-            decision = self.controller.fov_table_approach_cmd(obs, phase="PLANE_FINAL_LOCK", mode="FINAL_LOCK")
+            self._transition(State.FINAL_SLOW_STOP, reason)
+            decision = self.controller.fov_table_approach_cmd(obs, phase="PLANE_FINAL_LOCK", mode="FINAL_SLOW_STOP")
             if decision.control_summary is not None:
                 decision.control_summary.update(enter_status)
             return decision
         block_reason = str(enter_status.get("final_lock_enter_block_reason") or "blocked")
         decision = self._table_approach_decision(obs, phase="PLANE_APPROACH", stop_ready_ignored=True)
-        if self.ctx.state != State.CONTROLLED_APPROACH:
-            self._transition(State.CONTROLLED_APPROACH, f"final_lock_enter_blocked:{block_reason}")
+        if self.ctx.state != State.EDGE_ADJUST:
+            self._transition(State.EDGE_ADJUST, f"final_slow_stop_enter_blocked:{block_reason}")
         return decision
 
     def _annotate_final_lock_decision(self, decision: MotionDecision, status: Dict[str, object]) -> MotionDecision:
@@ -3141,7 +2858,7 @@ class OrchestratorCore:
         if not action:
             self._log("info", f"[TABLE_DOCK][SETTLE] no jog action reason={status['reason']}")
             self._enter_table_dock_phase("STOP_AND_SETTLE")
-            return self.controller.stop_cmd("FINAL_LOCK")
+            return self.controller.stop_cmd("FINAL_SLOW_STOP")
 
         self.ctx.table_micro_adjust_count += 1
         reason = (
@@ -3152,7 +2869,7 @@ class OrchestratorCore:
         self.ctx.table_lock_frames = 0
         self._enter_table_dock_phase("STOP_AND_SETTLE")
         self._log("info", "[TABLE_DOCK][SETTLE] begin after JOG")
-        decision = self.controller.stop_cmd("FINAL_LOCK")
+        decision = self.controller.stop_cmd("FINAL_SLOW_STOP")
         decision.jog_action = action
         decision.jog_reason = reason
         if decision.control_summary is not None:
@@ -3823,11 +3540,11 @@ class OrchestratorCore:
         decision.control_summary["table_lost_search_timeout"] = False
         return decision
 
-    def _enter_dock_retry_or_next(self, reason: str) -> MotionDecision:
+    def _enter_no_progress_recovery_or_next(self, reason: str) -> MotionDecision:
         self.ctx.last_fail_reason = reason
-        if self.ctx.dock_retry_count < int(self.cfg.dock_retry_limit):
-            self.ctx.dock_retry_count += 1
-            self._transition(State.DOCK_RETRY, f"{reason}，准备重试第 {self.ctx.dock_retry_count} 次")
+        if self.ctx.no_progress_recovery_count < int(self.cfg.dock_retry_limit):
+            self.ctx.no_progress_recovery_count += 1
+            self._transition(State.NO_PROGRESS_RECOVERY, f"{reason}，准备重试第 {self.ctx.no_progress_recovery_count} 次")
             return self.controller.leave_edge_cmd()
         self._transition(State.NEXT_TABLE, reason)
         return self.controller.next_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
@@ -3872,7 +3589,27 @@ class OrchestratorCore:
             return self.controller.stop_cmd("AVOID_OBSTACLE", brake=True)
         return None
 
-    def _apply_depth_safety_logic(self, decision: MotionDecision) -> MotionDecision:
+    def _apply_soft_interception_and_safety(self, decision: MotionDecision) -> MotionDecision:
+        summary = decision.control_summary
+        if summary is None:
+            summary = {}
+            decision.control_summary = summary
+
+        allow_forward = summary.get("allow_forward", True)
+        allow_rotate = summary.get("allow_rotate", True)
+
+        # Apply Soft Interception based on allow_forward and allow_rotate
+        if not allow_forward and decision.cmd.vx_mps > 1e-9:
+            decision.cmd.vx_mps = 0.0
+            if not summary.get("forward_block_reason"):
+                summary["forward_block_reason"] = "allow_forward_false_intercept"
+
+        if not allow_rotate and abs(decision.cmd.wz_radps) > 1e-9:
+            decision.cmd.wz_radps = 0.0
+            if not summary.get("rotate_block_reason"):
+                summary["rotate_block_reason"] = "allow_rotate_false_intercept"
+
+        # Apply Depth Safety logic and update block reasons
         obs = self._fresh_table_obs()
         if obs is not None and obs.depth_p10 is not None:
             depth_p10 = obs.depth_p10
@@ -3880,14 +3617,33 @@ class OrchestratorCore:
                 if decision.cmd.vx_mps > 0 or (decision.cmd.vx_mps == 0 and abs(decision.cmd.wz_radps) > 0):
                     decision.cmd.vx_mps = 0.0
                     decision.cmd.wz_radps = 0.0
+                    summary["forward_block_reason"] = "depth_p10_too_close"
+                    summary["rotate_block_reason"] = "depth_p10_too_close"
+                    summary["stop_reason"] = "depth_p10_too_close"
+                    summary["allow_forward"] = False
+                    summary["allow_rotate"] = False
                     self._log("warn", f"Depth safety stop triggered: depth_p10={depth_p10:.3f}m < {self.cfg.near_stop_depth_m:.3f}m")
             elif depth_p10 < self.cfg.near_slow_depth_m:
                 max_vx = self.cfg.near_slow_max_vx_mps
                 max_wz = self.cfg.near_slow_max_wz_radps
                 if decision.cmd.vx_mps > max_vx:
                     decision.cmd.vx_mps = max_vx
+                    summary["forward_block_reason"] = "depth_p10_slowdown"
                 if abs(decision.cmd.wz_radps) > max_wz:
                     sign = 1.0 if decision.cmd.wz_radps >= 0 else -1.0
                     decision.cmd.wz_radps = sign * max_wz
+                    summary["rotate_block_reason"] = "depth_p10_slowdown"
                 self._log("info", f"Depth safety slowdown active: depth_p10={depth_p10:.3f}m. Limited to vx={decision.cmd.vx_mps:.3f}, wz={decision.cmd.wz_radps:.3f}")
+
+        # Set defaults if not present
+        summary["allow_forward"] = bool(allow_forward)
+        summary["allow_rotate"] = bool(allow_rotate)
+        summary["forward_block_reason"] = summary.get("forward_block_reason") or ""
+        summary["rotate_block_reason"] = summary.get("rotate_block_reason") or ""
+        summary["stop_reason"] = summary.get("stop_reason") or ""
+
+        if decision.cmd.vx_mps <= 1e-9 and abs(decision.cmd.wz_radps) <= 1e-9:
+            if not summary.get("stop_reason"):
+                summary["stop_reason"] = summary.get("forward_block_reason") or summary.get("rotate_block_reason") or "stopped"
+
         return decision
