@@ -136,6 +136,10 @@ class ControlThresholds:
     near_slow_max_vx_mps: float = 0.010
     near_slow_max_wz_radps: float = 0.04
 
+    # Final lock stabilization thresholds
+    final_lock_min_hold_ms: int = 800
+    final_lock_lost_timeout_ms: int = 1000
+
     search_target_init_hold_s: float = 0.25
     target_found_frames_to_confirm: int = 3
     target_confirm_conf_th: float = 0.30

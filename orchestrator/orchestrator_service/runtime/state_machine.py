@@ -1316,21 +1316,39 @@ class OrchestratorCore:
         return self._annotate_table_motion_hysteresis(decision, pending_reason=pending_reason)
 
     def _tick_final_lock(self) -> MotionDecision:
+        elapsed_ms = self._state_elapsed() * 1000.0
+        is_holding = elapsed_ms < self.cfg.final_lock_min_hold_ms
+
         if not self._table_final_lock_enabled():
+            if is_holding:
+                obs = self._fresh_table_obs()
+                status = self._final_lock_status(obs, stable_count=self.ctx.table_lock_frames)
+                return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_LOCK"), status)
             obs = self._fresh_table_obs()
             if self._table_visible(obs):
                 self._transition(State.CONTROLLED_APPROACH, "final_lock disabled，回到受控接近")
                 return self._table_approach_decision(obs, phase="PLANE_APPROACH", stop_ready_ignored=True)
             return self._handle_table_loss("final_lock disabled 且桌边丢失，回到搜索", State.SEARCH_TABLE, "FINAL_LOCK_DISABLED_HOLD")
+
         obs = self._fresh_table_obs()
         if not self._table_visible(obs):
             stale_obs = self.ctx.last_table_obs if obs is None else obs
             status = self._update_final_lock_count(stale_obs if stale_obs is not None else obs)
+            
+            # Start loss timer if not started
+            self._start_loss_timer("table_loss_since_mono")
+            loss_ms = self._loss_elapsed(self.ctx.table_loss_since_mono) * 1000.0
+            
+            if is_holding or loss_ms < self.cfg.final_lock_lost_timeout_ms:
+                return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_LOCK"), status)
+                
+            self.ctx.table_lost_frames += 1
             reason = str(status.get("reason") or "")
             self._log_final_lock_summary(stale_obs if stale_obs is not None else obs, lock_ready=False, reason=reason, stable_count=self.ctx.table_lock_frames, status=status)
             if str(status.get("lock_count_hold_reason") or ""):
                 return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_LOCK"), status)
             return self._handle_table_loss("最终锁边时桌边丢失，回到搜索", State.SEARCH_TABLE, "FINAL_LOCK_HOLD")
+
         self._reset_table_loss()
 
         phase = str(self.ctx.table_dock_phase or "APPROACH").upper()
@@ -1346,8 +1364,9 @@ class OrchestratorCore:
             )
             level = str(status.get("normalized_control_level") or self._control_level(obs))
             if not self._table_micro_adjust_enabled() and str(status.get("reason") or "") == "distance_too_far":
-                self._transition(State.CONTROLLED_APPROACH, "final_lock_distance_too_far_return_approach")
-                return self._table_approach_decision(obs, phase="PLANE_APPROACH")
+                if not is_holding:
+                    self._transition(State.CONTROLLED_APPROACH, "final_lock_distance_too_far_return_approach")
+                    return self._table_approach_decision(obs, phase="PLANE_APPROACH")
             if bool(status.get("final_lock_window_ready")):
                 return self._final_lock_arrived_decision(obs, status)
             if bool(status["lock_ready"]) or level == "stop" or bool(getattr(obs, "usable_for_stop", False)):
@@ -1356,7 +1375,8 @@ class OrchestratorCore:
                 self._log("info", "[TABLE_DOCK][SETTLE] begin after STOP")
                 return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_LOCK"), status)
             if self._state_elapsed() >= float(self.cfg.approach_timeout_s):
-                return self._enter_dock_retry_or_next(f"最终锁边超时:{status['reason']}")
+                if not is_holding:
+                    return self._enter_dock_retry_or_next(f"最终锁边超时:{status['reason']}")
             self._maybe_resend_req(self._active_req_payload())
             if level == "none":
                 return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_LOCK"), status)
@@ -1410,8 +1430,9 @@ class OrchestratorCore:
                 return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_LOCK"), lock_status)
 
             if not self._table_micro_adjust_enabled() and str(lock_status.get("reason") or "") == "distance_too_far":
-                self._transition(State.CONTROLLED_APPROACH, "final_lock_distance_too_far_return_approach")
-                return self._table_approach_decision(obs, phase="PLANE_APPROACH")
+                if not is_holding:
+                    self._transition(State.CONTROLLED_APPROACH, "final_lock_distance_too_far_return_approach")
+                    return self._table_approach_decision(obs, phase="PLANE_APPROACH")
 
             self._enter_table_dock_phase("MICRO_ADJUST", f"[TABLE_DOCK][SETTLE] done reason={lock_status['reason']}")
 
@@ -1421,9 +1442,10 @@ class OrchestratorCore:
                 return decision
 
         if self._state_elapsed() >= float(self.cfg.approach_timeout_s):
-            status = self._final_lock_status(obs, stable_count=self.ctx.table_lock_frames)
-            self._log_final_lock_summary(obs, lock_ready=False, reason=str(status["reason"]), stable_count=self.ctx.table_lock_frames)
-            return self._enter_dock_retry_or_next(f"最终锁边超时:{status['reason']}")
+            if not is_holding:
+                status = self._final_lock_status(obs, stable_count=self.ctx.table_lock_frames)
+                self._log_final_lock_summary(obs, lock_ready=False, reason=str(status["reason"]), stable_count=self.ctx.table_lock_frames)
+                return self._enter_dock_retry_or_next(f"最终锁边超时:{status['reason']}")
         self._maybe_resend_req(self._active_req_payload())
         return self._annotate_final_lock_decision(
             self.controller.stop_cmd("FINAL_LOCK"),
