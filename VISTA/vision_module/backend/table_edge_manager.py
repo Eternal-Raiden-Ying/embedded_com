@@ -14,7 +14,10 @@ import numpy as np
 
 from .depth_calibration import DepthIntrinsics, depth_intrinsics_from_dict
 from .table_edge_roi import choose_depth_roi
-from .vision_semantics import standardize_table_edge_payload
+from .vision_semantics import standardize_table_edge_payload, TableEdgeObservation
+from .math_utils import finite_percentiles, camera_points_to_robot, weighted_line_fit, ransac_line_fit
+from .docking_strategy import TableDockingStrategy
+from common.config_loader import get_config
 from ..config.schema import VisionServiceConfig
 from ..utils.table_roi import table_detection_debug
 
@@ -31,7 +34,7 @@ class TableEdgeManager:
         logger: Optional[logging.Logger] = None,
         capability_sink: CapabilitySink = None,
     ):
-        self.cfg = cfg or VisionServiceConfig()
+        self.cfg = cfg or get_config().vision
         self.log = logger or logging.getLogger("vision.table_edge_manager")
         self._capability_sink = capability_sink
         self._scheduler = None
@@ -39,41 +42,39 @@ class TableEdgeManager:
         self._runtime_running = False
         self._worker_thread: Optional[threading.Thread] = None
         self._worker_stop = threading.Event()
-        self._detector_mode = "lightweight"
-        self._edge_update_hz = 5.0
+
+        # Initialize configurations directly from type-safe config
+        table_edge_cfg = self.cfg.table_edge
+        self._detector_mode = table_edge_cfg.detector_mode
+        self._edge_update_hz = table_edge_cfg.update_hz
         self._worker_interval_s = 1.0 / max(1.0, self._edge_update_hz)
         self._default_interval_s = self._worker_interval_s
-        self._light_stride = 4
-        self._fast_plane_stride = 4
-        self._require_yolo_confirm = True
-        self._static_roi_enabled = False
-        self._camera_pitch_deg = 15.0
-        self._camera_height_m = 0.70
-        self._camera_roll_deg = 0.0
-        self._camera_yaw_deg = 0.0
-        self._table_height_m = 0.40
-        self._front_face_z_min_m = 0.03
-        self._front_face_z_max_m = 0.43
-        self._min_vertical_z_span_m = 0.12
-        self._min_vertical_support_points = 3
-        self._x_bin_width_m = 0.04
-        self._y_cluster_bin_m = 0.04
-        self._min_front_face_columns = 3
-        self._min_front_face_x_span_m = 0.07
-        self._front_cluster_gap_m = 0.10
-        self._max_yaw_abs_rad = 0.75
-        self._enable_yolo_in_plane_only = False
-        self._yolo_table_min_conf = 0.25
-        self._fast_candidate_point_cap = 1800
-        self._fast_front_edge_col_step = 2
-        self._fast_front_edge_row_step = 2
-        # debug knobs — read from global config, not per-mode
-        table_edge_cfg = getattr(self.cfg, "table_edge", None)
-        self._profile_log_interval_s = float(getattr(table_edge_cfg, "profile_log_interval_s", 2.0) or 2.0)
-        self._save_debug_frames = bool(getattr(table_edge_cfg, "save_debug_frames", False))
-        self._fast_candidate_point_cap = max(0, int(getattr(table_edge_cfg, "fast_candidate_point_cap", self._fast_candidate_point_cap) or 0))
-        self._fast_front_edge_col_step = max(1, int(getattr(table_edge_cfg, "fast_front_edge_col_step", self._fast_front_edge_col_step) or 1))
-        self._fast_front_edge_row_step = max(1, int(getattr(table_edge_cfg, "fast_front_edge_row_step", self._fast_front_edge_row_step) or 1))
+        self._light_stride = table_edge_cfg.light_stride
+        self._fast_plane_stride = table_edge_cfg.fast_plane_stride
+        self._require_yolo_confirm = table_edge_cfg.require_yolo_confirm
+        self._static_roi_enabled = table_edge_cfg.static_roi_enabled
+        self._camera_pitch_deg = table_edge_cfg.camera_pitch_deg
+        self._camera_height_m = table_edge_cfg.camera_height_m
+        self._camera_roll_deg = table_edge_cfg.camera_roll_deg
+        self._camera_yaw_deg = table_edge_cfg.camera_yaw_deg
+        self._table_height_m = table_edge_cfg.table_height_m
+        self._front_face_z_min_m = table_edge_cfg.front_face_z_min_m
+        self._front_face_z_max_m = table_edge_cfg.front_face_z_max_m
+        self._min_vertical_z_span_m = table_edge_cfg.min_vertical_z_span_m
+        self._min_vertical_support_points = table_edge_cfg.min_vertical_support_points
+        self._x_bin_width_m = table_edge_cfg.x_bin_width_m
+        self._y_cluster_bin_m = table_edge_cfg.y_cluster_bin_m
+        self._min_front_face_columns = table_edge_cfg.min_front_face_columns
+        self._min_front_face_x_span_m = table_edge_cfg.min_front_face_x_span_m
+        self._front_cluster_gap_m = table_edge_cfg.front_cluster_gap_m
+        self._max_yaw_abs_rad = table_edge_cfg.max_yaw_abs_rad
+        self._enable_yolo_in_plane_only = table_edge_cfg.enable_yolo_in_plane_only
+        self._yolo_table_min_conf = table_edge_cfg.yolo_table_min_conf
+        self._fast_candidate_point_cap = table_edge_cfg.fast_candidate_point_cap
+        self._fast_front_edge_col_step = table_edge_cfg.fast_front_edge_col_step
+        self._fast_front_edge_row_step = table_edge_cfg.fast_front_edge_row_step
+        self._profile_log_interval_s = float(table_edge_cfg.profile_log_interval_s)
+        self._save_debug_frames = bool(table_edge_cfg.save_debug_frames)
         self._last_camera_generation = 0
         self._last_camera_seq = 0
         self._last_camera_frame_capture_ts = 0.0
@@ -123,6 +124,7 @@ class TableEdgeManager:
         self._last_measured_edge_dist_m: Optional[float] = None
         self._fast_temporal_state: Dict[str, Any] = {}
         self._load_detector()
+        self.docking_strategy = TableDockingStrategy()
 
     @staticmethod
     def _normalize_detector_mode(value: Any) -> str:
@@ -798,21 +800,17 @@ class TableEdgeManager:
         }
 
     def _fast_debug_pixels_enabled(self) -> bool:
-        cfg = getattr(self.cfg, "table_edge", None)
-        if not bool(getattr(cfg, "fast_debug_pixels", True)):
+        cfg = self.cfg.table_edge
+        if not cfg.fast_debug_pixels:
             return False
         mode = str(self._source_mode_override or "").upper()
         is_offline = "OFFLINE" in mode or "BAG" in mode
         if is_offline:
-            return bool(getattr(cfg, "fast_debug_pixels_offline", True))
-        return bool(getattr(cfg, "fast_debug_pixels_online", False))
+            return cfg.fast_debug_pixels_offline
+        return cfg.fast_debug_pixels_online
 
     def _fast_debug_pixel_cap(self) -> int:
-        cfg = getattr(self.cfg, "table_edge", None)
-        try:
-            return max(0, int(float(getattr(cfg, "fast_debug_pixel_cap", 300) or 300)))
-        except Exception:
-            return 300
+        return self.cfg.table_edge.fast_debug_pixel_cap
 
     @staticmethod
     def _sparse_pixel_pairs(px: Any, py: Any, *, cap: int) -> list:
@@ -939,41 +937,7 @@ class TableEdgeManager:
         stage = str(distance_stage or "unknown").strip().lower()
         return False, "strong_stable_near_core" if stage == "near" else "strong_stable_far_core"
 
-    @staticmethod
-    def _finite_percentiles(values: Any, qs=(10, 50, 90)) -> Dict[str, Optional[float]]:
-        try:
-            arr = np.asarray(values, dtype=np.float32)
-            arr = arr[np.isfinite(arr)]
-        except Exception:
-            arr = np.asarray([], dtype=np.float32)
-        if arr.size <= 0:
-            return {f"p{int(q)}": None for q in qs}
-        return {f"p{int(q)}": float(np.percentile(arr, q)) for q in qs}
 
-    @staticmethod
-    def _camera_points_to_robot(
-        x_cam: Any,
-        y_cam_down: Any,
-        z_cam_forward: Any,
-        *,
-        pitch_deg: float,
-        camera_height_m: float,
-    ) -> tuple:
-        """Convert RealSense camera coordinates to robot frame.
-
-        Camera convention here is X right, Y down, Z forward. Robot convention is
-        X lateral, Y forward along ground, Z upward from ground. Positive pitch_deg
-        means the optical axis is pitched downward. With pitch=0, Y_robot=Z_cam and
-        Z_robot=camera_height-Y_cam.
-        """
-        theta = math.radians(float(pitch_deg))
-        c, s = math.cos(theta), math.sin(theta)
-        x_r = np.asarray(x_cam, dtype=np.float32)
-        y_down = np.asarray(y_cam_down, dtype=np.float32)
-        z_fwd = np.asarray(z_cam_forward, dtype=np.float32)
-        y_r = z_fwd * c - y_down * s
-        z_r = float(camera_height_m) - (z_fwd * s + y_down * c)
-        return x_r, y_r.astype(np.float32, copy=False), z_r.astype(np.float32, copy=False)
 
     @staticmethod
     def _fast_quantile_span(values: Any, low_q: float = 0.10, high_q: float = 0.90) -> float:
@@ -1105,24 +1069,7 @@ class TableEdgeManager:
             "support_rep_index": np.concatenate(support_rep_index).astype(np.int32, copy=False) if support_rep_index else np.asarray([], dtype=np.int32),
         }
 
-    @staticmethod
-    def _weighted_line_fit(x: Any, y: Any, weights: Any = None) -> tuple:
-        x_arr = np.asarray(x, dtype=np.float32)
-        y_arr = np.asarray(y, dtype=np.float32)
-        if weights is None:
-            k, b = np.polyfit(x_arr, y_arr, 1)
-            return float(k), float(b)
-        w_arr = np.asarray(weights, dtype=np.float32)
-        n = int(min(len(x_arr), len(y_arr), len(w_arr)))
-        if n <= 0:
-            k, b = np.polyfit(x_arr, y_arr, 1)
-            return float(k), float(b)
-        w_arr = np.clip(w_arr[:n], 0.2, 3.0)
-        if not np.all(np.isfinite(w_arr)) or float(np.max(w_arr)) <= 0.0:
-            k, b = np.polyfit(x_arr[:n], y_arr[:n], 1)
-        else:
-            k, b = np.polyfit(x_arr[:n], y_arr[:n], 1, w=w_arr)
-        return float(k), float(b)
+
 
     @staticmethod
     def _representative_neighbor_mask(x_values: Any, *, max_gap_m: float) -> np.ndarray:
@@ -1222,7 +1169,7 @@ class TableEdgeManager:
         v = py.astype(np.float32)
         x_c = (u - float(calib.cx)) * depths / float(calib.fx)
         y_c = (v - float(calib.cy)) * depths / float(calib.fy)
-        x_r, y_r, z_r = self._camera_points_to_robot(
+        x_r, y_r, z_r = camera_points_to_robot(
             x_c,
             y_c,
             depths,
@@ -1230,12 +1177,12 @@ class TableEdgeManager:
             camera_height_m=camera_height_m,
         )
         try:
-            k, b = self._weighted_line_fit(x_r, y_r, np.ones_like(x_r, dtype=np.float32))
+            k, b = weighted_line_fit(x_r, y_r, np.ones_like(x_r, dtype=np.float32))
             residual = np.abs(y_r - (float(k) * x_r + float(b)))
             threshold = 0.055
             inlier = residual <= threshold
             if int(inlier.sum()) >= 3:
-                k, b = self._weighted_line_fit(x_r[inlier], y_r[inlier], np.ones(int(inlier.sum()), dtype=np.float32))
+                k, b = weighted_line_fit(x_r[inlier], y_r[inlier], np.ones(int(inlier.sum()), dtype=np.float32))
                 residual = np.abs(y_r - (float(k) * x_r + float(b)))
                 inlier = residual <= threshold
             inlier_count = int(inlier.sum())
@@ -1387,15 +1334,15 @@ class TableEdgeManager:
                 cluster_infos.append(info)
                 continue
             try:
-                support_w = np.sqrt(np.clip(cs.astype(np.float32), 1.0, 36.0))
-                z_w = np.clip(cz_span / max(1e-6, float(min_vertical_z_span)), 0.5, 1.5) if cz_span.size else 1.0
-                weights = np.clip(support_w * z_w, 0.5, 3.0)
-                k, b = self._weighted_line_fit(cx, cy, weights)
+                (k, b), ransac_mask = ransac_line_fit(cx, cy, max_iterations=50, inlier_threshold=float(residual_threshold))
                 residual = np.abs(cy - (float(k) * cx + float(b)))
                 neighbor_mask = self._representative_neighbor_mask(cx, max_gap_m=max(0.18, float(x_bin_width_m) * 5.0))
                 inlier_local = (residual <= float(residual_threshold)) & neighbor_mask
                 if int(inlier_local.sum()) >= int(min_front_face_columns):
-                    k, b = self._weighted_line_fit(cx[inlier_local], cy[inlier_local], weights[inlier_local])
+                    support_w = np.sqrt(np.clip(cs.astype(np.float32), 1.0, 36.0))
+                    z_w = np.clip(cz_span / max(1e-6, float(min_vertical_z_span)), 0.5, 1.5) if cz_span.size else 1.0
+                    weights = np.clip(support_w * z_w, 0.5, 3.0)
+                    k, b = weighted_line_fit(cx[inlier_local], cy[inlier_local], weights[inlier_local])
                     residual = np.abs(cy - (float(k) * cx + float(b)))
                     inlier_local = (residual <= float(residual_threshold)) & neighbor_mask
                 inlier_count = int(inlier_local.sum())
@@ -1573,33 +1520,29 @@ class TableEdgeManager:
             if key in out:
                 out["edge_profile"][key] = out.get(key)
         out["edge_process_path"] = str(path or "")
-        cfg = getattr(self.cfg, "table_edge", None)
-        max_residual = getattr(cfg, "edge_trusted_max_residual", 0.0) if cfg is not None else 0.0
-        try:
-            max_residual = float(max_residual or 0.0)
-        except Exception:
-            max_residual = 0.0
+        cfg = self.cfg.table_edge
+        max_residual = float(cfg.edge_trusted_max_residual or 0.0)
         out = standardize_table_edge_payload(
             out,
-            edge_stable_required_frames=max(1, int(getattr(cfg, "yolo_table_edge_stable_frames", 5) if cfg is not None else 5)),
-            edge_trusted_min_conf=float(getattr(cfg, "edge_trusted_min_conf", 0.60) if cfg is not None else 0.60),
+            edge_stable_required_frames=max(1, int(cfg.yolo_table_edge_stable_frames)),
+            edge_trusted_min_conf=float(cfg.edge_trusted_min_conf),
             edge_trusted_max_residual=max_residual if max_residual > 0.0 else None,
-            edge_trusted_min_support_count=int(getattr(cfg, "edge_trusted_min_support_count", 0) if cfg is not None else 0),
-            edge_trusted_min_inlier_count=int(getattr(cfg, "edge_trusted_min_inlier_count", 0) if cfg is not None else 0),
-            edge_trusted_min_x_span_m=float(getattr(cfg, "edge_trusted_min_x_span_m", 0.0) if cfg is not None else 0.0),
-            edge_trusted_max_background_penalty=(float(getattr(cfg, "edge_trusted_max_background_penalty", 0.0)) if cfg is not None and float(getattr(cfg, "edge_trusted_max_background_penalty", 0.0) or 0.0) > 0.0 else None),
+            edge_trusted_min_support_count=int(cfg.edge_trusted_min_support_count),
+            edge_trusted_min_inlier_count=int(cfg.edge_trusted_min_inlier_count),
+            edge_trusted_min_x_span_m=float(cfg.edge_trusted_min_x_span_m),
+            edge_trusted_max_background_penalty=(float(cfg.edge_trusted_max_background_penalty) if float(cfg.edge_trusted_max_background_penalty or 0.0) > 0.0 else None),
         )
         return out
 
     def _update_edge_stability(self, payload: Dict[str, Any]) -> None:
-        cfg = getattr(self.cfg, "table_edge", None)
-        required = max(1, int(getattr(cfg, "yolo_table_edge_stable_frames", 5) or 5))
+        cfg = self.cfg.table_edge
+        required = max(1, int(cfg.yolo_table_edge_stable_frames))
         found = bool(payload.get("edge_found", False))
         conf = float(payload.get("confidence") or payload.get("edge_conf") or 0.0)
         yaw = payload.get("yaw_err_rad")
         dist = payload.get("dist_err_m")
         stable = False
-        if found and yaw is not None and dist is not None and conf >= float(getattr(cfg, "yolo_table_conf_min", 0.25) or 0.25):
+        if found and yaw is not None and dist is not None and conf >= float(cfg.yolo_table_conf_min):
             prev = dict(self._edge_stability_prev or {})
             try:
                 yaw_delta = abs(float(yaw) - float(prev.get("yaw", yaw)))
@@ -1664,8 +1607,8 @@ class TableEdgeManager:
             "reason": str(reason or ""),
             "reject_reason": str(reason or ""),
             "target_dist_m": float(self._target_dist_m),
-            "plane_only_mode": bool(getattr(self._detector_cfg, "plane_only_mode", False)),
-            "enable_crease_line": bool(getattr(self._detector_cfg, "enable_crease_line", True)),
+            "plane_only_mode": self._detector_cfg.plane_only_mode if self._detector_cfg is not None else False,
+            "enable_crease_line": self._detector_cfg.enable_crease_line if self._detector_cfg is not None else True,
             **self._detector_mode_payload(),
             "table_confirmed_by_yolo": False,
             "table_bbox_current_found": False,
@@ -1720,7 +1663,7 @@ class TableEdgeManager:
 
     def _yolo_table_confirmation(self, local: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         require_yolo = self._require_yolo_confirm
-        plane_only = bool(getattr(self._detector_cfg, "plane_only_mode", False))
+        plane_only = self._detector_cfg.plane_only_mode if self._detector_cfg is not None else False
         local_payload = dict(local if local is not None else self._local_perception())
         min_conf = float(self._yolo_table_min_conf)
         table_bbox = table_detection_debug(local_payload, local_payload.get("rgb_shape"), min_conf=-1.0).get("bbox")
@@ -1776,17 +1719,17 @@ class TableEdgeManager:
         if cfg is None:
             return None
         return [
-            int(getattr(cfg, "roi_x0", 0) or 0),
-            int(getattr(cfg, "roi_y0", 0) or 0),
-            int(getattr(cfg, "roi_x1", 0) or 0),
-            int(getattr(cfg, "roi_y1", 0) or 0),
+            int(cfg.roi_x0),
+            int(cfg.roi_y0),
+            int(cfg.roi_x1),
+            int(cfg.roi_y1),
         ]
 
     def _manual_static_roi_enabled(self) -> bool:
         return bool(self._static_roi_enabled)
 
     def _debug_roi_preset(self) -> str:
-        return str(getattr(getattr(self.cfg, "table_edge", None), "roi_preset", "") or "").strip().lower()
+        return str(self.cfg.table_edge.roi_preset or "").strip().lower()
 
     def _local_perception(self) -> Dict[str, Any]:
         if self._local_perception_override is not None:
@@ -1860,11 +1803,11 @@ class TableEdgeManager:
         local = self._local_perception()
         manual_static = self._manual_static_roi_enabled()
         roi_preset = self._debug_roi_preset()
-        table_edge_cfg = getattr(self.cfg, "table_edge", None)
-        dynamic_enable = bool(getattr(table_edge_cfg, "yolo_table_roi_enable", True))
-        stable_required = max(1, int(getattr(table_edge_cfg, "yolo_table_edge_stable_frames", 5) or 5))
+        table_edge_cfg = self.cfg.table_edge
+        dynamic_enable = bool(table_edge_cfg.yolo_table_roi_enable)
+        stable_required = max(1, int(table_edge_cfg.yolo_table_edge_stable_frames))
         edge_stable = bool(self._edge_stable_count >= stable_required)
-        near_dist_m = float(getattr(table_edge_cfg, "yolo_table_near_dist_m", 0.45) or 0.45)
+        near_dist_m = float(table_edge_cfg.yolo_table_near_dist_m)
         near_distance = bool(
             self._last_measured_edge_dist_m is not None
             and float(self._last_measured_edge_dist_m) <= near_dist_m
@@ -1889,30 +1832,30 @@ class TableEdgeManager:
             manual_static=manual_static,
             roi_preset=roi_preset,
             yolo_dynamic_enable=dynamic_enable,
-            yolo_table_class_id=int(getattr(table_edge_cfg, "yolo_table_class_id", 0) or 0),
-            yolo_table_conf_min=float(getattr(table_edge_cfg, "yolo_table_conf_min", self._yolo_table_min_conf) or self._yolo_table_min_conf),
+            yolo_table_class_id=int(table_edge_cfg.yolo_table_class_id),
+            yolo_table_conf_min=float(table_edge_cfg.yolo_table_conf_min),
             smoothed_table_center_x=smoothed_center_x,
             near_distance=near_distance,
-            yolo_near_bottom_norm=float(getattr(table_edge_cfg, "yolo_table_near_bottom_norm", 0.60) or 0.60),
+            yolo_near_bottom_norm=float(table_edge_cfg.yolo_table_near_bottom_norm),
             edge_stable=edge_stable,
             rgb_native_shape=local.get("rgb_native_shape"),
             rgb_crop_rect=local.get("rgb_crop_rect"),
-            yolo_roi_use_rgb_depth_mapping=bool(getattr(table_edge_cfg, "yolo_table_roi_use_rgb_depth_mapping", True)),
-            yolo_roi_mode=str(getattr(table_edge_cfg, "yolo_table_roi_mode", "centered_bbox_scale") or "centered_bbox_scale"),
-            yolo_roi_scale_x=float(getattr(table_edge_cfg, "yolo_table_roi_scale_x", 0.50) or 0.50),
-            yolo_roi_scale_y=float(getattr(table_edge_cfg, "yolo_table_roi_scale_y", 0.50) or 0.50),
-            rgb_depth_mapping_mode=str(getattr(table_edge_cfg, "rgb_depth_mapping_mode", "centered_scale") or "centered_scale"),
-            rgb_fov_in_depth_scale_x=float(getattr(table_edge_cfg, "rgb_fov_in_depth_scale_x", 0.75) or 0.75),
-            rgb_fov_in_depth_scale_y=float(getattr(table_edge_cfg, "rgb_fov_in_depth_scale_y", 0.75) or 0.75),
-            rgb_depth_center_offset_x=float(getattr(table_edge_cfg, "rgb_depth_center_offset_x", 0.0) or 0.0),
-            rgb_depth_center_offset_y=float(getattr(table_edge_cfg, "rgb_depth_center_offset_y", 0.0) or 0.0),
-            yolo_table_roi_boundary_extend_enable=bool(getattr(table_edge_cfg, "yolo_table_roi_boundary_extend_enable", True)),
-            yolo_table_roi_boundary_margin_norm=float(getattr(table_edge_cfg, "yolo_table_roi_boundary_margin_norm", 0.03) or 0.03),
+            yolo_roi_use_rgb_depth_mapping=bool(table_edge_cfg.yolo_table_roi_use_rgb_depth_mapping),
+            yolo_roi_mode=str(table_edge_cfg.yolo_table_roi_mode),
+            yolo_roi_scale_x=float(table_edge_cfg.yolo_table_roi_scale_x),
+            yolo_roi_scale_y=float(table_edge_cfg.yolo_table_roi_scale_y),
+            rgb_depth_mapping_mode=str(table_edge_cfg.rgb_depth_mapping_mode),
+            rgb_fov_in_depth_scale_x=float(table_edge_cfg.rgb_fov_in_depth_scale_x),
+            rgb_fov_in_depth_scale_y=float(table_edge_cfg.rgb_fov_in_depth_scale_y),
+            rgb_depth_center_offset_x=float(table_edge_cfg.rgb_depth_center_offset_x),
+            rgb_depth_center_offset_y=float(table_edge_cfg.rgb_depth_center_offset_y),
+            yolo_table_roi_boundary_extend_enable=bool(table_edge_cfg.yolo_table_roi_boundary_extend_enable),
+            yolo_table_roi_boundary_margin_norm=float(table_edge_cfg.yolo_table_roi_boundary_margin_norm),
             last_valid_depth_roi=self._last_valid_depth_roi,
-            yolo_table_bbox_hold_enable=bool(getattr(table_edge_cfg, "yolo_table_bbox_hold_enable", True)),
-            yolo_table_bbox_hold_frames=int(getattr(table_edge_cfg, "yolo_table_bbox_hold_frames", 8) or 8),
+            yolo_table_bbox_hold_enable=bool(table_edge_cfg.yolo_table_bbox_hold_enable),
+            yolo_table_bbox_hold_frames=int(table_edge_cfg.yolo_table_bbox_hold_frames),
             table_bbox_hold_age_frames=int(self._last_valid_table_bbox_hold_frames or 0),
-            yolo_table_roi_hold_enable=bool(getattr(table_edge_cfg, "yolo_table_roi_hold_enable", True)),
+            yolo_table_roi_hold_enable=bool(table_edge_cfg.yolo_table_roi_hold_enable),
         )
         force_roi = getattr(self, "_force_depth_roi_once", None)
         if force_roi is not None:
@@ -1956,20 +1899,20 @@ class TableEdgeManager:
         roi_meta["roi_hold_age_frames"] = int(self._last_valid_table_bbox_hold_frames if roi_source_text == "yolo_table_bbox_hold" else 0)
         roi_meta["last_valid_table_edge_roi"] = self._last_valid_depth_roi
         roi_meta["yolo_table_roi_enable"] = bool(dynamic_enable)
-        roi_meta["yolo_table_roi_use_rgb_depth_mapping"] = bool(getattr(table_edge_cfg, "yolo_table_roi_use_rgb_depth_mapping", True))
-        roi_meta["yolo_table_roi_mode"] = str(getattr(table_edge_cfg, "yolo_table_roi_mode", "centered_bbox_scale") or "centered_bbox_scale")
-        roi_meta["yolo_table_roi_scale_x"] = float(getattr(table_edge_cfg, "yolo_table_roi_scale_x", 0.50) or 0.50)
-        roi_meta["yolo_table_roi_scale_y"] = float(getattr(table_edge_cfg, "yolo_table_roi_scale_y", 0.50) or 0.50)
-        roi_meta["rgb_depth_mapping_mode"] = str(getattr(table_edge_cfg, "rgb_depth_mapping_mode", "centered_scale") or "centered_scale")
-        roi_meta["rgb_fov_in_depth_scale_x"] = float(getattr(table_edge_cfg, "rgb_fov_in_depth_scale_x", 0.75) or 0.75)
-        roi_meta["rgb_fov_in_depth_scale_y"] = float(getattr(table_edge_cfg, "rgb_fov_in_depth_scale_y", 0.75) or 0.75)
-        roi_meta["rgb_depth_center_offset_x"] = float(getattr(table_edge_cfg, "rgb_depth_center_offset_x", 0.0) or 0.0)
-        roi_meta["rgb_depth_center_offset_y"] = float(getattr(table_edge_cfg, "rgb_depth_center_offset_y", 0.0) or 0.0)
-        roi_meta["yolo_table_roi_boundary_extend_enable"] = bool(getattr(table_edge_cfg, "yolo_table_roi_boundary_extend_enable", True))
-        roi_meta["yolo_table_roi_boundary_margin_norm"] = float(getattr(table_edge_cfg, "yolo_table_roi_boundary_margin_norm", 0.03) or 0.03)
-        roi_meta["yolo_table_bbox_hold_enable"] = bool(getattr(table_edge_cfg, "yolo_table_bbox_hold_enable", True))
-        roi_meta["yolo_table_bbox_hold_frames"] = int(getattr(table_edge_cfg, "yolo_table_bbox_hold_frames", 8) or 8)
-        roi_meta["yolo_table_roi_hold_enable"] = bool(getattr(table_edge_cfg, "yolo_table_roi_hold_enable", True))
+        roi_meta["yolo_table_roi_use_rgb_depth_mapping"] = bool(table_edge_cfg.yolo_table_roi_use_rgb_depth_mapping)
+        roi_meta["yolo_table_roi_mode"] = str(table_edge_cfg.yolo_table_roi_mode)
+        roi_meta["yolo_table_roi_scale_x"] = float(table_edge_cfg.yolo_table_roi_scale_x)
+        roi_meta["yolo_table_roi_scale_y"] = float(table_edge_cfg.yolo_table_roi_scale_y)
+        roi_meta["rgb_depth_mapping_mode"] = str(table_edge_cfg.rgb_depth_mapping_mode)
+        roi_meta["rgb_fov_in_depth_scale_x"] = float(table_edge_cfg.rgb_fov_in_depth_scale_x)
+        roi_meta["rgb_fov_in_depth_scale_y"] = float(table_edge_cfg.rgb_fov_in_depth_scale_y)
+        roi_meta["rgb_depth_center_offset_x"] = float(table_edge_cfg.rgb_depth_center_offset_x)
+        roi_meta["rgb_depth_center_offset_y"] = float(table_edge_cfg.rgb_depth_center_offset_y)
+        roi_meta["yolo_table_roi_boundary_extend_enable"] = bool(table_edge_cfg.yolo_table_roi_boundary_extend_enable)
+        roi_meta["yolo_table_roi_boundary_margin_norm"] = float(table_edge_cfg.yolo_table_roi_boundary_margin_norm)
+        roi_meta["yolo_table_bbox_hold_enable"] = bool(table_edge_cfg.yolo_table_bbox_hold_enable)
+        roi_meta["yolo_table_bbox_hold_frames"] = int(table_edge_cfg.yolo_table_bbox_hold_frames)
+        roi_meta["yolo_table_roi_hold_enable"] = bool(table_edge_cfg.yolo_table_roi_hold_enable)
         roi_meta["yolo_table_roi_center_x_ema"] = self._yolo_table_roi_center_x_ema
         roi_meta["yolo_table_edge_stable_count"] = int(self._edge_stable_count)
         roi_meta["yolo_table_edge_stable_required"] = int(stable_required)
@@ -2090,10 +2033,10 @@ class TableEdgeManager:
         if cfg is not None:
             payload.update(
                 {
-                    "depth_z_min_m": float(getattr(cfg, "z_min", 0.0) or 0.0),
-                    "depth_z_max_m": float(getattr(cfg, "z_max", 0.0) or 0.0),
-                    "table_y_min_m": float(getattr(cfg, "table_y_min", 0.0) or 0.0),
-                    "table_y_max_m": float(getattr(cfg, "table_y_max", 0.0) or 0.0),
+                    "depth_z_min_m": float(cfg.z_min),
+                    "depth_z_max_m": float(cfg.z_max),
+                    "table_y_min_m": float(cfg.table_y_min),
+                    "table_y_max_m": float(cfg.table_y_max),
                 }
             )
         return payload
@@ -2458,10 +2401,10 @@ class TableEdgeManager:
             return self._attach_profile(payload, profile, path="fast_plane_only_roi_empty")
         depth_m = depth_roi.astype(np.float32, copy=False)
         if depth_roi.dtype != np.float32:
-            scale = float(getattr(self._detector.calib, "depth_scale", 0.001) if self._detector is not None else 0.001)
+            scale = float(self._detector.calib.depth_scale if self._detector is not None else 0.001)
             depth_m = depth_m * scale
-        z_min = float(getattr(cfg, "z_min", 0.2) if cfg is not None else 0.2)
-        z_max = float(getattr(cfg, "z_max", 2.0) if cfg is not None else 2.0)
+        z_min = float(cfg.z_min if cfg is not None else 0.2)
+        z_max = float(cfg.z_max if cfg is not None else 2.0)
         valid_mask = (depth_m > z_min) & (depth_m < z_max)
         yy, xx = np.nonzero(valid_mask)
         sampled_count = int(depth_roi.size)
@@ -2469,8 +2412,8 @@ class TableEdgeManager:
         profile["fast_depth_valid_ms"] = self._ms_since(point_start)
         profile["point_build_ms"] = float(profile["fast_depth_valid_ms"])
 
-        min_all = max(60, int(getattr(cfg, "min_all_points", 1000) if cfg is not None else 1000) // max(1, stride * stride))
-        min_table = max(45, int(getattr(cfg, "plane_min_inliers", 220) if cfg is not None else 220) // max(1, stride))
+        min_all = max(60, int(cfg.min_all_points if cfg is not None else 1000) // max(1, stride * stride))
+        min_table = max(45, int(cfg.plane_min_inliers if cfg is not None else 220) // max(1, stride))
         if self._detector is None or point_count < min_all:
             payload = self._default_result(
                 depth_valid=True,
@@ -2512,7 +2455,7 @@ class TableEdgeManager:
         min_front_face_columns = max(2, int(self._min_front_face_columns))
         min_front_face_x_span = float(self._min_front_face_x_span_m)
         max_yaw_cfg = float(self._max_yaw_abs_rad)
-        x_robot, y_robot, z_robot = self._camera_points_to_robot(
+        x_robot, y_robot, z_robot = camera_points_to_robot(
             x_c,
             y_c,
             z,
@@ -2520,7 +2463,7 @@ class TableEdgeManager:
             camera_height_m=camera_height_m,
         )
         height_filter_start = time.perf_counter()
-        robot_z_pct = self._finite_percentiles(z_robot)
+        robot_z_pct = finite_percentiles(z_robot)
         ground_like_count = int(np.sum((z_robot >= -0.04) & (z_robot <= 0.06)))
         table_height_like_count = int(np.sum(np.abs(z_robot - table_height_m) <= 0.06))
         height_mask = (z_robot > front_face_z_min) & (z_robot < front_face_z_max)
@@ -2543,7 +2486,7 @@ class TableEdgeManager:
         profile["fast_candidate_raw_count"] = int(raw_candidate_count)
         profile["fast_candidate_fit_count"] = int(candidate_count)
         profile["fast_candidate_point_cap"] = int(candidate_cap)
-        candidate_z_pct = self._finite_percentiles(height_z)
+        candidate_z_pct = finite_percentiles(height_z)
         candidate_x_span = float(np.max(height_x) - np.min(height_x)) if len(height_x) > 1 else 0.0
         profile["fast_height_filter_ms"] = self._ms_since(height_filter_start)
         raw_sample_pixels = self._sparse_pixel_sample(xx, yy, x0, y0, stride, cap=debug_cap) if debug_pixels_enabled else []
@@ -2885,7 +2828,7 @@ class TableEdgeManager:
         support_x = np.asarray(reps.get("support_x", []), dtype=np.float32)
         support_x_span = float(np.max(support_x) - np.min(support_x)) if support_x.size > 1 else 0.0
         rep_x_span = float(np.max(x_t) - np.min(x_t)) if x_t.size > 1 else 0.0
-        residual_threshold = max(0.035, float(getattr(cfg, "front_plane_max_residual_m", 0.035) if cfg is not None else 0.035) * 1.5)
+        residual_threshold = max(0.035, float(cfg.front_plane_max_residual_m if cfg is not None else 0.035) * 1.5)
         front_cluster_gap_m = float(self._front_cluster_gap_m)
         front_cluster_start = time.perf_counter()
         try:
@@ -3249,100 +3192,46 @@ class TableEdgeManager:
         profile["fast_background_protect_ms"] = self._ms_since(background_protect_start)
 
         control_gate_start = time.perf_counter()
-        reject_reason = ""
-        control_level = "none"
-        width_min = max(0.06, float(min_front_face_x_span) * 0.90)
-        hard_span_min = max(float(min_front_face_x_span), span_min * 0.90)
-        local_band_min = max(20, min_front_face_columns * min_vertical_support * 2)
-        if near_stage_far_jump:
-            reject_reason = "near_stage_far_jump"
-        elif background_blocked and background_penalty >= 0.60:
-            reject_reason = "far_background_selected_blocked"
-        elif selected_cluster_index > 0 and distance_stage == "near":
-            reject_reason = "background_only"
-        elif representative_inlier_count < min_front_face_columns:
-            reject_reason = "vertical_support_low"
-        elif support_inlier_count < min_front_face_columns * min_vertical_support:
-            reject_reason = "vertical_support_low"
-        elif rep_count < min_front_face_columns:
-            reject_reason = "front_face_columns_low"
-        elif residual_mean > residual_threshold:
-            reject_reason = "residual_too_large"
-        elif yaw_abs > max_yaw:
-            reject_reason = "yaw_out_of_range"
-        elif float(raw_width_norm or 0.0) < width_min:
-            reject_reason = "width_too_small"
-        elif x_span < hard_span_min:
-            reject_reason = "front_face_x_span_low"
-        elif local_band_support_count < local_band_min and local_band_edge_support < 3:
-            reject_reason = "front_line_weak"
-        elif int(edge_cue.get("inlier_count", 0) or 0) >= 4 and edge_consistency_score < 0.20 and background_penalty > 0.30:
-            reject_reason = "edge_inconsistent"
-        elif bool(temporal.get("jump", False)) and confidence < 0.62:
-            reject_reason = "temporal_jump"
-        else:
-            if distance_stage == "near":
-                usable_min, align_min = 0.40, 0.52
-            elif distance_stage == "middle":
-                usable_min, align_min = 0.44, 0.58
-            else:
-                usable_min, align_min = 0.38, 0.66
-            if confidence < usable_min:
-                reject_reason = "confidence_too_low"
-            elif yaw_abs >= 0.55:
-                control_level = "rotate_only"
-            elif distance_stage == "near":
-                if abs(dist_err) <= 0.12 and yaw_abs < 0.30 and confidence >= align_min:
-                    control_level = "stop_ready"
-                elif yaw_abs < 0.45 and confidence >= align_min:
-                    control_level = "align"
-                else:
-                    control_level = "approach_slow"
-            elif distance_stage == "middle":
-                middle_span_ok = x_span >= max(span_min * 1.35, 0.28) and float(raw_width_norm or 0.0) >= 0.28
-                if yaw_abs < 0.40 and confidence >= align_min and middle_span_ok:
-                    control_level = "align"
-                elif yaw_abs >= 0.45:
-                    control_level = "rotate_only"
-                else:
-                    control_level = "approach_slow"
-            else:
-                if yaw_abs < 0.25 and confidence >= align_min:
-                    control_level = "align"
-                elif yaw_abs >= 0.45:
-                    control_level = "rotate_only"
-                else:
-                    control_level = "approach_slow"
-        if not reject_reason:
-            if yaw_abs > max_yaw:
-                reject_reason = "yaw_out_of_range"
-                control_level = "none"
-            elif background_blocked:
-                reject_reason = "far_background_selected_blocked"
-                control_level = "none"
-            elif representative_inlier_count <= 3 or x_span < 0.15:
-                if control_level in {"stop_ready", "align"}:
-                    control_level = "approach_slow"
-                support_mode = "edge" if representative_inlier_count > 0 else "none"
-            elif (4 <= representative_inlier_count <= 7) or (0.15 <= x_span < 0.30):
-                if control_level == "stop_ready":
-                    control_level = "align"
-                support_mode = "partial"
-            if control_level == "stop_ready" and (
-                line_source == "vertical"
-                and edge_consistency_score < 0.25
-                and int(edge_cue.get("inlier_count", 0) or 0) >= 4
-            ):
-                control_level = "align"
-            if control_level == "stop_ready" and (
-                local_band_support_count < max(40, local_band_min * 2)
-                or local_band_x_span < 0.30
-                or background_penalty > 0.0
-            ):
-                control_level = "align"
+        control_level, reject_reason, extras = self.docking_strategy.evaluate_control_level(
+            mode="fast",
+            dist_err_m=float(dist_err),
+            yaw_err_rad=float(yaw_err),
+            confidence=float(confidence),
+            x_span=float(x_span),
+            representative_inlier_count=int(representative_inlier_count),
+            support_inlier_count=int(support_inlier_count),
+            rep_count=int(rep_count),
+            residual_mean=float(residual_mean),
+            residual_threshold=float(residual_threshold),
+            max_yaw=float(max_yaw_cfg),
+            min_front_face_columns=int(min_front_face_columns),
+            min_vertical_support=int(min_vertical_support),
+            min_front_face_x_span=float(min_front_face_x_span),
+            raw_width_norm=float(raw_width_norm) if raw_width_norm is not None else None,
+            local_band_support_count=int(local_band_support_count),
+            local_band_x_span=float(local_band_x_span),
+            local_band_edge_support=int(local_band_edge_support),
+            edge_cue_inlier_count=int(edge_cue.get("inlier_count", 0) or 0),
+            edge_consistency_score=float(edge_consistency_score),
+            background_penalty=float(background_penalty),
+            background_blocked=bool(background_blocked),
+            near_stage_far_jump=bool(near_stage_far_jump),
+            selected_cluster_index=int(selected_cluster_index),
+            selected_cluster_support=int(selected_cluster_support),
+            temporal_jump=bool(temporal.get("jump", False)),
+            line_source=str(line_source),
+        )
+        distance_stage = extras.get("distance_stage", "unknown")
         profile["fast_control_gate_ms"] = self._ms_since(control_gate_start)
         plane_usable = control_level != "none"
         valid_for_control = control_level in {"align", "stop_ready"}
+
+        if not reject_reason:
+            if representative_inlier_count <= 3 or x_span < 0.15:
+                support_mode = "edge" if representative_inlier_count > 0 else "none"
+            elif (4 <= representative_inlier_count <= 7) or (0.15 <= x_span < 0.30):
+                support_mode = "partial"
+
         debug_payload_start = time.perf_counter()
         support_px = support_px_all[selected_support_mask] if selected_support_mask.size == support_px_all.size else np.asarray([], dtype=np.int32)
         support_py = support_py_all[selected_support_mask] if selected_support_mask.size == support_py_all.size else np.asarray([], dtype=np.int32)
@@ -3360,12 +3249,14 @@ class TableEdgeManager:
         edge_found = bool(plane_usable)
         if edge_found:
             plane_bbox = raw_bbox
+        else:
+            plane_bbox = None
         plane_view = self._plane_view_from_bbox(
             plane_bbox or roi_box,
             getattr(depth_frame, "shape", None),
             area_ratio=float(support_inlier_count) / roi_area if edge_found else None,
         )
-        payload = {
+        payload_dict = {
             "table_found": bool(candidate_count > 0),
             "edge_found": bool(edge_found),
             "edge_detected": bool(edge_found),
@@ -3546,6 +3437,24 @@ class TableEdgeManager:
             **roi_payload,
             "type": "table_edge_obs",
         }
+
+        # Instantiate TableEdgeObservation
+        field_names = {f.name for f in dataclasses.fields(TableEdgeObservation) if f.name != "extra_fields"}
+        init_kwargs = {}
+        extra_fields = {}
+        for k, v in payload_dict.items():
+            if k in field_names:
+                init_kwargs[k] = v
+            else:
+                extra_fields[k] = v
+
+        # Ensure we set explicit block / reject reasons
+        init_kwargs["edge_reject_for_control_reason"] = reject_reason
+        init_kwargs["edge_control_block_reason"] = reject_reason
+
+        obs = TableEdgeObservation(extra_fields=extra_fields, **init_kwargs)
+        payload = obs.to_dict()
+
         profile["obs_build_ms"] = self._ms_since(obs_start)
         profile["total_edge_process_ms"] = self._ms_since(total_start)
         return self._attach_profile(payload, profile, path="fast_plane_only")
@@ -3576,19 +3485,19 @@ class TableEdgeManager:
             profile["total_edge_process_ms"] = self._ms_since(total_start)
             return self._attach_profile(payload, profile, path="light_roi_empty")
         if depth_roi.dtype != np.float32:
-            depth_m = depth_roi.astype(np.float32) * float(self._target_dist_m * 0.0 + getattr(self._detector.calib, "depth_scale", 0.001) if self._detector is not None else 0.001)
+            depth_m = depth_roi.astype(np.float32) * float(self._target_dist_m * 0.0 + (self._detector.calib.depth_scale if self._detector is not None else 0.001))
         else:
             depth_m = depth_roi
         cfg = self._detector_cfg
-        z_min = float(getattr(cfg, "z_min", 0.2) if cfg is not None else 0.2)
-        z_max = float(getattr(cfg, "z_max", 2.0) if cfg is not None else 2.0)
+        z_min = float(cfg.z_min if cfg is not None else 0.2)
+        z_max = float(cfg.z_max if cfg is not None else 2.0)
         valid_mask = (depth_m > z_min) & (depth_m < z_max)
         valid_count = int(valid_mask.sum())
         profile["depth_preprocess_ms"] = self._ms_since(prep_start)
 
         fit_start = time.perf_counter()
-        min_all = max(40, int(getattr(cfg, "min_all_points", 1000) if cfg is not None else 1000) // max(1, stride * stride))
-        min_table = max(25, int(getattr(cfg, "min_table_points", 500) if cfg is not None else 500) // max(1, stride * stride))
+        min_all = max(40, int(cfg.min_all_points if cfg is not None else 1000) // max(1, stride * stride))
+        min_table = max(25, int(cfg.min_table_points if cfg is not None else 500) // max(1, stride * stride))
         roi_payload = self._roi_payload(roi_box, roi_meta)
         if self._detector is None or valid_count < min_all:
             payload = self._default_result(
@@ -3610,7 +3519,7 @@ class TableEdgeManager:
         v = (y0 + yy.astype(np.float32) * float(stride))
         x_c = (u - float(calib.cx)) * z / float(calib.fx)
         y_c = (v - float(calib.cy)) * z / float(calib.fy)
-        table_mask = (y_c > float(getattr(cfg, "table_y_min", -0.2))) & (y_c < float(getattr(cfg, "table_y_max", 0.2)))
+        table_mask = (y_c > float(cfg.table_y_min if cfg is not None else -0.2)) & (y_c < float(cfg.table_y_max if cfg is not None else 0.2))
         table_count = int(table_mask.sum())
         if table_count < min_table:
             payload = self._default_result(depth_valid=True, reason="no_valid_edge", frame_seq=frame_seq, roi_meta=roi_meta)
@@ -3626,7 +3535,7 @@ class TableEdgeManager:
         try:
             k, b = np.polyfit(x_t, z_t, 1)
             residual = np.abs(z_t - (float(k) * x_t + float(b)))
-            threshold = float(getattr(cfg, "residual_threshold_m", 0.05))
+            threshold = float(cfg.residual_threshold_m if cfg is not None else 0.05)
             inlier = residual <= threshold
             inlier_count = int(inlier.sum())
             if inlier_count >= min_table:
@@ -3897,11 +3806,11 @@ class TableEdgeManager:
             self._worker_stop.wait(timeout=max(0.0, interval_s - elapsed_s))
 
     def _emit_edge_debug(self, payload: Dict[str, Any]) -> None:
-        debug_cfg = getattr(self.cfg, "debug", None)
-        if not bool(getattr(debug_cfg, "edge_debug_enabled", False)):
+        debug_cfg = self.cfg.debug
+        if not debug_cfg.edge_debug_enabled:
             return
         now = time.time()
-        period_s = float(getattr(debug_cfg, "edge_debug_period_s", 1.0) or 1.0)
+        period_s = float(debug_cfg.edge_debug_period_s)
         if now - float(self._last_edge_dbg_ts or 0.0) < max(0.1, period_s):
             return
         self._last_edge_dbg_ts = now

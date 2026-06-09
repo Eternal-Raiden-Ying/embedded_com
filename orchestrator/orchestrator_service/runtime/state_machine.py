@@ -165,6 +165,43 @@ class OrchestratorCore:
 
     def handle_table_obs(self, obs: TableEdgeObs):
         self.ctx.last_table_obs = obs
+        if self.controller._table_bbox_found(obs):
+            self.ctx.last_table_seen_ts = monotonic_ts()
+            self.ctx.last_table_seen_frame = getattr(obs, "frame_id", None)
+            xyxy = getattr(obs, "table_bbox_xyxy", getattr(obs, "yolo_bbox_xyxy", None))
+            if xyxy:
+                self.ctx.last_table_bbox_xyxy = list(xyxy)
+            
+            cx_norm = None
+            cy_norm = None
+            if getattr(obs, "table_cx_norm", None) is not None:
+                cx_norm = (float(obs.table_cx_norm) + 1.0) * 0.5
+            if getattr(obs, "table_cy_norm", None) is not None:
+                cy_norm = (float(obs.table_cy_norm) + 1.0) * 0.5
+                
+            if cx_norm is not None:
+                self.ctx.last_table_center_x_norm = cx_norm
+            if cy_norm is not None:
+                self.ctx.last_table_center_y_norm = cy_norm
+                
+            touch_left = bool(getattr(obs, "table_bbox_touch_left", getattr(obs, "yolo_bbox_touch_left", False)))
+            touch_right = bool(getattr(obs, "table_bbox_touch_right", getattr(obs, "yolo_bbox_touch_right", False)))
+            touch_bottom = bool(getattr(obs, "table_bbox_touch_bottom", getattr(obs, "yolo_bbox_touch_bottom", False)))
+            
+            self.ctx.last_table_touch_left = touch_left
+            self.ctx.last_table_touch_right = touch_right
+            self.ctx.last_table_touch_bottom = touch_bottom
+            
+            if touch_left:
+                self.ctx.last_table_side = "left"
+            elif touch_right:
+                self.ctx.last_table_side = "right"
+            elif cx_norm is not None and cx_norm < 0.35:
+                self.ctx.last_table_side = "left"
+            elif cx_norm is not None and cx_norm > 0.65:
+                self.ctx.last_table_side = "right"
+            else:
+                self.ctx.last_table_side = "center"
 
     def handle_target_obs(self, obs: TargetObs):
         self.ctx.last_target_obs = obs
@@ -429,6 +466,10 @@ class OrchestratorCore:
             "last_matched_conf": target_obs.matched_conf if target_obs is not None else None,
             "last_edge_conf": table_obs.confidence if table_obs is not None else None,
             "warnings": list(self.ctx.task_warning_history),
+            "last_side": self.ctx.last_table_side,
+            "memory_age": f"{(monotonic_ts() - self.ctx.last_table_seen_ts):.2f}s" if self.ctx.last_table_seen_ts > 0 else "0.00s",
+            "search_src": getattr(self.ctx, "current_search_direction_source", "default"),
+            "search_dir": getattr(self.ctx, "current_search_direction_reason", "no_memory"),
         }
 
     def _transition(self, new_state: State, reason: str):
@@ -1067,6 +1108,38 @@ class OrchestratorCore:
         self._transition(State.SEARCH_TABLE, "warmup未获得稳定plane obs，进入搜索")
         return self.controller.stop_cmd("TABLE_APPROACH_WARMUP")
 
+    def _get_memory_search_params(self) -> Tuple[int, str, str]:
+        turn_sign = self.ctx.relocate_turn_sign
+        search_src = "default"
+        search_dir = "no_memory"
+        
+        mem_age = monotonic_ts() - self.ctx.last_table_seen_ts
+        timeout = float(getattr(self.cfg, "table_memory_timeout_sec", 3.0) or 3.0)
+        
+        if mem_age > timeout:
+            self.ctx.last_table_side = "unknown"
+            
+        side = self.ctx.last_table_side
+        if side == "left":
+            turn_sign = 1
+            search_src = "memory"
+            search_dir = "memory_left"
+        elif side == "right":
+            turn_sign = -1
+            search_src = "memory"
+            search_dir = "memory_right"
+        elif side == "center":
+            center_hold = float(getattr(self.cfg, "table_center_loss_hold_sec", 1.0) or 1.0)
+            if mem_age <= center_hold:
+                search_src = "memory"
+                search_dir = "memory_center_hold"
+            else:
+                search_dir = "no_memory"
+                
+        self.ctx.current_search_direction_source = search_src
+        self.ctx.current_search_direction_reason = search_dir
+        return turn_sign, search_src, search_dir
+
     def _tick_search_table(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
         obs = self._fresh_table_obs()
@@ -1114,7 +1187,7 @@ class OrchestratorCore:
             self.ctx.last_fail_reason = "搜索桌边超时"
             self._transition(State.NEXT_TABLE, self.ctx.last_fail_reason)
             return self.controller.next_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
-        decision = self.controller.search_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+        decision = self.controller.search_table_cmd(*self._get_memory_search_params())
         decision.control_summary.update(
             {
                 "control_source": "local_rotate_search",
@@ -1130,7 +1203,7 @@ class OrchestratorCore:
         obs = self._fresh_table_obs()
         if not self._table_yolo_reliable(obs):
             self._transition(State.SEARCH_TABLE, "COARSE_ALIGN未检测到table bbox，进入本地旋转搜索")
-            return self.controller.search_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+            return self.controller.search_table_cmd(*self._get_memory_search_params())
         self._reset_table_loss()
         if self._table_yolo_reliable(obs) and not self.controller._edge_trusted(obs):
             self._transition(State.CONTROLLED_APPROACH, "COARSE_ALIGN被阻止：table bbox存在但edge未trusted，回到YOLO默认前进")
@@ -1178,7 +1251,7 @@ class OrchestratorCore:
         obs = self._fresh_table_obs()
         if not self._table_yolo_reliable(obs):
             self._transition(State.SEARCH_TABLE, "CONTROLLED_APPROACH未检测到table bbox，进入本地旋转搜索")
-            return self.controller.search_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+            return self.controller.search_table_cmd(*self._get_memory_search_params())
         self._reset_table_loss()
         if self._table_yolo_reliable(obs) and not self.controller._edge_trusted(obs):
             return self.controller.yolo_table_search_cmd(
@@ -1394,7 +1467,7 @@ class OrchestratorCore:
         if self._state_elapsed() < float(self.cfg.dock_retry_backoff_s):
             return self.controller.leave_edge_cmd()
         self._transition(State.SEARCH_TABLE, "停靠重试完成，重新搜索桌边")
-        return self.controller.search_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+        return self.controller.search_table_cmd(*self._get_memory_search_params())
 
     def _tick_at_table_edge(self) -> MotionDecision:
         if self._table_edge_only_test_enabled():
@@ -2050,7 +2123,7 @@ class OrchestratorCore:
         if self._state_elapsed() < float(self.cfg.relocate_turn_s):
             return self.controller.relocate_cmd(turn_sign=self.ctx.relocate_turn_sign)
         self._transition(State.REACQUIRE_EDGE, f"开始重捕获边 {self.ctx.current_edge_id}")
-        return self.controller.search_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+        return self.controller.search_table_cmd(*self._get_memory_search_params())
 
     def _tick_reacquire_edge(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
@@ -2066,14 +2139,14 @@ class OrchestratorCore:
             self.ctx.last_fail_reason = f"重捕获边 {self.ctx.current_edge_id} 超时"
             self._transition(State.NEXT_TABLE, self.ctx.last_fail_reason)
             return self.controller.next_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
-        return self.controller.search_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+        return self.controller.search_table_cmd(*self._get_memory_search_params())
 
     def _tick_next_table(self) -> MotionDecision:
         if self._state_elapsed() >= float(self.cfg.next_table_dwell_s):
             self.ctx.table_cycle_count += 1
             self.ctx.reset_edge_plan()
             self._transition(State.SEARCH_TABLE, "切换到下一张桌后重新搜索")
-            return self.controller.search_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+            return self.controller.search_table_cmd(*self._get_memory_search_params())
         return self.controller.next_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
 
     def _tick_avoid_obstacle(self) -> MotionDecision:
@@ -2105,7 +2178,7 @@ class OrchestratorCore:
             lost_hold_ok = self._loss_elapsed(self.ctx.tag_loss_since_mono) >= float(self.cfg.return_lost_hold_s)
             min_dwell_ok = self._state_elapsed() >= float(self.cfg.return_min_dwell_s)
             if lost_frames_ok and lost_hold_ok and min_dwell_ok:
-                return self.controller.search_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+                return self.controller.search_table_cmd(*self._get_memory_search_params())
             return self.controller.return_hold_cmd()
         self.ctx.tag_lost_frames = 0
         self.ctx.tag_loss_since_mono = 0.0
@@ -3622,7 +3695,7 @@ class OrchestratorCore:
         min_dwell_ok = self._state_elapsed() >= float(self.cfg.approach_min_dwell_s)
         if lost_frames_ok and lost_hold_ok and min_dwell_ok:
             self._transition(fallback_state, reason)
-            decision = self.controller.search_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+            decision = self.controller.search_table_cmd(*self._get_memory_search_params())
             if fallback_state == State.SEARCH_TABLE:
                 decision.control_summary.update(
                     {

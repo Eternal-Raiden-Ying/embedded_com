@@ -79,6 +79,19 @@ class RuntimeContext:
     last_home_obs: Optional[HomeTagObs] = None
     last_car_state: Optional[CarState] = None
 
+    last_table_bbox_xyxy: Optional[List[float]] = None
+    last_table_center_x_norm: Optional[float] = None
+    last_table_center_y_norm: Optional[float] = None
+    last_table_seen_ts: float = 0.0
+    last_table_seen_frame: Optional[int] = None
+    last_table_side: str = "unknown"
+    last_table_touch_left: bool = False
+    last_table_touch_right: bool = False
+    last_table_touch_bottom: bool = False
+    
+    current_search_direction_source: str = "default"
+    current_search_direction_reason: str = "no_memory"
+
     state_enter_mono: float = field(default_factory=monotonic_ts)
     state_enter_wall_ts: float = field(default_factory=time.time)
     task_start_wall_ts: float = 0.0
@@ -192,6 +205,15 @@ class RuntimeContext:
         self.last_table_obs = None
         self.last_target_obs = None
         self.last_home_obs = None
+        self.last_table_bbox_xyxy = None
+        self.last_table_center_x_norm = None
+        self.last_table_center_y_norm = None
+        self.last_table_seen_ts = 0.0
+        self.last_table_seen_frame = None
+        self.last_table_side = "unknown"
+        self.last_table_touch_left = False
+        self.last_table_touch_right = False
+        self.last_table_touch_bottom = False
 
     def reset_edge_plan(self):
         self.current_edge_id = self.edge_visit_order[0] if self.edge_visit_order else "front"

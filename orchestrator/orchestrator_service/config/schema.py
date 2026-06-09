@@ -113,6 +113,8 @@ class ControlThresholds:
     edge_trusted_max_background_penalty: float = 0.0
     yolo_table_near_dist_m: float = 0.45
     yolo_table_lost_to_search_frames: int = 8
+    table_memory_timeout_sec: float = 3.0
+    table_center_loss_hold_sec: float = 1.0
     rotate_search_timeout_s: float = 10.0
     rotate_require_edge_stable_frames: int = 5
     rotate_yaw_threshold_rad: float = 0.20

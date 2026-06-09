@@ -299,7 +299,7 @@ class MotionController:
         })
         return MotionDecision(cmd=cmd, control_summary=summary)
 
-    def search_table_cmd(self, turn_sign: int = 1) -> MotionDecision:
+    def search_table_cmd(self, turn_sign: int = 1, search_src: str = "default", search_dir: str = "no_memory") -> MotionDecision:
         self._reset_fallback_memory()
         wz = float(self.car_cfg.search_table_wz_radps) * (1.0 if int(turn_sign) >= 0 else -1.0)
         cmd = self._cmd("SEARCH_TABLE", wz=wz)
@@ -312,6 +312,9 @@ class MotionController:
                 "edge_yaw_err_rad": 0.0,
                 "yolo_view_err_norm": 0.0,
                 "yolo_edge_yaw_conflict": False,
+                "search_direction_source": search_src,
+                "search_direction_reason": search_dir,
+                "search_wz_sign": 1 if wz > 0 else -1,
             }
         )
         return MotionDecision(cmd=cmd, cx_norm_abs=abs(wz), distance_ratio=1.0, control_summary=summary)
