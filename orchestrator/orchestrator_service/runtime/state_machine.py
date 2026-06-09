@@ -41,6 +41,8 @@ _GRASP_REPOSITION_SPEED_CM_S = 10.0
 
 MOVING_STATES = {
     State.SEARCH_TABLE,
+    State.YOLO_ACQUIRE_ALIGN,
+    State.YOLO_APPROACH,
     State.COARSE_ALIGN,
     State.CONTROLLED_APPROACH,
     State.FINAL_LOCK,
@@ -59,6 +61,8 @@ MOVING_STATES = {
 TABLE_VISION_STATES = {
     State.TABLE_APPROACH_WARMUP,
     State.SEARCH_TABLE,
+    State.YOLO_ACQUIRE_ALIGN,
+    State.YOLO_APPROACH,
     State.COARSE_ALIGN,
     State.CONTROLLED_APPROACH,
     State.FINAL_LOCK,
@@ -78,6 +82,8 @@ TARGET_VISION_STATES = {
 TABLE_APPROACH_STATES = {
     State.TABLE_APPROACH_WARMUP,
     State.SEARCH_TABLE,
+    State.YOLO_ACQUIRE_ALIGN,
+    State.YOLO_APPROACH,
     State.COARSE_ALIGN,
     State.CONTROLLED_APPROACH,
     State.FINAL_LOCK,
@@ -272,6 +278,8 @@ class OrchestratorCore:
                 State.IDLE: self._tick_idle,
                 State.TABLE_APPROACH_WARMUP: self._tick_table_approach_warmup,
                 State.SEARCH_TABLE: self._tick_search_table,
+                State.YOLO_ACQUIRE_ALIGN: self._tick_yolo_acquire_align,
+                State.YOLO_APPROACH: self._tick_yolo_approach,
                 State.COARSE_ALIGN: self._tick_coarse_align,
                 State.CONTROLLED_APPROACH: self._tick_controlled_approach,
                 State.FINAL_LOCK: self._tick_final_lock,
@@ -324,6 +332,7 @@ class OrchestratorCore:
             "table_lost_frames": self.ctx.table_lost_frames,
             "table_lock_frames": self.ctx.table_lock_frames,
             "table_approach_warmup_active": self.ctx.state == State.TABLE_APPROACH_WARMUP,
+            "yolo_acquire_align_active": self.ctx.state == State.YOLO_ACQUIRE_ALIGN,
             "warmup_elapsed_s": self._state_elapsed() if self.ctx.state == State.TABLE_APPROACH_WARMUP else 0.0,
             "warmup_plane_seen_count": int(self.ctx.table_approach_warmup_plane_seen_count),
             "warmup_fresh_obs_count": int(self.ctx.table_approach_warmup_fresh_obs_count),
@@ -1142,6 +1151,68 @@ class OrchestratorCore:
         self.ctx.current_search_direction_reason = search_dir
         return turn_sign, search_src, search_dir
 
+    def _get_bbox_center_x_norm(self, obs: Optional[TableEdgeObs]) -> float:
+        if obs is not None:
+            if getattr(obs, "yolo_bbox_center_x_norm", None) is not None:
+                return float(obs.yolo_bbox_center_x_norm)
+            if getattr(obs, "table_cx_norm", None) is not None:
+                return (float(obs.table_cx_norm) + 1.0) * 0.5
+        if self.ctx.last_table_center_x_norm is not None:
+            return float(self.ctx.last_table_center_x_norm)
+        return 0.5
+
+    def _tick_yolo_acquire_align(self) -> MotionDecision:
+        self._maybe_resend_req(self._active_req_payload())
+        obs = self._fresh_table_obs()
+        if not self._table_yolo_reliable(obs):
+            self._transition(State.SEARCH_TABLE, "YOLO_ACQUIRE_ALIGN lost table bbox, enter SEARCH")
+            return self._tick_search_table()
+        cx_norm = self._get_bbox_center_x_norm(obs)
+        if 0.35 <= cx_norm <= 0.65:
+            self._transition(State.YOLO_APPROACH, f"YOLO_ACQUIRE_ALIGN aligned (cx_norm={cx_norm:.3f}), transition to YOLO_APPROACH")
+            return self._tick_yolo_approach()
+        
+        # Rotate in place towards center
+        cx = (cx_norm * 2.0) - 1.0
+        gain = float(getattr(self.car_cfg, "yolo_table_yaw_gain", 0.20) or 0.20)
+        max_wz = abs(float(getattr(self.car_cfg, "yolo_table_max_wz_radps", 0.06) or 0.06))
+        sign = float(getattr(self.car_cfg, "table_view_wz_sign", -1.0))
+        wz_raw = cx * gain * sign
+        wz = max(-max_wz, min(max_wz, wz_raw))
+        if abs(wz) < 0.02:
+            wz = 0.0
+            
+        decision = self.controller.stop_cmd("YOLO_ACQUIRE_ALIGN")
+        decision.cmd.vx_mps = 0.0
+        decision.cmd.wz_radps = wz
+        decision.control_summary.update({
+            "control_source": "yolo_align",
+            "yolo_acquire_align_active": True,
+            "bbox_cx_norm": float(cx_norm),
+            "vx_mps": 0.0,
+            "wz_radps": float(wz)
+        })
+        return decision
+
+    def _tick_yolo_approach(self) -> MotionDecision:
+        self._maybe_resend_req(self._active_req_payload())
+        obs = self._fresh_table_obs()
+        if not self._table_yolo_reliable(obs):
+            self._transition(State.SEARCH_TABLE, "YOLO_APPROACH lost table bbox, enter SEARCH")
+            return self._tick_search_table()
+        if self.controller._edge_trusted(obs):
+            self._transition(State.COARSE_ALIGN, "YOLO_APPROACH table edge trusted, transition to COARSE_ALIGN")
+            return self._tick_coarse_align()
+            
+        decision = self.controller.yolo_table_search_cmd(
+            obs,
+            turn_sign=self.ctx.relocate_turn_sign,
+            mode="YOLO_APPROACH",
+            reason="yolo_approach_forward",
+            control_source="yolo_forward",
+        )
+        return decision
+
     def _tick_search_table(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
         obs = self._fresh_table_obs()
@@ -1168,20 +1239,13 @@ class OrchestratorCore:
             return decision
         level = self._control_level(obs)
         if bool(getattr(self.cfg, "yolo_table_control_enable", True)) and self._table_yolo_reliable(obs):
-            self._transition(State.CONTROLLED_APPROACH, "table bbox found，YOLO默认前进")
-            decision = self.controller.yolo_table_search_cmd(
-                obs,
-                turn_sign=self.ctx.relocate_turn_sign,
-                mode="CONTROLLED_APPROACH",
-                reason="table_bbox_found_default_forward",
-                control_source="yolo_forward",
-            )
-            decision.control_summary["search_blocked_by_yolo_valid"] = True
-            decision.control_summary["yolo_valid_prevent_search_fallback"] = True
-            decision.control_summary["table_lost_search_active"] = bool(local_search_active)
-            decision.control_summary["table_lost_search_elapsed_s"] = float(local_search_elapsed_s)
-            decision.control_summary["table_lost_search_timeout"] = False
-            return decision
+            cx_norm = self._get_bbox_center_x_norm(obs)
+            if cx_norm < 0.35 or cx_norm > 0.65:
+                self._transition(State.YOLO_ACQUIRE_ALIGN, f"table bbox found but center x={cx_norm:.3f} outside [0.35, 0.65]")
+                return self._tick_yolo_acquire_align()
+            else:
+                self._transition(State.YOLO_APPROACH, f"table bbox found and center x={cx_norm:.3f} aligned")
+                return self._tick_yolo_approach()
         # Without table bbox, docking/edge must not drive state transitions.
         # It can still be logged by vision, but control falls back to local rotate search.
         self.ctx.table_found_frames = 0
@@ -1208,10 +1272,10 @@ class OrchestratorCore:
             return self.controller.search_table_cmd(*self._get_memory_search_params())
         self._reset_table_loss()
         if self._table_yolo_reliable(obs) and not self.controller._edge_trusted(obs):
-            self._transition(State.CONTROLLED_APPROACH, "COARSE_ALIGN被阻止：table bbox存在但edge未trusted，回到YOLO默认前进")
+            self._transition(State.YOLO_APPROACH, "COARSE_ALIGN被阻止：table bbox存在但edge未trusted，回到YOLO默认前进")
             return self.controller.yolo_table_search_cmd(
                 obs,
-                mode="CONTROLLED_APPROACH",
+                mode="YOLO_APPROACH",
                 reason="coarse_align_blocked_edge_not_trusted",
                 control_source="yolo_forward",
             )
@@ -1256,9 +1320,10 @@ class OrchestratorCore:
             return self.controller.search_table_cmd(*self._get_memory_search_params())
         self._reset_table_loss()
         if self._table_yolo_reliable(obs) and not self.controller._edge_trusted(obs):
+            self._transition(State.YOLO_APPROACH, "CONTROLLED_APPROACH table edge not trusted, fallback to YOLO_APPROACH")
             return self.controller.yolo_table_search_cmd(
                 obs,
-                mode="CONTROLLED_APPROACH",
+                mode="YOLO_APPROACH",
                 reason="controlled_approach_edge_not_trusted_yolo_forward",
                 control_source="yolo_forward",
             )
