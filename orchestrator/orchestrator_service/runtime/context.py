@@ -46,8 +46,11 @@ class RuntimeContext:
     active_session_id: str = ""
     active_epoch: int = 0
     active_req_id: str = ""
-    active_vision_stage: str = ""
-    active_vision_mode: str = ""
+    desired_vision_stage: str = ""
+    desired_vision_mode: str = ""
+    confirmed_vision_stage: str = ""
+    confirmed_vision_mode: str = ""
+    vision_confirm_source: str = ""
     current_edge_id: str = "front"
     edge_visit_order: List[str] = field(default_factory=lambda: ["front", "right", "back", "left"])
     edge_visit_index: int = 0
@@ -261,8 +264,11 @@ class RuntimeContext:
         self.active_session_id = ""
         self.active_epoch = 0
         self.active_req_id = ""
-        self.active_vision_stage = ""
-        self.active_vision_mode = ""
+        self.desired_vision_stage = ""
+        self.desired_vision_mode = ""
+        self.confirmed_vision_stage = ""
+        self.confirmed_vision_mode = ""
+        self.vision_confirm_source = ""
         self.task_start_wall_ts = 0.0
         self.resume_state = None
         self.last_safety_reason = ""
@@ -291,3 +297,19 @@ class RuntimeContext:
         self.reset_edge_plan()
         self.clear_perception_cache()
         self.clear_motion_counters()
+
+    @property
+    def active_vision_stage(self) -> str:
+        return self.confirmed_vision_stage
+
+    @active_vision_stage.setter
+    def active_vision_stage(self, val: str):
+        self.confirmed_vision_stage = val
+
+    @property
+    def active_vision_mode(self) -> str:
+        return self.confirmed_vision_mode
+
+    @active_vision_mode.setter
+    def active_vision_mode(self, val: str):
+        self.confirmed_vision_mode = val

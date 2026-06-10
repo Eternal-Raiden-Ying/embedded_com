@@ -300,7 +300,7 @@ class OrchestratorService(BaseModule):
         boxes = payload.get("boxes_count", payload.get("box_count", payload.get("boxes", 0)))
         if isinstance(boxes, list):
             boxes = len(boxes)
-        mode = str(payload.get("vision_mode") or payload.get("mode") or self.core.ctx.active_vision_mode or "").strip() or "n/a"
+        mode = str(payload.get("vision_mode") or payload.get("mode") or self.core.ctx.confirmed_vision_mode or "").strip() or "n/a"
         return f"[ORCH] OBS target={target} found=0 boxes={int(boxes or 0)} mode={mode}"
 
     def _vision_req_console_summary(self, payload: Dict[str, Any]) -> Optional[str]:
@@ -1818,6 +1818,7 @@ class OrchestratorService(BaseModule):
         msg_type = str(payload.get("type", "") or "").strip().lower()
         if msg_type == "vision_obs":
             env = VisionObsEnvelope.from_dict(payload)
+            self.core.confirm_vision_state(env.stage, env.mode, source="vision_obs")
             self.run_logger.write_jsonl("vision_obs", env.to_dict() if self._vision_full_obs_log else self._lite_vision_obs(env))
             perception = dict(env.perception or {})
             has_table_edge = isinstance(perception.get("table_edge_obs"), dict)
@@ -2438,7 +2439,7 @@ class OrchestratorService(BaseModule):
             if self.core.ctx.last_target_obs is None:
                 return "waiting_first_target_obs"
             return "target_search_hold"
-        if str(self.core.ctx.active_vision_mode or "").upper() == "FIND_OBJECT" and self.core.ctx.last_table_obs is None:
+        if str(self.core.ctx.confirmed_vision_mode or "").upper() == "FIND_OBJECT" and self.core.ctx.last_table_obs is None:
             return "no_table_edge_obs_in_track_local"
         if not bool(getattr(self.cfg.control, "edge_relocate_enabled", True)):
             return "config_disabled"
@@ -2464,10 +2465,11 @@ class OrchestratorService(BaseModule):
             age = max(0.0, time.time() - float(getattr(last_obs, "ts", 0.0) or 0.0))
         else:
             age = max(0.0, float(elapsed))
-        mode = str(getattr(self.core.ctx, "active_vision_mode", "") or "n/a").strip() or "n/a"
+        desired = str(getattr(self.core.ctx, "desired_vision_mode", "") or "n/a").strip() or "n/a"
+        confirmed = str(getattr(self.core.ctx, "confirmed_vision_mode", "") or "n/a").strip() or "n/a"
         self.operator_console.emit_rate_limited(
             "target_obs_missing",
-            f"[ORCH] WARN target_obs_missing mode={mode} age={age:.1f}s",
+            f"[ORCH] WARN target_obs_missing desired_mode={desired} confirmed_mode={confirmed} age={age:.1f}s",
             self.operator_console.default_interval_s,
         )
 

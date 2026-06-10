@@ -166,6 +166,8 @@ class OrchestratorCore:
 
     def handle_table_obs(self, obs: TableEdgeObs):
         self.ctx.last_table_obs = obs
+        if getattr(obs, "source_mode", None):
+            self.confirm_vision_state("SEARCH", obs.source_mode, source="vision_obs")
         if self.controller._table_bbox_found(obs):
             self.ctx.last_table_seen_ts = monotonic_ts()
             self.ctx.last_table_seen_frame = getattr(obs, "frame_id", None)
@@ -206,6 +208,8 @@ class OrchestratorCore:
 
     def handle_target_obs(self, obs: TargetObs):
         self.ctx.last_target_obs = obs
+        if self.ctx.desired_vision_mode == "FIND_OBJECT":
+            self.confirm_vision_state("SEARCH", "FIND_OBJECT", source="vision_obs")
 
     def handle_home_obs(self, obs: HomeTagObs):
         self.ctx.last_home_obs = obs
@@ -236,12 +240,64 @@ class OrchestratorCore:
             self.ctx.last_fail_reason = reason
             self._enter_error_recovery(reason, tts_text="底盘通信超时，已停止", interrupt_tts=True)
 
+    def confirm_vision_state(self, stage: str, mode: str, source: str = "vision_obs") -> bool:
+        stage = str(stage or "").strip().upper()
+        mode = str(mode or "").strip().upper()
+        if not stage and not mode:
+            return False
+
+        desired_stage = str(self.ctx.desired_vision_stage or "").strip().upper()
+        desired_mode = str(self.ctx.desired_vision_mode or "").strip().upper()
+        confirmed_stage = str(self.ctx.confirmed_vision_stage or "").strip().upper()
+        confirmed_mode = str(self.ctx.confirmed_vision_mode or "").strip().upper()
+
+        matches_desired = (
+            (not desired_stage or stage == desired_stage) and
+            (not desired_mode or mode == desired_mode)
+        )
+        matches_current = (
+            (not confirmed_stage or stage == confirmed_stage) and
+            (not confirmed_mode or mode == confirmed_mode)
+        )
+
+        if matches_desired:
+            self.ctx.confirmed_vision_stage = stage or desired_stage
+            self.ctx.confirmed_vision_mode = mode or desired_mode
+            self.ctx.vision_confirm_source = source
+            self._log("info", f"[VISION_CONFIRM] Confirmed vision state via {source}: stage={self.ctx.confirmed_vision_stage} mode={self.ctx.confirmed_vision_mode} desired={desired_stage}/{desired_mode}")
+            return True
+        elif matches_current:
+            self.ctx.vision_confirm_source = source
+            return False
+        else:
+            self._log("warn", f"[VISION_CONFIRM] Ignored stale/unrelated vision state from {source}: incoming stage={stage} mode={mode} | desired={desired_stage}/{desired_mode} | confirmed={confirmed_stage}/{confirmed_mode}")
+            return False
+
     def handle_vision_req_send_result(self, sent: bool, payload: Dict, error: str = ""):
-        if sent:
-            self.ctx.vision_req_fail_streak = 0
-            self.ctx.active_req_id = str(payload.get("req_id", "") or self.ctx.active_req_id)
-            return
-        self.ctx.vision_req_fail_streak += 1
+        req_type = str(payload.get("req_type") or "").strip().lower()
+        if req_type == "mode_request":
+            if sent:
+                self.ctx.vision_req_fail_streak = 0
+                self.ctx.active_req_id = str(payload.get("req_id", "") or self.ctx.active_req_id)
+                stage = str(payload.get("stage") or "").strip().upper()
+                mode = str(payload.get("mode_hint") or "").strip().upper()
+                self.confirm_vision_state(stage, mode, source="send_result")
+                self._last_mode_request_key = self._vision_request_key(payload, req_type="mode_request")
+                return
+            else:
+                self.ctx.vision_req_fail_streak += 1
+                self.ctx.desired_vision_stage = self.ctx.confirmed_vision_stage
+                self.ctx.desired_vision_mode = self.ctx.confirmed_vision_mode
+                self._log("warn", f"[VISION_SEND] mode_request send failed (streak={self.ctx.vision_req_fail_streak}). Rolled back desired to confirmed: {self.ctx.confirmed_vision_stage}/{self.ctx.confirmed_vision_mode}")
+        else:
+            if sent:
+                self.ctx.vision_req_fail_streak = 0
+                self.ctx.active_req_id = str(payload.get("req_id", "") or self.ctx.active_req_id)
+                return
+            else:
+                self.ctx.vision_req_fail_streak += 1
+                self._log("warn", f"[VISION_SEND] target_update send failed (streak={self.ctx.vision_req_fail_streak})")
+
         if not self.cfg.vision_req_fail_to_stop:
             return
         if self.ctx.state in {State.IDLE, State.ERROR_RECOVERY}:
@@ -324,6 +380,12 @@ class OrchestratorCore:
             "rotate_block_reason": str(summary.get("rotate_block_reason") or ""),
             "lateral_block_reason": str(summary.get("lateral_block_reason") or ""),
             "stop_reason": str(summary.get("stop_reason") or ""),
+            "desired_vision_stage": self.ctx.desired_vision_stage,
+            "desired_vision_mode": self.ctx.desired_vision_mode,
+            "confirmed_vision_stage": self.ctx.confirmed_vision_stage,
+            "confirmed_vision_mode": self.ctx.confirmed_vision_mode,
+            "vision_stage": self.ctx.confirmed_vision_stage,
+            "vision_mode": self.ctx.confirmed_vision_mode,
             # Backwards compatibility fields for unit tests
             "edge_valid": bool(sem.edge_geometry_valid),
             "confidence": float(table_obs.confidence) if table_obs is not None else None,
@@ -564,8 +626,10 @@ class OrchestratorCore:
     def _on_enter_state(self, state: State):
         if state == State.IDLE:
             self.reset_task_runtime("enter_idle", keep_session=False)
-            self.ctx.active_vision_stage = ""
-            self.ctx.active_vision_mode = ""
+            self.ctx.desired_vision_stage = ""
+            self.ctx.desired_vision_mode = ""
+            self.ctx.confirmed_vision_stage = ""
+            self.ctx.confirmed_vision_mode = ""
             self.ctx.resume_state = None
             return
         if state == State.SEARCH_TARGET_INIT:
@@ -746,8 +810,10 @@ class OrchestratorCore:
             "active_session_id",
             "active_epoch",
             "active_req_id",
-            "active_vision_stage",
-            "active_vision_mode",
+            "desired_vision_stage",
+            "desired_vision_mode",
+            "confirmed_vision_stage",
+            "confirmed_vision_mode",
             "current_edge_id",
             "edge_visit_index",
             "edge_transition_count",
@@ -843,9 +909,7 @@ class OrchestratorCore:
         self.ctx.active_req_id = str(payload.get("req_id", self.ctx.active_req_id) or self.ctx.active_req_id)
         self.ctx.pending_vision_msgs.append(payload)
         self._last_req_mono = now_m
-        if req_type == "mode_request":
-            self._last_mode_request_key = request_key
-        elif req_type == "target_update":
+        if req_type == "target_update":
             self._last_target_update_key = request_key
             self._last_target_update_mono = now_m
 
@@ -2052,18 +2116,21 @@ class OrchestratorCore:
         binding = self._vision_binding_for_state(self.ctx.state)
         if binding is None:
             return None
-        prev_stage = str(self.ctx.active_vision_stage or "").strip().upper()
-        prev_mode = str(self.ctx.active_vision_mode or "").strip().upper()
+        prev_stage = str(self.ctx.confirmed_vision_stage or "").strip().upper()
+        prev_mode = str(self.ctx.confirmed_vision_mode or "").strip().upper()
         next_stage = str(binding.stage or "").strip().upper()
         next_mode = str(binding.mode_hint or "").strip().upper()
         changed_mode_level = (not prev_stage) or prev_stage != next_stage or prev_mode != next_mode
         req_type = "mode_request" if changed_mode_level else "target_update"
         op = "START" if req_type == "mode_request" else "UPDATE"
-        self.ctx.active_vision_stage = binding.stage
-        self.ctx.active_vision_mode = binding.mode_hint
+        self.ctx.desired_vision_stage = binding.stage
+        self.ctx.desired_vision_mode = binding.mode_hint
         payload = dict(binding.payload or {})
         payload["req_type"] = req_type
         payload["request_reason"] = "vision_mode_changed" if req_type == "mode_request" else "target_or_stage_update"
+        
+        self._log("info", f"[VISION_PAYLOAD] state={self.ctx.state.value} type={req_type} op={op} desired={self.ctx.desired_vision_stage}/{self.ctx.desired_vision_mode} confirmed={prev_stage}/{prev_mode}")
+        
         return make_vision_req(
             target=binding.target,
             session_id=self.ctx.active_session_id,
@@ -2450,8 +2517,8 @@ class OrchestratorCore:
         return bool(obs.edge_found)
 
     def _edge_follow_quality(self, obs: TableEdgeObs) -> Dict[str, Any]:
-        source_mode = str(obs.source_mode or self.ctx.active_vision_mode or "").strip().upper()
-        is_track_local = source_mode == "FIND_OBJECT" or str(self.ctx.active_vision_mode or "").strip().upper() == "FIND_OBJECT"
+        source_mode = str(obs.source_mode or self.ctx.confirmed_vision_mode or "").strip().upper()
+        is_track_local = source_mode == "FIND_OBJECT" or str(self.ctx.confirmed_vision_mode or "").strip().upper() == "FIND_OBJECT"
         min_conf = float(
             getattr(
                 self.cfg,
