@@ -56,13 +56,13 @@ STACK_PROFILE=full UART_DEV=/dev/ttyHS1 ./start_robot_stack.sh
 | 状态 | 说明 |
 |------|------|
 | `IDLE` | 空闲，等待 `task_cmd` |
-| `SEARCH_TABLE` | 旋转/搜索桌边，请求 VISTA `DEPTH_PERCEPTION` |
-| `COARSE_ALIGN` | 桌边可见后先粗对齐 yaw/横向偏差 |
-| `CONTROLLED_APPROACH` | 按桌边观测受控靠近 |
-| `FINAL_LOCK` | 最终锁边，检查 yaw/dist/lateral 和稳定帧 |
+| `SEARCH_TABLE` | 旋转/搜索桌边，请求 VISTA `FIND_EDGE` |
+| `YOLO_ACQUIRE_ALIGN` | 桌边可见后先粗对齐 yaw/横向偏差 |
+| `YOLO_APPROACH` | 按桌边观测受控靠近 |
+| `EDGE_ADJUST` | 最终锁边，检查 yaw/dist/lateral 和稳定帧 |
 | `AT_TABLE_EDGE` | 已停靠桌边，短暂停稳 |
 | `SEARCH_TARGET_INIT` | 初始化沿边找目标 |
-| `EDGE_SLIDE_SEARCH` | 沿桌边滑动搜索目标，请求 VISTA `TRACK_LOCAL` |
+| `EDGE_SLIDE_SEARCH` | 沿桌边滑动搜索目标，请求 VISTA `FIND_OBJECT` |
 | `TARGET_CONFIRM` | 目标候选稳定确认 |
 | `TARGET_LOCKED` | 目标已锁定 |
 | `FREEZE_BASE` | 冻结底盘，等待任务完成 |

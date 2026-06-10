@@ -24,23 +24,24 @@ Orchestrator <--vision_obs:9002--- VISTA
 
 | Stage | 默认 mode | 说明 |
 |------|-----------|------|
-| `SEARCH` | `TRACK_LOCAL` | 本地目标搜索；桌边任务会按 Orchestrator 请求切到深度 mode |
+| `SEARCH` | `FIND_OBJECT` | 本地目标搜索；桌边任务会按 Orchestrator 请求切到深度 mode |
 | `GRASP` | `MICRO_ADJUST` | 抓取前微调与远程抓取协作 |
-| `RETURN` | `TRACK_LOCAL` | 返航 tag / 返回目标观测 |
+| `RETURN` | `FIND_OBJECT` | 返航 tag / 返回目标观测 |
 | `IDLE` | `IDLE` | 空闲 |
 
 当前主链路 mode：
 
 | mode | 摄像头/模型 | 主要输出 | 说明 |
 |------|-------------|----------|------|
-| `TRACK_LOCAL` | RGB + depth + 本地模型 | `target_obs` + `table_edge_obs`，返航时输出 home tag 观测 | 桌边目标搜索、返航；轻量 depth 用于 table edge 提升抓取稳定性 |
-| `DEPTH_PERCEPTION` | depth；可选 RGB 桌面框模型 | `table_edge_obs` | 搜桌边、粗对齐、接近、最终锁边 |
-| `TABLE_EDGE_PERCEPTION` | RGB + depth + 本地模型 | `table_edge_obs` + `target_obs` | 同时保持桌边与目标观测 |
+| `FIND_OBJECT` | RGB + depth + 本地模型 | `target_obs` + `table_edge_obs`，返航时输出 home tag 观测 | 桌边目标搜索、返航；轻量 depth 用于 table edge 提升抓取稳定性（对应旧别名 `TRACK_LOCAL`） |
+| `FIND_EDGE` | depth；可选 RGB 桌面框模型 | `table_edge_obs` | 搜桌边、对齐、接近、锁边（对应旧别名 `DEPTH_PERCEPTION` 或 `TABLE_EDGE_PERCEPTION`） |
 | `MICRO_ADJUST` | RGB + 本地模型 | micro-adjust proposal | 抓取前微调 |
 | `GRASP_REMOTE` | RGB + depth + remote client | `remote_result` | 远程抓取预测 |
 | `IDLE_HOT` | RGB | runtime_status / preview | 热待机 |
 
-Orchestrator 在 `SEARCH_TABLE`, `COARSE_ALIGN`, `CONTROLLED_APPROACH`, `FINAL_LOCK`, `REACQUIRE_EDGE` 请求 `DEPTH_PERCEPTION`；在 `AT_TABLE_EDGE`, `SEARCH_TARGET_INIT`, `EDGE_SLIDE_SEARCH`, `TARGET_CONFIRM`, `TARGET_LOCKED`, `FREEZE_BASE` 请求 `TRACK_LOCAL`。
+注：旧的 mode 别名 `TRACK_LOCAL`、`DEPTH_PERCEPTION` 和 `TABLE_EDGE_PERCEPTION` 仍被自动接受并规范化映射。
+
+Orchestrator 在 `SEARCH_TABLE`, `YOLO_ACQUIRE_ALIGN`, `YOLO_APPROACH`, `EDGE_ADJUST`, `REACQUIRE_EDGE` 请求 `FIND_EDGE`；在 `AT_TABLE_EDGE`, `SEARCH_TARGET_INIT`, `EDGE_SLIDE_SEARCH`, `TARGET_CONFIRM`, `TARGET_LOCKED`, `FREEZE_BASE` 请求 `FIND_OBJECT`。
 
 ## Runtime Baseline
 
@@ -75,7 +76,7 @@ cd /home/aidlux/embedded_com/VISTA
 | `VISION_REQ_PORT` | `9003` | 接收 `vision_req` |
 | `VISION_OBS_PORT` | `9002` | 发送 `vision_obs` |
 | `VISION_ACTIVE_MODEL` | `yolov7_detect` | 本地检测模型 profile |
-| `VISTA_TABLE_BBOX_ENABLE` | `0` | `DEPTH_PERCEPTION` 是否启用 RGB 桌面框模型 |
+| `VISTA_TABLE_BBOX_ENABLE` | `0` | `FIND_EDGE` 是否启用 RGB 桌面框模型 |
 | `VISTA_TABLE_MODEL` | `yolov7_detect` | 桌面框模型 |
 | `VISION_REMOTE_BASE_URL` | 空 | 远程抓取服务地址 |
 | `VISION_PREVIEW` | 板端默认 `1` | OpenCV 预览 |

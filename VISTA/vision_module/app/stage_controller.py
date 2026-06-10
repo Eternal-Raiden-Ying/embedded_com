@@ -3,7 +3,7 @@
 
 from copy import deepcopy
 from dataclasses import asdict
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from ..ipc.protocol import VisionReq
 from .stages.base import BaseStagePlan, StageContext, StageOutput, StageTickInput, build_vision_obs, normalize_upper
@@ -306,7 +306,7 @@ class StageController:
         except Exception:
             pass
 
-    def _transition_to(self, stage: str, req: Optional[VisionReq] = None) -> tuple:
+    def _transition_to(self, stage: str, req: Optional[VisionReq] = None) -> Tuple[Optional[BaseStagePlan], Optional[StageOutput]]:
         """Return (plan, on_enter_error) — error is None unless on_enter returned a StageOutput."""
         target = normalize_upper(stage, "IDLE")
         current = self.current_plan()
@@ -373,7 +373,7 @@ class StageController:
         """Expose the mutable runtime context owned by the controller."""
         return self._ctx
 
-    def activate_stage(self, stage: str, req: Optional[VisionReq] = None) -> Optional[BaseStagePlan]:
+    def activate_stage(self, stage: str, req: Optional[VisionReq] = None) -> Tuple[Optional[BaseStagePlan], Optional[StageOutput]]:
         """Prepare a stage for execution and invoke its enter hook.
 
         The full transition policy is intentionally deferred to later work.
@@ -438,7 +438,7 @@ class StageController:
 
         if req.is_stop() or op == "STOP":
             stop_output = current.on_stop(req, self._ctx) if current is not None else None
-            self._transition_to("IDLE")
+            _, _ = self._transition_to("IDLE")
             if not self._apply_context_mode(reason="stop", force=False):
                 self._restore_context(ctx_before)
                 return self._finalize_request(
@@ -551,7 +551,17 @@ class StageController:
             )
 
         if op == "START":
-            plan = self._transition_to(stage, req=req)
+            plan, on_enter_output = self._transition_to(stage, req=req)
+            if on_enter_output is not None:
+                return self._finalize_request(
+                    current,
+                    on_enter_output,
+                    req,
+                    ctx_before,
+                    req_type=req_type,
+                    idempotent=False,
+                    reason="restart",
+                )
             requested_mode = normalize_upper(self._ctx.current_mode, "IDLE")
             if not self._apply_context_mode(reason="restart", force=False):
                 self._restore_context(ctx_before)
@@ -621,7 +631,7 @@ class StageController:
         finalized = self._finalize_output(plan, output)
         # Auto-transition: StagePlan set next_stage → transition after current tick output
         if finalized is not None and finalized.next_stage:
-            self._transition_to(finalized.next_stage)
+            _, _ = self._transition_to(finalized.next_stage)
             self._apply_context_mode(reason="auto_transition", force=True)
         return finalized
 

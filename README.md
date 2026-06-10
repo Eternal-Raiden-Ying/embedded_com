@@ -58,9 +58,9 @@ STACK_PROFILE=full UART_DEV=/dev/ttyHS1 ./start_robot_stack.sh
 ```text
 IDLE
  -> SEARCH_TABLE
- -> COARSE_ALIGN
- -> CONTROLLED_APPROACH
- -> FINAL_LOCK
+ -> YOLO_ACQUIRE_ALIGN
+ -> YOLO_APPROACH
+ -> EDGE_ADJUST
  -> AT_TABLE_EDGE
  -> SEARCH_TARGET_INIT
  -> EDGE_SLIDE_SEARCH
@@ -76,9 +76,8 @@ VISTA 当前主要 mode：
 
 | mode | 用途 |
 |------|------|
-| `TRACK_LOCAL` | RGB + 本地模型，输出 `target_obs` 或返航 tag 观测 |
-| `DEPTH_PERCEPTION` | 深度为主的桌边感知，输出 `table_edge_obs` |
-| `TABLE_EDGE_PERCEPTION` | RGB + depth + 本地模型，用于沿边目标搜索时同时输出桌边和目标信息 |
+| `FIND_OBJECT` | RGB + 本地模型，输出 `target_obs` 或返航 tag 观测（亦接受旧别名 `TRACK_LOCAL`） |
+| `FIND_EDGE` | 深度为主的桌边感知，输出 `table_edge_obs`（亦接受旧别名 `DEPTH_PERCEPTION` 或 `TABLE_EDGE_PERCEPTION`） |
 
 ## 工程验收
 
@@ -87,5 +86,5 @@ VISTA 当前主要 mode：
 最低验收：
 
 - dry-run：`mobile_gateway` 收到 `fetch_object` 后，Orchestrator 进入 `SEARCH_TABLE`，`orchestrator/runs/run_*/ipc.jsonl` 有 `task_cmd/task_ack/vision_req`。
-- 手持相机：VISTA 能切到 `DEPTH_PERCEPTION` 或 `TRACK_LOCAL`，`VISTA/runs/run_*/ipc.jsonl` 持续输出 `vision_obs`。
+- 手持相机：VISTA 能切到 `FIND_EDGE` 或 `FIND_OBJECT`，`VISTA/runs/run_*/ipc.jsonl` 持续输出 `vision_obs`。
 - 真实车低速：`STACK_PROFILE=full` 下 UART 有 `MODE`/`V`/`STOP`，STOP 后底盘停止，日志可回放状态切换。

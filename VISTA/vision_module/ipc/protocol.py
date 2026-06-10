@@ -104,6 +104,17 @@ def _canonical_op(payload: Dict[str, Any], stage: str) -> str:
     return "START"
 
 
+def canonical_vision_mode(mode: Optional[str]) -> Optional[str]:
+    if not mode:
+        return None
+    mode_upper = str(mode).strip().upper()
+    if mode_upper == "TRACK_LOCAL":
+        return "FIND_OBJECT"
+    if mode_upper in ("DEPTH_PERCEPTION", "TABLE_EDGE_PERCEPTION"):
+        return "FIND_EDGE"
+    return mode_upper
+
+
 @dataclass
 class VisionReq:
     ts: float
@@ -121,15 +132,23 @@ class VisionReq:
     legacy_type: Optional[str] = None
     type: str = "vision_req"
 
+    def __post_init__(self) -> None:
+        self.mode_hint = canonical_vision_mode(self.mode_hint)
+
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "VisionReq":
         stage = _canonical_stage(payload)
+        mode_hint_raw = _opt_str(payload, "mode_hint")
+        canonical_hint = canonical_vision_mode(mode_hint_raw)
+        legacy_type = _opt_str(payload, "type") if _upper_text(payload.get("type", "VISION_REQ")) != "VISION_REQ" else None
+        if mode_hint_raw and mode_hint_raw != canonical_hint and not legacy_type:
+            legacy_type = f"mode_hint:{mode_hint_raw}"
         return cls(
             ts=float(payload.get("ts", now_ts())),
             op=_canonical_op(payload, stage),
             stage=stage,
             target=_opt_str(payload, "target"),
-            mode_hint=_upper_text(payload.get("mode_hint", "")) or None,
+            mode_hint=canonical_hint,
             session_id=_opt_str(payload, "session_id"),
             req_id=_opt_str(payload, "req_id"),
             req_type=_opt_str(payload, "req_type"),
@@ -137,9 +156,10 @@ class VisionReq:
             interaction_id=_opt_str(payload, "interaction_id"),
             response=_opt_dict(payload, "response"),
             payload=_opt_dict(payload, "payload"),
-            legacy_type=_opt_str(payload, "type") if _upper_text(payload.get("type", "VISION_REQ")) != "VISION_REQ" else None,
+            legacy_type=legacy_type,
             type="vision_req",
         )
+
 
     def to_dict(self) -> Dict[str, Any]:
         return _compact(asdict(self))

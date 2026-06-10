@@ -356,7 +356,12 @@ class SearchStagePlan(BaseStagePlan):
         search_kind = normalize_upper(payload.get("search_kind", ""), "")
         if search_kind not in {"TABLE_EDGE", "TARGET", "EDGE_FOLLOW_TARGET", "TARGET_ON_EDGE"}:
             return StageOutput(
-                vision_obs=self.build_obs(ctx, status="error", perception={}),
+                vision_obs=self.build_obs(
+                    ctx,
+                    status="FAILED",
+                    perception={},
+                    result={"reason": f"invalid search_kind: {search_kind}"}
+                ),
                 signals={"invalid_search_kind": True},
             )
         ctx.current_mode = self._mode_for_request(req, search_kind, self.default_mode)
@@ -373,7 +378,12 @@ class SearchStagePlan(BaseStagePlan):
             search_kind = normalize_upper(req.payload.get("search_kind", ""), "")
             if search_kind not in {"TABLE_EDGE", "TARGET", "EDGE_FOLLOW_TARGET", "TARGET_ON_EDGE"}:
                 return StageOutput(
-                    vision_obs=self.build_obs(ctx, status="error", perception={}),
+                    vision_obs=self.build_obs(
+                        ctx,
+                        status="FAILED",
+                        perception={},
+                        result={"reason": f"invalid search_kind: {search_kind}"}
+                    ),
                     signals={"invalid_search_kind": True},
                 )
             ctx.current_mode = self._mode_for_request(req, search_kind, self.default_mode)

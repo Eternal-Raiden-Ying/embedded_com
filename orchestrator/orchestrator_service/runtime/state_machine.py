@@ -37,6 +37,9 @@ _GRASP_RETRY_LIMIT = 3
 _GRASP_REPOSITION_TIMEOUT_S = 5.0
 
 
+KNOWN_VISION_STATUS = {"RUNNING", "WAITING_RESPONSE", "RESULT_READY", "FAILED", "RELAXING"}
+
+
 MOVING_STATES = {
     State.SEARCH_TABLE,
     State.YOLO_ACQUIRE_ALIGN,
@@ -164,6 +167,10 @@ class OrchestratorCore:
         return False, "unsupported intent"
 
     def handle_table_obs(self, obs: TableEdgeObs):
+        status = str(getattr(obs, "vision_status", "") or "").strip().upper()
+        if status and status not in KNOWN_VISION_STATUS:
+            self._enter_error_recovery(f"unknown vision status: {status}")
+            return
         self.ctx.last_table_obs = obs
         if getattr(obs, "source_mode", None):
             self.confirm_vision_state("SEARCH", obs.source_mode, source="vision_obs")
@@ -206,6 +213,10 @@ class OrchestratorCore:
                 self.ctx.last_table_side = "center"
 
     def handle_target_obs(self, obs: TargetObs):
+        status = str(getattr(obs, "vision_status", "") or "").strip().upper()
+        if status and status not in KNOWN_VISION_STATUS:
+            self._enter_error_recovery(f"unknown vision status: {status}")
+            return
         self.ctx.last_target_obs = obs
         if self.ctx.desired_vision_mode == "FIND_OBJECT":
             self.confirm_vision_state("SEARCH", "FIND_OBJECT", source="vision_obs")
@@ -214,7 +225,11 @@ class OrchestratorCore:
         self.ctx.last_home_obs = obs
 
     def handle_grasp_obs(self, obs: Dict[str, Any]):
-        self.ctx.grasp_status = str(obs.get("status") or "")
+        status = str(obs.get("status") or "").strip().upper()
+        if status and status not in KNOWN_VISION_STATUS:
+            self._enter_error_recovery(f"unknown vision status: {status}")
+            return
+        self.ctx.grasp_status = status
         self.ctx.grasp_result = obs.get("grasp") if isinstance(obs.get("grasp"), dict) else None
         self.ctx.grasp_reason = str(obs.get("reason") or "")
         proposal = obs.get("reposition_proposal")
@@ -1871,6 +1886,9 @@ class OrchestratorCore:
             return self.controller.stop_cmd("GRASP")
 
         status = str(self.ctx.grasp_status or "").upper()
+        if status not in {"", "RUNNING", "WAITING_RESPONSE", "RESULT_READY", "FAILED", "RELAXING"}:
+            self._enter_error_recovery(f"unknown vision status: {status}")
+            return self.controller.stop_cmd("GRASP")
 
         if status == "RESULT_READY" and isinstance(self.ctx.grasp_result, dict):
             self.ctx.grasp_substate = "PRE_ARM_STOP_SETTLE"

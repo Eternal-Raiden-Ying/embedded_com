@@ -478,6 +478,7 @@ class TableEdgeObs:
     edge_roi: Optional[list] = None
     roi_format: Optional[str] = None
     reason: Optional[str] = None
+    vision_status: Optional[str] = None
     req_id: Optional[str] = None
     session_id: Optional[str] = None
     epoch: int = 0
@@ -641,6 +642,7 @@ class TableEdgeObs:
             edge_roi=payload.get("edge_roi"),
             roi_format=_pick_optional_str(payload, "roi_format"),
             reason=_pick_optional_str(payload, "reason", "error"),
+            vision_status=payload.get("vision_status", payload.get("status")),
             req_id=_pick_optional_str(payload, "req_id"),
             session_id=_pick_optional_str(payload, "session_id", "task_id"),
             epoch=int(payload.get("epoch", 0) or 0),
@@ -696,6 +698,7 @@ class TargetObs:
     obstacle_flag: bool = False
     best_turn_dir: Optional[str] = None
     obstacle_distance_m: Optional[float] = None
+    vision_status: Optional[str] = None
     source: Optional[str] = None
     type: str = "target_obs"
 
@@ -751,6 +754,7 @@ class TargetObs:
             obstacle_flag=bool(payload.get("obstacle_flag", payload.get("obstacle", False))),
             best_turn_dir=_pick_optional_str(payload, "best_turn_dir", "avoid_dir"),
             obstacle_distance_m=_pick_optional_float(payload, "obstacle_distance_m", "obstacle_distance", "front_obstacle_m"),
+            vision_status=payload.get("vision_status", payload.get("status")),
             source=_pick_optional_str(payload, "source"),
             type=str(payload.get("type", "target_obs") or "target_obs"),
         )
@@ -774,6 +778,7 @@ class HomeTagObs:
     obstacle_flag: bool = False
     best_turn_dir: Optional[str] = None
     obstacle_distance_m: Optional[float] = None
+    vision_status: Optional[str] = None
     source: Optional[str] = None
     type: str = "home_tag_obs"
 
@@ -793,6 +798,7 @@ class HomeTagObs:
             obstacle_flag=bool(payload.get("obstacle_flag", payload.get("obstacle", False))),
             best_turn_dir=_pick_optional_str(payload, "best_turn_dir", "avoid_dir"),
             obstacle_distance_m=_pick_optional_float(payload, "obstacle_distance_m", "obstacle_distance", "front_obstacle_m"),
+            vision_status=payload.get("vision_status", payload.get("status")),
             source=_pick_optional_str(payload, "source"),
             type=str(payload.get("type", "home_tag_obs") or "home_tag_obs"),
         )
