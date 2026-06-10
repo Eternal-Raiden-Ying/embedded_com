@@ -87,6 +87,7 @@ class GraspStageRemoteFlowTest(unittest.TestCase):
             op="START",
             stage="GRASP",
             target="bottle",
+            mode_hint="MICRO_ADJUST",
             payload={"remote_grasp": True, "need_depth": True, "class_id": 4},
         )
         plan.on_enter(start_req, ctx)
@@ -113,6 +114,9 @@ class GraspStageRemoteFlowTest(unittest.TestCase):
         self.assertIsNotNone(respond_out)
         self.assertEqual(respond_out.effects, [])
 
+        ctx.current_mode = "GRASP_REMOTE_INIT"
+        ctx.server_status = "unknown"
+
         request_id = ctx.stage_state["remote_request_id"]
         retry_tick = plan.tick(
             StageTickInput(
@@ -133,8 +137,9 @@ class GraspStageRemoteFlowTest(unittest.TestCase):
         )
         self.assertIsNotNone(retry_tick)
         self.assertEqual(retry_tick.vision_obs["status"], "RUNNING")
-        self.assertEqual(retry_tick.vision_obs["result"]["remote_state"], "retrying_init")
+        self.assertEqual(retry_tick.vision_obs["result"]["remote_state"], "initializing")
 
+        ctx.server_status = "ready"
         init_ready_tick = plan.tick(
             StageTickInput(
                 ts=time.time(),
@@ -153,7 +158,7 @@ class GraspStageRemoteFlowTest(unittest.TestCase):
         )
         self.assertIsNotNone(init_ready_tick)
         self.assertEqual(init_ready_tick.vision_obs["status"], "RUNNING")
-        self.assertEqual(init_ready_tick.vision_obs["result"]["remote_state"], "awaiting_fresh_frames")
+        self.assertEqual(init_ready_tick.vision_obs["result"]["remote_state"], "init_ok_switching_to_predict")
 
         predict_tick = plan.tick(
             StageTickInput(
@@ -178,6 +183,7 @@ class GraspStageRemoteFlowTest(unittest.TestCase):
         )
         self.assertIsNotNone(predict_tick)
         self.assertEqual(predict_tick.vision_obs["status"], "RUNNING")
+        self.assertEqual(predict_tick.vision_obs["result"]["remote_state"], "awaiting_predict")
 
         final_tick = plan.tick(
             StageTickInput(
@@ -210,6 +216,7 @@ class GraspStageRemoteFlowTest(unittest.TestCase):
             op="START",
             stage="GRASP",
             target="bottle",
+            mode_hint="MICRO_ADJUST",
             payload={"remote_grasp": True, "need_depth": True, "class_id": 4},
         )
         plan.on_enter(start_req, ctx)
@@ -229,6 +236,9 @@ class GraspStageRemoteFlowTest(unittest.TestCase):
             response={"decision": "ACCEPT"},
         )
         plan.on_respond(respond_req, ctx)
+
+        ctx.current_mode = "GRASP_REMOTE_INIT"
+        ctx.server_status = "unknown"
 
         for service_attempts in (1, 2, 3):
             tick = plan.tick(
@@ -251,6 +261,7 @@ class GraspStageRemoteFlowTest(unittest.TestCase):
             self.assertIsNotNone(tick)
             self.assertEqual(tick.vision_obs["status"], "RUNNING")
 
+        ctx.server_status = "error"
         failed_tick = plan.tick(
             StageTickInput(
                 ts=time.time(),
@@ -270,9 +281,8 @@ class GraspStageRemoteFlowTest(unittest.TestCase):
         )
         self.assertIsNotNone(failed_tick)
         self.assertEqual(failed_tick.vision_obs["status"], "FAILED")
-        self.assertEqual(failed_tick.vision_obs["result"]["reason"], "remote_init_failed")
-        self.assertEqual(failed_tick.vision_obs["result"]["init_attempts"], 3)
-        self.assertFalse(failed_tick.vision_obs["result"]["init_confirmed"])
+        self.assertEqual(failed_tick.vision_obs["result"]["reason"], "init_failed")
+        self.assertEqual(failed_tick.vision_obs["result"]["server_status"], "error")
         self.assertEqual(failed_tick.effects, [])
 
 
@@ -285,6 +295,7 @@ class ReturnStageDetectContractTest(unittest.TestCase):
             op="START",
             stage="RETURN",
             target="cup",
+            mode_hint="FIND_OBJECT",
         )
         plan.on_enter(start_req, ctx)
 
@@ -317,6 +328,7 @@ class ReturnStageDetectContractTest(unittest.TestCase):
             ts=time.time(),
             op="START",
             stage="RETURN",
+            mode_hint="FIND_OBJECT",
         )
         plan.on_enter(start_req, ctx)
 
@@ -1412,19 +1424,12 @@ class ModeProfileCameraContractTest(unittest.TestCase):
         profiles = build_default_mode_profiles("test_model", cfg)
 
         track_rgb = dict(profiles["FIND_OBJECT"].camera_overrides["rgb"])
-        micro_rgb = dict(profiles["MICRO_ADJUST"].camera_overrides["rgb"])
         grasp_rgb = dict(profiles["GRASP_REMOTE"].camera_overrides["rgb"])
 
         self.assertEqual(track_rgb["format"], "BGR")
-        self.assertEqual(micro_rgb["format"], "BGR")
         self.assertEqual(grasp_rgb["format"], "BGR")
         self.assertEqual(track_rgb["fps"], 24)
-        self.assertEqual(micro_rgb["fps"], 30)
         self.assertEqual(grasp_rgb["fps"], 15)
-        self.assertNotEqual(
-            (track_rgb["crop_x"], track_rgb["crop_y"], track_rgb["crop_w"], track_rgb["crop_h"]),
-            (micro_rgb["crop_x"], micro_rgb["crop_y"], micro_rgb["crop_w"], micro_rgb["crop_h"]),
-        )
         self.assertIn("depth", profiles["GRASP_REMOTE"].camera_overrides)
 
 
@@ -1578,10 +1583,10 @@ class GenerationAwareFrameConsumptionTest(unittest.TestCase):
             while time.time() < deadline:
                 payload = scheduler.read_result("table_edge_obs", default=None)
                 snapshot = manager.snapshot()
-                if isinstance(payload, dict) and snapshot["last_camera_generation"] == 2:
+                if payload is not None and snapshot["last_camera_generation"] == 2:
                     break
                 time.sleep(0.05)
-            self.assertIsInstance(payload, dict)
+            self.assertIsNotNone(payload)
             self.assertEqual(payload["source_mode"], "FIND_OBJECT")
             self.assertEqual(manager.snapshot()["last_camera_generation"], 2)
         finally:

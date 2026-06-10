@@ -1845,7 +1845,8 @@ class OrchestratorService(BaseModule):
         msg_type = str(payload.get("type", "") or "").strip().lower()
         if msg_type == "vision_obs":
             env = VisionObsEnvelope.from_dict(payload)
-            self.core.confirm_vision_state(env.stage, env.mode, source="vision_obs")
+            if env.obs_class != "diagnostic":
+                self.core.confirm_vision_state(env.stage, env.mode, source="vision_obs")
             self.run_logger.write_jsonl("vision_obs", env.to_dict() if self._vision_full_obs_log else self._lite_vision_obs(env))
             perception = dict(env.perception or {})
             has_table_edge = isinstance(perception.get("table_edge_obs"), dict)

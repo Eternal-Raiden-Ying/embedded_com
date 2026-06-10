@@ -217,6 +217,7 @@ class VisionObs:
     proposal: Optional[Dict[str, Any]] = None
     result: Optional[Dict[str, Any]] = None
     type: str = "vision_obs"
+    obs_class: str = "control"
 
     def to_dict(self) -> Dict[str, Any]:
         return _compact(asdict(self))

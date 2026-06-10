@@ -1820,8 +1820,12 @@ class TableEdgeManager:
         bbox_conf = det.get("conf")
         yolo_reliable = bool(confirmed)
         gate_open = bool(confirmed)
-        if not gate_open and not require_yolo and plane_only and self._enable_yolo_in_plane_only:
-            gate_open = False
+        if not require_yolo:
+            gate_open = True
+            reason = "not_required"
+        elif plane_only and not self._enable_yolo_in_plane_only:
+            gate_open = True
+            reason = "not_required_plane_only"
         return {
             "table_confirmed_by_yolo": confirmed,
             "table_bbox_current_found": bool(bbox_found),

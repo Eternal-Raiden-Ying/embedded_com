@@ -202,6 +202,7 @@ class VisionObsEnvelope:
     result: Optional[Dict[str, Any]] = None
     source: Optional[str] = None
     type: str = "vision_obs"
+    obs_class: Optional[str] = None
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "VisionObsEnvelope":
@@ -222,6 +223,7 @@ class VisionObsEnvelope:
             result=_pick_optional_dict(payload, "result"),
             source=_pick_optional_str(payload, "source"),
             type=msg_type,
+            obs_class=_pick_optional_str(payload, "obs_class"),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -229,6 +231,9 @@ class VisionObsEnvelope:
 
 
 def iter_vision_perception_payloads(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    obs_class = str(payload.get("obs_class", "") or "").strip().lower()
+    if obs_class == "diagnostic":
+        return []
     msg_type = str(payload.get("type", "") or "").strip().lower()
     if msg_type in {"table_edge_obs", "target_obs", "home_tag_obs"}:
         legacy_payload = dict(payload)
