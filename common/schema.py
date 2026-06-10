@@ -63,6 +63,30 @@ class SocketEndpoint:
     async_queue_size: int = 64
     async_drop_oldest: bool = True
 
+    @property
+    def uds_path(self) -> str:
+        return self.ipc_socket_path
+
+    @uds_path.setter
+    def uds_path(self, value: str) -> None:
+        self.ipc_socket_path = value
+
+    @property
+    def host(self) -> str:
+        return "127.0.0.1"
+
+    @host.setter
+    def host(self, value: str) -> None:
+        pass
+
+    @property
+    def port(self) -> int:
+        return 0
+
+    @port.setter
+    def port(self, value: int) -> None:
+        pass
+
 
 # ==============================================================================
 # Vision Module Configs
@@ -451,13 +475,13 @@ class ControlThresholds:
     controlled_approach_min_dwell_s: float = 0.80
     final_lock_frames_to_arrive: int = 3
     final_lock_yaw_tol_rad: float = 0.25
-    final_lock_dist_tol_m: float = 0.03
+    final_lock_dist_tol_m: float = 0.03  # Strict distance tolerance for declaring final lock stop condition
     final_lock_lateral_tol_m: float = 0.03
     table_edge_only_test: bool = False
-    table_target_dist_m: float = 0.50
-    table_dist_tol_m: float = 0.05
-    table_yaw_tol_rad: float = 0.25
-    table_stop_margin_m: float = 0.05
+    table_target_dist_m: float = 0.30  # Nominal target docking distance (stopped position relative to table edge)
+    table_dist_tol_m: float = 0.05     # Allowable distance error tolerance during docking/alignment
+    table_yaw_tol_rad: float = 0.13962634015954636  # Target yaw alignment error threshold (8 degrees in radians)
+    table_stop_margin_m: float = 0.05  # Safety stop margin added to target distance in stop conditions checking
     table_settle_s: float = 0.50
     table_stable_frames: int = 5
     yolo_table_control_enable: bool = True
@@ -712,7 +736,7 @@ class DockingControlConfig:
     spin_only_yaw_rad: float = 0.18
 
     precise_yaw_tol_rad: float = 0.025
-    precise_dist_tol_m: float = 0.015
+    precise_dist_tol_m: float = 0.015  # Distance error stopping tolerance/threshold for precise approach (mapped from controlled_approach.target_dist_m in stage_params.yaml)
     precise_lateral_tol_m: float = 0.015
     precise_stable_s: float = 0.50
 

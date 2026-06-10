@@ -1472,6 +1472,33 @@ class OrchestratorService(BaseModule):
             f"edge_conf={self.cfg.docking.min_confidence:.2f} "
             f"slide_vy={self.cfg.car.edge_slide_vy_mps:.2f}"
         )
+        
+        # Effective config dump to standard output
+        import sys
+        effective_dry = bool(getattr(self.uart, "dry_run", self.cfg.serial.dry_run))
+        uart_mode = "fake" if effective_dry else str(self.cfg.serial.port)
+        loaded_files = ",".join(self.cfg.runtime.loaded_config_files) or "<defaults>"
+        
+        print("\n" + "="*80)
+        print("  EFFECTIVE ORCHESTRATOR CONFIGURATION")
+        print("="*80)
+        print(f"  UART Port            : {uart_mode} (dry_run={int(effective_dry)})")
+        print(f"  tick_hz              : {float(self.cfg.runtime.tick_hz):.2f}")
+        print(f"  near_stop_depth_m    : {float(self.cfg.control.near_stop_depth_m):.3f}")
+        print(f"  near_slow_depth_m    : {float(self.cfg.control.near_slow_depth_m):.3f}")
+        print(f"  edge_slide_vy_mps    : {float(self.cfg.car.edge_slide_vy_mps):.3f}")
+        print(f"  edge_slide_max_vx_mps: {float(self.cfg.car.edge_slide_max_vx_mps):.3f}")
+        print(f"  edge_slide_max_wz_radps: {float(self.cfg.car.edge_slide_max_wz_radps):.3f}")
+        print(f"  final_lock thresholds:")
+        print(f"    yaw_tol_rad        : {float(self.cfg.control.final_lock_yaw_tol_rad):.4f}")
+        print(f"    dist_tol_m         : {float(self.cfg.control.final_lock_dist_tol_m):.4f}")
+        print(f"    lateral_tol_m      : {float(self.cfg.control.final_lock_lateral_tol_m):.4f}")
+        print(f"  loaded stage_params  : {self.cfg.runtime.stage_params_file or '<none>'}")
+        print(f"  loaded car_cmd_params: {self.cfg.runtime.car_cmd_params_file or '<none>'}")
+        print(f"  loaded config files  : {loaded_files}")
+        print("="*80 + "\n")
+        sys.stdout.flush()
+        
         self.uart.start()
         self.task_server.start()
         self.vision_server.start()

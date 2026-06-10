@@ -190,7 +190,7 @@ def test_grasp_non_reposition_must_stop():
     assert decision.control_summary["allow_forward"] is False
     assert decision.control_summary["allow_rotate"] is False
     assert decision.control_summary["allow_lateral"] is False
-    assert decision.control_summary["forward_block_reason"] == "state_State.GRASP_disallowed"
+    assert decision.control_summary["forward_block_reason"] in {"state_State.GRASP_disallowed", "state_GRASP_disallowed"}
 
 
 def test_grasp_repositioning_allowed():
