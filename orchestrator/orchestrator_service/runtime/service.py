@@ -2702,6 +2702,7 @@ class OrchestratorService(BaseModule):
                 arm.pitch_deg, arm.roll_deg,
                 arm.claw_deg, arm.time_ms,
             )
+            self.motion_adapter.cancel_active_jogs()
             self.uart.send_arm_command(arm_line)
             self.run_logger.write_jsonl("arm_cmd", arm.to_dict())
             return

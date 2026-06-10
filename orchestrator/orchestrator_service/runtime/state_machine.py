@@ -35,8 +35,6 @@ _GRASP_RESULT_TIMEOUT_S = 15.0
 _GRASP_ARM_TIMEOUT_S = 10.0
 _GRASP_RETRY_LIMIT = 3
 _GRASP_REPOSITION_TIMEOUT_S = 5.0
-_GRASP_REPOSITION_SPEED = 0.15
-_GRASP_REPOSITION_SPEED_CM_S = 10.0
 
 
 MOVING_STATES = {
@@ -119,6 +117,7 @@ class OrchestratorCore:
         logger: Optional[Callable] = None,
     ):
         self.cfg = cfg
+        self.car_cfg = car_cfg
         self.ctx = RuntimeContext()
         self._logger = logger
         self.controller = MotionController(cfg, car_cfg, docking_cfg)
@@ -1835,6 +1834,8 @@ class OrchestratorCore:
             return self._tick_grasp_awaiting_respond(now_m)
         if substate == "AWAITING_RESULT":
             return self._tick_grasp_awaiting_result(now_m)
+        if substate == "PRE_ARM_STOP_SETTLE":
+            return self._tick_grasp_pre_arm_stop_settle(now_m)
         if substate == "REPOSITIONING":
             return self._tick_grasp_repositioning(now_m)
         if substate == "AWAITING_ARM":
@@ -1872,10 +1873,9 @@ class OrchestratorCore:
         status = str(self.ctx.grasp_status or "").upper()
 
         if status == "RESULT_READY" and isinstance(self.ctx.grasp_result, dict):
-            arm_cmd = grasp_to_pose_params(self.ctx.grasp_result, time_ms=500)
-            self.ctx.grasp_substate = "AWAITING_ARM"
-            self.ctx.grasp_timeout_mono = now_m + _GRASP_ARM_TIMEOUT_S
-            return MotionDecision(cmd=self.controller.stop_cmd("GRASP").cmd, arm_cmd=arm_cmd)
+            self.ctx.grasp_substate = "PRE_ARM_STOP_SETTLE"
+            self.ctx.pre_arm_stop_settle_start_mono = now_m
+            return self.controller.stop_cmd("GRASP")
 
         if status == "RUNNING" and self.ctx.grasp_reposition_proposal is not None:
             self.ctx.grasp_retry_count += 1
@@ -1897,21 +1897,57 @@ class OrchestratorCore:
 
         return self.controller.stop_cmd("GRASP")
 
+    def _tick_grasp_pre_arm_stop_settle(self, now_m: float) -> MotionDecision:
+        settle_ms = getattr(self.car_cfg, "pre_arm_stop_settle_ms", 150)
+        settle_s = float(settle_ms) / 1000.0
+        if now_m - self.ctx.pre_arm_stop_settle_start_mono < settle_s:
+            return self.controller.stop_cmd("GRASP")
+
+        if isinstance(self.ctx.grasp_result, dict):
+            arm_cmd = grasp_to_pose_params(self.ctx.grasp_result, time_ms=500)
+            self.ctx.grasp_substate = "AWAITING_ARM"
+            self.ctx.grasp_timeout_mono = now_m + _GRASP_ARM_TIMEOUT_S
+            return MotionDecision(cmd=self.controller.stop_cmd("GRASP").cmd, arm_cmd=arm_cmd)
+        else:
+            self.ctx.grasp_substate = "AWAITING_RESPOND"
+            self.ctx.grasp_timeout_mono = now_m + _GRASP_RESPOND_TIMEOUT_S
+            return self.controller.stop_cmd("GRASP")
+
     def _tick_grasp_repositioning(self, now_m: float) -> MotionDecision:
         if now_m > self.ctx.grasp_timeout_mono:
+            self._active_reposition_proposal = None
             self._enter_error_recovery("grasp reposition timeout")
             return self.controller.stop_cmd("GRASP")
 
         proposal = self.ctx.grasp_reposition_proposal
         if not isinstance(proposal, dict):
+            self._active_reposition_proposal = None
             self.ctx.grasp_substate = "AWAITING_RESPOND"
             self.ctx.grasp_timeout_mono = now_m + _GRASP_RESPOND_TIMEOUT_S
             return self.controller.stop_cmd("GRASP")
 
         dx = float(proposal.get("dx_cm", 0.0) or 0.0)
         dy = float(proposal.get("dy_cm", 0.0) or 0.0)
-        distance = max(abs(dx), abs(dy))
-        if distance < 0.5:
+        total_distance = math.hypot(dx, dy)
+
+        # Track active proposal and reset start time if proposal changed
+        active_prop = getattr(self, "_active_reposition_proposal", None)
+        if active_prop is None or active_prop != proposal:
+            self._log("info", f"[GRASP][REPOSITION] Proposal changed from {active_prop} to {proposal}, resetting start time.")
+            self._active_reposition_proposal = proposal
+            self.ctx.grasp_reposition_start_mono = now_m
+
+        speed_cm_s = float(getattr(self.car_cfg, "grasp_reposition_speed_cm_s", 10.0))
+        if speed_cm_s <= 0.0 or not math.isfinite(speed_cm_s):
+            speed_cm_s = 10.0
+        speed_cm_s = max(1.0, min(30.0, speed_cm_s))
+
+        speed_m_s = speed_cm_s / 100.0
+        duration = total_distance / speed_cm_s
+        elapsed = now_m - self.ctx.grasp_reposition_start_mono
+
+        if total_distance < 0.5 or (duration - elapsed) <= 0.08:
+            self._active_reposition_proposal = None
             self.ctx.grasp_reposition_proposal = None
             self.ctx.grasp_substate = "AWAITING_RESPOND"
             self.ctx.grasp_timeout_mono = now_m + _GRASP_RESPOND_TIMEOUT_S
@@ -1927,30 +1963,12 @@ class OrchestratorCore:
             )
             return self.controller.stop_cmd("GRASP")
 
-        duration = min(distance / _GRASP_REPOSITION_SPEED_CM_S, 2.0)
-        elapsed = now_m - self.ctx.grasp_reposition_start_mono
-        if elapsed < duration:
-            vx = _GRASP_REPOSITION_SPEED if dx > 0 else (-_GRASP_REPOSITION_SPEED if dx < 0 else 0.0)
-            vy = _GRASP_REPOSITION_SPEED if dy > 0 else (-_GRASP_REPOSITION_SPEED if dy < 0 else 0.0)
-            cmd = self.controller._cmd("GRASP_REPOSITION", vx=vx, vy=vy, wz=0.0)
-            return MotionDecision(cmd=cmd, control_summary=self.controller._summary(
-                "GRASP_REPOSITION", cmd, reason=f"reposition dx={dx:.1f} dy={dy:.1f}"
-            ))
-
-        self.ctx.grasp_reposition_proposal = None
-        self.ctx.grasp_substate = "AWAITING_RESPOND"
-        self.ctx.grasp_timeout_mono = now_m + _GRASP_RESPOND_TIMEOUT_S
-        self._queue_vision_req(
-            make_grasp_req(
-                target=self.ctx.active_target or "",
-                class_id=target_to_class_id(self.ctx.active_target or ""),
-                session_id=self.ctx.active_session_id,
-                epoch=self.ctx.active_epoch,
-                op="START",
-            ),
-            force=True,
-        )
-        return self.controller.stop_cmd("GRASP")
+        vx = (dx / total_distance) * speed_m_s
+        vy = (dy / total_distance) * speed_m_s
+        cmd = self.controller._cmd("GRASP_REPOSITION", vx=vx, vy=vy, wz=0.0)
+        return MotionDecision(cmd=cmd, control_summary=self.controller._summary(
+            "GRASP_REPOSITION", cmd, reason=f"reposition dx={dx:.1f} dy={dy:.1f}"
+        ))
 
     def _tick_grasp_awaiting_arm(self, now_m: float) -> MotionDecision:
         if now_m > self.ctx.grasp_timeout_mono:

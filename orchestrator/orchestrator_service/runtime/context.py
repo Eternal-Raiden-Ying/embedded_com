@@ -161,6 +161,7 @@ class RuntimeContext:
     grasp_reason: str = ""
     grasp_reposition_proposal: Optional[Dict] = None
     grasp_reposition_start_mono: float = 0.0
+    pre_arm_stop_settle_start_mono: float = 0.0
     grasp_retry_count: int = 0
     arm_response: Optional[object] = None
     grasp_timeout_mono: float = 0.0
@@ -290,6 +291,7 @@ class RuntimeContext:
         self.grasp_reason = ""
         self.grasp_reposition_proposal = None
         self.grasp_reposition_start_mono = 0.0
+        self.pre_arm_stop_settle_start_mono = 0.0
         self.grasp_retry_count = 0
         self.arm_response = None
         self.grasp_timeout_mono = 0.0

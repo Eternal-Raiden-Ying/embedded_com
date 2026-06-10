@@ -50,7 +50,7 @@ class UartBridge:
         self._tx_thread: Optional[threading.Thread] = None
         self._tx_event = threading.Event()
         self._pending_lock = threading.Lock()
-        self._write_lock = threading.Lock()
+        self._write_lock = threading.RLock()
         self._last_estop_mono = 0.0
         self._pending_tx: Optional[Dict[str, Any]] = None
         self._fifo_tx: "queue.Queue[Dict[str, Any]]" = queue.Queue()
@@ -208,7 +208,17 @@ class UartBridge:
         """
         if not str(command_line or "").strip():
             return False
-        self._write_line(command_line, tx_meta=tx_meta)
+        with self._write_lock:
+            with self._pending_lock:
+                self._pending_tx = None
+                while not self._fifo_tx.empty():
+                    try:
+                        self._fifo_tx.get_nowait()
+                    except queue.Empty:
+                        break
+                self._last_estop_mono = time.monotonic()
+            self._write_line("STOP\r\n", tx_meta={"reason": "pre_arm_stop"})
+            self._write_line(command_line, tx_meta=tx_meta)
         return True
 
     def drain_rx_lines(self) -> List[str]:

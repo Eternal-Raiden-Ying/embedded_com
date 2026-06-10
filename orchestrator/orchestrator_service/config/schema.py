@@ -228,6 +228,8 @@ class ControlThresholds:
 
 @dataclass
 class CarMotionConfig:
+    grasp_reposition_speed_cm_s: float = 10.0
+    pre_arm_stop_settle_ms: int = 150
     search_table_wz_radps: float = 0.10
     fallback_align_turn_wz_min_radps: float = 0.10
     fallback_align_turn_wz_max_radps: float = 0.45
