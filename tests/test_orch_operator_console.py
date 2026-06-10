@@ -40,6 +40,7 @@ class _RunLogger:
 def _service(lines, mode="operator"):
     svc = OrchestratorService.__new__(OrchestratorService)
     svc.cfg = OrchestratorConfig()
+    svc.cfg.serial.dry_run_echo_stdout = True
     svc.operator_console = OperatorConsole(mode=mode, default_interval_s=1.0, sink=lines.append)
     svc.demo_console = DemoConsolePresenter(svc.operator_console, dry_run=svc.cfg.serial.dry_run, emoji_enabled=False)
     svc.demo_console.level = "demo"
@@ -66,7 +67,7 @@ def _service(lines, mode="operator"):
     svc.run_logger = _RunLogger()
     svc.core = SimpleNamespace(
         ctx=SimpleNamespace(
-            state=SimpleNamespace(value="CONTROLLED_APPROACH"),
+            state=SimpleNamespace(value="EDGE_ADJUST"),
             current_edge_id=1,
             active_target="apple",
             active_vision_mode="FIND_OBJECT",
@@ -89,6 +90,18 @@ def _service(lines, mode="operator"):
             "lock_reason": "distance_too_far",
         },
     )
+    svc._uart_full_log = False
+    svc._state_blocks_full_log = False
+    from collections import deque
+    svc._uart_keepalive_last_tx_ts = 0.0
+    svc._uart_keepalive_last_summary_ts = 0.0
+    svc._uart_keepalive_tx_ts = deque(maxlen=512)
+    svc._uart_keepalive_interval_samples = deque(maxlen=512)
+    svc._uart_keepalive_last_key = ""
+    svc._uart_keepalive_same_cmd_repeat_count = 0
+    svc._uart_keepalive_tx_count = 0
+    svc._uart_keepalive_last_interval_ms = None
+    svc._uart_keepalive_last_cmd_type = ""
     return svc
 
 
@@ -145,7 +158,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         svc.cfg.serial.dry_run = True
         svc.core.ctx.state = SimpleNamespace(value="IDLE")
         decision = MotionDecision(
-            cmd=CmdVel(ts=now_ts(), mode="IDLE", vx_norm=0.0, vy_norm=0.0, wz_norm=0.0),
+            cmd=CmdVel(ts=now_ts(), mode="IDLE", vx_mps=0.0, vy_mps=0.0, wz_radps=0.0),
             control_summary={"state": "IDLE", "edge_obs_is_stale": True},
         )
         svc._emit_operator_control(decision)
@@ -184,22 +197,22 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         lines = []
         svc = _service(lines, mode="operator")
         decision = MotionDecision(
-            cmd=CmdVel(ts=now_ts(), mode="CONTROLLED_APPROACH", vx_norm=0.04, vy_norm=0.0, wz_norm=-0.06),
-            control_summary={"state": "CONTROLLED_APPROACH", "reason": "distance_too_far"},
+            cmd=CmdVel(ts=now_ts(), mode="EDGE_ADJUST", vx_mps=0.04, vy_mps=0.0, wz_radps=-0.06),
+            control_summary={"state": "EDGE_ADJUST", "reason": "distance_too_far"},
         )
-        with patch("common.runtime_logging.time.time", side_effect=[100.0, 100.2, 101.2]):
+        with patch("common.runtime_logging.time.time", side_effect=[100.0, 100.2, 106.0]):
             svc._emit_operator_control(decision)
             svc._emit_operator_control(decision)
             svc._emit_operator_control(decision)
         self.assertEqual(len(lines), 2)
-        self.assertIn("[ORCH] CTRL state=CONTROLLED_APPROACH", lines[0])
+        self.assertIn("[ORCH] CTRL state=EDGE_ADJUST", lines[0])
 
     def test_state_transition_emits_once_and_no_unchanged_tick(self) -> None:
         lines = []
         svc = _service(lines, mode="operator")
-        svc._on_state_transition("SEARCH_TABLE", "COARSE_ALIGN", "table_edge_seen")
-        svc._on_state_transition("SEARCH_TABLE", "COARSE_ALIGN", "table_edge_seen")
-        self.assertIn("[ORCH] STATE SEARCH_TABLE -> COARSE_ALIGN reason=table_edge_seen", lines)
+        svc._on_state_transition("SEARCH_TABLE", "EDGE_ADJUST", "table_edge_seen")
+        svc._on_state_transition("SEARCH_TABLE", "EDGE_ADJUST", "table_edge_seen")
+        self.assertIn("[ORCH] STATE SEARCH_TABLE -> EDGE_ADJUST reason=table_edge_seen", lines)
         self.assertIn("[DEMO][TABLE] edge found, aligning", lines)
 
     def test_fake_car_repeated_vel_mode_and_speed_policy(self) -> None:
@@ -209,18 +222,18 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
             "ts": 100.0,
             "dry_run": True,
             "summary_key": "a",
-            "mode": "CONTROLLED_APPROACH",
+            "mode": "EDGE_ADJUST",
             "kind": "cmd_vel",
-            "vx_norm": 0.04,
-            "vy_norm": 0.0,
-            "wz_norm": -0.06,
+            "vx_mps": 0.04,
+            "vy_mps": 0.0,
+            "wz_radps": -0.06,
             "hold_ms": 150,
             "raw": "VEL 0.040 0.000 -0.060 150",
         }
         svc._update_uart_console(dict(base))
         svc._update_uart_console(dict(base, ts=100.2))
-        svc._update_uart_console(dict(base, ts=100.3, summary_key="b", mode="FINAL_LOCK"))
-        svc._update_uart_console(dict(base, ts=100.4, summary_key="c", mode="FINAL_LOCK", vx_norm=0.052))
+        svc._update_uart_console(dict(base, ts=100.3, summary_key="b", mode="FINAL_SLOW_STOP"))
+        svc._update_uart_console(dict(base, ts=100.4, summary_key="c", mode="FINAL_SLOW_STOP", vx_mps=0.052))
         self.assertEqual(len(lines), 2)
         self.assertIn("[ORCH] CAR_VEL vx=+0.040", lines[0])
         self.assertIn("vx=+0.052", lines[1])
@@ -231,7 +244,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         svc._on_uart_tx(
             "MODE SEARCH\nV 0.000 0.000 0.220\n",
             True,
-            {"mode": "SEARCH_TABLE", "kind": "cmd_vel", "vx_norm": 0.0, "vy_norm": 0.0, "wz_norm": 0.22, "hold_ms": 150, "state": "SEARCH_TABLE"},
+            {"mode": "SEARCH_TABLE", "kind": "cmd_vel", "vx_mps": 0.0, "vy_mps": 0.0, "wz_radps": 0.22, "hold_ms": 150, "state": "SEARCH_TABLE"},
         )
         joined = "\n".join(lines)
         self.assertIn("[ORCH] CAR_MODE mode=SEARCH", joined)
@@ -244,7 +257,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         svc._on_uart_tx(
             "MODE EDGE_SLIDE_SEARCH\n",
             True,
-            {"mode": "EDGE_SLIDE_SEARCH", "kind": "cmd_vel", "vx_norm": 0.0, "vy_norm": 0.04, "wz_norm": 0.0, "hold_ms": 150, "state": "EDGE_SLIDE_SEARCH", "reason": "edge_slide"},
+            {"mode": "EDGE_SLIDE_SEARCH", "kind": "cmd_vel", "vx_mps": 0.0, "vy_mps": 0.04, "wz_radps": 0.0, "hold_ms": 150, "state": "EDGE_SLIDE_SEARCH", "reason": "edge_slide"},
         )
         joined = "\n".join(lines)
         self.assertIn("[ORCH] WARN no_vel_sent state=EDGE_SLIDE_SEARCH reason=edge_slide", joined)
@@ -258,7 +271,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         svc.operator_console = OperatorConsole(mode="operator", default_interval_s=1.0, sink=lines.append)
         payload = {
             "state": "locking_table",
-            "backend_state": "FINAL_LOCK",
+            "backend_state": "FINAL_SLOW_STOP",
             "target": "apple",
             "progress": 65,
             "lock_reason": "yaw_not_aligned",
@@ -276,7 +289,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         svc.core.ctx.state = SimpleNamespace(value="EDGE_SLIDE_SEARCH")
         payload = {"type": "target_obs", "target": "apple", "found": False, "boxes_count": 3, "vision_mode": "FIND_OBJECT"}
         svc._emit_target_obs_console(payload)
-        self.assertEqual(lines, ["[ORCH] OBS target=apple found=0 boxes=3 mode=TRACK_LOCAL"])
+        self.assertEqual(lines, ["[ORCH] OBS target=apple found=0 boxes=3 mode=FIND_OBJECT"])
         svc.operator_console._last_ts_by_key.clear()
         svc._emit_target_obs_console({
             "type": "target_obs",
@@ -441,7 +454,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         svc.core.ctx.state = SimpleNamespace(value="EDGE_SLIDE_SEARCH")
         svc.core.ctx.active_vision_mode = "FIND_OBJECT"
         decision = MotionDecision(
-            cmd=CmdVel(ts=now_ts(), mode="EDGE_SLIDE_SEARCH", vx_norm=0.0, vy_norm=0.0, wz_norm=0.0),
+            cmd=CmdVel(ts=now_ts(), mode="EDGE_SLIDE_SEARCH", vx_mps=0.0, vy_mps=0.0, wz_radps=0.0),
             control_summary={"state": "EDGE_SLIDE_SEARCH", "reason": "safety_hold"},
         )
         svc._emit_operator_control(decision)
@@ -456,7 +469,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         svc = _service(lines, mode="operator")
         svc.core.ctx.state = SimpleNamespace(value="EDGE_SLIDE_SEARCH")
         decision = MotionDecision(
-            cmd=CmdVel(ts=now_ts(), mode="EDGE_SLIDE_SEARCH", vx_norm=0.0, vy_norm=0.0, wz_norm=0.0),
+            cmd=CmdVel(ts=now_ts(), mode="EDGE_SLIDE_SEARCH", vx_mps=0.0, vy_mps=0.0, wz_radps=0.0),
             control_summary={"state": "EDGE_SLIDE_SEARCH", "reason": "safety_hold_no_edge", "edge_found": False},
         )
         svc._emit_operator_control(decision)
@@ -467,7 +480,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
     def test_edge_lost_but_yolo_valid_uses_yolo_assist(self) -> None:
         cfg = OrchestratorConfig()
         core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
-        core.ctx.state = State.CONTROLLED_APPROACH
+        core.ctx.state = State.EDGE_ADJUST
         core.handle_table_obs(
             TableEdgeObs(
                 ts=now_ts(),
@@ -487,43 +500,39 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
 
         decision = core.tick()
 
-        self.assertEqual(core.ctx.state, State.CONTROLLED_APPROACH)
-        self.assertEqual(decision.cmd.mode, "CONTROLLED_APPROACH")
-        self.assertEqual(decision.control_summary["control_source"], "yolo_assist")
-        self.assertTrue(decision.control_summary["edge_lost_but_yolo_valid"])
-        self.assertTrue(decision.control_summary["search_blocked_by_yolo_valid"])
-        self.assertEqual(decision.control_summary["roi_source"], "yolo_table_lower_band")
-        self.assertEqual(decision.control_summary["roi_phase"], "near_yolo_assist")
+        self.assertEqual(core.ctx.state, State.YOLO_APPROACH)
+        self.assertEqual(decision.cmd.mode, "YOLO_APPROACH")
+        self.assertEqual(decision.control_summary["control_source"], "yolo_forward")
 
     def test_uart_soft_stale_repeats_last_valid_motion(self) -> None:
         svc = OrchestratorService.__new__(OrchestratorService)
         svc.cfg = OrchestratorConfig()
         svc.cfg.car.motion_hold_ms = 400
         svc.cfg.car.soft_stale_hold_enable = True
-        svc.core = SimpleNamespace(ctx=SimpleNamespace(state=State.CONTROLLED_APPROACH))
+        svc.core = SimpleNamespace(ctx=SimpleNamespace(state=State.EDGE_ADJUST))
         svc._last_valid_motion_cmd = None
         svc._last_valid_motion_ts = 0.0
 
-        moving = CmdVel(ts=now_ts(), mode="CONTROLLED_APPROACH", vx_norm=0.12, vy_norm=0.0, wz_norm=0.03, hold_ms=150)
+        moving = CmdVel(ts=now_ts(), mode="EDGE_ADJUST", vx_mps=0.12, vy_mps=0.0, wz_radps=0.03, hold_ms=150)
         effective, meta = svc._arbitrate_uart_motion_cmd(moving, {"stale_level": "fresh"})
         self.assertEqual(meta["uart_emit_reason"], "controller_update")
-        self.assertAlmostEqual(effective.vx_norm, 0.12)
+        self.assertAlmostEqual(effective.vx_mps, 0.12)
 
-        zero_soft_stale = CmdVel(ts=now_ts(), mode="CONTROLLED_APPROACH", vx_norm=0.0, vy_norm=0.0, wz_norm=0.0, hold_ms=150)
+        zero_soft_stale = CmdVel(ts=now_ts(), mode="EDGE_ADJUST", vx_mps=0.0, vy_mps=0.0, wz_radps=0.0, hold_ms=150)
         effective, meta = svc._arbitrate_uart_motion_cmd(zero_soft_stale, {"stale_level": "soft_stale"})
         self.assertEqual(meta["uart_emit_reason"], "keepalive_repeat_last_valid")
         self.assertTrue(meta["soft_stale_hold_active"])
-        self.assertAlmostEqual(effective.vx_norm, 0.12)
-        self.assertAlmostEqual(effective.wz_norm, 0.03)
+        self.assertAlmostEqual(effective.vx_mps, 0.12)
+        self.assertAlmostEqual(effective.wz_radps, 0.03)
 
     def test_uart_hard_stale_stops_and_clears_last_valid_motion(self) -> None:
         svc = OrchestratorService.__new__(OrchestratorService)
         svc.cfg = OrchestratorConfig()
-        svc.core = SimpleNamespace(ctx=SimpleNamespace(state=State.CONTROLLED_APPROACH))
-        svc._last_valid_motion_cmd = {"mode": "CONTROLLED_APPROACH", "vx_norm": 0.12, "vy_norm": 0.0, "wz_norm": 0.03, "hold_ms": 150}
+        svc.core = SimpleNamespace(ctx=SimpleNamespace(state=State.EDGE_ADJUST))
+        svc._last_valid_motion_cmd = {"mode": "EDGE_ADJUST", "vx_mps": 0.12, "vy_mps": 0.0, "wz_radps": 0.03, "hold_ms": 150}
         svc._last_valid_motion_ts = time.time()
 
-        zero_hard_stale = CmdVel(ts=now_ts(), mode="CONTROLLED_APPROACH", vx_norm=0.0, vy_norm=0.0, wz_norm=0.0, hold_ms=150)
+        zero_hard_stale = CmdVel(ts=now_ts(), mode="EDGE_ADJUST", vx_mps=0.0, vy_mps=0.0, wz_radps=0.0, hold_ms=150)
         effective, meta = svc._arbitrate_uart_motion_cmd(zero_hard_stale, {"stale_level": "hard_stale"})
         self.assertEqual(meta["uart_emit_reason"], "hard_stale_stop")
         self.assertEqual(meta["zero_cmd_reason"], "hard_stale")
@@ -559,7 +568,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
     def test_search_table_entry_clears_stale_edge_and_locks(self) -> None:
         cfg = OrchestratorConfig()
         core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
-        core.ctx.state = State.CONTROLLED_APPROACH
+        core.ctx.state = State.EDGE_ADJUST
         core.ctx.active_target = "apple"
         core.ctx.active_session_id = "sess_reset"
         core.ctx.last_table_obs = TableEdgeObs(ts=now_ts(), table_found=True, edge_found=True, confidence=0.9, yaw_err_rad=0.1, dist_err_m=0.02)
@@ -642,7 +651,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
                 "payload": {"search_kind": "TARGET"},
             }
         )
-        self.assertEqual(line, "[ORCH] REQ target_update stage=SEARCH kind=TARGET target=apple mode_hint=TRACK_LOCAL req=req_1")
+        self.assertEqual(line, "[ORCH] REQ target_update stage=SEARCH kind=TARGET target=apple mode_hint=FIND_OBJECT req=req_1")
 
     def test_target_obs_found_enters_confirm_stop_logic(self) -> None:
         cfg = OrchestratorConfig()
@@ -814,7 +823,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
 
     def test_edge_slide_config_nonzero_outputs_nonzero_vy(self) -> None:
         cfg = OrchestratorConfig()
-        cfg.car.edge_slide_vy_norm = 0.04
+        cfg.car.edge_slide_vy_mps = 0.04
         cfg.control.edge_slide_pause_s = 0.0
         core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
         core.ctx.state = State.EDGE_SLIDE_SEARCH
@@ -824,14 +833,14 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         core.handle_table_obs(TableEdgeObs(ts=now_ts(), table_found=True, edge_found=True, confidence=0.9, yaw_err_rad=0.01, dist_err_m=0.02))
         decision = core.tick()
         self.assertEqual(decision.cmd.mode, "EDGE_SLIDE_SEARCH")
-        self.assertAlmostEqual(decision.cmd.vy_norm, 0.04, places=6)
-        self.assertNotEqual(decision.cmd.vx_norm, 0.0)
+        self.assertAlmostEqual(decision.cmd.vy_mps, 0.04, places=6)
+        self.assertNotEqual(decision.cmd.vx_mps, 0.0)
 
     def test_track_local_weak_edge_conf_continues_slow_slide(self) -> None:
         cfg = OrchestratorConfig()
         cfg.control.edge_slide_pause_s = 0.0
-        cfg.car.edge_slide_vy_norm = 0.14
-        cfg.car.edge_slide_weak_vy_norm = 0.05
+        cfg.car.edge_slide_vy_mps = 0.14
+        cfg.car.edge_slide_weak_vy_mps = 0.05
         core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
         core.ctx.state = State.EDGE_SLIDE_SEARCH
         core.ctx.active_vision_mode = "FIND_OBJECT"
@@ -855,7 +864,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         decision = core.tick()
         self.assertEqual(core.ctx.state, State.EDGE_SLIDE_SEARCH)
         self.assertEqual(decision.cmd.mode, "EDGE_SLIDE_SEARCH")
-        self.assertAlmostEqual(decision.cmd.vy_norm, 0.05, places=6)
+        self.assertAlmostEqual(decision.cmd.vy_mps, 0.05, places=6)
         self.assertEqual(decision.control_summary["reason"], "weak_edge_slide")
         self.assertEqual(core.ctx.last_edge_quality.get("mode"), "weak")
         self.assertTrue(core.ctx.last_edge_quality.get("edge_identity_ok"))
@@ -940,8 +949,8 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         self.assertEqual(decision.cmd.mode, "EDGE_SLIDE_SEARCH")
         core.ctx.table_loss_since_mono = monotonic_ts() - float(cfg.control.edge_slide_recover_timeout_s) - 0.1
         decision = core.tick()
-        self.assertEqual(core.ctx.state, State.FINAL_LOCK)
-        self.assertEqual(decision.cmd.mode, "FINAL_LOCK")
+        self.assertEqual(core.ctx.state, State.FINAL_SLOW_STOP)
+        self.assertEqual(decision.cmd.mode, "FINAL_SLOW_STOP")
         self.assertEqual(core.ctx.edge_slide_relock_attempts, 1)
 
     def test_edge_slide_distance_out_of_tolerance_fails_after_retries(self) -> None:
@@ -958,8 +967,8 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         core.handle_table_obs(TableEdgeObs(ts=now_ts(), table_found=True, edge_found=True, confidence=0.9, yaw_err_rad=0.01, dist_err_m=0.08))
         core.ctx.table_loss_since_mono = monotonic_ts() - 0.2
         decision = core.tick()
-        self.assertEqual(core.ctx.state, State.FINAL_LOCK)
-        self.assertEqual(decision.cmd.mode, "FINAL_LOCK")
+        self.assertEqual(core.ctx.state, State.FINAL_SLOW_STOP)
+        self.assertEqual(decision.cmd.mode, "FINAL_SLOW_STOP")
         core.ctx.state = State.EDGE_SLIDE_SEARCH
         core.ctx.state_enter_mono = monotonic_ts() - 1.0
         core.ctx.table_loss_since_mono = monotonic_ts() - 0.2
@@ -1009,8 +1018,8 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         self.assertIn("edge_recover", decision.control_summary["reason"])
         core.ctx.table_loss_since_mono = monotonic_ts() - float(cfg.control.edge_slide_recover_timeout_s) - 0.1
         decision = core.tick()
-        self.assertEqual(core.ctx.state, State.FINAL_LOCK)
-        self.assertEqual(decision.cmd.mode, "FINAL_LOCK")
+        self.assertEqual(core.ctx.state, State.FINAL_SLOW_STOP)
+        self.assertEqual(decision.cmd.mode, "FINAL_SLOW_STOP")
 
     def test_track_local_without_table_edge_holds_with_reason(self) -> None:
         cfg = OrchestratorConfig()
@@ -1022,14 +1031,14 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         decision = core.tick()
         self.assertEqual(core.ctx.state, State.SEARCH_TARGET_INIT)
         self.assertEqual(decision.cmd.mode, "SEARCH_TARGET_INIT")
-        self.assertEqual(decision.cmd.vy_norm, 0.0)
+        self.assertEqual(decision.cmd.vy_mps, 0.0)
         self.assertIn("stop", decision.control_summary["reason"])
 
     def test_edge_slide_rejects_stale_table_edge_obs(self) -> None:
         cfg = OrchestratorConfig()
         cfg.control.edge_slide_pause_s = 0.0
         cfg.control.table_edge_obs_max_age_ms = 500
-        cfg.control.edge_follow_stale_fallback_state = "FINAL_LOCK"
+        cfg.control.edge_follow_stale_fallback_state = "FINAL_SLOW_STOP"
         core = OrchestratorCore(cfg.control, cfg.car, cfg.docking)
         core.ctx.state = State.EDGE_SLIDE_SEARCH
         core.ctx.active_vision_mode = "FIND_OBJECT"
@@ -1054,13 +1063,13 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         decision = core.tick()
         self.assertEqual(core.ctx.state, State.EDGE_SLIDE_SEARCH)
         self.assertEqual(decision.cmd.mode, "EDGE_SLIDE_SEARCH")
-        self.assertEqual(decision.cmd.vy_norm, 0.0)
+        self.assertEqual(decision.cmd.vy_mps, 0.0)
         self.assertIn("edge_follow_stale_hold", decision.control_summary["reason"])
         core.ctx.table_loss_since_mono = monotonic_ts() - float(cfg.control.table_loss_hold_s) - 0.1
         decision = core.tick()
-        self.assertEqual(core.ctx.state, State.FINAL_LOCK)
-        self.assertEqual(decision.cmd.mode, "FINAL_LOCK")
-        self.assertEqual(decision.cmd.vx_norm, 0.0)
+        self.assertEqual(core.ctx.state, State.FINAL_SLOW_STOP)
+        self.assertEqual(decision.cmd.mode, "FINAL_SLOW_STOP")
+        self.assertEqual(decision.cmd.vx_mps, 0.0)
 
     def test_table_edge_only_final_lock_stops_done_before_target_search(self) -> None:
         cfg = OrchestratorConfig()
@@ -1069,7 +1078,7 @@ class OrchestratorOperatorConsoleTest(unittest.TestCase):
         cfg.control.table_stable_frames = 1
         logs = []
         core = OrchestratorCore(cfg.control, cfg.car, cfg.docking, logger=lambda level, src, msg, extra=None: logs.append(msg))
-        core.ctx.state = State.FINAL_LOCK
+        core.ctx.state = State.FINAL_SLOW_STOP
         core.ctx.table_dock_phase = "STOP_AND_SETTLE"
         core.ctx.table_dock_phase_since_mono = monotonic_ts() - 1.0
         core.handle_table_obs(

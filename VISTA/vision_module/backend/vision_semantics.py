@@ -89,10 +89,7 @@ class TableEdgeObservation:
     edge_trusted_min_support_count: int = 0
     edge_trusted_min_inlier_count: int = 0
     edge_trusted_min_x_span_m: float = 0.0
-    edge_valid: bool = False
-    valid_for_control: bool = False
-    edge_control_allowed: bool = False
-    edge_control_block_reason: str = ""
+
 
     # 桌子 Bounding Box 相关的语义
     table_bbox_current_found: bool = False
@@ -107,13 +104,7 @@ class TableEdgeObservation:
     table_bbox_area_ratio: Optional[float] = None
     table_bbox_center: Optional[list[float]] = None
     table_bbox_center_norm: Optional[list[float]] = None
-    table_bbox_found: bool = False
-    table_bbox_detected: bool = False
-    yolo_table_control_valid: bool = False
-    table_confirmed_by_yolo: bool = False
-    yolo_valid_reason: str = ""
-    yolo_invalid_reason: str = ""
-    docking_enabled_by_yolo: bool = False
+
 
     # 测量误差/控制所需的目标观测值
     dist_err_m: Optional[float] = None
@@ -490,11 +481,6 @@ def standardize_table_edge_payload(
             "edge_trusted_min_support_count": int(edge_trusted_min_support_count or 0),
             "edge_trusted_min_inlier_count": int(edge_trusted_min_inlier_count or 0),
             "edge_trusted_min_x_span_m": float(edge_trusted_min_x_span_m or 0.0),
-            "edge_valid": bool(edge_geometry_valid),
-            "valid_for_control": bool(edge_trusted),
-            "edge_control_allowed": bool(edge_trusted),
-            "docking_enabled_by_yolo": bool(out.get("table_bbox_control_valid", False)),
-            "edge_control_block_reason": block_reason,
         }
     )
 

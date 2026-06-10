@@ -81,9 +81,9 @@ class TcpTaskCmdBackend:
     def __init__(self, endpoint: GatewayEndpoint, name: str = "mobile_gateway_task_cmd_out"):
         self.sender = JsonlClientSender(
             mode=endpoint.transport,
-            tcp_host=endpoint.host,
-            tcp_port=endpoint.port,
-            uds_path=endpoint.uds_path,
+            tcp_host=getattr(endpoint, "host", "127.0.0.1"),
+            tcp_port=getattr(endpoint, "port", 0),
+            uds_path=getattr(endpoint, "uds_path", "") or getattr(endpoint, "ipc_socket_path", ""),
             name=name,
             send_mode=endpoint.send_mode,
         )
@@ -312,16 +312,16 @@ class MobileGatewayService(BaseModule):
         self.run_logger = RunLogger("mobile_gateway", cfg.runtime.runs_dir, cfg.runtime.stack_run_id) if cfg.runtime.log_enabled else _NullRunLogger("mobile_gateway", cfg.runtime.stack_run_id)
         self.command_server = JsonlInboundServer(
             mode=cfg.command_in.transport,
-            tcp_host=cfg.command_in.host,
-            tcp_port=cfg.command_in.port,
-            uds_path=cfg.command_in.uds_path,
+            tcp_host=getattr(cfg.command_in, "host", "127.0.0.1"),
+            tcp_port=getattr(cfg.command_in, "port", 0),
+            uds_path=getattr(cfg.command_in, "uds_path", "") or getattr(cfg.command_in, "ipc_socket_path", ""),
             name="mobile_command_in",
         )
         self.status_sender = JsonlClientSender(
             mode=cfg.status_out.transport,
-            tcp_host=cfg.status_out.host,
-            tcp_port=cfg.status_out.port,
-            uds_path=cfg.status_out.uds_path,
+            tcp_host=getattr(cfg.status_out, "host", "127.0.0.1"),
+            tcp_port=getattr(cfg.status_out, "port", 0),
+            uds_path=getattr(cfg.status_out, "uds_path", "") or getattr(cfg.status_out, "ipc_socket_path", ""),
             name="mobile_status_out",
             send_mode=cfg.status_out.send_mode,
         )
@@ -400,9 +400,9 @@ class MobileGatewayService(BaseModule):
             return None
         return JsonlInboundServer(
             mode=ep.transport,
-            tcp_host=ep.host,
-            tcp_port=ep.port,
-            uds_path=ep.uds_path,
+            tcp_host=getattr(ep, "host", "127.0.0.1"),
+            tcp_port=getattr(ep, "port", 0),
+            uds_path=getattr(ep, "uds_path", "") or getattr(ep, "ipc_socket_path", ""),
             name=name,
         )
 
@@ -438,23 +438,19 @@ class MobileGatewayService(BaseModule):
             "backend_mode": self.backend_mode,
             "command_in": {
                 "transport": self.cfg.command_in.transport,
-                "host": self.cfg.command_in.host,
-                "port": self.cfg.command_in.port,
+                "ipc_socket_path": getattr(self.cfg.command_in, "ipc_socket_path", "") or getattr(self.cfg.command_in, "uds_path", ""),
             },
             "status_out": {
                 "transport": self.cfg.status_out.transport,
-                "host": self.cfg.status_out.host,
-                "port": self.cfg.status_out.port,
+                "ipc_socket_path": getattr(self.cfg.status_out, "ipc_socket_path", "") or getattr(self.cfg.status_out, "uds_path", ""),
             },
             "orchestrator_task_cmd_out": {
                 "transport": self.cfg.orchestrator_task_cmd_out.transport,
-                "host": self.cfg.orchestrator_task_cmd_out.host,
-                "port": self.cfg.orchestrator_task_cmd_out.port,
+                "ipc_socket_path": getattr(self.cfg.orchestrator_task_cmd_out, "ipc_socket_path", "") or getattr(self.cfg.orchestrator_task_cmd_out, "uds_path", ""),
             },
             "orchestrator_task_ack_in": {
                 "transport": self.cfg.orchestrator_task_ack_in.transport,
-                "host": self.cfg.orchestrator_task_ack_in.host,
-                "port": self.cfg.orchestrator_task_ack_in.port,
+                "ipc_socket_path": getattr(self.cfg.orchestrator_task_ack_in, "ipc_socket_path", "") or getattr(self.cfg.orchestrator_task_ack_in, "uds_path", ""),
             },
         })
         self.command_server.start()

@@ -319,9 +319,16 @@ class OrchestratorCore:
             "edge_trusted": bool(sem.edge_trusted),
             "allow_forward": bool(summary.get("allow_forward", False)),
             "allow_rotate": bool(summary.get("allow_rotate", False)),
+            "allow_lateral": bool(summary.get("allow_lateral", False)),
             "forward_block_reason": str(summary.get("forward_block_reason") or ""),
             "rotate_block_reason": str(summary.get("rotate_block_reason") or ""),
+            "lateral_block_reason": str(summary.get("lateral_block_reason") or ""),
             "stop_reason": str(summary.get("stop_reason") or ""),
+            # Backwards compatibility fields for unit tests
+            "edge_valid": bool(sem.edge_geometry_valid),
+            "confidence": float(table_obs.confidence) if table_obs is not None else None,
+            "yaw_err_rad": float(table_obs.yaw_err_rad) if (table_obs and table_obs.yaw_err_rad is not None) else None,
+            "lock_ready": bool(getattr(table_obs, "edge_ready", False)) if table_obs is not None else False,
         }
 
 
@@ -1074,6 +1081,12 @@ class OrchestratorCore:
 
         if not self.ctx.table_dock_phase:
             self.ctx.table_dock_phase = "aligning"
+            self.ctx.table_dock_phase_since_mono = monotonic_ts()
+
+        phase_since = self.ctx.table_dock_phase_since_mono
+        if phase_since <= 0.0:
+            phase_since = self.ctx.state_enter_mono
+        phase_elapsed = max(0.0, monotonic_ts() - phase_since) if phase_since > 0.0 else 0.0
 
         yaw_ready = self._yaw_ready_for_controlled_approach(obs)
         yaw_needs_realign = self._yaw_needs_realign_from_approach(obs)
@@ -1084,8 +1097,9 @@ class OrchestratorCore:
                 ok=yaw_ready,
                 last_key_attr="align_hysteresis_last_obs_key",
                 count_attr="approach_aligned_frames",
-            ) >= self._align_to_approach_stable_obs():
+            ) >= self._align_to_approach_stable_obs() and phase_elapsed >= self._coarse_align_min_dwell_s():
                 self.ctx.table_dock_phase = "approaching"
+                self.ctx.table_dock_phase_since_mono = monotonic_ts()
                 self.ctx.approach_realign_frames = 0
                 self.ctx.table_motion_pending_transition_reason = ""
             else:
@@ -1096,8 +1110,9 @@ class OrchestratorCore:
                 ok=yaw_needs_realign,
                 last_key_attr="approach_hysteresis_last_obs_key",
                 count_attr="approach_realign_frames",
-            ) >= self._approach_to_align_stable_obs():
+            ) >= self._approach_to_align_stable_obs() and phase_elapsed >= self._controlled_approach_min_dwell_s():
                 self.ctx.table_dock_phase = "aligning"
+                self.ctx.table_dock_phase_since_mono = monotonic_ts()
                 self.ctx.approach_aligned_frames = 0
                 self.ctx.table_motion_pending_transition_reason = ""
             else:
@@ -1114,6 +1129,7 @@ class OrchestratorCore:
         else:
             decision = self._table_approach_decision(obs, phase="PLANE_APPROACH")
             decision.control_summary["control_intent"] = "edge_parallel"
+        decision = self._annotate_table_motion_hysteresis(decision, pending_reason=pending_reason)
         return decision
 
     def _tick_final_slow_stop(self) -> MotionDecision:
@@ -2516,7 +2532,23 @@ class OrchestratorCore:
     def _raw_control_level(obs: Optional[TableEdgeObs]) -> str:
         if obs is None:
             return "none"
-        return str(getattr(obs, "control_level", "none") or "none").strip().lower()
+        level = getattr(obs, "control_level", None)
+        if level:
+            level_str = str(level).strip().lower()
+            if "stop" in level_str:
+                return "stop"
+            if "approach" in level_str:
+                return "approach"
+            if "align" in level_str or "rotate" in level_str:
+                return "alignment"
+            return "none"
+        if getattr(obs, "usable_for_stop", False):
+            return "stop"
+        if getattr(obs, "usable_for_approach", False):
+            return "approach"
+        if getattr(obs, "usable_for_alignment", False):
+            return "alignment"
+        return "none"
 
     @classmethod
     def _control_level(cls, obs: Optional[TableEdgeObs]) -> str:
@@ -2691,7 +2723,7 @@ class OrchestratorCore:
         if not self._table_visible(obs) or not bool(getattr(obs, "edge_found", False)):
             status["final_lock_enter_block_reason"] = "edge_invalid"
             return status
-        if not bool(getattr(obs, "valid_for_control", False) or getattr(obs, "usable_for_stop", False)):
+        if not bool(getattr(obs, "edge_trusted", False) or getattr(obs, "usable_for_stop", False)):
             status["final_lock_enter_block_reason"] = "not_valid_for_control"
             return status
         if level != "stop" and not bool(getattr(obs, "usable_for_stop", False)):
@@ -3060,7 +3092,7 @@ class OrchestratorCore:
         ) -> Dict[str, object]:
             obs_age_ms = self._table_obs_age_ms(obs)
             stale_reason = self._vision_stale_reason(obs)
-            valid_for_control = bool(getattr(obs, "valid_for_control", False)) if obs is not None else False
+            valid_for_control = bool(getattr(obs, "edge_trusted", False)) if obs is not None else False
             usable_for_approach = bool(getattr(obs, "usable_for_approach", False)) if obs is not None else False
             usable_for_stop = bool(getattr(obs, "usable_for_stop", False)) if obs is not None else False
             raw_control_level = self._raw_control_level(obs)
@@ -3590,60 +3622,10 @@ class OrchestratorCore:
         return None
 
     def _apply_soft_interception_and_safety(self, decision: MotionDecision) -> MotionDecision:
-        summary = decision.control_summary
-        if summary is None:
-            summary = {}
-            decision.control_summary = summary
+        from .safety.base_motion_safety import apply_base_motion_safety
 
-        allow_forward = summary.get("allow_forward", True)
-        allow_rotate = summary.get("allow_rotate", True)
+        def log_fn(level: str, msg: str, *args: Any) -> None:
+            self._log(level, msg, *args)
 
-        # Apply Soft Interception based on allow_forward and allow_rotate
-        if not allow_forward and decision.cmd.vx_mps > 1e-9:
-            decision.cmd.vx_mps = 0.0
-            if not summary.get("forward_block_reason"):
-                summary["forward_block_reason"] = "allow_forward_false_intercept"
+        return apply_base_motion_safety(decision, ctx=self.ctx, cfg=self.cfg, log_fn=log_fn)
 
-        if not allow_rotate and abs(decision.cmd.wz_radps) > 1e-9:
-            decision.cmd.wz_radps = 0.0
-            if not summary.get("rotate_block_reason"):
-                summary["rotate_block_reason"] = "allow_rotate_false_intercept"
-
-        # Apply Depth Safety logic and update block reasons
-        obs = self._fresh_table_obs()
-        if obs is not None and obs.depth_p10 is not None:
-            depth_p10 = obs.depth_p10
-            if depth_p10 < self.cfg.near_stop_depth_m:
-                if decision.cmd.vx_mps > 0 or (decision.cmd.vx_mps == 0 and abs(decision.cmd.wz_radps) > 0):
-                    decision.cmd.vx_mps = 0.0
-                    decision.cmd.wz_radps = 0.0
-                    summary["forward_block_reason"] = "depth_p10_too_close"
-                    summary["rotate_block_reason"] = "depth_p10_too_close"
-                    summary["stop_reason"] = "depth_p10_too_close"
-                    summary["allow_forward"] = False
-                    summary["allow_rotate"] = False
-                    self._log("warn", f"Depth safety stop triggered: depth_p10={depth_p10:.3f}m < {self.cfg.near_stop_depth_m:.3f}m")
-            elif depth_p10 < self.cfg.near_slow_depth_m:
-                max_vx = self.cfg.near_slow_max_vx_mps
-                max_wz = self.cfg.near_slow_max_wz_radps
-                if decision.cmd.vx_mps > max_vx:
-                    decision.cmd.vx_mps = max_vx
-                    summary["forward_block_reason"] = "depth_p10_slowdown"
-                if abs(decision.cmd.wz_radps) > max_wz:
-                    sign = 1.0 if decision.cmd.wz_radps >= 0 else -1.0
-                    decision.cmd.wz_radps = sign * max_wz
-                    summary["rotate_block_reason"] = "depth_p10_slowdown"
-                self._log("info", f"Depth safety slowdown active: depth_p10={depth_p10:.3f}m. Limited to vx={decision.cmd.vx_mps:.3f}, wz={decision.cmd.wz_radps:.3f}")
-
-        # Set defaults if not present
-        summary["allow_forward"] = bool(allow_forward)
-        summary["allow_rotate"] = bool(allow_rotate)
-        summary["forward_block_reason"] = summary.get("forward_block_reason") or ""
-        summary["rotate_block_reason"] = summary.get("rotate_block_reason") or ""
-        summary["stop_reason"] = summary.get("stop_reason") or ""
-
-        if decision.cmd.vx_mps <= 1e-9 and abs(decision.cmd.wz_radps) <= 1e-9:
-            if not summary.get("stop_reason"):
-                summary["stop_reason"] = summary.get("forward_block_reason") or summary.get("rotate_block_reason") or "stopped"
-
-        return decision

@@ -257,8 +257,8 @@ class SimpleCarProtocolTest(unittest.TestCase):
                 return True
 
         uart = FakeUart()
-        adapter = Stm32MotionAdapter(uart, logger=lambda _line: None, vx_scale=1, vy_scale=1, wz_scale=1)
-        cmd = CmdVel(ts=0.0, mode="TRACK", vx_norm=0.20, vy_norm=0.10, wz_norm=0.05)
+        adapter = Stm32MotionAdapter(uart, logger=lambda _line: None, max_vx_mps=1.0, max_vy_mps=1.0, max_wz_radps=1.0)
+        cmd = CmdVel(ts=0.0, mode="TRACK", vx_mps=0.20, vy_mps=0.10, wz_radps=0.05)
 
         self.assertEqual(adapter.cmd_vel_to_velocity(cmd), (0.20, 0.10, 0.05))
         self.assertEqual(adapter.send_cmd_vel(cmd, reason="track"), 1)
@@ -266,17 +266,17 @@ class SimpleCarProtocolTest(unittest.TestCase):
         self.assertEqual(uart.calls[-1][0], "line")
         self.assertEqual(uart.calls[-1][1][0], "MODE SEARCH\r\nV 0.200 0.100 0.050\r\n")
 
-        stop_cmd = CmdVel(ts=0.0, mode="STOP", vx_norm=0.0, vy_norm=0.0, wz_norm=0.0)
+        stop_cmd = CmdVel(ts=0.0, mode="STOP", vx_mps=0.0, vy_mps=0.0, wz_radps=0.0)
         self.assertEqual(adapter.send_cmd_vel(stop_cmd, reason="stop"), 2)
         self.assertEqual(uart.calls[-1][0], "stop")
         self.assertEqual(uart.calls[-1][1][0], 2)
 
-        limited = Stm32MotionAdapter(uart, logger=lambda _line: None, vx_scale=1, vy_scale=1, wz_scale=1)
-        fast_cmd = CmdVel(ts=0.0, mode="TRACK", vx_norm=1.0, vy_norm=1.0, wz_norm=1.0)
-        over_cmd = CmdVel(ts=0.0, mode="TRACK", vx_norm=2.0, vy_norm=-2.0, wz_norm=3.0)
+        limited = Stm32MotionAdapter(uart, logger=lambda _line: None, max_vx_mps=1.0, max_vy_mps=1.0, max_wz_radps=1.0)
+        fast_cmd = CmdVel(ts=0.0, mode="TRACK", vx_mps=1.0, vy_mps=1.0, wz_radps=1.0)
+        over_cmd = CmdVel(ts=0.0, mode="TRACK", vx_mps=2.0, vy_mps=-2.0, wz_radps=3.0)
         self.assertEqual(limited.cmd_vel_to_velocity(over_cmd), (1.0, -1.0, 1.0))
 
-        safe = Stm32MotionAdapter(uart, logger=lambda _line: None, vx_scale=None, vy_scale=0, wz_scale="bad")
+        safe = Stm32MotionAdapter(uart, logger=lambda _line: None, max_vx_mps=None, max_vy_mps=0.0, max_wz_radps="bad")
         self.assertEqual(safe.cmd_vel_to_velocity(fast_cmd), (0.30, 0.30, 1.0))
 
     def test_stm32_motion_adapter_small_jogs(self) -> None:

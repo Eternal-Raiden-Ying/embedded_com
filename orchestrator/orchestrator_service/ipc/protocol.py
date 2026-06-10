@@ -459,7 +459,7 @@ class TableEdgeObs:
     valid_edge_points: Optional[int] = None
     edge_inlier_count: Optional[int] = None
     target_dist_m: Optional[float] = None
-    valid_for_control: Optional[bool] = None
+    edge_trusted: bool = False
     pose_found: bool = False
     pose_source: Optional[str] = None
     final_pose_source: Optional[str] = None
@@ -468,7 +468,6 @@ class TableEdgeObs:
     usable_for_approach: bool = False
     usable_for_alignment: bool = False
     usable_for_stop: bool = False
-    control_level: str = "none"
     control_reject_reason: Optional[str] = None
     reject_reason: Optional[str] = None
     fast_temporal_jump: bool = False
@@ -484,6 +483,13 @@ class TableEdgeObs:
     epoch: int = 0
     source: Optional[str] = None
     type: str = "table_edge_obs"
+
+    def __post_init__(self):
+        if getattr(self, "table_found", False):
+            if not getattr(self, "table_bbox_found", False):
+                self.table_bbox_found = True
+            if not getattr(self, "yolo_reliable", False):
+                self.yolo_reliable = True
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "TableEdgeObs":
@@ -616,7 +622,7 @@ class TableEdgeObs:
             valid_edge_points=_pick_optional_int(payload, "valid_edge_points", "edge_point_count"),
             edge_inlier_count=_pick_optional_int(payload, "edge_inlier_count", "inlier_count"),
             target_dist_m=_pick_optional_float(payload, "target_dist_m", "target_distance_m"),
-            valid_for_control=_pick_optional_bool(payload, "valid_for_control"),
+            edge_trusted=bool(payload.get("edge_trusted", payload.get("valid_for_control", False))),
             pose_found=bool(payload.get("pose_found", False)),
             pose_source=_pick_optional_str(payload, "pose_source"),
             final_pose_source=_pick_optional_str(payload, "final_pose_source"),
@@ -625,7 +631,6 @@ class TableEdgeObs:
             usable_for_approach=bool(payload.get("usable_for_approach", False)),
             usable_for_alignment=bool(payload.get("usable_for_alignment", False)),
             usable_for_stop=bool(payload.get("usable_for_stop", False)),
-            control_level=str(payload.get("control_level", "none") or "none"),
             control_reject_reason=_pick_optional_str(payload, "control_reject_reason"),
             reject_reason=_pick_optional_str(payload, "reject_reason", "fast_gate_reject_reason", "fast_raw_reject_reason"),
             fast_temporal_jump=bool(payload.get("fast_temporal_jump", False)),

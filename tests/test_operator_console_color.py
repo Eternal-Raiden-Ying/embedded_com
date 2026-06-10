@@ -56,9 +56,10 @@ class OperatorConsoleColorTest(unittest.TestCase):
         self.assertIsNone(ANSI_RE.search(lines[0]))
 
     def test_jsonl_writer_is_not_colorized(self) -> None:
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+        with tempfile.TemporaryDirectory() as tmp:
             logger = RunLogger("test", tmp, stack_run_id="run_color_test", enable_text_events=False)
             logger.write_jsonl("event", {"event": "[ORCH] ERROR target", "message": "[VISTA] TARGET found=1"})
+            logger.close()
             path = Path(tmp) / "run_color_test" / "event.jsonl"
             raw = path.read_text(encoding="utf-8")
             self.assertIsNone(ANSI_RE.search(raw))

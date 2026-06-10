@@ -93,9 +93,9 @@ class ControlThresholds:
     final_lock_dist_tol_m: float = 0.03
     final_lock_lateral_tol_m: float = 0.03
     table_edge_only_test: bool = False
-    table_target_dist_m: float = 0.50
+    table_target_dist_m: float = 0.30
     table_dist_tol_m: float = 0.05
-    table_yaw_tol_rad: float = 0.25
+    table_yaw_tol_rad: float = 0.13962634015954636
     table_stop_margin_m: float = 0.05
     table_settle_s: float = 0.50
     table_stable_frames: int = 5
@@ -134,6 +134,7 @@ class ControlThresholds:
     near_slow_depth_m: float = 0.40
     near_stop_depth_m: float = 0.25
     near_slow_max_vx_mps: float = 0.010
+    near_slow_max_vy_mps: float = 0.010
     near_slow_max_wz_radps: float = 0.04
 
     # Final lock stabilization thresholds
