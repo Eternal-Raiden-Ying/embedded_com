@@ -38,7 +38,10 @@ class _RunLogger:
 
 
 def _service(lines, mode="operator"):
+    from unittest.mock import MagicMock
     svc = OrchestratorService.__new__(OrchestratorService)
+    svc.uart = MagicMock()
+    svc.motion_adapter = MagicMock()
     svc.cfg = OrchestratorConfig()
     svc.cfg.serial.dry_run_echo_stdout = True
     svc.operator_console = OperatorConsole(mode=mode, default_interval_s=1.0, sink=lines.append)

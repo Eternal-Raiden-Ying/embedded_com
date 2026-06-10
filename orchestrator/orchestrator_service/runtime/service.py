@@ -476,6 +476,9 @@ class OrchestratorService(BaseModule):
             self.operator_console.emit_change("task_done", self._task_done_summary_line(reason))
             self._emit_demo_task_finished(success=True, reason=reason)
         if new_state == "ERROR_RECOVERY":
+            self.log("warn", "service", f"Immediate transition to ERROR_RECOVERY due to: {reason}, triggering emergency stop")
+            self.uart.send_emergency_stop()
+            self.motion_adapter.cancel_active_jogs()
             self._emit_demo_task_finished(success=False, reason=reason)
         if old_state == "DONE" and new_state == "IDLE":
             self.operator_console.emit_change("idle_after_done", "[ORCH][IDLE] task finished, waiting for next command")
@@ -1597,6 +1600,10 @@ class OrchestratorService(BaseModule):
             state = parse_car_state_line(raw)
             if state is not None:
                 self._update_stm32_motion_status(state)
+                if state.estop and self.cfg.car_estop_to_stop:
+                    self.log("warn", "service", f"Immediate user ESTOP detected: {state.message or state.state}, triggering emergency stop")
+                    self.uart.send_emergency_stop()
+                    self.motion_adapter.cancel_active_jogs()
                 self.core.handle_car_state(state)
                 self.run_logger.write_jsonl("car_state", state.to_dict())
                 self.run_logger.write_jsonl("motion_status", dict(self.motion_status))
@@ -1776,6 +1783,10 @@ class OrchestratorService(BaseModule):
                 continue
             if cmd.intent in {"FIND", "RETURN"}:
                 self._demo_start_pending_target = cmd.target or ("return_home" if cmd.intent == "RETURN" else "n/a")
+            if cmd.intent == "STOP":
+                self.log("warn", "service", "Immediate task_cmd STOP received: triggering emergency stop")
+                self.uart.send_emergency_stop()
+                self.motion_adapter.cancel_active_jogs()
             accepted, reason = self.core.handle_task_cmd(cmd)
             if accepted and cmd.intent in {"FIND", "RETURN"}:
                 self.demo_console.dry_run = bool(getattr(self.cfg.serial, "dry_run", False))

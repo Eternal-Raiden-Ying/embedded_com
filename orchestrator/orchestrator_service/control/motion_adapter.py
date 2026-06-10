@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import math
+import threading
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -44,6 +45,8 @@ class Stm32MotionAdapter:
         self.jog_duration_ms = self._clamp_int(jog_duration_ms, 60, 500)
         self._seq = 0
         self._last_wire_mode = ""
+        self._jog_cancel_events = []
+        self._jog_lock = threading.Lock()
 
     @staticmethod
     def _clamp_int(value: Any, lo: int, hi: int) -> int:
@@ -177,18 +180,33 @@ class Stm32MotionAdapter:
 
     def send_cmd_vel(self, cmd: Any, reason: str = "") -> int:
         if self._cmd_is_stop(cmd):
-            return self.stop(reason=reason)
+            mode = str(getattr(cmd, "mode", "") or "").strip().upper()
+            is_soft = mode in {"IDLE", "DONE", "AT_TABLE_EDGE"}
+            if "error" in reason.lower() or "estop" in reason.lower() or "fatal" in reason.lower() or "failsafe" in reason.lower():
+                is_soft = False
+            return self.stop(reason=reason, soft=is_soft)
         vx, vy, wz = self.cmd_vel_to_velocity(cmd)
         return self.set_velocity(vx, vy, wz, mode=str(getattr(cmd, "mode", "SEARCH") or "SEARCH"), reason=reason)
 
-    def stop(self, reason: str = "") -> int:
+    def stop(self, reason: str = "", soft: bool = False) -> int:
+        self.cancel_active_jogs()
         seq = self._next_seq()
         self._last_wire_mode = "STOP"
-        self._log(f"[MOTION][STOP] seq={seq} reason={reason}")
-        self.uart.send_stm32_stop(seq, tx_meta=self._meta("stop", seq, reason, wire_mode="STOP"))
+        self._log(f"[MOTION][STOP] seq={seq} reason={reason} soft={soft}")
+        if soft:
+            self.uart.send_soft_stop(tx_meta=self._meta("stop", seq, reason, wire_mode="SSTOP"))
+        else:
+            self.uart.send_emergency_stop_mcu(tx_meta=self._meta("stop", seq, reason, wire_mode="STOP"))
         return seq
 
+    def cancel_active_jogs(self):
+        with self._jog_lock:
+            for evt in self._jog_cancel_events:
+                evt.set()
+            self._jog_cancel_events.clear()
+
     def jog_velocity(self, vx_mps: float = 0.0, vy_mps: float = 0.0, wz_radps: float = 0.0, reason: str = "") -> int:
+        self.cancel_active_jogs()
         seq = self._next_seq()
         duration = self.jog_duration_ms
         self._last_wire_mode = "SEARCH"
@@ -211,8 +229,28 @@ class Stm32MotionAdapter:
             tx_meta=meta,
             latest_override=False,
         )
-        time.sleep(float(duration) / 1000.0)
-        self.uart.send_motion_line("STOP\r\n", tx_meta=dict(meta, kind="stm32_stop", pulse_stop=True), latest_override=False)
+        
+        evt = threading.Event()
+        with self._jog_lock:
+            self._jog_cancel_events.append(evt)
+            
+        def _jog_worker():
+            try:
+                cancelled = evt.wait(timeout=float(duration) / 1000.0)
+                if cancelled:
+                    return
+                if hasattr(self.uart, "_last_estop_mono") and self.uart._last_estop_mono >= start_mono:
+                    return
+                if hasattr(self.uart, "_stop") and self.uart._stop.is_set():
+                    return
+                self.uart.send_motion_line("STOP\r\n", tx_meta=dict(meta, kind="stm32_stop", pulse_stop=True), latest_override=False)
+            finally:
+                with self._jog_lock:
+                    if evt in self._jog_cancel_events:
+                        self._jog_cancel_events.remove(evt)
+                        
+        start_mono = time.monotonic()
+        threading.Thread(target=_jog_worker, daemon=True, name=f"jog_worker_{seq}").start()
         return seq
 
     def jog_forward_small(self, reason: str = "") -> int:

@@ -80,6 +80,14 @@ def encode_stm32_stop(*_) -> str:
     return encode_stop()
 
 
+def encode_emergency_stop(*_) -> str:
+    return "STOP"
+
+
+def encode_soft_stop(*_) -> str:
+    return "SSTOP"
+
+
 def encode_jog(vx_mps, vy_mps, wz_radps, duration_ms=None, *_, digits: int = 3) -> str:
     del duration_ms
     return encode_vel(vx_mps, vy_mps, wz_radps, digits=digits)
@@ -139,6 +147,7 @@ class SimpleCarMapper:
 
     def from_cmd_vel(self, cmd: CmdVel, cx_norm_abs: Optional[float] = None, distance_ratio: Optional[float] = None) -> SimpleCarCommand:
         del cx_norm_abs, distance_ratio
+        orig_mode = str(cmd.mode or "IDLE").strip().upper()
         mode = normalize_wire_mode(cmd.mode or "IDLE")
         vx = self._clamp_abs(float(cmd.vx_mps), getattr(self.cfg, "max_vx_mps", 1.0))
         vy = self._clamp_abs(float(cmd.vy_mps), getattr(self.cfg, "max_vy_mps", 1.0))
@@ -157,7 +166,10 @@ class SimpleCarMapper:
             )
 
         if mode == "STOP":
-            line = "STOP\r\n"
+            if orig_mode in {"IDLE", "DONE", "AT_TABLE_EDGE"}:
+                line = "SSTOP\r\n"
+            else:
+                line = "STOP\r\n"
             return SimpleCarCommand(raw_line=line, kind="stop", mode=mode, hold_ms=hold_ms)
 
         if mode not in WIRE_MOTION_MODES:
@@ -323,7 +335,7 @@ def _parse_stm32_feedback(raw: str, upper: str) -> Optional[CarState]:
                 wz = float(v_match.group(3))
             except Exception:
                 vx = vy = wz = None
-        if echoed_upper == "STOP":
+        if echoed_upper in {"STOP", "SSTOP"}:
             mode = "STOP"
 
     ack_match = re.match(r"^(ACK_START|ACK_DONE)\b(?:\s+(.*))?$", raw, re.IGNORECASE)
