@@ -1,3 +1,6 @@
+import pytest
+pytest.skip("manual interactive grasp script, not an automated test", allow_module_level=True)
+
 import serial
 import threading
 import time
