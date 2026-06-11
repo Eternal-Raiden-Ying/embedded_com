@@ -4,6 +4,7 @@
 # Python
 __pycache__/
 .venv/
+.venv_test/
 *.py[cod]
 *.pyc
 *.pyo
@@ -21,6 +22,7 @@ dist/
 # Logs - strict patterns
 *.out
 *.log
+*.jsonl
 vision.out*
 logs/
 **/logs/

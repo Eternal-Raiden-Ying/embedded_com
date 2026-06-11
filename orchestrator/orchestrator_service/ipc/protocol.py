@@ -11,6 +11,7 @@ import msgpack
 ALLOWED_INTENTS: Set[str] = {"FIND", "RETURN", "STOP"}
 ALLOWED_VISTA_OPS: Set[str] = {"START", "UPDATE", "RESPOND", "STOP"}
 ALLOWED_VISTA_STAGES: Set[str] = {"SEARCH", "GRASP", "RETURN", "IDLE"}
+ALLOWED_VISION_OBS_CLASSES: Set[str] = {"control", "diagnostic"}
 
 
 class ProtocolError(ValueError):
@@ -28,6 +29,11 @@ def _new_id(prefix: str) -> str:
 def _upper_text(value: Any, default: str = "") -> str:
     text = str(value or default).strip().upper()
     return text or str(default).strip().upper()
+
+
+def canonical_vision_obs_class(value: Any) -> str:
+    text = str(value or "control").strip().lower()
+    return text if text in ALLOWED_VISION_OBS_CLASSES else "control"
 
 
 def _payload_ts(payload: Dict[str, Any]) -> float:
@@ -184,7 +190,9 @@ class VisionReqMsg:
         )
 
     def to_dict(self) -> Dict[str, Any]:
-        return _compact(asdict(self))
+        data = asdict(self)
+        data["obs_class"] = canonical_vision_obs_class(data.get("obs_class"))
+        return _compact(data)
 
 
 @dataclass
@@ -196,13 +204,13 @@ class VisionObsEnvelope:
     session_id: Optional[str] = None
     req_id: Optional[str] = None
     epoch: int = 0
+    obs_class: str = "control"
     interaction: Optional[Dict[str, Any]] = None
     perception: Optional[Dict[str, Any]] = None
     proposal: Optional[Dict[str, Any]] = None
     result: Optional[Dict[str, Any]] = None
     source: Optional[str] = None
     type: str = "vision_obs"
-    obs_class: Optional[str] = None
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "VisionObsEnvelope":
@@ -217,13 +225,13 @@ class VisionObsEnvelope:
             session_id=_pick_optional_str(payload, "session_id"),
             req_id=_pick_optional_str(payload, "req_id"),
             epoch=int(payload.get("epoch", 0) or 0),
+            obs_class=canonical_vision_obs_class(payload.get("obs_class")),
             interaction=_pick_optional_dict(payload, "interaction"),
             perception=_pick_optional_dict(payload, "perception"),
             proposal=_pick_optional_dict(payload, "proposal"),
             result=_pick_optional_dict(payload, "result"),
             source=_pick_optional_str(payload, "source"),
             type=msg_type,
-            obs_class=_pick_optional_str(payload, "obs_class"),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -231,8 +239,7 @@ class VisionObsEnvelope:
 
 
 def iter_vision_perception_payloads(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    obs_class = str(payload.get("obs_class", "") or "").strip().lower()
-    if obs_class == "diagnostic":
+    if canonical_vision_obs_class(payload.get("obs_class")) == "diagnostic":
         return []
     msg_type = str(payload.get("type", "") or "").strip().lower()
     if msg_type in {"table_edge_obs", "target_obs", "home_tag_obs"}:

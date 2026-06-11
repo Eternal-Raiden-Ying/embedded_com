@@ -22,7 +22,8 @@ if PKG_NAME not in sys.modules:
     if spec and spec.loader:
         spec.loader.exec_module(module)
 
-from orchestrator_service.bridge.simple_car_protocol import SimpleCarMapper, parse_car_state_line
+from orchestrator_service.bridge.simple_car_protocol import parse_car_state_line
+from orchestrator_service.control.motion.velocity_limits import SimpleCarMapper
 from orchestrator_service.config.schema import CarMotionConfig
 from orchestrator_service.ipc.protocol import CmdVel
 

@@ -9,7 +9,7 @@ from io import StringIO
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 ORCH_ROOT = ROOT / "orchestrator"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -239,6 +239,10 @@ class SimpleCarProtocolTest(unittest.TestCase):
                 self.calls.append(("line", args, kwargs))
                 return True
 
+            def send_emergency_stop(self, *args, **kwargs):
+                self.calls.append(("emergency_stop", args, kwargs))
+                return True
+
             def send_emergency_stop_mcu(self, *args, **kwargs):
                 self.calls.append(("emergency_stop_mcu", args, kwargs))
                 return True
@@ -260,7 +264,7 @@ class SimpleCarProtocolTest(unittest.TestCase):
 
         self.assertEqual(uart.calls[0][0], "line")
         self.assertEqual(uart.calls[0][1][0], "MODE SEARCH\r\nV 0.100 -0.100 0.500\r\n")
-        self.assertEqual(uart.calls[1][0], "emergency_stop_mcu")
+        self.assertEqual(uart.calls[1][0], "emergency_stop")
         self.assertEqual(uart.calls[2][0], "soft_stop")
         self.assertEqual(uart.calls[3][0], "line")
         self.assertEqual(uart.calls[3][1][0], "MODE SEARCH\r\nV 0.020 0.000 0.000\r\n")
@@ -290,6 +294,10 @@ class SimpleCarProtocolTest(unittest.TestCase):
                 self.calls.append(("line", args, kwargs))
                 return True
 
+            def send_emergency_stop(self, *args, **kwargs):
+                self.calls.append(("emergency_stop", args, kwargs))
+                return True
+
             def send_emergency_stop_mcu(self, *args, **kwargs):
                 self.calls.append(("emergency_stop_mcu", args, kwargs))
                 return True
@@ -310,7 +318,7 @@ class SimpleCarProtocolTest(unittest.TestCase):
 
         stop_cmd = CmdVel(ts=0.0, mode="STOP", vx_mps=0.0, vy_mps=0.0, wz_radps=0.0)
         self.assertEqual(adapter.send_cmd_vel(stop_cmd, reason="stop"), 2)
-        self.assertEqual(uart.calls[-1][0], "emergency_stop_mcu")
+        self.assertEqual(uart.calls[-1][0], "emergency_stop")
 
         soft_stop_cmd = CmdVel(ts=0.0, mode="IDLE", vx_mps=0.0, vy_mps=0.0, wz_radps=0.0)
         self.assertEqual(adapter.send_cmd_vel(soft_stop_cmd, reason="stop"), 3)

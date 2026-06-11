@@ -1,3 +1,25 @@
+### === Layered Configuration Entry Point === ###
+# Merge order:
+#   1. schema dataclass defaults in common/config/schema.py
+#   2. defaults below
+#   3. project config sections in this file
+#   4. configs/profiles/<profile>.yaml
+#   5. runtime_overrides below
+#   6. environment variables
+profile: "windows_dev"
+defaults:
+  orchestrator:
+    runtime:
+      stage_params_file: "orchestrator/configs/stage_params.yaml"
+      car_cmd_params_file: "orchestrator/configs/car_cmd_params.yaml"
+    serial:
+      dry_run: true
+runtime_overrides:
+  orchestrator:
+    runtime:
+      stage_params_file: "orchestrator/configs/stage_params.yaml"
+      car_cmd_params_file: "orchestrator/configs/car_cmd_params.yaml"
+
 ### === Vision Module Configuration === ###
 vision:
   runtime:

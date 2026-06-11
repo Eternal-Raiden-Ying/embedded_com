@@ -1,0 +1,45 @@
+profile: "sc171_board"
+runtime_overrides:
+  vision:
+    req_in:
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/vision_req.sock"
+    obs_out:
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/vision_obs.sock"
+  orchestrator:
+    runtime:
+      config_profile: "sc171_board"
+    serial:
+      port: "/dev/ttyHS1"
+      dry_run: false
+      readback_enabled: true
+    task_cmd_in:
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/task_cmd.sock"
+    task_ack_out:
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/task_ack.sock"
+    vision_obs_in:
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/vision_obs.sock"
+    vision_req_out:
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/vision_req.sock"
+    tts_event_out:
+      transport: "disabled"
+  gateway:
+    command_in:
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/mobile_gateway_cmd.sock"
+    status_out:
+      transport: "disabled"
+    orchestrator_task_cmd_out:
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/task_cmd.sock"
+    orchestrator_task_ack_in:
+      transport: "disabled"
+  online_edge:
+    output:
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/table_edge_obs.sock"

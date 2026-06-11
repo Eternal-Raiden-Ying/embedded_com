@@ -5,7 +5,7 @@ import sys
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 ORCH_ROOT = ROOT / "orchestrator"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -14,8 +14,36 @@ if str(ORCH_ROOT) not in sys.path:
 
 from orchestrator_service.config.schema import OrchestratorConfig
 from orchestrator_service.runtime.context import State
+from orchestrator_service.runtime.service import OrchestratorService
 from orchestrator_service.runtime.state_machine import OrchestratorCore
-from orchestrator_service.ipc.protocol import TableEdgeObs, TargetObs, now_ts
+from orchestrator_service.ipc.protocol import (
+    TableEdgeObs,
+    TargetObs,
+    VisionObsEnvelope,
+    iter_vision_perception_payloads,
+    now_ts,
+)
+
+
+class _FakeRunLogger:
+    def __init__(self):
+        self.jsonl = []
+        self.ipc = []
+
+    def write_jsonl(self, *args, **kwargs):
+        self.jsonl.append((args, kwargs))
+
+    def write_ipc(self, *args, **kwargs):
+        self.ipc.append((args, kwargs))
+
+
+class _FakeCore:
+    def __init__(self):
+        self.confirmed = []
+
+    def confirm_vision_state(self, stage, mode, source="vision_obs"):
+        self.confirmed.append((stage, mode, source))
+        return True
 
 
 class VisionStateSyncTest(unittest.TestCase):
@@ -137,6 +165,38 @@ class VisionStateSyncTest(unittest.TestCase):
         # Now confirm the new desired mode FIND_OBJECT via ack/send success
         self.core.handle_vision_req_send_result(True, req2)
         self.assertEqual(self.core.ctx.confirmed_vision_mode, "FIND_OBJECT")
+
+    def test_diagnostic_vision_obs_does_not_drive_control_state(self):
+        payload = {
+            "type": "vision_obs",
+            "ts": 123.0,
+            "stage": "SEARCH",
+            "mode": "FIND_OBJECT",
+            "status": "RUNNING",
+            "session_id": "s1",
+            "req_id": "r1",
+            "epoch": 7,
+            "obs_class": "Diagnostic",
+            "metrics": {"obs_skip_count": 3, "diag_obs_hz": 1.0},
+            "perception": {
+                "table_edge_obs": {"table_found": True},
+                "target_obs": {"found": True, "target": "cup"},
+            },
+        }
+        self.assertEqual(VisionObsEnvelope.from_dict(payload).obs_class, "diagnostic")
+        self.assertEqual(iter_vision_perception_payloads(payload), [])
+
+        svc = object.__new__(OrchestratorService)
+        svc._vision_full_obs_log = False
+        svc.run_logger = _FakeRunLogger()
+        svc.core = _FakeCore()
+        svc.log_ipc = lambda *args, **kwargs: None
+
+        flattened = OrchestratorService._flatten_vision_payloads(svc, payload)
+
+        self.assertEqual(flattened, [])
+        self.assertEqual(svc.core.confirmed, [])
+        self.assertEqual(svc._last_diagnostic_obs_metrics["obs_skip_count"], 3)
 
 
 if __name__ == "__main__":

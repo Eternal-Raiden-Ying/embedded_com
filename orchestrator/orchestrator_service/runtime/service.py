@@ -14,10 +14,11 @@ from common.console_presenter import DemoConsolePresenter
 from common.base_module import BaseModule
 from common.runtime_logging import OperatorConsole
 from common.system_metrics import SystemMetricsSampler
-from ..bridge.simple_car_protocol import SimpleCarMapper, parse_car_state_line
+from ..bridge.simple_car_protocol import parse_car_state_line
 from ..bridge.uart_bridge import UartBridge
 from ..config.schema import OrchestratorConfig, SocketEndpoint
 from ..control.motion_adapter import Stm32MotionAdapter
+from ..control.motion.velocity_limits import SimpleCarMapper
 from ..ipc.protocol import (
     HomeTagObs,
     TableEdgeObs,
@@ -74,6 +75,7 @@ class OrchestratorService(BaseModule):
         self._last_heartbeat_ts = 0.0
         self._last_task_cmd_recv_ts = 0.0
         self._last_vision_obs_recv_ts = 0.0
+        self._last_diagnostic_obs_metrics: Dict[str, Any] = {}
         self._last_home_obs_recv_ts = 0.0
         self._last_uart_tx_ts = 0.0
         self._edge_obs_rate_ts = deque(maxlen=128)
@@ -239,6 +241,7 @@ class OrchestratorService(BaseModule):
             "session_id": env.session_id,
             "req_id": env.req_id,
             "epoch": int(env.epoch),
+            "obs_class": env.obs_class,
             "source": env.source,
             "perception": lite_perception,
             "type": "vision_obs",
@@ -1474,30 +1477,10 @@ class OrchestratorService(BaseModule):
         )
         
         # Effective config dump to standard output
-        import sys
+        from common.config.effective_dump import print_effective_config
+        from common.config_loader import get_config
         effective_dry = bool(getattr(self.uart, "dry_run", self.cfg.serial.dry_run))
-        uart_mode = "fake" if effective_dry else str(self.cfg.serial.port)
-        loaded_files = ",".join(self.cfg.runtime.loaded_config_files) or "<defaults>"
-        
-        print("\n" + "="*80)
-        print("  EFFECTIVE ORCHESTRATOR CONFIGURATION")
-        print("="*80)
-        print(f"  UART Port            : {uart_mode} (dry_run={int(effective_dry)})")
-        print(f"  tick_hz              : {float(self.cfg.runtime.tick_hz):.2f}")
-        print(f"  near_stop_depth_m    : {float(self.cfg.control.near_stop_depth_m):.3f}")
-        print(f"  near_slow_depth_m    : {float(self.cfg.control.near_slow_depth_m):.3f}")
-        print(f"  edge_slide_vy_mps    : {float(self.cfg.car.edge_slide_vy_mps):.3f}")
-        print(f"  edge_slide_max_vx_mps: {float(self.cfg.car.edge_slide_max_vx_mps):.3f}")
-        print(f"  edge_slide_max_wz_radps: {float(self.cfg.car.edge_slide_max_wz_radps):.3f}")
-        print(f"  final_lock thresholds:")
-        print(f"    yaw_tol_rad        : {float(self.cfg.control.final_lock_yaw_tol_rad):.4f}")
-        print(f"    dist_tol_m         : {float(self.cfg.control.final_lock_dist_tol_m):.4f}")
-        print(f"    lateral_tol_m      : {float(self.cfg.control.final_lock_lateral_tol_m):.4f}")
-        print(f"  loaded stage_params  : {self.cfg.runtime.stage_params_file or '<none>'}")
-        print(f"  loaded car_cmd_params: {self.cfg.runtime.car_cmd_params_file or '<none>'}")
-        print(f"  loaded config files  : {loaded_files}")
-        print("="*80 + "\n")
-        sys.stdout.flush()
+        print_effective_config(get_config(), effective_dry_run=effective_dry)
         
         self.uart.start()
         self.task_server.start()
@@ -1845,9 +1828,39 @@ class OrchestratorService(BaseModule):
         msg_type = str(payload.get("type", "") or "").strip().lower()
         if msg_type == "vision_obs":
             env = VisionObsEnvelope.from_dict(payload)
-            if env.obs_class != "diagnostic":
-                self.core.confirm_vision_state(env.stage, env.mode, source="vision_obs")
             self.run_logger.write_jsonl("vision_obs", env.to_dict() if self._vision_full_obs_log else self._lite_vision_obs(env))
+            if env.obs_class == "diagnostic":
+                metrics = payload.get("metrics")
+                if not isinstance(metrics, dict):
+                    perception = env.perception if isinstance(env.perception, dict) else {}
+                    metrics = perception.get("metrics")
+                self._last_diagnostic_obs_metrics = dict(metrics) if isinstance(metrics, dict) else {}
+                self.log_ipc("RX", "vision_obs", "diagnostic_metrics", {
+                    "req_id": env.req_id,
+                    "stage": env.stage,
+                    "mode": env.mode,
+                    "status": env.status,
+                    "session_id": env.session_id,
+                    "epoch": env.epoch,
+                    "obs_class": env.obs_class,
+                    "metrics_keys": sorted(self._last_diagnostic_obs_metrics.keys()),
+                })
+                self.run_logger.write_ipc(
+                    "vision_obs_in",
+                    "diagnostic_metrics",
+                    direction="RX",
+                    req_id=env.req_id,
+                    session_id=env.session_id,
+                    epoch=env.epoch,
+                    ok=True,
+                    stage=env.stage,
+                    mode=env.mode,
+                    status=env.status,
+                    obs_class=env.obs_class,
+                    metrics=safe_dump(self._last_diagnostic_obs_metrics),
+                )
+                return []
+            self.core.confirm_vision_state(env.stage, env.mode, source="vision_obs")
             perception = dict(env.perception or {})
             has_table_edge = isinstance(perception.get("table_edge_obs"), dict)
             has_target = isinstance(perception.get("target_obs"), dict)
@@ -1863,6 +1876,7 @@ class OrchestratorService(BaseModule):
                 "status": env.status,
                 "session_id": env.session_id,
                 "epoch": env.epoch,
+                "obs_class": env.obs_class,
                 "has_table_edge_obs": has_table_edge,
                 "has_target_obs": has_target,
             })
@@ -1877,6 +1891,7 @@ class OrchestratorService(BaseModule):
                 stage=env.stage,
                 mode=env.mode,
                 status=env.status,
+                obs_class=env.obs_class,
                 has_table_edge_obs=has_table_edge,
                 has_target_obs=has_target,
             )

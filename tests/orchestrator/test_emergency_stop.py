@@ -8,7 +8,7 @@ import time
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 ORCH_ROOT = ROOT / "orchestrator"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -291,6 +291,10 @@ class EmergencyStopTest(unittest.TestCase):
 
             def send_soft_stop(self, tx_meta=None):
                 self.written.append("SSTOP\r\n")
+                return True
+
+            def send_emergency_stop(self, tx_meta=None):
+                self.written.append("STOP\r\n")
                 return True
 
             def send_emergency_stop_mcu(self, tx_meta=None):

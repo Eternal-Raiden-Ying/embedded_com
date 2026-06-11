@@ -8,9 +8,9 @@ import time
 from typing import Any, Callable, Dict, List, Optional
 
 from .simple_car_protocol import (
-    SimpleCarCommand,
+    encode_emergency_stop,
     encode_mode,
-    encode_stop,
+    encode_soft_stop,
     encode_vel,
 )
 
@@ -107,7 +107,7 @@ class UartBridge:
                 pass
             self._ser = None
 
-    def send_car_command(self, cmd: SimpleCarCommand, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
+    def send_car_command(self, cmd: Any, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
         if not str(cmd.raw_line or "").strip():
             return False
         return self._publish_latest(cmd.raw_line, tx_meta=tx_meta)
@@ -134,7 +134,7 @@ class UartBridge:
 
     def send_stm32_stop(self, seq, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
         del seq
-        return self.send_motion_line(encode_stop(), tx_meta=tx_meta)
+        return self.send_emergency_stop(tx_meta=tx_meta)
 
     def send_stm32_jog(self, vx_mps, vy_mps, wz_radps, _unused, duration_ms, seq, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
         del _unused, duration_ms, seq
@@ -148,7 +148,7 @@ class UartBridge:
         return self.send_emergency_stop(tx_meta=tx_meta)
 
     def send_soft_stop(self, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
-        return self._publish_latest("SSTOP\r\n", tx_meta=tx_meta)
+        return self._publish_latest(encode_soft_stop() + "\r\n", tx_meta=tx_meta)
 
     def send_emergency_stop_mcu(self, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
         return self.send_emergency_stop(tx_meta=tx_meta)
@@ -156,6 +156,12 @@ class UartBridge:
     def send_emergency_stop(self, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
         meta = dict(tx_meta or {})
         meta["emergency_stop"] = True
+        with self._write_lock:
+            self._clear_motion_queues_for_estop()
+            self._write_line(encode_emergency_stop() + "\r\n", tx_meta=meta)
+        return True
+
+    def _clear_motion_queues_for_estop(self) -> None:
         with self._pending_lock:
             self._pending_tx = None
             while not self._fifo_tx.empty():
@@ -164,8 +170,6 @@ class UartBridge:
                 except queue.Empty:
                     break
             self._last_estop_mono = time.monotonic()
-        self._write_line("STOP\r\n", tx_meta=meta)
-        return True
 
     def flush_and_write_stop(self, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
         return self.send_emergency_stop(tx_meta)
@@ -209,15 +213,11 @@ class UartBridge:
         if not str(command_line or "").strip():
             return False
         with self._write_lock:
-            with self._pending_lock:
-                self._pending_tx = None
-                while not self._fifo_tx.empty():
-                    try:
-                        self._fifo_tx.get_nowait()
-                    except queue.Empty:
-                        break
-                self._last_estop_mono = time.monotonic()
-            self._write_line("STOP\r\n", tx_meta={"reason": "pre_arm_stop"})
+            self._clear_motion_queues_for_estop()
+            self._write_line(
+                encode_emergency_stop() + "\r\n",
+                tx_meta={"reason": "pre_arm_stop", "emergency_stop": True},
+            )
             self._write_line(command_line, tx_meta=tx_meta)
         return True
 

@@ -31,6 +31,7 @@ from ..config.board_config import CONFIG
 from ..diagnostics.operator_console import OperatorConsole
 from ..ipc.protocol import VisionReq
 from ..ipc.transport import JsonlClientSender, JsonlInboundServer
+from .observation import ObservationMetrics, ObservationRouter
 from .stage_controller import StageController
 from .stages import GraspStagePlan, InitStagePlan, ReturnStagePlan, SearchStagePlan
 
@@ -155,6 +156,8 @@ class VistaApp(BaseModule):
         self._last_processed_frame_id = None
         self._last_diag_send_ts = 0.0
         self._rate_diag_send_ts = deque(maxlen=256)
+        self.obs_metrics = ObservationMetrics()
+        self.obs_router = ObservationRouter(metrics=self.obs_metrics, control_send_interval_s=self._control_send_interval_s())
         self._warn_deprecated_env()
 
     def _warn_deprecated_env(self):
@@ -1129,153 +1132,62 @@ class VistaApp(BaseModule):
             return False
         if output.vision_obs is None:
             return False
-        if not force_send and (now - self.last_send_ts) < self._control_send_interval_s():
-            self._obs_out_drop_or_skip_count += 1
-            self.obs_skip_count += 1
-            self._obs_out_skip_reason = "send_hz_limit"
-            return False
 
-        # Retrieve frame metadata for latency/staleness checks
         frame_meta = {}
         try:
             frame_meta = self.scheduler.read_result("frame_meta") or {}
         except Exception:
             pass
 
-        frame_id = frame_meta.get("frame_seq") or frame_meta.get("camera_frame_seq")
-        capture_ts = frame_meta.get("frame_capture_ts")
-        if capture_ts is None:
-            capture_ts_ms = frame_meta.get("camera_frame_ts_ms")
-            if capture_ts_ms is not None:
-                capture_ts = float(capture_ts_ms) / 1000.0
+        self.obs_router.update_intervals(control_send_interval_s=self._control_send_interval_s())
+        route_result = self.obs_router.route(
+            vision_obs=output.vision_obs,
+            frame_meta=frame_meta,
+            now=now,
+            force_send=force_send,
+            freq_warning_reason=self._check_freq_and_reason(now) or "",
+        )
+        self._sync_observation_metrics_from_router()
+        if route_result.skipped:
+            self._obs_out_drop_or_skip_count += 1
+            self._obs_out_skip_reason = route_result.skip_reason
+            return False
 
-        perception = output.vision_obs.get("perception") or {}
-        if frame_id is None:
-            for obs_key in ("table_edge_obs", "target_obs", "home_tag_obs"):
-                obs = perception.get(obs_key)
-                if isinstance(obs, dict):
-                    frame_id = obs.get("frame_id") or obs.get("seq") or obs.get("camera_frame_seq")
-                    if frame_id is not None:
-                        break
-        if capture_ts is None:
-            for obs_key in ("table_edge_obs", "target_obs", "home_tag_obs"):
-                obs = perception.get(obs_key)
-                if isinstance(obs, dict):
-                    obs_ts = obs.get("obs_ts") or obs.get("ts")
-                    if obs_ts is not None:
-                        capture_ts = float(obs_ts)
-                        break
+        control_obs = route_result.control_obs
+        if control_obs is None:
+            return False
 
-        if frame_id is None:
-            frame_id = 0
-        if capture_ts is None:
-            capture_ts = now
-
-        # Update reuse count
-        if frame_id == self._last_processed_frame_id:
-            self.same_frame_reuse_count += 1
-        else:
-            self._last_processed_frame_id = frame_id
-
-        process_done_ts = now
-        send_ts = time.time()
-        process_latency_ms = max(0.0, (process_done_ts - capture_ts) * 1000.0)
-        send_latency_ms = max(0.0, (send_ts - process_done_ts) * 1000.0)
-        obs_total_age_ms = max(0.0, (send_ts - capture_ts) * 1000.0)
-        self.obs_total_age_ms = obs_total_age_ms
-
-        # Construct control_obs (lightweight, high-priority)
-        control_obs = {
-            "type": "vision_obs",
-            "ts": output.vision_obs.get("ts", now),
-            "stage": output.vision_obs.get("stage"),
-            "mode": output.vision_obs.get("mode"),
-            "status": output.vision_obs.get("status"),
-            "session_id": output.vision_obs.get("session_id"),
-            "req_id": output.vision_obs.get("req_id"),
-            "epoch": output.vision_obs.get("epoch"),
-            "interaction": output.vision_obs.get("interaction"),
-            "obs_class": "control",
-            "perception": {},
-        }
-
-        # Check and populate control_obs["perception"]
-        for key in ("table_edge_obs", "target_obs", "home_tag_obs"):
-            if key in perception:
-                control_obs["perception"][key] = dict(perception[key])
-
-        # Inject latency tracking to control_obs
-        control_obs["frame_id"] = frame_id
-        control_obs["capture_ts"] = capture_ts
-        control_obs["process_done_ts"] = process_done_ts
-        control_obs["send_ts"] = send_ts
-        control_obs["process_latency_ms"] = process_latency_ms
-        control_obs["send_latency_ms"] = send_latency_ms
-        control_obs["obs_total_age_ms"] = obs_total_age_ms
-
-        freq_warning_reason = self._check_freq_and_reason(now)
-        control_hz = self._hz_for_samples(self._rate_obs_out_send_ts, now)
-        diag_hz = self._hz_for_samples(self._rate_diag_send_ts, now)
-
-        control_obs["metrics"] = {
-            "obs_skip_count": int(self.obs_skip_count),
-            "obs_drop_count": int(self.obs_drop_count),
-            "same_frame_reuse_count": int(self.same_frame_reuse_count),
-            "control_obs_hz": float(control_hz),
-            "diag_obs_hz": float(diag_hz),
-            "obs_total_age_ms": float(self.obs_total_age_ms),
-            "freq_warning_reason": freq_warning_reason or "",
-        }
-
-        # Inject latency tracking to control sub-observations for Orchestrator compatibility
-        for key in ("table_edge_obs", "target_obs", "home_tag_obs"):
-            obs = control_obs["perception"].get(key)
-            if isinstance(obs, dict):
-                obs["frame_id"] = frame_id
-                obs["capture_ts"] = capture_ts
-                obs["process_done_ts"] = process_done_ts
-                obs["send_ts"] = send_ts
-                obs["process_latency_ms"] = process_latency_ms
-                obs["send_latency_ms"] = send_latency_ms
-                obs["obs_total_age_ms"] = obs_total_age_ms
-                obs["camera_frame_seq"] = frame_id
-                obs["camera_frame_ts_ms"] = int(round(capture_ts * 1000.0))
-                obs["vision_process_end_ts_ms"] = int(round(process_done_ts * 1000.0))
-                obs["obs_out_send_ts_ms"] = int(round(send_ts * 1000.0))
-
-        # Send control_obs via obs_sender
         queued = self._send_obs(control_obs, sender=self.obs_sender, obs_class="control")
         if queued:
             self.last_send_ts = now
+            self.obs_router.mark_control_sent(now)
+            self._sync_observation_metrics_from_router()
             self._record_rate_sample(control_obs, now)
             self._emit_rate_summary_if_needed()
+        else:
+            self.obs_router.mark_drop()
+            self._sync_observation_metrics_from_router()
 
-        # Send diagnostic_obs via diag_sender (low-priority, strictly rate-limited to 1.0s).
-        if now - self._last_diag_send_ts >= 1.0:
-            diagnostic_obs = {
-                "type": "vision_obs",
-                "ts": output.vision_obs.get("ts", now),
-                "stage": output.vision_obs.get("stage"),
-                "mode": output.vision_obs.get("mode"),
-                "status": output.vision_obs.get("status"),
-                "session_id": output.vision_obs.get("session_id"),
-                "req_id": output.vision_obs.get("req_id"),
-                "epoch": output.vision_obs.get("epoch"),
-                "interaction": output.vision_obs.get("interaction"),
-                "obs_class": "diagnostic",
-                "perception": {
-                    k: v for k, v in perception.items()
-                    if k not in {"table_edge_obs", "target_obs", "home_tag_obs"}
-                },
-                "proposal": output.vision_obs.get("proposal"),
-                "result": output.vision_obs.get("result"),
-                "metrics": control_obs["metrics"],
-            }
+        diagnostic_obs = route_result.diagnostic_obs
+        if diagnostic_obs is not None:
             diag_queued = self._send_obs(diagnostic_obs, sender=self.diag_sender, obs_class="diagnostic")
             if diag_queued:
+                self.obs_router.mark_diagnostic_sent(now)
                 self._last_diag_send_ts = now
+                self._sync_observation_metrics_from_router()
+            else:
+                self.obs_router.mark_drop()
+                self._sync_observation_metrics_from_router()
 
         return queued
+
+    def _sync_observation_metrics_from_router(self) -> None:
+        metrics = self.obs_router.metrics
+        self.obs_skip_count = int(metrics.obs_skip_count)
+        self.obs_drop_count = int(metrics.obs_drop_count)
+        self.obs_total_age_ms = float(metrics.obs_total_age_ms)
+        self.same_frame_reuse_count = int(metrics.same_frame_reuse_count)
+        self._last_processed_frame_id = metrics.last_processed_frame_id
 
     def _handle_stop_request(self, stage: str, stop_state=None):
         self._record_event("VISION_STOP", trigger="request:STOP", stage=stage)

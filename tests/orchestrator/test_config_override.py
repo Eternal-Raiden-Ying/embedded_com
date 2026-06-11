@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 # Add workspace and orchestrator roots to sys.path
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 ORCH_ROOT = ROOT / "orchestrator"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -18,8 +18,9 @@ if str(ORCH_ROOT) not in sys.path:
 # Mock serial module
 sys.modules["serial"] = MagicMock()
 
-from common.config_loader import load_global_config, validate_config, get_config
-from common.schema import SystemGlobalConfig
+from common.config.loader import load_global_config
+from common.config.schema import SystemGlobalConfig
+from common.config.validators import validate_config
 
 
 class ConfigOverrideTest(unittest.TestCase):
@@ -35,7 +36,7 @@ class ConfigOverrideTest(unittest.TestCase):
         config.orchestrator.runtime.stage_params_file = "orchestrator/configs/stage_params.yaml"
         
         # Call the private helper directly to verify mapping
-        from common.config_loader import _load_and_merge_stage_params
+        from common.config.loader import _load_and_merge_stage_params
         stage_path = ROOT / "orchestrator" / "configs" / "stage_params.yaml"
         self.assertTrue(stage_path.is_file())
         
@@ -45,7 +46,7 @@ class ConfigOverrideTest(unittest.TestCase):
     def test_edge_slide_max_vx_wz_override(self):
         """3. edge_slide_max_vx_mps and edge_slide_max_wz_radps are overridden using actual YAML keys"""
         config = SystemGlobalConfig()
-        from common.config_loader import _load_and_merge_stage_params
+        from common.config.loader import _load_and_merge_stage_params
         stage_path = ROOT / "orchestrator" / "configs" / "stage_params.yaml"
         _load_and_merge_stage_params(config, stage_path)
         
@@ -58,7 +59,7 @@ class ConfigOverrideTest(unittest.TestCase):
     def test_final_lock_dist_abs_th_m_mapping(self):
         """4. final_lock.dist_abs_th_m maps to final_lock_dist_tol_m"""
         config = SystemGlobalConfig()
-        from common.config_loader import _load_and_merge_stage_params
+        from common.config.loader import _load_and_merge_stage_params
         stage_path = ROOT / "orchestrator" / "configs" / "stage_params.yaml"
         _load_and_merge_stage_params(config, stage_path)
         

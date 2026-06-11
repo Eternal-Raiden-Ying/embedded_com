@@ -3,9 +3,11 @@
 
 import time
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set
 
 import msgpack
+
+ALLOWED_VISION_OBS_CLASSES: Set[str] = {"control", "diagnostic"}
 
 
 def now_ts() -> float:
@@ -36,6 +38,11 @@ def _opt_dict(payload: Dict[str, Any], key: str) -> Optional[Dict[str, Any]]:
 def _upper_text(value: Any, default: str = "") -> str:
     text = str(value or default).strip().upper()
     return text or str(default).strip().upper()
+
+
+def canonical_vision_obs_class(value: Any) -> str:
+    text = str(value or "control").strip().lower()
+    return text if text in ALLOWED_VISION_OBS_CLASSES else "control"
 
 
 _PRESERVE_NONE_KEYS = {
@@ -204,7 +211,7 @@ class HomeTagObs:
 
 
 @dataclass
-class VisionObs:
+class VisionObsEnvelope:
     ts: float
     stage: str
     mode: str
@@ -212,15 +219,40 @@ class VisionObs:
     session_id: Optional[str] = None
     req_id: Optional[str] = None
     epoch: int = 0
+    obs_class: str = "control"
     interaction: Optional[Dict[str, Any]] = None
     perception: Optional[Dict[str, Any]] = None
     proposal: Optional[Dict[str, Any]] = None
     result: Optional[Dict[str, Any]] = None
     type: str = "vision_obs"
-    obs_class: str = "control"
+
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any]) -> "VisionObsEnvelope":
+        return cls(
+            ts=float(payload.get("ts", now_ts()) or now_ts()),
+            stage=_upper_text(payload.get("stage"), "IDLE"),
+            mode=_upper_text(payload.get("mode"), "IDLE"),
+            status=_upper_text(payload.get("status"), "RUNNING"),
+            session_id=_opt_str(payload, "session_id"),
+            req_id=_opt_str(payload, "req_id"),
+            epoch=_opt_int(payload, "epoch", 0),
+            obs_class=canonical_vision_obs_class(payload.get("obs_class")),
+            interaction=_opt_dict(payload, "interaction"),
+            perception=_opt_dict(payload, "perception"),
+            proposal=_opt_dict(payload, "proposal"),
+            result=_opt_dict(payload, "result"),
+            type=str(payload.get("type", "vision_obs") or "vision_obs"),
+        )
 
     def to_dict(self) -> Dict[str, Any]:
-        return _compact(asdict(self))
+        data = asdict(self)
+        data["obs_class"] = canonical_vision_obs_class(data.get("obs_class"))
+        return _compact(data)
+
+
+@dataclass
+class VisionObs(VisionObsEnvelope):
+    pass
 
 
 def pack_msg(payload: Dict[str, Any]) -> bytes:

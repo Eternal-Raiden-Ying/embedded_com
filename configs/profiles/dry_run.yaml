@@ -1,0 +1,44 @@
+profile: "dry_run"
+runtime_overrides:
+  vision:
+    req_in:
+      transport: "disabled"
+    obs_out:
+      transport: "disabled"
+  orchestrator:
+    runtime:
+      config_profile: "dry_run"
+    serial:
+      port: "DRY_RUN"
+      dry_run: true
+      readback_enabled: false
+    task_cmd_in:
+      transport: "tcp"
+      tcp_host: "127.0.0.1"
+      tcp_port: 19101
+    task_ack_out:
+      transport: "tcp"
+      tcp_host: "127.0.0.1"
+      tcp_port: 19102
+    vision_obs_in:
+      transport: "tcp"
+      tcp_host: "127.0.0.1"
+      tcp_port: 19103
+    vision_req_out:
+      transport: "tcp"
+      tcp_host: "127.0.0.1"
+      tcp_port: 19104
+    tts_event_out:
+      transport: "disabled"
+  gateway:
+    command_in:
+      transport: "disabled"
+    status_out:
+      transport: "disabled"
+    orchestrator_task_cmd_out:
+      transport: "disabled"
+    orchestrator_task_ack_in:
+      transport: "disabled"
+  online_edge:
+    output:
+      transport: "disabled"
