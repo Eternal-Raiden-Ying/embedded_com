@@ -165,6 +165,24 @@ class SimpleCarProtocolTest(unittest.TestCase):
         self.assertEqual([item[0] for item in captured[:3]], ["STOP\r\n", "STOP\r\n", "STOP\r\n"])
         self.assertTrue(all(item[1] for item in captured[:3]))
 
+    def test_uart_send_stop_is_synchronous_emergency_stop(self) -> None:
+        captured = []
+        bridge = UartBridge(
+            "/dev/null",
+            115200,
+            0.01,
+            dry_run=True,
+            dry_run_echo_stdout=False,
+            tx_callback=lambda line, dry_run, meta: captured.append((line, dry_run, meta)),
+        )
+
+        bridge.send_motion_line("MODE SEARCH\r\nV 0.100 0.000 0.000\r\n", latest_override=False)
+        self.assertTrue(bridge.send_stop(tx_meta={"kind": "stm32_stop"}))
+
+        self.assertEqual([item[0] for item in captured], ["STOP\r\n"])
+        self.assertFalse(bridge._has_pending_tx())
+        self.assertTrue(captured[0][2].get("emergency_stop"))
+
     def test_service_tracks_stm32_feedback(self) -> None:
         service = object.__new__(OrchestratorService)
         service.motion_status = {

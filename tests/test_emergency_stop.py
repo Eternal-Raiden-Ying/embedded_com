@@ -134,6 +134,110 @@ class EmergencyStopTest(unittest.TestCase):
         for line in self.ser.written[1:]:
             self.assertNotIn("V ", line)
 
+    def test_motion_adapter_hard_stop_writes_stop_synchronously(self) -> None:
+        """MotionAdapter.stop(soft=False) must synchronously write STOP first."""
+        captured = []
+        bridge = UartBridge(
+            "/dev/null",
+            115200,
+            0.1,
+            dry_run=True,
+            dry_run_echo_stdout=False,
+            readback_enabled=False,
+            tx_callback=lambda line, dry_run, meta: captured.append(line),
+        )
+        bridge.send_motion_line("MODE SEARCH\r\nV 0.300 0.000 0.000\r\n", latest_override=False)
+
+        adapter = Stm32MotionAdapter(bridge, logger=lambda _line: None)
+        adapter.stop(reason="hard_stop", soft=False)
+
+        self.assertGreaterEqual(len(captured), 1)
+        self.assertEqual(captured[0], "STOP\r\n")
+        self.assertEqual(captured, ["STOP\r\n"])
+
+    def test_emergency_stop_mcu_synchronous_not_queued(self) -> None:
+        """send_emergency_stop_mcu() must write immediately without a writer thread."""
+        captured = []
+        bridge = UartBridge(
+            "/dev/null",
+            115200,
+            0.1,
+            dry_run=True,
+            dry_run_echo_stdout=False,
+            readback_enabled=False,
+            tx_callback=lambda line, dry_run, meta: captured.append(line),
+        )
+
+        self.assertTrue(bridge.send_emergency_stop_mcu())
+
+        self.assertEqual(captured, ["STOP\r\n"])
+        self.assertFalse(bridge._has_pending_tx())
+
+    def test_send_arm_command_writes_stop_before_arm_and_drops_old_velocity(self) -> None:
+        """Arm commands must flush old base motion, write STOP, then write the arm command."""
+        captured = []
+        bridge = UartBridge(
+            "/dev/null",
+            115200,
+            0.1,
+            dry_run=True,
+            dry_run_echo_stdout=False,
+            readback_enabled=False,
+            tx_callback=lambda line, dry_run, meta: captured.append(line),
+        )
+        bridge.send_motion_line("V 0.250 0.000 0.000\r\n", latest_override=False)
+
+        self.assertTrue(bridge.send_arm_command("POSE 10 20 30 0 0 90 1000\r\n"))
+
+        self.assertEqual(captured, ["STOP\r\n", "POSE 10 20 30 0 0 90 1000\r\n"])
+        self.assertFalse(bridge._has_pending_tx())
+
+    def test_queued_mode_velocity_not_written_after_stop(self) -> None:
+        """Queued MODE/V commands must not leak out after a synchronous STOP."""
+        captured = []
+        bridge = UartBridge(
+            "/dev/null",
+            115200,
+            0.1,
+            dry_run=True,
+            dry_run_echo_stdout=False,
+            readback_enabled=False,
+            tx_callback=lambda line, dry_run, meta: captured.append(line),
+        )
+        bridge.send_motion_line("MODE SEARCH\r\nV 0.200 0.000 0.000\r\n", latest_override=False)
+
+        self.assertTrue(bridge.send_emergency_stop_mcu())
+
+        self.assertEqual(captured, ["STOP\r\n"])
+        self.assertFalse(bridge._has_pending_tx())
+
+    def test_soft_true_is_only_sstop_path(self) -> None:
+        """MotionAdapter.stop(soft=True) sends SSTOP; hard stop sends STOP."""
+        captured = []
+        bridge = UartBridge(
+            "/dev/null",
+            115200,
+            0.1,
+            dry_run=True,
+            dry_run_echo_stdout=False,
+            readback_enabled=False,
+            tx_callback=lambda line, dry_run, meta: captured.append(line),
+        )
+        bridge.start()
+
+        try:
+            adapter = Stm32MotionAdapter(bridge, logger=lambda _line: None)
+            adapter.stop(reason="hard", soft=False)
+            adapter.stop(reason="soft", soft=True)
+
+            deadline = time.time() + 1.0
+            while len(captured) < 2 and time.time() < deadline:
+                time.sleep(0.01)
+
+            self.assertEqual(captured[:2], ["STOP\r\n", "SSTOP\r\n"])
+        finally:
+            bridge.close()
+
     def test_stale_v_and_cooldown_suppression(self) -> None:
         """Verify that stale V commands or V commands during cooldown window are suppressed.
 

@@ -2,13 +2,12 @@
 # -*- coding: utf-8 -*-
 
 import json
+import os
 import queue
 import socket
 import threading
 import time
 
-if not hasattr(socket, "AF_UNIX"):
-    socket.AF_UNIX = 9999
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -74,11 +73,23 @@ class JsonlClientSender:
         start = time.perf_counter()
         if self.mode == "disabled":
             raise RuntimeError("disabled mode does not create socket")
+        if self.mode == "tcp":
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(self.send_timeout)
+            sock.connect((self.tcp_host, self.tcp_port))
+            self._last_connect_ms = max(0.0, (time.perf_counter() - start) * 1000.0)
+            return sock
+        if os.name == "nt":
+            raise RuntimeError("uds transport is not supported on Windows")
+        if not hasattr(socket, "AF_UNIX"):
+            raise RuntimeError("uds transport requested but socket.AF_UNIX is unavailable")
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(self.send_timeout)
         path_str = self.uds_path
         if not path_str and self.tcp_port:
             path_str = f"/tmp/robot_ipc_{self.tcp_port}.sock"
+        if not path_str:
+            raise ValueError("uds transport requires uds_path or tcp_port-derived path")
         sock.connect(path_str)
         self._last_connect_ms = max(0.0, (time.perf_counter() - start) * 1000.0)
         return sock
@@ -263,7 +274,7 @@ class JsonlClientSender:
 class JsonlInboundServer:
     def __init__(self, mode: str = "tcp", tcp_host: str = "127.0.0.1", tcp_port: int = 0,
                  uds_path: str = "", name: str = "jsonl_server", logger: Logger = None):
-        if mode not in {"tcp", "uds"}:
+        if mode not in {"disabled", "tcp", "uds"}:
             raise ValueError(f"unsupported server mode: {mode}")
         self.mode = mode
         self.tcp_host = tcp_host
@@ -288,9 +299,25 @@ class JsonlInboundServer:
             self.logger(payload)
 
     def _bind_socket(self) -> socket.socket:
+        if self.mode == "disabled":
+            raise RuntimeError("disabled mode does not create socket")
+        if self.mode == "tcp":
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((self.tcp_host, self.tcp_port))
+            self.tcp_host, self.tcp_port = sock.getsockname()[:2]
+            sock.listen(4)
+            sock.settimeout(1.0)
+            return sock
+        if os.name == "nt":
+            raise RuntimeError("uds transport is not supported on Windows")
+        if not hasattr(socket, "AF_UNIX"):
+            raise RuntimeError("uds transport requested but socket.AF_UNIX is unavailable")
         path_str = self.uds_path
         if not path_str and self.tcp_port:
             path_str = f"/tmp/robot_ipc_{self.tcp_port}.sock"
+        if not path_str:
+            raise ValueError("uds transport requires uds_path or tcp_port-derived path")
         path = Path(path_str)
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists():
@@ -306,6 +333,10 @@ class JsonlInboundServer:
 
     def start(self):
         if self._accept_thread is not None:
+            return
+        if self.mode == "disabled":
+            self.listening = False
+            self._log("info", "disabled", transport=self.mode)
             return
         self._server_sock = self._bind_socket()
         self._accept_thread = threading.Thread(target=self._accept_loop, daemon=True, name=f"{self.name}_accept")
@@ -337,9 +368,11 @@ class JsonlInboundServer:
             self._accept_thread.join(timeout=1.5)
         for th in self._client_threads:
             th.join(timeout=0.5)
-        path_str = self.uds_path
-        if not path_str and self.tcp_port:
-            path_str = f"/tmp/robot_ipc_{self.tcp_port}.sock"
+        path_str = ""
+        if self.mode == "uds":
+            path_str = self.uds_path
+            if not path_str and self.tcp_port:
+                path_str = f"/tmp/robot_ipc_{self.tcp_port}.sock"
         if path_str:
             path = Path(path_str)
             if path.exists():

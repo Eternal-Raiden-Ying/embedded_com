@@ -2,19 +2,31 @@
 # -*- coding: utf-8 -*-
 
 import argparse
+import importlib.util
+import platform
 import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 
 TEST_DIR = Path(__file__).resolve().parent
 VISION_ROOT = TEST_DIR.parent
 VISTA_ROOT = VISION_ROOT.parent
+CAMERA_BACKEND_DIR = VISION_ROOT / "backend" / "camera"
 if str(VISTA_ROOT) not in sys.path:
     sys.path.insert(0, str(VISTA_ROOT))
 if str(VISION_ROOT) not in sys.path:
     sys.path.insert(0, str(VISION_ROOT))
+if str(CAMERA_BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(CAMERA_BACKEND_DIR))
+
+if platform.machine().lower() != "aarch64":
+    pytest.skip("VISTA camera inference e2e requires aarch64 target hardware", allow_module_level=True)
+if importlib.util.find_spec("fast_cam") is None:
+    pytest.skip("VISTA camera inference e2e requires fast_cam native module", allow_module_level=True)
 
 from vision_module.backend.camera.ColorCamera import ColorCamera
 from vision_module.backend.predictor.QNN_YOLO_Detect_Predictor import QNN_YOLO_Detect_Predictor

@@ -51,6 +51,8 @@ def apply_base_motion_safety(decision: Any, *, ctx: Any, cfg: Any, log_fn: Optio
             state_allows_motion = True
 
     if not state_allows_motion:
+        state_name = getattr(state, "value", str(state))
+        block_reason = f"state_{state_name}_disallowed"
         # Block all base motion
         decision.cmd.vx_mps = 0.0
         decision.cmd.vy_mps = 0.0
@@ -58,10 +60,10 @@ def apply_base_motion_safety(decision: Any, *, ctx: Any, cfg: Any, log_fn: Optio
         summary["allow_forward"] = False
         summary["allow_rotate"] = False
         summary["allow_lateral"] = False
-        summary["forward_block_reason"] = f"state_{state}_disallowed"
-        summary["rotate_block_reason"] = f"state_{state}_disallowed"
-        summary["lateral_block_reason"] = f"state_{state}_disallowed"
-        summary["stop_reason"] = f"state_{state}_disallowed"
+        summary["forward_block_reason"] = block_reason
+        summary["rotate_block_reason"] = block_reason
+        summary["lateral_block_reason"] = block_reason
+        summary["stop_reason"] = block_reason
         return decision
 
     # Retrieve initial values of the allow flags

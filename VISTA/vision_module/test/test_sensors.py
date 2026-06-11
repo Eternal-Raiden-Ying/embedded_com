@@ -76,7 +76,7 @@ def optional_controls(camera) -> str:
     return ", ".join(checks)
 
 
-def test_stream(stream_name: str, kwargs: dict, requested_backend: str, rgb_controls: bool = False) -> dict:
+def _run_stream_test(stream_name: str, kwargs: dict, requested_backend: str, rgb_controls: bool = False) -> dict:
     result = {
         "stream": stream_name,
         "requested": requested_backend,
@@ -120,9 +120,9 @@ def main() -> int:
     print_header("VISTA Sensor Backend Test", args)
 
     results = [
-        test_stream("rgb", make_rgb_kwargs(args), args.backend, rgb_controls=True),
-        test_stream("depth", make_depth_kwargs(args), args.backend),
-        test_stream("ir", make_ir_kwargs(args), args.backend),
+        _run_stream_test("rgb", make_rgb_kwargs(args), args.backend, rgb_controls=True),
+        _run_stream_test("depth", make_depth_kwargs(args), args.backend),
+        _run_stream_test("ir", make_ir_kwargs(args), args.backend),
     ]
 
     statuses = [item["status"] for item in results]

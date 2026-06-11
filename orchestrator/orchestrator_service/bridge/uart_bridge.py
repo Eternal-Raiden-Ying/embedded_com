@@ -145,13 +145,13 @@ class UartBridge:
         return False
 
     def send_stop(self, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
-        return self._publish_latest("STOP\r\n", tx_meta=tx_meta)
+        return self.send_emergency_stop(tx_meta=tx_meta)
 
     def send_soft_stop(self, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
         return self._publish_latest("SSTOP\r\n", tx_meta=tx_meta)
 
     def send_emergency_stop_mcu(self, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
-        return self._publish_latest("STOP\r\n", tx_meta=tx_meta)
+        return self.send_emergency_stop(tx_meta=tx_meta)
 
     def send_emergency_stop(self, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
         meta = dict(tx_meta or {})

@@ -190,8 +190,8 @@ orchestrator:
     debug: false # Debug level traces enabled
     state_block_period_s: 1.0 # State report publish period
     heartbeat_period_s: 1.0 # State machine heartbeat period
-    stage_params_file: "" # Dynamic state configuration override yaml
-    car_cmd_params_file: "" # Velocity limits override yaml
+    stage_params_file: "orchestrator/configs/stage_params.yaml" # Dynamic state configuration override yaml
+    car_cmd_params_file: "orchestrator/configs/car_cmd_params.yaml" # Velocity limits override yaml
     loaded_config_files: [] # List of config files loaded during boot
   serial:
     port: "/dev/ttyHS1" # Serial port device descriptor
@@ -503,18 +503,26 @@ orchestrator:
       deadband: 0.004 # Control deadband
       min_abs_output: 0.04 # Minimum starting output speed
   task_cmd_in:
-    transport: "uds" # Task cmd input channel mode
+    transport: "tcp" # Task cmd input channel mode
     ipc_socket_path: "/tmp/robot_stack/task_cmd.sock" # Socket file path
+    tcp_host: "127.0.0.1" # TCP bind host
+    tcp_port: 19101 # TCP bind port
   task_ack_out:
-    transport: "uds" # Task ack output channel mode
+    transport: "tcp" # Task ack output channel mode
     ipc_socket_path: "/tmp/robot_stack/task_ack.sock" # Socket file path
+    tcp_host: "127.0.0.1" # TCP connect host
+    tcp_port: 19102 # TCP connect port
     send_mode: "oneshot" # Socket persistence mode
   vision_obs_in:
-    transport: "uds" # Vision observations input channel mode
+    transport: "tcp" # Vision observations input channel mode
     ipc_socket_path: "/tmp/robot_stack/vision_obs.sock" # Socket file path
+    tcp_host: "127.0.0.1" # TCP bind host
+    tcp_port: 19103 # TCP bind port
   vision_req_out:
-    transport: "uds" # Vision requests output channel mode
+    transport: "tcp" # Vision requests output channel mode
     ipc_socket_path: "/tmp/robot_stack/vision_req.sock" # Socket file path
+    tcp_host: "127.0.0.1" # TCP connect host
+    tcp_port: 19104 # TCP connect port
     send_mode: "oneshot" # Socket persistence mode
     async_enabled: true # Enable async socket operations
   tts_event_out:

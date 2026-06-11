@@ -18,6 +18,8 @@ _DEFAULT_PID_DIR = _DEFAULT_PROJECT_ROOT / "pids"
 class SocketEndpoint:
     transport: str = "uds"
     ipc_socket_path: str = ""
+    tcp_host: str = "127.0.0.1"
+    tcp_port: int = 0
     send_mode: str = "persistent"
     async_enabled: bool = False
     async_queue_size: int = 64
@@ -33,19 +35,19 @@ class SocketEndpoint:
 
     @property
     def host(self) -> str:
-        return "127.0.0.1"
+        return self.tcp_host
 
     @host.setter
     def host(self, value: str) -> None:
-        pass
+        self.tcp_host = value
 
     @property
     def port(self) -> int:
-        return 0
+        return self.tcp_port
 
     @port.setter
     def port(self, value: int) -> None:
-        pass
+        self.tcp_port = int(value)
 
 
 @dataclass
@@ -371,21 +373,25 @@ class OrchestratorConfig:
     car: CarMotionConfig = field(default_factory=CarMotionConfig)
     docking: DockingControlConfig = field(default_factory=DockingControlConfig)
     task_cmd_in: SocketEndpoint = field(default_factory=lambda: SocketEndpoint(
-        transport="uds",
+        transport="tcp",
         ipc_socket_path="/tmp/robot_stack/task_cmd.sock",
+        tcp_port=19101,
     ))
     task_ack_out: SocketEndpoint = field(default_factory=lambda: SocketEndpoint(
-        transport="uds",
+        transport="tcp",
         ipc_socket_path="/tmp/robot_stack/task_ack.sock",
+        tcp_port=19102,
         send_mode="oneshot",
     ))
     vision_obs_in: SocketEndpoint = field(default_factory=lambda: SocketEndpoint(
-        transport="uds",
+        transport="tcp",
         ipc_socket_path="/tmp/robot_stack/vision_obs.sock",
+        tcp_port=19103,
     ))
     vision_req_out: SocketEndpoint = field(default_factory=lambda: SocketEndpoint(
-        transport="uds",
+        transport="tcp",
         ipc_socket_path="/tmp/robot_stack/vision_req.sock",
+        tcp_port=19104,
         send_mode="oneshot",
         async_enabled=True,
     ))
