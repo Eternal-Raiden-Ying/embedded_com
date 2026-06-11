@@ -1015,6 +1015,28 @@ class VistaApp(BaseModule):
         send_hz = max(10.0, send_hz)
         return 1.0 / send_hz
 
+    def _should_force_send_stage_output(self, output) -> bool:
+        if output is None or not isinstance(getattr(output, "vision_obs", None), dict):
+            return False
+        obs = output.vision_obs
+        status = str(obs.get("status") or "").strip().upper()
+        if status in {"START", "STOP", "FAILED", "FATAL"}:
+            return True
+        signals = getattr(output, "signals", {}) or {}
+        request_op = str(signals.get("request_op") or "").strip().upper()
+        if request_op in {"START", "STOP"}:
+            return True
+        if str(signals.get("transition") or "").strip():
+            return True
+        if bool(signals.get("urgent") or signals.get("force_send") or signals.get("fatal")):
+            return True
+        if bool(signals.get("mode_apply_failed", False)):
+            return True
+        result = obs.get("result")
+        if isinstance(result, dict) and bool(result.get("urgent") or result.get("fatal")):
+            return True
+        return False
+
     def _check_freq_and_reason(self, now: float) -> Optional[str]:
         mode = self._safe_mode_text(self._ctx().current_mode)
         if mode not in {"FIND_OBJECT", "FIND_EDGE"}:
@@ -1228,8 +1250,8 @@ class VistaApp(BaseModule):
             self._record_rate_sample(control_obs, now)
             self._emit_rate_summary_if_needed()
 
-        # Send diagnostic_obs via diag_sender (low-priority, rate-limited to 1.0s interval unless forced)
-        if force_send or (now - self._last_diag_send_ts >= 1.0):
+        # Send diagnostic_obs via diag_sender (low-priority, strictly rate-limited to 1.0s).
+        if now - self._last_diag_send_ts >= 1.0:
             diagnostic_obs = {
                 "type": "vision_obs",
                 "ts": output.vision_obs.get("ts", now),
@@ -1337,7 +1359,11 @@ class VistaApp(BaseModule):
             interaction_id=req.interaction_id,
             data=req_event_data,
         )
-        obs_sent = self._apply_stage_output(stage_output, now=time.time(), force_send=bool(stage_output and stage_output.vision_obs))
+        obs_sent = self._apply_stage_output(
+            stage_output,
+            now=time.time(),
+            force_send=self._should_force_send_stage_output(stage_output),
+        )
         if not obs_sent:
             self.last_send_ts = 0.0
 

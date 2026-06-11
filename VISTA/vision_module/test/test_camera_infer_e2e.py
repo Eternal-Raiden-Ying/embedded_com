@@ -16,12 +16,15 @@ TEST_DIR = Path(__file__).resolve().parent
 VISION_ROOT = TEST_DIR.parent
 VISTA_ROOT = VISION_ROOT.parent
 CAMERA_BACKEND_DIR = VISION_ROOT / "backend" / "camera"
+AARCH64_LIB_DIR = VISION_ROOT / "libs" / "aarch64"
 if str(VISTA_ROOT) not in sys.path:
     sys.path.insert(0, str(VISTA_ROOT))
 if str(VISION_ROOT) not in sys.path:
     sys.path.insert(0, str(VISION_ROOT))
 if str(CAMERA_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(CAMERA_BACKEND_DIR))
+if str(AARCH64_LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(AARCH64_LIB_DIR))
 
 if platform.machine().lower() != "aarch64":
     pytest.skip("VISTA camera inference e2e requires aarch64 target hardware", allow_module_level=True)

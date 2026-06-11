@@ -5,6 +5,7 @@
 __pycache__/
 .venv/
 *.py[cod]
+*.pyc
 *.pyo
 .pytest_cache/
 *.egg-info/
@@ -46,6 +47,7 @@ pids/
 # Run data (runtime generated)
 runs/
 **/runs/
+tmp/
 
 # Large QNN model binaries (consider git LFS for these)
 *.amf

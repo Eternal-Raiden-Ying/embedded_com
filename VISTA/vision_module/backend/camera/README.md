@@ -30,9 +30,11 @@ The import selector lives in `__init__.py` and currently supports:
 - `base.py`: camera abstraction base
 - `mock.py`: mock backend
 - `_fast_gst_camera.py`: Python bridge for the fast camera path
-- `fast_cam.cpython-38-aarch64-linux-gnu.so`: prebuilt target-device binary
 - `cxx/`: native source/build directory for camera extension work
 - `camera_info.md`: raw capability notes for the current hardware
+
+The prebuilt `fast_cam.cpython-38-aarch64-linux-gnu.so` target-device binary is
+stored outside this Python source directory at `VISTA/vision_module/libs/aarch64/`.
 
 ## Build Path
 
@@ -46,7 +48,9 @@ cmake ..
 make
 ```
 
-The old `aidlux_cam/csrc` path is obsolete for this repository.
+Copy the generated `fast_cam.cpython-38-aarch64-linux-gnu.so` into
+`VISTA/vision_module/libs/aarch64/`. The old `aidlux_cam/csrc` path is obsolete
+for this repository.
 
 ## Current Architectural Notes
 
@@ -60,6 +64,9 @@ The old `aidlux_cam/csrc` path is obsolete for this repository.
 ## Current Limitations
 
 - The real runtime target is AidLux / QCS6490, not Windows.
+- The `fast_cam` native extension is a Python 3.8 aarch64 Linux binary. Windows
+  host environments cannot import it; host-side tests that require it must skip
+  unless both `platform.machine() == "aarch64"` and `fast_cam` is importable.
 - On Windows or unsupported environments, the backend may resolve to `mock` depending on runtime settings.
 - `camera_info.md` is a hardware note, not the authoritative architecture contract.
 

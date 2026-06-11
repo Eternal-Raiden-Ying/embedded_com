@@ -44,7 +44,8 @@ The following shape is recommended, but it is not implemented in this cleanup:
 - `tools/`: manual debugging scripts.
 - `tests/`: automated tests and regression tests.
 
-Native camera extensions such as `backend/camera/fast_cam.cpython-38-aarch64-linux-gnu.so`
-are board runtime artifacts. Keep them in place for now; a later cleanup can
-move native camera code under `backend/camera/native/` once build and packaging
-instructions are explicit.
+Native camera extensions such as `fast_cam.cpython-38-aarch64-linux-gnu.so`
+are board runtime artifacts and live under `libs/aarch64/`, separate from the
+Python camera source. The current binary targets Python 3.8 on aarch64 Linux
+and is not importable on Windows hosts; hardware-only tests must skip when that
+platform or module is unavailable.
