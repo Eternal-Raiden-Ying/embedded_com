@@ -298,6 +298,42 @@ class JsonlInboundServer:
             payload.update(kwargs)
             self.logger(payload)
 
+    def _fix_uds_socket_permissions(self, path: str) -> None:
+        if os.name == "nt":
+            return
+        try:
+            import pwd
+            
+            sudo_uid = os.environ.get("SUDO_UID")
+            sudo_gid = os.environ.get("SUDO_GID")
+            
+            target_uid = None
+            target_gid = None
+            
+            if sudo_uid and sudo_gid:
+                target_uid = int(sudo_uid)
+                target_gid = int(sudo_gid)
+            else:
+                try:
+                    user_info = pwd.getpwnam("aidlux")
+                    target_uid = user_info.pw_uid
+                    target_gid = user_info.pw_gid
+                except KeyError:
+                    pass
+            
+            if target_uid is not None and target_gid is not None:
+                os.chown(path, target_uid, target_gid)
+                os.chmod(path, 0o660)
+            else:
+                os.chmod(path, 0o666)
+                self._log("warn", "ownership_not_resolved_fallback_666", path=path)
+        except Exception as exc:
+            self._log("warn", "failed_to_fix_uds_socket_permission", path=path, error=repr(exc))
+            try:
+                os.chmod(path, 0o666)
+            except Exception:
+                pass
+
     def _bind_socket(self) -> socket.socket:
         if self.mode == "disabled":
             raise RuntimeError("disabled mode does not create socket")
@@ -319,7 +355,16 @@ class JsonlInboundServer:
         if not path_str:
             raise ValueError("uds transport requires uds_path or tcp_port-derived path")
         path = Path(path_str)
+        parent_existed = path.parent.exists()
         path.parent.mkdir(parents=True, exist_ok=True)
+        if not parent_existed and os.name != "nt":
+            try:
+                os.chmod(str(path.parent), 0o1777)
+            except Exception:
+                try:
+                    os.chmod(str(path.parent), 0o777)
+                except Exception:
+                    pass
         if path.exists():
             try:
                 path.unlink()
@@ -327,6 +372,7 @@ class JsonlInboundServer:
                 pass
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.bind(str(path))
+        self._fix_uds_socket_permissions(str(path))
         sock.listen(4)
         sock.settimeout(1.0)
         return sock
@@ -343,7 +389,19 @@ class JsonlInboundServer:
         self._accept_thread.start()
         self.listening = True
         desc = self.uds_path if self.mode == "uds" else f"{self.tcp_host}:{self.tcp_port}"
-        self._log("info", "listening", transport=self.mode, bind=desc)
+        if self.mode == "uds":
+            owner = "unknown"
+            perm = "unknown"
+            try:
+                st = os.stat(self.uds_path)
+                owner = f"{st.st_uid}:{st.st_gid}"
+                perm = oct(st.st_mode & 0o777)
+                print(f"[IPC] server listening mode=uds path={self.uds_path} owner={owner} perm={perm}", flush=True)
+            except Exception:
+                pass
+            self._log("info", "listening", transport=self.mode, bind=desc, owner=owner, perm=perm)
+        else:
+            self._log("info", "listening", transport=self.mode, bind=desc)
 
     def close(self):
         self._stop.set()

@@ -414,7 +414,7 @@ class OrchestratorService(BaseModule):
         return [f"transport={ep.transport}"]
 
     def _operator_ipc_line(self, channel: str, event: str, details: Dict[str, Any]) -> str:
-        level = "ERROR" if event in {"send_failed", "invalid_json"} else ("WARN" if "failed" in event or "closed" in event else "IPC")
+        level = "ERROR" if event in {"send_failed", "invalid_json"} else ("WARN" if ("failed" in event or "closed" in event) and event != "peer_closed_empty" else "IPC")
         parts = [f"[ORCH] {level} {channel} {event}"]
         parts.extend(self._endpoint_parts(channel))
         if details.get("peer"):
@@ -423,6 +423,10 @@ class OrchestratorService(BaseModule):
             parts.append(f"err={self._short_err(details.get('error'))}")
         if details.get("fail_count") is not None:
             parts.append(f"retry={details.get('fail_count')}")
+        if details.get("owner") is not None:
+            parts.append(f"owner={details.get('owner')}")
+        if details.get("perm") is not None:
+            parts.append(f"perm={details.get('perm')}")
         return " ".join(parts)
 
     def _operator_ipc_event(self, channel: str, event: str, details: Dict[str, Any]) -> None:
