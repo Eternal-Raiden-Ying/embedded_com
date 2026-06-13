@@ -1,0 +1,686 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>智能语音取物机器人 - 工程 Dashboard 控制台</title>
+  <meta name="description" content="智能语音取物机器人工程 Dashboard，整合架构说明、配置矩阵、启动调试及单元测试。">
+  <link rel="stylesheet" href="assets/style.css">
+  
+  <!-- Dynamic Data Libraries loaded synchronously -->
+  <script src="data/modules.js"></script>
+  <script src="data/troubleshooting.js"></script>
+  <script src="data/config_matrix.js"></script>
+  <script src="data/docs_manifest.js"></script>
+  <script src="data/module_pages.js"></script>
+  <script src="data/raw_docs.js"></script>
+  <script src="data/pictures_manifest.js"></script>
+  
+  <!-- Core Dashboard Application Logic -->
+  <script src="assets/app.js"></script>
+</head>
+<body>
+
+  <!-- Top Header Console -->
+  <header>
+    <div class="header-brand">
+      <h1 class="header-title" id="main-title">面向视障服务的智能语音取物机器人</h1>
+      <div class="header-subtitle">SC171 + VISTA + Orchestrator + STM32 + Cloud Grasping 工程控制台</div>
+    </div>
+    
+    <div class="header-controls">
+      <!-- Search Engine Input -->
+      <div class="search-container">
+        <svg viewBox="0 0 24 24">
+          <path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>
+        </svg>
+        <input type="text" id="searchInput" class="search-input" placeholder="输入关键字过滤当前页面...">
+      </div>
+      
+      <!-- Theme Switch -->
+      <button class="theme-toggle" id="themeToggle" title="切换深色/浅色模式">
+        <!-- Injected dynamically by JS -->
+      </button>
+    </div>
+  </header>
+
+  <div class="app-container">
+    <!-- Left Sidebar Navigation Menu -->
+    <aside class="sidebar">
+      <nav>
+        <ul class="sidebar-nav">
+          <div class="nav-group-title">控制中心</div>
+          <li>
+            <div class="nav-item active" data-target="overview">
+              <svg viewBox="0 0 24 24"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
+              <span>控制台首页 (Overview)</span>
+            </div>
+          </li>
+          <li>
+            <div class="nav-item" data-target="architecture">
+              <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+              <span>二维架构矩阵 (Architecture)</span>
+            </div>
+          </li>
+          
+          <div class="nav-group-title">核心模块系统</div>
+          <li>
+            <div class="nav-item" data-target="sc171">
+              <svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-4 6h-4v2h4v2h-4v2h4v2H9V7h6v2z"/></svg>
+              <span>SC171 边缘智能端</span>
+            </div>
+            <!-- Submenu folders -->
+            <ul class="sidebar-submenu" id="submenu-sc171">
+              <li class="submenu-item" data-target="orchestrator" data-parent="sc171">Orchestrator 任务状态机</li>
+              <li class="submenu-item" data-target="vista" data-parent="sc171">VISTA 视觉算法服务</li>
+              <li class="submenu-item" data-target="mobile_gateway" data-parent="sc171">Mobile Gateway 网关</li>
+            </ul>
+          </li>
+          
+          <li>
+            <div class="nav-item" data-target="execution">
+              <svg viewBox="0 0 24 24"><path d="M22 9V7h-2V5c0-1.1-.9-2-2-2H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2v-2h2v-2h-2v-2h2v-2h-2V9h2zm-4 10H4V5h14v14zM6 13h5v4H6zm6-6h4v3h-4z"/></svg>
+              <span>Chassis 执行驱动端</span>
+            </div>
+            <!-- Submenu chassis -->
+            <ul class="sidebar-submenu" id="submenu-execution">
+              <li class="submenu-item" data-target="chassis" data-parent="execution">STM32 麦克纳姆底盘</li>
+              <li class="submenu-item" data-target="arm" data-parent="execution">机械臂控制模块</li>
+            </ul>
+          </li>
+          
+          <li>
+            <div class="nav-item" data-target="cloud_grasp">
+              <svg viewBox="0 0 24 24"><path d="M19.35 10.04A7.49 7.49 0 0012 4C9.11 4 6.6 5.64 5.35 8.04A5.994 5.994 0 000 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM19 18H6c-2.21 0-4-1.79-4-4 0-2.05 1.53-3.76 3.56-3.97l1.07-.11.5-.95A5.468 5.468 0 0112 6c2.62 0 4.88 1.86 5.39 4.43l.3 1.5 1.53.11c1.56.1 2.78 1.41 2.78 2.96 0 1.65-1.35 3-3 3z"/></svg>
+              <span>云端 3D 抓取 (Cloud Grasp)</span>
+            </div>
+          </li>
+          
+          <div class="nav-group-title">配置调试与支持</div>
+          <li>
+            <div class="nav-item" data-target="startup">
+              <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+              <span>运行与启动调试</span>
+            </div>
+          </li>
+          <li>
+            <div class="nav-item" data-target="config">
+              <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.488.488 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84a.48.48 0 00-.48.4l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.4l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
+              <span>系统配置矩阵</span>
+            </div>
+          </li>
+          <li>
+            <div class="nav-item" data-target="testing">
+              <svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+              <span>测试契约与排障</span>
+            </div>
+          </li>
+          
+          <div class="nav-group-title">归档</div>
+          <li>
+            <div class="nav-item" data-target="reference">
+              <svg viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>
+              <span>全量文档阅览室</span>
+            </div>
+          </li>
+        </ul>
+      </nav>
+    </aside>
+
+    <!-- Main Content Panel Area -->
+    <main class="main-content">
+      
+      <!-- Global Search Notification Pop -->
+      <div id="searchNotification" style="display: none; background-color: var(--accent-light); border: 1px solid var(--accent); color: var(--text-primary); font-size: 0.8rem; padding: 10px 14px; border-radius: 8px; margin-bottom: 16px; font-weight: 600; animation: fadeIn 0.2s ease;">
+      </div>
+
+      <!-- Tab 1: Overview (Visual Executive Cockpit) -->
+      <section class="section-panel active" id="overview">
+        <!-- Overview Hero Banner -->
+        <div id="overviewHeroContainer" style="margin-bottom: 36px;"></div>
+        <!-- Large system flow diagram on top -->
+        <div class="system-flow-diagram">
+          <h4 style="font-size: 0.9rem; font-weight: 800; margin-bottom: 14px; text-transform: uppercase; color: var(--accent); letter-spacing: 0.05em;">系统数据闭环流拓扑图</h4>
+          <div class="svg-flow-wrapper">
+            <svg viewBox="0 0 920 60" style="width: 100%; height: 100%;">
+              <defs>
+                <marker id="arrow" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                  <path d="M 0 1.5 L 7 5 L 0 8.5 z" fill="var(--accent)"/>
+                </marker>
+              </defs>
+              <g style="font-family: var(--font-sans); font-size: 0.78rem; font-weight: 700; fill: var(--text-primary);">
+                <!-- Node 1 -->
+                <rect x="2" y="10" width="105" height="36" rx="6" fill="var(--bg-color)" stroke="var(--border-color)" stroke-width="1"/>
+                <text x="54" y="32" text-anchor="middle">微信小程序/手机</text>
+                <path d="M 107 28 L 125 28" fill="none" stroke="var(--accent)" stroke-width="2" marker-end="url(#arrow)"/>
+                
+                <!-- Node 2 -->
+                <rect x="131" y="10" width="105" height="36" rx="6" fill="var(--bg-color)" stroke="var(--border-color)" stroke-width="1"/>
+                <text x="183" y="32" text-anchor="middle">Mobile Gateway</text>
+                <path d="M 236 28 L 254 28" fill="none" stroke="var(--accent)" stroke-width="2" marker-end="url(#arrow)"/>
+                
+                <!-- Node 3 -->
+                <rect x="260" y="10" width="105" height="36" rx="6" fill="var(--bg-color)" stroke="var(--border-color)" stroke-width="1"/>
+                <text x="312" y="32" text-anchor="middle">Orchestrator 任务</text>
+                <path d="M 365 28 L 383 28" fill="none" stroke="var(--accent)" stroke-width="2" marker-end="url(#arrow)"/>
+                
+                <!-- Node 4 -->
+                <rect x="389" y="10" width="105" height="36" rx="6" fill="var(--bg-color)" stroke="var(--border-color)" stroke-width="1"/>
+                <text x="441" y="32" text-anchor="middle">VISTA 视觉算法</text>
+                <path d="M 494 28 L 512 28" fill="none" stroke="var(--accent)" stroke-width="2" marker-end="url(#arrow)"/>
+                
+                <!-- Node 5 -->
+                <rect x="518" y="10" width="115" height="36" rx="6" fill="var(--bg-color)" stroke="var(--border-color)" stroke-width="1"/>
+                <text x="575" y="32" text-anchor="middle">STM32底盘/机械臂</text>
+                <path d="M 633 28 L 651 28" fill="none" stroke="var(--accent)" stroke-width="2" marker-end="url(#arrow)"/>
+                
+                <!-- Node 6 -->
+                <rect x="657" y="10" width="105" height="36" rx="6" fill="var(--bg-color)" stroke="var(--border-color)" stroke-width="1"/>
+                <text x="709" y="32" text-anchor="middle">云端 3D 抓取规划</text>
+                <path d="M 762 28 L 780 28" fill="none" stroke="var(--accent)" stroke-width="2" marker-end="url(#arrow)"/>
+                
+                <!-- Node 7 -->
+                <rect x="786" y="10" width="95" height="36" rx="6" fill="var(--success-light)" stroke="var(--success)" stroke-width="1"/>
+                <text x="833" y="32" text-anchor="middle" fill="var(--success)">执行反馈</text>
+              </g>
+            </svg>
+          </div>
+        </div>
+
+        <!-- Four Domain Cards -->
+        <div style="margin-bottom: 24px;">
+          <h4 style="font-size: 0.9rem; font-weight: 800; margin-bottom: 12px; text-transform: uppercase; color: var(--accent); letter-spacing: 0.05em;">系统横向四域总览</h4>
+          <div class="grid-4">
+            <div class="card" id="dom-card-user">
+              <div class="card-title">
+                <span style="color: var(--accent); font-weight: bold;">用户交互端</span>
+                <span class="status-badge status-ok">Active</span>
+              </div>
+              <p class="card-desc">小程序发布取物、急停，接收反馈流。MQTT 驱动通信桥接。</p>
+            </div>
+            <div class="card" id="dom-card-edge">
+              <div class="card-title">
+                <span style="color: var(--accent); font-weight: bold;">SC171 边缘端</span>
+                <span class="status-badge status-ok">Active</span>
+              </div>
+              <p class="card-desc">运行核心算法与编排状态机，多进程 UDS 套接字闭环通信中心。</p>
+            </div>
+            <div class="card" id="dom-card-execution">
+              <div class="card-title">
+                <span style="color: var(--accent); font-weight: bold;">Chassis 执行端</span>
+                <span class="status-badge status-ok">Connected</span>
+              </div>
+              <p class="card-desc">STM32 麦克纳姆四轮速度解算，低速插帧控制，物理急停保护。</p>
+            </div>
+            <div class="card" id="dom-card-cloud">
+              <div class="card-title">
+                <span style="color: var(--accent); font-weight: bold;">云端抓取端</span>
+                <span class="status-badge status-ok">Idle</span>
+              </div>
+              <p class="card-desc">接收 3D RGB-D 深度数据，云端算力完成 3D 障碍规避与姿态求解。</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Charts Placeholders (Visual Analytics) -->
+        <div class="grid-3" style="margin-bottom: 24px;">
+          <!-- Pie/Donut component ratio using pure CSS conic-gradient -->
+          <div class="card">
+            <div class="card-title">核心模块分布占比 (Ratio)</div>
+            <div class="chart-box">
+              <div style="width: 100px; height: 100px; border-radius: 50%; background: conic-gradient(var(--accent) 0% 45%, var(--success) 45% 80%, var(--warning) 80% 90%, var(--danger) 90% 100%); margin-right: 12px; box-shadow: var(--shadow);"></div>
+              <div style="font-size: 0.72rem; line-height: 1.4; color: var(--text-secondary);">
+                <div style="display: flex; align-items: center; gap: 4px;"><span style="display:inline-block; width:8px; height:8px; background:var(--accent); border-radius:50%;"></span>VISTA 45%</div>
+                <div style="display: flex; align-items: center; gap: 4px;"><span style="display:inline-block; width:8px; height:8px; background:var(--success); border-radius:50%;"></span>Orch 35%</div>
+                <div style="display: flex; align-items: center; gap: 4px;"><span style="display:inline-block; width:8px; height:8px; background:var(--warning); border-radius:50%;"></span>Gateway 10%</div>
+                <div style="display: flex; align-items: center; gap: 4px;"><span style="display:inline-block; width:8px; height:8px; background:var(--danger); border-radius:50%;"></span>Bridge 10%</div>
+              </div>
+            </div>
+          </div>
+          
+          <!-- Running Frequency Polyline -->
+          <div class="card">
+            <div class="card-title">控制下发实时频率 (Hz)</div>
+            <div class="chart-box">
+              <svg id="svgLineChart" width="100%" height="120px" viewBox="0 0 280 120">
+                <!-- Grid Lines -->
+                <line x1="10" y1="35" x2="270" y2="35" stroke="rgba(0,0,0,0.05)" stroke-width="1" stroke-dasharray="2,2"/>
+                <line x1="10" y1="70" x2="270" y2="70" stroke="rgba(0,0,0,0.05)" stroke-width="1" stroke-dasharray="2,2"/>
+                <line x1="10" y1="105" x2="270" y2="105" stroke="rgba(0,0,0,0.05)" stroke-width="1" stroke-dasharray="2,2"/>
+                <!-- Graph Line -->
+                <polyline fill="none" stroke="var(--accent)" stroke-width="2.5" points=""/>
+              </svg>
+              <!-- Info overlay -->
+              <div style="position: absolute; bottom: 8px; right: 10px; font-size: 0.68rem; font-weight: bold; color: var(--accent); background: var(--accent-light); padding: 1px 6px; border-radius: 3px;">
+                平均: ~20Hz (Ticker loop)
+              </div>
+            </div>
+          </div>
+
+          <!-- Risk level progress bar -->
+          <div class="card">
+            <div class="card-title">系统当前潜在风险评估</div>
+            <div class="chart-box">
+              <div class="risk-bar-wrapper">
+                <div class="risk-bar-item">
+                  <div class="risk-bar-labels">
+                    <span>底盘惯性滑动风险</span>
+                    <span style="color: var(--warning);">30%</span>
+                  </div>
+                  <div class="risk-bar-container">
+                    <div class="risk-bar-fill" style="width: 30%; background-color: var(--warning);"></div>
+                  </div>
+                </div>
+                <div class="risk-bar-item">
+                  <div class="risk-bar-labels">
+                    <span>IPC 丢包致盲风险</span>
+                    <span style="color: var(--success);">10%</span>
+                  </div>
+                  <div class="risk-bar-container">
+                    <div class="risk-bar-fill" style="width: 10%; background-color: var(--success);"></div>
+                  </div>
+                </div>
+                <div class="risk-bar-item">
+                  <div class="risk-bar-labels">
+                    <span>机械臂姿态碰撞风险</span>
+                    <span style="color: var(--danger);">45%</span>
+                  </div>
+                  <div class="risk-bar-container">
+                    <div class="risk-bar-fill" style="width: 45%; background-color: var(--danger);"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Secondary Overview Diagram Card -->
+        <div id="overviewSecondaryContainer" style="margin-bottom: 24px;"></div>
+
+        <!-- Quick Access Gateways -->
+        <div style="margin-bottom: 24px;">
+          <h4 style="font-size: 0.9rem; font-weight: 800; margin-bottom: 12px; text-transform: uppercase; color: var(--accent); letter-spacing: 0.05em;">控制台核心模块快捷导航</h4>
+          <div class="grid-4" style="gap: 10px;">
+            <button class="shortcut-btn" id="btn-qa-sc171" style="padding: 12px; font-size: 0.8rem;">SC171 边缘智能</button>
+            <button class="shortcut-btn" id="btn-qa-vista" style="padding: 12px; font-size: 0.8rem;">VISTA 视觉算法</button>
+            <button class="shortcut-btn" id="btn-qa-orch" style="padding: 12px; font-size: 0.8rem;">Orchestrator 任务机</button>
+            <button class="shortcut-btn" id="btn-qa-chassis" style="padding: 12px; font-size: 0.8rem;">STM32 底盘运动</button>
+            <button class="shortcut-btn" id="btn-qa-arm" style="padding: 12px; font-size: 0.8rem;">机械臂协作</button>
+            <button class="shortcut-btn" id="btn-qa-grasp" style="padding: 12px; font-size: 0.8rem;">云端 3D 抓取规划</button>
+            <button class="shortcut-btn" id="btn-qa-startup" style="padding: 12px; font-size: 0.8rem;">多进程启动调试</button>
+            <button class="shortcut-btn" id="btn-qa-config" style="padding: 12px; font-size: 0.8rem;">核心配置矩阵</button>
+          </div>
+        </div>
+
+        <!-- Status Cards -->
+        <div>
+          <h4 style="font-size: 0.9rem; font-weight: 800; margin-bottom: 12px; text-transform: uppercase; color: var(--accent); letter-spacing: 0.05em;">当前系统自检健康状态</h4>
+          <div class="grid-3" id="overviewStatusGrid">
+            <!-- Populated dynamically -->
+          </div>
+        </div>
+      </section>
+
+      <!-- Tab 2: System Architecture (2D Grid Matrix Matrix) -->
+      <section class="section-panel" id="architecture">
+        <div class="section-header">
+          <div>
+            <h2 class="section-title">二维系统架构矩阵</h2>
+            <p class="section-desc">纵向展示五层核心系统职责分工，横向展示四大物理/功能领域的架构交互。点击单元模块快速切入详情。</p>
+          </div>
+        </div>
+        
+        <!-- Architecture Hero Banner -->
+        <div id="architectureHeroContainer" style="margin-bottom: 36px;"></div>
+
+        <div class="matrix-container">
+          <table class="matrix-table">
+            <thead>
+              <tr>
+                <th style="width: 200px;">层级 \ 功能域</th>
+                <th>用户交互端</th>
+                <th>SC171 边缘智能端</th>
+                <th>STM32 执行控制端</th>
+                <th>云端抓取规划端</th>
+              </tr>
+            </thead>
+            <tbody id="archMatrixBody">
+              <!-- Rendered dynamically by JS -->
+            </tbody>
+          </table>
+        </div>
+        
+        <!-- Extra info card -->
+        <div class="card" style="margin-top: 16px; border-left: 4px solid var(--accent);">
+          <h4 style="font-size: 0.9rem; margin-bottom: 6px;">架构矩阵快速指引</h4>
+          <p class="card-desc">点击矩阵中的任何高亮模块标签，页面会自动将您定位到该组件的代码目录、职责定义、输入输出通道以及从源码 Markdown 文档自动编译转换的正文详细说明中。</p>
+        </div>
+      </section>
+
+      <!-- Tab 3: SC171 Edge Center Overview -->
+      <section class="section-panel" id="sc171">
+        <div class="section-header">
+          <div>
+            <h2 class="section-title">SC171 边缘智能计算中心 (Edge Center)</h2>
+            <p class="section-desc">运行多进程多任务的核心芯片，利用 Qualcomm Edge SDK 驱动 Yolov7 目标与桌边检测，进行任务决策与状态分发。</p>
+          </div>
+        </div>
+        <div class="grid-3" style="margin-bottom: 24px;">
+          <div class="card" style="cursor: pointer;" onclick="window.switchTabGlobal('orchestrator')">
+            <h4 style="color: var(--accent); margin-bottom: 6px;">Orchestrator 任务编排</h4>
+            <p class="card-desc">主导状态转移决策，读取感知，下发串口速度命令。</p>
+            <span style="font-size: 0.72rem; color: var(--accent); font-weight: bold; display: block; margin-top: 8px;">查看详情 &rarr;</span>
+          </div>
+          <div class="card" style="cursor: pointer;" onclick="window.switchTabGlobal('vista')">
+            <h4 style="color: var(--accent); margin-bottom: 6px;">VISTA 视觉算法</h4>
+            <p class="card-desc">高负荷相机全生命周期管理与 YOLO 拟合计算核心。</p>
+            <span style="font-size: 0.72rem; color: var(--accent); font-weight: bold; display: block; margin-top: 8px;">查看详情 &rarr;</span>
+          </div>
+          <div class="card" style="cursor: pointer;" onclick="window.switchTabGlobal('mobile_gateway')">
+            <h4 style="color: var(--accent); margin-bottom: 6px;">Mobile Gateway 网关</h4>
+            <p class="card-desc">MQTT 服务与套接字进程桥梁，命令接收准入门限。</p>
+            <span style="font-size: 0.72rem; color: var(--accent); font-weight: bold; display: block; margin-top: 8px;">查看详情 &rarr;</span>
+          </div>
+        </div>
+        
+        <div class="card" style="border-left: 4px solid var(--accent);">
+          <h4 style="margin-bottom: 8px;">SC171 环境说明</h4>
+          <p class="card-desc" style="line-height: 1.6;">板端端侧环境配备了 Qualcomm 专用 QNN 推理芯片。视觉检测在 aarch64 底层运行时会自动调配 CPU/GPU/NPU 通道进行运算加速，Orchestrator 内部提供 safety-gate 逻辑来约束运行时的异常状态转移。</p>
+        </div>
+      </section>
+
+      <!-- Sub-Tab 3.1: Orchestrator -->
+      <section class="section-panel" id="orchestrator">
+        <div class="module-header-mount" data-module="orchestrator"></div>
+        <div id="doc-content-orchestrator" class="module-doc-content">
+          <!-- Injected dynamically from compiled markdown -->
+        </div>
+      </section>
+
+      <!-- Sub-Tab 3.2: VISTA -->
+      <section class="section-panel" id="vista">
+        <div class="module-header-mount" data-module="vista"></div>
+        <div class="module-gallery-mount" data-module="vista"></div>
+        <div id="doc-content-vista" class="module-doc-content">
+          <!-- Injected dynamically -->
+        </div>
+      </section>
+
+      <!-- Sub-Tab 3.3: Mobile Gateway -->
+      <section class="section-panel" id="mobile_gateway">
+        <div class="module-header-mount" data-module="mobile_gateway"></div>
+        <div class="module-gallery-mount" data-module="mobile_gateway"></div>
+        <div id="doc-content-mobile_gateway" class="module-doc-content">
+          <!-- Injected dynamically -->
+        </div>
+      </section>
+
+      <!-- Tab 4: Execution System Overview -->
+      <section class="section-panel" id="execution">
+        <div class="section-header">
+          <div>
+            <h2 class="section-title">Chassis 运动执行系统</h2>
+            <p class="section-desc">包含底盘麦克纳姆轮低速解算、脉冲微调机制以及机械臂多轴 Modbus 连接驱动。</p>
+          </div>
+        </div>
+        <div class="grid-2" style="margin-bottom: 24px;">
+          <div class="card" style="cursor: pointer;" onclick="window.switchTabGlobal('chassis')">
+            <h4 style="color: var(--accent); margin-bottom: 6px;">STM32 麦克纳姆底盘</h4>
+            <p class="card-desc">负责解算物理速度指令，通过离散微占空比插帧降低最低平均速，接收物理急停指令。</p>
+            <span style="font-size: 0.72rem; color: var(--accent); font-weight: bold; display: block; margin-top: 8px;">查看详情 &rarr;</span>
+          </div>
+          <div class="card" style="cursor: pointer;" onclick="window.switchTabGlobal('arm')">
+            <h4 style="color: var(--accent); margin-bottom: 6px;">机械臂控制器 (Arm Controller)</h4>
+            <p class="card-desc">AT_TABLE_EDGE 后协同动作，控制多自由度机械臂接近并完成取物精准抓取动作。</p>
+            <span style="font-size: 0.72rem; color: var(--accent); font-weight: bold; display: block; margin-top: 8px;">查看详情 &rarr;</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Sub-Tab 4.1: STM32 Chassis -->
+      <section class="section-panel" id="chassis">
+        <div class="module-header-mount" data-module="chassis"></div>
+        <div class="module-gallery-mount" data-module="chassis"></div>
+        <div id="doc-content-chassis" class="module-doc-content">
+          <!-- Injected dynamically -->
+        </div>
+      </section>
+
+      <!-- Sub-Tab 4.2: Arm Controller -->
+      <section class="section-panel" id="arm">
+        <div class="module-header-mount" data-module="arm"></div>
+        <div class="module-gallery-mount" data-module="arm"></div>
+        <div id="doc-content-arm" class="module-doc-content">
+          <!-- Injected dynamically -->
+        </div>
+      </section>
+
+      <!-- Tab 5: Cloud Grasping -->
+      <section class="section-panel" id="cloud_grasp">
+        <div class="module-header-mount" data-module="cloud_grasp"></div>
+        <div class="module-gallery-mount" data-module="cloud_grasp"></div>
+        <div id="doc-content-cloud_grasp" class="module-doc-content">
+          <!-- Injected dynamically -->
+        </div>
+      </section>
+
+      <!-- Tab 6: Runtime & Startup -->
+      <section class="section-panel" id="startup">
+        <div class="section-header">
+          <div>
+            <h2 class="section-title">运行启动与守护时序调试</h2>
+            <p class="section-desc">详细展示多进程启动校验、套接字端口及常见故障急停排障方法。</p>
+          </div>
+        </div>
+        
+        <!-- Timeline and checklist already built in first edition -->
+        <div class="grid-2" style="margin-bottom: 24px;">
+          <div>
+            <h3 style="margin-bottom: 12px; font-size: 1.1rem;">Full 模式启动检查链</h3>
+            <div class="card">
+              <div class="flow-container">
+                <div class="flow-step active">
+                  <div class="flow-step-num">检查 1</div>
+                  <div class="flow-step-title">清理 stale sockets 套接字残余</div>
+                  <div class="flow-step-desc"><code>rm -f /tmp/robot_stack/*.sock</code>，初始化套接字权限。</div>
+                </div>
+                <div class="flow-step active">
+                  <div class="flow-step-num">检查 2</div>
+                  <div class="flow-step-title">拉起 VISTA 感知服务端</div>
+                  <div class="flow-step-desc">使用 <code>/usr/bin/python3 -m vision_module.app.app</code>，后台建立摄像头获取。</div>
+                </div>
+                <div class="flow-step active">
+                  <div class="flow-step-num">检查 3</div>
+                  <div class="flow-step-title">轮询等待 vision_req.sock 产生</div>
+                  <div class="flow-step-desc">等待进程在端口正常监听，最多自检 35 秒。</div>
+                </div>
+                <div class="flow-step active">
+                  <div class="flow-step-num">检查 4</div>
+                  <div class="flow-step-title">拉起 Orchestrator 控制状态机</div>
+                  <div class="flow-step-desc">打开底层物理串口 <code>/dev/ttyHS1</code>。</div>
+                </div>
+                <div class="flow-step active">
+                  <div class="flow-step-num">检查 5</div>
+                  <div class="flow-step-title">轮询等待 task_cmd.sock 与 vision_obs.sock 建立</div>
+                  <div class="flow-step-desc">验证多套接字之间读写管道联通。</div>
+                </div>
+                <div class="flow-step active">
+                  <div class="flow-step-num">检查 6</div>
+                  <div class="flow-step-title">开启 Mobile Gateway 小程序桥接网关</div>
+                  <div class="flow-step-desc">前置鉴权，MQTT 离线检测机制启动。</div>
+                </div>
+                <div class="flow-step">
+                  <div class="flow-step-num">就绪</div>
+                  <div class="flow-step-title">进入 IDLE 待命模式</div>
+                  <div class="flow-step-desc">自检成功，系统进入热待机，可以接收小程序端指令。</div>
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          <div>
+            <h3 style="margin-bottom: 12px; font-size: 1.1rem;">UDS socket 套接字详细定位</h3>
+            <div class="card" style="margin-bottom: 12px;">
+              <h5 style="font-family: var(--font-mono); font-size: 0.82rem; color: var(--accent);">/tmp/robot_stack/vision_req.sock</h5>
+              <p class="card-desc">Orchestrator 调配 VISTA Perceptual Stage 感知阶段转换的请求端点。</p>
+            </div>
+            <div class="card" style="margin-bottom: 12px;">
+              <h5 style="font-family: var(--font-mono); font-size: 0.82rem; color: var(--accent);">/tmp/robot_stack/task_cmd.sock</h5>
+              <p class="card-desc">Mobile Gateway 转发用户 fetch_object 指令到状态机的控制输入端点。</p>
+            </div>
+            <div class="card" style="margin-bottom: 12px;">
+              <h5 style="font-family: var(--font-mono); font-size: 0.82rem; color: var(--accent);">/tmp/robot_stack/vision_obs.sock</h5>
+              <p class="card-desc">VISTA 高频推送 obs_class="control" 距离角度控制包给状态机的对齐决策端点。</p>
+            </div>
+            <div class="card">
+              <h5 style="font-family: var(--font-mono); font-size: 0.82rem; color: var(--accent);">/tmp/robot_stack/task_ack.sock</h5>
+              <p class="card-desc">状态机执行任务终点或故障超时时，反向推送异步返回包通知网关的反馈端点。</p>
+            </div>
+          </div>
+        </div>
+
+        <div id="doc-content-startup" class="module-doc-content">
+          <!-- Injected dynamically -->
+        </div>
+      </section>
+
+      <!-- Tab 7: Configuration Matrix -->
+      <section class="section-panel" id="config">
+        <div class="section-header">
+          <div>
+            <h2 class="section-title">核心配置层级与运行矩阵</h2>
+            <p class="section-desc">包含多层覆盖配置体系，参数检验安全围栏与核心运行配置表。</p>
+          </div>
+        </div>
+        
+        <div class="config-table-container" style="margin-bottom: 24px;">
+          <table class="config-table">
+            <thead>
+              <tr>
+                <th style="width: 180px;">配置参数</th>
+                <th>作用描述</th>
+                <th style="width: 120px; text-align: center;">板端真值 (Board)</th>
+                <th style="width: 120px; text-align: center;">主机仿真值 (Dev)</th>
+                <th>危险警示限制与原因</th>
+              </tr>
+            </thead>
+            <tbody id="configParamsBody">
+              <!-- Rendered dynamically -->
+            </tbody>
+          </table>
+        </div>
+
+        <div id="doc-content-config" class="module-doc-content">
+          <!-- Injected dynamically -->
+        </div>
+      </section>
+
+      <!-- Tab 8: Testing & Debug (Tests lists and Troubleshooting accordion) -->
+      <section class="section-panel" id="testing">
+        <div class="section-header">
+          <div>
+            <h2 class="section-title">测试体系与排障控制台</h2>
+            <p class="section-desc">防倒退核心契约测试清单以及 6 大主要运行时常见故障排障面板。</p>
+          </div>
+        </div>
+        
+        <div style="margin-bottom: 24px;">
+          <h3 style="margin-bottom: 12px; font-size: 1.15rem; color: var(--accent);">防倒退必要契约测试列表</h3>
+          <div class="config-table-container">
+            <table class="config-table">
+              <thead>
+                <tr>
+                  <th style="width: 200px;">测试脚本</th>
+                  <th>安全拦截风险定义</th>
+                  <th style="width: 380px;">运行指令</th>
+                </tr>
+              </thead>
+              <tbody id="testingListBody">
+                <!-- Injected dynamically -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+        
+        <div>
+          <h3 style="margin-bottom: 12px; font-size: 1.15rem; color: var(--accent);">主要故障异常快速诊断卡片</h3>
+          <div class="accordion" id="troubleAccordionList">
+            <!-- Injected dynamically -->
+          </div>
+        </div>
+
+        <div id="doc-content-testing" class="module-doc-content">
+          <!-- Injected dynamically -->
+        </div>
+      </section>
+
+      <!-- Tab 9: Documentation Library (Bottom Archive Index) -->
+      <section class="section-panel" id="reference">
+        <div class="section-header">
+          <div>
+            <h2 class="section-title">项目文档阅览室 (Archive Docs)</h2>
+            <p class="section-desc">此处列出项目中扫描提取的所有 Markdown 原始文件。仅作为底部归档目录索引，不影响主要业务流程的阅读体验。</p>
+          </div>
+        </div>
+        
+        <div id="referenceDocsList">
+          <!-- Rendered dynamically -->
+        </div>
+      </section>
+
+    </main>
+
+    <!-- Right Side Context Rail -->
+    <aside class="context-rail">
+      <!-- Card 1: 当前模块速览 -->
+      <div class="rail-card" id="railSummaryCard">
+        <div class="rail-card-header">
+          <svg viewBox="0 0 24 24" class="rail-card-icon"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/></svg>
+          <h3 class="rail-card-title">当前模块速览</h3>
+        </div>
+        <div class="rail-card-body">
+          <div class="rail-module-badge" id="railModuleBadge">Overview</div>
+          <p class="rail-summary-text" id="railSummary">模块速览摘要加载中...</p>
+        </div>
+      </div>
+      
+      <!-- Card 2: 关联信息卡 -->
+      <div class="rail-card" id="railInfoCard">
+        <div class="rail-card-header">
+          <svg viewBox="0 0 24 24" class="rail-card-icon"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>
+          <h3 class="rail-card-title">系统关联信息</h3>
+        </div>
+        <div class="rail-card-body" style="padding: 0;">
+          <div class="rail-info-table" id="railInfoList">
+            <!-- Rendered dynamically -->
+          </div>
+        </div>
+      </div>
+      
+      <!-- Card 3: 离线状态卡 -->
+      <div class="rail-card" id="railOfflineCard">
+        <div class="rail-card-header">
+          <div class="rail-status-dot status-pulse"></div>
+          <h3 class="rail-card-title">本地离线运行模式</h3>
+        </div>
+        <div class="rail-card-body">
+          <div class="rail-status-text">OFFLINE READY / LOCAL LOADED</div>
+          <p class="rail-desc-text">本控制台已整合离线双通道加载，所有核心配置参数、Markdown正文及WebP调试现场图片均由本地离线资源渲染，完全脱离外部CDN与网络依赖。</p>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- Fullscreen Raw Document Viewer Modal -->
+  <div id="rawDocViewModal" style="display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0,0,0,0.4); backdrop-filter: blur(4px);">
+    <div style="background-color: var(--card-bg); margin: 60px auto; padding: 24px; border: 1px solid var(--card-border); width: 75%; max-width: 900px; border-radius: 12px; box-shadow: var(--shadow-lg); position: relative; animation: fadeIn 0.2s ease;">
+      <button id="rawDocModalClose" style="position: absolute; top: 16px; right: 16px; font-size: 1.5rem; font-weight: bold; background: none; border: none; cursor: pointer; color: var(--text-secondary); line-height: 1;">&times;</button>
+      <h3 id="rawDocModalTitle" style="font-size: 1.25rem; font-weight: 800; margin-bottom: 12px; border-bottom: 2px solid var(--accent); padding-bottom: 8px;">文档标题</h3>
+      <div id="rawDocModalBody" style="max-height: 70vh; overflow-y: auto; padding-right: 8px;">
+        <!-- Full compiled markdown HTML injected here -->
+      </div>
+    </div>
+  </div>
+
+</body>
+</html>
