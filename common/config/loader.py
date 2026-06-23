@@ -97,6 +97,12 @@ def apply_env_overrides(config: SystemGlobalConfig) -> None:
             else:
                 setattr(obj, attr, str(raw).strip())
 
+    def _set_endpoint_from_env(endpoint, prefix: str) -> None:
+        _set_from_env(endpoint, "transport", f"{prefix}_TRANSPORT", str)
+        _set_from_env(endpoint, "ipc_socket_path", f"{prefix}_SOCKET_PATH", str)
+        _set_from_env(endpoint, "send_mode", f"{prefix}_SEND_MODE", str)
+        _set_from_env(endpoint, "async_enabled", f"{prefix}_ASYNC_ENABLED", bool)
+
     # Vision Runtime
     _set_from_env(config.vision.runtime, "project_root", "VISION_PROJECT_ROOT", str)
     _set_from_env(config.vision.runtime, "runs_dir", "VISION_RUNS_DIR", str)
@@ -169,9 +175,28 @@ def apply_env_overrides(config: SystemGlobalConfig) -> None:
     _set_from_env(config.gateway.backend, "observer_enabled", "MOBILE_GATEWAY_OBSERVER_ENABLED", bool)
     _set_from_env(config.gateway.backend, "observer_poll_interval_s", "MOBILE_GATEWAY_OBSERVER_POLL_INTERVAL_S", float)
     _set_from_env(config.gateway.backend, "orchestrator_runs_dir", "MOBILE_GATEWAY_ORCH_RUNS_DIR", str)
+    _set_from_env(config.gateway.backend, "state_blocks_path", "MOBILE_GATEWAY_ORCH_STATE_BLOCKS_PATH", str)
     _set_from_env(config.gateway.backend, "state_block_log_mode", "MOBILE_GATEWAY_ORCH_STATE_BLOCK_LOG_MODE", str)
     _set_from_env(config.gateway.backend, "state_block_log_period_s", "MOBILE_GATEWAY_ORCH_STATE_BLOCK_LOG_PERIOD_S", float)
     _set_from_env(config.gateway.backend, "stop_cooldown_s", "MOBILE_GATEWAY_STOP_COOLDOWN_S", float)
+
+    # Gateway MQTT
+    _set_from_env(config.gateway.mqtt, "enabled", "MOBILE_GATEWAY_MQTT_ENABLED", bool)
+    _set_from_env(config.gateway.mqtt, "transport", "MOBILE_GATEWAY_MQTT_TRANSPORT", str)
+    _set_from_env(config.gateway.mqtt, "use_tls", "MOBILE_GATEWAY_MQTT_USE_TLS", bool)
+    _set_from_env(config.gateway.mqtt, "broker_host", "MOBILE_GATEWAY_MQTT_BROKER_HOST", str)
+    _set_from_env(config.gateway.mqtt, "broker_port", "MOBILE_GATEWAY_MQTT_BROKER_PORT", int)
+    _set_from_env(config.gateway.mqtt, "websocket_path", "MOBILE_GATEWAY_MQTT_WEBSOCKET_PATH", str)
+    _set_from_env(config.gateway.mqtt, "username", "MOBILE_GATEWAY_MQTT_USERNAME", str)
+    _set_from_env(config.gateway.mqtt, "password", "MOBILE_GATEWAY_MQTT_PASSWORD", str)
+    _set_from_env(config.gateway.mqtt, "client_id", "MOBILE_GATEWAY_MQTT_CLIENT_ID", str)
+    _set_from_env(config.gateway.mqtt, "robot_id", "MOBILE_GATEWAY_MQTT_ROBOT_ID", str)
+
+    # Gateway local IPC endpoints
+    _set_endpoint_from_env(config.gateway.command_in, "MOBILE_GATEWAY_COMMAND_IN")
+    _set_endpoint_from_env(config.gateway.status_out, "MOBILE_GATEWAY_STATUS_OUT")
+    _set_endpoint_from_env(config.gateway.orchestrator_task_cmd_out, "MOBILE_GATEWAY_ORCH_TASK_CMD")
+    _set_endpoint_from_env(config.gateway.orchestrator_task_ack_in, "MOBILE_GATEWAY_ORCH_TASK_ACK")
 
     # Online Edge Runtime
     _set_from_env(config.online_edge.runtime, "project_root", "EDGE_PROJECT_ROOT", str)

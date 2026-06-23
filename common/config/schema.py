@@ -861,7 +861,7 @@ class GatewayRuntimeConfig:
 
 @dataclass
 class GatewayBackendConfig:
-    mode: str = "mock"  # mock / orchestrator_tcp / tcp_no_ack
+    mode: str = "mock"  # mock / orchestrator_tcp / tcp_no_ack / orchestrator_uds / uds_no_ack
     default_robot_id: str = "sc171_car_01"
     default_confidence: float = 0.99
     mock_step_interval_s: float = 0.20

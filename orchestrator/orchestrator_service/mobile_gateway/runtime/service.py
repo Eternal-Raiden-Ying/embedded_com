@@ -73,8 +73,13 @@ class TaskTemplate:
     text: Optional[str] = None
 
 
-ACK_REQUIRED_MODES = {"orchestrator_tcp"}
-TCP_BACKEND_ALIASES = {"orchestrator_bridge": "orchestrator_tcp", "dry_orchestrator_tcp": "tcp_no_ack"}
+ACK_REQUIRED_MODES = {"orchestrator_tcp", "orchestrator_uds"}
+REAL_ORCHESTRATOR_BACKEND_MODES = {"orchestrator_tcp", "tcp_no_ack", "orchestrator_uds", "uds_no_ack"}
+TCP_BACKEND_ALIASES = {
+    "orchestrator_bridge": "orchestrator_tcp",
+    "dry_orchestrator_tcp": "tcp_no_ack",
+    "dry_orchestrator_uds": "uds_no_ack",
+}
 
 
 class TcpTaskCmdBackend:
@@ -330,12 +335,12 @@ class MobileGatewayService(BaseModule):
         self.ack_server = None
         if self.backend_mode in ACK_REQUIRED_MODES and str(cfg.orchestrator_task_ack_in.transport).strip().lower() != "disabled":
             self.ack_server = self._build_optional_server(cfg.orchestrator_task_ack_in, "orchestrator_task_ack_in")
-        if self.backend_mode in {"orchestrator_tcp", "tcp_no_ack"}:
+        if self.backend_mode in REAL_ORCHESTRATOR_BACKEND_MODES:
             self.backend: Any = TcpTaskCmdBackend(cfg.orchestrator_task_cmd_out)
         else:
             self.backend = MockOrchestratorBackend(cfg.backend.mock_step_interval_s)
         self.observer = None
-        if self.backend_mode in {"orchestrator_tcp", "tcp_no_ack"} and cfg.backend.observer_enabled:
+        if self.backend_mode in REAL_ORCHESTRATOR_BACKEND_MODES and cfg.backend.observer_enabled:
             self.observer = OrchestratorStateObserver(
                 runs_dir=cfg.backend.orchestrator_runs_dir,
                 state_blocks_path=cfg.backend.state_blocks_path,

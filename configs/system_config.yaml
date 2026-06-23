@@ -596,7 +596,7 @@ gateway:
     status_stdout: true # Write status payload logs to console stdout
     stdin_enabled: false # Read tasks from terminal stdin
   backend:
-    mode: "mock" # Backend gateway operations mode: mock, orchestrator_tcp, tcp_no_ack
+    mode: "mock" # Backend gateway operations mode: mock, orchestrator_tcp, tcp_no_ack, orchestrator_uds, uds_no_ack
     default_robot_id: "sc171_car_01" # Robot serial number identifier
     default_confidence: 0.99 # Mock confidence level default
     mock_step_interval_s: 0.20 # Period of mock state changes

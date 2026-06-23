@@ -63,6 +63,7 @@ STACK_SOCK_DIR="${STACK_SOCK_DIR:-/tmp/robot_stack}"
 VISION_READY_SOCKETS="${VISION_READY_SOCKETS:-/tmp/robot_stack/vision_req.sock}"
 ORCH_READY_SOCKETS="${ORCH_READY_SOCKETS:-/tmp/robot_stack/task_cmd.sock /tmp/robot_stack/vision_obs.sock}"
 GATEWAY_READY_PATTERN="${GATEWAY_READY_PATTERN:-gateway online|SERVICE_READY|mqtt connected|mqtt disabled}"
+GATEWAY_READY_SOCKETS="${GATEWAY_READY_SOCKETS:-/tmp/robot_stack/mobile_gateway_cmd.sock}"
 
 # 额外等待（秒）
 VISION_READY_EXTRA_S="${VISION_READY_EXTRA_S:-2}"
@@ -560,8 +561,13 @@ export MOBILE_GATEWAY_LOG_FILE="$(gateway_logs_enabled && echo "$GATEWAY_LOG_DIR
 export MOBILE_GATEWAY_RUNS_DIR="$STACK_RUNS_ROOT"
 export MOBILE_GATEWAY_ORCH_RUNS_DIR="$STACK_RUNS_ROOT"
 export MOBILE_GATEWAY_ORCH_STATE_BLOCKS_PATH="$STACK_RUN_DIR/orchestrator/state_blocks.jsonl"
-export MOBILE_GATEWAY_ORCH_TASK_CMD_SOCKET_PATH="/tmp/robot_stack/task_cmd.sock"
-export MOBILE_GATEWAY_ORCH_TASK_ACK_SOCKET_PATH="/tmp/robot_stack/task_ack.sock"
+export MOBILE_GATEWAY_BACKEND="${MOBILE_GATEWAY_BACKEND:-orchestrator_uds}"
+export MOBILE_GATEWAY_COMMAND_IN_TRANSPORT="${MOBILE_GATEWAY_COMMAND_IN_TRANSPORT:-uds}"
+export MOBILE_GATEWAY_COMMAND_IN_SOCKET_PATH="${MOBILE_GATEWAY_COMMAND_IN_SOCKET_PATH:-/tmp/robot_stack/mobile_gateway_cmd.sock}"
+export MOBILE_GATEWAY_ORCH_TASK_CMD_TRANSPORT="${MOBILE_GATEWAY_ORCH_TASK_CMD_TRANSPORT:-uds}"
+export MOBILE_GATEWAY_ORCH_TASK_CMD_SOCKET_PATH="${MOBILE_GATEWAY_ORCH_TASK_CMD_SOCKET_PATH:-/tmp/robot_stack/task_cmd.sock}"
+export MOBILE_GATEWAY_ORCH_TASK_ACK_TRANSPORT="${MOBILE_GATEWAY_ORCH_TASK_ACK_TRANSPORT:-uds}"
+export MOBILE_GATEWAY_ORCH_TASK_ACK_SOCKET_PATH="${MOBILE_GATEWAY_ORCH_TASK_ACK_SOCKET_PATH:-/tmp/robot_stack/task_ack.sock}"
 exec stdbuf -oL -eL /usr/bin/python3 -m orchestrator_service.mobile_gateway.runtime.service --config "$GATEWAY_CONFIG"
 CMD
 )
@@ -1009,8 +1015,11 @@ except Exception as e:
       exit 1
     fi
   else
-    sleep "$GATEWAY_READY_EXTRA_S"
-    mark note "gateway logs disabled by default; skipped log-based gateway ready-check"
+    if ! wait_for_sockets "mobile_gateway" "$GATEWAY_READY_SOCKETS" "$READY_TIMEOUT_S" "$GATEWAY_READY_EXTRA_S"; then
+      stop_all || true
+      exit 1
+    fi
+    mark note "gateway logs disabled by default; used socket-based gateway ready-check"
   fi
 
   headline "启动完成"

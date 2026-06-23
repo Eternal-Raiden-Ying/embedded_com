@@ -84,6 +84,49 @@ class ConfigLoaderLayeringTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "soft_stop_command"):
             validate_config(cfg)
 
+    def test_gateway_env_overrides_match_stack_launcher_socket_names(self):
+        env = {
+            "SYSTEM_CONFIG_PROFILE": "windows_dev",
+            "MOBILE_GATEWAY_BACKEND": "orchestrator_uds",
+            "MOBILE_GATEWAY_COMMAND_IN_TRANSPORT": "uds",
+            "MOBILE_GATEWAY_COMMAND_IN_SOCKET_PATH": "/tmp/robot_stack/mobile_gateway_cmd.sock",
+            "MOBILE_GATEWAY_ORCH_TASK_CMD_TRANSPORT": "uds",
+            "MOBILE_GATEWAY_ORCH_TASK_CMD_SOCKET_PATH": "/tmp/robot_stack/task_cmd.sock",
+            "MOBILE_GATEWAY_ORCH_TASK_ACK_TRANSPORT": "uds",
+            "MOBILE_GATEWAY_ORCH_TASK_ACK_SOCKET_PATH": "/tmp/robot_stack/task_ack.sock",
+            "MOBILE_GATEWAY_ORCH_STATE_BLOCKS_PATH": "/tmp/robot_stack/run/orchestrator/state_blocks.jsonl",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            cfg = load_global_config(str(ROOT / "configs" / "system_config.yaml"))
+
+        self.assertEqual(cfg.gateway.backend.mode, "orchestrator_uds")
+        self.assertEqual(cfg.gateway.command_in.transport, "uds")
+        self.assertEqual(cfg.gateway.command_in.ipc_socket_path, "/tmp/robot_stack/mobile_gateway_cmd.sock")
+        self.assertEqual(cfg.gateway.orchestrator_task_cmd_out.transport, "uds")
+        self.assertEqual(cfg.gateway.orchestrator_task_cmd_out.ipc_socket_path, "/tmp/robot_stack/task_cmd.sock")
+        self.assertEqual(cfg.gateway.orchestrator_task_ack_in.transport, "uds")
+        self.assertEqual(cfg.gateway.orchestrator_task_ack_in.ipc_socket_path, "/tmp/robot_stack/task_ack.sock")
+        self.assertEqual(cfg.gateway.backend.state_blocks_path, "/tmp/robot_stack/run/orchestrator/state_blocks.jsonl")
+
+    def test_gateway_orchestrator_uds_uses_real_backend_and_ack_server(self):
+        from common.config.schema import SystemGlobalConfig
+        from orchestrator_service.mobile_gateway.runtime.service import MobileGatewayService, TcpTaskCmdBackend
+
+        cfg = SystemGlobalConfig().gateway
+        cfg.runtime.log_enabled = False
+        cfg.backend.mode = "orchestrator_uds"
+        cfg.orchestrator_task_cmd_out.transport = "uds"
+        cfg.orchestrator_task_cmd_out.ipc_socket_path = "/tmp/robot_stack/task_cmd.sock"
+        cfg.orchestrator_task_ack_in.transport = "uds"
+        cfg.orchestrator_task_ack_in.ipc_socket_path = "/tmp/robot_stack/task_ack.sock"
+
+        service = MobileGatewayService(cfg)
+
+        self.assertEqual(service.backend_mode, "orchestrator_uds")
+        self.assertIsInstance(service.backend, TcpTaskCmdBackend)
+        self.assertIsNotNone(service.ack_server)
+
+
     def test_sc171_board_profile_keeps_real_uart_on_non_windows(self):
         if platform.system().lower().startswith("win"):
             self.skipTest("sc171_board profile intentionally uses UDS and is board-only")
