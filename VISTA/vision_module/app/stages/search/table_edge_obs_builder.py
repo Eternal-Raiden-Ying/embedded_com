@@ -184,11 +184,32 @@ def merge_table_bbox_from_local_perception(
     obs_ts = _local_obs_ts(local_perception, tick_ts)
     frame_id = _local_frame_id(local_perception)
 
+    edge_frame_id = out.get("frame_id") or out.get("frame_seq") or out.get("seq")
+    is_current_frame = (frame_id is not None and edge_frame_id is not None and frame_id == edge_frame_id)
+
     if bbox is None:
-        edge_present = bool(out.get("edge_found", out.get("edge_detected", False)))
+        if is_current_frame:
+            edge_present = bool(out.get("edge_found", False))
+            edge_valid = bool(out.get("edge_valid", False))
+            edge_trusted = bool(out.get("edge_trusted", False))
+            reason = out.get("reason") or ("no_current_table_bbox_edge_candidate_present" if edge_present else "no_current_table_bbox")
+        else:
+            edge_present = False
+            edge_valid = False
+            edge_trusted = False
+            out["edge_found"] = False
+            out["edge_valid"] = False
+            out["edge_trusted"] = False
+            out["point_count"] = 0
+            out["table_point_count"] = 0
+            reason = "no_current_table_bbox"
+
         out.update(
             {
-                "table_found": bool(out.get("edge_found", False) and out.get("edge_valid", False)),
+                "table_found": bool(edge_present and edge_valid),
+                "edge_found": edge_present,
+                "edge_valid": edge_valid,
+                "edge_trusted": edge_trusted,
                 "obs_ts": float(obs_ts),
                 "ts": float(obs_ts),
                 "age_ms": 0.0,
@@ -213,11 +234,33 @@ def merge_table_bbox_from_local_perception(
                 "yolo_table_visible": False,
                 "yolo_table_fresh": False,
                 "yolo_table_age_ms": None,
-                "reason": "no_current_table_bbox_edge_candidate_present" if edge_present else "no_current_table_bbox",
+                "reason": reason,
                 "source": "local_perception_no_table_bbox",
             }
         )
         return out
+
+    if is_current_frame:
+        edge_present = bool(out.get("edge_found", False))
+        edge_valid = bool(out.get("edge_valid", False))
+        edge_trusted = bool(out.get("edge_trusted", False))
+        edge_obs_unavailable = bool(out.get("edge_obs_unavailable", False))
+        point_count = int(out.get("point_count", 0) or 0)
+        table_point_count = int(out.get("table_point_count", 0) or 0)
+        reason = out.get("reason") or ("edge_result_with_local_perception_table_bbox" if edge_present else "table_bbox_from_local_perception_no_edge_result")
+    else:
+        edge_present = False
+        edge_valid = False
+        edge_trusted = False
+        edge_obs_unavailable = True
+        point_count = 0
+        table_point_count = 0
+        reason = "table_bbox_from_local_perception_no_edge_result"
+        out["edge_found"] = False
+        out["edge_valid"] = False
+        out["edge_trusted"] = False
+        out["point_count"] = 0
+        out["table_point_count"] = 0
 
     metrics = _bbox_metrics(bbox, local_perception.get("rgb_shape"))
     source = str(local_perception.get("table_roi_source") or "local_perception_table_bbox")
@@ -228,25 +271,23 @@ def merge_table_bbox_from_local_perception(
         or _bbox_conf(local_perception.get("detected_table_bbox"))
         or _bbox_conf(local_perception.get("table_bbox"))
     )
-    edge_present = bool(out.get("edge_found", out.get("edge_detected", False)))
-    edge_valid = bool(out.get("edge_valid", out.get("edge_geometry_valid", False)))
+
     out.update(
         {
             "table_found": True,
             "edge_found": edge_present,
             "edge_valid": edge_valid,
-            "edge_trusted": bool(out.get("edge_trusted", False)),
-            "edge_obs_unavailable": bool(out.get("edge_obs_unavailable", True)),
-            "depth_valid": None,
+            "edge_trusted": edge_trusted,
+            "edge_obs_unavailable": edge_obs_unavailable,
+            "point_count": point_count,
+            "table_point_count": table_point_count,
             "obs_ts": float(obs_ts),
             "ts": float(obs_ts),
             "age_ms": 0.0,
             "frame_id": frame_id,
             "seq": frame_id,
             "is_stale": False,
-            "reason": (out.get("reason") or "edge_result_with_local_perception_table_bbox")
-            if edge_present
-            else "table_bbox_from_local_perception_no_edge_result",
+            "reason": reason,
             "table_confirmed_by_yolo": True,
             "table_bbox_current_found": True,
             "table_bbox_control_valid": True,
@@ -261,8 +302,8 @@ def merge_table_bbox_from_local_perception(
             "yolo_valid_reason": "table_bbox_found",
             "yolo_invalid_reason": "",
             "docking_enabled_by_yolo": True,
-            "edge_control_allowed": True,
-            "edge_control_block_reason": "",
+            "edge_control_allowed": edge_trusted,
+            "edge_control_block_reason": "" if edge_trusted else (out.get("edge_reject_for_control_reason") or out.get("edge_control_block_reason") or "edge_not_trusted"),
             "yolo_table_control_valid": True,
             "yolo_table_visible": True,
             "yolo_table_fresh": True,
@@ -276,6 +317,12 @@ def merge_table_bbox_from_local_perception(
             "source": "local_perception_table_bbox",
         }
     )
+
+    if is_current_frame:
+        out.setdefault("depth_valid", True)
+    else:
+        out["depth_valid"] = False
+
     out.update(metrics)
     out["yolo_bbox_area_norm"] = out.get("table_bbox_area_ratio")
     out["yolo_bbox_touch_left"] = out.get("table_bbox_touch_left")
@@ -340,24 +387,116 @@ def annotate_table_edge_obs(
     out = dict(obs or default_table_edge_obs())
     out["type"] = "table_edge_obs"
     out["source_mode"] = str(source_mode or "").strip().upper()
-    out["edge_conf"] = float(out.get("edge_conf", out.get("confidence", 0.0)) or 0.0)
-    out["yaw_err"] = out.get("yaw_err", out.get("yaw_err_rad"))
-    out["dist_err"] = out.get("dist_err", out.get("dist_err_m"))
+    
+    # Ensure aliases and defaults are populated first
     out.setdefault("seq", out.get("frame_seq", out.get("frame_id")))
     out.setdefault("frame_id", out.get("frame_seq", out.get("seq")))
-    out["edge_obs_unavailable"] = bool(
+    
+    # Detect candidate
+    edge_candidate = bool(
+        out.get("detector_candidate_line_present")
+        or out.get("candidate")
+        or out.get("candidate_line_present")
+        or out.get("edge_candidate_found")
+        or (out.get("support_count", 0) or 0) > 0
+        or (out.get("inlier_count", 0) or 0) > 0
+    )
+    out["edge_candidate_found"] = edge_candidate
+    out["candidate_line_present"] = edge_candidate
+    out["detector_candidate_line_present"] = edge_candidate
+
+    edge_obs_unavailable = bool(
         out.get("edge_obs_unavailable", False)
         or out.get("reason") in {"depth_unavailable", "depth_frame_missing", "depth_frame_not_2d", "detector_unavailable"}
     )
-    if "edge_found" not in out and "edge_detected" in out:
-        out["edge_found"] = bool(out.get("edge_detected"))
-    if "edge_valid" not in out:
-        if "edge_geometry_valid" in out:
-            out["edge_valid"] = bool(out.get("edge_geometry_valid")) and not out.get("edge_obs_unavailable", False)
+    out["edge_obs_unavailable"] = edge_obs_unavailable
+
+    # Get raw status flags
+    raw_edge_found = bool(out.get("edge_found", out.get("edge_detected", False)))
+    raw_edge_valid = bool(out.get("edge_valid", out.get("edge_geometry_valid", False)))
+    raw_edge_trusted = bool(out.get("edge_trusted", out.get("valid_for_control", out.get("edge_control_allowed", False))))
+
+    # Prioritize and set final fields if this is a fresh results source
+    if source == "results":
+        if raw_edge_trusted and not edge_obs_unavailable:
+            out["reason"] = "edge_trusted"
+            out["edge_found"] = True
+            out["edge_valid"] = True
+            out["edge_trusted"] = True
+            out["valid_for_control"] = True
+            out["edge_control_allowed"] = True
+            out["reject_reason"] = ""
+            out["edge_reject_for_control_reason"] = ""
+            out["edge_control_block_reason"] = ""
+        elif raw_edge_valid and not edge_obs_unavailable:
+            out["reason"] = "edge_valid"
+            out["edge_found"] = True
+            out["edge_valid"] = True
+            out["edge_trusted"] = False
+            out["valid_for_control"] = False
+            out["edge_control_allowed"] = False
+        elif edge_candidate and not edge_obs_unavailable:
+            out["reason"] = "edge_candidate_rejected"
+            out["edge_found"] = True
+            out["edge_valid"] = False
+            out["edge_trusted"] = False
+            out["valid_for_control"] = False
+            out["edge_control_allowed"] = False
         else:
-            out["edge_valid"] = bool(out.get("edge_found", False) and not out.get("edge_obs_unavailable", False))
-    if "valid_for_control" not in out and "edge_trusted" in out:
-        out["valid_for_control"] = bool(out.get("edge_trusted"))
+            out["reason"] = out.get("reason") or "table_bbox_from_local_perception_no_edge_result"
+            out["edge_found"] = False
+            out["edge_valid"] = False
+            out["edge_trusted"] = False
+            out["valid_for_control"] = False
+            out["edge_control_allowed"] = False
+            out["point_count"] = 0
+            out["table_point_count"] = 0
+            if not out.get("reject_reason"):
+                out["reject_reason"] = out["reason"]
+    else:
+        out["edge_found"] = raw_edge_found
+        out["edge_valid"] = raw_edge_valid
+        out["edge_trusted"] = raw_edge_trusted
+        out["valid_for_control"] = raw_edge_trusted
+        out["edge_control_allowed"] = raw_edge_trusted
+
+    # Populate final unified keys
+    out["edge_detected"] = out["edge_found"]
+    out["edge_geometry_valid"] = out["edge_valid"]
+
+    # Align point count fields
+    point_count = int(out.get("point_count", 0) or 0)
+    out["point_count"] = point_count
+
+    table_point_count = int(out.get("table_point_count", 0) or 0)
+    out["table_point_count"] = table_point_count
+
+    support_count = int(out.get("support_count", out.get("fast_support_point_count", 0)) or 0)
+    out["support_count"] = support_count
+    out["fast_support_point_count"] = support_count
+
+    inlier_count = int(out.get("inlier_count", out.get("edge_inlier_count", 0)) or 0)
+    out["inlier_count"] = inlier_count
+    out["edge_inlier_count"] = inlier_count
+    out["valid_edge_points"] = inlier_count
+
+    # Align error fields
+    yaw = out.get("yaw_err_rad", out.get("yaw_err", out.get("yaw")))
+    out["yaw_err_rad"] = yaw
+    out["yaw_err"] = yaw
+    out["yaw"] = yaw
+
+    dist = out.get("dist_err_m", out.get("dist_err", out.get("dist")))
+    out["dist_err_m"] = dist
+    out["dist_err"] = dist
+    out["dist"] = dist
+
+    lateral = out.get("lateral", out.get("lateral_err_m", dist))
+    out["lateral"] = lateral
+    out["lateral_err_m"] = lateral
+
+    out["edge_conf"] = float(out.get("edge_conf", out.get("confidence", 0.0)) or 0.0)
+
     obs_ts = out.get("obs_ts", out.get("ts"))
     age_ms = None
     try:

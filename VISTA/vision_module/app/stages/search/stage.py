@@ -105,6 +105,131 @@ class SearchStagePlan(BaseStagePlan):
                 ctx.stage_state.setdefault("table_edge_obs", table_edge_obs_from_payload(None))
         return StageOutput()
 
+    def _process_table_edge_obs(
+        self,
+        results: dict,
+        ctx: StageContext,
+        tick_input: StageTickInput,
+        local_perception: Optional[dict],
+    ) -> tuple:
+        table_edge_obs, table_edge_source = resolve_stage_summary(
+            results=results,
+            stage_state=ctx.stage_state,
+            state_key="table_edge_obs",
+            default_factory=lambda: table_edge_obs_from_payload(None),
+            result_factory=table_edge_obs_from_results,
+            result_route="table_edge_obs",
+        )
+        table_edge_obs = annotate_table_edge_obs(
+            table_edge_obs,
+            tick_ts=tick_input.ts,
+            source=table_edge_source,
+            source_mode=ctx.current_mode,
+        )
+
+        local_frame_id = None
+        if isinstance(local_perception, dict):
+            local_frame_id = (
+                local_perception.get("frame_seq")
+                or local_perception.get("frame_id")
+                or local_perception.get("camera_frame_seq")
+                or local_perception.get("yolo_frame_seq")
+            )
+        
+        edge_frame_id = table_edge_obs.get("frame_id") or table_edge_obs.get("frame_seq") or table_edge_obs.get("seq")
+        is_current_frame = (local_frame_id is not None and edge_frame_id is not None and local_frame_id == edge_frame_id)
+
+        # Before merge metrics:
+        before_edge_found = bool(table_edge_obs.get("edge_found"))
+        before_edge_valid = bool(table_edge_obs.get("edge_valid"))
+        before_edge_trusted = bool(table_edge_obs.get("edge_trusted"))
+        before_point_count = int(table_edge_obs.get("point_count", 0) or 0)
+        before_table_point_count = int(table_edge_obs.get("table_point_count", 0) or 0)
+        before_yaw = table_edge_obs.get("yaw_err")
+        before_dist = table_edge_obs.get("dist_err")
+        before_reason = table_edge_obs.get("reason")
+
+        # Perform merge:
+        table_edge_obs = merge_table_bbox_from_local_perception(
+            table_edge_obs,
+            local_perception,
+            tick_ts=tick_input.ts,
+        )
+
+        # After merge metrics:
+        after_edge_found = bool(table_edge_obs.get("edge_found"))
+        after_edge_valid = bool(table_edge_obs.get("edge_valid"))
+        after_edge_trusted = bool(table_edge_obs.get("edge_trusted"))
+        after_point_count = int(table_edge_obs.get("point_count", 0) or 0)
+        after_table_point_count = int(table_edge_obs.get("table_point_count", 0) or 0)
+        after_yaw = table_edge_obs.get("yaw_err")
+        after_dist = table_edge_obs.get("dist_err")
+        after_reason = table_edge_obs.get("reason")
+
+        same_frame_mapping_ok = True
+        mismatch_details = []
+        if is_current_frame:
+            if before_edge_found != after_edge_found:
+                same_frame_mapping_ok = False
+                mismatch_details.append(f"edge_found:{before_edge_found}->{after_edge_found}")
+            if before_edge_valid != after_edge_valid:
+                same_frame_mapping_ok = False
+                mismatch_details.append(f"edge_valid:{before_edge_valid}->{after_edge_valid}")
+            if before_edge_trusted != after_edge_trusted:
+                same_frame_mapping_ok = False
+                mismatch_details.append(f"edge_trusted:{before_edge_trusted}->{after_edge_trusted}")
+            if before_point_count != after_point_count:
+                same_frame_mapping_ok = False
+                mismatch_details.append(f"point_count:{before_point_count}->{after_point_count}")
+            if before_table_point_count != after_table_point_count:
+                same_frame_mapping_ok = False
+                mismatch_details.append(f"table_point_count:{before_table_point_count}->{after_table_point_count}")
+            if before_yaw != after_yaw:
+                same_frame_mapping_ok = False
+                mismatch_details.append(f"yaw_err:{before_yaw}->{after_yaw}")
+            if before_dist != after_dist:
+                same_frame_mapping_ok = False
+                mismatch_details.append(f"dist_err:{before_dist}->{after_dist}")
+            if before_reason != after_reason:
+                same_frame_mapping_ok = False
+                mismatch_details.append(f"reason:{before_reason}->{after_reason}")
+
+            if not same_frame_mapping_ok:
+                import logging
+                logger = logging.getLogger("vista.stage.search")
+                logger.warning(
+                    "[EDGE_MAPPING_MISMATCH] frame_id=%s %s",
+                    edge_frame_id,
+                    ", ".join(mismatch_details)
+                )
+
+        import time
+        now = time.time()
+        last_log = getattr(self, "_last_payload_log_ts", 0.0)
+        if now - last_log >= 0.5:
+            self._last_payload_log_ts = now
+            import logging
+            logger = logging.getLogger("vista.stage.search")
+            logger.info(
+                "[EDGE_OBS_PAYLOAD] frame_id=%s source=%s is_current=%s same_frame_mapping_ok=%s "
+                "before=[found=%s valid=%s trusted=%s pts=%s table_pts=%s yaw=%s dist=%s reason=%s] "
+                "after=[found=%s valid=%s trusted=%s pts=%s table_pts=%s yaw=%s dist=%s reason=%s]",
+                edge_frame_id,
+                table_edge_source,
+                is_current_frame,
+                same_frame_mapping_ok,
+                before_edge_found, before_edge_valid, before_edge_trusted, before_point_count, before_table_point_count, before_yaw, before_dist, before_reason,
+                after_edge_found, after_edge_valid, after_edge_trusted, after_point_count, after_table_point_count, after_yaw, after_dist, after_reason
+            )
+
+        ctx.stage_state["table_edge_obs"] = dict(table_edge_obs)
+        
+        force_send = False
+        if table_edge_source == "results" and is_current_frame:
+            force_send = True
+
+        return table_edge_obs, table_edge_source, force_send
+
     def tick(self, tick_input: StageTickInput, ctx: StageContext) -> Optional[StageOutput]:
         results = dict(tick_input.results or {})
         mode = normalize_upper(ctx.current_mode, "")
@@ -123,26 +248,11 @@ class SearchStagePlan(BaseStagePlan):
                     result_factory=lambda payload: target_obs_from_results(payload, ctx.target_name),
                 )
                 ctx.stage_state["target_obs"] = dict(target_obs)
-            table_edge_obs, table_edge_source = resolve_stage_summary(
-                results=results,
-                stage_state=ctx.stage_state,
-                state_key="table_edge_obs",
-                default_factory=lambda: table_edge_obs_from_payload(None),
-                result_factory=table_edge_obs_from_results,
-                result_route="table_edge_obs",
+            
+            table_edge_obs, table_edge_source, force_send = self._process_table_edge_obs(
+                results, ctx, tick_input, local_perception
             )
-            table_edge_obs = annotate_table_edge_obs(
-                table_edge_obs,
-                tick_ts=tick_input.ts,
-                source=table_edge_source,
-                source_mode=ctx.current_mode,
-            )
-            table_edge_obs = merge_table_bbox_from_local_perception(
-                table_edge_obs,
-                local_perception,
-                tick_ts=tick_input.ts,
-            )
-            ctx.stage_state["table_edge_obs"] = dict(table_edge_obs)
+            
             perception = {"table_edge_obs": table_edge_obs}
             if target_obs is not None:
                 perception["target_obs"] = target_obs
@@ -151,6 +261,11 @@ class SearchStagePlan(BaseStagePlan):
             source_payload = {"table_edge_obs": table_edge_source}
             if target_source:
                 source_payload["target_obs"] = target_source
+            
+            signals = {}
+            if force_send:
+                signals["force_send"] = True
+                
             return StageOutput(
                 vision_obs=self.build_obs(
                     ctx,
@@ -163,6 +278,7 @@ class SearchStagePlan(BaseStagePlan):
                     "source": source_payload,
                     "search_kind": ctx.stage_state.get("search_kind"),
                 },
+                signals=signals,
             )
 
         if mode == "FIND_TABLE":
@@ -195,26 +311,15 @@ class SearchStagePlan(BaseStagePlan):
                 default_factory=lambda: target_obs_from_payload(None, ctx.target_name),
                 result_factory=lambda payload: target_obs_from_results(payload, ctx.target_name),
             )
-            table_edge_obs, table_edge_source = resolve_stage_summary(
-                results=results,
-                stage_state=ctx.stage_state,
-                state_key="table_edge_obs",
-                default_factory=lambda: table_edge_obs_from_payload(None),
-                result_factory=table_edge_obs_from_results,
-                result_route="table_edge_obs",
+            
+            table_edge_obs, table_edge_source, force_send = self._process_table_edge_obs(
+                results, ctx, tick_input, results.get("local_perception")
             )
-            table_edge_obs = annotate_table_edge_obs(
-                table_edge_obs,
-                tick_ts=tick_input.ts,
-                source=table_edge_source,
-                source_mode=ctx.current_mode,
-            )
-            table_edge_obs = merge_table_bbox_from_local_perception(
-                table_edge_obs,
-                results.get("local_perception"),
-                tick_ts=tick_input.ts,
-            )
-            ctx.stage_state["table_edge_obs"] = dict(table_edge_obs)
+            
+            signals = {}
+            if force_send:
+                signals["force_send"] = True
+                
             return StageOutput(
                 vision_obs=self.build_obs(
                     ctx,
@@ -230,6 +335,7 @@ class SearchStagePlan(BaseStagePlan):
                     "source": {"target_obs": source, "table_edge_obs": table_edge_source},
                     "search_kind": ctx.stage_state.get("search_kind"),
                 },
+                signals=signals,
             )
 
         return StageOutput(
