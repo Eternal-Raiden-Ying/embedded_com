@@ -21,6 +21,34 @@
 
 ## 2. 运行模式与配置 (Runtime & Environment Config)
 
+### 2.0 本地 HTTP 真实入口 (Default Local HTTP Entry)
+
+`dry_run` 与 `sc171_board/full` profile 默认都使用真实 HTTP 手机端入口，不再默认启动 `mock` backend：
+
+*   `backend.mode=tcp_no_ack`
+*   `command_in.transport=http`
+*   `command_in.tcp_host=0.0.0.0`
+*   `command_in.tcp_port=9001`
+*   legacy JSONL TCP compatibility: `0.0.0.0:9101`
+*   `orchestrator_task_cmd_out.transport=uds`
+*   `orchestrator_task_cmd_out.ipc_socket_path=/tmp/robot_stack/task_cmd.sock`
+
+启动后可用以下命令验证：
+
+```bash
+ss -lntup | egrep '9001|9101|gateway'
+curl http://127.0.0.1:9001/health
+curl -X POST http://127.0.0.1:9001/task \
+  -H "Content-Type: application/json" \
+  -d '{"task_id":"test_001","action":"move","params":{"x":1,"y":2}}'
+python3 tools/mock_mobile_sender.py --host 127.0.0.1 --port 9101 fetch_object apple
+tail -f logs/runs/latest/mobile_gateway/mobile_gateway.out
+tail -f logs/runs/latest/orchestrator/orchestrator.out
+tail -f logs/runs/latest/orchestrator/heartbeat.jsonl
+```
+
+`/task` 同时接受正式移动端命令 payload（例如 `cmd=fetch_object`）和简化 TaskCmd 风格 payload（例如 `intent` 或 `action`）。
+
 ### 2.1 网关运行级别 (Runtime Styles)
 网关支持两种运行日志级别：
 *   **`production` (生产模式)**：正式服务结构，低噪日志。禁止打印 raw MQTT payload 敏感内容，在公开的 MQTT 载荷中不暴露底层私有字段。

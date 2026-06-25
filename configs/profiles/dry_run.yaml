@@ -13,9 +13,8 @@ runtime_overrides:
       dry_run: true
       readback_enabled: false
     task_cmd_in:
-      transport: "tcp"
-      tcp_host: "127.0.0.1"
-      tcp_port: 19101
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/task_cmd.sock"
     task_ack_out:
       transport: "tcp"
       tcp_host: "127.0.0.1"
@@ -31,12 +30,17 @@ runtime_overrides:
     tts_event_out:
       transport: "disabled"
   gateway:
+    backend:
+      mode: "tcp_no_ack"
     command_in:
-      transport: "disabled"
+      transport: "http"
+      tcp_host: "0.0.0.0"
+      tcp_port: 9001
     status_out:
       transport: "disabled"
     orchestrator_task_cmd_out:
-      transport: "disabled"
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/task_cmd.sock"
     orchestrator_task_ack_in:
       transport: "disabled"
   online_edge:

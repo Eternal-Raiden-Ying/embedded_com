@@ -1512,6 +1512,18 @@ class MotionController:
         return self._from_docking_cmd("FINAL_LOCK", obs, fallback_forward=True)
 
     def fov_table_approach_cmd(self, obs: Optional[TableEdgeObs], phase: str = "", mode: str = "CONTROLLED_APPROACH") -> MotionDecision:
+        mode_name = str(mode or "CONTROLLED_APPROACH").upper().strip() or "CONTROLLED_APPROACH"
+        if (
+            mode_name in {"CONTROLLED_APPROACH", "EDGE_ADJUST", "YOLO_APPROACH"}
+            and self._table_bbox_found(obs)
+            and not self._edge_trusted(obs)
+        ):
+            return self.yolo_table_search_cmd(
+                obs,
+                mode=mode_name,
+                reason="table_bbox_found_edge_not_trusted_yolo_forward",
+                control_source="yolo_forward",
+            )
         return self._compose_fov_table_cmd(obs, mode, phase=phase, reason="fov_table_approach")
 
     def plane_approach_cmd(self, obs: Optional[TableEdgeObs], mode: str = "CONTROLLED_APPROACH", reason: str = "plane_approach") -> MotionDecision:

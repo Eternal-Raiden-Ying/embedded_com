@@ -596,7 +596,7 @@ gateway:
     status_stdout: true # Write status payload logs to console stdout
     stdin_enabled: false # Read tasks from terminal stdin
   backend:
-    mode: "mock" # Backend gateway operations mode: mock, orchestrator_tcp, tcp_no_ack
+    mode: "tcp_no_ack" # Backend gateway operations mode: mock, orchestrator_tcp, tcp_no_ack
     default_robot_id: "sc171_car_01" # Robot serial number identifier
     default_confidence: 0.99 # Mock confidence level default
     mock_step_interval_s: 0.20 # Period of mock state changes
@@ -633,8 +633,10 @@ gateway:
       status: "robot/sc171_car_01/status" # Status topic path
       heartbeat: "robot/sc171_car_01/heartbeat" # Heartbeat topic path
   command_in:
-    transport: "uds" # Gateway incoming command IPC mode
+    transport: "http" # Gateway external command mode: http, tcp, uds, disabled
     ipc_socket_path: "/tmp/robot_stack/mobile_gateway_cmd.sock" # Socket file path
+    tcp_host: "0.0.0.0" # HTTP/TCP bind host for real mobile entry
+    tcp_port: 9001 # HTTP/TCP bind port for real mobile entry
   status_out:
     transport: "disabled" # Gateway outgoing status IPC mode
     ipc_socket_path: "/tmp/robot_stack/mobile_gateway_status.sock" # Socket file path

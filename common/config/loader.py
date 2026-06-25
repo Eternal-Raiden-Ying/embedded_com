@@ -106,6 +106,13 @@ def apply_env_overrides(config: SystemGlobalConfig) -> None:
     # Vision Model
     _set_from_env(config.vision.model, "active_model", "VISTA_TABLE_MODEL", str)
 
+    # Vision debug / preview compatibility with start_robot_stack.sh
+    _set_from_env(config.vision.debug, "preview", "VISTA_DEBUG_PREVIEW", bool)
+    _set_from_env(config.vision.debug, "preview", "VISTA_PREVIEW_RGB", bool)
+    _set_from_env(config.vision.preview, "show_rgb", "VISTA_PREVIEW_RGB", bool)
+    _set_from_env(config.vision.debug, "table_bbox_enabled", "VISTA_TABLE_BBOX_ENABLE", bool)
+    _set_from_env(config.vision.debug, "mock_table_bbox", "VISTA_MOCK_TABLE_BBOX", str)
+
     # Vision IPC endpoints
     _set_from_env(config.vision.req_in, "transport", "VISION_REQ_IN_TRANSPORT", str)
     _set_from_env(config.vision.req_in, "ipc_socket_path", "VISION_REQ_IN_SOCKET_PATH", str)
@@ -196,6 +203,40 @@ def apply_env_overrides(config: SystemGlobalConfig) -> None:
     _set_from_env(config.gateway.backend, "state_block_log_mode", "MOBILE_GATEWAY_ORCH_STATE_BLOCK_LOG_MODE", str)
     _set_from_env(config.gateway.backend, "state_block_log_period_s", "MOBILE_GATEWAY_ORCH_STATE_BLOCK_LOG_PERIOD_S", float)
     _set_from_env(config.gateway.backend, "stop_cooldown_s", "MOBILE_GATEWAY_STOP_COOLDOWN_S", float)
+
+    # Gateway MQTT
+    _set_from_env(config.gateway.mqtt, "enabled", "MOBILE_GATEWAY_MQTT_ENABLED", bool)
+    _set_from_env(config.gateway.mqtt, "transport", "MOBILE_GATEWAY_MQTT_TRANSPORT", str)
+    _set_from_env(config.gateway.mqtt, "use_tls", "MOBILE_GATEWAY_MQTT_USE_TLS", bool)
+    _set_from_env(config.gateway.mqtt, "broker_host", "MOBILE_GATEWAY_MQTT_BROKER_HOST", str)
+    _set_from_env(config.gateway.mqtt, "broker_port", "MOBILE_GATEWAY_MQTT_BROKER_PORT", int)
+    _set_from_env(config.gateway.mqtt, "websocket_path", "MOBILE_GATEWAY_MQTT_WEBSOCKET_PATH", str)
+    _set_from_env(config.gateway.mqtt, "username", "MOBILE_GATEWAY_MQTT_USERNAME", str)
+    _set_from_env(config.gateway.mqtt, "password", "MOBILE_GATEWAY_MQTT_PASSWORD", str)
+    _set_from_env(config.gateway.mqtt, "client_id", "MOBILE_GATEWAY_MQTT_CLIENT_ID", str)
+    _set_from_env(config.gateway.mqtt, "robot_id", "MOBILE_GATEWAY_MQTT_ROBOT_ID", str)
+    _set_from_env(config.gateway.mqtt.topics, "cmd", "MOBILE_GATEWAY_MQTT_TOPIC_CMD", str)
+    _set_from_env(config.gateway.mqtt.topics, "ack", "MOBILE_GATEWAY_MQTT_TOPIC_ACK", str)
+    _set_from_env(config.gateway.mqtt.topics, "status", "MOBILE_GATEWAY_MQTT_TOPIC_STATUS", str)
+    _set_from_env(config.gateway.mqtt.topics, "heartbeat", "MOBILE_GATEWAY_MQTT_TOPIC_HEARTBEAT", str)
+
+    # Gateway endpoints
+    _set_from_env(config.gateway.command_in, "transport", "MOBILE_GATEWAY_COMMAND_IN_TRANSPORT", str)
+    _set_from_env(config.gateway.command_in, "ipc_socket_path", "MOBILE_GATEWAY_COMMAND_IN_SOCKET_PATH", str)
+    _set_from_env(config.gateway.command_in, "tcp_host", "MOBILE_GATEWAY_COMMAND_IN_HOST", str)
+    _set_from_env(config.gateway.command_in, "tcp_port", "MOBILE_GATEWAY_COMMAND_IN_PORT", int)
+    _set_from_env(config.gateway.status_out, "transport", "MOBILE_GATEWAY_STATUS_OUT_TRANSPORT", str)
+    _set_from_env(config.gateway.status_out, "ipc_socket_path", "MOBILE_GATEWAY_STATUS_OUT_SOCKET_PATH", str)
+    _set_from_env(config.gateway.status_out, "tcp_host", "MOBILE_GATEWAY_STATUS_OUT_HOST", str)
+    _set_from_env(config.gateway.status_out, "tcp_port", "MOBILE_GATEWAY_STATUS_OUT_PORT", int)
+    _set_from_env(config.gateway.orchestrator_task_cmd_out, "transport", "MOBILE_GATEWAY_ORCH_TASK_CMD_TRANSPORT", str)
+    _set_from_env(config.gateway.orchestrator_task_cmd_out, "ipc_socket_path", "MOBILE_GATEWAY_ORCH_TASK_CMD_SOCKET_PATH", str)
+    _set_from_env(config.gateway.orchestrator_task_cmd_out, "tcp_host", "MOBILE_GATEWAY_ORCH_TASK_CMD_HOST", str)
+    _set_from_env(config.gateway.orchestrator_task_cmd_out, "tcp_port", "MOBILE_GATEWAY_ORCH_TASK_CMD_PORT", int)
+    _set_from_env(config.gateway.orchestrator_task_ack_in, "transport", "MOBILE_GATEWAY_ORCH_TASK_ACK_TRANSPORT", str)
+    _set_from_env(config.gateway.orchestrator_task_ack_in, "ipc_socket_path", "MOBILE_GATEWAY_ORCH_TASK_ACK_SOCKET_PATH", str)
+    _set_from_env(config.gateway.orchestrator_task_ack_in, "tcp_host", "MOBILE_GATEWAY_ORCH_TASK_ACK_HOST", str)
+    _set_from_env(config.gateway.orchestrator_task_ack_in, "tcp_port", "MOBILE_GATEWAY_ORCH_TASK_ACK_PORT", int)
 
     # Online Edge Runtime
     _set_from_env(config.online_edge.runtime, "project_root", "EDGE_PROJECT_ROOT", str)

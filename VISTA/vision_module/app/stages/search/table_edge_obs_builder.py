@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import os
-from typing import Dict, Optional
+from typing import Dict, Optional, Sequence
 
 
 def payload_has_table_edge_obs(payload: Optional[Dict[str, object]]) -> bool:
@@ -37,6 +37,128 @@ def default_table_edge_obs() -> Dict[str, object]:
         "source": "vision_table_edge_manager",
         "type": "table_edge_obs",
     }
+
+
+def _coerce_bbox(value: object) -> Optional[list]:
+    if not isinstance(value, (list, tuple)) or len(value) < 4:
+        return None
+    try:
+        return [float(value[0]), float(value[1]), float(value[2]), float(value[3])]
+    except Exception:
+        return None
+
+
+def _shape_wh(value: object) -> Optional[tuple]:
+    if not isinstance(value, (list, tuple)) or len(value) < 2:
+        return None
+    try:
+        h = float(value[0])
+        w = float(value[1])
+    except Exception:
+        return None
+    if w <= 0.0 or h <= 0.0:
+        return None
+    return w, h
+
+
+def _bbox_metrics(bbox: Sequence[float], shape: object) -> Dict[str, object]:
+    wh = _shape_wh(shape)
+    if wh is None:
+        return {
+            "table_cx_norm": None,
+            "table_size_norm": None,
+            "table_bbox_area_ratio": None,
+            "table_bbox_touch_left": False,
+            "table_bbox_touch_right": False,
+            "table_bbox_touch_bottom": False,
+            "table_bbox_boundary_allowed": False,
+        }
+    w, h = wh
+    x0, y0, x1, y1 = [float(v) for v in bbox[:4]]
+    bw = max(0.0, x1 - x0)
+    bh = max(0.0, y1 - y0)
+    cx_norm = (((x0 + x1) * 0.5) / max(1.0, w) - 0.5) * 2.0
+    area_ratio = (bw * bh) / max(1.0, w * h)
+    touch_left = x0 <= max(2.0, w * 0.02)
+    touch_right = x1 >= min(w - 2.0, w * 0.98)
+    touch_bottom = y1 >= min(h - 2.0, h * 0.98)
+    return {
+        "table_cx_norm": max(-1.0, min(1.0, float(cx_norm))),
+        "table_size_norm": max(0.0, min(1.0, float(area_ratio))),
+        "table_bbox_area_ratio": max(0.0, min(1.0, float(area_ratio))),
+        "table_bbox_touch_left": bool(touch_left),
+        "table_bbox_touch_right": bool(touch_right),
+        "table_bbox_touch_bottom": bool(touch_bottom),
+        "table_bbox_boundary_allowed": bool(touch_left or touch_right or touch_bottom),
+    }
+
+
+def merge_table_bbox_from_local_perception(
+    obs: Dict[str, object],
+    local_perception: object,
+    *,
+    tick_ts: float,
+) -> Dict[str, object]:
+    """Preserve current YOLO table bbox when the depth edge worker has no result."""
+    if not isinstance(local_perception, dict):
+        return obs
+    bbox = _coerce_bbox(
+        local_perception.get("table_bbox")
+        or local_perception.get("table_bbox_xyxy")
+        or local_perception.get("yolo_table_bbox")
+    )
+    if bbox is None:
+        return obs
+    out = dict(obs or default_table_edge_obs())
+    existing_bbox = _coerce_bbox(out.get("table_bbox_xyxy") or out.get("table_bbox") or out.get("yolo_table_bbox"))
+    if bool(out.get("table_bbox_found", False)) and existing_bbox is not None:
+        return out
+
+    metrics = _bbox_metrics(bbox, local_perception.get("rgb_shape"))
+    source = str(local_perception.get("table_roi_source") or "local_perception_table_bbox")
+    out.update(
+        {
+            "table_found": True,
+            "edge_found": bool(out.get("edge_found", False)),
+            "edge_valid": bool(out.get("edge_valid", False)),
+            "edge_obs_unavailable": bool(out.get("edge_obs_unavailable", True)),
+            "depth_valid": None,
+            "obs_ts": float(tick_ts),
+            "age_ms": 0.0,
+            "is_stale": False,
+            "reason": "table_bbox_from_local_perception_no_edge_result",
+            "table_confirmed_by_yolo": True,
+            "table_bbox_current_found": True,
+            "table_bbox_control_valid": True,
+            "table_bbox_found": True,
+            "table_bbox_xyxy": bbox,
+            "table_bbox": bbox,
+            "table_bbox_source": source,
+            "yolo_table_bbox": bbox,
+            "yolo_reliable": True,
+            "yolo_valid_reason": "table_bbox_found",
+            "yolo_invalid_reason": "",
+            "docking_enabled_by_yolo": True,
+            "edge_control_allowed": True,
+            "edge_control_block_reason": "",
+            "yolo_table_control_valid": True,
+            "roi_source": source,
+            "roi_reason": local_perception.get("table_roi_reason") or "local_perception_table_bbox",
+            "table_quadrant": local_perception.get("table_quadrant"),
+            "rgb_search_roi": local_perception.get("rgb_search_roi"),
+            "rgb_shape": local_perception.get("rgb_shape"),
+            "source": "local_perception_table_bbox",
+        }
+    )
+    out.update(metrics)
+    out["yolo_bbox_area_norm"] = out.get("table_bbox_area_ratio")
+    out["yolo_bbox_touch_left"] = out.get("table_bbox_touch_left")
+    out["yolo_bbox_touch_right"] = out.get("table_bbox_touch_right")
+    out["yolo_bbox_touch_bottom"] = out.get("table_bbox_touch_bottom")
+    out["yolo_bbox_touch_boundary"] = bool(
+        out.get("table_bbox_touch_left") or out.get("table_bbox_touch_right") or out.get("table_bbox_touch_bottom")
+    )
+    return out
 
 
 def table_edge_obs_from_payload(payload: Optional[Dict[str, object]]) -> Dict[str, object]:

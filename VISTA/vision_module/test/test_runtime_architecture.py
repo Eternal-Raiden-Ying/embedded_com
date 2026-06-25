@@ -491,6 +491,41 @@ class SearchStagePlanKindTest(unittest.TestCase):
         self.assertEqual(sorted(perception.keys()), ["table_edge_obs"])
         self.assertTrue(perception["table_edge_obs"]["edge_found"])
 
+    def test_table_edge_search_preserves_yolo_table_bbox_without_depth_edge_result(self):
+        plan, ctx = self._enter("TABLE_EDGE")
+        tick_ts = time.time()
+        output = plan.tick(
+            StageTickInput(
+                ts=tick_ts,
+                generation=1,
+                results={
+                    "local_perception": {
+                        "has_infer": True,
+                        "rgb_shape": [640, 640, 3],
+                        "table_bbox": [0, 198, 208, 360],
+                        "table_quadrant": "LT",
+                        "rgb_search_roi": [0, 0, 320, 320],
+                        "table_roi_source": "yolo_table_bbox",
+                    },
+                },
+            ),
+            ctx,
+        )
+
+        table_obs = output.vision_obs["perception"]["table_edge_obs"]
+        self.assertTrue(table_obs["table_found"])
+        self.assertTrue(table_obs["table_bbox_found"])
+        self.assertTrue(table_obs["table_bbox_current_found"])
+        self.assertTrue(table_obs["table_bbox_control_valid"])
+        self.assertTrue(table_obs["yolo_table_control_valid"])
+        self.assertFalse(table_obs["edge_found"])
+        self.assertFalse(table_obs["edge_valid"])
+        self.assertFalse(table_obs["is_stale"])
+        self.assertEqual(table_obs["table_bbox_xyxy"], [0.0, 198.0, 208.0, 360.0])
+        self.assertEqual(table_obs["roi_source"], "yolo_table_bbox")
+        self.assertEqual(table_obs["source"], "local_perception_table_bbox")
+        self.assertEqual(table_obs["reason"], "table_bbox_from_local_perception_no_edge_result")
+
     def test_edge_follow_target_outputs_both_and_keeps_partial_results(self):
         plan, ctx = self._enter("EDGE_FOLLOW_TARGET")
         self.assertEqual(ctx.current_mode, "FIND_EDGE")

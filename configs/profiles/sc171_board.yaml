@@ -29,9 +29,13 @@ runtime_overrides:
     tts_event_out:
       transport: "disabled"
   gateway:
+    backend:
+      mode: "tcp_no_ack"
     command_in:
-      transport: "uds"
+      transport: "http"
       ipc_socket_path: "/tmp/robot_stack/mobile_gateway_cmd.sock"
+      tcp_host: "0.0.0.0"
+      tcp_port: 9001
     status_out:
       transport: "disabled"
     orchestrator_task_cmd_out:

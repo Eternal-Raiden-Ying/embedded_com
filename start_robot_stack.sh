@@ -21,7 +21,11 @@ STACK_ROOT="$SCRIPT_DIR"
 VISION_ROOT="${VISION_ROOT:-$STACK_ROOT/VISTA}"
 ORCH_ROOT="${ORCH_ROOT:-$STACK_ROOT/orchestrator}"
 SYSTEM_CONFIG_FILE="${SYSTEM_CONFIG_FILE:-$STACK_ROOT/configs/system_config.yaml}"
-GATEWAY_CONFIG="${GATEWAY_CONFIG:-$SYSTEM_CONFIG_FILE}"
+if [[ -z "${GATEWAY_CONFIG+x}" && -f "$STACK_ROOT/configs/mobile_gateway.mqtt.yaml" ]]; then
+  GATEWAY_CONFIG="$STACK_ROOT/configs/mobile_gateway.mqtt.yaml"
+else
+  GATEWAY_CONFIG="${GATEWAY_CONFIG:-$SYSTEM_CONFIG_FILE}"
+fi
 VISION_LD_PRELOAD="${VISION_LD_PRELOAD:-/lib/aarch64-linux-gnu/libGLdispatch.so.0}"
 VISTA_TABLE_BBOX_ENABLE="${VISTA_TABLE_BBOX_ENABLE:-0}"
 VISTA_TABLE_MODEL="${VISTA_TABLE_MODEL:-yolo26s_detect}"
@@ -48,12 +52,12 @@ READY_TIMEOUT_S="${READY_TIMEOUT_S:-35}"
 # STOP 后按 Ctrl+C 只退出当前日志显示，不停止服务
 FOLLOW_STACK_LOGS_AFTER_START="${FOLLOW_STACK_LOGS_AFTER_START:-1}"
 ROBOT_CONSOLE_LEVEL="${ROBOT_CONSOLE_LEVEL:-normal}"
-ENABLE_GATEWAY_LOGS="${ENABLE_GATEWAY_LOGS:-false}"
-COLLECT_GATEWAY_LOGS="${COLLECT_GATEWAY_LOGS:-false}"
+ENABLE_GATEWAY_LOGS="${ENABLE_GATEWAY_LOGS:-true}"
+COLLECT_GATEWAY_LOGS="${COLLECT_GATEWAY_LOGS:-true}"
 
 # 当前终端显示的状态摘要和手机链路关键字
 ORCH_SUMMARY_PATTERN='状态切换|MODE |DRY_RUN|UART|stop_class=|搜索超时|已发现目标|目标丢失|开始寻找|AUTOEXPLORE|AUTOSEARCH|SEARCH|RETURN|收到 STOP 命令|热待机|重新发现目标|自动搜索超时|TASK_CMD|task_cmd|vision_req|TASK_DONE|DEMO|IDLE_HOT|preview kept alive|waiting for next command|target        :|session_id    :|result        :|final_state   :|reason        :|total_time_s  :|next_state    :|preview       :|waiting       :|━━━━━━━━'
-GATEWAY_SUMMARY_PATTERN='gateway online|mqtt connected|mqtt disconnected|cmd received|gateway_ack sent|task_cmd forwarded|task_ack forwarded|status changed|heartbeat running|fetch_object|mobile_cmd|stop'
+GATEWAY_SUMMARY_PATTERN='gateway online|mqtt connected|mqtt disconnected|received mobile command|forwarded task_cmd|gateway_ack sent|task_ack forwarded|status changed|heartbeat running|fetch_object|mobile_cmd|stop'
 VISION_SUMMARY_PATTERN='SERVICE_READY|vision runtime started|mode switched|camera enabled|model loaded|vision_obs|vision_req|target_obs|table_edge_obs|FAILED|ERROR'
 LOG_TAIL_N="${LOG_TAIL_N:-80}"
 
@@ -62,7 +66,7 @@ STACK_PORTS="${STACK_PORTS:-9001 9002 9003 9011 9012 9101 9102}"
 STACK_SOCK_DIR="${STACK_SOCK_DIR:-/tmp/robot_stack}"
 VISION_READY_SOCKETS="${VISION_READY_SOCKETS:-/tmp/robot_stack/vision_req.sock}"
 ORCH_READY_SOCKETS="${ORCH_READY_SOCKETS:-/tmp/robot_stack/task_cmd.sock /tmp/robot_stack/vision_obs.sock}"
-GATEWAY_READY_PATTERN="${GATEWAY_READY_PATTERN:-gateway online|SERVICE_READY|mqtt connected|mqtt disabled}"
+GATEWAY_READY_PATTERN="${GATEWAY_READY_PATTERN:-gateway online|SERVICE_READY|mqtt connected|http listening}"
 
 # 额外等待（秒）
 VISION_READY_EXTRA_S="${VISION_READY_EXTRA_S:-2}"
@@ -304,6 +308,7 @@ show_banner() {
   printf '%bsudo%b           : requested=%s effective=%s\n' "$C_BOLD" "$C_RESET" "$ORCH_USE_SUDO" "$([[ $(orch_use_sudo_effective; echo $?) -eq 0 ]] && echo 1 || echo 0)"
   printf '%bdry-run%b        : ORCH_SERIAL_DRY_RUN=%s  ORCH_DRY_RUN_ECHO_STDOUT=%s\n' "$C_BOLD" "$C_RESET" "$ORCH_SERIAL_DRY_RUN" "$ORCH_DRY_RUN_ECHO_STDOUT"
   printf '%bconsole%b        : ROBOT_CONSOLE_LEVEL=%s  ROBOT_CONSOLE_COLOR=%s\n' "$C_BOLD" "$C_RESET" "$ROBOT_CONSOLE_LEVEL" "${ROBOT_CONSOLE_COLOR:-auto}"
+  printf '%bgateway logs%b   : enabled=%s  collect=%s\n' "$C_BOLD" "$C_RESET" "$ENABLE_GATEWAY_LOGS" "$COLLECT_GATEWAY_LOGS"
   printf '%bports%b          : %s\n' "$C_BOLD" "$C_RESET" "$STACK_PORTS"
 }
 
@@ -573,6 +578,14 @@ export MOBILE_GATEWAY_LOG_FILE="$(gateway_logs_enabled && echo "$GATEWAY_LOG_DIR
 export MOBILE_GATEWAY_RUNS_DIR="$STACK_RUNS_ROOT"
 export MOBILE_GATEWAY_ORCH_RUNS_DIR="$STACK_RUNS_ROOT"
 export MOBILE_GATEWAY_ORCH_STATE_BLOCKS_PATH="$STACK_RUN_DIR/orchestrator/state_blocks.jsonl"
+export MOBILE_GATEWAY_BACKEND="\${MOBILE_GATEWAY_BACKEND:-tcp_no_ack}"
+export MOBILE_GATEWAY_COMMAND_IN_TRANSPORT="\${MOBILE_GATEWAY_COMMAND_IN_TRANSPORT:-http}"
+export MOBILE_GATEWAY_COMMAND_IN_HOST="\${MOBILE_GATEWAY_COMMAND_IN_HOST:-0.0.0.0}"
+export MOBILE_GATEWAY_COMMAND_IN_PORT="\${MOBILE_GATEWAY_COMMAND_IN_PORT:-9001}"
+export MOBILE_GATEWAY_LEGACY_TCP_ENABLED="\${MOBILE_GATEWAY_LEGACY_TCP_ENABLED:-1}"
+export MOBILE_GATEWAY_LEGACY_TCP_HOST="\${MOBILE_GATEWAY_LEGACY_TCP_HOST:-0.0.0.0}"
+export MOBILE_GATEWAY_LEGACY_TCP_PORT="\${MOBILE_GATEWAY_LEGACY_TCP_PORT:-9101}"
+export MOBILE_GATEWAY_ORCH_TASK_CMD_TRANSPORT="\${MOBILE_GATEWAY_ORCH_TASK_CMD_TRANSPORT:-uds}"
 export MOBILE_GATEWAY_ORCH_TASK_CMD_SOCKET_PATH="/tmp/robot_stack/task_cmd.sock"
 export MOBILE_GATEWAY_ORCH_TASK_ACK_SOCKET_PATH="/tmp/robot_stack/task_ack.sock"
 exec stdbuf -oL -eL /usr/bin/python3 -m orchestrator_service.mobile_gateway.runtime.service --config "$GATEWAY_CONFIG"
@@ -923,6 +936,112 @@ wait_for_log_pattern() {
   done
 }
 
+gateway_spec() {
+  SYSTEM_CONFIG_FILE="$SYSTEM_CONFIG_FILE" SYSTEM_CONFIG_PROFILE="$SYSTEM_CONFIG_PROFILE" PYTHONPATH="$STACK_ROOT:${PYTHONPATH:-}" \
+    MOBILE_GATEWAY_BACKEND="${MOBILE_GATEWAY_BACKEND:-tcp_no_ack}" \
+    MOBILE_GATEWAY_COMMAND_IN_TRANSPORT="${MOBILE_GATEWAY_COMMAND_IN_TRANSPORT:-http}" \
+    MOBILE_GATEWAY_COMMAND_IN_HOST="${MOBILE_GATEWAY_COMMAND_IN_HOST:-0.0.0.0}" \
+    MOBILE_GATEWAY_COMMAND_IN_PORT="${MOBILE_GATEWAY_COMMAND_IN_PORT:-9001}" \
+    MOBILE_GATEWAY_ORCH_TASK_CMD_TRANSPORT="${MOBILE_GATEWAY_ORCH_TASK_CMD_TRANSPORT:-uds}" \
+    MOBILE_GATEWAY_ORCH_TASK_CMD_SOCKET_PATH="${MOBILE_GATEWAY_ORCH_TASK_CMD_SOCKET_PATH:-/tmp/robot_stack/task_cmd.sock}" \
+    /usr/bin/python3 -c '
+from common.config_loader import get_config
+
+cfg = get_config().gateway
+cmd = cfg.command_in
+orch = cfg.orchestrator_task_cmd_out
+print("|".join([
+    str(cfg.backend.mode or ""),
+    str(cmd.transport or ""),
+    str(getattr(cmd, "tcp_host", "") or getattr(cmd, "host", "") or ""),
+    str(getattr(cmd, "tcp_port", 0) or getattr(cmd, "port", 0) or 0),
+    str(getattr(cmd, "ipc_socket_path", "") or getattr(cmd, "uds_path", "") or ""),
+    "1" if bool(cfg.mqtt.enabled) else "0",
+    str(orch.transport or ""),
+    str(getattr(orch, "ipc_socket_path", "") or getattr(orch, "uds_path", "") or ""),
+    str(getattr(orch, "tcp_host", "") or getattr(orch, "host", "") or ""),
+    str(getattr(orch, "tcp_port", 0) or getattr(orch, "port", 0) or 0),
+]))
+'
+}
+
+gateway_http_health_ok() {
+  local host="$1" port="$2"
+  [[ "$host" == "0.0.0.0" || "$host" == "::" || -z "$host" ]] && host="127.0.0.1"
+  /usr/bin/python3 -c '
+import http.client
+import json
+import sys
+
+host, port = sys.argv[1], int(sys.argv[2] or 0)
+try:
+    conn = http.client.HTTPConnection(host, port, timeout=0.8)
+    conn.request("GET", "/health")
+    resp = conn.getresponse()
+    data = json.loads(resp.read().decode("utf-8") or "{}")
+    conn.close()
+    if resp.status != 200 or not data.get("ok"):
+        raise RuntimeError(f"bad health status={resp.status} payload={data!r}")
+    if str(data.get("backend_mode", "")).lower() == "mock":
+        raise RuntimeError("gateway backend_mode is mock")
+except Exception as exc:
+    print(str(exc), file=sys.stderr)
+    raise SystemExit(1)
+' "$host" "$port"
+}
+
+wait_for_gateway_ready() {
+  local timeout_s="$1" extra_s="$2"
+  local spec backend cmd_mode cmd_host cmd_port cmd_path mqtt_enabled orch_mode orch_path orch_host orch_port
+  spec="$(gateway_spec)" || return 1
+  IFS='|' read -r backend cmd_mode cmd_host cmd_port cmd_path mqtt_enabled orch_mode orch_path orch_host orch_port <<< "$spec"
+  backend="$(printf '%s' "$backend" | tr '[:upper:]' '[:lower:]')"
+  cmd_mode="$(printf '%s' "$cmd_mode" | tr '[:upper:]' '[:lower:]')"
+  orch_mode="$(printf '%s' "$orch_mode" | tr '[:upper:]' '[:lower:]')"
+
+  mark note "[READY_CHECK] gateway backend=$backend command_in=$cmd_mode host=$cmd_host port=$cmd_port path=$cmd_path"
+  mark note "[READY_CHECK] gateway orchestrator_task_cmd_out=$orch_mode host=$orch_host port=$orch_port path=$orch_path"
+
+  if [[ "$backend" == "mock" && "${MOBILE_GATEWAY_ALLOW_MOCK:-0}" != "1" ]]; then
+    mark err "mobile_gateway backend_mode=mock；dry_run/full 默认禁止 mock，请显式 MOBILE_GATEWAY_ALLOW_MOCK=1 才能调试使用"
+    return 1
+  fi
+  if [[ "$orch_mode" != "uds" && "$orch_mode" != "tcp" ]]; then
+    mark err "mobile_gateway orchestrator_task_cmd_out 未启用：transport=$orch_mode"
+    return 1
+  fi
+
+  local start_ts now_ts
+  start_ts=$(date +%s)
+  while true; do
+    if endpoint_connect_ok "$orch_mode" "$orch_path" "${orch_host:-127.0.0.1}" "${orch_port:-0}"; then
+      if [[ "$cmd_mode" == "http" ]]; then
+        if gateway_http_health_ok "$cmd_host" "$cmd_port" 2>/dev/null; then
+          [[ "$extra_s" -gt 0 ]] && sleep "$extra_s"
+          mark ok "mobile_gateway ready  backend=$backend http=${cmd_host}:${cmd_port} orch_task_cmd=$orch_mode"
+          return 0
+        fi
+      elif [[ "$mqtt_enabled" == "1" ]]; then
+        if [[ -f "$GATEWAY_LOG_FILE" ]] && grep -qE "mqtt connected" "$GATEWAY_LOG_FILE" 2>/dev/null; then
+          [[ "$extra_s" -gt 0 ]] && sleep "$extra_s"
+          mark ok "mobile_gateway ready  backend=$backend mqtt=connected orch_task_cmd=$orch_mode"
+          return 0
+        fi
+      else
+        mark err "mobile_gateway command_in=$cmd_mode 且 mqtt 未启用；需要 HTTP 或 MQTT 真实入口"
+        return 1
+      fi
+    fi
+
+    now_ts=$(date +%s)
+    if (( now_ts - start_ts >= timeout_s )); then
+      mark err "mobile_gateway ready-check 超时 backend=$backend command_in=$cmd_mode http=${cmd_host}:${cmd_port} orch_task_cmd=$orch_mode"
+      return 1
+    fi
+    sleep 0.5
+  done
+}
+
 tail_last_logs_on_failure() {
   local name="$1" file="$2"
   headline "$name 启动失败"
@@ -1166,15 +1285,10 @@ except Exception as e:
   fi
 
   start_gateway_bg
-  if gateway_logs_enabled; then
-    if ! wait_for_log_pattern "mobile_gateway" "$GATEWAY_LOG_FILE" "$GATEWAY_READY_PATTERN" "$READY_TIMEOUT_S" "$GATEWAY_READY_EXTRA_S"; then
-      tail_last_logs_on_failure "mobile_gateway" "$GATEWAY_LOG_FILE"
-      stop_all || true
-      exit 1
-    fi
-  else
-    sleep "$GATEWAY_READY_EXTRA_S"
-    mark note "gateway logs disabled by default; skipped log-based gateway ready-check"
+  if ! wait_for_gateway_ready "$READY_TIMEOUT_S" "$GATEWAY_READY_EXTRA_S"; then
+    tail_last_logs_on_failure "mobile_gateway" "$GATEWAY_LOG_FILE"
+    stop_all || true
+    exit 1
   fi
 
   headline "启动完成"
@@ -1195,8 +1309,15 @@ stop_stack() {
 }
 
 main() {
-  apply_profile_defaults
   local action="${1:-start}"
+  case "$action" in
+    dryrun|dry_run|full|sc171_board|windows_dev)
+      STACK_PROFILE="$action"
+      shift || true
+      action="${1:-start}"
+      ;;
+  esac
+  apply_profile_defaults
   case "$action" in
     start|on|up|run|开启|开)
       start_stack
@@ -1211,6 +1332,8 @@ main() {
     *)
       echo "用法："
       echo "  ./start_robot_stack.sh        # 开启（默认）"
+      echo "  ./start_robot_stack.sh full   # 使用 full/sc171_board 配置开启"
+      echo "  ./start_robot_stack.sh dryrun # 使用 dry_run 配置开启"
       echo "  ./start_robot_stack.sh stop   # 结束"
       echo "  ./start_robot_stack.sh status # 查看状态"
       exit 1

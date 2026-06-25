@@ -2179,10 +2179,10 @@ class TableEdgeManager:
         if cfg is not None:
             payload.update(
                 {
-                    "depth_z_min_m": float(cfg.z_min),
-                    "depth_z_max_m": float(cfg.z_max),
-                    "table_y_min_m": float(cfg.table_y_min),
-                    "table_y_max_m": float(cfg.table_y_max),
+                    "depth_z_min_m": float(getattr(cfg, "z_min", 0.2)),
+                    "depth_z_max_m": float(getattr(cfg, "z_max", 2.0)),
+                    "table_y_min_m": float(getattr(cfg, "table_y_min", -0.5)),
+                    "table_y_max_m": float(getattr(cfg, "table_y_max", 0.5)),
                 }
             )
         return payload
@@ -2471,6 +2471,9 @@ class TableEdgeManager:
         except Exception:
             roi_box = tuple(int(v) for v in self._static_roi() or (0, 0, depth_frame.shape[1], depth_frame.shape[0]))
         x0, y0, x1, y1 = [int(v) for v in roi_box]
+        calib = getattr(self._detector, "calib", None) if self._detector is not None else None
+        if calib is None:
+            calib = self._fallback_calib
         h_frame, w_frame = depth_frame.shape[:2]
         if not hasattr(self, "_ray_x") or self._ray_x.shape != (h_frame, w_frame):
             self._precompute_rays(force_h=h_frame, force_w=w_frame)
@@ -2554,7 +2557,7 @@ class TableEdgeManager:
             return self._attach_profile(payload, profile, path="fast_plane_only_roi_empty")
         depth_m = depth_roi.astype(np.float32, copy=False)
         if depth_roi.dtype != np.float32:
-            scale = float(self._detector.calib.depth_scale if self._detector is not None else 0.001)
+            scale = float(getattr(calib, "depth_scale", 0.001) or 0.001)
             depth_m = depth_m * scale
         z_min = float(cfg.z_min if cfg is not None else 0.2)
         z_max = float(cfg.z_max if cfg is not None else 2.0)
@@ -3599,7 +3602,7 @@ class TableEdgeManager:
 
         # Ensure we set explicit block / reject reasons
         init_kwargs["edge_reject_for_control_reason"] = reject_reason
-        init_kwargs["edge_control_block_reason"] = reject_reason
+        extra_fields["edge_control_block_reason"] = reject_reason
 
         obs = TableEdgeObservation(extra_fields=extra_fields, **init_kwargs)
         payload = obs.to_dict()
