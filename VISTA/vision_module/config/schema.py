@@ -31,6 +31,9 @@ class RuntimeConfig:
     stale_req_s: float = 3.0
     hot_standby_s: float = 30.0
     keep_preview_after_stop: bool = True
+    keep_vision_alive_after_task: bool = True
+    keep_preview_alive_after_task: bool = True
+    release_model_on_idle: bool = False
     keep_model_hot_in_standby: bool = True
     enable_infer_during_hot_standby: bool = False
     capability_placeholder: bool = False

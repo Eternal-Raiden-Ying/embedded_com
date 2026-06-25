@@ -74,6 +74,11 @@ class MotionController:
             }
         control_ts = float(control_ts if control_ts is not None else time.time())
         frame_capture_ts = getattr(obs, "frame_capture_ts", None)
+        if frame_capture_ts is None and getattr(obs, "camera_frame_ts_ms", None) is not None:
+            try:
+                frame_capture_ts = float(getattr(obs, "camera_frame_ts_ms")) / 1000.0
+            except Exception:
+                frame_capture_ts = None
         obs_total_age_ms = getattr(obs, "obs_total_age_ms", None)
         if frame_capture_ts is not None:
             try:
@@ -88,6 +93,11 @@ class MotionController:
                 obs_total_age_ms = None
         control_loop_age_ms = None
         recv_ts = getattr(obs, "obs_recv_ts", None)
+        if recv_ts is None and getattr(obs, "orchestrator_recv_ts_ms", None) is not None:
+            try:
+                recv_ts = float(getattr(obs, "orchestrator_recv_ts_ms")) / 1000.0
+            except Exception:
+                recv_ts = None
         if recv_ts is not None:
             try:
                 control_loop_age_ms = max(0.0, (control_ts - float(recv_ts)) * 1000.0)
@@ -151,6 +161,15 @@ class MotionController:
                 measured_distance = float(target_distance) + float(obs.dist_err_m)
         timing = self._stale_guard(obs, cmd.ts)
         stale_level = str(timing.get("stale_level") or "")
+        yolo_table_visible = (
+            bool(getattr(obs, "yolo_table_visible", getattr(obs, "table_bbox_found", False))) if obs is not None else False
+        )
+        yolo_table_fresh_raw = getattr(obs, "yolo_table_fresh", None) if obs is not None else None
+        yolo_table_fresh = (
+            bool(yolo_table_visible and stale_level == "fresh")
+            if yolo_table_fresh_raw is None
+            else bool(yolo_table_fresh_raw)
+        )
         semantic_fields = self._semantic_summary_fields(obs) if obs is not None else {
             "table_bbox_current_found": False,
             "table_bbox_control_valid": False,
@@ -218,6 +237,9 @@ class MotionController:
             "table_confirmed_by_yolo": bool(getattr(obs, "table_confirmed_by_yolo", False)) if obs is not None else False,
             "yolo_reliable": bool(getattr(obs, "yolo_reliable", False)) if obs is not None else False,
             "yolo_table_control_valid": bool(getattr(obs, "yolo_table_control_valid", getattr(obs, "yolo_reliable", False))) if obs is not None else False,
+            "yolo_table_visible": yolo_table_visible,
+            "yolo_table_fresh": yolo_table_fresh,
+            "yolo_table_age_ms": getattr(obs, "yolo_table_age_ms", None) if obs is not None else None,
             "yolo_valid_reason": str(getattr(obs, "yolo_valid_reason", "") or "") if obs is not None else "",
             "yolo_invalid_reason": str(getattr(obs, "yolo_invalid_reason", "") or "") if obs is not None else "",
             **semantic_fields,
@@ -383,6 +405,12 @@ class MotionController:
                 "allow_rotate": False,
                 "forward_block_reason": "" if assist_vx > 0.0 else "yolo_vx_zero",
                 "rotate_block_reason": "yolo_forward_owns_control",
+                "bbox_visible_but_edge_invalid": bool(source_name == "yolo_forward" and not bool(getattr(obs, "edge_trusted", False))),
+                "selected_timeout_reason": "bbox_visible_but_edge_invalid" if source_name == "yolo_forward" and not bool(getattr(obs, "edge_trusted", False)) else "",
+                "fallback_action": "yolo_assist" if source_name == "yolo_forward" else "",
+                "edge_geometry_timeout": False,
+                "no_table_bbox_timeout": False,
+                "table_lost_search_timeout": False,
                 "yolo_view_err_norm": float(cx),
                 "edge_yaw_err_rad": float(getattr(obs, "yaw_err_rad", 0.0) or 0.0) if obs is not None else 0.0,
                 "yolo_edge_yaw_conflict": False,

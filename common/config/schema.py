@@ -112,6 +112,9 @@ class VisionRuntimeConfig:
     stale_req_s: float = 3.0
     hot_standby_s: float = 30.0
     keep_preview_after_stop: bool = True
+    keep_vision_alive_after_task: bool = True
+    keep_preview_alive_after_task: bool = True
+    release_model_on_idle: bool = False
     keep_model_hot_in_standby: bool = True
     enable_infer_during_hot_standby: bool = False
     capability_placeholder: bool = False
@@ -501,6 +504,8 @@ class ControlThresholds:
     near_slow_depth_m: float = 0.40
     near_stop_depth_m: float = 0.25
     yolo_table_lost_to_search_frames: int = 8
+    no_table_bbox_timeout_s: float = 10.0
+    edge_geometry_timeout_s: float = 10.0
     table_memory_timeout_sec: float = 3.0
     table_center_loss_hold_sec: float = 1.0
     rotate_search_timeout_s: float = 10.0
@@ -600,6 +605,8 @@ class ControlThresholds:
     post_stop_ignore_s: float = 0.80
     vision_req_fail_to_stop: bool = True
     vision_req_fail_threshold: int = 2
+    keep_vision_alive_after_task: bool = True
+    task_done_shutdown_vision: bool = False
     enable_pick_pipeline: bool = False
     assume_grasp_success_for_test: bool = False
 

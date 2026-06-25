@@ -143,6 +143,7 @@ class ModeController:
                 "predictor": {
                     "enabled": bool(profile.predictor_enabled),
                     "model_name": profile.predictor_model,
+                    "keep_loaded": bool((profile.metadata or {}).get("keep_model_loaded", False)),
                 },
                 "remote": {
                     "enabled": bool(remote_profile.enabled),

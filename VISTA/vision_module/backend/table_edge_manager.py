@@ -1621,6 +1621,99 @@ class TableEdgeManager:
         out["plane_mask_status"] = "present" if inlier is not None or candidate is not None or bool(out["front_plane_candidate_pixels"]) else "missing"
         return out
 
+    @staticmethod
+    def _present_number(value: Any) -> bool:
+        try:
+            return value is not None and math.isfinite(float(value))
+        except Exception:
+            return False
+
+    @classmethod
+    def _line_pair_present(cls, payload: Dict[str, Any], k_name: str, b_name: str) -> bool:
+        return bool(cls._present_number(payload.get(k_name)) and cls._present_number(payload.get(b_name)))
+
+    @classmethod
+    def _edge_publish_consistency_fields(cls, payload: Dict[str, Any]) -> Dict[str, Any]:
+        out = dict(payload or {})
+        detector_line_present = bool(
+            cls._line_pair_present(out, "edge_k", "edge_b")
+            or cls._line_pair_present(out, "plane_k", "plane_b")
+            or cls._line_pair_present(out, "line_k", "line_b")
+            or cls._line_pair_present(out, "upper_line_k", "upper_line_b")
+            or cls._line_pair_present(out, "lower_line_k", "lower_line_b")
+        )
+        preview_line_present = bool(cls._line_pair_present(out, "image_line_k", "image_line_b"))
+        debug_pixels_present = any(
+            bool(out.get(key))
+            for key in (
+                "fast_edge_pixels",
+                "fast_support_pixels",
+                "fast_inlier_pixels",
+                "fast_front_face_rep_pixels",
+                "front_plane_candidate_pixels",
+            )
+        )
+        candidate_count = int(out.get("fast_candidate_point_count", out.get("candidate_count", 0)) or 0)
+        support_count = int(out.get("fast_support_point_count", out.get("support_point_count", 0)) or 0)
+        inlier_count = int(
+            out.get("fast_rep_inlier_count", out.get("edge_inlier_count", out.get("inlier_count", 0))) or 0
+        )
+        line_source = str(out.get("fast_line_source") or out.get("fast_fit_line_source") or "").strip().lower()
+        detector_candidate_line_present = bool(
+            detector_line_present
+            or preview_line_present
+            or support_count > 0
+            or inlier_count > 0
+            or line_source not in {"", "none", "na", "n/a"}
+        )
+        preview_line_source = "image_line" if preview_line_present else ("debug_pixels" if debug_pixels_present else "none")
+        is_stale = bool(out.get("is_stale", False))
+        out.update(
+            {
+                "detector_candidate_line_present": bool(detector_candidate_line_present),
+                "preview_line_present": bool(preview_line_present or debug_pixels_present),
+                "preview_line_source": preview_line_source,
+                "preview_line_is_current_frame": bool((preview_line_present or debug_pixels_present) and not is_stale),
+                "publish_reason": str(out.get("reason") or out.get("reject_reason") or ""),
+                "support_count": support_count,
+                "inlier_count": inlier_count,
+                "candidate_count": candidate_count,
+            }
+        )
+        return out
+
+    def _emit_edge_publish_summary(self, payload: Dict[str, Any]) -> None:
+        period_s = max(0.5, float(getattr(self.cfg.debug, "edge_debug_period_s", 1.0) or 1.0))
+        now = time.time()
+        if now - float(getattr(self, "_last_edge_publish_summary_ts", 0.0) or 0.0) < period_s:
+            return
+        self._last_edge_publish_summary_ts = now
+        self.log.info(
+            "[EDGE_PUBLISH] frame_id=%s yolo_table_visible=%s table_bbox=%s roi_source=%s roi=%s quadrant=%s "
+            "candidate=%s preview_line=%s preview_current=%s preview_source=%s edge_found=%s edge_valid=%s "
+            "edge_trusted=%s point_count=%s support_count=%s inlier_count=%s yaw=%s dist=%s lateral=%s reason=%s",
+            payload.get("frame_id", payload.get("frame_seq")),
+            int(bool(payload.get("yolo_table_visible", payload.get("table_bbox_current_found", False)))),
+            payload.get("table_bbox_xyxy") or payload.get("table_bbox"),
+            payload.get("roi_source"),
+            payload.get("edge_roi") or payload.get("table_edge_roi") or payload.get("depth_edge_roi"),
+            payload.get("table_quadrant") or payload.get("roi_position"),
+            int(bool(payload.get("detector_candidate_line_present", False))),
+            int(bool(payload.get("preview_line_present", False))),
+            int(bool(payload.get("preview_line_is_current_frame", False))),
+            payload.get("preview_line_source"),
+            int(bool(payload.get("edge_found", False))),
+            int(bool(payload.get("edge_valid", False))),
+            int(bool(payload.get("edge_trusted", False))),
+            payload.get("point_count"),
+            payload.get("support_count", payload.get("fast_support_point_count")),
+            payload.get("inlier_count", payload.get("edge_inlier_count")),
+            payload.get("yaw_err_rad"),
+            payload.get("dist_err_m"),
+            payload.get("lateral_err_m", payload.get("dist_err_m")),
+            payload.get("publish_reason") or payload.get("reason") or payload.get("reject_reason"),
+        )
+
     def _attach_profile(self, payload: Dict[str, Any], profile: Dict[str, Any], *, path: str) -> Dict[str, Any]:
         out = dict(payload or {})
         self._update_edge_stability(out)
@@ -1662,9 +1755,10 @@ class TableEdgeManager:
             if key in out:
                 out["edge_profile"][key] = out.get(key)
         out["edge_process_path"] = str(path or "")
+        out = self._edge_publish_consistency_fields(out)
         cfg = self.cfg.table_edge
         max_residual = float(cfg.edge_trusted_max_residual or 0.0)
-        out = standardize_table_edge_payload(
+        standardized = standardize_table_edge_payload(
             out,
             edge_stable_required_frames=max(1, int(cfg.yolo_table_edge_stable_frames)),
             edge_trusted_min_conf=float(cfg.edge_trusted_min_conf),
@@ -1674,6 +1768,8 @@ class TableEdgeManager:
             edge_trusted_min_x_span_m=float(cfg.edge_trusted_min_x_span_m),
             edge_trusted_max_background_penalty=(float(cfg.edge_trusted_max_background_penalty) if float(cfg.edge_trusted_max_background_penalty or 0.0) > 0.0 else None),
         )
+        out = self._edge_publish_consistency_fields(standardized.to_dict())
+        self._emit_edge_publish_summary(out)
         return out
 
     def _update_edge_stability(self, payload: Dict[str, Any]) -> None:
@@ -3375,8 +3471,22 @@ class TableEdgeManager:
         )
         distance_stage = extras.get("distance_stage", "unknown")
         profile["fast_control_gate_ms"] = self._ms_since(control_gate_start)
-        plane_usable = control_level != "none"
-        valid_for_control = control_level in {"align", "stop_ready"}
+        candidate_line_present = bool(
+            representative_inlier_count > 0
+            or selected_cluster_support > 0
+            or support_inlier_count > 0
+            or line_source not in {"", "none"}
+        )
+        edge_geometry_valid = bool(
+            candidate_line_present
+            and representative_inlier_count >= max(1, min_front_face_columns)
+            and x_span >= float(min_front_face_x_span)
+            and residual_mean <= float(residual_threshold)
+            and yaw_abs <= float(max_yaw_cfg)
+            and not bool(background_blocked)
+        )
+        plane_usable = bool(edge_geometry_valid)
+        valid_for_control = control_level in {"align", "alignment", "stop_ready", "stop"}
 
         if not reject_reason:
             if representative_inlier_count <= 3 or x_span < 0.15:
@@ -3398,7 +3508,7 @@ class TableEdgeManager:
         fast_background_pixels = self._sparse_pixel_pairs(rep_background_px, rep_background_py, cap=debug_cap) if debug_pixels_enabled else []
         fast_weak_pixels = self._sparse_pixel_pairs(rep_weak_px, rep_weak_py, cap=debug_cap) if debug_pixels_enabled else []
         profile["fast_debug_payload_ms"] = self._ms_since(debug_payload_start)
-        edge_found = bool(plane_usable)
+        edge_found = bool(candidate_line_present)
         if edge_found:
             plane_bbox = raw_bbox
         else:
@@ -3406,14 +3516,14 @@ class TableEdgeManager:
         plane_view = self._plane_view_from_bbox(
             plane_bbox or roi_box,
             getattr(depth_frame, "shape", None),
-            area_ratio=float(support_inlier_count) / roi_area if edge_found else None,
+            area_ratio=float(support_inlier_count) / roi_area if edge_geometry_valid else None,
         )
         payload_dict = {
             "table_found": bool(candidate_count > 0),
             "edge_found": bool(edge_found),
             "edge_detected": bool(edge_found),
-            "edge_geometry_valid": bool(edge_found),
-            "edge_valid": bool(edge_found),
+            "edge_geometry_valid": bool(edge_geometry_valid),
+            "edge_valid": bool(edge_geometry_valid),
             "valid_for_control": valid_for_control,
             "confidence": float(confidence if edge_found else 0.0),
             "edge_conf": float(confidence if edge_found else 0.0),

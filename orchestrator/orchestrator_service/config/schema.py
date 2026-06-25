@@ -137,6 +137,8 @@ class ControlThresholds:
     edge_trusted_max_background_penalty: float = 0.0
     yolo_table_near_dist_m: float = 0.45
     yolo_table_lost_to_search_frames: int = 8
+    no_table_bbox_timeout_s: float = 10.0
+    edge_geometry_timeout_s: float = 10.0
     table_memory_timeout_sec: float = 3.0
     table_center_loss_hold_sec: float = 1.0
     rotate_search_timeout_s: float = 10.0
@@ -248,6 +250,8 @@ class ControlThresholds:
     post_stop_ignore_s: float = 0.80
     vision_req_fail_to_stop: bool = True
     vision_req_fail_threshold: int = 2
+    keep_vision_alive_after_task: bool = True
+    task_done_shutdown_vision: bool = False
     enable_pick_pipeline: bool = False
     assume_grasp_success_for_test: bool = False
 

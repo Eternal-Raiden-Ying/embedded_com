@@ -46,6 +46,22 @@ from ..core_types import (
 
 
 class RecoveryMixin:
+    def _should_send_vision_idle_after_task(self) -> bool:
+        if bool(getattr(self.cfg, "task_done_shutdown_vision", False)):
+            return True
+        return not bool(getattr(self.cfg, "keep_vision_alive_after_task", True))
+
+    def _finish_task_to_idle(self, reason: str) -> None:
+        if self._should_send_vision_idle_after_task():
+            self._queue_vision_req(make_vision_idle(session_id=self.ctx.active_session_id, epoch=self.ctx.active_epoch), force=True)
+        else:
+            self._log(
+                "info",
+                "task reached idle; keep vision hot "
+                f"reason={reason} session={self.ctx.active_session_id} epoch={self.ctx.active_epoch}",
+            )
+        self._transition(State.IDLE, reason)
+
     def _tick_no_progress_recovery(self) -> MotionDecision:
         if self._state_elapsed() < float(self.cfg.dock_retry_backoff_s):
             return self.controller.leave_edge_cmd()
@@ -133,14 +149,12 @@ class RecoveryMixin:
 
     def _tick_error_recovery(self) -> MotionDecision:
         if self._state_elapsed() >= float(self.cfg.error_recovery_hold_s):
-            self._queue_vision_req(make_vision_idle(session_id=self.ctx.active_session_id, epoch=self.ctx.active_epoch), force=True)
-            self._transition(State.IDLE, "错误恢复完成，回到空闲")
+            self._finish_task_to_idle("错误恢复完成，回到空闲")
         return self.controller.stop_cmd("ERROR_RECOVERY", brake=True)
 
     def _tick_done(self) -> MotionDecision:
         if self._state_elapsed() >= float(self.cfg.done_hold_s):
-            self._queue_vision_req(make_vision_idle(session_id=self.ctx.active_session_id, epoch=self.ctx.active_epoch), force=True)
-            self._transition(State.IDLE, "任务完成，回到空闲")
+            self._finish_task_to_idle("任务完成，回到空闲")
         return self.controller.stop_cmd("DONE")
 
     def _handle_table_loss(self, reason: str, fallback_state: State, hold_mode: str) -> MotionDecision:
@@ -185,4 +199,3 @@ class RecoveryMixin:
             return self.controller.leave_edge_cmd()
         self._transition(State.NEXT_TABLE, reason)
         return self.controller.next_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
-

@@ -29,6 +29,7 @@ from vision_module.backend.runtime_supervisor import RuntimeSupervisor
 from vision_module.backend.table_edge_manager import TableEdgeManager
 from vision_module.backend.predictor_manager import PredictorManager
 from vision_module.backend.scheduler import Scheduler
+from vision_module.backend.vision_semantics import standardize_table_edge_payload
 from vision_module.config.mode_defaults import build_default_mode_profiles
 from vision_module.ipc.protocol import VisionReq
 try:
@@ -526,6 +527,122 @@ class SearchStagePlanKindTest(unittest.TestCase):
         self.assertEqual(table_obs["source"], "local_perception_table_bbox")
         self.assertEqual(table_obs["reason"], "table_bbox_from_local_perception_no_edge_result")
 
+    def test_table_edge_search_replaces_stale_stage_bbox_with_current_local_bbox(self):
+        plan, ctx = self._enter("TABLE_EDGE")
+        output = plan.tick(
+            StageTickInput(
+                ts=200.0,
+                generation=8,
+                results={
+                    "table_edge_obs": {
+                        "edge_found": False,
+                        "table_bbox_found": True,
+                        "table_bbox_xyxy": [1, 2, 3, 4],
+                        "obs_ts": 100.0,
+                        "frame_id": 4,
+                    },
+                    "local_perception": {
+                        "has_infer": True,
+                        "rgb_shape": [640, 640, 3],
+                        "table_bbox": [80, 220, 520, 620],
+                        "table_bbox_current_found": True,
+                        "frame_seq": 18,
+                        "obs_ts": 199.5,
+                        "yolo_table_conf": 0.82,
+                    },
+                },
+            ),
+            ctx,
+        )
+
+        table_obs = output.vision_obs["perception"]["table_edge_obs"]
+        self.assertEqual(table_obs["table_bbox_xyxy"], [80.0, 220.0, 520.0, 620.0])
+        self.assertEqual(table_obs["obs_ts"], 199.5)
+        self.assertEqual(table_obs["frame_id"], 18)
+        self.assertEqual(table_obs["seq"], 18)
+        self.assertTrue(table_obs["yolo_table_visible"])
+        self.assertTrue(table_obs["yolo_table_fresh"])
+        self.assertEqual(table_obs["yolo_table_age_ms"], 0.0)
+        self.assertEqual(table_obs["table_conf"], 0.82)
+
+    def test_table_edge_search_preserves_edge_candidate_when_merging_current_bbox(self):
+        plan, ctx = self._enter("TABLE_EDGE")
+        output = plan.tick(
+            StageTickInput(
+                ts=250.0,
+                generation=8,
+                results={
+                    "table_edge_obs": {
+                        "edge_found": True,
+                        "edge_detected": True,
+                        "edge_valid": False,
+                        "edge_geometry_valid": False,
+                        "edge_trusted": False,
+                        "point_count": 160,
+                        "support_count": 22,
+                        "inlier_count": 6,
+                        "reason": "edge_candidate_not_trusted",
+                        "obs_ts": 249.5,
+                        "frame_id": 20,
+                    },
+                    "local_perception": {
+                        "has_infer": True,
+                        "rgb_shape": [640, 640, 3],
+                        "table_bbox": [360, 320, 630, 635],
+                        "table_bbox_current_found": True,
+                        "frame_seq": 20,
+                        "obs_ts": 249.5,
+                    },
+                },
+            ),
+            ctx,
+        )
+
+        table_obs = output.vision_obs["perception"]["table_edge_obs"]
+        self.assertTrue(table_obs["edge_found"])
+        self.assertFalse(table_obs["edge_valid"])
+        self.assertFalse(table_obs["edge_trusted"])
+        self.assertEqual(table_obs["point_count"], 160)
+        self.assertEqual(table_obs["support_count"], 22)
+        self.assertEqual(table_obs["inlier_count"], 6)
+        self.assertEqual(table_obs["reason"], "edge_candidate_not_trusted")
+
+    def test_table_edge_search_clears_stale_bbox_when_current_frame_has_no_table(self):
+        plan, ctx = self._enter("TABLE_EDGE")
+        output = plan.tick(
+            StageTickInput(
+                ts=300.0,
+                generation=9,
+                results={
+                    "table_edge_obs": {
+                        "edge_found": False,
+                        "table_bbox_found": True,
+                        "table_bbox_xyxy": [1, 2, 3, 4],
+                        "obs_ts": 100.0,
+                        "frame_id": 4,
+                    },
+                    "local_perception": {
+                        "has_infer": True,
+                        "rgb_shape": [640, 640, 3],
+                        "table_bbox_current_found": False,
+                        "frame_seq": 19,
+                        "obs_ts": 299.5,
+                    },
+                },
+            ),
+            ctx,
+        )
+
+        table_obs = output.vision_obs["perception"]["table_edge_obs"]
+        self.assertFalse(table_obs["table_bbox_found"])
+        self.assertFalse(table_obs["table_bbox_current_found"])
+        self.assertFalse(table_obs["yolo_table_visible"])
+        self.assertFalse(table_obs["yolo_table_fresh"])
+        self.assertIsNone(table_obs.get("table_bbox_xyxy"))
+        self.assertEqual(table_obs["obs_ts"], 299.5)
+        self.assertEqual(table_obs["frame_id"], 19)
+        self.assertEqual(table_obs["reason"], "no_current_table_bbox")
+
     def test_edge_follow_target_outputs_both_and_keeps_partial_results(self):
         plan, ctx = self._enter("EDGE_FOLLOW_TARGET")
         self.assertEqual(ctx.current_mode, "FIND_EDGE")
@@ -560,7 +677,78 @@ class StageControllerStatusTest(unittest.TestCase):
         self.assertEqual(status["target"], "apple")
 
 
+class TableEdgeSemanticsPublishTest(unittest.TestCase):
+    def test_standardize_syncs_legacy_found_valid_trusted_fields(self):
+        obs = standardize_table_edge_payload(
+            {
+                "edge_detected": True,
+                "edge_geometry_valid": False,
+                "edge_obs_unavailable": False,
+                "fast_candidate_point_count": 80,
+                "fast_support_point_count": 12,
+                "fast_rep_inlier_count": 3,
+                "edge_conf": 0.45,
+                "table_bbox_current_found": True,
+                "table_bbox_xyxy": [120, 220, 520, 620],
+            },
+            edge_stable_required_frames=3,
+        ).to_dict()
+
+        self.assertTrue(obs["edge_found"])
+        self.assertFalse(obs["edge_valid"])
+        self.assertFalse(obs["edge_trusted"])
+        self.assertFalse(obs["valid_for_control"])
+        self.assertEqual(obs["edge_quality"]["support_count"], 12)
+        self.assertEqual(obs["edge_quality"]["inlier_count"], 3)
+
+
 class RuntimeSupervisorModeApplyTest(unittest.TestCase):
+    def test_idle_hot_uses_keep_model_hot_config(self):
+        args = SimpleNamespace(
+            rgb_device="mock_rgb",
+            depth_device="mock_depth",
+            ir_device="mock_ir",
+            rgb_in_w=1280,
+            rgb_in_h=720,
+            rgb_out_w=640,
+            rgb_out_h=640,
+            rgb_fps=30,
+            depth_width=424,
+            depth_height=240,
+            depth_fps=15,
+            ir_in_w=640,
+            ir_in_h=480,
+            ir_out_w=640,
+            ir_out_h=480,
+            ir_fps=30,
+            model_path="",
+            model_width=640,
+            model_height=640,
+            conf_thres=0.25,
+            iou_thres=0.15,
+            class_num=20,
+        )
+        cfg = build_test_config(args)
+        cfg.runtime.keep_model_hot_in_standby = True
+        cfg.runtime.release_model_on_idle = False
+
+        profiles = build_default_mode_profiles(cfg.model.active_model, cfg=cfg)
+        self.assertFalse(profiles["IDLE_HOT"].predictor_enabled)
+        self.assertEqual(profiles["IDLE_HOT"].predictor_model, "test_model")
+        self.assertTrue(profiles["IDLE_HOT"].metadata["keep_model_loaded"])
+
+        cfg.runtime.enable_infer_during_hot_standby = True
+        profiles = build_default_mode_profiles(cfg.model.active_model, cfg=cfg)
+        self.assertTrue(profiles["IDLE_HOT"].predictor_enabled)
+        self.assertEqual(profiles["IDLE_HOT"].predictor_model, "test_model")
+
+        cfg.runtime.enable_infer_during_hot_standby = False
+        cfg.runtime.release_model_on_idle = True
+        profiles = build_default_mode_profiles(cfg.model.active_model, cfg=cfg)
+        self.assertFalse(profiles["IDLE_HOT"].predictor_enabled)
+        self.assertIsNone(profiles["IDLE_HOT"].predictor_model)
+        self.assertFalse(profiles["IDLE_HOT"].metadata["keep_model_loaded"])
+
     def test_runtime_supervisor_reconciles_managers_from_mode(self):
         args = SimpleNamespace(
             rgb_device="mock_rgb",
@@ -603,6 +791,51 @@ class RuntimeSupervisorModeApplyTest(unittest.TestCase):
             snapshot = mode_controller.runtime_snapshot()
             self.assertEqual(snapshot["runtime_supervisor"]["camera"]["enabled_cameras"], [])
             self.assertIsNone(snapshot["runtime_supervisor"]["predictor"]["active_model_name"])
+        finally:
+            mode_controller.stop_runtime()
+
+    def test_idle_hot_keeps_model_loaded_without_running_inference_by_default(self):
+        args = SimpleNamespace(
+            rgb_device="mock_rgb",
+            depth_device="mock_depth",
+            ir_device="mock_ir",
+            rgb_in_w=1280,
+            rgb_in_h=720,
+            rgb_out_w=640,
+            rgb_out_h=640,
+            rgb_fps=30,
+            depth_width=424,
+            depth_height=240,
+            depth_fps=15,
+            ir_in_w=640,
+            ir_in_h=480,
+            ir_out_w=640,
+            ir_out_h=480,
+            ir_fps=30,
+            model_path="",
+            model_width=640,
+            model_height=640,
+            conf_thres=0.25,
+            iou_thres=0.15,
+            class_num=20,
+        )
+        cfg = build_test_config(args)
+        cfg.runtime.capability_placeholder = True
+        cfg.runtime.keep_model_hot_in_standby = True
+        cfg.runtime.release_model_on_idle = False
+        cfg.runtime.enable_infer_during_hot_standby = False
+        _patch_managers("mock")
+
+        mode_controller, _, stage_controller = build_runtime_stack(cfg, PrintLogger("idle_hot"))
+        try:
+            mode_controller.start_runtime()
+            self.assertTrue(stage_controller.set_runtime_mode("FIND_OBJECT", reason="load_model", force=True))
+            self.assertTrue(stage_controller.set_runtime_mode("IDLE_HOT", reason="hot_idle", force=True))
+            snapshot = mode_controller.runtime_snapshot()["runtime_supervisor"]
+            self.assertEqual(snapshot["predictor"]["active_model_name"], "test_model")
+            self.assertFalse(snapshot["predictor"]["runtime_running"])
+            self.assertFalse(snapshot["predictor"]["inference_enabled"])
+            self.assertEqual(snapshot["camera"]["enabled_cameras"], ["rgb"])
         finally:
             mode_controller.stop_runtime()
 

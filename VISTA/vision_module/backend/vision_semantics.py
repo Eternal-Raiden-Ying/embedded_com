@@ -469,13 +469,18 @@ def standardize_table_edge_payload(
 
     out.update(
         {
+            "edge_found": bool(edge_detected),
             "edge_detected": bool(edge_detected),
             "edge_geometry_valid": bool(edge_geometry_valid),
+            "edge_valid": bool(edge_geometry_valid),
             "edge_stable": bool(edge_stable),
             "edge_trusted": bool(edge_trusted),
+            "valid_for_control": bool(edge_trusted),
+            "edge_control_allowed": bool(edge_trusted),
             "edge_quality": quality,
             "edge_trust_reason": edge_trust_reason,
             "edge_reject_for_control_reason": block_reason,
+            "edge_control_block_reason": block_reason,
             "edge_stable_required_frames": int(stable_required),
             "edge_trusted_min_conf": float(edge_trusted_min_conf),
             "edge_trusted_min_support_count": int(edge_trusted_min_support_count or 0),

@@ -38,6 +38,9 @@ vision:
     stale_req_s: 3.0 # Duration to consider incoming request stale
     hot_standby_s: 30.0 # Hot standby timeout duration
     keep_preview_after_stop: true # Keep debug preview active after stop
+    keep_vision_alive_after_task: true # Keep cameras/preview alive after task failure or completion
+    keep_preview_alive_after_task: true # Keep preview window alive after task failure or completion
+    release_model_on_idle: false # Do not release model on normal task idle
     keep_model_hot_in_standby: true # Keep YOLO model in memory during standby
     enable_infer_during_hot_standby: false # Run inference in standby
     capability_placeholder: false # Capability sink indicator
@@ -275,6 +278,8 @@ orchestrator:
     edge_trusted_max_background_penalty: 0.0 # Max background noise allowed
     yolo_table_near_dist_m: 0.45 # Lateral distance threshold for near stage
     yolo_table_lost_to_search_frames: 8 # Frame drop threshold to trigger search
+    no_table_bbox_timeout_s: 10.0 # Timeout only when YOLO table bbox is also absent
+    edge_geometry_timeout_s: 10.0 # Time to degrade edge geometry before YOLO assist fallback
     table_memory_timeout_sec: 3.0 # Maximum age of search with memory cache
     table_center_loss_hold_sec: 1.0 # Duration to keep rotating in center direction
     rotate_search_timeout_s: 10.0 # Timeout for blind rotate search
@@ -368,6 +373,8 @@ orchestrator:
     post_stop_ignore_s: 0.80 # Quiet time after e-stop/hardware stop
     vision_req_fail_to_stop: true # Stop if vision request fails
     vision_req_fail_threshold: 2 # Fail limit
+    keep_vision_alive_after_task: true # Do not send vision STOP on normal task done/error
+    task_done_shutdown_vision: false # Only explicit stack stop should close vision/preview
     enable_pick_pipeline: false # Enable picker robot subsystem integration
     assume_grasp_success_for_test: false # Bypass hardware checks during test
   car:
