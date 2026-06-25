@@ -1750,12 +1750,13 @@ class OrchestratorService(BaseModule):
 
     def _send_task_ack(self, cmd: TaskCmd, accepted: bool, reason: str):
         ack = make_task_ack(cmd, accepted=accepted, reason=reason, state=self.core.ctx.state.value)
-        sent = self.task_ack_sender.send(ack)
+        disabled = str(getattr(self.cfg.task_ack_out, "transport", "") or "").lower() == "disabled"
+        sent = True if disabled else self.task_ack_sender.send(ack)
         self._last_tx_summary["task_ack_out"] = time.time()
         self.run_logger.write_jsonl("task_ack", ack)
         self.run_logger.write_ipc(
             "task_ack_out",
-            "ack_sent" if sent else "ack_send_failed",
+            "disabled" if disabled else ("ack_sent" if sent else "ack_send_failed"),
             direction="TX",
             cmd_id=cmd.cmd_id,
             session_id=cmd.session_id,
@@ -1766,10 +1767,10 @@ class OrchestratorService(BaseModule):
         )
         self._operator_ipc_event(
             "task_ack_out",
-            "ack_sent" if sent else "ack_send_failed",
+            "disabled" if disabled else ("ack_sent" if sent else "ack_send_failed"),
             {"cmd_id": cmd.cmd_id, "accepted": accepted, "error": "" if sent else reason},
         )
-        self.log_ipc("TX", "task_ack", "sent" if sent else "failed", {"cmd_id": cmd.cmd_id, "accepted": accepted})
+        self.log_ipc("TX", "task_ack", "disabled" if disabled else ("sent" if sent else "failed"), {"cmd_id": cmd.cmd_id, "accepted": accepted})
 
     def _drain_task_cmds(self):
         for item in self.task_server.drain():
@@ -2178,6 +2179,30 @@ class OrchestratorService(BaseModule):
                 if key != self._last_target_search_req_console_key:
                     self._last_target_search_req_console_key = key
                     self.operator_console.emit(summary_line)
+            if str(getattr(self.cfg.vision_req_out, "transport", "") or "").lower() == "disabled":
+                self._last_tx_summary["vision_req_out"] = time.time()
+                self.core.handle_vision_req_send_result(True, msg)
+                self.run_logger.write_ipc(
+                    "vision_req_out",
+                    "disabled",
+                    direction="TX",
+                    req_id=msg.get("req_id"),
+                    session_id=msg.get("session_id"),
+                    epoch=msg.get("epoch"),
+                    ok=True,
+                    op=msg.get("op"),
+                    stage=msg.get("stage"),
+                    mode_hint=msg.get("mode_hint"),
+                )
+                self.run_logger.write_timeline(
+                    "VISION_REQ_DISABLED",
+                    req_id=msg.get("req_id"),
+                    op=msg.get("op"),
+                    stage=msg.get("stage"),
+                    mode_hint=msg.get("mode_hint"),
+                    session_id=msg.get("session_id"),
+                )
+                continue
             if isinstance(self.vision_req_sender, AsyncJsonlClientSender):
                 queued = self._enqueue_async_or_fail(self.vision_req_sender, "vision_req_out", msg)
                 if not queued:

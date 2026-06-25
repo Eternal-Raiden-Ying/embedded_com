@@ -137,6 +137,20 @@ class VisionStateSyncTest(unittest.TestCase):
         self.assertEqual(req2["req_type"], "target_update")
         self.assertEqual(req2["op"], "UPDATE")
 
+    def test_vision_send_failure_does_not_stop_when_fail_to_stop_disabled(self):
+        """Dry-run profiles can observe missing vision request receivers without failing the task."""
+        self.cfg.control.vision_req_fail_to_stop = False
+        self.cfg.control.vision_req_fail_threshold = 1
+        core = OrchestratorCore(self.cfg.control, self.cfg.car, self.cfg.docking)
+        core.ctx.state = State.SEARCH_TABLE
+
+        req = core._active_req_payload()
+        core.handle_vision_req_send_result(False, req, error="mock link down")
+
+        self.assertEqual(core.ctx.state, State.SEARCH_TABLE)
+        self.assertEqual(core.ctx.vision_req_fail_streak, 1)
+        self.assertEqual(core.ctx.last_fail_reason, "")
+
     def test_stale_observation_protection(self):
         """Verify stale old observations do not overwrite or roll back confirmed mode."""
         self.core.ctx.state = State.SEARCH_TABLE

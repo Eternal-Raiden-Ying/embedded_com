@@ -96,6 +96,17 @@ class ConfigLoaderLayeringTest(unittest.TestCase):
         self.assertFalse(cfg.orchestrator.serial.dry_run)
         self.assertEqual(cfg.orchestrator.serial.port, "/dev/ttyHS1")
 
+    def test_dry_run_profile_disables_external_ack_and_vision_request_outputs(self):
+        env = {"SYSTEM_CONFIG_PROFILE": "dry_run"}
+        with patch.dict(os.environ, env, clear=False):
+            cfg = load_global_config(str(ROOT / "configs" / "system_config.yaml"))
+
+        self.assertEqual(cfg.profile, "dry_run")
+        self.assertTrue(cfg.orchestrator.serial.dry_run)
+        self.assertEqual(cfg.orchestrator.task_ack_out.transport, "disabled")
+        self.assertEqual(cfg.orchestrator.vision_req_out.transport, "disabled")
+        self.assertFalse(cfg.orchestrator.control.vision_req_fail_to_stop)
+
 
 if __name__ == "__main__":
     unittest.main()

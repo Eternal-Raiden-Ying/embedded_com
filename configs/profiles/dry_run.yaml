@@ -12,21 +12,19 @@ runtime_overrides:
       port: "DRY_RUN"
       dry_run: true
       readback_enabled: false
+    control:
+      vision_req_fail_to_stop: false
     task_cmd_in:
       transport: "uds"
       ipc_socket_path: "/tmp/robot_stack/task_cmd.sock"
     task_ack_out:
-      transport: "tcp"
-      tcp_host: "127.0.0.1"
-      tcp_port: 19102
+      transport: "disabled"
     vision_obs_in:
       transport: "tcp"
       tcp_host: "127.0.0.1"
       tcp_port: 19103
     vision_req_out:
-      transport: "tcp"
-      tcp_host: "127.0.0.1"
-      tcp_port: 19104
+      transport: "disabled"
     tts_event_out:
       transport: "disabled"
   gateway:
