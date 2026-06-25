@@ -928,6 +928,10 @@ class OpenCVPreviewSink(PreviewSink):
                     pts.append((px, py))
             for p1, p2 in zip(pts[:-1], pts[1:]):
                 cv2.line(panel, p1, p2, YELLOW, 2, lineType=cv2.LINE_AA)
+            current = self._boolish(table_edge.get("preview_line_is_current_frame", not table_edge.get("is_stale", False)))
+            source = str(table_edge.get("preview_line_source") or "image_line").strip() or "image_line"
+            label = "EDGE_CURRENT" if current else "LAST_EDGE"
+            self._corner_note(panel, f"{label} source={source}", fg=YELLOW)
         elif table_edge.get("edge_found"):
             self._corner_note(panel, "edge line image projection unavailable", fg=YELLOW)
         elif table_edge.get("reason") or table_edge.get("reject_reason"):

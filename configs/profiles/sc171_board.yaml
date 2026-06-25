@@ -1,6 +1,10 @@
 profile: "sc171_board"
 runtime_overrides:
   vision:
+    runtime:
+      keep_vision_alive_after_task: true
+      keep_preview_alive_after_task: true
+      release_model_on_idle: false
     req_in:
       transport: "uds"
       ipc_socket_path: "/tmp/robot_stack/vision_req.sock"
@@ -14,6 +18,13 @@ runtime_overrides:
       port: "/dev/ttyHS1"
       dry_run: false
       readback_enabled: true
+    control:
+      yolo_table_control_enable: true
+      vision_req_fail_to_stop: true
+      no_table_bbox_timeout_s: 10.0
+      edge_geometry_timeout_s: 10.0
+      keep_vision_alive_after_task: true
+      task_done_shutdown_vision: false
     task_cmd_in:
       transport: "uds"
       ipc_socket_path: "/tmp/robot_stack/task_cmd.sock"
@@ -29,9 +40,13 @@ runtime_overrides:
     tts_event_out:
       transport: "disabled"
   gateway:
+    backend:
+      mode: "tcp_no_ack"
     command_in:
-      transport: "uds"
+      transport: "http"
       ipc_socket_path: "/tmp/robot_stack/mobile_gateway_cmd.sock"
+      tcp_host: "0.0.0.0"
+      tcp_port: 9001
     status_out:
       transport: "disabled"
     orchestrator_task_cmd_out:

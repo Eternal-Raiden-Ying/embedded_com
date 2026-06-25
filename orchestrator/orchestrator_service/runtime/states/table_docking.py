@@ -128,15 +128,24 @@ class TableDockingMixin:
         if abs(wz) < 0.02:
             wz = 0.0
             
-        decision = self.controller.stop_cmd("YOLO_ACQUIRE_ALIGN")
-        decision.cmd.vx_mps = 0.0
-        decision.cmd.wz_radps = wz
+        cmd = self.controller._cmd("YOLO_ACQUIRE_ALIGN", vx=0.0, wz=wz)
+        decision = MotionDecision(
+            cmd=cmd,
+            control_summary=self.controller._summary("YOLO_ACQUIRE_ALIGN", cmd, obs, reason="yolo_acquire_align"),
+        )
         decision.control_summary.update({
             "control_source": "yolo_align",
             "yolo_acquire_align_active": True,
             "bbox_cx_norm": float(cx_norm),
             "vx_mps": 0.0,
-            "wz_radps": float(wz)
+            "vy_mps": 0.0,
+            "wz_radps": float(wz),
+            "allow_forward": False,
+            "allow_rotate": True,
+            "forward_block_reason": "yolo_align_rotate_only",
+            "rotate_block_reason": "",
+            "speed_profile": "search",
+            "speed_limit_reason": "yolo_align",
         })
         return decision
 
@@ -164,29 +173,79 @@ class TableDockingMixin:
     def _tick_search_table(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
         obs = self._fresh_table_obs()
+        yolo_status = self._yolo_table_status(obs)
         local_search_active = bool(
             self.ctx.prev_state in TABLE_APPROACH_STATES
             and ("丢失" in str(self.ctx.last_enter_reason or "") or "lost" in str(self.ctx.last_enter_reason or "").lower())
         )
         local_search_elapsed_s = self._state_elapsed() if local_search_active else 0.0
-        local_search_timeout_s = max(0.0, float(getattr(self.cfg, "rotate_search_timeout_s", 10.0) or 10.0))
+        local_search_timeout_s = max(
+            0.0,
+            float(
+                getattr(
+                    self.cfg,
+                    "no_table_bbox_timeout_s",
+                    getattr(self.cfg, "rotate_search_timeout_s", 10.0),
+                )
+                or getattr(self.cfg, "rotate_search_timeout_s", 10.0)
+            ),
+        )
         if local_search_active and local_search_elapsed_s >= local_search_timeout_s:
-            self.ctx.last_fail_reason = "table_lost_search_timeout"
-            self._enter_error_recovery(self.ctx.last_fail_reason, tts_text="桌边丢失搜索超时，已停车", interrupt_tts=True)
-            decision = self.controller.stop_cmd("ERROR_RECOVERY", brake=True)
-            decision.control_summary.update(
-                {
-                    "control_source": "search_failed_stop",
-                    "table_lost_search_active": True,
-                    "table_lost_search_elapsed_s": float(local_search_elapsed_s),
-                    "table_lost_search_timeout": True,
-                    "stop_source_state": "SEARCH_TABLE",
-                    "stop_reason": self.ctx.last_fail_reason,
-                }
-            )
-            return decision
+            if yolo_status["fresh"]:
+                self._log(
+                    "warn",
+                    (
+                        "[TABLE_TIMEOUT] suppressed table_lost_search_timeout "
+                        f"current_state={self.ctx.state.value} selected_timeout_reason=bbox_visible_but_edge_invalid "
+                        f"fallback_action=yolo_assist "
+                        f"yolo_table_visible={int(yolo_status['visible'])} "
+                        f"yolo_table_fresh={int(yolo_status['fresh'])} "
+                        f"yolo_table_age_ms={yolo_status['age_ms']} "
+                        f"edge_valid={int(bool(getattr(obs, 'edge_valid', False))) if obs is not None else 0} "
+                        f"edge_trusted={int(bool(getattr(obs, 'edge_trusted', False))) if obs is not None else 0} "
+                        f"edge_age_ms={self._table_obs_age_ms(obs)}"
+                    ),
+                )
+            else:
+                self.ctx.last_fail_reason = "table_lost_search_timeout:no_table_bbox_timeout"
+                self._log(
+                    "warn",
+                    (
+                        "[TABLE_TIMEOUT] triggering table_lost_search_timeout "
+                        f"current_state={self.ctx.state.value} selected_timeout_reason=no_table_bbox_timeout "
+                        f"fallback_action=error_recovery "
+                        f"yolo_table_visible={int(yolo_status['visible'])} "
+                        f"yolo_table_fresh={int(yolo_status['fresh'])} "
+                        f"yolo_table_age_ms={yolo_status['age_ms']} "
+                        f"edge_valid={int(bool(getattr(obs, 'edge_valid', False))) if obs is not None else 0} "
+                        f"edge_trusted={int(bool(getattr(obs, 'edge_trusted', False))) if obs is not None else 0} "
+                        f"edge_age_ms={self._table_obs_age_ms(obs)}"
+                    ),
+                )
+                self._enter_error_recovery(self.ctx.last_fail_reason, tts_text="桌边丢失搜索超时，已停车", interrupt_tts=True)
+                decision = self.controller.stop_cmd("ERROR_RECOVERY", brake=True)
+                decision.control_summary.update(
+                    {
+                        "control_source": "search_failed_stop",
+                        "table_lost_search_active": True,
+                        "table_lost_search_elapsed_s": float(local_search_elapsed_s),
+                        "table_lost_search_timeout": True,
+                        "no_table_bbox_timeout": True,
+                        "selected_timeout_reason": "no_table_bbox_timeout",
+                        "fallback_action": "error_recovery",
+                        "yolo_table_visible": bool(yolo_status["visible"]),
+                        "yolo_table_fresh": bool(yolo_status["fresh"]),
+                        "yolo_table_age_ms": yolo_status["age_ms"],
+                        "edge_valid": bool(getattr(obs, "edge_valid", False)) if obs is not None else False,
+                        "edge_trusted": bool(getattr(obs, "edge_trusted", False)) if obs is not None else False,
+                        "edge_age_ms": self._table_obs_age_ms(obs),
+                        "stop_source_state": "SEARCH_TABLE",
+                        "stop_reason": self.ctx.last_fail_reason,
+                    }
+                )
+                return decision
         level = self._control_level(obs)
-        if bool(getattr(self.cfg, "yolo_table_control_enable", True)) and self._table_yolo_reliable(obs):
+        if bool(getattr(self.cfg, "yolo_table_control_enable", True)) and yolo_status["fresh"] and self._table_yolo_reliable(obs):
             cx_norm = self._get_bbox_center_x_norm(obs)
             if cx_norm < 0.35 or cx_norm > 0.65:
                 self._transition(State.YOLO_ACQUIRE_ALIGN, f"table bbox found but center x={cx_norm:.3f} outside [0.35, 0.65]")
@@ -208,6 +267,15 @@ class TableDockingMixin:
                 "table_lost_search_active": bool(local_search_active),
                 "table_lost_search_elapsed_s": float(local_search_elapsed_s),
                 "table_lost_search_timeout": False,
+                "no_table_bbox_timeout": False,
+                "selected_timeout_reason": "bbox_visible_but_edge_invalid" if yolo_status["visible"] else "searching_no_table_bbox",
+                "fallback_action": "yolo_assist" if yolo_status["fresh"] else "local_rotate_search",
+                "yolo_table_visible": bool(yolo_status["visible"]),
+                "yolo_table_fresh": bool(yolo_status["fresh"]),
+                "yolo_table_age_ms": yolo_status["age_ms"],
+                "edge_valid": bool(getattr(obs, "edge_valid", False)) if obs is not None else False,
+                "edge_trusted": bool(getattr(obs, "edge_trusted", False)) if obs is not None else False,
+                "edge_age_ms": self._table_obs_age_ms(obs),
                 "search_table_stale_gate_bypass": True,
             }
         )
@@ -768,6 +836,35 @@ class TableDockingMixin:
         if hasattr(obs, "yolo_reliable"):
             return bool(getattr(obs, "yolo_reliable", False))
         return bool(getattr(obs, "table_confirmed_by_yolo", False)) and getattr(obs, "table_cx_norm", None) is not None
+
+    def _yolo_table_status(self, obs: Optional[TableEdgeObs]) -> Dict[str, object]:
+        if obs is None:
+            return {"visible": False, "fresh": False, "age_ms": None}
+        bbox = getattr(obs, "table_bbox_xyxy", None)
+        has_bbox = isinstance(bbox, (list, tuple)) and len(bbox) >= 4
+        visible = bool(
+            getattr(obs, "yolo_table_visible", False)
+            or getattr(obs, "table_bbox_current_found", False)
+            or getattr(obs, "table_bbox_found", False)
+            or has_bbox
+        )
+        age_ms = getattr(obs, "yolo_table_age_ms", None)
+        if age_ms is None:
+            age_ms = self._table_obs_age_ms(obs)
+        explicit_fresh = getattr(obs, "yolo_table_fresh", None)
+        max_age_ms = max(
+            float(getattr(self.cfg, "table_obs_stale_stop_ms", 500) or 500),
+            float(getattr(self.cfg, "no_table_bbox_timeout_s", 1.0) or 1.0) * 1000.0,
+        )
+        try:
+            age_ok = age_ms is not None and float(age_ms) <= max_age_ms
+        except Exception:
+            age_ok = False
+        if explicit_fresh is None:
+            fresh = bool(visible and age_ok and not bool(getattr(obs, "is_stale", False)))
+        else:
+            fresh = bool(visible and bool(explicit_fresh) and age_ok)
+        return {"visible": bool(visible), "fresh": bool(fresh), "age_ms": age_ms}
 
     def _table_plane_stable(self, obs: Optional[TableEdgeObs]) -> bool:
         # Geometry can be stable from the detector perspective, but it is only

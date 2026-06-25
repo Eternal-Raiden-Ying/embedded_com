@@ -9,6 +9,7 @@ from .request_mapping import invalid_search_kind_reason, is_valid_search_kind, m
 from .status_policy import FAILED, RELAXING, RUNNING, invalid_search_kind_result
 from .table_edge_obs_builder import (
     annotate_table_edge_obs,
+    merge_table_bbox_from_local_perception,
     payload_has_table_edge_obs,
     table_edge_obs_from_payload,
     table_edge_obs_from_results,
@@ -136,6 +137,11 @@ class SearchStagePlan(BaseStagePlan):
                 source=table_edge_source,
                 source_mode=ctx.current_mode,
             )
+            table_edge_obs = merge_table_bbox_from_local_perception(
+                table_edge_obs,
+                local_perception,
+                tick_ts=tick_input.ts,
+            )
             ctx.stage_state["table_edge_obs"] = dict(table_edge_obs)
             perception = {"table_edge_obs": table_edge_obs}
             if target_obs is not None:
@@ -202,6 +208,11 @@ class SearchStagePlan(BaseStagePlan):
                 tick_ts=tick_input.ts,
                 source=table_edge_source,
                 source_mode=ctx.current_mode,
+            )
+            table_edge_obs = merge_table_bbox_from_local_perception(
+                table_edge_obs,
+                results.get("local_perception"),
+                tick_ts=tick_input.ts,
             )
             ctx.stage_state["table_edge_obs"] = dict(table_edge_obs)
             return StageOutput(

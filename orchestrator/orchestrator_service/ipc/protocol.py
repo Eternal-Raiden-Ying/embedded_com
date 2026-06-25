@@ -419,7 +419,9 @@ class TableEdgeObs:
     edge_b: Optional[float] = None
     depth_valid: Optional[bool] = None
     table_cx_norm: Optional[float] = None
+    table_cy_norm: Optional[float] = None
     table_size_norm: Optional[float] = None
+    table_conf: Optional[float] = None
     plane_cx_norm: Optional[float] = None
     plane_width_norm: Optional[float] = None
     plane_area_ratio: Optional[float] = None
@@ -453,6 +455,9 @@ class TableEdgeObs:
     table_bbox_touch_bottom: bool = False
     table_bbox_boundary_allowed: bool = False
     yolo_table_control_valid: bool = False
+    yolo_table_visible: bool = False
+    yolo_table_fresh: Optional[bool] = None
+    yolo_table_age_ms: Optional[float] = None
     yolo_table_roi_valid: bool = False
     yolo_gate_open: bool = False
     yolo_table_conf: Optional[float] = None
@@ -583,7 +588,9 @@ class TableEdgeObs:
             edge_b=_pick_optional_float(payload, "edge_b"),
             depth_valid=_pick_optional_bool(payload, "depth_valid"),
             table_cx_norm=_pick_optional_float(payload, "table_cx_norm", "table_cx"),
+            table_cy_norm=_pick_optional_float(payload, "table_cy_norm", "table_cy"),
             table_size_norm=_pick_optional_float(payload, "table_size_norm", "table_area_norm", "table_area", "size_norm"),
+            table_conf=_pick_optional_float(payload, "table_conf", "table_confidence"),
             plane_cx_norm=_pick_optional_float(payload, "plane_cx_norm", "front_plane_cx_norm"),
             plane_width_norm=_pick_optional_float(payload, "plane_width_norm", "front_plane_width_norm"),
             plane_area_ratio=_pick_optional_float(payload, "plane_area_ratio", "front_plane_area_ratio", "front_face_area_ratio"),
@@ -617,6 +624,9 @@ class TableEdgeObs:
             table_bbox_touch_bottom=bool(payload.get("table_bbox_touch_bottom", payload.get("yolo_bbox_touch_bottom", False))),
             table_bbox_boundary_allowed=bool(payload.get("table_bbox_boundary_allowed", False)),
             yolo_table_control_valid=bool(payload.get("yolo_table_control_valid", payload.get("table_bbox_found", _pick_optional_bbox(payload, "table_bbox_xyxy", "yolo_table_bbox", "table_bbox", "detected_table_bbox") is not None or payload.get("yolo_reliable", False)))),
+            yolo_table_visible=bool(payload.get("yolo_table_visible", payload.get("table_bbox_current_found", payload.get("table_bbox_found", False)))),
+            yolo_table_fresh=(bool(payload["yolo_table_fresh"]) if "yolo_table_fresh" in payload else None),
+            yolo_table_age_ms=_pick_optional_float(payload, "yolo_table_age_ms"),
             yolo_table_roi_valid=bool(payload.get("yolo_table_roi_valid", False)),
             yolo_gate_open=bool(payload.get("yolo_gate_open", False)),
             yolo_table_conf=_pick_optional_float(payload, "yolo_table_conf"),

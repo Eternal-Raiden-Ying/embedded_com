@@ -6,11 +6,13 @@ import json
 import os
 import queue
 import signal
+import socket
 import sys
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional, Set, Tuple
 
@@ -105,6 +107,225 @@ class TcpTaskCmdBackend:
             return True, "task_cmd forwarded"
         snap = self.sender.snapshot()
         return False, f"task_cmd forward failed: {snap.get('link_state')}"
+
+
+class MobileHttpCommandServer:
+    def __init__(
+        self,
+        endpoint: GatewayEndpoint,
+        task_handler: Callable[[Dict[str, Any]], Dict[str, Any]],
+        health_handler: Callable[[], Dict[str, Any]],
+        logger: Callable[[str, str, Dict[str, Any]], None],
+    ):
+        self.host = str(getattr(endpoint, "host", "0.0.0.0") or getattr(endpoint, "tcp_host", "0.0.0.0") or "0.0.0.0")
+        self.port = int(getattr(endpoint, "port", 0) or getattr(endpoint, "tcp_port", 0) or 0)
+        self.task_handler = task_handler
+        self.health_handler = health_handler
+        self.logger = logger
+        self._server: Optional[ThreadingHTTPServer] = None
+        self._thread: Optional[threading.Thread] = None
+        self.listening = False
+        self.total_recv_count = 0
+        self.last_recv_ts = 0.0
+
+    def start(self) -> None:
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            server_version = "MobileGatewayHTTP/1.0"
+
+            def log_message(self, fmt: str, *args: Any) -> None:
+                return
+
+            def _send_json(self, status: int, payload: Dict[str, Any]) -> None:
+                body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self) -> None:
+                if self.path.split("?", 1)[0] != "/health":
+                    outer.logger("warn", "http request not found", {"method": "GET", "path": self.path, "client": self.client_address[0]})
+                    self._send_json(404, {"ok": False, "error": "not found"})
+                    return
+                outer.logger("info", "http health request", {"method": "GET", "path": self.path, "client": self.client_address[0]})
+                self._send_json(200, outer.health_handler())
+
+            def do_POST(self) -> None:
+                if self.path.split("?", 1)[0] != "/task":
+                    outer.logger("warn", "http request not found", {"method": "POST", "path": self.path, "client": self.client_address[0]})
+                    self._send_json(404, {"ok": False, "error": "not found"})
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0") or 0)
+                    if length <= 0 or length > 1024 * 1024:
+                        raise ValueError("invalid Content-Length")
+                    raw = self.rfile.read(length)
+                    payload = json.loads(raw.decode("utf-8"))
+                    if not isinstance(payload, dict):
+                        raise ValueError("task payload must be a JSON object")
+                except Exception as exc:
+                    outer.logger("warn", "http bad request", {"method": "POST", "path": self.path, "client": self.client_address[0], "error": str(exc)})
+                    self._send_json(400, {"ok": False, "error": str(exc)})
+                    return
+                outer.total_recv_count += 1
+                outer.last_recv_ts = now_ts()
+                outer.logger("info", "http task request", {"method": "POST", "path": self.path, "client": self.client_address[0]})
+                result = outer.task_handler(payload)
+                self._send_json(202 if result.get("ok") else 502, result)
+
+        self._server = ThreadingHTTPServer((self.host, self.port), Handler)
+        self._server.daemon_threads = True
+        self.host, self.port = self._server.server_address[:2]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True, name="mobile_gateway_http")
+        self._thread.start()
+        self.listening = True
+        self.logger("info", "http listening", {"host": self.host, "port": self.port, "paths": ["/health", "/task"]})
+
+    def close(self) -> None:
+        self.listening = False
+        if self._server is not None:
+            self._server.shutdown()
+            self._server.server_close()
+            self._server = None
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+
+    def snapshot(self) -> Dict[str, Any]:
+        return {
+            "mode": "http",
+            "host": self.host,
+            "port": self.port,
+            "listening": self.listening,
+            "total_recv_count": self.total_recv_count,
+            "last_recv_ts": self.last_recv_ts,
+        }
+
+
+class MobileJsonTcpCommandServer:
+    def __init__(self, host: str, port: int, logger: Callable[[str, str, Dict[str, Any]], None]):
+        self.host = str(host or "0.0.0.0")
+        self.port = int(port or 0)
+        self.logger = logger
+        self._server_sock: Optional[socket.socket] = None
+        self._accept_thread: Optional[threading.Thread] = None
+        self._client_threads: List[threading.Thread] = []
+        self._stop = threading.Event()
+        self._queue: "queue.Queue[Dict[str, Any]]" = queue.Queue()
+        self.listening = False
+        self.start_ts = 0.0
+        self.last_recv_ts = 0.0
+        self.total_recv_count = 0
+        self.invalid_json_count = 0
+        self.client_count = 0
+
+    def start(self) -> None:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((self.host, self.port))
+        self.host, self.port = sock.getsockname()[:2]
+        sock.listen(4)
+        sock.settimeout(1.0)
+        self._server_sock = sock
+        self._accept_thread = threading.Thread(target=self._accept_loop, daemon=True, name="mobile_gateway_json_tcp")
+        self._accept_thread.start()
+        self.listening = True
+        self.start_ts = now_ts()
+        self.logger("info", "json tcp listening", {"host": self.host, "port": self.port})
+
+    def close(self) -> None:
+        self._stop.set()
+        self.listening = False
+        if self._server_sock is not None:
+            try:
+                self._server_sock.close()
+            except Exception:
+                pass
+        if self._accept_thread is not None:
+            self._accept_thread.join(timeout=1.5)
+            self._accept_thread = None
+        for thread in self._client_threads:
+            thread.join(timeout=0.5)
+
+    def drain(self) -> List[Dict[str, Any]]:
+        items: List[Dict[str, Any]] = []
+        while True:
+            try:
+                items.append(self._queue.get_nowait())
+            except queue.Empty:
+                break
+        return items
+
+    def snapshot(self) -> Dict[str, Any]:
+        return {
+            "name": "mobile_command_in_legacy_json_tcp",
+            "mode": "json_tcp",
+            "host": self.host,
+            "port": self.port,
+            "listening": self.listening,
+            "start_ts": self.start_ts,
+            "last_recv_ts": self.last_recv_ts,
+            "invalid_json_count": self.invalid_json_count,
+            "queue_depth": self._queue.qsize(),
+            "total_recv_count": self.total_recv_count,
+            "client_count": self.client_count,
+        }
+
+    def _accept_loop(self) -> None:
+        assert self._server_sock is not None
+        while not self._stop.is_set():
+            try:
+                conn, addr = self._server_sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            peer = str(addr)
+            self.client_count += 1
+            self.logger("info", "json tcp peer connected", {"peer": peer, "client_count": self.client_count})
+            thread = threading.Thread(target=self._client_loop, args=(conn, peer), daemon=True, name="mobile_gateway_json_tcp_client")
+            self._client_threads.append(thread)
+            thread.start()
+
+    def _client_loop(self, conn: socket.socket, peer: str) -> None:
+        with conn:
+            conn.settimeout(1.0)
+            buffer = b""
+            while not self._stop.is_set():
+                try:
+                    chunk = conn.recv(4096)
+                except socket.timeout:
+                    continue
+                except Exception as exc:
+                    self.logger("warn", "json tcp recv failed", {"peer": peer, "error": repr(exc)})
+                    break
+                if not chunk:
+                    if buffer.strip():
+                        self._handle_line(buffer.strip(), peer)
+                    break
+                buffer += chunk
+                while b"\n" in buffer:
+                    line, buffer = buffer.split(b"\n", 1)
+                    self._handle_line(line.strip(), peer)
+
+    def _handle_line(self, raw: bytes, peer: str) -> None:
+        if not raw:
+            return
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("payload must be a JSON object")
+        except Exception as exc:
+            self.invalid_json_count += 1
+            self.logger("warn", "json tcp bad payload", {"peer": peer, "error": str(exc), "raw": raw[:200].decode("utf-8", errors="replace")})
+            return
+        self.last_recv_ts = now_ts()
+        self.total_recv_count += 1
+        self.logger("info", "json tcp command received", {"peer": peer, "cmd": payload.get("cmd"), "cmd_id": payload.get("cmd_id")})
+        self._queue.put({"peer": peer, "payload": payload, "recv_ts": self.last_recv_ts})
 
 
 class MockOrchestratorBackend:
@@ -315,13 +536,34 @@ class MobileGatewayService(BaseModule):
         ensure_dir(cfg.runtime.runs_dir)
         ensure_dir(cfg.runtime.pid_dir)
         self.run_logger = RunLogger("mobile_gateway", cfg.runtime.runs_dir, cfg.runtime.stack_run_id) if cfg.runtime.log_enabled else _NullRunLogger("mobile_gateway", cfg.runtime.stack_run_id)
-        self.command_server = JsonlInboundServer(
-            mode=cfg.command_in.transport,
-            tcp_host=getattr(cfg.command_in, "host", "127.0.0.1"),
-            tcp_port=getattr(cfg.command_in, "port", 0),
-            uds_path=getattr(cfg.command_in, "uds_path", "") or getattr(cfg.command_in, "ipc_socket_path", ""),
-            name="mobile_command_in",
+        command_transport = str(cfg.command_in.transport or "disabled").strip().lower()
+        legacy_tcp_enabled = (
+            command_transport == "http"
+            and str(os.getenv("MOBILE_GATEWAY_LEGACY_TCP_ENABLED", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
         )
+        if legacy_tcp_enabled:
+            self.command_server = MobileJsonTcpCommandServer(
+                os.getenv("MOBILE_GATEWAY_LEGACY_TCP_HOST", "0.0.0.0"),
+                int(os.getenv("MOBILE_GATEWAY_LEGACY_TCP_PORT", "9101") or 9101),
+                lambda level, msg, data: self.log(level, "legacy_tcp", msg, data),
+            )
+        else:
+            self.command_server = JsonlInboundServer(
+                mode="disabled" if command_transport == "http" else command_transport,
+                tcp_host=getattr(cfg.command_in, "host", "127.0.0.1"),
+                tcp_port=getattr(cfg.command_in, "port", 0),
+                uds_path=getattr(cfg.command_in, "uds_path", "") or getattr(cfg.command_in, "ipc_socket_path", ""),
+                name="mobile_command_in",
+            )
+        self.legacy_tcp_enabled = legacy_tcp_enabled
+        self.http_server: Optional[MobileHttpCommandServer] = None
+        if command_transport == "http":
+            self.http_server = MobileHttpCommandServer(
+                cfg.command_in,
+                self._handle_http_task_payload,
+                self._http_health_payload,
+                lambda level, msg, data: self.log(level, "http", msg, data),
+            )
         self.status_sender = JsonlClientSender(
             mode=cfg.status_out.transport,
             tcp_host=getattr(cfg.status_out, "host", "127.0.0.1"),
@@ -430,6 +672,103 @@ class MobileGatewayService(BaseModule):
         }.get(event, event)
         self.log(level, "mqtt", msg, data or None)
 
+    def _endpoint_log_payload(self, endpoint: GatewayEndpoint) -> Dict[str, Any]:
+        return {
+            "transport": endpoint.transport,
+            "host": getattr(endpoint, "host", ""),
+            "port": getattr(endpoint, "port", 0),
+            "ipc_socket_path": getattr(endpoint, "ipc_socket_path", "") or getattr(endpoint, "uds_path", ""),
+        }
+
+    def _command_in_snapshot(self) -> Dict[str, Any]:
+        if self.http_server is not None:
+            return self.http_server.snapshot()
+        return self.command_server.snapshot()
+
+    def _http_health_payload(self) -> Dict[str, Any]:
+        return {
+            "ok": True,
+            "service": "mobile_gateway",
+            "backend_mode": self.backend_mode,
+            "runtime_mode": self.cfg.runtime.mode,
+            "command_in": self._command_in_snapshot(),
+            "mqtt_enabled": self.mqtt_adapter is not None,
+            "mqtt": {
+                "enabled": bool(self.cfg.mqtt.enabled),
+                "broker_host": self.cfg.mqtt.broker_host,
+                "broker_port": self.cfg.mqtt.broker_port,
+                "topic_cmd": self.cfg.mqtt.topics.cmd,
+            },
+            "legacy_tcp": self.command_server.snapshot() if self.legacy_tcp_enabled else {"enabled": False},
+            "orchestrator_task_cmd_out": self._endpoint_log_payload(self.cfg.orchestrator_task_cmd_out),
+            "status_out_enabled": str(self.cfg.status_out.transport).strip().lower() != "disabled",
+            "ack_in_enabled": self.ack_server is not None,
+        }
+
+    def _coerce_http_task_cmd(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        raw_action = str(payload.get("action") or "").strip().lower()
+        raw_intent = str(payload.get("intent") or "").strip().upper()
+        if not raw_intent:
+            if raw_action in {"stop", "halt", "cancel"}:
+                raw_intent = "STOP"
+            elif raw_action in {"find", "fetch", "fetch_object", "pick"}:
+                raw_intent = "FIND"
+            else:
+                raw_intent = "RETURN"
+
+        params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+        target = payload.get("target") or params.get("target") or params.get("object")
+        task_cmd = {
+            "ts": float(payload.get("ts", now_ts()) or now_ts()),
+            "type": "task_cmd",
+            "intent": raw_intent,
+            "confidence": float(payload.get("confidence", self.cfg.backend.default_confidence) or self.cfg.backend.default_confidence),
+            "cmd_id": str(payload.get("cmd_id") or payload.get("task_id") or new_id("cmd")),
+            "session_id": str(payload.get("session_id") or payload.get("task_id") or new_id("sess")),
+            "epoch": int(payload.get("epoch", 0) or 0),
+            "source": str(payload.get("source") or "mobile_http"),
+            "text": str(payload.get("text") or raw_action or "").strip(),
+        }
+        if raw_intent == "FIND" and target:
+            task_cmd["target"] = str(target).strip().lower()
+        return {k: v for k, v in task_cmd.items() if v not in (None, "")}
+
+    def _handle_http_task_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        self._last_req_ts = now_ts()
+        self.log_info("protocol", "received mobile command", {"transport": "http", "payload": payload})
+        if "cmd" in payload or str(payload.get("type", "")).strip().upper() == "FIND_AND_PICK":
+            self.handle_mobile_command_payload(payload)
+            return {"ok": True, "accepted": True, "mode": "mobile_command"}
+
+        task_cmd = self._coerce_http_task_cmd(payload)
+        ok, reason = self.backend.submit(task_cmd)
+        self.run_logger.write_jsonl("mobile_command", payload)
+        self.run_logger.write_jsonl("task_cmd_forward", task_cmd)
+        self.run_logger.write_ipc_record(
+            "TX",
+            "orchestrator_task_cmd_out",
+            "forwarded" if ok else "forward_failed",
+            msg_type="task_cmd",
+            session_id=task_cmd.get("session_id"),
+            epoch=task_cmd.get("epoch"),
+            ok=ok,
+            data={"payload": task_cmd, "reason": reason},
+        )
+        if ok:
+            self.log_info("backend", "forwarded task_cmd", {
+                "cmd_id": task_cmd.get("cmd_id"),
+                "intent": task_cmd.get("intent"),
+                "session_id": task_cmd.get("session_id"),
+                "reason": reason,
+            })
+        else:
+            self.log_error("backend", "forward task_cmd failed", {
+                "cmd_id": task_cmd.get("cmd_id"),
+                "intent": task_cmd.get("intent"),
+                "reason": reason,
+            })
+        return {"ok": ok, "accepted": ok, "reason": reason, "task_cmd": task_cmd}
+
     def start(self) -> None:
         self.run_logger.write_meta({
             "service": "mobile_gateway",
@@ -444,21 +783,37 @@ class MobileGatewayService(BaseModule):
             "command_in": {
                 "transport": self.cfg.command_in.transport,
                 "ipc_socket_path": getattr(self.cfg.command_in, "ipc_socket_path", "") or getattr(self.cfg.command_in, "uds_path", ""),
+                "host": getattr(self.cfg.command_in, "host", ""),
+                "port": getattr(self.cfg.command_in, "port", 0),
             },
             "status_out": {
                 "transport": self.cfg.status_out.transport,
                 "ipc_socket_path": getattr(self.cfg.status_out, "ipc_socket_path", "") or getattr(self.cfg.status_out, "uds_path", ""),
+                "host": getattr(self.cfg.status_out, "host", ""),
+                "port": getattr(self.cfg.status_out, "port", 0),
             },
             "orchestrator_task_cmd_out": {
                 "transport": self.cfg.orchestrator_task_cmd_out.transport,
                 "ipc_socket_path": getattr(self.cfg.orchestrator_task_cmd_out, "ipc_socket_path", "") or getattr(self.cfg.orchestrator_task_cmd_out, "uds_path", ""),
+                "host": getattr(self.cfg.orchestrator_task_cmd_out, "host", ""),
+                "port": getattr(self.cfg.orchestrator_task_cmd_out, "port", 0),
             },
             "orchestrator_task_ack_in": {
                 "transport": self.cfg.orchestrator_task_ack_in.transport,
                 "ipc_socket_path": getattr(self.cfg.orchestrator_task_ack_in, "ipc_socket_path", "") or getattr(self.cfg.orchestrator_task_ack_in, "uds_path", ""),
+                "host": getattr(self.cfg.orchestrator_task_ack_in, "host", ""),
+                "port": getattr(self.cfg.orchestrator_task_ack_in, "port", 0),
+            },
+            "mqtt": {
+                "enabled": bool(self.cfg.mqtt.enabled),
+                "broker_host": self.cfg.mqtt.broker_host,
+                "broker_port": self.cfg.mqtt.broker_port,
+                "topic_cmd": self.cfg.mqtt.topics.cmd,
             },
         })
         self.command_server.start()
+        if self.http_server is not None:
+            self.http_server.start()
         if self.ack_server is not None:
             self.ack_server.start()
         if self.backend_mode == "mock":
@@ -476,6 +831,11 @@ class MobileGatewayService(BaseModule):
             "backend_mode": self.backend_mode,
             "runtime_mode": self.cfg.runtime.mode,
             "mqtt_enabled": self.mqtt_adapter is not None,
+            "command_in": self._endpoint_log_payload(self.cfg.command_in),
+            "legacy_tcp": self.command_server.snapshot() if self.legacy_tcp_enabled else {"enabled": False},
+            "orchestrator_task_cmd_out": self._endpoint_log_payload(self.cfg.orchestrator_task_cmd_out),
+            "status_out_enabled": str(self.cfg.status_out.transport).strip().lower() != "disabled",
+            "ack_in_enabled": self.ack_server is not None,
         })
         self._publish_status(dict(self._snapshot), force=True)
 
@@ -488,6 +848,11 @@ class MobileGatewayService(BaseModule):
             self.command_server.close()
         except Exception:
             pass
+        if self.http_server is not None:
+            try:
+                self.http_server.close()
+            except Exception:
+                pass
         if self.ack_server is not None:
             try:
                 self.ack_server.close()
@@ -623,11 +988,12 @@ class MobileGatewayService(BaseModule):
                 })
             return
         self._remember_cmd_id(command.cmd_id)
-        self.log_info("protocol", "cmd received", {
+        self.log_info("protocol", "received mobile command", {
             "cmd_id": command.cmd_id,
             "cmd": command.cmd,
             "session_id": command.session_id,
             "target": command.target,
+            "source": command.source,
         })
         if command.cmd not in {"query_status", "stop"}:
             self.demo_console.phone_command(command.target or "n/a")
@@ -782,7 +1148,7 @@ class MobileGatewayService(BaseModule):
                 epoch=epoch,
             ))
             return
-        self.log_info("backend", "task_cmd forwarded", {
+        self.log_info("backend", "forwarded task_cmd", {
             "cmd_id": command.cmd_id,
             "intent": intent,
             "session_id": session_id,
@@ -1098,7 +1464,7 @@ class MobileGatewayService(BaseModule):
             last_req_age_s=(now - self._last_req_ts) if self._last_req_ts else None,
             last_obs_send_age_s=last_status_age,
             ready={
-                "command_in_listening": bool(self.command_server.snapshot().get("listening")),
+                "command_in_listening": bool(self._command_in_snapshot().get("listening")),
                 "ack_in_enabled": self.ack_server is not None,
                 "observer_enabled": self.observer is not None,
                 "mqtt_enabled": self.mqtt_adapter is not None,

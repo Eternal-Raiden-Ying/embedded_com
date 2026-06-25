@@ -112,6 +112,9 @@ class VisionRuntimeConfig:
     stale_req_s: float = 3.0
     hot_standby_s: float = 30.0
     keep_preview_after_stop: bool = True
+    keep_vision_alive_after_task: bool = True
+    keep_preview_alive_after_task: bool = True
+    release_model_on_idle: bool = False
     keep_model_hot_in_standby: bool = True
     enable_infer_during_hot_standby: bool = False
     capability_placeholder: bool = False
@@ -501,6 +504,8 @@ class ControlThresholds:
     near_slow_depth_m: float = 0.40
     near_stop_depth_m: float = 0.25
     yolo_table_lost_to_search_frames: int = 8
+    no_table_bbox_timeout_s: float = 10.0
+    edge_geometry_timeout_s: float = 10.0
     table_memory_timeout_sec: float = 3.0
     table_center_loss_hold_sec: float = 1.0
     rotate_search_timeout_s: float = 10.0
@@ -600,6 +605,8 @@ class ControlThresholds:
     post_stop_ignore_s: float = 0.80
     vision_req_fail_to_stop: bool = True
     vision_req_fail_threshold: int = 2
+    keep_vision_alive_after_task: bool = True
+    task_done_shutdown_vision: bool = False
     enable_pick_pipeline: bool = False
     assume_grasp_success_for_test: bool = False
 
@@ -828,10 +835,36 @@ class OrchestratorConfig:
 class GatewayEndpoint:
     transport: str = "uds"
     ipc_socket_path: str = ""
+    tcp_host: str = "127.0.0.1"
+    tcp_port: int = 0
     send_mode: str = "oneshot"
     async_enabled: bool = False
     async_queue_size: int = 64
     async_drop_oldest: bool = True
+
+    @property
+    def uds_path(self) -> str:
+        return self.ipc_socket_path
+
+    @uds_path.setter
+    def uds_path(self, value: str) -> None:
+        self.ipc_socket_path = value
+
+    @property
+    def host(self) -> str:
+        return self.tcp_host
+
+    @host.setter
+    def host(self, value: str) -> None:
+        self.tcp_host = value
+
+    @property
+    def port(self) -> int:
+        return self.tcp_port
+
+    @port.setter
+    def port(self, value: int) -> None:
+        self.tcp_port = int(value)
 
 
 @dataclass
@@ -861,7 +894,7 @@ class GatewayRuntimeConfig:
 
 @dataclass
 class GatewayBackendConfig:
-    mode: str = "mock"  # mock / orchestrator_tcp / tcp_no_ack / orchestrator_uds / uds_no_ack
+    mode: str = "tcp_no_ack"  # mock / orchestrator_tcp / tcp_no_ack
     default_robot_id: str = "sc171_car_01"
     default_confidence: float = 0.99
     mock_step_interval_s: float = 0.20
@@ -914,7 +947,7 @@ class MobileGatewayConfig:
     backend: GatewayBackendConfig = field(default_factory=GatewayBackendConfig)
     mqtt: MqttAdapterConfig = field(default_factory=MqttAdapterConfig)
     command_in: GatewayEndpoint = field(default_factory=lambda: GatewayEndpoint(
-        transport="uds", ipc_socket_path="/tmp/robot_stack/mobile_gateway_cmd.sock",
+        transport="http", ipc_socket_path="/tmp/robot_stack/mobile_gateway_cmd.sock", tcp_host="0.0.0.0", tcp_port=9001,
     ))
     status_out: GatewayEndpoint = field(default_factory=lambda: GatewayEndpoint(
         transport="disabled", ipc_socket_path="/tmp/robot_stack/mobile_gateway_status.sock", send_mode="oneshot",

@@ -138,6 +138,43 @@ class ConfigLoaderLayeringTest(unittest.TestCase):
         self.assertEqual(cfg.profile, "sc171_board")
         self.assertFalse(cfg.orchestrator.serial.dry_run)
         self.assertEqual(cfg.orchestrator.serial.port, "/dev/ttyHS1")
+        self.assertTrue(cfg.orchestrator.control.yolo_table_control_enable)
+        self.assertTrue(cfg.orchestrator.control.vision_req_fail_to_stop)
+        self.assertAlmostEqual(cfg.orchestrator.control.no_table_bbox_timeout_s, 10.0)
+        self.assertAlmostEqual(cfg.orchestrator.control.edge_geometry_timeout_s, 10.0)
+        self.assertTrue(cfg.orchestrator.control.keep_vision_alive_after_task)
+        self.assertFalse(cfg.orchestrator.control.task_done_shutdown_vision)
+        self.assertTrue(cfg.vision.runtime.keep_vision_alive_after_task)
+        self.assertTrue(cfg.vision.runtime.keep_preview_alive_after_task)
+        self.assertFalse(cfg.vision.runtime.release_model_on_idle)
+
+    def test_dry_run_profile_keeps_vision_link_enabled_but_disables_external_ack(self):
+        env = {"SYSTEM_CONFIG_PROFILE": "dry_run"}
+        with patch.dict(os.environ, env, clear=False):
+            cfg = load_global_config(str(ROOT / "configs" / "system_config.yaml"))
+
+        self.assertEqual(cfg.profile, "dry_run")
+        self.assertTrue(cfg.orchestrator.serial.dry_run)
+        self.assertTrue(cfg.vision.debug.preview)
+        self.assertTrue(cfg.vision.preview.show_rgb)
+        self.assertEqual(cfg.vision.req_in.transport, "uds")
+        self.assertEqual(cfg.vision.req_in.ipc_socket_path, "/tmp/robot_stack/vision_req.sock")
+        self.assertEqual(cfg.vision.obs_out.transport, "uds")
+        self.assertEqual(cfg.vision.obs_out.ipc_socket_path, "/tmp/robot_stack/vision_obs.sock")
+        self.assertEqual(cfg.orchestrator.task_ack_out.transport, "disabled")
+        self.assertEqual(cfg.orchestrator.vision_obs_in.transport, "uds")
+        self.assertEqual(cfg.orchestrator.vision_obs_in.ipc_socket_path, "/tmp/robot_stack/vision_obs.sock")
+        self.assertEqual(cfg.orchestrator.vision_req_out.transport, "uds")
+        self.assertEqual(cfg.orchestrator.vision_req_out.ipc_socket_path, "/tmp/robot_stack/vision_req.sock")
+        self.assertFalse(cfg.orchestrator.control.vision_req_fail_to_stop)
+        self.assertTrue(cfg.orchestrator.control.yolo_table_control_enable)
+        self.assertAlmostEqual(cfg.orchestrator.control.no_table_bbox_timeout_s, 10.0)
+        self.assertAlmostEqual(cfg.orchestrator.control.edge_geometry_timeout_s, 10.0)
+        self.assertTrue(cfg.orchestrator.control.keep_vision_alive_after_task)
+        self.assertFalse(cfg.orchestrator.control.task_done_shutdown_vision)
+        self.assertTrue(cfg.vision.runtime.keep_vision_alive_after_task)
+        self.assertTrue(cfg.vision.runtime.keep_preview_alive_after_task)
+        self.assertFalse(cfg.vision.runtime.release_model_on_idle)
 
 
 if __name__ == "__main__":

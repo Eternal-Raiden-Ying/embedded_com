@@ -1,10 +1,20 @@
 profile: "dry_run"
 runtime_overrides:
   vision:
+    runtime:
+      keep_vision_alive_after_task: true
+      keep_preview_alive_after_task: true
+      release_model_on_idle: false
+    debug:
+      preview: true
+    preview:
+      show_rgb: true
     req_in:
-      transport: "disabled"
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/vision_req.sock"
     obs_out:
-      transport: "disabled"
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/vision_obs.sock"
   orchestrator:
     runtime:
       config_profile: "dry_run"
@@ -12,31 +22,38 @@ runtime_overrides:
       port: "DRY_RUN"
       dry_run: true
       readback_enabled: false
+    control:
+      vision_req_fail_to_stop: false
+      yolo_table_control_enable: true
+      no_table_bbox_timeout_s: 10.0
+      edge_geometry_timeout_s: 10.0
+      keep_vision_alive_after_task: true
+      task_done_shutdown_vision: false
     task_cmd_in:
-      transport: "tcp"
-      tcp_host: "127.0.0.1"
-      tcp_port: 19101
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/task_cmd.sock"
     task_ack_out:
-      transport: "tcp"
-      tcp_host: "127.0.0.1"
-      tcp_port: 19102
+      transport: "disabled"
     vision_obs_in:
-      transport: "tcp"
-      tcp_host: "127.0.0.1"
-      tcp_port: 19103
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/vision_obs.sock"
     vision_req_out:
-      transport: "tcp"
-      tcp_host: "127.0.0.1"
-      tcp_port: 19104
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/vision_req.sock"
     tts_event_out:
       transport: "disabled"
   gateway:
+    backend:
+      mode: "tcp_no_ack"
     command_in:
-      transport: "disabled"
+      transport: "http"
+      tcp_host: "0.0.0.0"
+      tcp_port: 9001
     status_out:
       transport: "disabled"
     orchestrator_task_cmd_out:
-      transport: "disabled"
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/task_cmd.sock"
     orchestrator_task_ack_in:
       transport: "disabled"
   online_edge:

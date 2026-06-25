@@ -641,6 +641,19 @@ class VistaApp(BaseModule):
                 "frame_id": edge_obs.get("frame_id"),
                 "seq": edge_obs.get("seq"),
                 "obs_ts": edge_obs.get("obs_ts"),
+                "age_ms": edge_obs.get("age_ms"),
+                "table_bbox_xyxy": edge_obs.get("table_bbox_xyxy"),
+                "table_cx_norm": edge_obs.get("table_cx_norm"),
+                "table_cy_norm": edge_obs.get("table_cy_norm"),
+                "table_size_norm": edge_obs.get("table_size_norm"),
+                "table_conf": edge_obs.get("table_conf", edge_obs.get("yolo_table_conf")),
+                "yolo_table_bbox": edge_obs.get("yolo_table_bbox"),
+                "yolo_table_visible": edge_obs.get("yolo_table_visible"),
+                "yolo_table_fresh": edge_obs.get("yolo_table_fresh"),
+                "yolo_table_age_ms": edge_obs.get("yolo_table_age_ms"),
+                "edge_found": edge_obs.get("edge_found"),
+                "edge_valid": edge_obs.get("edge_valid"),
+                "edge_trusted": edge_obs.get("edge_trusted"),
                 "obs_seq": edge_obs.get("obs_seq"),
                 "camera_frame_seq": edge_obs.get("camera_frame_seq"),
                 "frame_capture_ts": edge_obs.get("frame_capture_ts"),
@@ -784,6 +797,12 @@ class VistaApp(BaseModule):
             },
             "table_edge": {
                 "process_ms": edge_process_ms,
+                "table_bbox_xyxy": (edge_obs or {}).get("table_bbox_xyxy") if isinstance(edge_obs, dict) else None,
+                "yolo_table_visible": (edge_obs or {}).get("yolo_table_visible") if isinstance(edge_obs, dict) else None,
+                "yolo_table_fresh": (edge_obs or {}).get("yolo_table_fresh") if isinstance(edge_obs, dict) else None,
+                "yolo_table_age_ms": (edge_obs or {}).get("yolo_table_age_ms") if isinstance(edge_obs, dict) else None,
+                "edge_valid": (edge_obs or {}).get("edge_valid") if isinstance(edge_obs, dict) else None,
+                "edge_trusted": (edge_obs or {}).get("edge_trusted") if isinstance(edge_obs, dict) else None,
                 "latest_frame_lag_ms": (edge_obs or {}).get("latest_frame_lag_ms") if isinstance(edge_obs, dict) else None,
                 "obs_total_age_ms": obs_total_age_ms,
                 "scheduler_read_ms": (edge_obs or {}).get("scheduler_read_ms") if isinstance(edge_obs, dict) else None,
@@ -938,12 +957,22 @@ class VistaApp(BaseModule):
 
     def _enter_hot_standby(self, current_mode: str, target_name, epoch: int):
         self.stage_controller.set_runtime_mode("IDLE_HOT", reason="enter_hot_standby", force=True)
-        new_until = time.time() + float(CONFIG.runtime.hot_standby_s)
+        keep_hot = bool(
+            getattr(CONFIG.runtime, "keep_vision_alive_after_task", True)
+            or getattr(CONFIG.runtime, "keep_preview_alive_after_task", True)
+        )
+        new_until = 0.0 if keep_hot else time.time() + float(CONFIG.runtime.hot_standby_s)
         self.hot_until_ts = new_until
         self.log_info(
             "runtime",
             "enter hot standby",
-            {"prev_mode": current_mode, "prev_target": target_name, "until_ts": new_until},
+            {
+                "prev_mode": current_mode,
+                "prev_target": target_name,
+                "until_ts": new_until,
+                "keep_hot": keep_hot,
+                "release_model_on_idle": bool(getattr(CONFIG.runtime, "release_model_on_idle", False)),
+            },
         )
         self._record_event(
             "ENTER_HOT_STANDBY",
@@ -952,6 +981,7 @@ class VistaApp(BaseModule):
                 "prev_mode": current_mode,
                 "prev_target": target_name,
                 "until_ts": new_until,
+                "keep_hot": keep_hot,
             },
             epoch=int(epoch),
         )
@@ -1200,7 +1230,12 @@ class VistaApp(BaseModule):
         prev_mode = str(state.get("mode") or self._safe_mode_text(ctx.current_mode) or "IDLE").strip().upper()
         prev_target = state.get("target_name", ctx.target_name)
         stop_epoch = int(state.get("epoch", int(getattr(ctx, "epoch", 0) or 0)))
-        if CONFIG.runtime.keep_preview_after_stop and float(CONFIG.runtime.hot_standby_s) > 0.0:
+        keep_after_stop = bool(
+            CONFIG.runtime.keep_preview_after_stop
+            or getattr(CONFIG.runtime, "keep_vision_alive_after_task", True)
+            or getattr(CONFIG.runtime, "keep_preview_alive_after_task", True)
+        )
+        if keep_after_stop and float(CONFIG.runtime.hot_standby_s) >= 0.0:
             self._enter_hot_standby(prev_mode, prev_target, stop_epoch)
         else:
             self.log_info("runtime", "enter idle", {"reason": stage})
@@ -1301,6 +1336,11 @@ class VistaApp(BaseModule):
         self._apply_stage_output(stage_output, now=now)
 
     def _expire_hot_standby(self, now: float):
+        if bool(
+            getattr(CONFIG.runtime, "keep_vision_alive_after_task", True)
+            or getattr(CONFIG.runtime, "keep_preview_alive_after_task", True)
+        ):
+            return
         if self._safe_mode_text(self._ctx().current_mode) != "IDLE_HOT" or self.hot_until_ts <= 0 or now < self.hot_until_ts:
             return
         self._enter_cold_idle(int(getattr(self._ctx(), "epoch", 0) or 0))
@@ -1322,7 +1362,18 @@ class VistaApp(BaseModule):
         self.operator_console.emit(f"[VISTA] SERVICE_STARTING run={self.run_logger.stack_run_id}")
         if self._console_is_full():
             self.log_info("runtime", "structured logs ready", self.log_paths)
+        req_mode = str(CONFIG.req_in.transport or "disabled").strip().lower()
+        req_path = str(CONFIG.req_in.ipc_socket_path or "")
+        req_desc = (
+            f"mode=uds path={req_path}"
+            if req_mode == "uds"
+            else f"mode={req_mode}"
+        )
+        self.operator_console.emit(f"[VISTA] request server endpoint {req_desc}")
         self.req_server.start()
+        self.operator_console.emit(
+            f"[VISTA] request server listening mode={self.req_server.mode} ready={int(bool(self.req_server.listening))}"
+        )
         self.mode_controller.start_runtime()
         # Activate INIT stage — non-blocking, task worker starts via mode plan
         init_req = VisionReq(ts=time.time(), op="START", stage="INIT", mode_hint="INIT")
@@ -1330,7 +1381,9 @@ class VistaApp(BaseModule):
         self._sync_runtime_from_stage_context(reason="service_start")
         self._running = True
         self._record_event("SERVICE_READY", trigger="start")
-        self.operator_console.emit(f"[VISTA] READY mode=INIT run={self.run_logger.stack_run_id}")
+        self.operator_console.emit(
+            f"[VISTA] READY mode=INIT request_server_ready={int(bool(self.req_server.listening))} run={self.run_logger.stack_run_id}"
+        )
         if self._console_is_full():
             self.log_info(
                 "runtime",
