@@ -389,6 +389,10 @@ class VistaApp(BaseModule):
             parts.append(f"peer={details.get('peer')}")
         if details.get("error"):
             parts.append(f"error={details.get('error')}")
+        if details.get("owner") is not None:
+            parts.append(f"owner={details.get('owner')}")
+        if details.get("perm") is not None:
+            parts.append(f"perm={details.get('perm')}")
         return " ".join(str(p) for p in parts)
 
     def _log_ipc_event(self, payload):

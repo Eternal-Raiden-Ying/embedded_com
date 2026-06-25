@@ -747,44 +747,111 @@ wait_for_endpoint_group() {
 
 wait_for_sockets() {
   local name="$1" sockets_str="$2" timeout_s="$3" extra_s="$4"
-  local start_ts now_ts all_ok s pid_file use_sudo
+  local start_ts now_ts all_ok s pid_file use_sudo log_file ready_pattern
   start_ts=$(date +%s)
+  local last_err=""
+  
+  pid_file=""
+  use_sudo=0
+  log_file=""
+  ready_pattern=""
+  case "$name" in
+    vision)
+      pid_file="$VISION_PID_FILE"
+      log_file="$VISION_LOG_FILE"
+      ready_pattern="\[VISTA\] READY|SERVICE_READY"
+      ;;
+    orchestrator)
+      pid_file="$ORCH_PID_FILE"
+      log_file="$ORCH_LOG_FILE"
+      ready_pattern="\[ORCH\] READY"
+      if orch_use_sudo_effective; then
+        use_sudo=1
+      fi
+      ;;
+    mobile_gateway)
+      pid_file="$GATEWAY_PID_FILE"
+      log_file="$GATEWAY_LOG_FILE"
+      ready_pattern="gateway online|SERVICE_READY"
+      ;;
+  esac
+
   while true; do
+    if [[ -n "$pid_file" ]] && ! pid_alive "$pid_file" "$use_sudo"; then
+      mark err "$name ready-check 失败：进程已退出"
+      if [[ -n "$log_file" ]]; then
+        tail_last_logs_on_failure "$name" "$log_file"
+      fi
+      return 1
+    fi
+
     all_ok=1
     for s in $sockets_str; do
       if [[ ! -S "$s" ]]; then
         all_ok=0
+        last_err="FileNotFoundError: [Errno 2] No such file or directory: '$s' (or not a UDS socket)"
+        break
+      fi
+      
+      err_msg=$(/usr/bin/python3 -c "
+import socket, sys
+try:
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(1.0)
+    s.connect('$s')
+    s.close()
+except Exception as e:
+    print(f'{type(e).__name__}: {e}', end='')
+    sys.exit(1)
+" 2>&1 || true)
+      
+      if [[ -n "$err_msg" ]]; then
+        all_ok=0
+        last_err="$err_msg"
         break
       fi
     done
+
     if [[ "$all_ok" == "1" ]]; then
       [[ "$extra_s" -gt 0 ]] && sleep "$extra_s"
-      pid_file=""
-      use_sudo=0
-      case "$name" in
-        vision)
-          pid_file="$VISION_PID_FILE"
-          ;;
-        orchestrator)
-          pid_file="$ORCH_PID_FILE"
-          if orch_use_sudo_effective; then
-            use_sudo=1
-          fi
-          ;;
-        mobile_gateway)
-          pid_file="$GATEWAY_PID_FILE"
-          ;;
-      esac
       if [[ -n "$pid_file" ]] && ! pid_alive "$pid_file" "$use_sudo"; then
-        mark err "$name ready-check 失败：Socket 曾经可用，但进程已退出"
+        mark err "$name ready-check 失败：进程已退出"
+        if [[ -n "$log_file" ]]; then
+          tail_last_logs_on_failure "$name" "$log_file"
+        fi
         return 1
       fi
       mark ok "$name ready  sockets=[$sockets_str]"
       return 0
     fi
+
     now_ts=$(date +%s)
     if (( now_ts - start_ts >= timeout_s )); then
       mark err "$name ready-check 超时  sockets=[$sockets_str]"
+      mark err "---------------- ready-check Timeout Details ----------------"
+      mark err "  Endpoint Name: $name"
+      mark err "  Mode: uds"
+      mark err "  Path: $sockets_str"
+      mark err "  ls -l /tmp/robot_stack:"
+      ls -l /tmp/robot_stack 2>&1 | while read -r line; do mark err "    $line"; done || true
+      for s in $sockets_str; do
+        mark err "  stat $s:"
+        stat "$s" 2>&1 | while read -r line; do mark err "    $line"; done || true
+      done
+      mark err "  Last Connect Exception: $last_err"
+      
+      local log_has_ready="no"
+      if [[ -n "$log_file" && -f "$log_file" ]]; then
+        if grep -qE "$ready_pattern" "$log_file" 2>/dev/null; then
+          log_has_ready="yes"
+        fi
+      fi
+      mark err "  Service Log Reports READY: $log_has_ready"
+      
+      if [[ "$name" == "orchestrator" && "$log_has_ready" == "yes" ]]; then
+        mark err "process reports READY but UDS socket is not connectable; likely permission or stale socket issue"
+      fi
+      mark err "-------------------------------------------------------------"
       return 1
     fi
     sleep 0.5
@@ -920,7 +987,17 @@ kill_by_ports() {
 }
 
 cleanup_sockets() {
-  [[ -d "$STACK_SOCK_DIR" ]] && rm -f "$STACK_SOCK_DIR"/*.sock 2>/dev/null || true
+  if [[ -d "$STACK_SOCK_DIR" ]]; then
+    if ! rm -f "$STACK_SOCK_DIR"/*.sock 2>/dev/null; then
+      sudo rm -f \
+        "$STACK_SOCK_DIR/vision_req.sock" \
+        "$STACK_SOCK_DIR/task_cmd.sock" \
+        "$STACK_SOCK_DIR/vision_obs.sock" \
+        "$STACK_SOCK_DIR/task_ack.sock" 2>/dev/null || true
+    fi
+  fi
+  mkdir -p "$STACK_SOCK_DIR"
+  chmod 1777 "$STACK_SOCK_DIR" 2>/dev/null || sudo chmod 1777 "$STACK_SOCK_DIR" 2>/dev/null || true
 }
 
 stop_all() {
@@ -1041,6 +1118,51 @@ start_stack() {
     tail_last_logs_on_failure "orchestrator" "$ORCH_LOG_FILE"
     stop_all || true
     exit 1
+  fi
+
+  # Check connection to orchestrator task_cmd socket for mobile_gateway (normal user check)
+  if [[ "$STACK_PROFILE" == "full" ]]; then
+    local gateway_task_cmd_socket="/tmp/robot_stack/task_cmd.sock"
+    headline "mobile_gateway 启动前连接检查"
+    mark wait "检查普通用户连接 orchestrator task_cmd UDS 能力..."
+    
+    if [[ -S "$gateway_task_cmd_socket" ]]; then
+      local cmd_user=""
+      if [[ "$(id -u)" -eq 0 ]]; then
+        cmd_user="sudo -u aidlux "
+      fi
+      local conn_err
+      conn_err=$(${cmd_user}/usr/bin/python3 -c "
+import socket, sys
+try:
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(2.0)
+    s.connect('$gateway_task_cmd_socket')
+    s.close()
+    sys.exit(0)
+except Exception as e:
+    print(f'{type(e).__name__}: {e}', end='')
+    sys.exit(1)
+" 2>&1 || true)
+      
+      if [[ -n "$conn_err" ]]; then
+        mark err "连接检查失败："
+        mark err "  socket path: $gateway_task_cmd_socket"
+        mark err "  ls -l parent: $(ls -l \"$(dirname "$gateway_task_cmd_socket")\" 2>&1 || true)"
+        mark err "  stat socket: $(stat "$gateway_task_cmd_socket" 2>&1 || true)"
+        mark err "  connect error: $conn_err"
+        mark err "  提示：请检查 UDS socket 文件拥有者及权限是否正确（当前由 sudo 启动可能导致普通用户无权访问）"
+        stop_all || true
+        exit 1
+      else
+        mark ok "普通用户连接 orchestrator task_cmd 成功！"
+      fi
+    else
+      mark err "UDS socket 文件不存在或不是 socket: $gateway_task_cmd_socket"
+      mark err "  ls -l parent: $(ls -l \"$(dirname "$gateway_task_cmd_socket")\" 2>&1 || true)"
+      stop_all || true
+      exit 1
+    fi
   fi
 
   start_gateway_bg
