@@ -1318,7 +1318,18 @@ class VistaApp(BaseModule):
         self.operator_console.emit(f"[VISTA] SERVICE_STARTING run={self.run_logger.stack_run_id}")
         if self._console_is_full():
             self.log_info("runtime", "structured logs ready", self.log_paths)
+        req_mode = str(CONFIG.req_in.transport or "disabled").strip().lower()
+        req_path = str(CONFIG.req_in.ipc_socket_path or "")
+        req_desc = (
+            f"mode=uds path={req_path}"
+            if req_mode == "uds"
+            else f"mode={req_mode}"
+        )
+        self.operator_console.emit(f"[VISTA] request server endpoint {req_desc}")
         self.req_server.start()
+        self.operator_console.emit(
+            f"[VISTA] request server listening mode={self.req_server.mode} ready={int(bool(self.req_server.listening))}"
+        )
         self.mode_controller.start_runtime()
         # Activate INIT stage — non-blocking, task worker starts via mode plan
         init_req = VisionReq(ts=time.time(), op="START", stage="INIT", mode_hint="INIT")
@@ -1326,7 +1337,9 @@ class VistaApp(BaseModule):
         self._sync_runtime_from_stage_context(reason="service_start")
         self._running = True
         self._record_event("SERVICE_READY", trigger="start")
-        self.operator_console.emit(f"[VISTA] READY mode=INIT run={self.run_logger.stack_run_id}")
+        self.operator_console.emit(
+            f"[VISTA] READY mode=INIT request_server_ready={int(bool(self.req_server.listening))} run={self.run_logger.stack_run_id}"
+        )
         if self._console_is_full():
             self.log_info(
                 "runtime",

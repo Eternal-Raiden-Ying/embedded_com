@@ -106,6 +106,12 @@ def apply_env_overrides(config: SystemGlobalConfig) -> None:
     # Vision Model
     _set_from_env(config.vision.model, "active_model", "VISTA_TABLE_MODEL", str)
 
+    # Vision IPC endpoints
+    _set_from_env(config.vision.req_in, "transport", "VISION_REQ_IN_TRANSPORT", str)
+    _set_from_env(config.vision.req_in, "ipc_socket_path", "VISION_REQ_IN_SOCKET_PATH", str)
+    _set_from_env(config.vision.obs_out, "transport", "VISION_OBS_OUT_TRANSPORT", str)
+    _set_from_env(config.vision.obs_out, "ipc_socket_path", "VISION_OBS_OUT_SOCKET_PATH", str)
+
     # Orchestrator Runtime
     _set_from_env(config.orchestrator.runtime, "project_root", "ORCH_PROJECT_ROOT", str)
     _set_from_env(config.orchestrator.runtime, "log_dir", "ORCH_LOG_DIR", str)
@@ -136,6 +142,24 @@ def apply_env_overrides(config: SystemGlobalConfig) -> None:
     _set_from_env(config.orchestrator.serial, "uart_lowfreq_period_s", "ORCH_UART_LOWFREQ_PERIOD_S", float)
     _set_from_env(config.orchestrator.serial, "stm32_status_enabled", "ORCH_STM32_STATUS_ENABLED", bool)
     _set_from_env(config.orchestrator.serial, "stm32_status_period_s", "ORCH_STM32_STATUS_PERIOD_S", float)
+
+    # Orchestrator IPC endpoints
+    _set_from_env(config.orchestrator.task_cmd_in, "transport", "ORCH_TASK_CMD_IN_TRANSPORT", str)
+    _set_from_env(config.orchestrator.task_cmd_in, "ipc_socket_path", "ORCH_TASK_CMD_IN_SOCKET_PATH", str)
+    _set_from_env(config.orchestrator.task_cmd_in, "tcp_host", "ORCH_TASK_CMD_IN_HOST", str)
+    _set_from_env(config.orchestrator.task_cmd_in, "tcp_port", "ORCH_TASK_CMD_IN_PORT", int)
+    _set_from_env(config.orchestrator.task_ack_out, "transport", "ORCH_TASK_ACK_OUT_TRANSPORT", str)
+    _set_from_env(config.orchestrator.task_ack_out, "ipc_socket_path", "ORCH_TASK_ACK_OUT_SOCKET_PATH", str)
+    _set_from_env(config.orchestrator.task_ack_out, "tcp_host", "ORCH_TASK_ACK_OUT_HOST", str)
+    _set_from_env(config.orchestrator.task_ack_out, "tcp_port", "ORCH_TASK_ACK_OUT_PORT", int)
+    _set_from_env(config.orchestrator.vision_obs_in, "transport", "ORCH_VISION_OBS_IN_TRANSPORT", str)
+    _set_from_env(config.orchestrator.vision_obs_in, "ipc_socket_path", "ORCH_VISION_OBS_IN_SOCKET_PATH", str)
+    _set_from_env(config.orchestrator.vision_obs_in, "tcp_host", "ORCH_VISION_OBS_IN_HOST", str)
+    _set_from_env(config.orchestrator.vision_obs_in, "tcp_port", "ORCH_VISION_OBS_IN_PORT", int)
+    _set_from_env(config.orchestrator.vision_req_out, "transport", "ORCH_VISION_REQ_OUT_TRANSPORT", str)
+    _set_from_env(config.orchestrator.vision_req_out, "ipc_socket_path", "ORCH_VISION_REQ_OUT_SOCKET_PATH", str)
+    _set_from_env(config.orchestrator.vision_req_out, "tcp_host", "ORCH_VISION_REQ_OUT_HOST", str)
+    _set_from_env(config.orchestrator.vision_req_out, "tcp_port", "ORCH_VISION_REQ_OUT_PORT", int)
 
     # Gateway Runtime
     _set_from_env(config.gateway.runtime, "project_root", "MOBILE_GATEWAY_PROJECT_ROOT", str)

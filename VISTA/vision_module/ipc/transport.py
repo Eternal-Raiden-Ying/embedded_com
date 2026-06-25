@@ -302,13 +302,20 @@ class JsonlInboundServer:
         if self.mode == "disabled":
             raise RuntimeError("disabled mode does not create socket")
         if self.mode == "tcp":
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind((self.tcp_host, self.tcp_port))
-            self.tcp_host, self.tcp_port = sock.getsockname()[:2]
-            sock.listen(4)
-            sock.settimeout(1.0)
-            return sock
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind((self.tcp_host, self.tcp_port))
+                self.tcp_host, self.tcp_port = sock.getsockname()[:2]
+                sock.listen(4)
+                sock.settimeout(1.0)
+                return sock
+            except Exception as exc:
+                print(
+                    f"[IPC] server bind failed mode=tcp host={self.tcp_host} port={self.tcp_port} exception={exc!r}",
+                    flush=True,
+                )
+                raise
         if os.name == "nt":
             raise RuntimeError("uds transport is not supported on Windows")
         if not hasattr(socket, "AF_UNIX"):
@@ -318,18 +325,22 @@ class JsonlInboundServer:
             path_str = f"/tmp/robot_ipc_{self.tcp_port}.sock"
         if not path_str:
             raise ValueError("uds transport requires uds_path or tcp_port-derived path")
-        path = Path(path_str)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists():
-            try:
+        try:
+            path = Path(path_str)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.exists():
                 path.unlink()
-            except Exception:
-                pass
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.bind(str(path))
-        sock.listen(4)
-        sock.settimeout(1.0)
-        return sock
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.bind(str(path))
+            sock.listen(4)
+            sock.settimeout(1.0)
+            return sock
+        except Exception as exc:
+            print(
+                f"[IPC] server bind failed mode=uds path={path_str} exception={exc!r}",
+                flush=True,
+            )
+            raise
 
     def start(self):
         if self._accept_thread is not None:
@@ -343,6 +354,10 @@ class JsonlInboundServer:
         self._accept_thread.start()
         self.listening = True
         desc = self.uds_path if self.mode == "uds" else f"{self.tcp_host}:{self.tcp_port}"
+        if self.mode == "uds":
+            print(f"[IPC] server listening mode=uds path={self.uds_path}", flush=True)
+        else:
+            print(f"[IPC] server listening mode=tcp host={self.tcp_host} port={self.tcp_port}", flush=True)
         self._log("info", "listening", transport=self.mode, bind=desc)
 
     def close(self):
