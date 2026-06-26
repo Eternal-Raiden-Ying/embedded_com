@@ -1235,6 +1235,48 @@ class TableDockingMixin:
             return abs(float(obs.dist_err_m)) <= float(self.cfg.final_lock_dist_tol_m) * 2.0
         return bool(obs.edge_found)
 
+    def _depth_roi_stop_status(self, obs: Optional[TableEdgeObs]) -> Dict[str, object]:
+        # depth_p10 represents a statistical percentile indicator of depth in the ROI and is not a direct geometric edge distance.
+        status = {
+            "depth_roi_stop_ready": False,
+            "reason": "",
+            "depth_p10": None,
+            "target_dist": None,
+            "margin": None,
+        }
+        if obs is None:
+            status["reason"] = "no_recent_obs"
+            return status
+        
+        # Check table visibility
+        if not self._table_visible(obs):
+            status["reason"] = "table_not_visible"
+            return status
+            
+        # Check depth validity and depth_p10 presence
+        depth_valid = getattr(obs, "depth_valid", True) is not False
+        depth_p10 = getattr(obs, "depth_p10", None)
+        if not depth_valid or depth_p10 is None:
+            status["reason"] = "depth_roi_invalid"
+            return status
+            
+        target_dist = self._table_target_dist_m(obs)
+        margin = max(0.0, float(getattr(self.cfg, "table_stop_margin_m", 0.05)))
+        status["depth_p10"] = float(depth_p10)
+        status["target_dist"] = float(target_dist)
+        status["margin"] = float(margin)
+        
+        if float(depth_p10) > target_dist + margin:
+            status["reason"] = "distance_too_far"
+            return status
+            
+        status["depth_roi_stop_ready"] = True
+        status["reason"] = "allowed"
+        return status
+
+    def _roi_depth_stop_ready(self, obs: Optional[TableEdgeObs]) -> bool:
+        return bool(self._depth_roi_stop_status(obs)["depth_roi_stop_ready"])
+
     def _final_lock_enter_status(self, obs: Optional[TableEdgeObs]) -> Dict[str, object]:
         level = self._control_level(obs)
         yaw_th = abs(float(getattr(self.cfg, "final_lock_enter_yaw_th_rad", 0.10) or 0.10))
@@ -1261,7 +1303,19 @@ class TableDockingMixin:
         if stale_level in {"hard_stale", "dead"}:
             status["final_lock_enter_block_reason"] = "vision_stale"
             return status
-        if bool(getattr(obs, "is_stale", False)) or getattr(obs, "depth_valid", True) is False:
+        if bool(getattr(obs, "is_stale", False)):
+            status["final_lock_enter_block_reason"] = "obs_invalid"
+            return status
+            
+        depth_stop_ready = self._roi_depth_stop_ready(obs)
+        
+        # If depth stop is ready and table is visible, we bypass edge trust checks
+        if depth_stop_ready:
+            status["final_lock_enter_allowed"] = True
+            status["final_lock_enter_block_reason"] = "allowed"
+            return status
+            
+        if getattr(obs, "depth_valid", True) is False:
             status["final_lock_enter_block_reason"] = "obs_invalid"
             return status
         if not self._table_visible(obs) or not bool(getattr(obs, "edge_found", False)):
@@ -1682,43 +1736,63 @@ class TableDockingMixin:
                 "vision_stale_reason": stale_reason,
             }
 
+        depth_stop_ready = self._roi_depth_stop_ready(obs)
+
         if obs is None:
             reason = "vision_stale" if self.ctx.last_table_obs is not None else "table_lost"
             return _status(lock_ready=False, reason=reason, lock_count_reset_reason="no_recent_obs")
-        if not bool(getattr(obs, "table_found", False)):
+        if not bool(getattr(obs, "table_found", False)) and not depth_stop_ready:
             return _status(lock_ready=False, reason="table_lost", lock_count_reset_reason="table_lost")
-        if not bool(obs.edge_found):
+        if not bool(obs.edge_found) and not depth_stop_ready:
             return _status(lock_ready=False, reason="no_edge", lock_count_reset_reason="no_edge")
-        if not self._edge_valid_for_follow(obs):
+        if not self._edge_valid_for_follow(obs) and not depth_stop_ready:
             return _status(lock_ready=False, reason="edge_invalid", lock_count_reset_reason="edge_invalid")
         stale_reason = self._vision_stale_reason(obs)
-        if stale_reason in {"hard_stale", "obs_invalid", "temporal_jump", "no_recent_obs", "yaw_jump", "dist_jump"}:
+        if stale_reason in {"hard_stale", "obs_invalid", "temporal_jump", "no_recent_obs", "yaw_jump", "dist_jump"} and not depth_stop_ready:
             return _status(lock_ready=False, reason="vision_stale", lock_count_reset_reason=stale_reason)
         min_confidence = float(getattr(self.controller.docking.cfg, "min_confidence", 0.0))
         confidence_ok = float(obs.confidence or 0.0) >= min_confidence
-        if not confidence_ok:
+        if not confidence_ok and not depth_stop_ready:
             return _status(lock_ready=False, reason="low_confidence", confidence_ok=False, lock_count_reset_reason="low_confidence")
-        if obs.depth_valid is False:
+        if obs.depth_valid is False and not depth_stop_ready:
             return _status(lock_ready=False, reason="vision_stale", confidence_ok=confidence_ok, lock_count_reset_reason="obs_invalid")
         yaw_tol = float(getattr(self.cfg, "table_yaw_tol_rad", self.cfg.final_lock_yaw_tol_rad))
         dist_tol = float(getattr(self.cfg, "table_dist_tol_m", self.cfg.final_lock_dist_tol_m))
-        yaw_ok = obs.yaw_err_rad is not None and abs(float(obs.yaw_err_rad)) <= yaw_tol
-        measured_dist = self._table_measured_dist_m(obs)
-        target_dist = self._table_target_dist_m(obs)
-        dist_delta = (float(measured_dist) - target_dist) if measured_dist is not None else None
-        dist_ok = dist_delta is not None and abs(float(dist_delta)) <= dist_tol
-        lat_ok = obs.lateral_err_m is None or abs(float(obs.lateral_err_m)) <= float(self.cfg.final_lock_lateral_tol_m)
+        
+        if obs.yaw_err_rad is None:
+            yaw_ok = True if depth_stop_ready else False
+        else:
+            yaw_ok = abs(float(obs.yaw_err_rad)) <= yaw_tol
+            
+        if depth_stop_ready:
+            dist_ok = True
+            dist_delta = 0.0
+        else:
+            measured_dist = self._table_measured_dist_m(obs)
+            target_dist = self._table_target_dist_m(obs)
+            dist_delta = (float(measured_dist) - target_dist) if measured_dist is not None else None
+            dist_ok = dist_delta is not None and abs(float(dist_delta)) <= dist_tol
+            
+        if obs.lateral_err_m is None:
+            lat_ok = True if depth_stop_ready else False
+        else:
+            lat_ok = abs(float(obs.lateral_err_m)) <= float(self.cfg.final_lock_lateral_tol_m)
+            
         reason = "stable_count_not_enough"
         if not yaw_ok:
             reason = "yaw_not_aligned"
-        elif dist_delta is None:
+        elif dist_delta is None and not depth_stop_ready:
             reason = "vision_stale"
         elif not dist_ok:
-            reason = "distance_too_far" if float(dist_delta) > 0 else "distance_too_close"
+            reason = "distance_too_far" if dist_delta is not None and float(dist_delta) > 0 else "distance_too_close"
         elif not lat_ok:
             reason = "yaw_not_aligned"
-        lock_ready = bool(yaw_ok and dist_ok and lat_ok and stale_reason != "soft_stale")
-        hold_reason = "soft_stale" if stale_reason == "soft_stale" else ""
+            
+        lock_ready = bool((yaw_ok and dist_ok and lat_ok and stale_reason != "soft_stale") or depth_stop_ready)
+        if depth_stop_ready:
+            reason = "allowed"
+            
+        hold_reason = "soft_stale" if (stale_reason == "soft_stale" and not depth_stop_ready) else ""
         reset_reason = "" if (lock_ready or hold_reason) else reason
         return _status(
             lock_ready=lock_ready,
