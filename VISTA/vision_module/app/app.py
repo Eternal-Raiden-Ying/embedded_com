@@ -1195,32 +1195,22 @@ class VistaApp(BaseModule):
             perception = control_obs.get("perception") or {}
             edge_obs = perception.get("table_edge_obs")
             if isinstance(edge_obs, dict):
-                # Log EDGE_OBS_PAYLOAD_FINAL
-                self.log.info(
-                    "[EDGE_OBS_PAYLOAD_FINAL]\n"
-                    "frame_id=%s\n"
-                    "edge_found=%s\n"
-                    "edge_valid=%s\n"
-                    "edge_trusted=%s\n"
-                    "point_count=%s\n"
-                    "table_point_count=%s\n"
-                    "reason=%s\n"
-                    "source=%s\n"
-                    "obs_ts=%s\n"
-                    "send_allowed=%s\n"
-                    "force_send=%s",
-                    edge_obs.get("frame_id"),
-                    str(bool(edge_obs.get("edge_found", False))).lower(),
-                    str(bool(edge_obs.get("edge_valid", False))).lower(),
-                    str(bool(edge_obs.get("edge_trusted", False))).lower(),
-                    edge_obs.get("point_count"),
-                    edge_obs.get("table_point_count"),
-                    edge_obs.get("reason"),
-                    edge_obs.get("source"),
-                    edge_obs.get("obs_ts"),
-                    str(not route_result.skipped).lower(),
-                    str(force_send).lower(),
+                # Log EDGE_OBS_PAYLOAD_FINAL using self.log_info
+                payload_msg = (
+                    f"[EDGE_OBS_PAYLOAD_FINAL]\n"
+                    f"frame_id={edge_obs.get('frame_id')}\n"
+                    f"edge_found={str(bool(edge_obs.get('edge_found', False))).lower()}\n"
+                    f"edge_valid={str(bool(edge_obs.get('edge_valid', False))).lower()}\n"
+                    f"edge_trusted={str(bool(edge_obs.get('edge_trusted', False))).lower()}\n"
+                    f"point_count={edge_obs.get('point_count')}\n"
+                    f"table_point_count={edge_obs.get('table_point_count')}\n"
+                    f"reason={edge_obs.get('reason')}\n"
+                    f"source={edge_obs.get('source')}\n"
+                    f"obs_ts={edge_obs.get('obs_ts')}\n"
+                    f"send_allowed={str(not route_result.skipped).lower()}\n"
+                    f"force_send={str(force_send).lower()}"
                 )
+                self.log_info("runtime", payload_msg)
 
                 # Check mapping mismatch against the debug_publish fields
                 pub_found = bool(edge_obs.get("debug_publish_found", False))
@@ -1239,29 +1229,20 @@ class VistaApp(BaseModule):
                     (pub_trusted and not pay_trusted)
                 )
                 if mismatch:
-                    self.log.warning(
-                        "[EDGE_MAPPING_MISMATCH_FINAL]\n"
-                        "frame_id=%s\n"
-                        "publish_found=%d\n"
-                        "publish_valid=%d\n"
-                        "publish_trusted=%d\n"
-                        "publish_point_count=%d\n"
-                        "payload_found=%d\n"
-                        "payload_valid=%d\n"
-                        "payload_trusted=%d\n"
-                        "payload_point_count=%d\n"
-                        "payload_reason=%s",
-                        edge_obs.get("frame_id"),
-                        int(pub_found),
-                        int(pub_valid),
-                        int(pub_trusted),
-                        pub_point_count,
-                        int(pay_found),
-                        int(pay_valid),
-                        int(pay_trusted),
-                        pay_point_count,
-                        edge_obs.get("reason"),
+                    mismatch_msg = (
+                        f"[EDGE_MAPPING_MISMATCH_FINAL]\n"
+                        f"frame_id={edge_obs.get('frame_id')}\n"
+                        f"publish_found={int(pub_found)}\n"
+                        f"publish_valid={int(pub_valid)}\n"
+                        f"publish_trusted={int(pub_trusted)}\n"
+                        f"publish_point_count={pub_point_count}\n"
+                        f"payload_found={int(pay_found)}\n"
+                        f"payload_valid={int(pay_valid)}\n"
+                        f"payload_trusted={int(pay_trusted)}\n"
+                        f"payload_point_count={pay_point_count}\n"
+                        f"payload_reason={edge_obs.get('reason')}"
                     )
+                    self.log_warn("runtime", mismatch_msg)
 
         queued = self._send_obs(control_obs, sender=self.obs_sender, obs_class="control")
         if queued:
