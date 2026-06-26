@@ -16,7 +16,9 @@ from .perception_semantics import TablePerceptionSemantics
 
 VALID_CONTROL_SOURCES = {
     "yolo_forward",
+    "yolo_track_forward",
     "edge_adjust",
+    "edge_guided_forward",
     "local_rotate_search",
     "final_lock",
     "final_slow_stop",

@@ -165,6 +165,28 @@ def _has_local_table_bbox_signal(local_perception: Dict[str, object]) -> bool:
     return False
 
 
+def _edge_semantic_present(obs: Dict[str, object]) -> bool:
+    if not isinstance(obs, dict):
+        return False
+    for key in (
+        "edge_found",
+        "edge_valid",
+        "edge_trusted",
+        "candidate_line_present",
+        "detector_candidate_line_present",
+        "edge_candidate_found",
+    ):
+        if bool(obs.get(key, False)):
+            return True
+    for key in ("point_count", "table_point_count", "valid_edge_points", "support_count", "inlier_count"):
+        try:
+            if int(obs.get(key, 0) or 0) > 0:
+                return True
+        except Exception:
+            pass
+    return False
+
+
 _last_current_check_log_ts = 0.0
 _last_current_enough_state = None
 
@@ -259,6 +281,48 @@ def merge_table_bbox_from_local_perception(
         return obs
     bbox = _local_current_table_bbox(local_perception)
     out = dict(obs or default_table_edge_obs())
+    protected_edge = bool(
+        str(out.get("selected_source") or out.get("source") or "").strip().lower() == "results"
+        and _edge_semantic_present(out)
+    )
+    protected_values = {
+        key: out.get(key)
+        for key in (
+            "edge_found",
+            "edge_valid",
+            "edge_trusted",
+            "valid_for_control",
+            "edge_control_allowed",
+            "point_count",
+            "table_point_count",
+            "valid_edge_points",
+            "support_count",
+            "inlier_count",
+            "edge_inlier_count",
+            "yaw_err_rad",
+            "yaw_err",
+            "yaw",
+            "dist_err_m",
+            "dist_err",
+            "dist",
+            "lateral_err_m",
+            "lateral",
+            "reason",
+            "reject_reason",
+            "edge_reject_for_control_reason",
+            "edge_control_block_reason",
+            "source",
+            "selected_source",
+            "edge_obs_unavailable",
+            "frame_id",
+            "seq",
+            "obs_ts",
+            "ts",
+            "age_ms",
+            "is_stale",
+        )
+        if key in out
+    }
     if bbox is None and not _has_local_table_bbox_signal(local_perception):
         return out
     obs_ts = _local_obs_ts(local_perception, tick_ts)
@@ -311,7 +375,12 @@ def merge_table_bbox_from_local_perception(
         )
 
     if bbox is None:
-        if is_current_frame:
+        if protected_edge:
+            edge_present = bool(out.get("edge_found", False))
+            edge_valid = bool(out.get("edge_valid", False))
+            edge_trusted = bool(out.get("edge_trusted", False))
+            reason = out.get("reason") or ("no_current_table_bbox_edge_candidate_present" if edge_present else "no_current_table_bbox")
+        elif is_current_frame:
             edge_present = bool(out.get("edge_found", False))
             edge_valid = bool(out.get("edge_valid", False))
             edge_trusted = bool(out.get("edge_trusted", False))
@@ -358,12 +427,40 @@ def merge_table_bbox_from_local_perception(
                 "yolo_table_fresh": False,
                 "yolo_table_age_ms": None,
                 "reason": reason,
-                "source": "local_perception_no_table_bbox",
+                "source": out.get("source") if protected_edge else "local_perception_no_table_bbox",
             }
         )
+        if protected_edge:
+            out.update(protected_values)
+            out["table_confirmed_by_yolo"] = False
+            out["table_bbox_current_found"] = False
+            out["table_bbox_control_valid"] = False
+            out["table_bbox_found"] = False
+            out["table_bbox_xyxy"] = None
+            out["table_bbox"] = None
+            out["table_bbox_source"] = "none"
+            out["yolo_table_bbox"] = None
+            out["yolo_reliable"] = False
+            out["yolo_valid_reason"] = ""
+            out["yolo_invalid_reason"] = "no_current_table_bbox"
+            out["docking_enabled_by_yolo"] = False
+            out["yolo_table_control_valid"] = False
+            out["yolo_table_visible"] = False
+            out["yolo_table_fresh"] = False
+            out["yolo_table_age_ms"] = None
         return out
 
-    if is_current_frame:
+    if protected_edge:
+        edge_present = bool(out.get("edge_found", False))
+        edge_valid = bool(out.get("edge_valid", False))
+        edge_trusted = bool(out.get("edge_trusted", False))
+        edge_obs_unavailable = bool(out.get("edge_obs_unavailable", False))
+        point_count = int(out.get("point_count", 0) or 0)
+        table_point_count = int(out.get("table_point_count", 0) or point_count)
+        reason = out.get("reason") or (
+            "edge_trusted" if edge_trusted else ("edge_valid" if edge_valid else ("edge_candidate_found" if edge_present else "edge_result_with_local_perception_table_bbox"))
+        )
+    elif is_current_frame:
         edge_present = bool(out.get("edge_found", False))
         edge_valid = bool(out.get("edge_valid", False))
         edge_trusted = bool(out.get("edge_trusted", False))
@@ -404,12 +501,12 @@ def merge_table_bbox_from_local_perception(
             "edge_obs_unavailable": edge_obs_unavailable,
             "point_count": point_count,
             "table_point_count": table_point_count,
-            "obs_ts": float(obs_ts),
-            "ts": float(obs_ts),
-            "age_ms": 0.0,
-            "frame_id": frame_id,
-            "seq": frame_id,
-            "is_stale": False,
+            "obs_ts": out.get("obs_ts") if protected_edge else float(obs_ts),
+            "ts": out.get("ts") if protected_edge else float(obs_ts),
+            "age_ms": out.get("age_ms") if protected_edge else 0.0,
+            "frame_id": out.get("frame_id") if protected_edge else frame_id,
+            "seq": out.get("seq") if protected_edge else frame_id,
+            "is_stale": bool(out.get("is_stale", False)) if protected_edge else False,
             "reason": reason,
             "table_confirmed_by_yolo": True,
             "table_bbox_current_found": True,
@@ -437,9 +534,40 @@ def merge_table_bbox_from_local_perception(
             "table_quadrant": local_perception.get("table_quadrant"),
             "rgb_search_roi": local_perception.get("rgb_search_roi"),
             "rgb_shape": local_perception.get("rgb_shape"),
-            "source": "local_perception_table_bbox",
+            "source": out.get("source") if protected_edge else "local_perception_table_bbox",
         }
     )
+    if protected_edge:
+        out.update(protected_values)
+        out.update(
+            {
+                "table_found": True,
+                "table_confirmed_by_yolo": True,
+                "table_bbox_current_found": True,
+                "table_bbox_control_valid": True,
+                "table_bbox_found": True,
+                "table_bbox_xyxy": bbox,
+                "table_bbox": bbox,
+                "table_bbox_source": source,
+                "table_conf": conf,
+                "table_bbox_conf_raw": conf,
+                "yolo_table_bbox": bbox,
+                "yolo_reliable": True,
+                "yolo_valid_reason": "table_bbox_found",
+                "yolo_invalid_reason": "",
+                "docking_enabled_by_yolo": True,
+                "yolo_table_control_valid": True,
+                "yolo_table_visible": True,
+                "yolo_table_fresh": True,
+                "yolo_table_age_ms": 0.0,
+                "yolo_table_conf": conf,
+                "roi_source": source,
+                "roi_reason": local_perception.get("table_roi_reason") or "local_perception_table_bbox",
+                "table_quadrant": local_perception.get("table_quadrant"),
+                "rgb_search_roi": local_perception.get("rgb_search_roi"),
+                "rgb_shape": local_perception.get("rgb_shape"),
+            }
+        )
 
     if is_current_frame:
         out.setdefault("depth_valid", True)

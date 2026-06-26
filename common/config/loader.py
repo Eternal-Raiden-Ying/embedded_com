@@ -546,6 +546,14 @@ def _load_and_merge_stage_params(config: SystemGlobalConfig, file_path: Path) ->
             car.table_approach_yaw_deadband_rad = _sf(tdm["approach_yaw_deadband_rad"])
         if "approach_yaw_realign_rad" in tdm:
             car.table_approach_yaw_realign_rad = _sf(tdm["approach_yaw_realign_rad"])
+        if "edge_hard_rotate_only_yaw_rad" in tdm:
+            car.table_edge_hard_rotate_only_yaw_rad = _sf(tdm["edge_hard_rotate_only_yaw_rad"])
+        if "edge_hard_yaw_rotate_only_frames" in tdm:
+            car.table_edge_hard_yaw_rotate_only_frames = int(tdm["edge_hard_yaw_rotate_only_frames"])
+        if "edge_hard_yaw_rotate_only_ms" in tdm:
+            car.table_edge_hard_yaw_rotate_only_ms = int(tdm["edge_hard_yaw_rotate_only_ms"])
+        if "perception_warmup_s" in tdm:
+            car.table_perception_warmup_s = _sf(tdm["perception_warmup_s"])
         if "approach_allow_wz" in tdm:
             car.table_approach_allow_wz = _sb(tdm["approach_allow_wz"])
         if "approach_allow_vy" in tdm:

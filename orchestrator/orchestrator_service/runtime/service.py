@@ -1006,7 +1006,7 @@ class OrchestratorService(BaseModule):
             or "system_perception_dead" in stale_reason
         )
         yolo_allows_edge_stale = bool(
-            control_source in {"yolo_forward"}
+            control_source in {"yolo_forward", "yolo_track_forward", "edge_guided_forward"}
             and bool(summary.get("yolo_table_control_valid", False))
             and not perception_dead
         )
@@ -2548,6 +2548,7 @@ class OrchestratorService(BaseModule):
     def _emit_operator_control(self, decision) -> None:
         summary = self._control_summary_with_context(decision)
         self.run_logger.write_jsonl("control_summary", summary)
+        self._emit_motion_gate_trace(summary)
         state = str(summary.get("state") or self.core.ctx.state.value)
         self._emit_demo_health(summary)
         if state in {"IDLE", "DONE", "ERROR_RECOVERY"} and not self.operator_console.full:
@@ -2557,6 +2558,100 @@ class OrchestratorService(BaseModule):
         period_s = 5.0
         self.operator_console.emit_rate_limited(key, line, period_s)
         self._emit_target_obs_missing_warning()
+
+    @staticmethod
+    def _motion_num(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except Exception:
+            return float(default)
+
+    def _emit_motion_gate_trace(self, summary: Dict[str, Any]) -> None:
+        cmd = dict(summary.get("cmd") or {})
+        vx = self._motion_num(summary.get("vx_mps", cmd.get("vx", 0.0)))
+        wz = self._motion_num(summary.get("wz_radps", cmd.get("wz", 0.0)))
+        cx_norm = summary.get("bbox_cx_norm")
+        if cx_norm is None:
+            cx_norm = summary.get("yolo_bbox_center_x_norm")
+        center_error = summary.get("center_error")
+        if center_error is None and cx_norm is not None:
+            center_error = self._motion_num(cx_norm) - 0.5
+        yaw_err = self._motion_num(summary.get("yaw_err_rad", summary.get("yaw_err", 0.0)))
+        dist_err = self._motion_num(summary.get("dist_err_m", 0.0))
+        target_dist = self._motion_num(summary.get("target_dist_m", getattr(self.cfg.control, "table_target_dist_m", 0.5)), 0.5)
+        hard_yaw = abs(self._motion_num(summary.get("hard_rotate_only_yaw_rad", getattr(self.cfg.car, "table_edge_hard_rotate_only_yaw_rad", 0.45)), 0.45))
+        tolerance = max(0.0, self._motion_num(getattr(self.cfg.control, "final_lock_dist_tol_m", 0.02), 0.02))
+        yolo_visible = bool(summary.get("yolo_table_visible") or summary.get("table_bbox_found"))
+        bbox_valid = bool(summary.get("table_bbox_control_valid") or summary.get("yolo_table_control_valid") or summary.get("yolo_reliable"))
+        edge_trusted = bool(summary.get("edge_trusted") or summary.get("valid_for_control"))
+        trace = {
+            "ts": time.time(),
+            "state": str(summary.get("state") or self.core.ctx.state.value),
+            "control_source": summary.get("control_source") or "",
+            "yolo_table_visible": yolo_visible,
+            "table_bbox_control_valid": bbox_valid,
+            "edge_found": bool(summary.get("edge_found")),
+            "edge_valid": bool(summary.get("edge_valid")),
+            "edge_trusted": edge_trusted,
+            "edge_control_allowed": bool(summary.get("edge_control_allowed") or summary.get("usable_for_approach")),
+            "edge_stable_count": summary.get("yolo_table_edge_stable_count"),
+            "cx_norm": cx_norm,
+            "center_error": center_error,
+            "yaw_err_rad": yaw_err,
+            "dist_err_m": dist_err,
+            "target_dist_m": target_dist,
+            "stale_level": summary.get("stale_level") or "",
+            "allow_forward": bool(summary.get("allow_forward", summary.get("forward_allowed", False))),
+            "allow_rotate": bool(summary.get("allow_rotate", abs(wz) > 1e-9)),
+            "vx_mps": vx,
+            "wz_radps": wz,
+            "forward_block_reason": summary.get("forward_block_reason") or "",
+            "transition_reason": summary.get("transition_reason") or summary.get("reason") or "",
+        }
+        self.run_logger.write_jsonl("motion_gate_trace", trace)
+        sig = (
+            trace["state"],
+            trace["control_source"],
+            round(vx, 3),
+            round(wz, 3),
+            trace["forward_block_reason"],
+        )
+        now = time.time()
+        last_sig = getattr(self, "_last_motion_gate_trace_sig", None)
+        last_ts = float(getattr(self, "_last_motion_gate_trace_ts", 0.0) or 0.0)
+        if sig != last_sig or now - last_ts >= 1.0:
+            self._last_motion_gate_trace_sig = sig
+            self._last_motion_gate_trace_ts = now
+            self.operator_console.emit_rate_limited(
+                "motion_gate_trace",
+                "[MOTION_GATE_TRACE] "
+                f"state={trace['state']} control_source={trace['control_source']} "
+                f"yolo_table_visible={int(yolo_visible)} table_bbox_control_valid={int(bbox_valid)} "
+                f"edge_found={int(trace['edge_found'])} edge_valid={int(trace['edge_valid'])} edge_trusted={int(edge_trusted)} "
+                f"edge_control_allowed={int(trace['edge_control_allowed'])} edge_stable_count={trace['edge_stable_count']} "
+                f"cx_norm={cx_norm} center_error={center_error} yaw_err_rad={yaw_err:.3f} dist_err_m={dist_err:.3f} "
+                f"target_dist_m={target_dist:.3f} allow_forward={int(trace['allow_forward'])} allow_rotate={int(trace['allow_rotate'])} "
+                f"vx_mps={vx:.3f} wz_radps={wz:.3f} forward_block_reason={trace['forward_block_reason']} "
+                f"transition_reason={trace['transition_reason']}",
+                interval_s=0.5,
+            )
+        should_forward = bool(
+            (yolo_visible or bbox_valid or edge_trusted)
+            and dist_err > target_dist + tolerance
+            and abs(yaw_err) < hard_yaw
+            and abs(vx) <= 1e-9
+            and str(trace["forward_block_reason"]).lower() not in {"soft_stale", "hard_stale", "dead", "vision_stale"}
+            and str(trace["stale_level"]).lower() not in {"soft_stale", "hard_stale", "dead"}
+        )
+        if should_forward:
+            self.run_logger.write_jsonl("motion_forward_block_bug", trace)
+            self.operator_console.emit_rate_limited(
+                "motion_forward_block_bug",
+                "[MOTION_FORWARD_BLOCK_BUG] "
+                f"reason={trace['forward_block_reason']} state={trace['state']} control_source={trace['control_source']} "
+                f"dist_err_m={dist_err:.3f} target_dist_m={target_dist:.3f} yaw_err_rad={yaw_err:.3f} hard_rotate_only_yaw_rad={hard_yaw:.3f}",
+                interval_s=0.5,
+            )
 
     def _rate_hz(self, samples, window_s: float = 5.0) -> float:
         now = time.time()

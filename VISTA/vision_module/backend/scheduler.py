@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from collections import deque
+import logging
 import threading
 import time
 from typing import Any, Deque, Dict, Optional
@@ -25,6 +26,10 @@ class Scheduler:
         self.last_snapshot: Dict[str, Any] = {}
         self._last_result_generation: int = 0
         self._lock = threading.RLock()
+        self._publish_trace_count: Dict[str, int] = {}
+        self._last_publish_trace_ts: Dict[str, float] = {}
+        self._last_collect_trace_ts: float = 0.0
+        self._logger = logging.getLogger("vision.scheduler")
 
     def _route_cfg(self, route_name: str) -> Dict[str, Any]:
         raw = (self.routes or {}).get(route_name)
@@ -79,36 +84,129 @@ class Scheduler:
                     "events_cleared_on_config": True,
                 }
             )
+            contract_results = dict((self.active_plan or {}).get("contract", {}).get("results") or {})
+            self._logger.info(
+                "[SCHEDULER_CONFIGURE] generation=%s mode=%s routes_keys=%s table_edge_obs_route_cfg=%s contract_results_stage=%s",
+                int(self.active_generation),
+                self.active_plan.get("mode"),
+                sorted(self.routes.keys()),
+                self._route_cfg("table_edge_obs"),
+                list(contract_results.get("stage") or []),
+            )
 
     def publish_result(self, route: str, payload: Any, generation: Optional[int] = None) -> bool:
         route_name = str(route or "").strip()
         if not route_name:
             return False
         with self._lock:
-            cfg = self._route_cfg(route_name)
-            if not cfg or str(cfg.get("policy", "slot")).strip().lower() != "slot":
-                self.last_snapshot["rejected_result_route"] = route_name
-                self.last_snapshot["rejected_result_ts"] = time.time()
-                return False
+            now = time.time()
             result_generation = int(self.active_generation if generation is None else generation)
+            routes_keys = sorted((self.routes or {}).keys())
+            result_slots_keys_before = sorted((self.result_slots or {}).keys())
+            cfg = self._route_cfg(route_name)
+            if not cfg:
+                reason = "route_missing"
+                accepted = False
+            elif str(cfg.get("policy", "slot")).strip().lower() != "slot":
+                reason = "policy_not_slot"
+                accepted = False
+            elif not self._should_accept_generation(result_generation):
+                reason = "generation_mismatch"
+                accepted = False
+            else:
+                reason = "accepted"
+                accepted = True
+
+            self.last_snapshot["publish_reject_reason"] = reason
+            self.last_snapshot["last_publish_result_route"] = route_name
+            self.last_snapshot["last_publish_result_reason"] = reason
+            self.last_snapshot["last_publish_result_accepted"] = bool(accepted)
+            self.last_snapshot["last_publish_result_generation"] = int(result_generation)
+            self.last_snapshot["last_publish_result_active_generation"] = int(self.active_generation)
+
+            if not accepted:
+                self.last_snapshot["rejected_result_route"] = route_name
+                self.last_snapshot["rejected_result_ts"] = now
+                if reason == "generation_mismatch":
+                    self.last_snapshot["dropped_result_generation"] = result_generation
+                    self.last_snapshot["dropped_result_ts"] = now
+                self._log_publish_result_trace(
+                    route_name=route_name,
+                    accepted=False,
+                    reason=reason,
+                    publish_generation=result_generation,
+                    routes_keys=routes_keys,
+                    route_cfg=cfg,
+                    result_slots_keys_before=result_slots_keys_before,
+                    result_slots_keys_after=sorted((self.result_slots or {}).keys()),
+                )
+                self._logger.info(
+                    "[PUBLISH_REJECT] route=%s reason=%s publish_generation=%s scheduler_active_generation=%s routes_keys=%s route_cfg=%s",
+                    route_name,
+                    reason,
+                    result_generation,
+                    int(self.active_generation),
+                    routes_keys,
+                    cfg,
+                )
+                return False
             self._last_result_generation = result_generation
             self.last_snapshot["last_result_generation"] = result_generation
-            if not self._should_accept_generation(result_generation):
-                self.last_snapshot["dropped_result_generation"] = result_generation
-                self.last_snapshot["dropped_result_ts"] = time.time()
-                return False
             slot = self.result_slots.setdefault(route_name, {})
             next_seq = int(slot.get("seq", 0) or 0) + 1
             slot.update(
                 {
                     "generation": result_generation,
-                    "ts": time.time(),
+                    "ts": now,
                     "seq": next_seq,
                     "payload": payload,
                 }
             )
-            self.last_snapshot["last_result_ts"] = time.time()
+            self.last_snapshot["last_result_ts"] = now
+            self._log_publish_result_trace(
+                route_name=route_name,
+                accepted=True,
+                reason=reason,
+                publish_generation=result_generation,
+                routes_keys=routes_keys,
+                route_cfg=cfg,
+                result_slots_keys_before=result_slots_keys_before,
+                result_slots_keys_after=sorted((self.result_slots or {}).keys()),
+            )
         return True
+
+    def _log_publish_result_trace(
+        self,
+        *,
+        route_name: str,
+        accepted: bool,
+        reason: str,
+        publish_generation: int,
+        routes_keys,
+        route_cfg,
+        result_slots_keys_before,
+        result_slots_keys_after,
+    ) -> None:
+        now = time.time()
+        count = int(self._publish_trace_count.get(route_name, 0) or 0)
+        last_ts = float(self._last_publish_trace_ts.get(route_name, 0.0) or 0.0)
+        should_log = route_name == "table_edge_obs" and (count < 5 or not accepted or (now - last_ts) >= 0.5)
+        if not should_log:
+            return
+        self._publish_trace_count[route_name] = count + 1
+        self._last_publish_trace_ts[route_name] = now
+        self._logger.info(
+            "[PUBLISH_RESULT_TRACE] route=%s accepted=%s reason=%s publish_generation=%s scheduler_active_generation=%s routes_keys=%s route_cfg=%s result_slots_keys_before=%s result_slots_keys_after=%s",
+            route_name,
+            str(bool(accepted)).lower(),
+            reason,
+            int(publish_generation),
+            int(self.active_generation),
+            list(routes_keys or []),
+            dict(route_cfg or {}),
+            list(result_slots_keys_before or []),
+            list(result_slots_keys_after or []),
+        )
 
     def publish_event(self, route: str, payload: Any, generation: Optional[int] = None) -> bool:
         route_name = str(route or "").strip()
@@ -209,11 +307,9 @@ class Scheduler:
     def collect_tick_input(self, ts: float, route_filter: set = None) -> StageTickInput:
         with self._lock:
             # DIAGNOSTIC LOG FOR ROUTING INVESTIGATION
-            import logging
-            logger = logging.getLogger("vision.scheduler")
             if "table_edge_obs" in self.result_slots:
                 slot = self.result_slots["table_edge_obs"]
-                logger.info(
+                self._logger.info(
                     "[DIAG_SCHEDULER] table_edge_obs slot exists: generation=%s active_gen=%s visible=%s payload_frame=%s",
                     slot.get("generation"),
                     self.active_generation,
@@ -221,27 +317,53 @@ class Scheduler:
                     (slot.get("payload") or {}).get("frame_id") if isinstance(slot.get("payload"), dict) else None
                 )
             else:
-                logger.info("[DIAG_SCHEDULER] table_edge_obs slot DOES NOT exist in result_slots")
+                self._logger.info("[DIAG_SCHEDULER] table_edge_obs slot DOES NOT exist in result_slots")
 
             signals = dict(self.pending_signals or {})
             self.pending_signals.clear()
             stage_results: Dict[str, Any] = {}
+            skipped_routes = []
             for route_name in sorted((self.routes or {}).keys()):
                 cfg = self._route_cfg(route_name)
                 if str(cfg.get("scope", "stage")).strip().lower() != "stage":
+                    skipped_routes.append((route_name, "scope_not_stage"))
                     continue
                 if route_filter is not None and route_name not in route_filter:
+                    skipped_routes.append((route_name, "route_filter_excluded"))
                     continue
                 slot = self.result_slots.get(route_name)
+                if slot is None:
+                    skipped_routes.append((route_name, "slot_missing"))
+                    continue
                 if not self._slot_visible(slot):
                     if isinstance(slot, dict):
                         self.last_snapshot["skipped_stage_route"] = route_name
                         self.last_snapshot["skipped_stage_route_generation"] = int(slot.get("generation", 0) or 0)
                         self.last_snapshot["skipped_stage_route_ts"] = time.time()
+                    skipped_routes.append((route_name, "slot_not_visible"))
                     continue
                 payload = (slot or {}).get("payload")
                 if payload is not None:
                     stage_results[route_name] = payload
+                else:
+                    skipped_routes.append((route_name, "payload_none"))
+            visible_routes = sorted(stage_results.keys())
+            now = time.time()
+            if now - float(self._last_collect_trace_ts or 0.0) >= 0.5 or "table_edge_obs" in self.result_slots:
+                self._last_collect_trace_ts = now
+                for skipped_route, skip_reason in skipped_routes:
+                    self.last_snapshot["collect_skipped_route"] = skipped_route
+                    self.last_snapshot["collect_skip_reason"] = skip_reason
+                    if skipped_route == "table_edge_obs":
+                        break
+                self._logger.info(
+                    "[SCHEDULER_COLLECT_TRACE] stage=SEARCH mode=%s subscribed_routes=%s result_slots_keys=%s visible_routes=%s skipped_routes=%s",
+                    (self.active_plan or {}).get("mode"),
+                    sorted(route_filter) if route_filter is not None else None,
+                    sorted((self.result_slots or {}).keys()),
+                    visible_routes,
+                    skipped_routes,
+                )
             snapshot = {
                 "runtime_running": bool(self.runtime_running),
                 "generation": int(self.active_generation),

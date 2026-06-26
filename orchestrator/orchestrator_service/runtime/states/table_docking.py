@@ -107,6 +107,72 @@ class TableDockingMixin:
             return float(self.ctx.last_table_center_x_norm)
         return 0.5
 
+    def _table_motion_signal_available(self, obs: Optional[TableEdgeObs]) -> bool:
+        if obs is None:
+            return False
+        return bool(
+            getattr(obs, "yolo_table_visible", False)
+            or getattr(obs, "yolo_table_control_valid", False)
+            or self._table_yolo_reliable(obs)
+            or getattr(obs, "edge_valid", False)
+            or getattr(obs, "edge_trusted", False)
+        )
+
+    def _annotate_hard_yaw_gate(self, obs: Optional[TableEdgeObs]) -> None:
+        if obs is None:
+            return
+        yaw_abs = abs(float(getattr(obs, "yaw_err_rad", 0.0) or 0.0))
+        hard_yaw = max(
+            abs(float(getattr(self.car_cfg, "table_edge_hard_rotate_only_yaw_rad", 0.45) or 0.45)),
+            abs(float(getattr(self.car_cfg, "table_approach_yaw_realign_rad", 0.16) or 0.16)),
+        )
+        now = monotonic_ts()
+        if yaw_abs > hard_yaw:
+            if self.ctx.edge_hard_yaw_since_mono <= 0.0:
+                self.ctx.edge_hard_yaw_since_mono = now
+                self.ctx.edge_hard_yaw_frames = 0
+            self.ctx.edge_hard_yaw_frames += 1
+        else:
+            self.ctx.edge_hard_yaw_since_mono = 0.0
+            self.ctx.edge_hard_yaw_frames = 0
+        min_frames = max(1, int(getattr(self.car_cfg, "table_edge_hard_yaw_rotate_only_frames", 3) or 3))
+        min_ms = max(0, int(getattr(self.car_cfg, "table_edge_hard_yaw_rotate_only_ms", 350) or 350))
+        elapsed_ms = max(0.0, (now - float(self.ctx.edge_hard_yaw_since_mono or now)) * 1000.0)
+        active = bool(yaw_abs > hard_yaw and self.ctx.edge_hard_yaw_frames >= min_frames and elapsed_ms >= float(min_ms))
+        setattr(obs, "hard_yaw_rotate_only_active", active)
+        setattr(obs, "hard_yaw_frames", int(self.ctx.edge_hard_yaw_frames))
+        setattr(obs, "hard_yaw_elapsed_ms", float(elapsed_ms))
+        setattr(obs, "hard_rotate_only_yaw_rad", float(hard_yaw))
+
+    def _approach_from_table_signal(self, obs: TableEdgeObs, *, reason: str) -> MotionDecision:
+        self._annotate_hard_yaw_gate(obs)
+        yaw_abs = abs(float(getattr(obs, "yaw_err_rad", 0.0) or 0.0))
+        hard_yaw = float(getattr(obs, "hard_rotate_only_yaw_rad", getattr(self.car_cfg, "table_edge_hard_rotate_only_yaw_rad", 0.45)) or 0.45)
+        edge_guided = bool((getattr(obs, "edge_valid", False) or getattr(obs, "edge_trusted", False)) and yaw_abs <= hard_yaw)
+        if edge_guided:
+            if self.ctx.state != State.EDGE_ADJUST:
+                self._transition(State.EDGE_ADJUST, reason)
+            decision = self.controller.fov_table_approach_cmd(obs, phase="PLANE_APPROACH", mode="EDGE_ADJUST")
+            if decision.control_summary is not None:
+                decision.control_summary.update(
+                    {
+                        "control_source": "edge_guided_forward",
+                        "transition_reason": reason,
+                        "hard_yaw_frames": int(getattr(obs, "hard_yaw_frames", 0) or 0),
+                        "hard_yaw_elapsed_ms": float(getattr(obs, "hard_yaw_elapsed_ms", 0.0) or 0.0),
+                    }
+                )
+            return decision
+        if self.ctx.state != State.YOLO_APPROACH:
+            self._transition(State.YOLO_APPROACH, reason)
+        return self.controller.yolo_table_search_cmd(
+            obs,
+            turn_sign=self.ctx.relocate_turn_sign,
+            mode="YOLO_APPROACH",
+            reason=reason,
+            control_source="yolo_track_forward",
+        )
+
     def _tick_yolo_acquire_align(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
         obs = self._fresh_table_obs()
@@ -114,9 +180,39 @@ class TableDockingMixin:
             self._transition(State.SEARCH_TABLE, "YOLO_ACQUIRE_ALIGN lost table bbox, enter SEARCH")
             return self._tick_search_table()
         cx_norm = self._get_bbox_center_x_norm(obs)
-        if 0.35 <= cx_norm <= 0.65:
-            self._transition(State.YOLO_APPROACH, f"YOLO_ACQUIRE_ALIGN aligned (cx_norm={cx_norm:.3f}), transition to YOLO_APPROACH")
-            return self._tick_yolo_approach()
+        center_error = float(cx_norm) - 0.5
+        hard_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.25) or 0.25))
+        self._annotate_hard_yaw_gate(obs)
+        yaw_err = abs(float(getattr(obs, "yaw_err_rad", 0.0) or 0.0))
+        hard_yaw = max(
+            abs(float(getattr(self.car_cfg, "table_approach_yaw_realign_rad", 0.16) or 0.16)),
+            abs(float(getattr(self.car_cfg, "table_edge_hard_rotate_only_yaw_rad", 0.45) or 0.45)),
+        )
+        touch_side = bool(
+            getattr(obs, "table_bbox_touch_left", getattr(obs, "yolo_bbox_touch_left", False))
+            or getattr(obs, "table_bbox_touch_right", getattr(obs, "yolo_bbox_touch_right", False))
+        )
+        if (getattr(obs, "edge_valid", False) or getattr(obs, "edge_trusted", False)) and yaw_err <= hard_yaw:
+            return self._approach_from_table_signal(obs, reason=f"YOLO_ACQUIRE_ALIGN edge forward handoff yaw={yaw_err:.3f}")
+        if abs(center_error) <= hard_limit:
+            if self.ctx.state != State.YOLO_APPROACH:
+                self._transition(State.YOLO_APPROACH, f"YOLO_ACQUIRE_ALIGN bbox trackable (cx_norm={cx_norm:.3f}), transition to YOLO_APPROACH")
+            decision = self.controller.yolo_table_search_cmd(
+                obs,
+                turn_sign=self.ctx.relocate_turn_sign,
+                mode="YOLO_APPROACH",
+                reason="yolo_acquire_track_forward",
+                control_source="yolo_track_forward",
+            )
+            decision.control_summary.update(
+                {
+                    "yolo_acquire_align_active": True,
+                    "bbox_cx_norm": float(cx_norm),
+                    "center_error": float(center_error),
+                    "transition_reason": self.ctx.last_enter_reason,
+                }
+            )
+            return decision
         
         # Rotate in place towards center
         cx = (cx_norm * 2.0) - 1.0
@@ -142,7 +238,7 @@ class TableDockingMixin:
             "wz_radps": float(wz),
             "allow_forward": False,
             "allow_rotate": True,
-            "forward_block_reason": "yolo_align_rotate_only",
+            "forward_block_reason": "yolo_bbox_touch_side_rotate_only" if touch_side else "yolo_center_error_too_large_rotate_only",
             "rotate_block_reason": "",
             "speed_profile": "search",
             "speed_limit_reason": "yolo_align",
@@ -158,8 +254,20 @@ class TableDockingMixin:
         if self._check_approach_progress(obs):
             return self._enter_no_progress_recovery_or_next("YOLO接近无进展超时")
         if self.controller._edge_trusted(obs):
-            self._transition(State.EDGE_ADJUST, "YOLO_APPROACH table edge trusted, transition to EDGE_ADJUST")
-            return self._tick_edge_adjust()
+            decision = self.controller.fov_table_approach_cmd(
+                obs,
+                phase="PLANE_APPROACH",
+                mode="EDGE_ADJUST",
+            )
+            if decision.control_summary is not None:
+                decision.control_summary.update(
+                    {
+                        "control_source": "edge_guided_forward",
+                        "transition_reason": "YOLO_APPROACH table edge trusted, stay forward-controlled",
+                        "edge_trusted_yolo_approach_handoff": True,
+                    }
+                )
+            return decision
             
         decision = self.controller.yolo_table_search_cmd(
             obs,
@@ -174,6 +282,26 @@ class TableDockingMixin:
         self._maybe_resend_req(self._active_req_payload())
         obs = self._fresh_table_obs()
         yolo_status = self._yolo_table_status(obs)
+        warmup_s = max(0.0, float(getattr(self.car_cfg, "table_perception_warmup_s", 1.0) or 1.0))
+        task_elapsed_s = max(0.0, time.time() - float(getattr(self.ctx, "task_start_wall_ts", 0.0) or time.time()))
+        if task_elapsed_s <= warmup_s:
+            if obs is not None and self._table_motion_signal_available(obs):
+                return self._approach_from_table_signal(obs, reason=f"perception_warmup_signal_seen elapsed_s={task_elapsed_s:.2f}")
+            decision = self.controller.stop_cmd("SEARCH_TABLE")
+            decision.control_summary.update(
+                {
+                    "control_source": "perception_warmup_hold",
+                    "allow_forward": False,
+                    "allow_rotate": False,
+                    "forward_block_reason": "perception_warmup_waiting",
+                    "rotate_block_reason": "perception_warmup_waiting",
+                    "perception_warmup_active": True,
+                    "perception_warmup_elapsed_s": float(task_elapsed_s),
+                    "perception_warmup_s": float(warmup_s),
+                    "transition_reason": "perception_warmup_waiting",
+                }
+            )
+            return decision
         local_search_active = bool(
             self.ctx.prev_state in TABLE_APPROACH_STATES
             and ("丢失" in str(self.ctx.last_enter_reason or "") or "lost" in str(self.ctx.last_enter_reason or "").lower())
@@ -245,14 +373,41 @@ class TableDockingMixin:
                 )
                 return decision
         level = self._control_level(obs)
-        if bool(getattr(self.cfg, "yolo_table_control_enable", True)) and yolo_status["fresh"] and self._table_yolo_reliable(obs):
+        if obs is not None and self._table_motion_signal_available(obs):
             cx_norm = self._get_bbox_center_x_norm(obs)
-            if cx_norm < 0.35 or cx_norm > 0.65:
-                self._transition(State.YOLO_ACQUIRE_ALIGN, f"table bbox found but center x={cx_norm:.3f} outside [0.35, 0.65]")
-                return self._tick_yolo_acquire_align()
-            else:
-                self._transition(State.YOLO_APPROACH, f"table bbox found and center x={cx_norm:.3f} aligned")
-                return self._tick_yolo_approach()
+            center_error = float(cx_norm) - 0.5
+            hard_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.25) or 0.25))
+            self._annotate_hard_yaw_gate(obs)
+            yaw_err = abs(float(getattr(obs, "yaw_err_rad", 0.0) or 0.0))
+            hard_yaw = max(
+                abs(float(getattr(self.car_cfg, "table_approach_yaw_realign_rad", 0.16) or 0.16)),
+                abs(float(getattr(self.car_cfg, "table_edge_hard_rotate_only_yaw_rad", 0.45) or 0.45)),
+            )
+            touch_side = bool(
+                getattr(obs, "table_bbox_touch_left", getattr(obs, "yolo_bbox_touch_left", False))
+                or getattr(obs, "table_bbox_touch_right", getattr(obs, "yolo_bbox_touch_right", False))
+            )
+            edge_guided = bool((getattr(obs, "edge_valid", False) or getattr(obs, "edge_trusted", False)) and yaw_err <= hard_yaw)
+            next_state = State.YOLO_APPROACH if (edge_guided or abs(center_error) <= hard_limit) else State.YOLO_ACQUIRE_ALIGN
+            self._transition(next_state, f"table signal found cx_norm={cx_norm:.3f} center_error={center_error:.3f}")
+            if edge_guided:
+                decision = self.controller.fov_table_approach_cmd(obs, phase="PLANE_APPROACH", mode="EDGE_ADJUST")
+                if decision.control_summary is not None:
+                    decision.control_summary.update(
+                        {
+                            "control_source": "edge_guided_forward",
+                            "transition_reason": self.ctx.last_enter_reason,
+                            "edge_trusted_search_handoff": True,
+                        }
+                    )
+                return decision
+            return self.controller.yolo_table_search_cmd(
+                obs,
+                turn_sign=self.ctx.relocate_turn_sign,
+                mode=next_state.value,
+                reason="search_table_yolo_track_forward" if next_state == State.YOLO_APPROACH else "search_table_yolo_rotate_only",
+                control_source="yolo_track_forward" if next_state == State.YOLO_APPROACH else "local_rotate_search",
+            )
         # Without table bbox, docking/edge must not drive state transitions.
         # It can still be logged by vision, but control falls back to local rotate search.
         self.ctx.table_found_frames = 0

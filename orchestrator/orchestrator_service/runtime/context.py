@@ -128,6 +128,8 @@ class RuntimeContext:
     align_hysteresis_last_obs_key: str = ""
     approach_hysteresis_last_obs_key: str = ""
     table_motion_pending_transition_reason: str = ""
+    edge_hard_yaw_frames: int = 0
+    edge_hard_yaw_since_mono: float = 0.0
     target_found_frames: int = 0
     target_lost_frames: int = 0
     target_lock_frames: int = 0
@@ -188,6 +190,8 @@ class RuntimeContext:
         self.align_hysteresis_last_obs_key = ""
         self.approach_hysteresis_last_obs_key = ""
         self.table_motion_pending_transition_reason = ""
+        self.edge_hard_yaw_frames = 0
+        self.edge_hard_yaw_since_mono = 0.0
         self.target_found_frames = 0
         self.target_lost_frames = 0
         self.target_lock_frames = 0

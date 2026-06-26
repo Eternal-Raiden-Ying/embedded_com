@@ -1399,6 +1399,8 @@ class VistaApp(BaseModule):
         self._enter_cold_idle(int(getattr(self._ctx(), "epoch", 0) or 0))
 
     def start(self):
+        print(f"[VISTA_TABLE_EDGE_SCHEDULER_FIX_ACTIVE] version=20260626_table_edge_scheduler_route_v1 file={__file__}", flush=True)
+        self.log_info("runtime", f"[VISTA_TABLE_EDGE_SCHEDULER_FIX_ACTIVE] version=20260626_table_edge_scheduler_route_v1 file={__file__}")
         print(f"[VISTA_EDGE_MAPPING_FIX_ACTIVE] version=20260626_edge_payload_path_v2 file={__file__}", flush=True)
         self.log_info("runtime", f"[VISTA_EDGE_MAPPING_FIX_ACTIVE] version=20260626_edge_payload_path_v2 file={__file__}")
         cfg_dump = self._config_dump()

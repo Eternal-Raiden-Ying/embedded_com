@@ -15,10 +15,11 @@ except ImportError:
     from test_support import PrintLogger, build_test_config, import_camera_classes, import_predictor_class
 
 from vision_module.app.stage_controller import StageController
-from vision_module.app.stages.base import StageContext, StageTickInput
+from vision_module.app.stages.base import StageContext, StageOutput, StageTickInput
 from vision_module.app.stages.grasp import GraspStagePlan
 from vision_module.app.stages.return_home import ReturnStagePlan
 from vision_module.app.stages.search import SearchStagePlan
+from vision_module.app.stages.search.table_edge_obs_builder import merge_table_bbox_from_local_perception
 from vision_module.backend.camera_manager import CameraManager
 from vision_module.backend.mode_controller import ModeController
 from vision_module.backend.preview import NullPreviewSink, PreviewFrame, PreviewSink
@@ -607,6 +608,185 @@ class SearchStagePlanKindTest(unittest.TestCase):
         self.assertEqual(table_obs["inlier_count"], 6)
         self.assertEqual(table_obs["reason"], "edge_candidate_rejected")
 
+    def test_search_stage_prioritizes_results_table_edge_obs_over_stage_state(self):
+        class GetOnlyPayload:
+            __slots__ = ("_data",)
+
+            def __init__(self, data):
+                self._data = dict(data)
+
+            def get(self, key, default=None):
+                return self._data.get(key, default)
+
+        plan, ctx = self._enter("TABLE_EDGE")
+        now = time.time()
+        ctx.stage_state["table_edge_obs"] = {
+            "frame_id": 33,
+            "edge_found": False,
+            "edge_valid": False,
+            "edge_trusted": False,
+            "point_count": 0,
+            "reason": "table_bbox_from_local_perception_no_edge_result",
+        }
+        output = plan.tick(
+            StageTickInput(
+                ts=now,
+                generation=3,
+                results={
+                    "table_edge_obs": GetOnlyPayload({
+                        "frame_id": 33,
+                        "edge_found": True,
+                        "edge_valid": True,
+                        "edge_trusted": True,
+                        "point_count": 91,
+                        "table_point_count": 91,
+                        "yaw_err_rad": 0.079,
+                        "dist_err_m": 0.473,
+                        "reason": "edge_trusted",
+                        "source": "table_edge_detector",
+                        "obs_ts": now,
+                    }),
+                    "local_perception": {
+                        "frame_seq": 33,
+                        "obs_ts": now,
+                        "rgb_shape": [640, 640, 3],
+                        "table_bbox": [80, 220, 520, 620],
+                        "table_bbox_current_found": True,
+                    },
+                },
+            ),
+            ctx,
+        )
+        table_obs = output.vision_obs["perception"]["table_edge_obs"]
+        self.assertEqual(table_obs["selected_source"], "results")
+        self.assertEqual(table_obs["source"], "results")
+        self.assertTrue(table_obs["edge_found"])
+        self.assertTrue(table_obs["edge_valid"])
+        self.assertTrue(table_obs["edge_trusted"])
+        self.assertEqual(table_obs["point_count"], 91)
+        self.assertEqual(table_obs["reason"], "edge_trusted")
+
+    def test_local_perception_merge_does_not_overwrite_edge_result(self):
+        now = time.time()
+        base_obs = {
+            "type": "table_edge_obs",
+            "selected_source": "results",
+            "source": "results",
+            "frame_id": 33,
+            "seq": 33,
+            "obs_ts": now,
+            "edge_found": True,
+            "edge_valid": True,
+            "edge_trusted": True,
+            "valid_for_control": True,
+            "edge_control_allowed": True,
+            "point_count": 91,
+            "table_point_count": 91,
+            "yaw_err_rad": 0.079,
+            "dist_err_m": 0.473,
+            "reason": "edge_trusted",
+        }
+        merged = merge_table_bbox_from_local_perception(
+            base_obs,
+            {
+                "frame_seq": 33,
+                "obs_ts": now,
+                "rgb_shape": [640, 640, 3],
+                "table_bbox": [80, 220, 520, 620],
+                "table_bbox_current_found": True,
+                "table_roi_source": "yolo_table_bbox",
+                "yolo_table_conf": 0.82,
+            },
+            tick_ts=now,
+        )
+        self.assertTrue(merged["edge_found"])
+        self.assertTrue(merged["edge_valid"])
+        self.assertTrue(merged["edge_trusted"])
+        self.assertEqual(merged["point_count"], 91)
+        self.assertEqual(merged["table_point_count"], 91)
+        self.assertEqual(merged["reason"], "edge_trusted")
+        self.assertEqual(merged["source"], "results")
+        self.assertEqual(merged["table_bbox_xyxy"], [80.0, 220.0, 520.0, 620.0])
+        self.assertEqual(merged["table_bbox_source"], "yolo_table_bbox")
+        self.assertTrue(merged["yolo_table_visible"])
+
+    def test_edge_result_reaches_final_payload(self):
+        from vision_module.app.app import VistaApp
+
+        class _Sender:
+            def __init__(self):
+                self.sent_payloads = []
+
+            def send(self, payload):
+                self.sent_payloads.append(payload)
+                return True
+
+            def close(self):
+                pass
+
+        scheduler = Scheduler()
+        scheduler.start_runtime()
+        plan = {
+            "mode": "FIND_EDGE",
+            "routes": {
+                "table_edge_obs": {"policy": "slot", "scope": "stage"},
+                "frame_meta": {"policy": "slot", "scope": "stage"},
+                "local_perception": {"policy": "slot", "scope": "stage"},
+                "runtime_status": {"policy": "slot", "scope": "backend"},
+            },
+        }
+        now = time.time()
+        scheduler.configure(plan, generation=3)
+        scheduler.publish_result("frame_meta", {"frame_seq": 33, "frame_capture_ts": now}, generation=3)
+        scheduler.publish_result(
+            "local_perception",
+            {
+                "frame_seq": 33,
+                "obs_ts": now,
+                "rgb_shape": [640, 640, 3],
+                "table_bbox": [80, 220, 520, 620],
+                "table_bbox_current_found": True,
+            },
+            generation=3,
+        )
+        scheduler.publish_result(
+            "table_edge_obs",
+            {
+                "frame_id": 33,
+                "edge_found": True,
+                "edge_valid": True,
+                "edge_trusted": True,
+                "point_count": 91,
+                "table_point_count": 91,
+                "reason": "edge_trusted",
+                "obs_ts": now,
+            },
+            generation=3,
+        )
+        try:
+            search_plan = SearchStagePlan()
+            tick_input = scheduler.collect_tick_input(
+                ts=now,
+                route_filter=set(search_plan.subscribed_routes("FIND_EDGE")),
+            )
+            ctx = StageContext(current_stage="SEARCH", current_mode="FIND_EDGE", stage_state={"search_kind": "TABLE_EDGE"})
+            stage_output = search_plan.tick(tick_input, ctx)
+
+            app = VistaApp()
+            app.scheduler = scheduler
+            app.obs_sender = _Sender()
+            app.diag_sender = _Sender()
+            queued = app._apply_stage_output(stage_output, now=time.time(), force_send=True)
+            self.assertTrue(queued)
+            final_edge = app.obs_sender.sent_payloads[0]["perception"]["table_edge_obs"]
+            self.assertTrue(final_edge["edge_found"])
+            self.assertTrue(final_edge["edge_valid"])
+            self.assertTrue(final_edge["edge_trusted"])
+            self.assertGreater(final_edge["point_count"], 0)
+            self.assertGreater(final_edge["table_point_count"], 0)
+        finally:
+            scheduler.stop_runtime()
+
     def test_table_edge_search_clears_stale_bbox_when_current_frame_has_no_table(self):
         plan, ctx = self._enter("TABLE_EDGE")
         output = plan.tick(
@@ -1039,6 +1219,100 @@ class SchedulerIsolationTest(unittest.TestCase):
         self.assertFalse(self.scheduler.publish_result("test_event", {"bad": True}, generation=1))
         self.assertFalse(self.scheduler.publish_event("local_perception", {"bad": True}, generation=1))
         self.assertFalse(self.scheduler.publish_result("unknown_route", {"bad": True}, generation=1))
+
+    def test_scheduler_publish_result_accepts_current_generation_table_edge_obs(self):
+        plan = {
+            "mode": "FIND_EDGE",
+            "routes": {
+                "table_edge_obs": {"policy": "slot", "scope": "stage"},
+                "frame_meta": {"policy": "slot", "scope": "stage"},
+                "local_perception": {"policy": "slot", "scope": "stage"},
+                "runtime_status": {"policy": "slot", "scope": "backend"},
+            },
+        }
+        self.scheduler.configure(plan, generation=3)
+        success = self.scheduler.publish_result(
+            "table_edge_obs",
+            {"frame_id": 33, "edge_found": True, "edge_valid": True, "point_count": 91},
+            generation=3,
+        )
+        tick_input = self.scheduler.collect_tick_input(ts=time.time())
+        self.assertTrue(success)
+        self.assertIn("table_edge_obs", self.scheduler.result_slots)
+        self.assertIn("table_edge_obs", tick_input.results)
+
+    def test_scheduler_publish_result_rejects_stale_generation_with_reason(self):
+        plan = {
+            "mode": "FIND_EDGE",
+            "routes": {
+                "table_edge_obs": {"policy": "slot", "scope": "stage"},
+                "frame_meta": {"policy": "slot", "scope": "stage"},
+                "local_perception": {"policy": "slot", "scope": "stage"},
+                "runtime_status": {"policy": "slot", "scope": "backend"},
+            },
+        }
+        self.scheduler.configure(plan, generation=3)
+        success = self.scheduler.publish_result(
+            "table_edge_obs",
+            {"frame_id": 33, "edge_found": True, "edge_valid": True, "point_count": 91},
+            generation=1,
+        )
+        self.assertFalse(success)
+        self.assertEqual(self.scheduler.last_snapshot["publish_reject_reason"], "generation_mismatch")
+
+    def test_table_edge_manager_publish_uses_scheduler_active_generation_when_getter_stale(self):
+        class FakeScheduler:
+            active_generation = 3
+            routes = {"table_edge_obs": {"policy": "slot", "scope": "stage"}}
+
+            def __init__(self):
+                self.calls = []
+
+            def publish_result(self, route, payload, generation=None):
+                self.calls.append((route, payload, generation))
+                return generation == self.active_generation
+
+        scheduler = FakeScheduler()
+        manager = TableEdgeManager(logger=PrintLogger("table_edge_publish_generation"))
+        manager.bind_runtime(scheduler, lambda: 1)
+        payload = {"frame_id": 33, "edge_found": True, "edge_valid": True, "point_count": 91}
+        manager._publish_result("table_edge_obs", payload)
+        self.assertEqual(len(scheduler.calls), 1)
+        self.assertEqual(scheduler.calls[0][0], "table_edge_obs")
+        self.assertEqual(scheduler.calls[0][2], 3)
+
+    def test_search_stage_receives_table_edge_obs_after_scheduler_publish(self):
+        plan = {
+            "mode": "FIND_EDGE",
+            "routes": {
+                "table_edge_obs": {"policy": "slot", "scope": "stage"},
+                "frame_meta": {"policy": "slot", "scope": "stage"},
+                "local_perception": {"policy": "slot", "scope": "stage"},
+                "runtime_status": {"policy": "slot", "scope": "backend"},
+            },
+        }
+        self.scheduler.configure(plan, generation=3)
+        edge_payload = {
+            "frame_id": 33,
+            "edge_found": True,
+            "edge_valid": True,
+            "edge_trusted": True,
+            "point_count": 91,
+            "table_point_count": 91,
+            "obs_ts": time.time(),
+        }
+        self.assertTrue(self.scheduler.publish_result("table_edge_obs", edge_payload, generation=3))
+        search_plan = SearchStagePlan()
+        tick_input = self.scheduler.collect_tick_input(
+            ts=time.time(),
+            route_filter=set(search_plan.subscribed_routes("FIND_EDGE")),
+        )
+        self.assertIn("table_edge_obs", tick_input.results)
+        ctx = StageContext(current_stage="SEARCH", current_mode="FIND_EDGE", stage_state={"search_kind": "TABLE_EDGE"})
+        output = search_plan.tick(tick_input, ctx)
+        self.assertIsNotNone(output)
+        table_obs = output.vision_obs["perception"]["table_edge_obs"]
+        self.assertTrue(table_obs["edge_found"])
 
 
 class PreviewBehaviorTest(unittest.TestCase):

@@ -74,7 +74,11 @@ table_docking_motion:
   approach_max_vx_mps: 0.035
   approach_yaw_deadband_rad: 0.08
   approach_yaw_realign_rad: 0.16
-  approach_allow_wz: false
+  edge_hard_rotate_only_yaw_rad: 0.45
+  edge_hard_yaw_rotate_only_frames: 3
+  edge_hard_yaw_rotate_only_ms: 350
+  perception_warmup_s: 1.0
+  approach_allow_wz: true
   approach_allow_vy: false
   pose_missing_safe_vx_mps: 0.020
   pose_missing_max_hold_s: 3.0
@@ -91,9 +95,9 @@ table_docking_motion:
     vy_min_mps: 0.000
     vy_max_mps: 0.000
     wz_min_radps: 0.000
-    wz_max_radps: 0.000
+    wz_max_radps: 0.120
     allow_vy: false
-    allow_wz: false
+    allow_wz: true
   final_lock:
     vx_min_mps: 0.000
     vx_max_mps: 0.008

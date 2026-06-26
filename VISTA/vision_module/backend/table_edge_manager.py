@@ -266,12 +266,28 @@ class TableEdgeManager:
         if scheduler is None:
             return
         try:
-            generation = int(self._generation_getter())
+            getter_generation = int(self._generation_getter())
         except Exception:
-            generation = 0
+            getter_generation = 0
         try:
+            scheduler_generation = int(getattr(scheduler, "active_generation", getter_generation))
+        except Exception:
+            scheduler_generation = getter_generation
+        routes = getattr(scheduler, "routes", {}) or {}
+        route_cfg = dict((routes or {}).get(route) or {}) if isinstance(routes, dict) else {}
+        route_exists = bool(route_cfg)
+        route_policy = str(route_cfg.get("policy", "slot")).strip().lower() if route_exists else ""
+        use_scheduler_generation = bool(route_exists and route_policy == "slot")
+        generation = scheduler_generation if use_scheduler_generation else getter_generation
+        if use_scheduler_generation and getter_generation != scheduler_generation:
+            self.log.info(
+                "[TABLE_EDGE_GENERATION_SYNC] getter_generation=%s scheduler_active_generation=%s using=scheduler_active_generation",
+                getter_generation,
+                scheduler_generation,
+            )
+        try:
+            publish_start = time.perf_counter()
             if isinstance(payload, dict):
-                publish_start = time.perf_counter()
                 now = time.time()
                 payload["table_edge_publish_interval_ms"] = (
                     (now - float(self._last_publish_ts)) * 1000.0
@@ -288,6 +304,15 @@ class TableEdgeManager:
                     profile["table_edge_publish_interval_ms"] = payload.get("table_edge_publish_interval_ms")
                     profile["vision_publish_ts_ms"] = payload.get("vision_publish_ts_ms")
             success = scheduler.publish_result(route, payload, generation=generation)
+            self.log.info(
+                "[TABLE_EDGE_PUBLISH_GEN] route=%s getter_generation=%s scheduler_active_generation=%s using_generation=%s route_exists=%s success=%s",
+                route,
+                getter_generation,
+                scheduler_generation,
+                generation,
+                route_exists,
+                success,
+            )
             self.log.info(
                 "[DIAG_PUBLISH] route=%s generation=%s success=%s frame_id=%s",
                 route,
