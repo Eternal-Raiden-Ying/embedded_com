@@ -328,9 +328,21 @@ class TableDockingMixin:
             decision.cmd.vy_mps = 0.0
             decision.cmd.wz_radps = edge_wz
             summary["forward_block_reason"] = ""
+            summary["forward_allowed"] = True
+            summary["pose_found"] = True
+            summary["pose_missing_duration_s"] = 0.0
+            summary["pose_missing_safe_vx_active"] = False
         elif edge_guided_candidate:
             decision.cmd.vx_mps = 0.0
             summary["forward_block_reason"] = edge_commit_block_reason
+            summary["forward_allowed"] = False
+            summary["pose_found"] = False
+            summary["pose_missing_safe_vx_active"] = False
+        elif phase == "EDGE_GUIDED_APPROACH":
+            summary["pose_found"] = False
+            summary["pose_missing_safe_vx_active"] = False
+            summary["forward_allowed"] = False
+
         summary.update({
             **geom, "bbox_yaw_cmd": float(bbox_wz),
             "control_phase": phase, "phase_reason": auth.phase_reason,
