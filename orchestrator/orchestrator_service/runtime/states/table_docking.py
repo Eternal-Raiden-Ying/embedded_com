@@ -311,6 +311,95 @@ class TableDockingMixin:
         raw_forward_reason = str(summary.get("forward_block_reason") or "")
         raw_rotate_reason = str(summary.get("rotate_block_reason") or "")
         depth_status = self._depth_roi_stop_status(obs)
+        now_mono = monotonic_ts()
+        geom_before_auth = self._bbox_control_geometry(obs)
+        fov_before_auth = self._bbox_fov_guard_status(obs, geom_before_auth, summary)
+        stale_level_before_auth = str(summary.get("stale_level") or self.controller._stale_guard(obs).get("stale_level") or "fresh").lower()
+        edge_usable_before_auth = bool(obs is not None and (getattr(obs, "edge_found", False) or getattr(obs, "usable_for_approach", False) or getattr(obs, "edge_trusted", False)))
+        bbox_usable_before_auth = bool(
+            geom_before_auth.get("bbox_center_valid")
+            and (bool(getattr(obs, "table_bbox_control_valid", False) or getattr(obs, "yolo_table_control_valid", False)) if obs is not None else False)
+        )
+        hard_safety_before_auth = bool(
+            explicit_stop_active
+            or any(bool(summary.get(key, False)) for key in (
+                "emergency_stop_active", "car_estop", "estop_active", "obstacle_active", "obstacle_stop_active",
+                "base_depth_hard_safety", "base_depth_stop_active", "base_depth_emergency_active", "depth_hard_stop_active", "safety_stop_active",
+            ))
+        )
+        active_docking_before_auth = str(getattr(self.ctx.state, "value", self.ctx.state) or "") in {"YOLO_APPROACH", "EDGE_ADJUST"}
+        healthy_table_obs = bool(
+            active_docking_before_auth
+            and bbox_usable_before_auth
+            and edge_usable_before_auth
+            and not bool(depth_status.get("depth_roi_stop_ready"))
+            and not hard_safety_before_auth
+            and str(fov_before_auth["level"]) != "hard"
+            and (self.ctx.control_phase == "EDGE_GUIDED_APPROACH" or self.ctx.approach_commit_active)
+            and stale_level_before_auth not in {"hard_stale", "dead"}
+        )
+        if healthy_table_obs:
+            self.ctx.last_good_table_obs_mono = now_mono
+            self.ctx.last_good_table_obs_summary = {
+                "edge_yaw_cmd": float(summary.get("edge_yaw_cmd", summary.get("wz_from_plane", 0.0)) or 0.0),
+                "bbox_cx_norm_control": geom_before_auth.get("bbox_cx_norm_control"),
+            }
+            self.ctx.perception_dropout_hold_active = False
+            self.ctx.perception_dropout_hold_started_mono = 0.0
+            self.ctx.perception_dropout_hold_reason = ""
+
+        last_good_age_ms = max(0.0, (now_mono - float(self.ctx.last_good_table_obs_mono or now_mono)) * 1000.0) if self.ctx.last_good_table_obs_mono else 0.0
+        dropout_window_s = 2.5
+        dropout_active = bool(
+            self.ctx.approach_commit_active
+            and stale_level_before_auth in {"hard_stale", "dead"}
+            and self.ctx.last_good_table_obs_mono > 0.0
+            and last_good_age_ms <= dropout_window_s * 1000.0
+            and not hard_safety_before_auth
+            and not bool(depth_status.get("depth_roi_stop_ready"))
+            and str(fov_before_auth["level"]) != "hard"
+        )
+        if dropout_active:
+            if not self.ctx.perception_dropout_hold_active:
+                self.ctx.perception_dropout_hold_started_mono = now_mono
+            self.ctx.perception_dropout_hold_active = True
+            self.ctx.perception_dropout_hold_reason = "approach_commit_short_dropout"
+            decision.cmd.vx_mps = 0.020
+            decision.cmd.vy_mps = 0.0
+            decision.cmd.wz_radps = float(self.ctx.last_edge_yaw_cmd or self.ctx.last_good_table_obs_summary.get("edge_yaw_cmd", 0.0) or 0.0)
+            summary.update({
+                **geom_before_auth,
+                "control_phase": "EDGE_GUIDED_APPROACH",
+                "phase_reason": "perception_dropout_hold",
+                "control_source": "approach_commit_dropout_hold",
+                "forward_source": "approach_commit",
+                "allow_forward": True,
+                "forward_allowed": True,
+                "forward_block_reason": "",
+                "perception_dropout_hold_active": True,
+                "perception_dropout_hold_age_ms": last_good_age_ms,
+                "last_good_table_obs_age_ms": last_good_age_ms,
+                "stale_hold_policy": "approach_commit_short_dropout",
+                "approach_commit_active": True,
+                "final_vx": float(decision.cmd.vx_mps),
+                "final_vy": float(decision.cmd.vy_mps),
+                "final_wz": float(decision.cmd.wz_radps),
+                "vx_mps": float(decision.cmd.vx_mps),
+                "vy_mps": float(decision.cmd.vy_mps),
+                "wz_radps": float(decision.cmd.wz_radps),
+                "authority_applied": True,
+            })
+            return decision
+        if self.ctx.approach_commit_active and stale_level_before_auth in {"hard_stale", "dead"} and self.ctx.last_good_table_obs_mono > 0.0 and last_good_age_ms > dropout_window_s * 1000.0:
+            self.ctx.approach_commit_active = False
+            self.ctx.perception_dropout_hold_active = False
+            self.ctx.perception_dropout_hold_reason = "perception_dropout_hold_expired"
+            summary.update({
+                "perception_dropout_hold_active": False,
+                "perception_dropout_hold_age_ms": last_good_age_ms,
+                "last_good_table_obs_age_ms": last_good_age_ms,
+                "stale_hold_policy": "perception_dropout_hold_expired",
+            })
         auth = self._get_control_authority(
             obs,
             depth_roi_stop_active=bool(depth_status.get("depth_roi_stop_ready")),
@@ -465,6 +554,10 @@ class TableDockingMixin:
             "bbox_fov_guard_reason": bbox_fov_guard_reason,
             "bbox_fov_soft_allowed_forward": bool(bbox_fov_guard_level == "soft" and not edge_commit_block_reason),
             "bbox_fov_hard_block": bool(bbox_fov_guard_level == "hard"),
+            "perception_dropout_hold_active": bool(self.ctx.perception_dropout_hold_active),
+            "perception_dropout_hold_age_ms": 0.0,
+            "last_good_table_obs_age_ms": max(0.0, (monotonic_ts() - float(self.ctx.last_good_table_obs_mono or monotonic_ts())) * 1000.0),
+            "stale_hold_policy": str(self.ctx.perception_dropout_hold_reason or ""),
             "approach_commit_active": bool(self.ctx.approach_commit_active),
             "forward_coast_active": bool(forward_coast_active),
             "edge_conf_score": float(self.ctx.edge_conf_score),

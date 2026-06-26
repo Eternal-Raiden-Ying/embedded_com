@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 import os
 import sys
+import time
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, ROOT)
@@ -224,6 +225,35 @@ def main() -> None:
     assert coast.control_summary["forward_coast_active"]
     assert coast.control_summary["control_phase"] == "EDGE_GUIDED_APPROACH"
 
+    # A short hard-stale observation dropout after an established commit holds
+    # the safe approach command instead of immediately stopping.
+    probe = DockingProbe()
+    dropout_good = bbox_obs(0.50)
+    dropout_good.edge_found = True
+    dropout_good.edge_trusted = True
+    dropout_good.yaw_err_rad = 0.10
+    edge_guided_decision(probe, dropout_good)
+    edge_guided_decision(probe, dropout_good)
+    assert probe.ctx.approach_commit_active and probe.ctx.last_good_table_obs_mono > 0.0
+    dropout_obs = bbox_obs(0.50)
+    dropout_obs.edge_found = True
+    dropout_obs.edge_trusted = True
+    dropout_obs.yaw_err_rad = 0.10
+    dropout_obs.ts = now_ts() - 0.60
+    dropout_obs.frame_capture_ts = dropout_obs.ts
+    dropout = edge_guided_decision(probe, dropout_obs)
+    assert dropout.cmd.vx_mps == 0.020
+    assert dropout.control_summary["perception_dropout_hold_active"]
+    assert dropout.control_summary["stale_hold_policy"] == "approach_commit_short_dropout"
+
+    # Once the dropout hold expires, the commit is cleared and normal stale
+    # recovery may stop or search instead of continuing blind forward motion.
+    probe.ctx.last_good_table_obs_mono = monotonic_ts() - 3.1
+    expired_dropout = edge_guided_decision(probe, dropout_obs)
+    assert expired_dropout.cmd.vx_mps == 0.0
+    assert not probe.ctx.approach_commit_active
+    assert expired_dropout.control_summary["stale_hold_policy"] == "perception_dropout_hold_expired"
+
     # A handoff timeout with a centered valid bbox must retain the committed
     # edge approach instead of falling into a double-zero BBOX_ACQUIRE command.
     probe = DockingProbe()
@@ -266,7 +296,10 @@ def main() -> None:
 
     uart_probe = UartBridge(port="COM_DRY_RUN", baudrate=115200, timeout_s=0.1, dry_run=True)
     assert uart_probe._writer_discard_reason({"line": "V 0.020 0.000 0.010", "tx_meta": {}}) == ""
+    assert uart_probe._writer_discard_reason({"line": "V 0.000 0.000 0.100", "tx_meta": {}}) == ""
     assert uart_probe._writer_discard_reason({"line": "MODE SEARCH", "tx_meta": {}}) == "non_velocity_line"
+    uart_probe._last_estop_mono = time.monotonic()
+    assert uart_probe._writer_discard_reason({"line": "V 0.000 0.000 0.100", "tx_meta": {}, "publish_mono": time.monotonic()}) == "estop_cooldown"
 
     probe = DockingProbe()
     edge_obs.edge_trusted = True

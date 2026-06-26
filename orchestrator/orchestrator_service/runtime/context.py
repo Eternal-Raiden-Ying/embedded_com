@@ -145,6 +145,11 @@ class RuntimeContext:
     last_edge_good_mono: float = 0.0
     zero_cmd_started_mono: float = 0.0
     edge_conf_score: float = 0.0
+    last_good_table_obs_mono: float = 0.0
+    last_good_table_obs_summary: Dict[str, object] = field(default_factory=dict)
+    perception_dropout_hold_active: bool = False
+    perception_dropout_hold_started_mono: float = 0.0
+    perception_dropout_hold_reason: str = ""
     bbox_fov_violation_streak: int = 0
     bbox_lost_since_mono: float = 0.0
     bbox_lost_hold_active: bool = False
@@ -229,6 +234,11 @@ class RuntimeContext:
         self.last_edge_good_mono = 0.0
         self.zero_cmd_started_mono = 0.0
         self.edge_conf_score = 0.0
+        self.last_good_table_obs_mono = 0.0
+        self.last_good_table_obs_summary.clear()
+        self.perception_dropout_hold_active = False
+        self.perception_dropout_hold_started_mono = 0.0
+        self.perception_dropout_hold_reason = ""
         self.bbox_fov_violation_streak = 0
         self.bbox_lost_since_mono = 0.0
         self.bbox_lost_hold_active = False

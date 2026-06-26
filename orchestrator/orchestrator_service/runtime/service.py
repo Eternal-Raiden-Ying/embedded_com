@@ -932,6 +932,14 @@ class OrchestratorService(BaseModule):
             "zero_cmd_reason",
             "original_cmd",
             "effective_cmd",
+            "stop_class",
+            "estop_cooldown_applied",
+            "estop_cooldown_reason",
+            "service_override",
+            "service_override_reason",
+            "effective_cmd_before_service",
+            "effective_cmd_after_service",
+            "perception_dropout_hold_active",
         ):
             if context.get(key) is not None:
                 meta[key] = context.get(key)
@@ -1024,6 +1032,9 @@ class OrchestratorService(BaseModule):
         )
         bbox_lost_hold_active = bool(summary.get("bbox_lost_hold_active", False))
         hard_stale = bool(hard_stale_raw and not search_allows_edge_stale and not yolo_allows_edge_stale and not bbox_lost_hold_active)
+        dropout_hold_active = bool(summary.get("perception_dropout_hold_active", False))
+        if dropout_hold_active:
+            hard_stale = False
         if perception_dead:
             stale_source = "vision"
         elif stale_level or stale_reason:
@@ -1047,11 +1058,13 @@ class OrchestratorService(BaseModule):
         )
         zero_cmd_reason = ""
         emit_reason = "controller_update"
+        stop_class = ""
         effective = cmd
 
         if explicit_stop:
             emit_reason = "explicit_stop"
             zero_cmd_reason = "explicit_stop"
+            stop_class = "emergency" if any(bool(summary.get(key, False)) for key in ("emergency_stop_active", "car_estop", "estop_active")) else "safety"
             effective = self._make_stop_cmd(now, hold_ms=int(getattr(cmd, "hold_ms", self.cfg.car.cmd_hold_ms) or self.cfg.car.cmd_hold_ms))
             self._last_valid_motion_cmd = None
             self._last_valid_motion_ts = 0.0
@@ -1059,6 +1072,7 @@ class OrchestratorService(BaseModule):
         elif hard_stale:
             emit_reason = "hard_stale_stop"
             zero_cmd_reason = "soft_stale_timeout" if soft_stale_timed_out else (stale_level or "hard_stale")
+            stop_class = "stale_recovery"
             effective = self._make_stop_cmd(now, hold_ms=int(getattr(cmd, "hold_ms", self.cfg.car.cmd_hold_ms) or self.cfg.car.cmd_hold_ms))
             self._last_valid_motion_cmd = None
             self._last_valid_motion_ts = 0.0
@@ -1076,15 +1090,18 @@ class OrchestratorService(BaseModule):
             else:
                 emit_reason = "no_valid_cmd_stop"
                 zero_cmd_reason = "last_valid_unavailable"
+                stop_class = "control_recovery"
                 effective = self._make_stop_cmd(now, hold_ms=int(getattr(cmd, "hold_ms", self.cfg.car.cmd_hold_ms) or self.cfg.car.cmd_hold_ms))
         else:
             emit_reason = "no_valid_cmd_stop"
             zero_cmd_reason = "last_valid_expired" if self._last_valid_motion_cmd else "no_last_valid_motion"
+            stop_class = "control_recovery"
             effective = self._make_stop_cmd(now, hold_ms=int(getattr(cmd, "hold_ms", self.cfg.car.cmd_hold_ms) or self.cfg.car.cmd_hold_ms))
             self._last_valid_motion_cmd = None
             self._last_valid_motion_ts = 0.0
             last_age_ms = None
 
+        service_override = bool(self._cmd_dict(effective) != self._cmd_dict(cmd))
         return effective, {
             "uart_emit_reason": emit_reason,
             "last_valid_motion_cmd": dict(self._last_valid_motion_cmd or {}),
@@ -1104,6 +1121,14 @@ class OrchestratorService(BaseModule):
             "search_allows_edge_stale": bool(search_allows_edge_stale),
             "search_table_stale_gate_bypass": bool(search_allows_edge_stale and hard_stale_raw),
             "stale_gate_stop_source_state": state if hard_stale else "",
+            "stop_class": stop_class,
+            "estop_cooldown_applied": bool(stop_class in {"emergency", "safety"}),
+            "estop_cooldown_reason": "hard_stop" if stop_class in {"emergency", "safety"} else "",
+            "service_override": service_override,
+            "service_override_reason": emit_reason if service_override else "",
+            "effective_cmd_before_service": self._cmd_dict(cmd),
+            "effective_cmd_after_service": self._cmd_dict(effective),
+            "perception_dropout_hold_active": dropout_hold_active,
         }
 
     def _render_uart_line(self, payload: Dict[str, Any]) -> str:
@@ -2658,6 +2683,10 @@ class OrchestratorService(BaseModule):
             "bbox_fov_guard_reason": summary.get("bbox_fov_guard_reason", ""),
             "bbox_fov_soft_allowed_forward": bool(summary.get("bbox_fov_soft_allowed_forward", False)),
             "bbox_fov_hard_block": bool(summary.get("bbox_fov_hard_block", False)),
+            "perception_dropout_hold_active": bool(summary.get("perception_dropout_hold_active", False)),
+            "perception_dropout_hold_age_ms": summary.get("perception_dropout_hold_age_ms", 0.0),
+            "last_good_table_obs_age_ms": summary.get("last_good_table_obs_age_ms", 0.0),
+            "stale_hold_policy": summary.get("stale_hold_policy", ""),
             "bbox_cx_norm_control": summary.get("bbox_cx_norm_control"),
             "bbox_center_error_control": summary.get("bbox_center_error_control"),
             "bbox_center_source": summary.get("bbox_center_source", ""),
@@ -2948,7 +2977,8 @@ class OrchestratorService(BaseModule):
         effective_cmd, uart_arbitration = self._arbitrate_uart_motion_cmd(cmd, summary)
         car_cmd = self.mapper.from_cmd_vel(effective_cmd, cx_norm_abs=decision.cx_norm_abs, distance_ratio=decision.distance_ratio)
         tx_meta = self._build_uart_tx_meta(car_cmd)
-        reason = str(tx_meta.get("reason") or car_cmd.kind or "").strip()
+        stop_class = str(uart_arbitration.get("stop_class") or "").strip()
+        reason = stop_class or str(tx_meta.get("reason") or car_cmd.kind or "").strip()
         velocity = self.motion_adapter.cmd_vel_to_velocity(effective_cmd)
         speed_profile = str(summary.get("speed_profile") or ("stop" if car_cmd.kind in {"stop", "brake"} else "search"))
         self._last_motion_tx_context = {
