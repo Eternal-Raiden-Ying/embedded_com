@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(ROOT, "VISTA"))
 
 import numpy as np
 
-from orchestrator.orchestrator_service.runtime.control_authority import decide_table_control_authority
+from orchestrator.orchestrator_service.runtime.control_authority import ControlAuthority, decide_table_control_authority
 from orchestrator.orchestrator_service.runtime.perception_semantics import TablePerceptionSemantics
 from orchestrator.orchestrator_service.runtime.states.table_docking import TableDockingMixin
 from orchestrator.orchestrator_service.runtime.common import monotonic_ts
@@ -73,6 +73,8 @@ def main() -> None:
             self.car_cfg = CarMotionConfig()
             self.ctx = RuntimeContext(state=State.YOLO_APPROACH)
             self.controller = MotionController(self.cfg, self.car_cfg)
+            self.force_edge_guided = False
+            self.force_depth_stop = False
 
         def _transition(self, state, _reason):
             self.ctx.prev_state = self.ctx.state
@@ -87,6 +89,20 @@ def main() -> None:
 
         def _loss_elapsed(self, started):
             return max(0.0, monotonic_ts() - float(started or 0.0)) if started else 0.0
+
+        def _get_control_authority(self, obs, depth_roi_stop_active=False, explicit_stop_active=False):
+            if self.force_edge_guided:
+                return ControlAuthority(
+                    control_phase="EDGE_GUIDED_APPROACH", phase_reason="static_edge_handoff",
+                    control_source="edge_guided_forward", yaw_source="edge", forward_source="edge",
+                    stop_source="none", allow_forward=True, allow_rotate=True, block_reason="edge_handoff_complete",
+                )
+            return super()._get_control_authority(obs, depth_roi_stop_active, explicit_stop_active)
+
+        def _depth_roi_stop_status(self, obs):
+            if self.force_depth_stop:
+                return {"depth_roi_stop_ready": True, "reason": "static_depth_final_stop"}
+            return super()._depth_roi_stop_status(obs)
 
     def bbox_obs(center: float, *, soft_stale: bool = False, found: bool = True) -> TableEdgeObs:
         ts = now_ts() - (0.35 if soft_stale else 0.01)
@@ -113,6 +129,24 @@ def main() -> None:
             obs,
         )
 
+    def edge_guided_decision(probe: DockingProbe, obs: TableEdgeObs, *, edge_wz: float = 0.03) -> MotionDecision:
+        probe.force_edge_guided = True
+        probe.ctx.edge_handoff_complete = True
+        cmd = probe.controller._cmd("YOLO_APPROACH", vx=0.0, wz=0.0)
+        summary = probe.controller._summary("YOLO_APPROACH", cmd, obs)
+        summary.update(
+            {
+                "edge_yaw_cmd": edge_wz,
+                "edge_yaw": float(getattr(obs, "yaw_err_rad", 0.0) or 0.0),
+                "hard_rotate_only_yaw_rad": 0.45,
+                "pose_found": False,
+                "pose_missing_duration_s": 99.0,
+                "pose_missing_safe_vx_active": False,
+                "forward_allowed": False,
+            }
+        )
+        return probe._apply_control_authority(MotionDecision(cmd=cmd, control_summary=summary), obs)
+
     # BBOX_ACQUIRE owns final yaw. Right side is positive/right turn even when
     # the raw/search command asks for the opposite turn.
     probe = DockingProbe()
@@ -133,6 +167,36 @@ def main() -> None:
     assert soft.control_summary["control_phase"] == "BBOX_ACQUIRE"
     assert soft.cmd.wz_radps == soft.control_summary["bbox_yaw_cmd"] > 0.0
     assert soft.cmd.vx_mps == 0.0
+
+    edge_obs = bbox_obs(0.50)
+    edge_obs.edge_found = True
+    edge_obs.edge_trusted = True
+    edge_obs.yaw_err_rad = 0.10
+    probe = DockingProbe()
+    committed = edge_guided_decision(probe, edge_obs)
+    assert committed.cmd.vx_mps == 0.020
+    assert committed.control_summary["pose_gate_ignored_for_phase"]
+    assert committed.control_summary["vx_override_reason"] == "edge_guided_commit"
+    assert committed.cmd.wz_radps == committed.control_summary["edge_yaw_cmd"]
+
+    probe = DockingProbe()
+    edge_obs.yaw_err_rad = 0.60
+    yaw_blocked = edge_guided_decision(probe, edge_obs)
+    assert yaw_blocked.cmd.vx_mps == 0.0
+    assert yaw_blocked.control_summary["forward_block_reason"] == "edge_yaw_too_large"
+
+    probe = DockingProbe()
+    edge_obs.yaw_err_rad = 0.10
+    probe.ctx.bbox_fov_violation_streak = 3
+    fov_blocked = edge_guided_decision(probe, edge_obs)
+    assert fov_blocked.cmd.vx_mps == 0.0
+    assert fov_blocked.control_summary["forward_block_reason"] == "bbox_fov_guard"
+
+    probe = DockingProbe()
+    probe.force_depth_stop = True
+    depth_stopped = authority_decision(probe, bbox_obs(0.50), raw_wz=0.03)
+    assert depth_stopped.control_summary["control_phase"] == "DEPTH_FINAL_STOP"
+    assert depth_stopped.cmd.vx_mps == 0.0
 
     probe = DockingProbe()
     probe.ctx.bbox_valid_streak = 3

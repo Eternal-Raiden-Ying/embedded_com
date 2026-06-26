@@ -282,6 +282,43 @@ class TableDockingMixin:
                 decision.cmd.wz_radps = bbox_wz
             elif phase == "EDGE_GUIDED_APPROACH":
                 decision.cmd.wz_radps = edge_wz
+
+        forward_commit_vx = 0.020
+        edge_guided_candidate = bool(
+            phase == "EDGE_GUIDED_APPROACH"
+            and bool(self.ctx.edge_handoff_complete)
+            and bool(auth.allow_forward)
+        )
+        edge_commit_block_reason = ""
+        stale_reason = str(summary.get("stale_guard_reason") or "").lower()
+        if edge_guided_candidate:
+            if explicit_stop_active or bool(decision.cmd.brake) or any(bool(summary.get(key, False)) for key in ("emergency_stop_active", "car_estop", "estop_active")):
+                edge_commit_block_reason = "explicit_stop"
+            elif stale_level in {"hard_stale", "dead"} or "perception_dead" in stale_reason or "vision_dead" in stale_reason:
+                edge_commit_block_reason = "hard_stale"
+            elif bool(depth_status.get("depth_roi_stop_ready")) or auth.stop_source == "roi_depth":
+                edge_commit_block_reason = "depth_final_stop"
+            elif any(bool(summary.get(key, False)) for key in ("obstacle_active", "obstacle_stop_active", "base_depth_hard_safety", "base_depth_stop_active", "base_depth_emergency_active", "depth_hard_stop_active", "safety_stop_active")):
+                edge_commit_block_reason = "base_safety"
+            else:
+                bbox_guard_frames = max(1, int(getattr(self.car_cfg, "table_bbox_fov_guard_frames", 3) or 3))
+                if bool(summary.get("bbox_fov_guard_active", False)) or int(self.ctx.bbox_fov_violation_streak) >= bbox_guard_frames:
+                    edge_commit_block_reason = "bbox_fov_guard"
+                else:
+                    hard_yaw = abs(float(summary.get("hard_rotate_only_yaw_rad", getattr(self.car_cfg, "table_edge_hard_rotate_only_yaw_rad", 0.45)) or 0.45))
+                    edge_yaw_abs = abs(float(summary.get("edge_yaw", getattr(obs, "yaw_err_rad", 0.0) if obs is not None else 0.0) or 0.0))
+                    if edge_yaw_abs > hard_yaw or bool(getattr(obs, "hard_yaw_rotate_only_active", False)):
+                        edge_commit_block_reason = "edge_yaw_too_large"
+
+        edge_guided_commit = bool(edge_guided_candidate and not edge_commit_block_reason)
+        if edge_guided_commit:
+            decision.cmd.vx_mps = forward_commit_vx
+            decision.cmd.vy_mps = 0.0
+            decision.cmd.wz_radps = edge_wz
+            summary["forward_block_reason"] = ""
+        elif edge_guided_candidate:
+            decision.cmd.vx_mps = 0.0
+            summary["forward_block_reason"] = edge_commit_block_reason
         summary.update({
             **geom, "bbox_yaw_cmd": float(bbox_wz),
             "control_phase": phase, "phase_reason": auth.phase_reason,
@@ -290,6 +327,11 @@ class TableDockingMixin:
             "edge_yaw_ema": self.ctx.edge_yaw_ema, "bbox_wz_sign": bbox_sign, "edge_wz_sign": edge_sign,
             "yaw_conflict": yaw_conflict, "search_wz_sign_latched": int(self.ctx.search_wz_sign_latched),
             "bbox_yaw_owner_enforced": bool(bbox_owner_active),
+            "forward_commit_vx": float(forward_commit_vx),
+            "pose_gate_ignored_for_phase": bool(edge_guided_commit),
+            "vx_override_reason": "edge_guided_commit" if edge_guided_commit else "",
+            "edge_guided_commit_active": bool(edge_guided_commit),
+            "edge_guided_commit_block_reason": edge_commit_block_reason,
             "search_latch_age_ms": float(max(0.0, (monotonic_ts() - (float(self.ctx.search_wz_latch_until_mono or monotonic_ts()) - 0.8)) * 1000.0)),
             "search_latch_reason": str(self.ctx.current_search_direction_reason or "latched_search_direction"),
             "wz_sign_final": sign(float(decision.cmd.wz_radps)),
@@ -303,13 +345,16 @@ class TableDockingMixin:
         if not auth.allow_rotate and abs(float(decision.cmd.wz_radps)) > 1e-9:
             decision.cmd.wz_radps = 0.0
         safety_tokens = ("stale", "emergency", "explicit", "obstacle", "hard_guard", "depth_p10", "safety")
-        if auth.allow_forward and raw_forward_reason and any(token in raw_forward_reason.lower() for token in safety_tokens):
+        if not edge_guided_commit and auth.allow_forward and raw_forward_reason and any(token in raw_forward_reason.lower() for token in safety_tokens):
             summary["forward_block_reason"] = raw_forward_reason
             summary["block_reason"] = raw_forward_reason
         if auth.allow_rotate and raw_rotate_reason and any(token in raw_rotate_reason.lower() for token in safety_tokens):
             summary["rotate_block_reason"] = raw_rotate_reason
             summary["block_reason"] = raw_rotate_reason
         # Always expose the final axis values, including a pre-existing safety stop.
+        summary["final_vx"] = float(decision.cmd.vx_mps)
+        summary["final_vy"] = float(decision.cmd.vy_mps)
+        summary["final_wz"] = float(decision.cmd.wz_radps)
         summary["vx_mps"] = float(decision.cmd.vx_mps)
         summary["vy_mps"] = float(decision.cmd.vy_mps)
         summary["wz_radps"] = float(decision.cmd.wz_radps)
