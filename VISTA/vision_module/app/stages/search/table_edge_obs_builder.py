@@ -594,8 +594,8 @@ def annotate_table_edge_obs(
     # Align point count fields
     point_count = int(out.get("point_count", 0) or 0)
     out["point_count"] = point_count
-    out["table_point_count"] = point_count
-    out["valid_edge_points"] = point_count
+    out["table_point_count"] = int(out.get("table_point_count") or point_count)
+    out["valid_edge_points"] = int(out.get("inlier_count", 0) or 0)
 
     support_count = int(out.get("support_count", out.get("fast_support_point_count", 0)) or 0)
     out["support_count"] = support_count

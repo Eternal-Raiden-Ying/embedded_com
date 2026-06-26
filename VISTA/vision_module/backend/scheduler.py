@@ -208,6 +208,21 @@ class Scheduler:
 
     def collect_tick_input(self, ts: float, route_filter: set = None) -> StageTickInput:
         with self._lock:
+            # DIAGNOSTIC LOG FOR ROUTING INVESTIGATION
+            import logging
+            logger = logging.getLogger("vision.scheduler")
+            if "table_edge_obs" in self.result_slots:
+                slot = self.result_slots["table_edge_obs"]
+                logger.info(
+                    "[DIAG_SCHEDULER] table_edge_obs slot exists: generation=%s active_gen=%s visible=%s payload_frame=%s",
+                    slot.get("generation"),
+                    self.active_generation,
+                    self._slot_visible(slot),
+                    (slot.get("payload") or {}).get("frame_id") if isinstance(slot.get("payload"), dict) else None
+                )
+            else:
+                logger.info("[DIAG_SCHEDULER] table_edge_obs slot DOES NOT exist in result_slots")
+
             signals = dict(self.pending_signals or {})
             self.pending_signals.clear()
             stage_results: Dict[str, Any] = {}

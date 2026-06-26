@@ -187,7 +187,7 @@ class TestTableEdgeObsBuilder(unittest.TestCase):
         self.assertTrue(merged["edge_valid"])
         self.assertTrue(merged["edge_trusted"])
         self.assertEqual(merged["point_count"], 99)
-        self.assertEqual(merged["table_point_count"], 99) # aligned
+        self.assertEqual(merged["table_point_count"], 70) # aligned
         self.assertEqual(merged["reason"], "edge_trusted")
 
     def test_merge_timestamp_gating(self):

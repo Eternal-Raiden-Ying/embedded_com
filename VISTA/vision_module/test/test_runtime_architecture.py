@@ -605,7 +605,7 @@ class SearchStagePlanKindTest(unittest.TestCase):
         self.assertEqual(table_obs["point_count"], 160)
         self.assertEqual(table_obs["support_count"], 22)
         self.assertEqual(table_obs["inlier_count"], 6)
-        self.assertEqual(table_obs["reason"], "edge_candidate_not_trusted")
+        self.assertEqual(table_obs["reason"], "edge_candidate_rejected")
 
     def test_table_edge_search_clears_stale_bbox_when_current_frame_has_no_table(self):
         plan, ctx = self._enter("TABLE_EDGE")

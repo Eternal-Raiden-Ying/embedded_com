@@ -273,6 +273,17 @@ class SearchStagePlan(BaseStagePlan):
 
     def tick(self, tick_input: StageTickInput, ctx: StageContext) -> Optional[StageOutput]:
         results = dict(tick_input.results or {})
+        
+        # DIAGNOSTIC LOG FOR ROUTING INVESTIGATION
+        import logging
+        logger = logging.getLogger("vision.stage.search")
+        logger.info("[DIAG_STAGE_TICK] results_keys=%s", list(results.keys()))
+        if "table_edge_obs" in results:
+            obs = results["table_edge_obs"] or {}
+            logger.info("[DIAG_STAGE_TICK] table_edge_obs present: frame_id=%s edge_found=%s", obs.get("frame_id"), obs.get("edge_found"))
+        else:
+            logger.info("[DIAG_STAGE_TICK] table_edge_obs is NOT in results keys")
+
         mode = normalize_upper(ctx.current_mode, "")
 
         if mode == "FIND_EDGE":

@@ -680,7 +680,7 @@ def choose_depth_roi(
         depth_edge_roi = fallback_roi
         roi_source = "manual_static"
         roi_reason = "manual_static_roi_enabled"
-    elif preset_roi is not None and not yolo_dynamic_enable:
+    elif preset_roi is not None:
         depth_edge_roi = preset_roi
         roi_source = f"preset:{preset_name}"
         roi_reason = "debug_roi_preset"

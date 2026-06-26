@@ -166,7 +166,7 @@ class TestObservationSending(unittest.TestCase):
 
         # 立即再次发送，force_send=False：控制观测受到时间间隔限制（可能跳过或发送），
         # 但诊断观测严格受 1.0 秒间隔限制
-        self.app.last_send_ts = 0.0  # 绕过控制发送间隔限制
+        self.app.obs_router.metrics.last_control_send_ts = 0.0  # 绕过控制发送间隔限制
         self.app._apply_stage_output(output, now=time.time(), force_send=False)
         self.assertEqual(len(self.app.obs_sender.sent_payloads), 2)
         # 诊断观测不应再次发送，因为 1.0 秒的间隔尚未过去

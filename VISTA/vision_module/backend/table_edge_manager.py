@@ -287,7 +287,14 @@ class TableEdgeManager:
                 if isinstance(profile, dict):
                     profile["table_edge_publish_interval_ms"] = payload.get("table_edge_publish_interval_ms")
                     profile["vision_publish_ts_ms"] = payload.get("vision_publish_ts_ms")
-            scheduler.publish_result(route, payload, generation=generation)
+            success = scheduler.publish_result(route, payload, generation=generation)
+            self.log.info(
+                "[DIAG_PUBLISH] route=%s generation=%s success=%s frame_id=%s",
+                route,
+                generation,
+                success,
+                payload.get("frame_id") if isinstance(payload, dict) else None
+            )
             if isinstance(payload, dict):
                 self._last_scheduler_publish_ms = self._ms_since(publish_start)
                 payload["scheduler_publish_ms"] = float(self._last_scheduler_publish_ms)
