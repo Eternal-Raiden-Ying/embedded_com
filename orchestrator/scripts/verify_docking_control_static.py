@@ -51,6 +51,23 @@ def main() -> None:
     xyxy_geom = TableDockingMixin._bbox_control_geometry(SimpleNamespace(), xyxy_obs)
     assert xyxy_geom["bbox_center_valid"] and abs(xyxy_geom["bbox_cx_norm_control"] - 0.75) < 1e-6
 
+    yolo_search_obs = TableEdgeObs.from_dict({
+        "ts": 1.0,
+        "table_found": True,
+        "edge_found": False,
+        "yolo_table_visible": True,
+        "yolo_table_fresh": True,
+        "yolo_table_control_valid": True,
+        "table_bbox_xyxy": [327, 218, 633, 591],
+        "rgb_shape": [640, 640, 3],
+    })
+    yolo_search_decision = MotionController(ControlThresholds(), CarMotionConfig()).yolo_table_search_cmd(yolo_search_obs)
+    yolo_search_summary = yolo_search_decision.control_summary
+    assert abs(yolo_search_summary["bbox_cx_norm"] - 0.75) < 1e-6
+    assert abs(yolo_search_summary["center_error"] - 0.25) < 1e-6
+    assert abs(yolo_search_summary["yolo_view_err_norm"] - 0.5) < 1e-6
+    assert isinstance(yolo_search_decision, MotionDecision)
+
     # Test unavailable bbox center
     invalid_obs = TableEdgeObs.from_dict({"ts": 1.0, "table_found": True, "edge_found": False})
     invalid_geom = TableDockingMixin._bbox_control_geometry(SimpleNamespace(), invalid_obs)

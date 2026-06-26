@@ -358,8 +358,11 @@ class MotionController:
         if not bool(getattr(self.cfg, "yolo_table_control_enable", True)):
             return self.search_table_cmd(turn_sign=turn_sign)
         geom = compute_bbox_control_geometry(obs)
-        cx_norm = geom["bbox_cx_norm_control"]
-        center_error = geom["bbox_center_error_control"]
+        bbox_cx_norm_control = geom["bbox_cx_norm_control"]
+        bbox_center_error_control = geom["bbox_center_error_control"]
+        cx_norm = bbox_cx_norm_control
+        center_error = bbox_center_error_control
+        view_err_norm = float(center_error * 2.0) if center_error is not None else 0.0
         gain = float(getattr(self.car_cfg, "yolo_table_yaw_gain", 0.20) or 0.20)
         max_wz = abs(float(getattr(self.car_cfg, "yolo_table_max_wz_radps", 0.06) or 0.06))
         if center_error is not None:
@@ -450,12 +453,12 @@ class MotionController:
                 "edge_geometry_timeout": False,
                 "no_table_bbox_timeout": False,
                 "table_lost_search_timeout": False,
-                "yolo_view_err_norm": float(cx),
+                "yolo_view_err_norm": view_err_norm,
                 "edge_yaw_err_rad": float(getattr(obs, "yaw_err_rad", 0.0) or 0.0) if obs is not None else 0.0,
                 "yolo_edge_yaw_conflict": False,
             }
         )
-        return MotionDecision(cmd=cmd, cx_norm_abs=abs(cx), distance_ratio=1.0, control_summary=summary)
+        return MotionDecision(cmd=cmd, cx_norm_abs=abs(view_err_norm), distance_ratio=1.0, control_summary=summary)
 
 
     def next_table_cmd(self, turn_sign: int = 1) -> MotionDecision:
