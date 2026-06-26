@@ -47,12 +47,37 @@ from ..core_types import (
 
 
 class TableDockingMixin:
+    def _bbox_control_geometry(self, obs: Optional[TableEdgeObs]) -> Dict[str, object]:
+        out = {"bbox_cx_norm_control": None, "bbox_center_error_control": None,
+               "bbox_center_source": "unavailable", "bbox_xyxy_for_control": None,
+               "bbox_width_norm_control": None, "bbox_center_valid": False}
+        if obs is None:
+            return out
+        center = getattr(obs, "yolo_bbox_center_x_norm", None)
+        if center is not None:
+            out.update(bbox_cx_norm_control=float(center), bbox_center_source="yolo_bbox_center_x_norm", bbox_center_valid=True)
+        else:
+            bbox = getattr(obs, "table_bbox_xyxy", None)
+            shape = getattr(obs, "rgb_shape", None)
+            if isinstance(bbox, (list, tuple)) and len(bbox) >= 4 and isinstance(shape, (list, tuple)) and len(shape) >= 2:
+                w = float(shape[1])
+                if w > 0.0:
+                    x0, x1 = float(bbox[0]), float(bbox[2])
+                    out.update(bbox_cx_norm_control=(x0 + x1) * 0.5 / w,
+                               bbox_width_norm_control=max(0.0, (x1 - x0) / w),
+                               bbox_center_source="table_bbox_xyxy_rgb_shape",
+                               bbox_xyxy_for_control=list(bbox[:4]), bbox_center_valid=True)
+        if out["bbox_center_valid"]:
+            out["bbox_center_error_control"] = float(out["bbox_cx_norm_control"]) - 0.5
+        return out
+
     def _control_phase_status(self, obs: Optional[TableEdgeObs], depth_stop_ready: bool) -> Dict[str, object]:
         """State-independent, hard ownership handoff between search/bbox/edge."""
         now = monotonic_ts()
         current_bbox = self._table_yolo_reliable(obs)
         hard_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.25) or 0.25))
-        center_error = self._get_bbox_center_x_norm(obs) - 0.5 if obs is not None else 0.0
+        geom = self._bbox_control_geometry(obs)
+        center_error = geom["bbox_center_error_control"]
         touch = bool(obs is not None and (getattr(obs, "table_bbox_touch_left", False) or getattr(obs, "table_bbox_touch_right", False)))
         edge_trusted = bool(current_bbox and self.controller._edge_trusted(obs))
         if not current_bbox:
@@ -63,7 +88,7 @@ class TableDockingMixin:
             phase, reason = "SEARCH_SCAN", "no_current_fresh_bbox"
         else:
             self.ctx.bbox_valid_streak += 1
-            centered = bool(not touch and abs(center_error) <= hard_limit)
+            centered = bool(center_error is not None and abs(float(center_error)) <= hard_limit and not (touch and abs(float(center_error)) > 0.12))
             self.ctx.bbox_centered_streak = self.ctx.bbox_centered_streak + 1 if centered else 0
             self.ctx.bbox_fov_violation_streak = 0 if centered else self.ctx.bbox_fov_violation_streak + 1
             if not edge_trusted:
@@ -101,7 +126,7 @@ class TableDockingMixin:
             self.ctx.control_phase = phase
             self.ctx.control_phase_since_mono = now
         dwell_ms = max(0.0, (now - float(self.ctx.control_phase_since_mono or now)) * 1000.0)
-        return {"control_phase": phase, "phase_reason": reason, "bbox_center_error": center_error,
+        return {"control_phase": phase, "phase_reason": reason, "bbox_center_error": center_error, **geom,
                 "bbox_touch_left": bool(obs is not None and getattr(obs, "table_bbox_touch_left", False)),
                 "bbox_touch_right": bool(obs is not None and getattr(obs, "table_bbox_touch_right", False)),
                 "phase_dwell_ms": dwell_ms, "edge_handoff_complete": self.ctx.edge_handoff_complete,
@@ -109,7 +134,8 @@ class TableDockingMixin:
 
     def _get_control_authority(self, obs: Optional[TableEdgeObs], depth_roi_stop_active: bool = False, explicit_stop_active: bool = False) -> ControlAuthority:
         sem = build_table_perception_semantics(obs, self.cfg)
-        center_error = self._get_bbox_center_x_norm(obs) - 0.5 if obs is not None else None
+        geom = self._bbox_control_geometry(obs)
+        center_error = geom["bbox_center_error_control"]
         phase = self._control_phase_status(obs, depth_roi_stop_active)
         return decide_table_control_authority(
             state=self.ctx.state.value if hasattr(self.ctx.state, "value") else str(self.ctx.state),
@@ -151,7 +177,13 @@ class TableDockingMixin:
             search_sign, _, _ = self._get_memory_search_params()
             self.ctx.search_wz_sign_latched = 1 if search_sign >= 0 else -1
             self.ctx.search_wz_latch_until_mono = monotonic_ts() + 0.8
-        bbox_wz = float(summary.get("yolo_yaw_cmd", decision.cmd.wz_radps) or 0.0)
+        geom = self._bbox_control_geometry(obs)
+        center_error = geom["bbox_center_error_control"]
+        bbox_wz = 0.0
+        if center_error is not None and abs(float(center_error)) >= 0.01:
+            bbox_wz = float(center_error) * 2.0 * float(getattr(self.car_cfg, "yolo_table_yaw_gain", 0.20) or 0.20) * float(getattr(self.car_cfg, "table_view_wz_sign", -1.0) or -1.0)
+            max_wz = abs(float(getattr(self.car_cfg, "yolo_table_max_wz_radps", 0.06) or 0.06))
+            bbox_wz = max(-max_wz, min(max_wz, bbox_wz))
         edge_wz = float(summary.get("edge_yaw_cmd", summary.get("wz_from_plane", 0.0)) or 0.0)
         deadband = 0.01
         sign = lambda value: 0 if abs(value) < deadband else (1 if value > 0.0 else -1)
@@ -166,6 +198,7 @@ class TableDockingMixin:
             elif phase == "EDGE_GUIDED_APPROACH":
                 decision.cmd.wz_radps = edge_wz
         summary.update({
+            **geom, "bbox_yaw_cmd": float(bbox_wz),
             "control_phase": phase, "phase_reason": auth.phase_reason,
             "bbox_valid_streak": int(self.ctx.bbox_valid_streak), "bbox_centered_streak": int(self.ctx.bbox_centered_streak),
             "edge_trusted_streak": int(self.ctx.edge_trusted_streak), "edge_yaw": float(getattr(obs, "yaw_err_rad", 0.0) or 0.0) if obs else 0.0,
@@ -659,6 +692,14 @@ class TableDockingMixin:
         self._maybe_resend_req(self._active_req_payload())
         obs = self._fresh_table_obs()
         if not self._table_yolo_reliable(obs):
+            self._start_loss_timer("table_loss_since_mono")
+            hold_ms = self._loss_elapsed(self.ctx.table_loss_since_mono) * 1000.0
+            hold_limit_ms = float(getattr(self.cfg, "table_loss_hold_s", 1.2) or 1.2) * 1000.0
+            if hold_ms < hold_limit_ms:
+                decision = self.controller.stop_cmd("EDGE_ADJUST")
+                decision.control_summary.update({"bbox_lost_hold_active": True, "bbox_lost_hold_age_ms": hold_ms,
+                                                 "phase_reset_reason": "bbox_lost_hold"})
+                return decision
             self._transition(State.SEARCH_TABLE, "EDGE_ADJUST未检测到table bbox，进入本地旋转搜索")
             decision = self.controller.search_table_cmd(*self._get_memory_search_params())
             return decision

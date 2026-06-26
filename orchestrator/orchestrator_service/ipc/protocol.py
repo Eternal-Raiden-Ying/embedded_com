@@ -447,6 +447,7 @@ class TableEdgeObs:
     table_bbox_current_found: bool = False
     table_bbox_control_valid: bool = False
     table_bbox_xyxy: Optional[list] = None
+    rgb_shape: Optional[list] = None
     table_bbox_area_ratio: Optional[float] = None
     table_bbox_conf_raw: Optional[float] = None
     table_bbox_conf_used_for_gate: bool = False
@@ -627,6 +628,7 @@ class TableEdgeObs:
             table_bbox_current_found=bool(payload.get("table_bbox_current_found", payload.get("yolo_table_visible", False) and payload.get("yolo_table_control_valid", False))),
             table_bbox_control_valid=bool(payload.get("table_bbox_control_valid", payload.get("yolo_table_control_valid", False))),
             table_bbox_xyxy=_pick_optional_bbox(payload, "table_bbox_xyxy", "yolo_table_bbox", "table_bbox", "detected_table_bbox"),
+            rgb_shape=payload.get("rgb_shape") if isinstance(payload.get("rgb_shape"), (list, tuple)) else None,
             table_bbox_area_ratio=_pick_bbox_area_ratio(payload),
             table_bbox_conf_raw=_pick_optional_float(payload, "table_bbox_conf_raw", "yolo_table_conf"),
             table_bbox_conf_used_for_gate=bool(payload.get("table_bbox_conf_used_for_gate", False)),

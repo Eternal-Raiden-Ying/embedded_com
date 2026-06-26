@@ -36,10 +36,16 @@ def main() -> None:
     vista_obs = TableEdgeObs.from_dict({
         "ts": 1.0, "table_found": True, "edge_found": False,
         "yolo_table_visible": True, "yolo_table_fresh": True, "yolo_table_control_valid": True,
-        "table_cx_norm": 0.70, "table_bbox_touch_right": True,
+        "yolo_bbox_center_x_norm": 0.70, "table_bbox_touch_right": True,
     })
     assert vista_obs.table_bbox_current_found and vista_obs.table_bbox_control_valid
-    assert vista_obs.table_cx_norm == 0.70 and vista_obs.table_bbox_touch_right
+    assert vista_obs.yolo_bbox_center_x_norm == 0.70 and vista_obs.table_bbox_touch_right
+    probe_geom = TableDockingMixin._bbox_control_geometry(SimpleNamespace(), vista_obs)
+    assert probe_geom["bbox_center_valid"] and abs(probe_geom["bbox_center_error_control"] - 0.20) < 1e-6
+    xyxy_obs = TableEdgeObs.from_dict({"ts": 1.0, "table_found": True, "edge_found": False,
+        "table_bbox_xyxy": [320, 20, 640, 200], "rgb_shape": [480, 640]})
+    xyxy_geom = TableDockingMixin._bbox_control_geometry(SimpleNamespace(), xyxy_obs)
+    assert xyxy_geom["bbox_center_valid"] and abs(xyxy_geom["bbox_cx_norm_control"] - 0.75) < 1e-6
     # Edge/depth facts without a current bbox must remain a rotate-only search.
     a = auth("YOLO_APPROACH", bbox=False, edge=True, depth_stop=True)
     assert (a.control_source, a.allow_forward, a.allow_rotate) == ("local_rotate_search", False, True)
