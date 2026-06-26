@@ -21,6 +21,7 @@ from orchestrator.orchestrator_service.runtime.controller import MotionDecision
 from orchestrator.orchestrator_service.config.schema import CarMotionConfig, ControlThresholds
 from orchestrator.orchestrator_service.control.motion_controller import MotionController
 from orchestrator.orchestrator_service.ipc.protocol import TableEdgeObs, now_ts
+from orchestrator.orchestrator_service.bridge.uart_bridge import UartBridge
 from vision_module.backend.table_roi_depth import table_roi_depth_statistics
 from vision_module.app.stages.search.table_edge_obs_builder import merge_table_bbox_from_local_perception
 
@@ -207,11 +208,67 @@ def main() -> None:
     probe = DockingProbe()
     committed = edge_guided_decision(probe, edge_obs)
     assert committed.cmd.vx_mps == 0.020
+    assert committed.control_summary["approach_commit_active"]
     assert committed.control_summary["pose_gate_ignored_for_phase"]
     assert committed.control_summary["vx_override_reason"] == "edge_guided_commit"
     assert committed.cmd.wz_radps == committed.control_summary["edge_yaw_cmd"]
 
+    # A committed approach must coast through a transient untrusted edge rather
+    # than returning to a centered BBOX_ACQUIRE stop.
+    edge_obs.edge_trusted = False
+    probe.ctx.edge_conf_score = 0.50
+    probe.ctx.last_edge_good_mono = monotonic_ts()
+    coast = edge_guided_decision(probe, edge_obs)
+    assert coast.cmd.vx_mps == 0.020
+    assert coast.control_summary["forward_coast_active"]
+    assert coast.control_summary["control_phase"] == "EDGE_GUIDED_APPROACH"
+
+    # A handoff timeout with a centered valid bbox must retain the committed
+    # edge approach instead of falling into a double-zero BBOX_ACQUIRE command.
     probe = DockingProbe()
+    probe.ctx.approach_commit_active = True
+    probe.ctx.edge_conf_score = 0.50
+    probe.ctx.last_edge_good_mono = monotonic_ts()
+    probe.ctx.edge_handoff_started_mono = monotonic_ts() - 2.1
+    timeout_obs = bbox_obs(0.50)
+    timeout_obs.edge_found = True
+    timeout_obs.edge_trusted = False
+    timeout_phase = probe._control_phase_status(timeout_obs, depth_stop_ready=False)
+    assert timeout_phase["control_phase"] == "EDGE_GUIDED_APPROACH"
+    assert timeout_phase["phase_reason"] == "forward_coast_edge_unstable"
+
+    # The watchdog revives a committed, safe double-zero command even when no
+    # current edge is usable enough for the normal coast branch.
+    probe = DockingProbe()
+    probe.force_edge_guided = True
+    probe.ctx.approach_commit_active = True
+    probe.ctx.edge_conf_score = 0.50
+    probe.ctx.zero_cmd_started_mono = monotonic_ts() - 0.9
+    watchdog_obs = bbox_obs(0.50)
+    watchdog = authority_decision(probe, watchdog_obs, raw_wz=0.0)
+    assert watchdog.cmd.vx_mps == 0.020
+    assert watchdog.control_summary["zero_escape_reason"] == "forward_coast"
+
+    # An emergency remains a hard forward-coast blocker.
+    probe = DockingProbe()
+    probe.force_edge_guided = True
+    probe.ctx.approach_commit_active = True
+    probe.ctx.edge_conf_score = 0.50
+    emergency_obs = bbox_obs(0.50)
+    emergency_obs.edge_found = True
+    emergency_obs.edge_trusted = False
+    emergency_cmd = probe.controller._cmd("YOLO_APPROACH", vx=0.0, wz=0.0)
+    emergency = probe._apply_control_authority(
+        MotionDecision(cmd=emergency_cmd, control_summary={"emergency_stop_active": True}), emergency_obs,
+    )
+    assert emergency.cmd.vx_mps == 0.0
+
+    uart_probe = UartBridge(port="COM_DRY_RUN", baudrate=115200, timeout_s=0.1, dry_run=True)
+    assert uart_probe._writer_discard_reason({"line": "V 0.020 0.000 0.010", "tx_meta": {}}) == ""
+    assert uart_probe._writer_discard_reason({"line": "MODE SEARCH", "tx_meta": {}}) == "non_velocity_line"
+
+    probe = DockingProbe()
+    edge_obs.edge_trusted = True
     edge_obs.yaw_err_rad = 0.60
     yaw_blocked = edge_guided_decision(probe, edge_obs)
     assert yaw_blocked.cmd.vx_mps == 0.0

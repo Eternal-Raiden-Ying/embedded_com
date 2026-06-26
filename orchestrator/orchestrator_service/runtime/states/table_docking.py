@@ -121,6 +121,13 @@ class TableDockingMixin:
         center_error = geom["bbox_center_error_control"]
         touch = bool(obs is not None and (getattr(obs, "table_bbox_touch_left", False) or getattr(obs, "table_bbox_touch_right", False)))
         edge_trusted = bool(current_bbox and self.controller._edge_trusted(obs))
+        edge_usable = bool(obs is not None and (getattr(obs, "edge_found", False) or getattr(obs, "usable_for_approach", False)))
+        hard_yaw = abs(float(getattr(self.car_cfg, "table_edge_hard_rotate_only_yaw_rad", 0.45) or 0.45))
+        edge_yaw = abs(float(getattr(obs, "yaw_err_rad", 0.0) or 0.0)) if obs is not None else 0.0
+        edge_score_delta = 0.20 if edge_trusted else (0.05 if edge_usable and edge_yaw <= hard_yaw else -0.15)
+        self.ctx.edge_conf_score = max(0.0, min(1.0, float(self.ctx.edge_conf_score) + edge_score_delta))
+        if edge_trusted:
+            self.ctx.last_edge_good_mono = now
         if not current_bbox:
             if bool(self.ctx.bbox_lost_hold_active):
                 phase = self.ctx.control_phase if self.ctx.control_phase else "BBOX_ACQUIRE"
@@ -128,6 +135,7 @@ class TableDockingMixin:
             else:
                 self.ctx.bbox_valid_streak = self.ctx.bbox_centered_streak = self.ctx.edge_trusted_streak = 0
                 self.ctx.edge_handoff_complete = False
+                self.ctx.approach_commit_active = False
                 self.ctx.edge_handoff_started_mono = 0.0
                 self.ctx.edge_yaw_ema = None
                 phase, reason = "SEARCH_SCAN", "no_current_fresh_bbox"
@@ -138,12 +146,27 @@ class TableDockingMixin:
             self.ctx.bbox_fov_violation_streak = 0 if centered else self.ctx.bbox_fov_violation_streak + 1
             if not edge_trusted:
                 self.ctx.edge_trusted_streak = 0
-                self.ctx.edge_yaw_ema = None
+                if not bool(self.ctx.approach_commit_active):
+                    self.ctx.edge_yaw_ema = None
             else:
                 self.ctx.edge_trusted_streak += 1
                 yaw = float(getattr(obs, "yaw_err_rad", 0.0) or 0.0)
                 self.ctx.edge_yaw_ema = yaw if self.ctx.edge_yaw_ema is None else (0.7 * self.ctx.edge_yaw_ema + 0.3 * yaw)
             stable_bbox = self.ctx.bbox_centered_streak >= 2
+            bbox_guard_frames = max(1, int(getattr(self.car_cfg, "table_bbox_fov_guard_frames", 3) or 3))
+            commit_bbox_safe = bool(
+                center_error is not None
+                and abs(float(center_error)) <= 0.35
+                and int(self.ctx.bbox_fov_violation_streak) < bbox_guard_frames
+            )
+            recent_edge_good = bool(now - float(self.ctx.last_edge_good_mono or 0.0) <= 0.8)
+            commit_coast_ready = bool(
+                self.ctx.approach_commit_active
+                and commit_bbox_safe
+                and not depth_stop_ready
+                and float(self.ctx.edge_conf_score) >= 0.25
+                and (edge_usable or recent_edge_good)
+            )
             dwell_fallback = False
             if not stable_bbox and current_bbox and self.ctx.bbox_valid_streak >= 2:
                 if self.ctx.control_phase == "BBOX_ACQUIRE":
@@ -160,6 +183,9 @@ class TableDockingMixin:
 
             if depth_stop_ready:
                 phase, reason = "DEPTH_FINAL_STOP", "stable_dynamic_roi_depth"
+                self.ctx.approach_commit_active = False
+            elif commit_coast_ready and not edge_trusted:
+                phase, reason = "EDGE_GUIDED_APPROACH", "forward_coast_edge_unstable"
             elif not stable_bbox and not dwell_fallback:
                 self.ctx.edge_handoff_complete = False
                 self.ctx.edge_handoff_started_mono = 0.0
@@ -172,7 +198,12 @@ class TableDockingMixin:
                 timeout_s = 2.0
                 self.ctx.edge_handoff_timeout = bool(now - self.ctx.edge_handoff_started_mono >= timeout_s)
                 if self.ctx.edge_handoff_timeout:
-                    phase, reason = "BBOX_ACQUIRE", "edge_handoff_timeout"
+                    if self.ctx.approach_commit_active and commit_coast_ready:
+                        phase, reason = "EDGE_GUIDED_APPROACH", "forward_coast_edge_unstable"
+                    elif center_error is not None and abs(float(center_error)) <= 0.10:
+                        phase, reason = "EDGE_HANDOFF_CONFIRM", "edge_handoff_timeout"
+                    else:
+                        phase, reason = "BBOX_ACQUIRE", "edge_handoff_timeout"
                 elif self.ctx.edge_trusted_streak >= max(2, int(getattr(self.cfg, "edge_trusted_stable_frames", 3) or 3)):
                     self.ctx.edge_handoff_complete = True
                     phase, reason = "EDGE_GUIDED_APPROACH", "edge_handoff_confirmed"
@@ -189,7 +220,9 @@ class TableDockingMixin:
                 "bbox_touch_left": bool(obs is not None and getattr(obs, "table_bbox_touch_left", False)),
                 "bbox_touch_right": bool(obs is not None and getattr(obs, "table_bbox_touch_right", False)),
                 "phase_dwell_ms": dwell_ms, "edge_handoff_complete": self.ctx.edge_handoff_complete,
-                "handoff_timeout": self.ctx.edge_handoff_timeout}
+                "handoff_timeout": self.ctx.edge_handoff_timeout,
+                "edge_conf_score": float(self.ctx.edge_conf_score),
+                "approach_commit_active": bool(self.ctx.approach_commit_active)}
 
     def _get_control_authority(self, obs: Optional[TableEdgeObs], depth_roi_stop_active: bool = False, explicit_stop_active: bool = False) -> ControlAuthority:
         sem = build_table_perception_semantics(obs, self.cfg)
@@ -300,10 +333,16 @@ class TableDockingMixin:
             phase == "EDGE_GUIDED_APPROACH"
             and bool(self.ctx.edge_handoff_complete)
             and bool(auth.allow_forward)
+            and bool(getattr(obs, "edge_trusted", False))
+        )
+        forward_coast_candidate = bool(
+            phase == "EDGE_GUIDED_APPROACH"
+            and bool(self.ctx.approach_commit_active)
+            and bool(auth.allow_forward)
         )
         edge_commit_block_reason = ""
         stale_reason = str(summary.get("stale_guard_reason") or "").lower()
-        if edge_guided_candidate:
+        if edge_guided_candidate or forward_coast_candidate:
             if explicit_stop_active or bool(decision.cmd.brake) or any(bool(summary.get(key, False)) for key in ("emergency_stop_active", "car_estop", "estop_active")):
                 edge_commit_block_reason = "explicit_stop"
             elif stale_level in {"hard_stale", "dead"} or "perception_dead" in stale_reason or "vision_dead" in stale_reason:
@@ -323,6 +362,8 @@ class TableDockingMixin:
                         edge_commit_block_reason = "edge_yaw_too_large"
 
         edge_guided_commit = bool(edge_guided_candidate and not edge_commit_block_reason)
+        forward_coast_active = False
+        coast_reason = ""
         if edge_guided_commit:
             decision.cmd.vx_mps = forward_commit_vx
             decision.cmd.vy_mps = 0.0
@@ -332,12 +373,39 @@ class TableDockingMixin:
             summary["pose_found"] = True
             summary["pose_missing_duration_s"] = 0.0
             summary["pose_missing_safe_vx_active"] = False
+        elif forward_coast_candidate and not edge_commit_block_reason:
+            edge_usable = bool(obs is not None and (getattr(obs, "edge_found", False) or getattr(obs, "usable_for_approach", False)))
+            edge_recent = bool(monotonic_ts() - float(self.ctx.last_edge_good_mono or 0.0) <= 0.8)
+            coast_ready = bool(
+                geom["bbox_center_valid"]
+                and float(self.ctx.edge_conf_score) >= 0.25
+                and (edge_usable or edge_recent)
+            )
+            if coast_ready:
+                coast_wz = edge_wz if bool(getattr(obs, "edge_trusted", False)) else float(self.ctx.last_edge_yaw_cmd or self.ctx.edge_yaw_ema or 0.0)
+                decision.cmd.vx_mps = forward_commit_vx
+                decision.cmd.vy_mps = 0.0
+                decision.cmd.wz_radps = coast_wz
+                forward_coast_active = True
+                coast_reason = "forward_coast_edge_unstable"
+                summary["forward_block_reason"] = ""
+                summary["forward_allowed"] = True
+                summary["pose_found"] = False
+                summary["pose_missing_safe_vx_active"] = False
+            else:
+                edge_commit_block_reason = "edge_confidence_low"
+                decision.cmd.vx_mps = 0.0
+                summary["forward_block_reason"] = edge_commit_block_reason
+                summary["forward_allowed"] = False
         elif edge_guided_candidate:
             decision.cmd.vx_mps = 0.0
             summary["forward_block_reason"] = edge_commit_block_reason
             summary["forward_allowed"] = False
             summary["pose_found"] = False
             summary["pose_missing_safe_vx_active"] = False
+
+        if edge_commit_block_reason in {"explicit_stop", "hard_stale", "depth_final_stop", "base_safety", "bbox_fov_guard", "edge_yaw_too_large"}:
+            self.ctx.approach_commit_active = False
         elif phase == "EDGE_GUIDED_APPROACH":
             summary["pose_found"] = False
             summary["pose_missing_safe_vx_active"] = False
@@ -356,6 +424,13 @@ class TableDockingMixin:
             "vx_override_reason": "edge_guided_commit" if edge_guided_commit else "",
             "edge_guided_commit_active": bool(edge_guided_commit),
             "edge_guided_commit_block_reason": edge_commit_block_reason,
+            "approach_commit_active": bool(self.ctx.approach_commit_active),
+            "forward_coast_active": bool(forward_coast_active),
+            "edge_conf_score": float(self.ctx.edge_conf_score),
+            "last_edge_yaw_cmd": float(self.ctx.last_edge_yaw_cmd),
+            "coast_reason": coast_reason,
+            "zero_cmd_age_ms": 0.0,
+            "zero_escape_reason": "",
             "search_latch_age_ms": float(max(0.0, (monotonic_ts() - (float(self.ctx.search_wz_latch_until_mono or monotonic_ts()) - 0.8)) * 1000.0)),
             "search_latch_reason": str(self.ctx.current_search_direction_reason or "latched_search_direction"),
             "wz_sign_final": sign(float(decision.cmd.wz_radps)),
@@ -391,6 +466,43 @@ class TableDockingMixin:
                 bbox_owner_active = True
                 summary["bbox_yaw_owner_enforced"] = True
 
+        safety_stop_active = bool(
+            explicit_stop_active
+            or bool(decision.cmd.brake)
+            or bool(depth_status.get("depth_roi_stop_ready"))
+            or edge_commit_block_reason in {"explicit_stop", "hard_stale", "depth_final_stop", "base_safety", "bbox_fov_guard", "edge_yaw_too_large"}
+        )
+        active_docking = str(getattr(self.ctx.state, "value", self.ctx.state) or "") in {"YOLO_ACQUIRE_ALIGN", "YOLO_APPROACH", "EDGE_ADJUST"}
+        zero_eps = 1e-6
+        if active_docking and not safety_stop_active and abs(float(decision.cmd.vx_mps)) < zero_eps and abs(float(decision.cmd.wz_radps)) < zero_eps:
+            now_mono = monotonic_ts()
+            if float(self.ctx.zero_cmd_started_mono or 0.0) <= 0.0:
+                self.ctx.zero_cmd_started_mono = now_mono
+            zero_age_s = max(0.0, now_mono - float(self.ctx.zero_cmd_started_mono))
+            summary["zero_cmd_age_ms"] = zero_age_s * 1000.0
+            if zero_age_s >= 0.8:
+                coast_safe = bool(
+                    self.ctx.approach_commit_active
+                    and bool(geom["bbox_center_valid"])
+                    and float(self.ctx.edge_conf_score) >= 0.25
+                )
+                if coast_safe:
+                    decision.cmd.vx_mps = forward_commit_vx
+                    decision.cmd.vy_mps = 0.0
+                    decision.cmd.wz_radps = float(self.ctx.last_edge_yaw_cmd or self.ctx.edge_yaw_ema or 0.0)
+                    summary["forward_coast_active"] = True
+                    summary["forward_source"] = "approach_commit"
+                    summary["coast_reason"] = "zero_watchdog_forward_coast"
+                    summary["zero_escape_reason"] = "forward_coast"
+                elif geom["bbox_center_valid"] and center_error is not None and abs(float(center_error)) > deadband:
+                    decision.cmd.wz_radps = bbox_wz
+                    summary["zero_escape_reason"] = "bbox_reacquire_rotate"
+                elif not bool(geom["bbox_center_valid"]):
+                    decision.cmd.wz_radps = abs(float(self.car_cfg.search_table_wz_radps)) * search_sign
+                    summary["zero_escape_reason"] = "search_rotate"
+        else:
+            self.ctx.zero_cmd_started_mono = 0.0
+
         # Check approach progress if phase is EDGE_GUIDED_APPROACH and vx > 0
         if phase == "EDGE_GUIDED_APPROACH" and decision.cmd.vx_mps > 0.0:
             if self._check_approach_progress(obs):
@@ -407,6 +519,13 @@ class TableDockingMixin:
             self.ctx.min_dist_seen = 999.0
             self.ctx.dist_progress_last_refreshed_mono = 0.0
             self.ctx.dist_missing_started_mono = 0.0
+
+        if phase == "EDGE_GUIDED_APPROACH" and decision.cmd.vx_mps > 0.0 and not safety_stop_active:
+            self.ctx.approach_commit_active = True
+            self.ctx.last_forward_cmd_mono = monotonic_ts()
+            self.ctx.last_edge_yaw_cmd = float(decision.cmd.wz_radps)
+        summary["approach_commit_active"] = bool(self.ctx.approach_commit_active)
+        summary["last_edge_yaw_cmd"] = float(self.ctx.last_edge_yaw_cmd)
 
         # Always expose the final axis values, including a pre-existing safety stop.
         summary["final_vx"] = float(decision.cmd.vx_mps)

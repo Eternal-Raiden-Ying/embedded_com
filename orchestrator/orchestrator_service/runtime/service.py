@@ -2640,6 +2640,13 @@ class OrchestratorService(BaseModule):
             "handoff_complete": bool(summary.get("edge_handoff_complete", False)),
             "handoff_timeout": bool(summary.get("handoff_timeout", False)),
             "phase_dwell_ms": summary.get("phase_dwell_ms", 0.0),
+            "approach_commit_active": bool(summary.get("approach_commit_active", False)),
+            "forward_coast_active": bool(summary.get("forward_coast_active", False)),
+            "edge_conf_score": summary.get("edge_conf_score", 0.0),
+            "last_edge_yaw_cmd": summary.get("last_edge_yaw_cmd", 0.0),
+            "zero_cmd_age_ms": summary.get("zero_cmd_age_ms", 0.0),
+            "zero_escape_reason": summary.get("zero_escape_reason", ""),
+            "coast_reason": summary.get("coast_reason", ""),
             "bbox_cx_norm_control": summary.get("bbox_cx_norm_control"),
             "bbox_center_error_control": summary.get("bbox_center_error_control"),
             "bbox_center_source": summary.get("bbox_center_source", ""),
@@ -2673,6 +2680,7 @@ class OrchestratorService(BaseModule):
                 f"state={trace['state']} control_source={trace['control_source']} "
                 f"control_phase={trace['control_phase']} phase_reason={trace['phase_reason']} "
                 f"search_latch={trace['search_wz_sign_latched']} latch_age_ms={trace['search_latch_age_ms']:.0f} wz_sign_final={trace['wz_sign_final']} "
+                f"commit={int(trace['approach_commit_active'])} coast={int(trace['forward_coast_active'])} edge_conf={trace['edge_conf_score']:.2f} "
                 f"yaw_source={yaw_source} forward_source={forward_source} stop_source={stop_source} "
                 f"allow_forward={int(trace['allow_forward'])} allow_rotate={int(trace['allow_rotate'])} "
                 f"vx_mps={vx:.3f} vy_mps={vy:.3f} wz_radps={wz:.3f} block_reason={block_reason} "

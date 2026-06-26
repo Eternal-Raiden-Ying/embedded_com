@@ -139,6 +139,12 @@ class RuntimeContext:
     edge_handoff_started_mono: float = 0.0
     edge_handoff_complete: bool = False
     edge_handoff_timeout: bool = False
+    approach_commit_active: bool = False
+    last_forward_cmd_mono: float = 0.0
+    last_edge_yaw_cmd: float = 0.0
+    last_edge_good_mono: float = 0.0
+    zero_cmd_started_mono: float = 0.0
+    edge_conf_score: float = 0.0
     bbox_fov_violation_streak: int = 0
     bbox_lost_since_mono: float = 0.0
     bbox_lost_hold_active: bool = False
@@ -217,6 +223,12 @@ class RuntimeContext:
         self.edge_handoff_started_mono = 0.0
         self.edge_handoff_complete = False
         self.edge_handoff_timeout = False
+        self.approach_commit_active = False
+        self.last_forward_cmd_mono = 0.0
+        self.last_edge_yaw_cmd = 0.0
+        self.last_edge_good_mono = 0.0
+        self.zero_cmd_started_mono = 0.0
+        self.edge_conf_score = 0.0
         self.bbox_fov_violation_streak = 0
         self.bbox_lost_since_mono = 0.0
         self.bbox_lost_hold_active = False

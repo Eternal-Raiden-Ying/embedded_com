@@ -118,9 +118,17 @@ class UartBridge:
         line = str(command_line).strip()
         if latest_override:
             return self._publish_latest(line, tx_meta=tx_meta)
+        meta = dict(tx_meta or {})
+        meta.update({
+            "uart_enqueue_ok": True,
+            "writer_accept_cmd": None,
+            "writer_discard_reason": "",
+            "serial_write_attempted": False,
+            "serial_write_ok": None,
+        })
         self._fifo_tx.put({
             "line": line,
-            "tx_meta": dict(tx_meta or {}),
+            "tx_meta": meta,
             "publish_ts": time.time(),
             "publish_mono": time.monotonic(),
         })
@@ -186,17 +194,33 @@ class UartBridge:
         return False
 
     def _should_suppress_vel(self, item: Dict[str, Any]) -> bool:
+        return bool(self._writer_discard_reason(item))
+
+    def _writer_discard_reason(self, item: Dict[str, Any]) -> str:
         line = item.get("line", "")
         tx_meta = item.get("tx_meta")
+        if str(line or "").strip().upper() == "MODE SEARCH":
+            return "non_velocity_line"
         if not self.is_velocity_command(line, tx_meta):
-            return False
+            return ""
         now_mono = time.monotonic()
         publish_mono = item.get("publish_mono", 0.0)
         if publish_mono < self._last_estop_mono:
-            return True
+            return "estop_superseded"
         if now_mono - self._last_estop_mono < 0.5:
-            return True
-        return False
+            return "estop_cooldown"
+        return ""
+
+    def _emit_writer_discard(self, item: Dict[str, Any], reason: str) -> None:
+        meta = dict(item.get("tx_meta") or {})
+        meta.update({
+            "writer_accept_cmd": False,
+            "writer_discard_reason": str(reason),
+            "serial_write_attempted": False,
+            "serial_write_ok": False,
+            "uart_tx_ok": False,
+        })
+        self._emit_tx_callback(str(item.get("line") or ""), self.dry_run, meta)
 
     def send_mode(self, mode: str, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
         return self.send_motion_line(encode_mode(mode), tx_meta=tx_meta)
@@ -262,9 +286,17 @@ class UartBridge:
     def _publish_latest(self, line: str, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
         if not line:
             return False
+        meta = dict(tx_meta or {})
+        meta.update({
+            "uart_enqueue_ok": True,
+            "writer_accept_cmd": None,
+            "writer_discard_reason": "",
+            "serial_write_attempted": False,
+            "serial_write_ok": None,
+        })
         item = {
             "line": str(line),
-            "tx_meta": dict(tx_meta or {}),
+            "tx_meta": meta,
             "publish_ts": time.time(),
             "publish_mono": time.monotonic(),
         }
@@ -302,8 +334,10 @@ class UartBridge:
             if item is None:
                 self._tx_event.clear()
                 continue
-            if self._should_suppress_vel(item):
+            discard_reason = self._writer_discard_reason(item)
+            if discard_reason:
                 self._log("warn", f"Discarding velocity command in writer loop: {item['line']}")
+                self._emit_writer_discard(item, discard_reason)
                 if not self._has_pending_tx():
                     self._tx_event.clear()
                 continue
@@ -343,14 +377,21 @@ class UartBridge:
                     "tx_meta": tx_meta,
                     "publish_mono": publish_mono if publish_mono is not None else time.monotonic()
                 }
-                if self._should_suppress_vel(item_to_check):
+                discard_reason = self._writer_discard_reason(item_to_check)
+                if discard_reason:
                     self._log("warn", f"Discarding velocity command under write lock: {line}")
+                    self._emit_writer_discard(item_to_check, discard_reason)
                     return
             raw_line = str(line).rstrip("\r\n")
             wire_line = raw_line.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r\n") + "\r\n"
             self._last_line = raw_line
             self.last_tx_ts = time.time()
             meta = dict(tx_meta or {})
+            meta.update({
+                "writer_accept_cmd": True,
+                "writer_discard_reason": "",
+                "serial_write_attempted": True,
+            })
             ok = False
             error = ""
             if self.dry_run:
@@ -377,6 +418,7 @@ class UartBridge:
                 self.send_fail_count += 1
                 self.last_tx_error = error or "unknown error"
             meta["uart_tx_ok"] = ok
+            meta["serial_write_ok"] = ok
             if error:
                 meta["uart_tx_error"] = error
             self._emit_tx_callback(wire_line, self.dry_run, meta)
