@@ -16,6 +16,7 @@ import numpy as np
 
 from .depth_calibration import DepthIntrinsics, depth_intrinsics_from_dict
 from .table_edge_roi import choose_depth_roi
+from .table_roi_depth import table_roi_depth_statistics
 from .vision_semantics import standardize_table_edge_payload, TableEdgeObservation
 from .math_utils import finite_percentiles, camera_points_to_robot, weighted_line_fit, ransac_line_fit
 from .docking_strategy import TableDockingStrategy
@@ -4049,6 +4050,10 @@ class TableEdgeManager:
             payload["camera_frame_seq"] = int(seq)
             payload["depth_p10"] = depth_p10
             payload["close_depth_ratio"] = close_depth_ratio
+            mapped_roi = payload.get("table_edge_roi") or payload.get("depth_edge_roi") or payload.get("dynamic_roi")
+            roi_stats = table_roi_depth_statistics(depth, depth_scale, mapped_roi)
+            roi_stats["table_roi_depth_mapping_source"] = str(payload.get("roi_source") or "")
+            payload.update(roi_stats)
 
         self._processed_frame_count += 1
         self._last_process_ms = max(0.0, (vision_done_ts - vision_start_ts) * 1000.0)

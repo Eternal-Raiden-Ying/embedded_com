@@ -146,6 +146,7 @@ class RuntimeContext:
     target_stable_since_mono: float = 0.0
     min_dist_seen: float = 999.0
     dist_progress_last_refreshed_mono: float = 0.0
+    dist_missing_started_mono: float = 0.0
     target_center_history: List[Dict[str, float]] = field(default_factory=list)
     target_obs_window: List[Dict[str, object]] = field(default_factory=list)
     target_last_center_jitter: float = 0.0
@@ -204,6 +205,7 @@ class RuntimeContext:
         self.target_stable_since_mono = 0.0
         self.min_dist_seen = 999.0
         self.dist_progress_last_refreshed_mono = 0.0
+        self.dist_missing_started_mono = 0.0
         self.target_center_history.clear()
         self.target_obs_window.clear()
         self.target_last_center_jitter = 0.0

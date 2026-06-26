@@ -2617,7 +2617,15 @@ class OrchestratorService(BaseModule):
             "vy_mps": vy,
             "wz_radps": wz,
             "forward_block_reason": summary.get("forward_block_reason") or "",
+            "rotate_block_reason": summary.get("rotate_block_reason") or "",
             "block_reason": block_reason,
+            "table_roi_depth_valid": bool(summary.get("table_roi_depth_valid", False)),
+            "table_roi_depth_p10": summary.get("table_roi_depth_p10", summary.get("roi_depth_stat")),
+            "table_roi_depth_median": summary.get("table_roi_depth_median"),
+            "table_roi_depth_valid_ratio": summary.get("table_roi_depth_valid_ratio", summary.get("roi_depth_valid_ratio")),
+            "table_roi_depth_sample_count": summary.get("table_roi_depth_sample_count", summary.get("roi_depth_sample_count")),
+            "table_roi_depth_coord_space": summary.get("table_roi_depth_coord_space", ""),
+            "roi_depth_window_ready": bool(summary.get("roi_depth_window_ready", False)),
             "transition_reason": summary.get("transition_reason") or summary.get("reason") or "",
         }
         self.run_logger.write_jsonl("motion_gate_trace", trace)
@@ -2641,7 +2649,9 @@ class OrchestratorService(BaseModule):
                 f"state={trace['state']} control_source={trace['control_source']} "
                 f"yaw_source={yaw_source} forward_source={forward_source} stop_source={stop_source} "
                 f"allow_forward={int(trace['allow_forward'])} allow_rotate={int(trace['allow_rotate'])} "
-                f"vx_mps={vx:.3f} vy_mps={vy:.3f} wz_radps={wz:.3f} block_reason={block_reason}",
+                f"vx_mps={vx:.3f} vy_mps={vy:.3f} wz_radps={wz:.3f} block_reason={block_reason} "
+                f"forward_block_reason={trace['forward_block_reason']} rotate_block_reason={trace['rotate_block_reason']} "
+                f"roi_p10={trace['table_roi_depth_p10']} roi_ratio={trace['table_roi_depth_valid_ratio']} roi_samples={trace['table_roi_depth_sample_count']}",
                 interval_s=0.5,
             )
         should_forward = bool(

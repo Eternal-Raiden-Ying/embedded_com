@@ -39,6 +39,8 @@ class ControlAuthority:
     allow_forward: bool
     allow_rotate: bool
     block_reason: str
+    forward_block_reason: str = ""
+    rotate_block_reason: str = ""
 
     @property
     def source(self) -> str:
@@ -51,14 +53,6 @@ class ControlAuthority:
     @property
     def reason(self) -> str:
         return self.block_reason
-
-    @property
-    def forward_block_reason(self) -> str:
-        return self.block_reason if not self.allow_forward else ""
-
-    @property
-    def rotate_block_reason(self) -> str:
-        return self.block_reason if not self.allow_rotate else ""
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -88,6 +82,7 @@ def decide_table_control_authority(
     cfg: Any = None,
     depth_roi_stop_active: bool = False,
     explicit_stop_active: bool = False,
+    bbox_center_error: float | None = None,
 ) -> ControlAuthority:
     """Return the owner of the current table-approach motion command.
 
@@ -95,100 +90,40 @@ def decide_table_control_authority(
     """
     state = str(state or "").upper().strip()
 
-    if explicit_stop_active:
+    def make(source: str, yaw: str, forward: str, stop: str, allow_forward: bool, allow_rotate: bool, reason: str = "") -> ControlAuthority:
         return ControlAuthority(
-            control_source="explicit_stop",
-            yaw_source="none",
-            forward_source="none",
-            stop_source="explicit",
-            allow_forward=False,
-            allow_rotate=False,
-            block_reason="explicit_stop_active",
+            control_source=source, yaw_source=yaw, forward_source=forward,
+            stop_source=stop, allow_forward=allow_forward, allow_rotate=allow_rotate,
+            block_reason=reason,
+            forward_block_reason="" if allow_forward else reason,
+            rotate_block_reason="" if allow_rotate else reason,
         )
+
+    if explicit_stop_active:
+        return make("explicit_stop", "none", "none", "explicit", False, False, "explicit_stop_active")
 
     if state in {"FINAL_SLOW_STOP", "AT_TABLE_EDGE"}:
-        return ControlAuthority(
-            control_source="final_slow_stop",
-            yaw_source="edge" if sem.edge_trusted else "last_stable",
-            forward_source="none",
-            stop_source="final_lock",
-            allow_forward=False,
-            allow_rotate=False,
-            block_reason="final_slow_stop_state",
-        )
+        return make("final_slow_stop", "edge" if sem.edge_trusted else "last_stable", "none", "final_lock", False, False, "final_slow_stop_state")
 
     if depth_roi_stop_active:
-        return ControlAuthority(
-            control_source="depth_roi_stop",
-            yaw_source="edge" if sem.edge_trusted else "yolo",
-            forward_source="none",
-            stop_source="depth_roi",
-            allow_forward=False,
-            allow_rotate=False,
-            block_reason="depth_roi_stop_active",
-        )
+        return make("depth_roi_stop", "edge" if sem.edge_trusted else "yolo", "none", "roi_depth", False, False, "depth_roi_stop_active")
 
     if not sem.table_bbox_control_valid:
-        return ControlAuthority(
-            control_source="local_rotate_search",
-            yaw_source="none",
-            forward_source="none",
-            stop_source="none",
-            allow_forward=False,
-            allow_rotate=True,
-            block_reason="table_bbox_unavailable",
-        )
+        return make("local_rotate_search", "none", "none", "none", False, True, "table_bbox_unavailable")
 
-    if state == "YOLO_ACQUIRE_ALIGN":
-        return ControlAuthority(
-            control_source="yolo_acquire_align",
-            yaw_source="yolo",
-            forward_source="none",
-            stop_source="none",
-            allow_forward=False,
-            allow_rotate=True,
-            block_reason="yolo_center_error_too_large",
-        )
+    hard_limit = abs(float(getattr(getattr(cfg, "car", cfg), "yolo_forward_center_hard_limit", 0.25) or 0.25))
+    if state == "YOLO_ACQUIRE_ALIGN" or (bbox_center_error is not None and abs(float(bbox_center_error)) > hard_limit):
+        return make("yolo_acquire_align", "yolo", "none", "none", False, True, "yolo_center_error_too_large")
 
     if state == "EDGE_ADJUST":
-        return ControlAuthority(
-            control_source="edge_guided_forward",
-            yaw_source="edge",
-            forward_source="edge",
-            stop_source="none",
-            allow_forward=True,
-            allow_rotate=True,
-            block_reason="",
-        )
+        if sem.edge_trusted:
+            return make("edge_guided_forward", "edge", "edge", "none", True, True)
+        return make("yolo_track_forward", "yolo", "yolo", "none", True, True)
 
     if state == "YOLO_APPROACH":
         if sem.edge_trusted:
-            return ControlAuthority(
-                control_source="edge_guided_forward",
-                yaw_source="edge",
-                forward_source="yolo_or_edge",
-                stop_source="none",
-                allow_forward=True,
-                allow_rotate=True,
-                block_reason="",
-            )
+            return make("edge_guided_forward", "edge", "yolo_or_edge", "none", True, True)
         else:
-            return ControlAuthority(
-                control_source="yolo_track_forward",
-                yaw_source="yolo",
-                forward_source="yolo",
-                stop_source="none",
-                allow_forward=True,
-                allow_rotate=True,
-                block_reason="",
-            )
+            return make("yolo_track_forward", "yolo", "yolo", "none", True, True)
 
-    return ControlAuthority(
-        control_source="local_rotate_search",
-        yaw_source="none",
-        forward_source="none",
-        stop_source="none",
-        allow_forward=False,
-        allow_rotate=True,
-        block_reason=f"unknown_state_{state}",
-    )
+    return make("local_rotate_search", "none", "none", "none", False, True, f"unknown_state_{state}")

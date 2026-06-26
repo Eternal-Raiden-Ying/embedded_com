@@ -61,9 +61,6 @@ class TransitionsMixin:
         self._log("info", f"状态切换 {old_state.value} -> {new_state.value} ({reason})")
         self.ctx.prev_state = old_state
         self.ctx.state = new_state
-        if new_state in {State.YOLO_APPROACH, State.EDGE_ADJUST, State.FINAL_SLOW_STOP}:
-            self.ctx.min_dist_seen = 999.0
-            self.ctx.dist_progress_last_refreshed_mono = monotonic_ts()
         self.ctx.state_enter_mono = monotonic_ts()
         self.ctx.state_enter_wall_ts = time.time()
         self.ctx.last_enter_reason = reason
@@ -79,6 +76,10 @@ class TransitionsMixin:
             if warning and warning not in self.ctx.task_warning_history:
                 self.ctx.task_warning_history.append(warning)
         self.ctx.clear_motion_counters()
+        if new_state in {State.YOLO_APPROACH, State.EDGE_ADJUST, State.FINAL_SLOW_STOP}:
+            self.ctx.min_dist_seen = 999.0
+            self.ctx.dist_progress_last_refreshed_mono = monotonic_ts()
+            self.ctx.dist_missing_started_mono = 0.0
         if preserve_target_debounce:
             self._restore_target_debounce_snapshot(target_debounce)
         if self.transition_observer is not None:
@@ -233,4 +234,3 @@ class TransitionsMixin:
         req = self._active_req_payload()
         if req is not None:
             self._queue_vision_req(req, force=True)
-

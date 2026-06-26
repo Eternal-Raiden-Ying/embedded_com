@@ -49,60 +49,94 @@ from ..core_types import (
 class TableDockingMixin:
     def _get_control_authority(self, obs: Optional[TableEdgeObs], depth_roi_stop_active: bool = False, explicit_stop_active: bool = False) -> ControlAuthority:
         sem = build_table_perception_semantics(obs, self.cfg)
+        center_error = self._get_bbox_center_x_norm(obs) - 0.5 if obs is not None else None
         return decide_table_control_authority(
             state=self.ctx.state.value if hasattr(self.ctx.state, "value") else str(self.ctx.state),
             sem=sem,
-            cfg=self.cfg,
+            cfg=self.car_cfg,
             depth_roi_stop_active=depth_roi_stop_active,
             explicit_stop_active=explicit_stop_active,
+            bbox_center_error=center_error,
         )
+
+    def _apply_control_authority(self, decision: MotionDecision, obs: Optional[TableEdgeObs], *, explicit_stop_active: bool = False) -> MotionDecision:
+        """Apply table-docking authority after raw motion/safety generation.
+
+        This is intentionally a one-way gate: it may zero an axis, never revive
+        an axis already stopped by stale, obstacle, depth, emergency, or physical
+        safety logic in the controller/service layers.
+        """
+        summary = decision.control_summary if decision.control_summary is not None else {}
+        decision.control_summary = summary
+        raw_forward_reason = str(summary.get("forward_block_reason") or "")
+        raw_rotate_reason = str(summary.get("rotate_block_reason") or "")
+        depth_status = self._depth_roi_stop_status(obs)
+        auth = self._get_control_authority(
+            obs,
+            depth_roi_stop_active=bool(depth_status.get("depth_roi_stop_ready")),
+            explicit_stop_active=explicit_stop_active,
+        )
+        summary.update(auth.to_dict())
+        summary.update(depth_status)
+        summary["authority_applied"] = True
+        summary["mode"] = str(decision.cmd.mode)
+        if not auth.allow_forward and abs(float(decision.cmd.vx_mps)) > 1e-9:
+            decision.cmd.vx_mps = 0.0
+        if not auth.allow_rotate and abs(float(decision.cmd.wz_radps)) > 1e-9:
+            decision.cmd.wz_radps = 0.0
+        safety_tokens = ("stale", "emergency", "explicit", "obstacle", "hard_guard", "depth_p10", "safety")
+        if auth.allow_forward and raw_forward_reason and any(token in raw_forward_reason.lower() for token in safety_tokens):
+            summary["forward_block_reason"] = raw_forward_reason
+            summary["block_reason"] = raw_forward_reason
+        if auth.allow_rotate and raw_rotate_reason and any(token in raw_rotate_reason.lower() for token in safety_tokens):
+            summary["rotate_block_reason"] = raw_rotate_reason
+            summary["block_reason"] = raw_rotate_reason
+        # Always expose the final axis values, including a pre-existing safety stop.
+        summary["vx_mps"] = float(decision.cmd.vx_mps)
+        summary["vy_mps"] = float(decision.cmd.vy_mps)
+        summary["wz_radps"] = float(decision.cmd.wz_radps)
+        return decision
 
     def _tick_search_table(self) -> MotionDecision:
         decision = self._tick_search_table_impl()
         obs = self._fresh_table_obs()
         explicit = "warmup" in str(decision.control_summary.get("control_source", "")) or "recovery" in str(decision.control_summary.get("control_source", "")) or "failed" in str(decision.control_summary.get("control_source", ""))
-        auth = self._get_control_authority(obs, explicit_stop_active=explicit)
-        decision.control_summary.update(auth.to_dict())
+        decision = self._apply_control_authority(decision, obs, explicit_stop_active=explicit)
         self._ensure_speed_profile(decision)
         return decision
 
     def _tick_yolo_acquire_align(self) -> MotionDecision:
         decision = self._tick_yolo_acquire_align_impl()
         obs = self._fresh_table_obs()
-        auth = self._get_control_authority(obs)
-        decision.control_summary.update(auth.to_dict())
+        decision = self._apply_control_authority(decision, obs)
         self._ensure_speed_profile(decision)
         return decision
 
     def _tick_yolo_approach(self) -> MotionDecision:
         decision = self._tick_yolo_approach_impl()
         obs = self._fresh_table_obs()
-        auth = self._get_control_authority(obs)
-        decision.control_summary.update(auth.to_dict())
+        decision = self._apply_control_authority(decision, obs)
         self._ensure_speed_profile(decision)
         return decision
 
     def _tick_edge_adjust(self) -> MotionDecision:
         decision = self._tick_edge_adjust_impl()
         obs = self._fresh_table_obs()
-        auth = self._get_control_authority(obs)
-        decision.control_summary.update(auth.to_dict())
+        decision = self._apply_control_authority(decision, obs)
         self._ensure_speed_profile(decision)
         return decision
 
     def _tick_final_slow_stop(self) -> MotionDecision:
         decision = self._tick_final_slow_stop_impl()
         obs = self._fresh_table_obs()
-        auth = self._get_control_authority(obs)
-        decision.control_summary.update(auth.to_dict())
+        decision = self._apply_control_authority(decision, obs)
         self._ensure_speed_profile(decision)
         return decision
 
     def _tick_at_table_edge(self) -> MotionDecision:
         decision = self._tick_at_table_edge_impl()
         obs = self._fresh_table_obs()
-        auth = self._get_control_authority(obs)
-        decision.control_summary.update(auth.to_dict())
+        decision = self._apply_control_authority(decision, obs)
         self._ensure_speed_profile(decision)
         return decision
 
@@ -149,13 +183,16 @@ class TableDockingMixin:
         if obs is not None:
             if obs.dist_err_m is not None:
                 curr_dist = float(obs.target_dist_m or self.cfg.table_target_dist_m) + float(obs.dist_err_m)
-            elif getattr(obs, "depth_p10", None) is not None:
-                curr_dist = float(obs.depth_p10)
+            elif bool(getattr(obs, "table_roi_depth_valid", False)) and getattr(obs, "table_roi_depth_median", None) is not None:
+                curr_dist = float(obs.table_roi_depth_median)
 
         now = monotonic_ts()
 
         if curr_dist is None:
-            elapsed_ms = (now - self.ctx.dist_progress_last_refreshed_mono) * 1000.0
+            if self.ctx.dist_missing_started_mono <= 0.0:
+                self.ctx.dist_missing_started_mono = now
+                return False
+            elapsed_ms = (now - self.ctx.dist_missing_started_mono) * 1000.0
             if elapsed_ms >= self.cfg.progress_window_ms:
                 self._log("warn", f"Approach progress timeout (distance missing): elapsed {elapsed_ms:.1f}ms >= window {self.cfg.progress_window_ms}ms")
                 return True
@@ -164,8 +201,13 @@ class TableDockingMixin:
         if curr_dist < self.ctx.min_dist_seen - 0.002:
             self.ctx.min_dist_seen = curr_dist
             self.ctx.dist_progress_last_refreshed_mono = now
+            self.ctx.dist_missing_started_mono = 0.0
             self._log("info", f"Approach progress refreshed: min_dist_seen={self.ctx.min_dist_seen:.4f}m")
         else:
+            if self.ctx.dist_progress_last_refreshed_mono <= 0.0:
+                self.ctx.dist_progress_last_refreshed_mono = now
+                self.ctx.dist_missing_started_mono = 0.0
+                return False
             elapsed_ms = (now - self.ctx.dist_progress_last_refreshed_mono) * 1000.0
             if elapsed_ms >= self.cfg.progress_window_ms:
                 self._log("warn", f"Approach progress timeout: distance did not decrease by 2mm for {elapsed_ms:.1f}ms. Min dist seen: {self.ctx.min_dist_seen:.4f}m, current: {curr_dist:.4f}m")
@@ -225,9 +267,8 @@ class TableDockingMixin:
         hard_yaw = float(getattr(obs, "hard_rotate_only_yaw_rad", getattr(self.car_cfg, "table_edge_hard_rotate_only_yaw_rad", 0.45)) or 0.45)
         edge_guided = bool((getattr(obs, "edge_valid", False) or getattr(obs, "edge_trusted", False)) and yaw_abs <= hard_yaw)
         if edge_guided:
-            if self.ctx.state != State.EDGE_ADJUST:
-                self._transition(State.EDGE_ADJUST, reason)
-            decision = self.controller.fov_table_approach_cmd(obs, phase="PLANE_APPROACH", mode="EDGE_ADJUST")
+            # Edge guidance is a per-frame control source, not a task state.
+            decision = self.controller.fov_table_approach_cmd(obs, phase="PLANE_APPROACH", mode=self.ctx.state.value)
             if decision.control_summary is not None:
                 decision.control_summary.update(
                     {
@@ -237,8 +278,6 @@ class TableDockingMixin:
                         "hard_yaw_elapsed_ms": float(getattr(obs, "hard_yaw_elapsed_ms", 0.0) or 0.0),
                     }
                 )
-            auth = self._get_control_authority(obs)
-            decision.control_summary.update(auth.to_dict())
             return decision
         if self.ctx.state != State.YOLO_APPROACH:
             self._transition(State.YOLO_APPROACH, reason)
@@ -249,8 +288,6 @@ class TableDockingMixin:
             reason=reason,
             control_source="yolo_track_forward",
         )
-        auth = self._get_control_authority(obs)
-        decision.control_summary.update(auth.to_dict())
         return decision
 
     def _tick_yolo_acquire_align_impl(self) -> MotionDecision:
@@ -292,8 +329,6 @@ class TableDockingMixin:
                     "transition_reason": self.ctx.last_enter_reason,
                 }
             )
-            auth = self._get_control_authority(obs)
-            decision.control_summary.update(auth.to_dict())
             return decision
         
         # Rotate in place towards center
@@ -325,8 +360,6 @@ class TableDockingMixin:
             "speed_profile": "search",
             "speed_limit_reason": "yolo_align",
         })
-        auth = self._get_control_authority(obs)
-        decision.control_summary.update(auth.to_dict())
         return decision
 
     def _tick_yolo_approach_impl(self) -> MotionDecision:
@@ -353,8 +386,6 @@ class TableDockingMixin:
                         "edge_trusted_yolo_approach_handoff": True,
                     }
                 )
-            auth = self._get_control_authority(obs)
-            decision.control_summary.update(auth.to_dict())
             return decision
             
         decision = self.controller.yolo_table_search_cmd(
@@ -364,8 +395,6 @@ class TableDockingMixin:
             reason="yolo_approach_forward",
             control_source="yolo_forward",
         )
-        auth = self._get_control_authority(obs)
-        decision.control_summary.update(auth.to_dict())
         return decision
 
     def _tick_search_table_impl(self) -> MotionDecision:
@@ -391,8 +420,6 @@ class TableDockingMixin:
                     "transition_reason": "perception_warmup_waiting",
                 }
             )
-            auth = self._get_control_authority(obs, explicit_stop_active=True)
-            decision.control_summary.update(auth.to_dict())
             return decision
         local_search_active = bool(
             self.ctx.prev_state in TABLE_APPROACH_STATES
@@ -463,8 +490,6 @@ class TableDockingMixin:
                         "stop_reason": self.ctx.last_fail_reason,
                     }
                 )
-                auth = self._get_control_authority(obs, explicit_stop_active=True)
-                decision.control_summary.update(auth.to_dict())
                 return decision
         level = self._control_level(obs)
         if obs is not None and self._table_motion_signal_available(obs):
@@ -497,8 +522,6 @@ class TableDockingMixin:
                             "edge_trusted_search_handoff": True,
                         }
                     )
-                auth = self._get_control_authority(obs)
-                decision.control_summary.update(auth.to_dict())
                 return decision
             decision = self.controller.yolo_table_search_cmd(
                 obs,
@@ -507,8 +530,6 @@ class TableDockingMixin:
                 reason="search_table_yolo_track_forward" if next_state == State.YOLO_APPROACH else "search_table_yolo_rotate_only",
                 control_source="yolo_track_forward" if next_state == State.YOLO_APPROACH else "local_rotate_search",
             )
-            auth = self._get_control_authority(obs)
-            decision.control_summary.update(auth.to_dict())
             return decision
         # Without table bbox, docking/edge must not drive state transitions.
         # It can still be logged by vision, but control falls back to local rotate search.
@@ -536,8 +557,6 @@ class TableDockingMixin:
                 "search_table_stale_gate_bypass": True,
             }
         )
-        auth = self._get_control_authority(obs)
-        decision.control_summary.update(auth.to_dict())
         return decision
 
     def _tick_edge_adjust_impl(self) -> MotionDecision:
@@ -546,8 +565,6 @@ class TableDockingMixin:
         if not self._table_yolo_reliable(obs):
             self._transition(State.SEARCH_TABLE, "EDGE_ADJUST未检测到table bbox，进入本地旋转搜索")
             decision = self.controller.search_table_cmd(*self._get_memory_search_params())
-            auth = self._get_control_authority(obs)
-            decision.control_summary.update(auth.to_dict())
             return decision
         self._reset_table_loss()
         if self._table_yolo_reliable(obs) and not self.controller._edge_trusted(obs):
@@ -558,8 +575,6 @@ class TableDockingMixin:
                 reason="edge_adjust_blocked_edge_not_trusted",
                 control_source="yolo_forward",
             )
-            auth = self._get_control_authority(obs)
-            decision.control_summary.update(auth.to_dict())
             return decision
         level = self._control_level(obs)
         if level == "none":
@@ -570,17 +585,11 @@ class TableDockingMixin:
                     reason="edge_adjust_level_none_yolo_forward",
                     control_source="yolo_forward",
                 )
-                auth = self._get_control_authority(obs)
-                decision.control_summary.update(auth.to_dict())
                 return decision
             decision = self.controller.stop_cmd("EDGE_ADJUST")
-            auth = self._get_control_authority(obs)
-            decision.control_summary.update(auth.to_dict())
             return decision
         if level == "stop" or self._edge_ready(obs):
             decision = self._enter_final_slow_stop_or_keep_approach(obs, "满足最终停车条件，进入慢速停车")
-            auth = self._get_control_authority(obs)
-            decision.control_summary.update(auth.to_dict())
             return decision
 
         if not self.ctx.table_dock_phase:
@@ -624,8 +633,6 @@ class TableDockingMixin:
 
         if self._check_approach_progress(obs):
             decision = self._enter_no_progress_recovery_or_next("微调阶段无进展超时")
-            auth = self._get_control_authority(obs)
-            decision.control_summary.update(auth.to_dict())
             return decision
 
         pending_reason = self.ctx.table_motion_pending_transition_reason
@@ -637,8 +644,6 @@ class TableDockingMixin:
             decision = self._table_approach_decision(obs, phase="PLANE_APPROACH")
             decision.control_summary["control_intent"] = "edge_parallel"
         decision = self._annotate_table_motion_hysteresis(decision, pending_reason=pending_reason)
-        auth = self._get_control_authority(obs)
-        decision.control_summary.update(auth.to_dict())
         return decision
 
     def _tick_final_slow_stop_impl(self) -> MotionDecision:
@@ -1257,11 +1262,14 @@ class TableDockingMixin:
         return bool(obs.edge_found)
 
     def _depth_roi_stop_status(self, obs: Optional[TableEdgeObs]) -> Dict[str, object]:
-        # depth_p10 represents a statistical percentile indicator of depth in the ROI and is not a direct geometric edge distance.
         status = {
             "depth_roi_stop_ready": False,
             "reason": "",
-            "depth_p10": None,
+            "roi_depth_stat": None,
+            "roi_depth_valid_ratio": None,
+            "roi_depth_sample_count": None,
+            "roi_depth_threshold": None,
+            "roi_depth_threshold_semantics": "table_roi_depth_p10_not_geometric_edge_distance",
             "target_dist": None,
             "margin": None,
         }
@@ -1274,18 +1282,22 @@ class TableDockingMixin:
             status["reason"] = "table_not_visible"
             return status
             
-        # Check depth validity and depth_p10 presence
-        depth_valid = getattr(obs, "depth_valid", True) is not False
-        depth_p10 = getattr(obs, "depth_p10", None)
+        depth_valid = bool(getattr(obs, "table_roi_depth_valid", False))
+        depth_p10 = getattr(obs, "table_roi_depth_p10", None)
+        ratio = getattr(obs, "table_roi_depth_valid_ratio", None)
+        samples = getattr(obs, "table_roi_depth_sample_count", None)
         if not depth_valid or depth_p10 is None:
             status["reason"] = "depth_roi_invalid"
             return status
             
         target_dist = self._table_target_dist_m(obs)
         margin = max(0.0, float(getattr(self.cfg, "table_stop_margin_m", 0.05)))
-        status["depth_p10"] = float(depth_p10)
+        status["roi_depth_stat"] = float(depth_p10)
+        status["roi_depth_valid_ratio"] = ratio
+        status["roi_depth_sample_count"] = samples
         status["target_dist"] = float(target_dist)
         status["margin"] = float(margin)
+        status["roi_depth_threshold"] = float(target_dist + margin)
         
         if float(depth_p10) > target_dist + margin:
             status["reason"] = "distance_too_far"
@@ -1328,12 +1340,23 @@ class TableDockingMixin:
             status["final_lock_enter_block_reason"] = "obs_invalid"
             return status
             
-        depth_stop_ready = self._roi_depth_stop_ready(obs)
+        depth_status = self._depth_roi_stop_status(obs)
+        depth_stop_ready = bool(depth_status.get("depth_roi_stop_ready"))
+        lock_status = self._update_final_lock_count(obs) if depth_stop_ready else {}
+        depth_window_ready = bool(lock_status.get("final_lock_window_ready", False))
+        status.update(depth_status)
+        status.update({
+            "roi_depth_consecutive_frames": lock_status.get("lock_ready_obs_count", 0),
+            "roi_depth_window_ready": depth_window_ready,
+        })
         
         # If depth stop is ready and table is visible, we bypass edge trust checks
-        if depth_stop_ready:
+        if depth_stop_ready and depth_window_ready:
             status["final_lock_enter_allowed"] = True
             status["final_lock_enter_block_reason"] = "allowed"
+            return status
+        if depth_stop_ready:
+            status["final_lock_enter_block_reason"] = "roi_depth_stability_window_pending"
             return status
             
         if getattr(obs, "depth_valid", True) is False:
@@ -1899,6 +1922,13 @@ class TableDockingMixin:
             f"final_lock_transition_block_reason={status.get('final_lock_transition_block_reason')}",
             f"final_lock_transition_reason={status.get('final_lock_transition_reason')}",
             f"vision_stale_reason={status.get('vision_stale_reason')}",
+            f"stop_source={status.get('stop_source')}",
+            f"roi_depth_stat={status.get('roi_depth_stat')}",
+            f"roi_depth_valid_ratio={status.get('roi_depth_valid_ratio')}",
+            f"roi_depth_sample_count={status.get('roi_depth_sample_count')}",
+            f"roi_depth_threshold={status.get('roi_depth_threshold')}",
+            f"roi_depth_consecutive_frames={status.get('roi_depth_consecutive_frames')}",
+            f"roi_depth_window_ready={status.get('roi_depth_window_ready')}",
             f"lock_reset_reason={status.get('lock_reset_reason')}",
             f"lock_ready={bool(lock_ready)}",
             f"reason={reason or status['reason']}",

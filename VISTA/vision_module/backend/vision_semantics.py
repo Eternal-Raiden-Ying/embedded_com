@@ -118,6 +118,15 @@ class TableEdgeObservation:
     lower_line_dist_err_m: Optional[float] = None
     target_dist_m: Optional[float] = None
     dist_err: Optional[float] = None
+    table_roi_depth_valid: bool = False
+    table_roi_depth_p10: Optional[float] = None
+    table_roi_depth_median: Optional[float] = None
+    table_roi_depth_valid_ratio: Optional[float] = None
+    table_roi_depth_sample_count: Optional[int] = None
+    table_roi_depth_bbox: Optional[list[float]] = None
+    table_roi_depth_bbox_norm: Optional[list[float]] = None
+    table_roi_depth_coord_space: Optional[str] = None
+    table_roi_depth_mapping_source: Optional[str] = None
 
     # Depth safety stop metrics
     depth_p10: Optional[float] = None
