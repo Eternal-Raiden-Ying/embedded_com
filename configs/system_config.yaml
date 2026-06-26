@@ -172,6 +172,7 @@ vision:
     max_yaw_abs_rad: 0.75 # Heading error safety threshold
     enable_yolo_in_plane_only: false # Mask pixels using YOLO bbox
     yolo_table_min_conf: 0.25 # YOLO table confidence minimum threshold
+    edge_sync_threshold_s: 0.25 # Timestamp sync threshold between edge and local perception
   preview:
     mode_layouts:
       IDLE: "rgb_minimal" # Layout for IDLE state
@@ -399,7 +400,7 @@ orchestrator:
     table_controlled_vy_min_mps: 0.000 # Minimum lateral velocity in controlled approach
     table_controlled_vy_max_mps: 0.000 # Maximum lateral velocity in controlled approach
     table_controlled_wz_min_radps: 0.000 # Minimum rotation velocity in controlled approach
-    table_controlled_wz_max_radps: 0.000 # Maximum rotation velocity in controlled approach
+    table_controlled_wz_max_radps: 0.150 # Maximum rotation velocity in controlled approach
     table_approach_safe_vx_mps: 0.020 # Safe forward velocity limit in approach
     table_approach_max_vx_mps: 0.035 # Maximum forward velocity limit in approach
     table_approach_yaw_deadband_rad: 0.08 # Deadband for heading corrections

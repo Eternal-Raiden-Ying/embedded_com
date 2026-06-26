@@ -65,7 +65,7 @@ controlled_approach:
   stage_b_vx_max_mps: 0.020
   stage_c_vx_max_mps: 0.035
   view_vy_max_mps: 0.000
-  view_wz_max_radps: 0.000
+  view_wz_max_radps: 0.050
   plane_wz_max_radps: 0.150
 
 # Motion profiles used by table approach / align / final lock.

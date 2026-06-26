@@ -142,6 +142,10 @@ def apply_env_overrides(config: SystemGlobalConfig) -> None:
     _set_from_env(config.orchestrator.runtime, "stage_params_file", "ORCH_STAGE_PARAMS_FILE", str)
     _set_from_env(config.orchestrator.runtime, "car_cmd_params_file", "ORCH_CAR_CMD_PARAMS_FILE", str)
 
+    # Orchestrator Car
+    _set_from_env(config.orchestrator.car, "table_controlled_wz_max_radps", "ORCH_CAR_TABLE_CONTROLLED_WZ_MAX_RADPS", float)
+    _set_from_env(config.orchestrator.car, "table_wz_view_max_radps", "ORCH_CAR_TABLE_WZ_VIEW_MAX_RADPS", float)
+
     # Orchestrator Serial
     _set_from_env(config.orchestrator.serial, "port", "ORCH_SERIAL_PORT", str)
     _set_from_env(config.orchestrator.serial, "baudrate", "ORCH_SERIAL_BAUDRATE", int)
@@ -358,7 +362,8 @@ def sync_orchestrator_config(config: SystemGlobalConfig) -> None:
     car.table_vx_mps_min = abs(float(car.table_controlled_vx_min_mps))
     car.table_vx_mps_max = abs(float(car.table_controlled_vx_max_mps))
     car.table_vy_max_mps = abs(float(car.table_controlled_vy_max_mps))
-    car.table_wz_view_max_radps = abs(float(car.table_controlled_wz_max_radps))
+    if getattr(car, "table_wz_view_max_radps", 0.0) == 0.0:
+        car.table_wz_view_max_radps = abs(float(car.table_controlled_wz_max_radps))
     car.table_wz_plane_max_radps = abs(float(car.table_coarse_align_wz_max_radps))
 
 
@@ -531,7 +536,7 @@ def _load_and_merge_stage_params(config: SystemGlobalConfig, file_path: Path) ->
         if "view_vy_max_mps" in ca:
             car.table_controlled_vy_max_mps = _sf(ca["view_vy_max_mps"])
         if "view_wz_max_radps" in ca:
-            car.table_controlled_wz_max_radps = _sf(ca["view_wz_max_radps"])
+            car.table_wz_view_max_radps = _sf(ca["view_wz_max_radps"])
         if "plane_wz_max_radps" in ca:
             car.table_coarse_align_wz_max_radps = _sf(ca["plane_wz_max_radps"])
 
@@ -920,7 +925,10 @@ def load_global_config(config_path: str = None) -> SystemGlobalConfig:
         else:
             raise FileNotFoundError(f"Configured car_cmd_params_file not found: {car_file_str} (resolved to: {resolved_car_path})")
 
-    # 7. Validate configuration
+    # 7. Re-apply env overrides at the very end to ensure env variables take highest priority
+    apply_env_overrides(config)
+
+    # 8. Validate configuration
     validate_config(config)
 
     # Synchronize orchestrator speed configs

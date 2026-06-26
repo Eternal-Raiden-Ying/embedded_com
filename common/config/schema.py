@@ -366,6 +366,7 @@ class TableEdgeConfig:
     max_yaw_abs_rad: float = 0.75
     enable_yolo_in_plane_only: bool = False
     yolo_table_min_conf: float = 0.25
+    edge_sync_threshold_s: float = 0.25
 
 
 @dataclass
