@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 
 import os
+import logging
+import time
 from typing import Dict, Optional, Sequence
 
 
@@ -163,6 +165,84 @@ def _has_local_table_bbox_signal(local_perception: Dict[str, object]) -> bool:
     return False
 
 
+_last_current_check_log_ts = 0.0
+_last_current_enough_state = None
+
+
+def check_edge_current_enough(
+    edge_frame_id: Optional[int],
+    local_frame_id: Optional[int],
+    edge_ts: Optional[float],
+    local_ts: Optional[float],
+) -> tuple:
+    global _last_current_check_log_ts, _last_current_enough_state
+    
+    # Coerce to int/float if possible
+    def safe_int(val):
+        if val is None:
+            return None
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            return None
+
+    def safe_float(val):
+        if val is None:
+            return None
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return None
+
+    edge_fid = safe_int(edge_frame_id)
+    local_fid = safe_int(local_frame_id)
+    edge_t = safe_float(edge_ts)
+    local_t = safe_float(local_ts)
+
+    frame_id_delta = None
+    if edge_fid is not None and local_fid is not None:
+        frame_id_delta = edge_fid - local_fid
+
+    ts_delta_ms = None
+    if edge_t is not None and local_t is not None:
+        ts_delta_ms = abs(edge_t - local_t) * 1000.0
+
+    edge_current_enough = False
+    if edge_t is not None and local_t is not None:
+        edge_current_enough = abs(edge_t - local_t) <= 0.15
+    elif edge_fid is not None and local_fid is not None:
+        edge_current_enough = abs(edge_fid - local_fid) <= 1
+
+    now = time.time()
+    state_changed = (edge_current_enough != _last_current_enough_state)
+    if state_changed or (now - _last_current_check_log_ts >= 0.5):
+        _last_current_check_log_ts = now
+        _last_current_enough_state = edge_current_enough
+        logger = logging.getLogger("vision.stage.search")
+        logger.info(
+            "[EDGE_CURRENT_CHECK] edge_frame_id=%s local_frame_id=%s frame_id_delta=%s "
+            "edge_ts=%s local_ts=%s ts_delta_ms=%s edge_current_enough=%s",
+            edge_fid,
+            local_fid,
+            frame_id_delta,
+            edge_t,
+            local_t,
+            f"{ts_delta_ms:.2f}" if ts_delta_ms is not None else None,
+            str(edge_current_enough).lower(),
+        )
+
+    details = {
+        "edge_frame_id": edge_fid,
+        "local_frame_id": local_fid,
+        "frame_id_delta": frame_id_delta,
+        "edge_ts": edge_t,
+        "local_ts": local_t,
+        "ts_delta_ms": ts_delta_ms,
+        "edge_current_enough": edge_current_enough,
+    }
+    return edge_current_enough, details
+
+
 def merge_table_bbox_from_local_perception(
     obs: Dict[str, object],
     local_perception: object,
@@ -185,7 +265,50 @@ def merge_table_bbox_from_local_perception(
     frame_id = _local_frame_id(local_perception)
 
     edge_frame_id = out.get("frame_id") or out.get("frame_seq") or out.get("seq")
-    is_current_frame = (frame_id is not None and edge_frame_id is not None and frame_id == edge_frame_id)
+    
+    edge_ts_val = None
+    for k in ("obs_ts", "ts"):
+        v = out.get(k)
+        if v is not None:
+            try:
+                edge_ts_val = float(v)
+                break
+            except (ValueError, TypeError):
+                pass
+
+    local_ts_val = None
+    for k in ("obs_ts", "ts", "frame_capture_ts"):
+        v = local_perception.get(k)
+        if v is not None:
+            try:
+                local_ts_val = float(v)
+                break
+            except (ValueError, TypeError):
+                pass
+    if local_ts_val is None:
+        local_ts_val = tick_ts
+
+    is_current_frame, current_details = check_edge_current_enough(
+        edge_frame_id=edge_frame_id,
+        local_frame_id=frame_id,
+        edge_ts=edge_ts_val,
+        local_ts=local_ts_val,
+    )
+
+    was_valid_edge = bool(out.get("edge_found")) or bool(out.get("edge_valid")) or bool(out.get("edge_trusted"))
+    if was_valid_edge and not is_current_frame:
+        logger = logging.getLogger("vision.stage.search")
+        logger.warning(
+            "[EDGE_DROPPED_STALE] reason=frame_or_ts_mismatch edge_frame_id=%s local_frame_id=%s "
+            "frame_id_delta=%s edge_ts=%s local_ts=%s ts_delta_ms=%s edge_current_enough=%s",
+            current_details["edge_frame_id"],
+            current_details["local_frame_id"],
+            current_details["frame_id_delta"],
+            current_details["edge_ts"],
+            current_details["local_ts"],
+            current_details["ts_delta_ms"],
+            str(current_details["edge_current_enough"]).lower(),
+        )
 
     if bbox is None:
         if is_current_frame:
@@ -367,6 +490,10 @@ def table_edge_obs_from_results(results: Dict[str, object]) -> Optional[Dict[str
             merged["edge_valid"] = bool(merged.get("edge_found", False)) and not bool(merged.get("edge_obs_unavailable", False))
     if "is_stale" not in table_edge:
         merged["is_stale"] = False
+    merged["debug_publish_found"] = bool(merged.get("edge_found", merged.get("edge_detected", False)))
+    merged["debug_publish_valid"] = bool(merged.get("edge_valid", merged.get("edge_geometry_valid", False)))
+    merged["debug_publish_trusted"] = bool(merged.get("edge_trusted", False))
+    merged["debug_publish_point_count"] = int(merged.get("point_count", 0) or 0)
     return merged
 
 
@@ -467,9 +594,8 @@ def annotate_table_edge_obs(
     # Align point count fields
     point_count = int(out.get("point_count", 0) or 0)
     out["point_count"] = point_count
-
-    table_point_count = int(out.get("table_point_count", 0) or 0)
-    out["table_point_count"] = table_point_count
+    out["table_point_count"] = point_count
+    out["valid_edge_points"] = point_count
 
     support_count = int(out.get("support_count", out.get("fast_support_point_count", 0)) or 0)
     out["support_count"] = support_count
@@ -478,7 +604,10 @@ def annotate_table_edge_obs(
     inlier_count = int(out.get("inlier_count", out.get("edge_inlier_count", 0)) or 0)
     out["inlier_count"] = inlier_count
     out["edge_inlier_count"] = inlier_count
-    out["valid_edge_points"] = inlier_count
+
+    edge_trusted = bool(out.get("edge_trusted", False))
+    out["valid_for_control"] = edge_trusted
+    out["edge_control_allowed"] = edge_trusted
 
     # Align error fields
     yaw = out.get("yaw_err_rad", out.get("yaw_err", out.get("yaw")))

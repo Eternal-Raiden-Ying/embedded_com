@@ -1191,6 +1191,78 @@ class VistaApp(BaseModule):
         if control_obs is None:
             return False
 
+        if isinstance(control_obs, dict):
+            perception = control_obs.get("perception") or {}
+            edge_obs = perception.get("table_edge_obs")
+            if isinstance(edge_obs, dict):
+                # Log EDGE_OBS_PAYLOAD_FINAL
+                self.log.info(
+                    "[EDGE_OBS_PAYLOAD_FINAL]\n"
+                    "frame_id=%s\n"
+                    "edge_found=%s\n"
+                    "edge_valid=%s\n"
+                    "edge_trusted=%s\n"
+                    "point_count=%s\n"
+                    "table_point_count=%s\n"
+                    "reason=%s\n"
+                    "source=%s\n"
+                    "obs_ts=%s\n"
+                    "send_allowed=%s\n"
+                    "force_send=%s",
+                    edge_obs.get("frame_id"),
+                    str(bool(edge_obs.get("edge_found", False))).lower(),
+                    str(bool(edge_obs.get("edge_valid", False))).lower(),
+                    str(bool(edge_obs.get("edge_trusted", False))).lower(),
+                    edge_obs.get("point_count"),
+                    edge_obs.get("table_point_count"),
+                    edge_obs.get("reason"),
+                    edge_obs.get("source"),
+                    edge_obs.get("obs_ts"),
+                    str(not route_result.skipped).lower(),
+                    str(force_send).lower(),
+                )
+
+                # Check mapping mismatch against the debug_publish fields
+                pub_found = bool(edge_obs.get("debug_publish_found", False))
+                pub_valid = bool(edge_obs.get("debug_publish_valid", False))
+                pub_trusted = bool(edge_obs.get("debug_publish_trusted", False))
+                pub_point_count = int(edge_obs.get("debug_publish_point_count", 0) or 0)
+
+                pay_found = bool(edge_obs.get("edge_found", False))
+                pay_valid = bool(edge_obs.get("edge_valid", False))
+                pay_trusted = bool(edge_obs.get("edge_trusted", False))
+                pay_point_count = int(edge_obs.get("point_count", 0) or 0)
+
+                mismatch = (
+                    (pub_found and not pay_found) or
+                    (pub_valid and not pay_valid) or
+                    (pub_trusted and not pay_trusted)
+                )
+                if mismatch:
+                    self.log.warning(
+                        "[EDGE_MAPPING_MISMATCH_FINAL]\n"
+                        "frame_id=%s\n"
+                        "publish_found=%d\n"
+                        "publish_valid=%d\n"
+                        "publish_trusted=%d\n"
+                        "publish_point_count=%d\n"
+                        "payload_found=%d\n"
+                        "payload_valid=%d\n"
+                        "payload_trusted=%d\n"
+                        "payload_point_count=%d\n"
+                        "payload_reason=%s",
+                        edge_obs.get("frame_id"),
+                        int(pub_found),
+                        int(pub_valid),
+                        int(pub_trusted),
+                        pub_point_count,
+                        int(pay_found),
+                        int(pay_valid),
+                        int(pay_trusted),
+                        pay_point_count,
+                        edge_obs.get("reason"),
+                    )
+
         queued = self._send_obs(control_obs, sender=self.obs_sender, obs_class="control")
         if queued:
             self.last_send_ts = now
@@ -1333,7 +1405,7 @@ class VistaApp(BaseModule):
         }
         stage_output = self.stage_controller.tick(tick_input)
         self._sync_runtime_from_stage_context(reason="tick")
-        self._apply_stage_output(stage_output, now=now)
+        self._apply_stage_output(stage_output, now=now, force_send=self._should_force_send_stage_output(stage_output))
 
     def _expire_hot_standby(self, now: float):
         if bool(
@@ -1346,6 +1418,8 @@ class VistaApp(BaseModule):
         self._enter_cold_idle(int(getattr(self._ctx(), "epoch", 0) or 0))
 
     def start(self):
+        print(f"[VISTA_EDGE_MAPPING_FIX_ACTIVE] version=20260626_edge_payload_path_v2 file={__file__}", flush=True)
+        self.log_info("runtime", f"[VISTA_EDGE_MAPPING_FIX_ACTIVE] version=20260626_edge_payload_path_v2 file={__file__}")
         cfg_dump = self._config_dump()
         self.run_logger.write_meta(
             {

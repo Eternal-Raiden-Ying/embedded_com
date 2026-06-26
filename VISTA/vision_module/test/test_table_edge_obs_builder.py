@@ -137,7 +137,7 @@ class TestTableEdgeObsBuilder(unittest.TestCase):
         self.assertEqual(merged["table_bbox"], [100, 200, 300, 400])
 
     def test_merge_stale_frame(self):
-        # Case: is_current_frame is False (frame IDs mismatch)
+        # Case: is_current_frame is False (frame IDs mismatch by > 1, no timestamp)
         # Verify edge result is reset to no edge
         obs = {
             "edge_found": True,
@@ -149,7 +149,7 @@ class TestTableEdgeObsBuilder(unittest.TestCase):
             "reason": "edge_trusted",
         }
         local_perception = {
-            "frame_id": 31, # New frame!
+            "frame_id": 32, # New frame (32 - 30 = 2, so stale)
             "table_bbox": [100, 200, 300, 400],
             "rgb_shape": (480, 640, 3),
         }
@@ -163,6 +163,61 @@ class TestTableEdgeObsBuilder(unittest.TestCase):
         self.assertEqual(merged["reason"], "table_bbox_from_local_perception_no_edge_result")
         self.assertEqual(merged["table_bbox"], [100, 200, 300, 400])
         self.assertFalse(merged["depth_valid"])
+
+    def test_merge_non_stale_frame_id_diff_1(self):
+        # Case: Frame IDs mismatch by 1, no timestamp
+        # Verify edge is NOT reset
+        obs = {
+            "edge_found": True,
+            "edge_valid": True,
+            "edge_trusted": True,
+            "point_count": 99,
+            "table_point_count": 70,
+            "frame_id": 30,
+            "reason": "edge_trusted",
+        }
+        local_perception = {
+            "frame_id": 31, # Diff of 1 (not stale)
+            "table_bbox": [100, 200, 300, 400],
+            "rgb_shape": (480, 640, 3),
+        }
+        merged = merge_table_bbox_from_local_perception(obs, local_perception, tick_ts=100.0)
+        self.assertTrue(merged["table_found"])
+        self.assertTrue(merged["edge_found"])
+        self.assertTrue(merged["edge_valid"])
+        self.assertTrue(merged["edge_trusted"])
+        self.assertEqual(merged["point_count"], 99)
+        self.assertEqual(merged["table_point_count"], 99) # aligned
+        self.assertEqual(merged["reason"], "edge_trusted")
+
+    def test_merge_timestamp_gating(self):
+        # Case: Frame IDs mismatch by 2, but timestamps match within <= 0.15s
+        obs = {
+            "edge_found": True,
+            "edge_valid": True,
+            "edge_trusted": True,
+            "point_count": 99,
+            "table_point_count": 70,
+            "frame_id": 30,
+            "obs_ts": 100.0,
+            "reason": "edge_trusted",
+        }
+        local_perception = {
+            "frame_id": 32, # Frame ID diff is 2, but...
+            "obs_ts": 100.12, # Timestamp diff is 0.12s (<= 0.15s, so not stale)
+            "table_bbox": [100, 200, 300, 400],
+            "rgb_shape": (480, 640, 3),
+        }
+        merged = merge_table_bbox_from_local_perception(obs, local_perception, tick_ts=100.2)
+        self.assertTrue(merged["table_found"])
+        self.assertTrue(merged["edge_found"])
+        self.assertTrue(merged["edge_trusted"])
+
+        # Case: Timestamps mismatch > 0.15s
+        local_perception["obs_ts"] = 100.16 # 0.16s diff (stale)
+        merged_stale = merge_table_bbox_from_local_perception(obs, local_perception, tick_ts=100.2)
+        self.assertFalse(merged_stale["edge_found"])
+
 
 if __name__ == "__main__":
     unittest.main()

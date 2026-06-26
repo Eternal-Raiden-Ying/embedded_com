@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+print("[VISTA_EDGE_MAPPING_FIX_ACTIVE] version=20260626_edge_payload_path_v2 file=" + __file__, flush=True)
+
 from typing import Optional
 
 from ....ipc.protocol import VisionReq
@@ -13,6 +15,7 @@ from .table_edge_obs_builder import (
     payload_has_table_edge_obs,
     table_edge_obs_from_payload,
     table_edge_obs_from_results,
+    check_edge_current_enough,
 )
 from .target_obs_builder import (
     payload_has_target_obs,
@@ -127,6 +130,12 @@ class SearchStagePlan(BaseStagePlan):
             source_mode=ctx.current_mode,
         )
 
+        # Previous flags for force_send detection
+        prev_obs = ctx.stage_state.get("table_edge_obs") or {}
+        prev_found = bool(prev_obs.get("edge_found", False))
+        prev_valid = bool(prev_obs.get("edge_valid", False))
+        prev_trusted = bool(prev_obs.get("edge_trusted", False))
+
         local_frame_id = None
         if isinstance(local_perception, dict):
             local_frame_id = (
@@ -137,7 +146,36 @@ class SearchStagePlan(BaseStagePlan):
             )
         
         edge_frame_id = table_edge_obs.get("frame_id") or table_edge_obs.get("frame_seq") or table_edge_obs.get("seq")
-        is_current_frame = (local_frame_id is not None and edge_frame_id is not None and local_frame_id == edge_frame_id)
+        
+        edge_ts_val = None
+        for k in ("obs_ts", "ts"):
+            v = table_edge_obs.get(k)
+            if v is not None:
+                try:
+                    edge_ts_val = float(v)
+                    break
+                except (ValueError, TypeError):
+                    pass
+
+        local_ts_val = None
+        if isinstance(local_perception, dict):
+            for k in ("obs_ts", "ts", "frame_capture_ts"):
+                v = local_perception.get(k)
+                if v is not None:
+                    try:
+                        local_ts_val = float(v)
+                        break
+                    except (ValueError, TypeError):
+                        pass
+        if local_ts_val is None:
+            local_ts_val = tick_input.ts
+
+        is_current_frame, _ = check_edge_current_enough(
+            edge_frame_id=edge_frame_id,
+            local_frame_id=local_frame_id,
+            edge_ts=edge_ts_val,
+            local_ts=local_ts_val,
+        )
 
         # Before merge metrics:
         before_edge_found = bool(table_edge_obs.get("edge_found"))
@@ -196,7 +234,7 @@ class SearchStagePlan(BaseStagePlan):
 
             if not same_frame_mapping_ok:
                 import logging
-                logger = logging.getLogger("vista.stage.search")
+                logger = logging.getLogger("vision.stage.search")
                 logger.warning(
                     "[EDGE_MAPPING_MISMATCH] frame_id=%s %s",
                     edge_frame_id,
@@ -209,7 +247,7 @@ class SearchStagePlan(BaseStagePlan):
         if now - last_log >= 0.5:
             self._last_payload_log_ts = now
             import logging
-            logger = logging.getLogger("vista.stage.search")
+            logger = logging.getLogger("vision.stage.search")
             logger.info(
                 "[EDGE_OBS_PAYLOAD] frame_id=%s source=%s is_current=%s same_frame_mapping_ok=%s "
                 "before=[found=%s valid=%s trusted=%s pts=%s table_pts=%s yaw=%s dist=%s reason=%s] "
@@ -224,8 +262,11 @@ class SearchStagePlan(BaseStagePlan):
 
         ctx.stage_state["table_edge_obs"] = dict(table_edge_obs)
         
+        status_changed = (after_edge_found != prev_found) or (after_edge_valid != prev_valid) or (after_edge_trusted != prev_trusted)
         force_send = False
         if table_edge_source == "results" and is_current_frame:
+            force_send = True
+        elif status_changed:
             force_send = True
 
         return table_edge_obs, table_edge_source, force_send

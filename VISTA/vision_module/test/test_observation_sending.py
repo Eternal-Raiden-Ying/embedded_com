@@ -188,6 +188,80 @@ class TestObservationSending(unittest.TestCase):
         self.assertFalse(queued)
         self.assertEqual(self.app.obs_drop_count, 1)
 
+    def test_search_stage_end_to_end_payload(self):
+        from vision_module.app.stages.search.stage import SearchStagePlan
+        from vision_module.app.stages.base import StageTickInput
+
+        results = {
+            "table_edge_obs": {
+                "frame_id": 33,
+                "edge_found": True,
+                "edge_valid": True,
+                "edge_trusted": True,
+                "point_count": 91,
+                "support_count": 85,
+                "inlier_count": 13,
+                "yaw_err_rad": 0.0791,
+                "dist_err_m": 0.4733,
+                "obs_ts": time.time() - 0.05,
+            },
+            "local_perception": {
+                "frame_seq": 33,
+                "table_bbox": [10, 20, 30, 40],
+                "rgb_shape": (480, 640, 3),
+            }
+        }
+
+        plan = SearchStagePlan()
+        tick_input = StageTickInput(
+            ts=time.time(),
+            generation=1,
+            results=results,
+        )
+
+        self.ctx.current_mode = "FIND_EDGE"
+        self.ctx.stage_state = {}
+
+        table_edge_obs, source, force_send = plan._process_table_edge_obs(
+            results=results,
+            ctx=self.ctx,
+            tick_input=tick_input,
+            local_perception=results["local_perception"],
+        )
+
+        self.assertTrue(table_edge_obs["edge_found"])
+        self.assertTrue(table_edge_obs["edge_valid"])
+        self.assertTrue(table_edge_obs["edge_trusted"])
+        self.assertEqual(table_edge_obs["point_count"], 91)
+        self.assertEqual(table_edge_obs["table_point_count"], 91)
+        self.assertEqual(table_edge_obs["reason"], "edge_trusted")
+
+        raw_obs = plan.build_obs(
+            self.ctx,
+            status="RUNNING",
+            perception={"table_edge_obs": table_edge_obs},
+        )
+        output = StageOutput(vision_obs=raw_obs)
+
+        self.app.scheduler.read_result = MagicMock(return_value={
+            "frame_seq": 33,
+            "frame_capture_ts": results["table_edge_obs"]["obs_ts"],
+        })
+
+        self.app.obs_sender.sent_payloads = []
+        queued = self.app._apply_stage_output(output, now=time.time(), force_send=force_send)
+        self.assertTrue(queued)
+
+        sent_payload = self.app.obs_sender.sent_payloads[0]
+        final_edge_obs = sent_payload["perception"]["table_edge_obs"]
+
+        self.assertTrue(final_edge_obs["edge_found"])
+        self.assertTrue(final_edge_obs["edge_valid"])
+        self.assertTrue(final_edge_obs["edge_trusted"])
+        self.assertEqual(final_edge_obs["point_count"], 91)
+        self.assertEqual(final_edge_obs["table_point_count"], 91)
+        self.assertEqual(final_edge_obs["reason"], "edge_trusted")
+
 
 if __name__ == "__main__":
     unittest.main()
