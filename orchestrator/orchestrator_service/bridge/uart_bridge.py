@@ -207,7 +207,9 @@ class UartBridge:
         publish_mono = item.get("publish_mono", 0.0)
         if publish_mono < self._last_estop_mono:
             return "estop_superseded"
-        if now_mono - self._last_estop_mono < 0.5:
+        cooldown_marked = (tx_meta or {}).get("estop_cooldown_applied")
+        cooldown_applies = bool(cooldown_marked is not False)
+        if now_mono - self._last_estop_mono < 0.5 and cooldown_applies:
             return "estop_cooldown"
         return ""
 

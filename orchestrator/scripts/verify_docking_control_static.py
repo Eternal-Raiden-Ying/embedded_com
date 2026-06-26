@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.join(ROOT, "VISTA"))
 import numpy as np
 
 from orchestrator.orchestrator_service.runtime.control_authority import ControlAuthority, decide_table_control_authority
+from orchestrator.orchestrator_service.runtime.motion_arbiter import MotionIntent, arbitrate_table_docking_motion
 from orchestrator.orchestrator_service.runtime.perception_semantics import TablePerceptionSemantics
 from orchestrator.orchestrator_service.runtime.states.table_docking import TableDockingMixin
 from orchestrator.orchestrator_service.runtime.states.recovery import RecoveryMixin
@@ -245,6 +246,8 @@ def main() -> None:
     assert dropout.cmd.vx_mps == 0.020
     assert dropout.control_summary["perception_dropout_hold_active"]
     assert dropout.control_summary["stale_hold_policy"] == "approach_commit_short_dropout"
+    assert dropout.control_summary["motion_class"] in {"recovery", "normal"}
+    assert dropout.control_summary["stop_class"] == "none"
 
     # Once the dropout hold expires, the commit is cleared and normal stale
     # recovery may stop or search instead of continuing blind forward motion.
@@ -279,6 +282,7 @@ def main() -> None:
     watchdog = authority_decision(probe, watchdog_obs, raw_wz=0.0)
     assert watchdog.cmd.vx_mps == 0.020
     assert watchdog.control_summary["zero_escape_reason"] == "forward_coast"
+    assert watchdog.control_summary["stop_class"] == "none"
 
     # An emergency remains a hard forward-coast blocker.
     probe = DockingProbe()
@@ -293,6 +297,7 @@ def main() -> None:
         MotionDecision(cmd=emergency_cmd, control_summary={"emergency_stop_active": True}), emergency_obs,
     )
     assert emergency.cmd.vx_mps == 0.0
+    assert emergency.control_summary["stop_class"] == "emergency"
 
     uart_probe = UartBridge(port="COM_DRY_RUN", baudrate=115200, timeout_s=0.1, dry_run=True)
     assert uart_probe._writer_discard_reason({"line": "V 0.020 0.000 0.010", "tx_meta": {}}) == ""
@@ -300,6 +305,37 @@ def main() -> None:
     assert uart_probe._writer_discard_reason({"line": "MODE SEARCH", "tx_meta": {}}) == "non_velocity_line"
     uart_probe._last_estop_mono = time.monotonic()
     assert uart_probe._writer_discard_reason({"line": "V 0.000 0.000 0.100", "tx_meta": {}, "publish_mono": time.monotonic()}) == "estop_cooldown"
+    assert uart_probe._writer_discard_reason({
+        "line": "V 0.000 0.000 0.100",
+        "tx_meta": {"stop_class": "stale_recovery", "estop_cooldown_applied": False},
+        "publish_mono": time.monotonic(),
+    }) == ""
+
+    search_result = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.SEARCH_TABLE),
+        None,
+        MotionIntent(
+            intent_type="local_rotate_search",
+            desired_vx=0.0,
+            desired_wz=0.10,
+            yaw_owner="search",
+            forward_allowed_by_behavior=False,
+            rotate_allowed_by_behavior=True,
+            reason="normal_stale_search_rotate",
+        ),
+        {"stale_level": "hard_stale", "control_phase": "SEARCH_SCAN"},
+    )
+    assert search_result.final_vx == 0.0 and abs(search_result.final_wz - 0.10) < 1e-6
+    assert search_result.stop_class == "none"
+
+    hard_stop_result = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("edge_guided_forward", desired_vx=0.02, desired_wz=0.0, forward_allowed_by_behavior=True),
+        {"emergency_stop_active": True},
+    )
+    assert hard_stop_result.final_vx == 0.0 and hard_stop_result.final_wz == 0.0
+    assert hard_stop_result.stop_class == "emergency"
 
     probe = DockingProbe()
     edge_obs.edge_trusted = True
@@ -322,6 +358,8 @@ def main() -> None:
     assert soft_fov.control_summary["bbox_fov_guard_level"] == "soft"
     assert soft_fov.cmd.vx_mps == 0.020
     assert soft_fov.control_summary["approach_commit_active"]
+    assert soft_fov.control_summary["motion_class"] == "normal"
+    assert soft_fov.control_summary["stop_class"] == "none"
 
     # Extreme center error remains a hard guard.
     probe = DockingProbe()

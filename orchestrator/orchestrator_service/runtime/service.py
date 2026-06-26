@@ -933,13 +933,24 @@ class OrchestratorService(BaseModule):
             "original_cmd",
             "effective_cmd",
             "stop_class",
+            "motion_class",
+            "motion_intent_type",
+            "yaw_owner",
+            "arbitration_reason",
+            "blocked_by",
+            "fov_guard_level",
+            "fov_guard_reason",
+            "approach_commit_active",
+            "perception_dropout_hold_active",
+            "zero_escape_reason",
+            "allow_uart_send",
+            "service_may_override",
             "estop_cooldown_applied",
             "estop_cooldown_reason",
             "service_override",
             "service_override_reason",
             "effective_cmd_before_service",
             "effective_cmd_after_service",
-            "perception_dropout_hold_active",
         ):
             if context.get(key) is not None:
                 meta[key] = context.get(key)
@@ -999,6 +1010,65 @@ class OrchestratorService(BaseModule):
         now = time.time()
         state = str(getattr(self.core.ctx.state, "value", self.core.ctx.state) or "").strip().upper()
         mode = str(getattr(cmd, "mode", "") or "").strip().upper()
+        arbiter_applied = bool(summary.get("arbiter_applied", False))
+        arbiter_stop_class = str(summary.get("stop_class") or "none").strip().lower()
+        arbiter_motion_class = str(summary.get("motion_class") or "").strip().lower()
+        if arbiter_applied:
+            hold_ms = max(0, int(getattr(self.cfg.car, "motion_hold_ms", getattr(self.cfg.car, "cmd_hold_ms", 150)) or 0))
+            emergency_or_safety = bool(arbiter_stop_class in {"emergency", "safety"} or arbiter_motion_class in {"emergency_stop", "safety_stop"})
+            explicit_stop = bool(getattr(cmd, "brake", False) or mode in {"STOP", "IDLE", "DONE", "ERROR", "ERROR_RECOVERY"} or state in {"IDLE", "STOP"})
+            effective = cmd
+            emit_reason = "arbiter_direct"
+            stop_class = "none" if arbiter_stop_class in {"", "none"} else arbiter_stop_class
+            if emergency_or_safety or explicit_stop:
+                emit_reason = "arbiter_hard_stop" if emergency_or_safety else "explicit_stop"
+                effective = self._make_stop_cmd(now, hold_ms=int(getattr(cmd, "hold_ms", self.cfg.car.cmd_hold_ms) or self.cfg.car.cmd_hold_ms))
+                self._last_valid_motion_cmd = None
+                self._last_valid_motion_ts = 0.0
+                last_age_ms = None
+                if not stop_class:
+                    stop_class = "emergency" if arbiter_motion_class == "emergency_stop" else "safety"
+            elif self._cmd_has_motion(cmd):
+                self._last_valid_motion_cmd = self._cmd_dict(cmd)
+                self._last_valid_motion_ts = now
+                last_age_ms = 0.0
+            else:
+                last_age_ms = self._last_valid_motion_age_ms(now)
+
+            service_override = bool(self._cmd_dict(effective) != self._cmd_dict(cmd))
+            return effective, {
+                "uart_emit_reason": emit_reason,
+                "last_valid_motion_cmd": dict(self._last_valid_motion_cmd or {}),
+                "last_valid_motion_age_ms": last_age_ms,
+                "soft_stale_hold_active": False,
+                "zero_cmd_reason": "" if self._cmd_has_motion(effective) else str(summary.get("zero_escape_reason") or ""),
+                "original_cmd": self._cmd_dict(cmd),
+                "effective_cmd": self._cmd_dict(effective),
+                "motion_hold_ms": int(hold_ms),
+                "hard_stale_stop_ms": int(getattr(self.cfg.car, "hard_stale_stop_ms", 800) or 800),
+                "soft_stale_hold_enable": bool(getattr(self.cfg.car, "soft_stale_hold_enable", True)),
+                "edge_stale_dead": False,
+                "table_bbox_stale": False,
+                "perception_dead": False,
+                "stale_source": "",
+                "yolo_allows_edge_stale": False,
+                "search_allows_edge_stale": False,
+                "search_table_stale_gate_bypass": bool(summary.get("search_table_stale_gate_bypass", False)),
+                "stale_gate_stop_source_state": "",
+                "stop_class": stop_class or "none",
+                "motion_class": summary.get("motion_class") or "",
+                "estop_cooldown_applied": (
+                    True if (stop_class or "").lower() in {"emergency", "safety"}
+                    else (False if (stop_class or "").lower() in {"control_recovery", "stale_recovery"} else None)
+                ),
+                "estop_cooldown_reason": "hard_stop" if (stop_class or "").lower() in {"emergency", "safety"} else "",
+                "service_override": service_override,
+                "service_override_reason": emit_reason if service_override else "",
+                "effective_cmd_before_service": self._cmd_dict(cmd),
+                "effective_cmd_after_service": self._cmd_dict(effective),
+                "perception_dropout_hold_active": bool(summary.get("perception_dropout_hold_active", False)),
+                "service_may_override": bool(summary.get("service_may_override", False)),
+            }
         control_source = str(summary.get("control_source") or "").strip().lower()
         stale_level = str(summary.get("stale_level") or "").strip().lower()
         stale_reason = str(summary.get("stale_guard_reason") or summary.get("reason") or "").strip().lower()
@@ -1122,7 +1192,10 @@ class OrchestratorService(BaseModule):
             "search_table_stale_gate_bypass": bool(search_allows_edge_stale and hard_stale_raw),
             "stale_gate_stop_source_state": state if hard_stale else "",
             "stop_class": stop_class,
-            "estop_cooldown_applied": bool(stop_class in {"emergency", "safety"}),
+            "estop_cooldown_applied": (
+                True if stop_class in {"emergency", "safety"}
+                else (False if stop_class in {"control_recovery", "stale_recovery"} else None)
+            ),
             "estop_cooldown_reason": "hard_stop" if stop_class in {"emergency", "safety"} else "",
             "service_override": service_override,
             "service_override_reason": emit_reason if service_override else "",
@@ -2624,8 +2697,14 @@ class OrchestratorService(BaseModule):
             "ts": time.time(),
             "state": str(summary.get("state") or self.core.ctx.state.value),
             "control_source": summary.get("control_source") or "",
+            "motion_intent_type": summary.get("motion_intent_type") or summary.get("control_source") or "",
             "control_phase": summary.get("control_phase") or "",
             "phase_reason": summary.get("phase_reason") or "",
+            "arbitration_reason": summary.get("arbitration_reason") or "",
+            "motion_class": summary.get("motion_class") or "",
+            "stop_class": summary.get("stop_class") or "none",
+            "blocked_by": summary.get("blocked_by") or "",
+            "yaw_owner": summary.get("yaw_owner") or yaw_source,
             "yaw_source": yaw_source,
             "forward_source": forward_source,
             "stop_source": stop_source,
@@ -2978,7 +3057,7 @@ class OrchestratorService(BaseModule):
         car_cmd = self.mapper.from_cmd_vel(effective_cmd, cx_norm_abs=decision.cx_norm_abs, distance_ratio=decision.distance_ratio)
         tx_meta = self._build_uart_tx_meta(car_cmd)
         stop_class = str(uart_arbitration.get("stop_class") or "").strip()
-        reason = stop_class or str(tx_meta.get("reason") or car_cmd.kind or "").strip()
+        reason = (stop_class if stop_class and stop_class != "none" else "") or str(tx_meta.get("reason") or car_cmd.kind or "").strip()
         velocity = self.motion_adapter.cmd_vel_to_velocity(effective_cmd)
         speed_profile = str(summary.get("speed_profile") or ("stop" if car_cmd.kind in {"stop", "brake"} else "search"))
         self._last_motion_tx_context = {
@@ -2986,6 +3065,19 @@ class OrchestratorService(BaseModule):
             "speed_limit_reason": summary.get("speed_limit_reason") or "",
             "forward_block_reason": summary.get("forward_block_reason") or "",
             "table_approach_phase": summary.get("table_approach_phase") or "",
+            "motion_intent_type": summary.get("motion_intent_type") or "",
+            "yaw_owner": summary.get("yaw_owner") or summary.get("yaw_source") or "",
+            "arbitration_reason": summary.get("arbitration_reason") or "",
+            "motion_class": summary.get("motion_class") or "",
+            "stop_class": summary.get("stop_class") or "none",
+            "blocked_by": summary.get("blocked_by") or "",
+            "fov_guard_level": summary.get("fov_guard_level") or summary.get("bbox_fov_guard_level") or "none",
+            "fov_guard_reason": summary.get("fov_guard_reason") or summary.get("bbox_fov_guard_reason") or "",
+            "approach_commit_active": bool(summary.get("approach_commit_active", False)),
+            "perception_dropout_hold_active": bool(summary.get("perception_dropout_hold_active", False)),
+            "zero_escape_reason": summary.get("zero_escape_reason") or "",
+            "allow_uart_send": bool(summary.get("allow_uart_send", True)),
+            "service_may_override": bool(summary.get("service_may_override", False)),
             "vx_mps": float(getattr(effective_cmd, "vx_mps", 0.0) or 0.0),
             "vy_mps": float(getattr(effective_cmd, "vy_mps", 0.0) or 0.0),
             "wz_radps": float(getattr(effective_cmd, "wz_radps", 0.0) or 0.0),

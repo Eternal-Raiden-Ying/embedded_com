@@ -29,6 +29,7 @@ from ..common import monotonic_ts
 from ..context import RuntimeContext, State
 from ..controller import MotionController, MotionDecision
 from ..control_authority import decide_table_control_authority, ControlAuthority
+from ..motion_arbiter import MotionIntent, arbitrate_table_docking_motion
 from ..perception_semantics import build_table_perception_semantics
 from ..core_types import (
     KNOWN_VISION_STATUS,
@@ -48,6 +49,59 @@ from ..core_types import (
 
 
 class TableDockingMixin:
+    def _arbitrate_table_motion_decision(self, decision: MotionDecision, obs: Optional[TableEdgeObs]) -> MotionDecision:
+        summary = decision.control_summary if decision.control_summary is not None else {}
+        decision.control_summary = summary
+        intent = MotionIntent(
+            intent_type=str(summary.get("control_source") or summary.get("control_intent") or decision.cmd.mode or ""),
+            desired_vx=float(getattr(decision.cmd, "vx_mps", 0.0) or 0.0),
+            desired_wz=float(getattr(decision.cmd, "wz_radps", 0.0) or 0.0),
+            yaw_owner=str(summary.get("yaw_source") or summary.get("yaw_owner") or ""),
+            forward_allowed_by_behavior=bool(
+                summary.get("allow_forward", summary.get("forward_allowed", False))
+                or abs(float(getattr(decision.cmd, "vx_mps", 0.0) or 0.0)) > 1e-9
+            ),
+            rotate_allowed_by_behavior=bool(
+                summary.get("allow_rotate", False)
+                or abs(float(getattr(decision.cmd, "wz_radps", 0.0) or 0.0)) > 1e-9
+            ),
+            reason=str(summary.get("phase_reason") or summary.get("reason") or summary.get("forward_block_reason") or ""),
+        )
+        result = arbitrate_table_docking_motion(self.ctx, obs, intent, summary)
+        decision.cmd.vx_mps = float(result.final_vx)
+        decision.cmd.vy_mps = float(result.final_vy)
+        decision.cmd.wz_radps = float(result.final_wz)
+        summary.update(result.summary)
+        summary.update(
+            {
+                "arbiter_applied": True,
+                "motion_intent_type": intent.intent_type,
+                "yaw_owner": intent.yaw_owner,
+                "arbitration_reason": result.reason,
+                "motion_class": result.motion_class,
+                "stop_class": result.stop_class,
+                "blocked_by": result.blocked_by,
+                "allow_uart_send": bool(result.allow_uart_send),
+                "service_may_override": bool(result.service_may_override),
+                "final_vx": float(result.final_vx),
+                "final_vy": float(result.final_vy),
+                "final_wz": float(result.final_wz),
+                "vx_mps": float(result.final_vx),
+                "vy_mps": float(result.final_vy),
+                "wz_radps": float(result.final_wz),
+            }
+        )
+        self.ctx.motion_intent_type = str(intent.intent_type or "")
+        self.ctx.yaw_owner = str(intent.yaw_owner or "")
+        self.ctx.arbitration_reason = str(result.reason or "")
+        self.ctx.motion_class = str(result.motion_class or "")
+        self.ctx.stop_class = str(result.stop_class or "none")
+        self.ctx.blocked_by = str(result.blocked_by or "")
+        self.ctx.fov_guard_level = str(summary.get("fov_guard_level") or summary.get("bbox_fov_guard_level") or "none")
+        self.ctx.fov_guard_reason = str(summary.get("fov_guard_reason") or summary.get("bbox_fov_guard_reason") or "")
+        self.ctx.zero_escape_reason = str(summary.get("zero_escape_reason") or "")
+        return decision
+
     def _bbox_control_geometry(self, obs: Optional[TableEdgeObs]) -> Dict[str, object]:
         return compute_bbox_control_geometry(obs)
 
@@ -295,7 +349,9 @@ class TableDockingMixin:
             summary.update(
                 {
                     "control_source": "bbox_lost_hold",
+                    "motion_intent_type": "bbox_lost_hold",
                     "yaw_source": str(summary.get("yaw_source", "none")),
+                    "yaw_owner": str(summary.get("yaw_source", "none")),
                     "forward_source": "none",
                     "allow_forward": False,
                     "allow_rotate": True,
@@ -307,7 +363,7 @@ class TableDockingMixin:
                     "wz_radps": wz,
                 }
             )
-            return decision
+            return self._arbitrate_table_motion_decision(decision, obs)
         raw_forward_reason = str(summary.get("forward_block_reason") or "")
         raw_rotate_reason = str(summary.get("rotate_block_reason") or "")
         depth_status = self._depth_roi_stop_status(obs)
@@ -372,8 +428,12 @@ class TableDockingMixin:
                 "control_phase": "EDGE_GUIDED_APPROACH",
                 "phase_reason": "perception_dropout_hold",
                 "control_source": "approach_commit_dropout_hold",
+                "motion_intent_type": "approach_commit_dropout_hold",
+                "yaw_owner": "edge_hold",
                 "forward_source": "approach_commit",
+                "yaw_source": "edge_hold",
                 "allow_forward": True,
+                "allow_rotate": True,
                 "forward_allowed": True,
                 "forward_block_reason": "",
                 "perception_dropout_hold_active": True,
@@ -389,7 +449,7 @@ class TableDockingMixin:
                 "wz_radps": float(decision.cmd.wz_radps),
                 "authority_applied": True,
             })
-            return decision
+            return self._arbitrate_table_motion_decision(decision, obs)
         if self.ctx.approach_commit_active and stale_level_before_auth in {"hard_stale", "dead"} and self.ctx.last_good_table_obs_mono > 0.0 and last_good_age_ms > dropout_window_s * 1000.0:
             self.ctx.approach_commit_active = False
             self.ctx.perception_dropout_hold_active = False
@@ -682,7 +742,7 @@ class TableDockingMixin:
         summary["vx_mps"] = float(decision.cmd.vx_mps)
         summary["vy_mps"] = float(decision.cmd.vy_mps)
         summary["wz_radps"] = float(decision.cmd.wz_radps)
-        return decision
+        return self._arbitrate_table_motion_decision(decision, obs)
 
     def _tick_search_table(self) -> MotionDecision:
         decision = self._tick_search_table_impl()
