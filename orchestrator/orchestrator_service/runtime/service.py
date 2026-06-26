@@ -2570,6 +2570,7 @@ class OrchestratorService(BaseModule):
         cmd = dict(summary.get("cmd") or {})
         vx = self._motion_num(summary.get("vx_mps", cmd.get("vx", 0.0)))
         wz = self._motion_num(summary.get("wz_radps", cmd.get("wz", 0.0)))
+        vy = self._motion_num(summary.get("vy_mps", cmd.get("vy", 0.0)))
         cx_norm = summary.get("bbox_cx_norm")
         if cx_norm is None:
             cx_norm = summary.get("yolo_bbox_center_x_norm")
@@ -2584,10 +2585,19 @@ class OrchestratorService(BaseModule):
         yolo_visible = bool(summary.get("yolo_table_visible") or summary.get("table_bbox_found"))
         bbox_valid = bool(summary.get("table_bbox_control_valid") or summary.get("yolo_table_control_valid") or summary.get("yolo_reliable"))
         edge_trusted = bool(summary.get("edge_trusted") or summary.get("valid_for_control"))
+        
+        yaw_source = summary.get("yaw_source") or ""
+        forward_source = summary.get("forward_source") or ""
+        stop_source = summary.get("stop_source") or ""
+        block_reason = summary.get("block_reason") or summary.get("forward_block_reason") or ""
+
         trace = {
             "ts": time.time(),
             "state": str(summary.get("state") or self.core.ctx.state.value),
             "control_source": summary.get("control_source") or "",
+            "yaw_source": yaw_source,
+            "forward_source": forward_source,
+            "stop_source": stop_source,
             "yolo_table_visible": yolo_visible,
             "table_bbox_control_valid": bbox_valid,
             "edge_found": bool(summary.get("edge_found")),
@@ -2604,8 +2614,10 @@ class OrchestratorService(BaseModule):
             "allow_forward": bool(summary.get("allow_forward", summary.get("forward_allowed", False))),
             "allow_rotate": bool(summary.get("allow_rotate", abs(wz) > 1e-9)),
             "vx_mps": vx,
+            "vy_mps": vy,
             "wz_radps": wz,
             "forward_block_reason": summary.get("forward_block_reason") or "",
+            "block_reason": block_reason,
             "transition_reason": summary.get("transition_reason") or summary.get("reason") or "",
         }
         self.run_logger.write_jsonl("motion_gate_trace", trace)
@@ -2613,8 +2625,9 @@ class OrchestratorService(BaseModule):
             trace["state"],
             trace["control_source"],
             round(vx, 3),
+            round(vy, 3),
             round(wz, 3),
-            trace["forward_block_reason"],
+            trace["block_reason"],
         )
         now = time.time()
         last_sig = getattr(self, "_last_motion_gate_trace_sig", None)
@@ -2626,13 +2639,9 @@ class OrchestratorService(BaseModule):
                 "motion_gate_trace",
                 "[MOTION_GATE_TRACE] "
                 f"state={trace['state']} control_source={trace['control_source']} "
-                f"yolo_table_visible={int(yolo_visible)} table_bbox_control_valid={int(bbox_valid)} "
-                f"edge_found={int(trace['edge_found'])} edge_valid={int(trace['edge_valid'])} edge_trusted={int(edge_trusted)} "
-                f"edge_control_allowed={int(trace['edge_control_allowed'])} edge_stable_count={trace['edge_stable_count']} "
-                f"cx_norm={cx_norm} center_error={center_error} yaw_err_rad={yaw_err:.3f} dist_err_m={dist_err:.3f} "
-                f"target_dist_m={target_dist:.3f} allow_forward={int(trace['allow_forward'])} allow_rotate={int(trace['allow_rotate'])} "
-                f"vx_mps={vx:.3f} wz_radps={wz:.3f} forward_block_reason={trace['forward_block_reason']} "
-                f"transition_reason={trace['transition_reason']}",
+                f"yaw_source={yaw_source} forward_source={forward_source} stop_source={stop_source} "
+                f"allow_forward={int(trace['allow_forward'])} allow_rotate={int(trace['allow_rotate'])} "
+                f"vx_mps={vx:.3f} vy_mps={vy:.3f} wz_radps={wz:.3f} block_reason={block_reason}",
                 interval_s=0.5,
             )
         should_forward = bool(

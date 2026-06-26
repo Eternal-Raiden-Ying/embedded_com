@@ -63,6 +63,7 @@ class TableDockingMixin:
         explicit = "warmup" in str(decision.control_summary.get("control_source", "")) or "recovery" in str(decision.control_summary.get("control_source", "")) or "failed" in str(decision.control_summary.get("control_source", ""))
         auth = self._get_control_authority(obs, explicit_stop_active=explicit)
         decision.control_summary.update(auth.to_dict())
+        self._ensure_speed_profile(decision)
         return decision
 
     def _tick_yolo_acquire_align(self) -> MotionDecision:
@@ -70,6 +71,7 @@ class TableDockingMixin:
         obs = self._fresh_table_obs()
         auth = self._get_control_authority(obs)
         decision.control_summary.update(auth.to_dict())
+        self._ensure_speed_profile(decision)
         return decision
 
     def _tick_yolo_approach(self) -> MotionDecision:
@@ -77,6 +79,7 @@ class TableDockingMixin:
         obs = self._fresh_table_obs()
         auth = self._get_control_authority(obs)
         decision.control_summary.update(auth.to_dict())
+        self._ensure_speed_profile(decision)
         return decision
 
     def _tick_edge_adjust(self) -> MotionDecision:
@@ -84,6 +87,7 @@ class TableDockingMixin:
         obs = self._fresh_table_obs()
         auth = self._get_control_authority(obs)
         decision.control_summary.update(auth.to_dict())
+        self._ensure_speed_profile(decision)
         return decision
 
     def _tick_final_slow_stop(self) -> MotionDecision:
@@ -91,6 +95,7 @@ class TableDockingMixin:
         obs = self._fresh_table_obs()
         auth = self._get_control_authority(obs)
         decision.control_summary.update(auth.to_dict())
+        self._ensure_speed_profile(decision)
         return decision
 
     def _tick_at_table_edge(self) -> MotionDecision:
@@ -98,7 +103,14 @@ class TableDockingMixin:
         obs = self._fresh_table_obs()
         auth = self._get_control_authority(obs)
         decision.control_summary.update(auth.to_dict())
+        self._ensure_speed_profile(decision)
         return decision
+
+    def _ensure_speed_profile(self, decision: MotionDecision) -> None:
+        """Populate speed_profile in control_summary if not already set."""
+        if decision.control_summary is not None and "speed_profile" not in decision.control_summary:
+            mode = decision.control_summary.get("state", decision.cmd.mode)
+            decision.control_summary["speed_profile"] = self.controller._table_speed_profile_name(mode, "")
 
     def _get_memory_search_params(self) -> Tuple[int, str, str]:
         turn_sign = self.ctx.relocate_turn_sign
@@ -133,12 +145,21 @@ class TableDockingMixin:
         return turn_sign, search_src, search_dir
 
     def _check_approach_progress(self, obs: Optional[TableEdgeObs]) -> bool:
-        if obs is None or obs.dist_err_m is None:
-            self.ctx.dist_progress_last_refreshed_mono = monotonic_ts()
-            return False
+        curr_dist = None
+        if obs is not None:
+            if obs.dist_err_m is not None:
+                curr_dist = float(obs.target_dist_m or self.cfg.table_target_dist_m) + float(obs.dist_err_m)
+            elif getattr(obs, "depth_p10", None) is not None:
+                curr_dist = float(obs.depth_p10)
 
-        curr_dist = float(obs.target_dist_m or self.cfg.table_target_dist_m) + float(obs.dist_err_m)
         now = monotonic_ts()
+
+        if curr_dist is None:
+            elapsed_ms = (now - self.ctx.dist_progress_last_refreshed_mono) * 1000.0
+            if elapsed_ms >= self.cfg.progress_window_ms:
+                self._log("warn", f"Approach progress timeout (distance missing): elapsed {elapsed_ms:.1f}ms >= window {self.cfg.progress_window_ms}ms")
+                return True
+            return False
 
         if curr_dist < self.ctx.min_dist_seen - 0.002:
             self.ctx.min_dist_seen = curr_dist

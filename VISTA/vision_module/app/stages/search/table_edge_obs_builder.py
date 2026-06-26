@@ -229,9 +229,18 @@ def check_edge_current_enough(
     if edge_t is not None and local_t is not None:
         ts_delta_ms = abs(edge_t - local_t) * 1000.0
 
+    threshold = 0.25
+    try:
+        from common.config_loader import get_config
+        cfg = get_config()
+        if cfg is not None and hasattr(cfg, "vision") and hasattr(cfg.vision, "table_edge") and hasattr(cfg.vision.table_edge, "edge_sync_threshold_s"):
+            threshold = float(cfg.vision.table_edge.edge_sync_threshold_s)
+    except Exception:
+        pass
+
     edge_current_enough = False
     if edge_t is not None and local_t is not None:
-        edge_current_enough = abs(edge_t - local_t) <= 0.15
+        edge_current_enough = abs(edge_t - local_t) <= threshold
     elif edge_fid is not None and local_fid is not None:
         edge_current_enough = abs(edge_fid - local_fid) <= 1
 

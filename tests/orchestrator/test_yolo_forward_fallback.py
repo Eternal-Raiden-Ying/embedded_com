@@ -41,7 +41,7 @@ def test_fov_approach_uses_yolo_forward_when_bbox_exists_but_edge_not_trusted():
 
     assert decision.cmd.vx_mps > 0.0
     assert decision.cmd.wz_radps == 0.0
-    assert decision.control_summary["control_source"] == "yolo_forward"
+    assert decision.control_summary["control_source"] == "yolo_track_forward"
     assert decision.control_summary["reason"] == "table_bbox_found_edge_not_trusted_yolo_forward"
 
 
@@ -71,7 +71,7 @@ def test_search_table_transitions_to_yolo_approach_and_commands_forward_motion()
     assert core.ctx.state == State.YOLO_APPROACH
     assert decision.cmd.vx_mps > 0.0
     assert decision.cmd.brake is False
-    assert decision.control_summary["control_source"] == "yolo_forward"
+    assert decision.control_summary["control_source"] == "yolo_track_forward"
     assert decision.control_summary["allow_forward"] is True
     assert decision.control_summary["forward_block_reason"] == ""
 
@@ -82,7 +82,7 @@ def test_yolo_acquire_align_outputs_rotate_command_not_stop_summary():
     core = OrchestratorCore(cfg, car_cfg)
     now = time.time()
     core.ctx.state = State.SEARCH_TABLE
-    core.ctx.task_start_wall_ts = now - 1.0
+    core.ctx.task_start_wall_ts = now - 2.0
     core.ctx.last_table_obs = TableEdgeObs.from_dict(
         {
             "ts": now,
@@ -91,8 +91,8 @@ def test_yolo_acquire_align_outputs_rotate_command_not_stop_summary():
             "edge_found": False,
             "table_bbox_found": True,
             "table_bbox_xyxy": [0.05, 0.35, 0.45, 0.90],
-            "table_cx_norm": -0.5,
-            "yolo_bbox_center_x_norm": 0.25,
+            "table_cx_norm": -0.6,
+            "yolo_bbox_center_x_norm": 0.20,
             "yolo_table_control_valid": True,
             "depth_valid": True,
         }
@@ -162,7 +162,7 @@ def test_lost_search_timeout_is_suppressed_when_fresh_yolo_bbox_is_visible():
 
     assert core.ctx.state == State.YOLO_APPROACH
     assert decision.cmd.vx_mps > 0.0
-    assert decision.control_summary["control_source"] == "yolo_forward"
+    assert decision.control_summary["control_source"] == "yolo_track_forward"
     assert decision.control_summary["table_lost_search_timeout"] is False
     assert decision.control_summary["bbox_visible_but_edge_invalid"] is True
     assert decision.control_summary["selected_timeout_reason"] == "bbox_visible_but_edge_invalid"

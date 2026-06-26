@@ -1,5 +1,13 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+import sys
+from pathlib import Path
+TEST_DIR = Path(__file__).resolve().parent
+VISION_ROOT = TEST_DIR.parent
+VISTA_ROOT = VISION_ROOT.parent
+STACK_ROOT = VISTA_ROOT.parent
+if str(STACK_ROOT) not in sys.path:
+    sys.path.insert(0, str(STACK_ROOT))
+if str(VISTA_ROOT) not in sys.path:
+    sys.path.insert(0, str(VISTA_ROOT))
 
 import unittest
 from vision_module.app.stages.search.table_edge_obs_builder import (
@@ -191,32 +199,41 @@ class TestTableEdgeObsBuilder(unittest.TestCase):
         self.assertEqual(merged["reason"], "edge_trusted")
 
     def test_merge_timestamp_gating(self):
-        # Case: Frame IDs mismatch by 2, but timestamps match within <= 0.15s
-        obs = {
-            "edge_found": True,
-            "edge_valid": True,
-            "edge_trusted": True,
-            "point_count": 99,
-            "table_point_count": 70,
-            "frame_id": 30,
-            "obs_ts": 100.0,
-            "reason": "edge_trusted",
-        }
-        local_perception = {
-            "frame_id": 32, # Frame ID diff is 2, but...
-            "obs_ts": 100.12, # Timestamp diff is 0.12s (<= 0.15s, so not stale)
-            "table_bbox": [100, 200, 300, 400],
-            "rgb_shape": (480, 640, 3),
-        }
-        merged = merge_table_bbox_from_local_perception(obs, local_perception, tick_ts=100.2)
-        self.assertTrue(merged["table_found"])
-        self.assertTrue(merged["edge_found"])
-        self.assertTrue(merged["edge_trusted"])
+        from unittest.mock import patch
+        class MockTableEdge:
+            edge_sync_threshold_s = 0.15
+        class MockVision:
+            table_edge = MockTableEdge()
+        class MockConfig:
+            vision = MockVision()
 
-        # Case: Timestamps mismatch > 0.15s
-        local_perception["obs_ts"] = 100.16 # 0.16s diff (stale)
-        merged_stale = merge_table_bbox_from_local_perception(obs, local_perception, tick_ts=100.2)
-        self.assertFalse(merged_stale["edge_found"])
+        with patch("common.config_loader.get_config", return_value=MockConfig()):
+            # Case: Frame IDs mismatch by 2, but timestamps match within <= 0.15s
+            obs = {
+                "edge_found": True,
+                "edge_valid": True,
+                "edge_trusted": True,
+                "point_count": 99,
+                "table_point_count": 70,
+                "frame_id": 30,
+                "obs_ts": 100.0,
+                "reason": "edge_trusted",
+            }
+            local_perception = {
+                "frame_id": 32, # Frame ID diff is 2, but...
+                "obs_ts": 100.12, # Timestamp diff is 0.12s (<= 0.15s, so not stale)
+                "table_bbox": [100, 200, 300, 400],
+                "rgb_shape": (480, 640, 3),
+            }
+            merged = merge_table_bbox_from_local_perception(obs, local_perception, tick_ts=100.2)
+            self.assertTrue(merged["table_found"])
+            self.assertTrue(merged["edge_found"])
+            self.assertTrue(merged["edge_trusted"])
+        
+            # Case: Timestamps mismatch > 0.15s
+            local_perception["obs_ts"] = 100.16 # 0.16s diff (stale)
+            merged_stale = merge_table_bbox_from_local_perception(obs, local_perception, tick_ts=100.2)
+            self.assertFalse(merged_stale["edge_found"])
 
 
 if __name__ == "__main__":
