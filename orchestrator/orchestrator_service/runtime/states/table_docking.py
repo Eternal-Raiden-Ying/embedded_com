@@ -257,12 +257,14 @@ class TableDockingMixin:
             decision = self.controller.fov_table_approach_cmd(
                 obs,
                 phase="PLANE_APPROACH",
-                mode="EDGE_ADJUST",
+                mode="YOLO_APPROACH",
             )
             if decision.control_summary is not None:
                 decision.control_summary.update(
                     {
                         "control_source": "edge_guided_forward",
+                        "yaw_source": "edge",
+                        "forward_source": "yolo_or_edge",
                         "transition_reason": "YOLO_APPROACH table edge trusted, stay forward-controlled",
                         "edge_trusted_yolo_approach_handoff": True,
                     }
@@ -388,9 +390,12 @@ class TableDockingMixin:
                 or getattr(obs, "table_bbox_touch_right", getattr(obs, "yolo_bbox_touch_right", False))
             )
             edge_guided = bool((getattr(obs, "edge_valid", False) or getattr(obs, "edge_trusted", False)) and yaw_err <= hard_yaw)
-            next_state = State.YOLO_APPROACH if (edge_guided or abs(center_error) <= hard_limit) else State.YOLO_ACQUIRE_ALIGN
-            self._transition(next_state, f"table signal found cx_norm={cx_norm:.3f} center_error={center_error:.3f}")
             if edge_guided:
+                next_state = State.EDGE_ADJUST
+            else:
+                next_state = State.YOLO_APPROACH if abs(center_error) <= hard_limit else State.YOLO_ACQUIRE_ALIGN
+            self._transition(next_state, f"table signal found cx_norm={cx_norm:.3f} center_error={center_error:.3f}")
+            if next_state == State.EDGE_ADJUST:
                 decision = self.controller.fov_table_approach_cmd(obs, phase="PLANE_APPROACH", mode="EDGE_ADJUST")
                 if decision.control_summary is not None:
                     decision.control_summary.update(

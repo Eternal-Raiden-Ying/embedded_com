@@ -840,7 +840,7 @@ class MotionController:
             return "coarse_align"
         if mode_text in {"FINAL_LOCK", "FINAL_SLOW_STOP"} or phase_text == "PLANE_STOP":
             return "final_lock"
-        if mode_text in {"CONTROLLED_APPROACH", "EDGE_ADJUST"}:
+        if mode_text in {"CONTROLLED_APPROACH", "EDGE_ADJUST", "YOLO_APPROACH"}:
             return "controlled_approach"
         return "search"
 
