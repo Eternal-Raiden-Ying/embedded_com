@@ -36,6 +36,36 @@ def canonical_vision_obs_class(value: Any) -> str:
     return text if text in ALLOWED_VISION_OBS_CLASSES else "control"
 
 
+def compute_bbox_control_geometry(obs: Optional["TableEdgeObs"]) -> Dict[str, Any]:
+    out = {
+        "bbox_cx_norm_control": None,
+        "bbox_center_error_control": None,
+        "bbox_center_source": "unavailable",
+        "bbox_xyxy_for_control": None,
+        "bbox_width_norm_control": None,
+        "bbox_center_valid": False,
+    }
+    if obs is None:
+        return out
+    center = getattr(obs, "yolo_bbox_center_x_norm", None)
+    if center is not None:
+        out.update(bbox_cx_norm_control=float(center), bbox_center_source="yolo_bbox_center_x_norm", bbox_center_valid=True)
+    else:
+        bbox = getattr(obs, "table_bbox_xyxy", None)
+        shape = getattr(obs, "rgb_shape", None)
+        if isinstance(bbox, (list, tuple)) and len(bbox) >= 4 and isinstance(shape, (list, tuple)) and len(shape) >= 2:
+            w = float(shape[1])
+            if w > 0.0:
+                x0, x1 = float(bbox[0]), float(bbox[2])
+                out.update(bbox_cx_norm_control=(x0 + x1) * 0.5 / w,
+                           bbox_width_norm_control=max(0.0, (x1 - x0) / w),
+                           bbox_center_source="table_bbox_xyxy_rgb_shape",
+                           bbox_xyxy_for_control=list(bbox[:4]), bbox_center_valid=True)
+    if out["bbox_center_valid"]:
+        out["bbox_center_error_control"] = float(out["bbox_cx_norm_control"]) - 0.5
+    return out
+
+
 def _payload_ts(payload: Dict[str, Any]) -> float:
     if payload.get("ts") is not None:
         return float(payload.get("ts"))

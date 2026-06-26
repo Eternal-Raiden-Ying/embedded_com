@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional, Tuple
 from ..config.schema import CarMotionConfig, ControlThresholds
 from .docking_controller import DockingController
 from .types import DockingControlConfig, EdgeControlObservation
-from ..ipc.protocol import ArmCommand, CmdVel, HomeTagObs, TableEdgeObs, TargetObs, now_ts
+from ..ipc.protocol import ArmCommand, CmdVel, HomeTagObs, TableEdgeObs, TargetObs, now_ts, compute_bbox_control_geometry
 from ..runtime.perception_semantics import build_table_perception_semantics, table_bbox_found as semantic_table_bbox_found
 from ..runtime.control_authority import normalize_control_source
 
@@ -357,19 +357,20 @@ class MotionController:
     ) -> MotionDecision:
         if not bool(getattr(self.cfg, "yolo_table_control_enable", True)):
             return self.search_table_cmd(turn_sign=turn_sign)
-        cx = self._clamp(float(getattr(obs, "table_cx_norm", 0.0) or 0.0), -1.0, 1.0)
-        bbox_cx = getattr(obs, "yolo_bbox_center_x_norm", None) if obs is not None else None
-        if bbox_cx is not None:
-            center_error = self._clamp(float(bbox_cx) - 0.5, -0.5, 0.5)
-        else:
-            center_error = float(cx * 0.5)
+        geom = compute_bbox_control_geometry(obs)
+        cx_norm = geom["bbox_cx_norm_control"]
+        center_error = geom["bbox_center_error_control"]
         gain = float(getattr(self.car_cfg, "yolo_table_yaw_gain", 0.20) or 0.20)
         max_wz = abs(float(getattr(self.car_cfg, "yolo_table_max_wz_radps", 0.06) or 0.06))
-        # Positive yaw speed is a right/clockwise turn. A bbox right of image
-        # center therefore must produce a positive yaw command.
-        wz_raw = center_error * 2.0 * gain
-        wz = self._clamp(wz_raw, -max_wz, max_wz)
-        if abs(wz) < 0.02:
+        if center_error is not None:
+            # Positive yaw speed is a right/clockwise turn. A bbox right of image
+            # center therefore must produce a positive yaw command.
+            wz_raw = center_error * 2.0 * gain
+            wz = self._clamp(wz_raw, -max_wz, max_wz)
+            if abs(wz) < 0.02:
+                wz = 0.0
+        else:
+            wz_raw = 0.0
             wz = 0.0
         mode_name = str(mode or "SEARCH_TABLE").upper().strip() or "SEARCH_TABLE"
         source_name = normalize_control_source(control_source or "yolo_forward")
@@ -388,7 +389,7 @@ class MotionController:
             abs(float(getattr(self.car_cfg, "table_vx_deadband_mps", 0.004) or 0.004)) * 2.0,
             min(forward_vx, forward_vx * 0.75),
         )
-        yolo_forward_allowed = bool(abs(center_error) <= center_hard_limit)
+        yolo_forward_allowed = bool(center_error is not None and abs(center_error) <= center_hard_limit)
         if source_name in {"yolo_forward", "yolo_track_forward"}:
             if yolo_forward_allowed:
                 assist_vx = forward_vx if abs(center_error) <= center_good_limit and not touch_side else slow_vx
@@ -418,13 +419,13 @@ class MotionController:
             {
                 "control_source": source_name,
                 "approach_source": "yolo_table_bbox",
-                "bbox_cx_norm": float((cx + 1.0) * 0.5),
-                "target_offset": float(center_error),
-                "center_error": float(center_error),
+                "bbox_cx_norm": float(cx_norm) if cx_norm is not None else None,
+                "target_offset": float(center_error) if center_error is not None else None,
+                "center_error": float(center_error) if center_error is not None else None,
                 "yolo_forward_center_good_limit": float(center_good_limit),
                 "yolo_forward_center_hard_limit": float(center_hard_limit),
                 "yolo_forward_allowed": bool(yolo_forward_allowed),
-                "table_cx_norm_signed": float(cx),
+                "table_cx_norm_signed": float(center_error * 2.0) if center_error is not None else None,
                 "yolo_yaw_gain": float(gain),
                 "yolo_max_wz_radps": float(max_wz),
                 "yolo_wz_raw": float(wz_raw),
@@ -440,7 +441,7 @@ class MotionController:
                 "control_intent": "forward" if assist_vx > 0.0 else "search",
                 "allow_forward": bool(assist_vx > 0.0),
                 "allow_rotate": bool(abs(wz) > 1e-9),
-                "forward_block_reason": "" if assist_vx > 0.0 else ("yolo_bbox_touch_side_rotate_only" if touch_side else "yolo_center_error_too_large_rotate_only"),
+                "forward_block_reason": "" if assist_vx > 0.0 else ("yolo_bbox_touch_side_rotate_only" if touch_side else "yolo_center_error_too_large_rotate_only" if center_error is not None else "center_unavailable"),
                 "edge_guidance_available": bool(edge_guidance_available),
                 "rotate_block_reason": "" if abs(wz) > 1e-9 else "yolo_track_forward",
                 "bbox_visible_but_edge_invalid": bool(source_name in {"yolo_forward", "yolo_track_forward"} and not bool(getattr(obs, "edge_trusted", False))),

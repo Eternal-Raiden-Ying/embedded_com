@@ -50,6 +50,13 @@ def main() -> None:
         "table_bbox_xyxy": [320, 20, 640, 200], "rgb_shape": [480, 640]})
     xyxy_geom = TableDockingMixin._bbox_control_geometry(SimpleNamespace(), xyxy_obs)
     assert xyxy_geom["bbox_center_valid"] and abs(xyxy_geom["bbox_cx_norm_control"] - 0.75) < 1e-6
+
+    # Test unavailable bbox center
+    invalid_obs = TableEdgeObs.from_dict({"ts": 1.0, "table_found": True, "edge_found": False})
+    invalid_geom = TableDockingMixin._bbox_control_geometry(SimpleNamespace(), invalid_obs)
+    assert not invalid_geom["bbox_center_valid"]
+    assert invalid_geom["bbox_cx_norm_control"] is None
+    assert invalid_geom["bbox_center_error_control"] is None
     # Edge/depth facts without a current bbox must remain a rotate-only search.
     a = auth("YOLO_APPROACH", bbox=False, edge=True, depth_stop=True)
     assert (a.control_source, a.allow_forward, a.allow_rotate) == ("local_rotate_search", False, True)

@@ -20,6 +20,7 @@ from ...ipc.protocol import (
     make_tts_event,
     make_vision_idle,
     make_vision_req,
+    compute_bbox_control_geometry,
 )
 from ...bridge.arm_protocol import parse_arm_response
 from ...utils.grasp_utils import grasp_to_pose_params
@@ -48,28 +49,7 @@ from ..core_types import (
 
 class TableDockingMixin:
     def _bbox_control_geometry(self, obs: Optional[TableEdgeObs]) -> Dict[str, object]:
-        out = {"bbox_cx_norm_control": None, "bbox_center_error_control": None,
-               "bbox_center_source": "unavailable", "bbox_xyxy_for_control": None,
-               "bbox_width_norm_control": None, "bbox_center_valid": False}
-        if obs is None:
-            return out
-        center = getattr(obs, "yolo_bbox_center_x_norm", None)
-        if center is not None:
-            out.update(bbox_cx_norm_control=float(center), bbox_center_source="yolo_bbox_center_x_norm", bbox_center_valid=True)
-        else:
-            bbox = getattr(obs, "table_bbox_xyxy", None)
-            shape = getattr(obs, "rgb_shape", None)
-            if isinstance(bbox, (list, tuple)) and len(bbox) >= 4 and isinstance(shape, (list, tuple)) and len(shape) >= 2:
-                w = float(shape[1])
-                if w > 0.0:
-                    x0, x1 = float(bbox[0]), float(bbox[2])
-                    out.update(bbox_cx_norm_control=(x0 + x1) * 0.5 / w,
-                               bbox_width_norm_control=max(0.0, (x1 - x0) / w),
-                               bbox_center_source="table_bbox_xyxy_rgb_shape",
-                               bbox_xyxy_for_control=list(bbox[:4]), bbox_center_valid=True)
-        if out["bbox_center_valid"]:
-            out["bbox_center_error_control"] = float(out["bbox_cx_norm_control"]) - 0.5
-        return out
+        return compute_bbox_control_geometry(obs)
 
     def _bbox_yaw_hold_valid(self, obs: Optional[TableEdgeObs]) -> bool:
         """A soft-stale/held bbox center may still own rotate-only control."""
@@ -478,16 +458,6 @@ class TableDockingMixin:
                 return True
         return False
 
-    def _get_bbox_center_x_norm(self, obs: Optional[TableEdgeObs]) -> float:
-        if obs is not None:
-            if getattr(obs, "yolo_bbox_center_x_norm", None) is not None:
-                return float(obs.yolo_bbox_center_x_norm)
-            if getattr(obs, "table_cx_norm", None) is not None:
-                return (float(obs.table_cx_norm) + 1.0) * 0.5
-        if self.ctx.last_table_center_x_norm is not None:
-            return float(self.ctx.last_table_center_x_norm)
-        return 0.5
-
     def _table_motion_signal_available(self, obs: Optional[TableEdgeObs]) -> bool:
         """Only a current, fresh YOLO bbox may leave local rotate search."""
         return self._table_yolo_reliable(obs)
@@ -558,8 +528,11 @@ class TableDockingMixin:
         self.ctx.bbox_lost_hold_active = False
         self.ctx.bbox_lost_since_mono = 0.0
         self._reset_table_loss()
-        cx_norm = self._get_bbox_center_x_norm(obs)
-        center_error = float(cx_norm) - 0.5
+        geom = self._bbox_control_geometry(obs)
+        cx_norm = geom["bbox_cx_norm_control"]
+        center_error = geom["bbox_center_error_control"]
+        if center_error is None:
+            return self._bbox_lost_hold_or_search(obs, "YOLO_ACQUIRE_ALIGN")
         hard_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.25) or 0.25))
         self._annotate_hard_yaw_gate(obs)
         yaw_err = abs(float(getattr(obs, "yaw_err_rad", 0.0) or 0.0))
@@ -757,44 +730,46 @@ class TableDockingMixin:
                 return decision
         level = self._control_level(obs)
         if obs is not None and self._table_motion_signal_available(obs):
-            cx_norm = self._get_bbox_center_x_norm(obs)
-            center_error = float(cx_norm) - 0.5
-            hard_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.25) or 0.25))
-            self._annotate_hard_yaw_gate(obs)
-            yaw_err = abs(float(getattr(obs, "yaw_err_rad", 0.0) or 0.0))
-            hard_yaw = max(
-                abs(float(getattr(self.car_cfg, "table_approach_yaw_realign_rad", 0.16) or 0.16)),
-                abs(float(getattr(self.car_cfg, "table_edge_hard_rotate_only_yaw_rad", 0.45) or 0.45)),
-            )
-            touch_side = bool(
-                getattr(obs, "table_bbox_touch_left", getattr(obs, "yolo_bbox_touch_left", False))
-                or getattr(obs, "table_bbox_touch_right", getattr(obs, "yolo_bbox_touch_right", False))
-            )
-            edge_guided = bool((getattr(obs, "edge_valid", False) or getattr(obs, "edge_trusted", False)) and yaw_err <= hard_yaw)
-            if edge_guided:
-                next_state = State.EDGE_ADJUST
-            else:
-                next_state = State.YOLO_APPROACH if abs(center_error) <= hard_limit else State.YOLO_ACQUIRE_ALIGN
-            self._transition(next_state, f"table signal found cx_norm={cx_norm:.3f} center_error={center_error:.3f}")
-            if next_state == State.EDGE_ADJUST:
-                decision = self.controller.fov_table_approach_cmd(obs, phase="PLANE_APPROACH", mode="EDGE_ADJUST")
-                if decision.control_summary is not None:
-                    decision.control_summary.update(
-                        {
-                            "control_source": "edge_guided_forward",
-                            "transition_reason": self.ctx.last_enter_reason,
-                            "edge_trusted_search_handoff": True,
-                        }
-                    )
+            geom = self._bbox_control_geometry(obs)
+            cx_norm = geom["bbox_cx_norm_control"]
+            center_error = geom["bbox_center_error_control"]
+            if center_error is not None:
+                hard_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.25) or 0.25))
+                self._annotate_hard_yaw_gate(obs)
+                yaw_err = abs(float(getattr(obs, "yaw_err_rad", 0.0) or 0.0))
+                hard_yaw = max(
+                    abs(float(getattr(self.car_cfg, "table_approach_yaw_realign_rad", 0.16) or 0.16)),
+                    abs(float(getattr(self.car_cfg, "table_edge_hard_rotate_only_yaw_rad", 0.45) or 0.45)),
+                )
+                touch_side = bool(
+                    getattr(obs, "table_bbox_touch_left", getattr(obs, "yolo_bbox_touch_left", False))
+                    or getattr(obs, "table_bbox_touch_right", getattr(obs, "yolo_bbox_touch_right", False))
+                )
+                edge_guided = bool((getattr(obs, "edge_valid", False) or getattr(obs, "edge_trusted", False)) and yaw_err <= hard_yaw)
+                if edge_guided:
+                    next_state = State.EDGE_ADJUST
+                else:
+                    next_state = State.YOLO_APPROACH if abs(center_error) <= hard_limit else State.YOLO_ACQUIRE_ALIGN
+                self._transition(next_state, f"table signal found cx_norm={cx_norm:.3f} center_error={center_error:.3f}")
+                if next_state == State.EDGE_ADJUST:
+                    decision = self.controller.fov_table_approach_cmd(obs, phase="PLANE_APPROACH", mode="EDGE_ADJUST")
+                    if decision.control_summary is not None:
+                        decision.control_summary.update(
+                            {
+                                "control_source": "edge_guided_forward",
+                                "transition_reason": self.ctx.last_enter_reason,
+                                "edge_trusted_search_handoff": True,
+                            }
+                        )
+                    return decision
+                decision = self.controller.yolo_table_search_cmd(
+                    obs,
+                    turn_sign=self.ctx.relocate_turn_sign,
+                    mode=next_state.value,
+                    reason="search_table_yolo_track_forward" if next_state == State.YOLO_APPROACH else "search_table_yolo_rotate_only",
+                    control_source="yolo_track_forward" if next_state == State.YOLO_APPROACH else "local_rotate_search",
+                )
                 return decision
-            decision = self.controller.yolo_table_search_cmd(
-                obs,
-                turn_sign=self.ctx.relocate_turn_sign,
-                mode=next_state.value,
-                reason="search_table_yolo_track_forward" if next_state == State.YOLO_APPROACH else "search_table_yolo_rotate_only",
-                control_source="yolo_track_forward" if next_state == State.YOLO_APPROACH else "local_rotate_search",
-            )
-            return decision
         # Without table bbox, docking/edge must not drive state transitions.
         # It can still be logged by vision, but control falls back to local rotate search.
         self.ctx.table_found_frames = 0
@@ -1377,9 +1352,9 @@ class TableDockingMixin:
     def _yolo_table_status(self, obs: Optional[TableEdgeObs]) -> Dict[str, object]:
         if obs is None:
             return {"visible": False, "fresh": False, "age_ms": None}
-        bbox = getattr(obs, "table_bbox_xyxy", None)
-        has_bbox = isinstance(bbox, (list, tuple)) and len(bbox) >= 4
-        has_center = getattr(obs, "table_cx_norm", None) is not None or getattr(obs, "yolo_bbox_center_x_norm", None) is not None
+        geom = self._bbox_control_geometry(obs)
+        has_bbox = geom["bbox_xyxy_for_control"] is not None
+        has_center = geom["bbox_center_valid"]
         yolo_control = bool(getattr(obs, "yolo_table_control_valid", False) or getattr(obs, "table_bbox_control_valid", False))
         # Legacy table_bbox_found/control_valid may be held/fallback state and
         # must not grant a new forward approach without a current detection.
@@ -1499,8 +1474,9 @@ class TableDockingMixin:
             return True
         if obs.yaw_err_rad is not None:
             return abs(float(obs.yaw_err_rad)) <= self._align_to_approach_yaw_rad()
-        if obs.table_cx_norm is not None:
-            return abs(float(obs.table_cx_norm)) <= 0.12
+        geom = self._bbox_control_geometry(obs)
+        if geom["bbox_center_valid"]:
+            return abs(float(geom["bbox_center_error_control"])) <= 0.06
         return False
 
     def _edge_ready(self, obs: Optional[TableEdgeObs]) -> bool:
