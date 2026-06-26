@@ -197,5 +197,8 @@ class RecoveryMixin:
             self.ctx.no_progress_recovery_count += 1
             self._transition(State.NO_PROGRESS_RECOVERY, f"{reason}，准备重试第 {self.ctx.no_progress_recovery_count} 次")
             return self.controller.leave_edge_cmd()
-        self._transition(State.NEXT_TABLE, reason)
-        return self.controller.next_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+        if bool(getattr(self.cfg, "multi_table_enabled", False)):
+            self._transition(State.NEXT_TABLE, reason)
+            return self.controller.next_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+        self._transition(State.SEARCH_TABLE, f"{reason}，单桌模式重新搜索桌边")
+        return self.controller.search_table_cmd(*self._get_memory_search_params())

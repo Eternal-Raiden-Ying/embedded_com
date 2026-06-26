@@ -51,6 +51,41 @@ class TableDockingMixin:
     def _bbox_control_geometry(self, obs: Optional[TableEdgeObs]) -> Dict[str, object]:
         return compute_bbox_control_geometry(obs)
 
+    def _bbox_fov_guard_status(self, obs: Optional[TableEdgeObs], geom: Dict[str, object], summary: Optional[Dict[str, object]] = None) -> Dict[str, object]:
+        """Classify bbox framing without turning benign near-field framing into a stop."""
+        summary = summary or {}
+        cx_norm = geom.get("bbox_cx_norm_control")
+        center_error = geom.get("bbox_center_error_control")
+        center_abs = abs(float(center_error)) if center_error is not None else 0.0
+        touch_left = bool(getattr(obs, "table_bbox_touch_left", False)) if obs is not None else False
+        touch_right = bool(getattr(obs, "table_bbox_touch_right", False)) if obs is not None else False
+        touch_bottom = bool(getattr(obs, "table_bbox_touch_bottom", False)) if obs is not None else False
+        side_touch = bool(touch_left or touch_right)
+        area_ratio = float(getattr(obs, "table_bbox_area_ratio", getattr(obs, "yolo_bbox_area_norm", 0.0)) or 0.0) if obs is not None else 0.0
+        guard_frames = max(1, int(getattr(self.car_cfg, "table_bbox_fov_guard_frames", 3) or 3))
+        severe_center = bool(cx_norm is not None and (float(cx_norm) < 0.20 or float(cx_norm) > 0.80))
+        severe_side_streak = bool(
+            side_touch
+            and center_abs > 0.25
+            and int(self.ctx.bbox_fov_violation_streak) >= guard_frames
+        )
+        if bool(summary.get("bbox_fov_guard_active", False)) or severe_center or severe_side_streak:
+            if bool(summary.get("bbox_fov_guard_active", False)):
+                reason = "explicit_bbox_fov_guard"
+            elif severe_center:
+                reason = "bbox_center_extreme"
+            else:
+                reason = "side_touch_center_error_streak"
+            return {"level": "hard", "reason": reason}
+        soft_reasons = []
+        if touch_bottom:
+            soft_reasons.append("touch_bottom")
+        if area_ratio >= 0.35:
+            soft_reasons.append("bbox_area_large")
+        if side_touch and 0.08 <= center_abs <= 0.20:
+            soft_reasons.append("mild_side_touch")
+        return {"level": "soft" if soft_reasons else "none", "reason": "+".join(soft_reasons)}
+
     def _bbox_yaw_hold_valid(self, obs: Optional[TableEdgeObs]) -> bool:
         """A soft-stale/held bbox center may still own rotate-only control."""
         geom = self._bbox_control_geometry(obs)
@@ -153,11 +188,11 @@ class TableDockingMixin:
                 yaw = float(getattr(obs, "yaw_err_rad", 0.0) or 0.0)
                 self.ctx.edge_yaw_ema = yaw if self.ctx.edge_yaw_ema is None else (0.7 * self.ctx.edge_yaw_ema + 0.3 * yaw)
             stable_bbox = self.ctx.bbox_centered_streak >= 2
-            bbox_guard_frames = max(1, int(getattr(self.car_cfg, "table_bbox_fov_guard_frames", 3) or 3))
+            fov_guard = self._bbox_fov_guard_status(obs, geom)
             commit_bbox_safe = bool(
                 center_error is not None
                 and abs(float(center_error)) <= 0.35
-                and int(self.ctx.bbox_fov_violation_streak) < bbox_guard_frames
+                and str(fov_guard["level"]) != "hard"
             )
             recent_edge_good = bool(now - float(self.ctx.last_edge_good_mono or 0.0) <= 0.8)
             commit_coast_ready = bool(
@@ -291,6 +326,9 @@ class TableDockingMixin:
             self.ctx.search_wz_sign_latched = 1 if search_sign >= 0 else -1
             self.ctx.search_wz_latch_until_mono = monotonic_ts() + 0.8
         geom = self._bbox_control_geometry(obs)
+        bbox_fov_guard = self._bbox_fov_guard_status(obs, geom, summary)
+        bbox_fov_guard_level = str(bbox_fov_guard["level"])
+        bbox_fov_guard_reason = str(bbox_fov_guard["reason"])
         center_error = geom["bbox_center_error_control"]
         bbox_wz = 0.0
         deadband = 0.01
@@ -352,9 +390,8 @@ class TableDockingMixin:
             elif any(bool(summary.get(key, False)) for key in ("obstacle_active", "obstacle_stop_active", "base_depth_hard_safety", "base_depth_stop_active", "base_depth_emergency_active", "depth_hard_stop_active", "safety_stop_active")):
                 edge_commit_block_reason = "base_safety"
             else:
-                bbox_guard_frames = max(1, int(getattr(self.car_cfg, "table_bbox_fov_guard_frames", 3) or 3))
-                if bool(summary.get("bbox_fov_guard_active", False)) or int(self.ctx.bbox_fov_violation_streak) >= bbox_guard_frames:
-                    edge_commit_block_reason = "bbox_fov_guard"
+                if bbox_fov_guard_level == "hard":
+                    edge_commit_block_reason = "bbox_fov_guard_hard"
                 else:
                     hard_yaw = abs(float(summary.get("hard_rotate_only_yaw_rad", getattr(self.car_cfg, "table_edge_hard_rotate_only_yaw_rad", 0.45)) or 0.45))
                     edge_yaw_abs = abs(float(summary.get("edge_yaw", getattr(obs, "yaw_err_rad", 0.0) if obs is not None else 0.0) or 0.0))
@@ -404,7 +441,7 @@ class TableDockingMixin:
             summary["pose_found"] = False
             summary["pose_missing_safe_vx_active"] = False
 
-        if edge_commit_block_reason in {"explicit_stop", "hard_stale", "depth_final_stop", "base_safety", "bbox_fov_guard", "edge_yaw_too_large"}:
+        if edge_commit_block_reason in {"explicit_stop", "hard_stale", "depth_final_stop", "base_safety", "bbox_fov_guard_hard", "edge_yaw_too_large"}:
             self.ctx.approach_commit_active = False
         elif phase == "EDGE_GUIDED_APPROACH":
             summary["pose_found"] = False
@@ -421,9 +458,13 @@ class TableDockingMixin:
             "bbox_yaw_owner_enforced": bool(bbox_owner_active),
             "forward_commit_vx": float(forward_commit_vx),
             "pose_gate_ignored_for_phase": bool(edge_guided_commit),
-            "vx_override_reason": "edge_guided_commit" if edge_guided_commit else "",
+            "vx_override_reason": "edge_guided_commit_soft_fov" if edge_guided_commit and bbox_fov_guard_level == "soft" else ("edge_guided_commit" if edge_guided_commit else ""),
             "edge_guided_commit_active": bool(edge_guided_commit),
             "edge_guided_commit_block_reason": edge_commit_block_reason,
+            "bbox_fov_guard_level": bbox_fov_guard_level,
+            "bbox_fov_guard_reason": bbox_fov_guard_reason,
+            "bbox_fov_soft_allowed_forward": bool(bbox_fov_guard_level == "soft" and not edge_commit_block_reason),
+            "bbox_fov_hard_block": bool(bbox_fov_guard_level == "hard"),
             "approach_commit_active": bool(self.ctx.approach_commit_active),
             "forward_coast_active": bool(forward_coast_active),
             "edge_conf_score": float(self.ctx.edge_conf_score),
@@ -470,7 +511,7 @@ class TableDockingMixin:
             explicit_stop_active
             or bool(decision.cmd.brake)
             or bool(depth_status.get("depth_roi_stop_ready"))
-            or edge_commit_block_reason in {"explicit_stop", "hard_stale", "depth_final_stop", "base_safety", "bbox_fov_guard", "edge_yaw_too_large"}
+            or edge_commit_block_reason in {"explicit_stop", "hard_stale", "depth_final_stop", "base_safety", "bbox_fov_guard_hard", "edge_yaw_too_large"}
         )
         active_docking = str(getattr(self.ctx.state, "value", self.ctx.state) or "") in {"YOLO_ACQUIRE_ALIGN", "YOLO_APPROACH", "EDGE_ADJUST"}
         zero_eps = 1e-6
@@ -503,11 +544,16 @@ class TableDockingMixin:
         else:
             self.ctx.zero_cmd_started_mono = 0.0
 
-        # Check approach progress if phase is EDGE_GUIDED_APPROACH and vx > 0
+        # Check progress only after the final authority gate has retained forward motion.
         if phase == "EDGE_GUIDED_APPROACH" and decision.cmd.vx_mps > 0.0:
-            if self._check_approach_progress(obs):
+            progress_timeout = self._check_approach_progress(obs)
+            progress_status = dict(getattr(self, "_last_approach_progress_status", {}) or {})
+            summary.update(progress_status)
+            if progress_timeout:
                 decision = self._enter_no_progress_recovery_or_next("接近无进展超时")
-                summary.update(decision.control_summary)
+                summary = decision.control_summary if decision.control_summary is not None else {}
+                decision.control_summary = summary
+                summary.update(progress_status)
                 summary["final_vx"] = float(decision.cmd.vx_mps)
                 summary["final_vy"] = float(decision.cmd.vy_mps)
                 summary["final_wz"] = float(decision.cmd.wz_radps)
@@ -519,6 +565,15 @@ class TableDockingMixin:
             self.ctx.min_dist_seen = 999.0
             self.ctx.dist_progress_last_refreshed_mono = 0.0
             self.ctx.dist_missing_started_mono = 0.0
+            summary.update({
+                "progress_window_ms": float(getattr(self.cfg, "progress_window_ms", 15000.0) or 15000.0),
+                "min_progress_m": float(getattr(self.cfg, "min_progress_m", 0.010) or 0.010),
+                "no_progress_warning": False,
+                "no_progress_elapsed_ms": 0.0,
+                "no_progress_policy": "forward_required",
+                "progress_recovery_allowed": False,
+                "progress_recovery_block_reason": "final_vx_zero_or_non_edge_phase",
+            })
 
         if phase == "EDGE_GUIDED_APPROACH" and decision.cmd.vx_mps > 0.0 and not safety_stop_active:
             self.ctx.approach_commit_active = True
@@ -618,7 +673,19 @@ class TableDockingMixin:
         return turn_sign, search_src, search_dir
 
     def _check_approach_progress(self, obs: Optional[TableEdgeObs]) -> bool:
-        progress_window_ms = float(getattr(self.cfg, "progress_window_ms", 5000.0) or 5000.0)
+        progress_window_ms = float(getattr(self.cfg, "progress_window_ms", 15000.0) or 15000.0)
+        min_progress_m = float(getattr(self.cfg, "min_progress_m", 0.010) or 0.010)
+        warning_window_ms = min(5000.0, progress_window_ms)
+        status = {
+            "progress_window_ms": progress_window_ms,
+            "min_progress_m": min_progress_m,
+            "no_progress_warning": False,
+            "no_progress_elapsed_ms": 0.0,
+            "no_progress_policy": "slow_forward_tolerated",
+            "progress_recovery_allowed": False,
+            "progress_recovery_block_reason": "within_progress_window",
+        }
+        self._last_approach_progress_status = status
         curr_dist = None
         if obs is not None:
             if obs.dist_err_m is not None:
@@ -633,12 +700,16 @@ class TableDockingMixin:
                 self.ctx.dist_missing_started_mono = now
                 return False
             elapsed_ms = (now - self.ctx.dist_missing_started_mono) * 1000.0
+            status["no_progress_elapsed_ms"] = elapsed_ms
+            status["no_progress_warning"] = bool(elapsed_ms >= warning_window_ms)
             if elapsed_ms >= progress_window_ms:
+                status["progress_recovery_allowed"] = True
+                status["progress_recovery_block_reason"] = ""
                 self._log("warn", f"Approach progress timeout (distance missing): elapsed {elapsed_ms:.1f}ms >= window {progress_window_ms}ms")
                 return True
             return False
 
-        if curr_dist < self.ctx.min_dist_seen - 0.002:
+        if curr_dist < self.ctx.min_dist_seen - min_progress_m:
             self.ctx.min_dist_seen = curr_dist
             self.ctx.dist_progress_last_refreshed_mono = now
             self.ctx.dist_missing_started_mono = 0.0
@@ -649,8 +720,12 @@ class TableDockingMixin:
                 self.ctx.dist_missing_started_mono = 0.0
                 return False
             elapsed_ms = (now - self.ctx.dist_progress_last_refreshed_mono) * 1000.0
+            status["no_progress_elapsed_ms"] = elapsed_ms
+            status["no_progress_warning"] = bool(elapsed_ms >= warning_window_ms)
             if elapsed_ms >= progress_window_ms:
-                self._log("warn", f"Approach progress timeout: distance did not decrease by 2mm for {elapsed_ms:.1f}ms. Min dist seen: {self.ctx.min_dist_seen:.4f}m, current: {curr_dist:.4f}m")
+                status["progress_recovery_allowed"] = True
+                status["progress_recovery_block_reason"] = ""
+                self._log("warn", f"Approach progress timeout: distance did not decrease by {min_progress_m:.3f}m for {elapsed_ms:.1f}ms. Min dist seen: {self.ctx.min_dist_seen:.4f}m, current: {curr_dist:.4f}m")
                 return True
         return False
 

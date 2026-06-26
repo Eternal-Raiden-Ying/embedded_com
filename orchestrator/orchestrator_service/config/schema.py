@@ -168,7 +168,9 @@ class ControlThresholds:
     # Final lock stabilization thresholds
     final_lock_min_hold_ms: int = 800
     final_lock_lost_timeout_ms: int = 1000
-    progress_window_ms: float = 5000.0
+    progress_window_ms: float = 15000.0
+    min_progress_m: float = 0.010
+    multi_table_enabled: bool = False
 
     search_target_init_hold_s: float = 0.25
     target_found_frames_to_confirm: int = 3

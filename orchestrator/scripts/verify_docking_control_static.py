@@ -15,6 +15,7 @@ import numpy as np
 from orchestrator.orchestrator_service.runtime.control_authority import ControlAuthority, decide_table_control_authority
 from orchestrator.orchestrator_service.runtime.perception_semantics import TablePerceptionSemantics
 from orchestrator.orchestrator_service.runtime.states.table_docking import TableDockingMixin
+from orchestrator.orchestrator_service.runtime.states.recovery import RecoveryMixin
 from orchestrator.orchestrator_service.runtime.common import monotonic_ts
 from orchestrator.orchestrator_service.runtime.context import RuntimeContext, State
 from orchestrator.orchestrator_service.runtime.controller import MotionDecision
@@ -274,12 +275,42 @@ def main() -> None:
     assert yaw_blocked.cmd.vx_mps == 0.0
     assert yaw_blocked.control_summary["forward_block_reason"] == "edge_yaw_too_large"
 
+    # A large, bottom-touching bbox with a mild side offset is soft framing:
+    # it must permit the first EDGE_GUIDED_APPROACH forward commit.
     probe = DockingProbe()
-    edge_obs.yaw_err_rad = 0.10
+    soft_fov_obs = bbox_obs(0.36)
+    soft_fov_obs.edge_found = True
+    soft_fov_obs.edge_trusted = True
+    soft_fov_obs.yaw_err_rad = 0.10
+    soft_fov_obs.table_bbox_touch_left = True
+    soft_fov_obs.table_bbox_touch_bottom = True
+    soft_fov_obs.table_bbox_area_ratio = 0.38
+    soft_fov = edge_guided_decision(probe, soft_fov_obs)
+    assert soft_fov.control_summary["bbox_fov_guard_level"] == "soft"
+    assert soft_fov.cmd.vx_mps == 0.020
+    assert soft_fov.control_summary["approach_commit_active"]
+
+    # Extreme center error remains a hard guard.
+    probe = DockingProbe()
+    extreme_fov_obs = bbox_obs(0.10)
+    extreme_fov_obs.edge_found = True
+    extreme_fov_obs.edge_trusted = True
+    extreme_fov = edge_guided_decision(probe, extreme_fov_obs)
+    assert extreme_fov.control_summary["bbox_fov_guard_level"] == "hard"
+    assert extreme_fov.cmd.vx_mps == 0.0
+    assert extreme_fov.control_summary["forward_block_reason"] == "bbox_fov_guard_hard"
+
+    # Side touch, large center error, and an established violation streak are
+    # also hard; touch_bottom alone is never sufficient.
+    probe = DockingProbe()
+    side_hard_obs = bbox_obs(0.80)
+    side_hard_obs.edge_found = True
+    side_hard_obs.edge_trusted = True
+    side_hard_obs.table_bbox_touch_right = True
     probe.ctx.bbox_fov_violation_streak = 3
-    fov_blocked = edge_guided_decision(probe, edge_obs)
+    fov_blocked = edge_guided_decision(probe, side_hard_obs)
+    assert fov_blocked.control_summary["bbox_fov_guard_level"] == "hard"
     assert fov_blocked.cmd.vx_mps == 0.0
-    assert fov_blocked.control_summary["forward_block_reason"] == "bbox_fov_guard"
 
     probe = DockingProbe()
     probe.force_depth_stop = True
@@ -328,7 +359,7 @@ def main() -> None:
     probe = ProgressProbe()
     assert not probe._check_approach_progress(None)
     assert probe.ctx.dist_missing_started_mono > 0.0
-    probe.ctx.dist_missing_started_mono = monotonic_ts() - 5.1
+    probe.ctx.dist_missing_started_mono = monotonic_ts() - 15.1
     assert probe._check_approach_progress(None)
 
     # 1. BBOX_ACQUIRE phase, vx=0, wz!=0. Ensure no-progress is NOT triggered even after 5s
@@ -359,7 +390,8 @@ def main() -> None:
     dec = authority_decision(p_confirm, obs_conf, raw_wz=0.10)
     assert p_confirm.ctx.state != State.NO_PROGRESS_RECOVERY  # Should NOT trigger recovery
 
-    # 3. EDGE_GUIDED_APPROACH phase, vx=0.02. Ensure no-progress IS triggered when distance is constant
+    # 3. Slow EDGE_GUIDED_APPROACH: five seconds of unchanged distance is a
+    # warning only; recovery is not allowed until the 15-second window expires.
     p_approach = DockingProbe()
     p_approach.force_edge_guided = True
     p_approach.ctx.edge_handoff_complete = True
@@ -375,12 +407,40 @@ def main() -> None:
     assert dec.cmd.vx_mps == 0.02
     assert p_approach.ctx.state != State.NO_PROGRESS_RECOVERY
     
-    # Set the last refreshed timestamp to 6 seconds ago to simulate no progress
+    # Five seconds without distance change remains tolerated for vx=0.020.
     p_approach.ctx.dist_progress_last_refreshed_mono = monotonic_ts() - 6.0
-    
-    # Second call should trigger no-progress recovery
+    dec = edge_guided_decision(p_approach, obs_app)
+    assert p_approach.ctx.state != State.NO_PROGRESS_RECOVERY
+    assert dec.cmd.vx_mps == 0.02
+    assert dec.control_summary["no_progress_warning"]
+    assert dec.control_summary["no_progress_policy"] == "slow_forward_tolerated"
+
+    # Only the longer 15-second window may permit strong recovery.
+    p_approach.ctx.dist_progress_last_refreshed_mono = monotonic_ts() - 15.1
     dec = edge_guided_decision(p_approach, obs_app)
     assert p_approach.ctx.state == State.NO_PROGRESS_RECOVERY
+    assert dec.control_summary["progress_recovery_allowed"]
+
+    class RecoveryProbe(RecoveryMixin, TableDockingMixin):
+        def __init__(self, *, multi_table_enabled: bool):
+            self.cfg = ControlThresholds(multi_table_enabled=multi_table_enabled)
+            self.car_cfg = CarMotionConfig()
+            self.ctx = RuntimeContext(state=State.YOLO_APPROACH)
+            self.ctx.no_progress_recovery_count = self.cfg.dock_retry_limit
+            self.controller = MotionController(self.cfg, self.car_cfg)
+
+        def _transition(self, state, _reason):
+            self.ctx.prev_state = self.ctx.state
+            self.ctx.state = state
+
+    # Exhausted no-progress retries remain on the current single-table task by
+    # default; NEXT_TABLE is reserved for explicit multi-table mode.
+    recovery_probe = RecoveryProbe(multi_table_enabled=False)
+    recovery_probe._enter_no_progress_recovery_or_next("static no progress")
+    assert recovery_probe.ctx.state == State.SEARCH_TABLE
+    multi_table_probe = RecoveryProbe(multi_table_enabled=True)
+    multi_table_probe._enter_no_progress_recovery_or_next("static no progress")
+    assert multi_table_probe.ctx.state == State.NEXT_TABLE
 
     # Dwell fallback tests
     def touch_obs(center: float, touch: bool = True) -> TableEdgeObs:
