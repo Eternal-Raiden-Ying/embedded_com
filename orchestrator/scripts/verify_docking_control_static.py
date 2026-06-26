@@ -307,6 +307,44 @@ def main() -> None:
     # Second call should trigger no-progress recovery
     dec = edge_guided_decision(p_approach, obs_app)
     assert p_approach.ctx.state == State.NO_PROGRESS_RECOVERY
+
+    # Dwell fallback tests
+    def touch_obs(center: float, touch: bool = True) -> TableEdgeObs:
+        obs = bbox_obs(center)
+        obs.table_bbox_touch_right = touch
+        obs.edge_found = True
+        obs.edge_trusted = True
+        obs.yaw_err_rad = 0.10
+        obs.dist_err_m = 0.50
+        return obs
+
+    # 1. bbox center 0.75 + touch_right + acquire dwell 未到 -> BBOX_ACQUIRE
+    p_fallback_1 = DockingProbe()
+    p_fallback_1.ctx.control_phase = "BBOX_ACQUIRE"
+    p_fallback_1.ctx.control_phase_since_mono = monotonic_ts() - 0.5
+    p_fallback_1.ctx.bbox_valid_streak = 3
+    obs_fallback_1 = touch_obs(0.75)
+    dec_fallback_1 = authority_decision(p_fallback_1, obs_fallback_1, raw_wz=0.10)
+    assert dec_fallback_1.control_summary["control_phase"] == "BBOX_ACQUIRE"
+
+    # 2. bbox center 0.75 + touch_right + acquire dwell 到达 + edge 可用 -> EDGE_HANDOFF_CONFIRM
+    p_fallback_2 = DockingProbe()
+    p_fallback_2.ctx.control_phase = "BBOX_ACQUIRE"
+    p_fallback_2.ctx.control_phase_since_mono = monotonic_ts() - 2.0
+    p_fallback_2.ctx.bbox_valid_streak = 3
+    obs_fallback_2 = touch_obs(0.75)
+    dec_fallback_2 = authority_decision(p_fallback_2, obs_fallback_2, raw_wz=0.10)
+    assert dec_fallback_2.control_summary["control_phase"] == "EDGE_HANDOFF_CONFIRM"
+
+    # 3. severe touch -> 仍 BBOX_ACQUIRE
+    p_fallback_3 = DockingProbe()
+    p_fallback_3.ctx.control_phase = "BBOX_ACQUIRE"
+    p_fallback_3.ctx.control_phase_since_mono = monotonic_ts() - 2.0
+    p_fallback_3.ctx.bbox_valid_streak = 3
+    obs_fallback_3 = touch_obs(0.90)  # error 0.40 > 0.35
+    dec_fallback_3 = authority_decision(p_fallback_3, obs_fallback_3, raw_wz=0.10)
+    assert dec_fallback_3.control_summary["control_phase"] == "BBOX_ACQUIRE"
+
     print("docking static verification: PASS")
 
 

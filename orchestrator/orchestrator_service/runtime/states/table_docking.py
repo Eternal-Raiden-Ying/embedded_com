@@ -144,9 +144,23 @@ class TableDockingMixin:
                 yaw = float(getattr(obs, "yaw_err_rad", 0.0) or 0.0)
                 self.ctx.edge_yaw_ema = yaw if self.ctx.edge_yaw_ema is None else (0.7 * self.ctx.edge_yaw_ema + 0.3 * yaw)
             stable_bbox = self.ctx.bbox_centered_streak >= 2
+            dwell_fallback = False
+            if not stable_bbox and current_bbox and self.ctx.bbox_valid_streak >= 2:
+                if self.ctx.control_phase == "BBOX_ACQUIRE":
+                    dwell_ms = (now - float(self.ctx.control_phase_since_mono or now)) * 1000.0
+                    if dwell_ms >= 1800.0:
+                        edge_available = bool(
+                            self.controller._edge_trusted(obs)
+                            or (obs is not None and getattr(obs, "edge_found", False) and getattr(obs, "yaw_err_rad", None) is not None and abs(float(obs.yaw_err_rad)) <= 0.45)
+                        )
+                        not_severe = bool(center_error is not None and abs(float(center_error)) <= 0.35)
+                        no_safety = not depth_stop_ready
+                        if edge_available and not_severe and no_safety:
+                            dwell_fallback = True
+
             if depth_stop_ready:
                 phase, reason = "DEPTH_FINAL_STOP", "stable_dynamic_roi_depth"
-            elif not stable_bbox:
+            elif not stable_bbox and not dwell_fallback:
                 self.ctx.edge_handoff_complete = False
                 self.ctx.edge_handoff_started_mono = 0.0
                 phase, reason = "BBOX_ACQUIRE", "bbox_not_centered_or_not_stable"
