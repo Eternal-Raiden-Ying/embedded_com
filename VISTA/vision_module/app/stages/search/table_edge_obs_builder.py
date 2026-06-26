@@ -341,6 +341,16 @@ def merge_table_bbox_from_local_perception(
         if key in out
     }
     if bbox is None and not _has_local_table_bbox_signal(local_perception):
+        if not bool(out.get("table_bbox_current_found", False)):
+            out.update({
+                "table_roi_depth_valid": False,
+                "table_roi_depth_p10": None,
+                "table_roi_depth_median": None,
+                "table_roi_depth_valid_ratio": 0.0,
+                "table_roi_depth_sample_count": 0,
+                "table_roi_depth_bbox": None,
+                "table_roi_depth_bbox_norm": None,
+            })
         return out
     obs_ts = _local_obs_ts(local_perception, tick_ts)
     frame_id = _local_frame_id(local_perception)
@@ -443,6 +453,13 @@ def merge_table_bbox_from_local_perception(
                 "yolo_table_visible": False,
                 "yolo_table_fresh": False,
                 "yolo_table_age_ms": None,
+                "table_roi_depth_valid": False,
+                "table_roi_depth_p10": None,
+                "table_roi_depth_median": None,
+                "table_roi_depth_valid_ratio": 0.0,
+                "table_roi_depth_sample_count": 0,
+                "table_roi_depth_bbox": None,
+                "table_roi_depth_bbox_norm": None,
                 "reason": reason,
                 "source": out.get("source") if protected_edge else "local_perception_no_table_bbox",
             }

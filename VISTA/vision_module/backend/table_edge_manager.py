@@ -4051,7 +4051,10 @@ class TableEdgeManager:
             payload["depth_p10"] = depth_p10
             payload["close_depth_ratio"] = close_depth_ratio
             mapped_roi = payload.get("table_edge_roi") or payload.get("depth_edge_roi") or payload.get("dynamic_roi")
-            roi_stats = table_roi_depth_statistics(depth, depth_scale, mapped_roi)
+            roi_stats = table_roi_depth_statistics(
+                depth, depth_scale, mapped_roi,
+                current_table_bbox_found=bool(payload.get("table_bbox_current_found", False)),
+            )
             roi_stats["table_roi_depth_mapping_source"] = str(payload.get("roi_source") or "")
             payload.update(roi_stats)
 

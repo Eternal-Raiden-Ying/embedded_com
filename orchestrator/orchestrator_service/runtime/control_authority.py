@@ -105,11 +105,13 @@ def decide_table_control_authority(
     if state in {"FINAL_SLOW_STOP", "AT_TABLE_EDGE"}:
         return make("final_slow_stop", "edge" if sem.edge_trusted else "last_stable", "none", "final_lock", False, False, "final_slow_stop_state")
 
+    # A held/fallback bbox is not a current YOLO detection and may not grant
+    # forward motion or edge-guided escalation.
+    if not sem.table_bbox_current_found:
+        return make("local_rotate_search", "none", "none", "none", False, True, "table_bbox_unavailable")
+
     if depth_roi_stop_active:
         return make("depth_roi_stop", "edge" if sem.edge_trusted else "yolo", "none", "roi_depth", False, False, "depth_roi_stop_active")
-
-    if not sem.table_bbox_control_valid:
-        return make("local_rotate_search", "none", "none", "none", False, True, "table_bbox_unavailable")
 
     hard_limit = abs(float(getattr(getattr(cfg, "car", cfg), "yolo_forward_center_hard_limit", 0.25) or 0.25))
     if state == "YOLO_ACQUIRE_ALIGN" or (bbox_center_error is not None and abs(float(bbox_center_error)) > hard_limit):

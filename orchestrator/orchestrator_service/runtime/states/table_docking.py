@@ -179,6 +179,7 @@ class TableDockingMixin:
         return turn_sign, search_src, search_dir
 
     def _check_approach_progress(self, obs: Optional[TableEdgeObs]) -> bool:
+        progress_window_ms = float(getattr(self.cfg, "progress_window_ms", 5000.0) or 5000.0)
         curr_dist = None
         if obs is not None:
             if obs.dist_err_m is not None:
@@ -193,8 +194,8 @@ class TableDockingMixin:
                 self.ctx.dist_missing_started_mono = now
                 return False
             elapsed_ms = (now - self.ctx.dist_missing_started_mono) * 1000.0
-            if elapsed_ms >= self.cfg.progress_window_ms:
-                self._log("warn", f"Approach progress timeout (distance missing): elapsed {elapsed_ms:.1f}ms >= window {self.cfg.progress_window_ms}ms")
+            if elapsed_ms >= progress_window_ms:
+                self._log("warn", f"Approach progress timeout (distance missing): elapsed {elapsed_ms:.1f}ms >= window {progress_window_ms}ms")
                 return True
             return False
 
@@ -209,7 +210,7 @@ class TableDockingMixin:
                 self.ctx.dist_missing_started_mono = 0.0
                 return False
             elapsed_ms = (now - self.ctx.dist_progress_last_refreshed_mono) * 1000.0
-            if elapsed_ms >= self.cfg.progress_window_ms:
+            if elapsed_ms >= progress_window_ms:
                 self._log("warn", f"Approach progress timeout: distance did not decrease by 2mm for {elapsed_ms:.1f}ms. Min dist seen: {self.ctx.min_dist_seen:.4f}m, current: {curr_dist:.4f}m")
                 return True
         return False
@@ -225,15 +226,8 @@ class TableDockingMixin:
         return 0.5
 
     def _table_motion_signal_available(self, obs: Optional[TableEdgeObs]) -> bool:
-        if obs is None:
-            return False
-        return bool(
-            getattr(obs, "yolo_table_visible", False)
-            or getattr(obs, "yolo_table_control_valid", False)
-            or self._table_yolo_reliable(obs)
-            or getattr(obs, "edge_valid", False)
-            or getattr(obs, "edge_trusted", False)
-        )
+        """Only a current, fresh YOLO bbox may leave local rotate search."""
+        return self._table_yolo_reliable(obs)
 
     def _annotate_hard_yaw_gate(self, obs: Optional[TableEdgeObs]) -> None:
         if obs is None:
@@ -262,6 +256,9 @@ class TableDockingMixin:
         setattr(obs, "hard_rotate_only_yaw_rad", float(hard_yaw))
 
     def _approach_from_table_signal(self, obs: TableEdgeObs, *, reason: str) -> MotionDecision:
+        if not self._table_yolo_reliable(obs):
+            # Edge/plane/depth facts are useful diagnostics, never an approach gate.
+            return self.controller.search_table_cmd(*self._get_memory_search_params())
         self._annotate_hard_yaw_gate(obs)
         yaw_abs = abs(float(getattr(obs, "yaw_err_rad", 0.0) or 0.0))
         hard_yaw = float(getattr(obs, "hard_rotate_only_yaw_rad", getattr(self.car_cfg, "table_edge_hard_rotate_only_yaw_rad", 0.45)) or 0.45)
@@ -1108,30 +1105,16 @@ class TableDockingMixin:
         return aliases.get(level, "none")
 
     def _table_yolo_reliable(self, obs: Optional[TableEdgeObs]) -> bool:
-        if obs is None:
-            return False
-        if bool(getattr(obs, "table_bbox_found", False)):
-            return True
-        bbox = getattr(obs, "table_bbox_xyxy", None)
-        if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
-            return True
-        if hasattr(obs, "yolo_table_control_valid") and bool(getattr(obs, "yolo_table_control_valid", False)):
-            return True
-        if hasattr(obs, "yolo_reliable"):
-            return bool(getattr(obs, "yolo_reliable", False))
-        return bool(getattr(obs, "table_confirmed_by_yolo", False)) and getattr(obs, "table_cx_norm", None) is not None
+        return bool(self._yolo_table_status(obs)["fresh"])
 
     def _yolo_table_status(self, obs: Optional[TableEdgeObs]) -> Dict[str, object]:
         if obs is None:
             return {"visible": False, "fresh": False, "age_ms": None}
         bbox = getattr(obs, "table_bbox_xyxy", None)
         has_bbox = isinstance(bbox, (list, tuple)) and len(bbox) >= 4
-        visible = bool(
-            getattr(obs, "yolo_table_visible", False)
-            or getattr(obs, "table_bbox_current_found", False)
-            or getattr(obs, "table_bbox_found", False)
-            or has_bbox
-        )
+        # Legacy table_bbox_found/control_valid may be held/fallback state and
+        # must not grant a new forward approach without a current detection.
+        visible = bool(getattr(obs, "table_bbox_current_found", False) and has_bbox)
         age_ms = getattr(obs, "yolo_table_age_ms", None)
         if age_ms is None:
             age_ms = self._table_obs_age_ms(obs)
@@ -1275,6 +1258,9 @@ class TableDockingMixin:
         }
         if obs is None:
             status["reason"] = "no_recent_obs"
+            return status
+        if not self._table_yolo_reliable(obs):
+            status["reason"] = "no_current_table_bbox"
             return status
         
         # Check table visibility
