@@ -444,6 +444,8 @@ class TableEdgeObs:
     fov_guard_active: bool = False
     fov_guard_reason: Optional[str] = None
     table_bbox_found: bool = False
+    table_bbox_current_found: bool = False
+    table_bbox_control_valid: bool = False
     table_bbox_xyxy: Optional[list] = None
     table_bbox_area_ratio: Optional[float] = None
     table_bbox_conf_raw: Optional[float] = None
@@ -622,6 +624,8 @@ class TableEdgeObs:
             fov_guard_active=bool(payload.get("fov_guard_active", False)),
             fov_guard_reason=_pick_optional_str(payload, "fov_guard_reason"),
             table_bbox_found=bool(payload.get("table_bbox_found", _pick_optional_bbox(payload, "table_bbox_xyxy", "yolo_table_bbox", "table_bbox", "detected_table_bbox") is not None)),
+            table_bbox_current_found=bool(payload.get("table_bbox_current_found", payload.get("yolo_table_visible", False) and payload.get("yolo_table_control_valid", False))),
+            table_bbox_control_valid=bool(payload.get("table_bbox_control_valid", payload.get("yolo_table_control_valid", False))),
             table_bbox_xyxy=_pick_optional_bbox(payload, "table_bbox_xyxy", "yolo_table_bbox", "table_bbox", "detected_table_bbox"),
             table_bbox_area_ratio=_pick_bbox_area_ratio(payload),
             table_bbox_conf_raw=_pick_optional_float(payload, "table_bbox_conf_raw", "yolo_table_conf"),

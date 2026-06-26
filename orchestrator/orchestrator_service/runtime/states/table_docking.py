@@ -95,6 +95,9 @@ class TableDockingMixin:
                 else:
                     phase, reason = "EDGE_HANDOFF_CONFIRM", "waiting_edge_trusted_stability"
         if phase != self.ctx.control_phase:
+            if phase == "SEARCH_SCAN" or self.ctx.control_phase == "SEARCH_SCAN":
+                self.ctx.search_wz_sign_latched = 0
+                self.ctx.search_wz_latch_until_mono = 0.0
             self.ctx.control_phase = phase
             self.ctx.control_phase_since_mono = now
         dwell_ms = max(0.0, (now - float(self.ctx.control_phase_since_mono or now)) * 1000.0)
@@ -144,7 +147,7 @@ class TableDockingMixin:
         phase = auth.control_phase
         # Pick one yaw owner after raw controller safety/limit generation; never blend.
         search_sign = int(self.ctx.search_wz_sign_latched or self.ctx.relocate_turn_sign or 1)
-        if phase == "SEARCH_SCAN" and monotonic_ts() >= float(self.ctx.search_wz_latch_until_mono or 0.0):
+        if phase == "SEARCH_SCAN" and not self.ctx.search_wz_sign_latched:
             search_sign, _, _ = self._get_memory_search_params()
             self.ctx.search_wz_sign_latched = 1 if search_sign >= 0 else -1
             self.ctx.search_wz_latch_until_mono = monotonic_ts() + 0.8
@@ -168,6 +171,9 @@ class TableDockingMixin:
             "edge_trusted_streak": int(self.ctx.edge_trusted_streak), "edge_yaw": float(getattr(obs, "yaw_err_rad", 0.0) or 0.0) if obs else 0.0,
             "edge_yaw_ema": self.ctx.edge_yaw_ema, "bbox_wz_sign": bbox_sign, "edge_wz_sign": edge_sign,
             "yaw_conflict": yaw_conflict, "search_wz_sign_latched": int(self.ctx.search_wz_sign_latched),
+            "search_latch_age_ms": float(max(0.0, (monotonic_ts() - (float(self.ctx.search_wz_latch_until_mono or monotonic_ts()) - 0.8)) * 1000.0)),
+            "search_latch_reason": str(self.ctx.current_search_direction_reason or "latched_search_direction"),
+            "wz_sign_final": sign(float(decision.cmd.wz_radps)),
             "edge_handoff_complete": bool(self.ctx.edge_handoff_complete), "handoff_timeout": bool(self.ctx.edge_handoff_timeout),
             "phase_dwell_ms": float(max(0.0, (monotonic_ts() - float(self.ctx.control_phase_since_mono or monotonic_ts())) * 1000.0)),
         })
@@ -1205,9 +1211,14 @@ class TableDockingMixin:
             return {"visible": False, "fresh": False, "age_ms": None}
         bbox = getattr(obs, "table_bbox_xyxy", None)
         has_bbox = isinstance(bbox, (list, tuple)) and len(bbox) >= 4
+        has_center = getattr(obs, "table_cx_norm", None) is not None or getattr(obs, "yolo_bbox_center_x_norm", None) is not None
+        yolo_control = bool(getattr(obs, "yolo_table_control_valid", False) or getattr(obs, "table_bbox_control_valid", False))
         # Legacy table_bbox_found/control_valid may be held/fallback state and
         # must not grant a new forward approach without a current detection.
-        visible = bool(getattr(obs, "table_bbox_current_found", False) and has_bbox)
+        visible = bool(
+            getattr(obs, "table_bbox_current_found", False)
+            or (bool(getattr(obs, "yolo_table_visible", False)) and yolo_control and (has_bbox or has_center))
+        )
         age_ms = getattr(obs, "yolo_table_age_ms", None)
         if age_ms is None:
             age_ms = self._table_obs_age_ms(obs)

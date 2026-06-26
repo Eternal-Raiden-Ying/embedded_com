@@ -2574,6 +2574,9 @@ class OrchestratorService(BaseModule):
         cx_norm = summary.get("bbox_cx_norm")
         if cx_norm is None:
             cx_norm = summary.get("yolo_bbox_center_x_norm")
+        if cx_norm is None:
+            raw_cx = summary.get("table_cx_norm")
+            cx_norm = (self._motion_num(raw_cx) + 1.0) * 0.5 if raw_cx is not None else None
         center_error = summary.get("center_error")
         if center_error is None and cx_norm is not None:
             center_error = self._motion_num(cx_norm) - 0.5
@@ -2636,6 +2639,9 @@ class OrchestratorService(BaseModule):
             "handoff_complete": bool(summary.get("edge_handoff_complete", False)),
             "handoff_timeout": bool(summary.get("handoff_timeout", False)),
             "phase_dwell_ms": summary.get("phase_dwell_ms", 0.0),
+            "search_latch_age_ms": summary.get("search_latch_age_ms", 0.0),
+            "search_latch_reason": summary.get("search_latch_reason", ""),
+            "wz_sign_final": summary.get("wz_sign_final", 0),
         }
         self.run_logger.write_jsonl("motion_gate_trace", trace)
         sig = (
@@ -2657,6 +2663,7 @@ class OrchestratorService(BaseModule):
                 "[MOTION_GATE_TRACE] "
                 f"state={trace['state']} control_source={trace['control_source']} "
                 f"control_phase={trace['control_phase']} phase_reason={trace['phase_reason']} "
+                f"search_latch={trace['search_wz_sign_latched']} latch_age_ms={trace['search_latch_age_ms']:.0f} wz_sign_final={trace['wz_sign_final']} "
                 f"yaw_source={yaw_source} forward_source={forward_source} stop_source={stop_source} "
                 f"allow_forward={int(trace['allow_forward'])} allow_rotate={int(trace['allow_rotate'])} "
                 f"vx_mps={vx:.3f} vy_mps={vy:.3f} wz_radps={wz:.3f} block_reason={block_reason} "

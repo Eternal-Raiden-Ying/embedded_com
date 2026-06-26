@@ -16,6 +16,7 @@ from orchestrator.orchestrator_service.runtime.control_authority import decide_t
 from orchestrator.orchestrator_service.runtime.perception_semantics import TablePerceptionSemantics
 from orchestrator.orchestrator_service.runtime.states.table_docking import TableDockingMixin
 from orchestrator.orchestrator_service.runtime.common import monotonic_ts
+from orchestrator.orchestrator_service.ipc.protocol import TableEdgeObs
 from vision_module.backend.table_roi_depth import table_roi_depth_statistics
 from vision_module.app.stages.search.table_edge_obs_builder import merge_table_bbox_from_local_perception
 
@@ -32,6 +33,13 @@ def auth(state: str, *, bbox: bool, edge: bool = False, error: float = 0.0, dept
 
 
 def main() -> None:
+    vista_obs = TableEdgeObs.from_dict({
+        "ts": 1.0, "table_found": True, "edge_found": False,
+        "yolo_table_visible": True, "yolo_table_fresh": True, "yolo_table_control_valid": True,
+        "table_cx_norm": 0.70, "table_bbox_touch_right": True,
+    })
+    assert vista_obs.table_bbox_current_found and vista_obs.table_bbox_control_valid
+    assert vista_obs.table_cx_norm == 0.70 and vista_obs.table_bbox_touch_right
     # Edge/depth facts without a current bbox must remain a rotate-only search.
     a = auth("YOLO_APPROACH", bbox=False, edge=True, depth_stop=True)
     assert (a.control_source, a.allow_forward, a.allow_rotate) == ("local_rotate_search", False, True)
