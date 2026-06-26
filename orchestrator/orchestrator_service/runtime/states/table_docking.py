@@ -331,6 +331,22 @@ class TableDockingMixin:
         if auth.allow_rotate and raw_rotate_reason and any(token in raw_rotate_reason.lower() for token in safety_tokens):
             summary["rotate_block_reason"] = raw_rotate_reason
             summary["block_reason"] = raw_rotate_reason
+
+        # Force bbox acquire yaw owner enforcement
+        if phase == "BBOX_ACQUIRE" and center_error is not None and abs(float(center_error)) > deadband:
+            safety_stop = (
+                explicit_stop_active
+                or bool(decision.cmd.brake)
+                or any(bool(summary.get(key, False)) for key in ("emergency_stop_active", "car_estop", "estop_active"))
+                or any(bool(summary.get(key, False)) for key in ("obstacle_active", "obstacle_stop_active", "base_depth_hard_safety", "base_depth_stop_active", "base_depth_emergency_active", "depth_hard_stop_active", "safety_stop_active"))
+            )
+            if not safety_stop:
+                decision.cmd.vx_mps = 0.0
+                decision.cmd.vy_mps = 0.0
+                decision.cmd.wz_radps = bbox_wz
+                bbox_owner_active = True
+                summary["bbox_yaw_owner_enforced"] = True
+
         # Always expose the final axis values, including a pre-existing safety stop.
         summary["final_vx"] = float(decision.cmd.vx_mps)
         summary["final_vy"] = float(decision.cmd.vy_mps)
