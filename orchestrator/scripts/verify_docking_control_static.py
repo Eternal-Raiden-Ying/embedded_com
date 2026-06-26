@@ -211,6 +211,8 @@ def main() -> None:
     lost = bbox_obs(0.5, found=False)
     held = probe._bbox_lost_hold_or_search(lost, "YOLO_APPROACH")
     assert held.control_summary["bbox_lost_hold_active"]
+    assert held.cmd.wz_radps != 0.0
+    assert held.cmd.vx_mps == 0.0
     assert probe.ctx.state == State.YOLO_APPROACH
     assert probe.ctx.bbox_valid_streak == 3 and probe.ctx.edge_handoff_complete
     probe.ctx.bbox_lost_since_mono = monotonic_ts() - float(probe.cfg.table_loss_hold_s) - 0.1

@@ -68,9 +68,18 @@ class TableDockingMixin:
         stale_level = str(self.controller._stale_guard(obs).get("stale_level") or "fresh")
         hard_lost = stale_level in {"hard_stale", "dead"}
         if not hard_lost and hold_age_s < hold_limit_s:
-            decision = self.controller.stop_cmd(mode)
-            summary = decision.control_summary if decision.control_summary is not None else {}
-            decision.control_summary = summary
+            last_yaw = getattr(self.ctx, "last_bbox_yaw_cmd", 0.0)
+            if abs(last_yaw) > 1e-6:
+                wz = last_yaw
+            else:
+                search_sign = int(self.ctx.search_wz_sign_latched or self.ctx.relocate_turn_sign or 1)
+                wz = abs(float(self.car_cfg.search_table_wz_radps)) * search_sign
+            cmd = self.controller._cmd(mode, vx=0.0, wz=wz)
+            decision = MotionDecision(
+                cmd=cmd,
+                control_summary=self.controller._summary(mode, cmd, obs, reason="bbox_lost_hold_rotate")
+            )
+            summary = decision.control_summary
             summary.update(
                 {
                     "bbox_lost_hold_active": True,
@@ -81,6 +90,13 @@ class TableDockingMixin:
                     "edge_handoff_complete": bool(self.ctx.edge_handoff_complete),
                     "bbox_valid_streak": int(self.ctx.bbox_valid_streak),
                     "bbox_centered_streak": int(self.ctx.bbox_centered_streak),
+                    "control_source": "bbox_lost_hold",
+                    "yaw_source": "last_bbox_yaw" if abs(last_yaw) > 1e-6 else "search",
+                    "allow_forward": False,
+                    "allow_rotate": True,
+                    "vx_mps": 0.0,
+                    "vy_mps": 0.0,
+                    "wz_radps": float(wz),
                 }
             )
             return decision
@@ -190,22 +206,23 @@ class TableDockingMixin:
         summary = decision.control_summary if decision.control_summary is not None else {}
         decision.control_summary = summary
         if bool(summary.get("bbox_lost_hold_active", False)):
+            wz = float(summary.get("wz_radps", 0.0))
             decision.cmd.vx_mps = 0.0
             decision.cmd.vy_mps = 0.0
-            decision.cmd.wz_radps = 0.0
+            decision.cmd.wz_radps = wz
             summary.update(
                 {
                     "control_source": "bbox_lost_hold",
-                    "yaw_source": "none",
+                    "yaw_source": str(summary.get("yaw_source", "none")),
                     "forward_source": "none",
                     "allow_forward": False,
-                    "allow_rotate": False,
+                    "allow_rotate": True,
                     "forward_block_reason": "bbox_lost_hold",
-                    "rotate_block_reason": "bbox_lost_hold",
+                    "rotate_block_reason": "",
                     "authority_applied": True,
                     "vx_mps": 0.0,
                     "vy_mps": 0.0,
-                    "wz_radps": 0.0,
+                    "wz_radps": wz,
                 }
             )
             return decision
@@ -236,6 +253,7 @@ class TableDockingMixin:
             bbox_wz = float(center_error) * 2.0 * float(getattr(self.car_cfg, "yolo_table_yaw_gain", 0.20) or 0.20)
             max_wz = abs(float(getattr(self.car_cfg, "yolo_table_max_wz_radps", 0.06) or 0.06))
             bbox_wz = max(-max_wz, min(max_wz, bbox_wz))
+            self.ctx.last_bbox_yaw_cmd = bbox_wz
         edge_wz = float(summary.get("edge_yaw_cmd", summary.get("wz_from_plane", 0.0)) or 0.0)
         sign = lambda value: 0 if abs(value) < deadband else (1 if value > 0.0 else -1)
         bbox_sign, edge_sign = sign(bbox_wz), sign(edge_wz)

@@ -1022,7 +1022,8 @@ class OrchestratorService(BaseModule):
             or "perception_dead" in stale_reason
             or soft_stale_timed_out
         )
-        hard_stale = bool(hard_stale_raw and not search_allows_edge_stale and not yolo_allows_edge_stale)
+        bbox_lost_hold_active = bool(summary.get("bbox_lost_hold_active", False))
+        hard_stale = bool(hard_stale_raw and not search_allows_edge_stale and not yolo_allows_edge_stale and not bbox_lost_hold_active)
         if perception_dead:
             stale_source = "vision"
         elif stale_level or stale_reason:

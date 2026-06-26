@@ -142,6 +142,7 @@ class RuntimeContext:
     bbox_fov_violation_streak: int = 0
     bbox_lost_since_mono: float = 0.0
     bbox_lost_hold_active: bool = False
+    last_bbox_yaw_cmd: float = 0.0
     search_wz_sign_latched: int = 0
     search_wz_latch_until_mono: float = 0.0
     target_found_frames: int = 0
