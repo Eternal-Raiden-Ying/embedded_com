@@ -20,13 +20,14 @@ from vision_module.backend.table_roi_depth import table_roi_depth_statistics
 from vision_module.app.stages.search.table_edge_obs_builder import merge_table_bbox_from_local_perception
 
 
-def auth(state: str, *, bbox: bool, edge: bool = False, error: float = 0.0, depth_stop: bool = False):
+def auth(state: str, *, bbox: bool, edge: bool = False, error: float = 0.0, depth_stop: bool = False, phase: str = ""):
     return decide_table_control_authority(
         state,
         TablePerceptionSemantics(table_bbox_current_found=bbox, table_bbox_control_valid=bbox, edge_trusted=edge),
         SimpleNamespace(yolo_forward_center_hard_limit=0.25),
         depth_roi_stop_active=depth_stop,
         bbox_center_error=error,
+        control_phase=phase,
     )
 
 
@@ -44,6 +45,9 @@ def main() -> None:
     assert a.control_source == "depth_roi_stop" and not a.allow_forward
     a = auth("YOLO_APPROACH", bbox=True, edge=True)
     assert a.stop_source == "none", "edge trust alone must not become a depth stop"
+    assert auth("YOLO_APPROACH", bbox=True, edge=True, phase="BBOX_ACQUIRE").yaw_source == "bbox"
+    assert auth("YOLO_APPROACH", bbox=True, edge=True, phase="EDGE_HANDOFF_CONFIRM").allow_forward is False
+    assert auth("YOLO_APPROACH", bbox=True, edge=True, phase="EDGE_GUIDED_APPROACH").yaw_source == "edge"
 
     depth = np.full((100, 100), 1000, dtype=np.uint16)
     stats = table_roi_depth_statistics(depth, 0.001, [10, 10, 90, 90])

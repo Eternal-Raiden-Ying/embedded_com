@@ -47,9 +47,67 @@ from ..core_types import (
 
 
 class TableDockingMixin:
+    def _control_phase_status(self, obs: Optional[TableEdgeObs], depth_stop_ready: bool) -> Dict[str, object]:
+        """State-independent, hard ownership handoff between search/bbox/edge."""
+        now = monotonic_ts()
+        current_bbox = self._table_yolo_reliable(obs)
+        hard_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.25) or 0.25))
+        center_error = self._get_bbox_center_x_norm(obs) - 0.5 if obs is not None else 0.0
+        touch = bool(obs is not None and (getattr(obs, "table_bbox_touch_left", False) or getattr(obs, "table_bbox_touch_right", False)))
+        edge_trusted = bool(current_bbox and self.controller._edge_trusted(obs))
+        if not current_bbox:
+            self.ctx.bbox_valid_streak = self.ctx.bbox_centered_streak = self.ctx.edge_trusted_streak = 0
+            self.ctx.edge_handoff_complete = False
+            self.ctx.edge_handoff_started_mono = 0.0
+            self.ctx.edge_yaw_ema = None
+            phase, reason = "SEARCH_SCAN", "no_current_fresh_bbox"
+        else:
+            self.ctx.bbox_valid_streak += 1
+            centered = bool(not touch and abs(center_error) <= hard_limit)
+            self.ctx.bbox_centered_streak = self.ctx.bbox_centered_streak + 1 if centered else 0
+            self.ctx.bbox_fov_violation_streak = 0 if centered else self.ctx.bbox_fov_violation_streak + 1
+            if not edge_trusted:
+                self.ctx.edge_trusted_streak = 0
+                self.ctx.edge_yaw_ema = None
+            else:
+                self.ctx.edge_trusted_streak += 1
+                yaw = float(getattr(obs, "yaw_err_rad", 0.0) or 0.0)
+                self.ctx.edge_yaw_ema = yaw if self.ctx.edge_yaw_ema is None else (0.7 * self.ctx.edge_yaw_ema + 0.3 * yaw)
+            stable_bbox = self.ctx.bbox_centered_streak >= 2
+            if depth_stop_ready:
+                phase, reason = "DEPTH_FINAL_STOP", "stable_dynamic_roi_depth"
+            elif not stable_bbox:
+                self.ctx.edge_handoff_complete = False
+                self.ctx.edge_handoff_started_mono = 0.0
+                phase, reason = "BBOX_ACQUIRE", "bbox_not_centered_or_not_stable"
+            elif self.ctx.edge_handoff_complete and edge_trusted:
+                phase, reason = "EDGE_GUIDED_APPROACH", "bbox_safe_edge_handoff_complete"
+            else:
+                if self.ctx.edge_handoff_started_mono <= 0.0:
+                    self.ctx.edge_handoff_started_mono = now
+                timeout_s = 2.0
+                self.ctx.edge_handoff_timeout = bool(now - self.ctx.edge_handoff_started_mono >= timeout_s)
+                if self.ctx.edge_handoff_timeout:
+                    phase, reason = "BBOX_ACQUIRE", "edge_handoff_timeout"
+                elif self.ctx.edge_trusted_streak >= max(2, int(getattr(self.cfg, "edge_trusted_stable_frames", 3) or 3)):
+                    self.ctx.edge_handoff_complete = True
+                    phase, reason = "EDGE_GUIDED_APPROACH", "edge_handoff_confirmed"
+                else:
+                    phase, reason = "EDGE_HANDOFF_CONFIRM", "waiting_edge_trusted_stability"
+        if phase != self.ctx.control_phase:
+            self.ctx.control_phase = phase
+            self.ctx.control_phase_since_mono = now
+        dwell_ms = max(0.0, (now - float(self.ctx.control_phase_since_mono or now)) * 1000.0)
+        return {"control_phase": phase, "phase_reason": reason, "bbox_center_error": center_error,
+                "bbox_touch_left": bool(obs is not None and getattr(obs, "table_bbox_touch_left", False)),
+                "bbox_touch_right": bool(obs is not None and getattr(obs, "table_bbox_touch_right", False)),
+                "phase_dwell_ms": dwell_ms, "edge_handoff_complete": self.ctx.edge_handoff_complete,
+                "handoff_timeout": self.ctx.edge_handoff_timeout}
+
     def _get_control_authority(self, obs: Optional[TableEdgeObs], depth_roi_stop_active: bool = False, explicit_stop_active: bool = False) -> ControlAuthority:
         sem = build_table_perception_semantics(obs, self.cfg)
         center_error = self._get_bbox_center_x_norm(obs) - 0.5 if obs is not None else None
+        phase = self._control_phase_status(obs, depth_roi_stop_active)
         return decide_table_control_authority(
             state=self.ctx.state.value if hasattr(self.ctx.state, "value") else str(self.ctx.state),
             sem=sem,
@@ -57,6 +115,11 @@ class TableDockingMixin:
             depth_roi_stop_active=depth_roi_stop_active,
             explicit_stop_active=explicit_stop_active,
             bbox_center_error=center_error,
+            control_phase=str(phase["control_phase"]),
+            phase_reason=str(phase["phase_reason"]),
+            edge_handoff_complete=bool(phase["edge_handoff_complete"]),
+            handoff_timeout=bool(phase["handoff_timeout"]),
+            phase_dwell_ms=float(phase["phase_dwell_ms"]),
         )
 
     def _apply_control_authority(self, decision: MotionDecision, obs: Optional[TableEdgeObs], *, explicit_stop_active: bool = False) -> MotionDecision:
@@ -78,6 +141,36 @@ class TableDockingMixin:
         )
         summary.update(auth.to_dict())
         summary.update(depth_status)
+        phase = auth.control_phase
+        # Pick one yaw owner after raw controller safety/limit generation; never blend.
+        search_sign = int(self.ctx.search_wz_sign_latched or self.ctx.relocate_turn_sign or 1)
+        if phase == "SEARCH_SCAN" and monotonic_ts() >= float(self.ctx.search_wz_latch_until_mono or 0.0):
+            search_sign, _, _ = self._get_memory_search_params()
+            self.ctx.search_wz_sign_latched = 1 if search_sign >= 0 else -1
+            self.ctx.search_wz_latch_until_mono = monotonic_ts() + 0.8
+        bbox_wz = float(summary.get("yolo_yaw_cmd", decision.cmd.wz_radps) or 0.0)
+        edge_wz = float(summary.get("edge_yaw_cmd", summary.get("wz_from_plane", 0.0)) or 0.0)
+        deadband = 0.01
+        sign = lambda value: 0 if abs(value) < deadband else (1 if value > 0.0 else -1)
+        bbox_sign, edge_sign = sign(bbox_wz), sign(edge_wz)
+        yaw_conflict = bool(bbox_sign and edge_sign and bbox_sign != edge_sign)
+        safety_active = bool(summary.get("stale_guard_active") or summary.get("fov_guard_active") or decision.cmd.brake)
+        if not safety_active and auth.allow_rotate:
+            if phase == "SEARCH_SCAN":
+                decision.cmd.wz_radps = abs(float(self.car_cfg.search_table_wz_radps)) * self.ctx.search_wz_sign_latched
+            elif phase in {"BBOX_ACQUIRE", "EDGE_HANDOFF_CONFIRM"}:
+                decision.cmd.wz_radps = bbox_wz
+            elif phase == "EDGE_GUIDED_APPROACH":
+                decision.cmd.wz_radps = edge_wz
+        summary.update({
+            "control_phase": phase, "phase_reason": auth.phase_reason,
+            "bbox_valid_streak": int(self.ctx.bbox_valid_streak), "bbox_centered_streak": int(self.ctx.bbox_centered_streak),
+            "edge_trusted_streak": int(self.ctx.edge_trusted_streak), "edge_yaw": float(getattr(obs, "yaw_err_rad", 0.0) or 0.0) if obs else 0.0,
+            "edge_yaw_ema": self.ctx.edge_yaw_ema, "bbox_wz_sign": bbox_sign, "edge_wz_sign": edge_sign,
+            "yaw_conflict": yaw_conflict, "search_wz_sign_latched": int(self.ctx.search_wz_sign_latched),
+            "edge_handoff_complete": bool(self.ctx.edge_handoff_complete), "handoff_timeout": bool(self.ctx.edge_handoff_timeout),
+            "phase_dwell_ms": float(max(0.0, (monotonic_ts() - float(self.ctx.control_phase_since_mono or monotonic_ts())) * 1000.0)),
+        })
         summary["authority_applied"] = True
         summary["mode"] = str(decision.cmd.mode)
         if not auth.allow_forward and abs(float(decision.cmd.vx_mps)) > 1e-9:

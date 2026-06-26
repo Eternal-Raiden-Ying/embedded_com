@@ -32,6 +32,8 @@ VALID_CONTROL_SOURCES = {
 
 @dataclass(frozen=True)
 class ControlAuthority:
+    control_phase: str
+    phase_reason: str
     control_source: str
     yaw_source: str
     forward_source: str
@@ -83,6 +85,11 @@ def decide_table_control_authority(
     depth_roi_stop_active: bool = False,
     explicit_stop_active: bool = False,
     bbox_center_error: float | None = None,
+    control_phase: str = "",
+    phase_reason: str = "",
+    edge_handoff_complete: bool = False,
+    handoff_timeout: bool = False,
+    phase_dwell_ms: float = 0.0,
 ) -> ControlAuthority:
     """Return the owner of the current table-approach motion command.
 
@@ -90,8 +97,9 @@ def decide_table_control_authority(
     """
     state = str(state or "").upper().strip()
 
-    def make(source: str, yaw: str, forward: str, stop: str, allow_forward: bool, allow_rotate: bool, reason: str = "") -> ControlAuthority:
+    def make(source: str, yaw: str, forward: str, stop: str, allow_forward: bool, allow_rotate: bool, reason: str = "", phase: str = "") -> ControlAuthority:
         return ControlAuthority(
+            control_phase=phase or control_phase, phase_reason=phase_reason or reason,
             control_source=source, yaw_source=yaw, forward_source=forward,
             stop_source=stop, allow_forward=allow_forward, allow_rotate=allow_rotate,
             block_reason=reason,
@@ -100,18 +108,25 @@ def decide_table_control_authority(
         )
 
     if explicit_stop_active:
-        return make("explicit_stop", "none", "none", "explicit", False, False, "explicit_stop_active")
+        return make("explicit_stop", "none", "none", "explicit", False, False, "explicit_stop_active", "SAFETY_STOP")
 
     if state in {"FINAL_SLOW_STOP", "AT_TABLE_EDGE"}:
-        return make("final_slow_stop", "edge" if sem.edge_trusted else "last_stable", "none", "final_lock", False, False, "final_slow_stop_state")
+        return make("final_slow_stop", "edge" if sem.edge_trusted else "last_stable", "none", "final_lock", False, False, "final_slow_stop_state", "DEPTH_FINAL_STOP")
 
     # A held/fallback bbox is not a current YOLO detection and may not grant
     # forward motion or edge-guided escalation.
     if not sem.table_bbox_current_found:
-        return make("local_rotate_search", "none", "none", "none", False, True, "table_bbox_unavailable")
+        return make("local_rotate_search", "search", "none", "none", False, True, "table_bbox_unavailable", "SEARCH_SCAN")
 
     if depth_roi_stop_active:
-        return make("depth_roi_stop", "edge" if sem.edge_trusted else "yolo", "none", "roi_depth", False, False, "depth_roi_stop_active")
+        return make("depth_roi_stop", "none", "none", "roi_depth", False, False, "depth_roi_stop_active", "DEPTH_FINAL_STOP")
+
+    if control_phase == "BBOX_ACQUIRE":
+        return make("yolo_acquire_align", "bbox", "none", "none", False, True, "bbox_acquire", "BBOX_ACQUIRE")
+    if control_phase == "EDGE_HANDOFF_CONFIRM":
+        return make("yolo_acquire_align", "bbox", "none", "none", False, True, "edge_handoff_confirm", "EDGE_HANDOFF_CONFIRM")
+    if control_phase == "EDGE_GUIDED_APPROACH":
+        return make("edge_guided_forward", "edge", "edge", "none", True, True, "edge_handoff_complete", "EDGE_GUIDED_APPROACH")
 
     hard_limit = abs(float(getattr(getattr(cfg, "car", cfg), "yolo_forward_center_hard_limit", 0.25) or 0.25))
     if state == "YOLO_ACQUIRE_ALIGN" or (bbox_center_error is not None and abs(float(bbox_center_error)) > hard_limit):

@@ -2595,6 +2595,8 @@ class OrchestratorService(BaseModule):
             "ts": time.time(),
             "state": str(summary.get("state") or self.core.ctx.state.value),
             "control_source": summary.get("control_source") or "",
+            "control_phase": summary.get("control_phase") or "",
+            "phase_reason": summary.get("phase_reason") or "",
             "yaw_source": yaw_source,
             "forward_source": forward_source,
             "stop_source": stop_source,
@@ -2627,6 +2629,13 @@ class OrchestratorService(BaseModule):
             "table_roi_depth_coord_space": summary.get("table_roi_depth_coord_space", ""),
             "roi_depth_window_ready": bool(summary.get("roi_depth_window_ready", False)),
             "transition_reason": summary.get("transition_reason") or summary.get("reason") or "",
+            "bbox_wz_sign": summary.get("bbox_wz_sign", 0),
+            "edge_wz_sign": summary.get("edge_wz_sign", 0),
+            "yaw_conflict": bool(summary.get("yaw_conflict", False)),
+            "search_wz_sign_latched": summary.get("search_wz_sign_latched", 0),
+            "handoff_complete": bool(summary.get("edge_handoff_complete", False)),
+            "handoff_timeout": bool(summary.get("handoff_timeout", False)),
+            "phase_dwell_ms": summary.get("phase_dwell_ms", 0.0),
         }
         self.run_logger.write_jsonl("motion_gate_trace", trace)
         sig = (
@@ -2647,6 +2656,7 @@ class OrchestratorService(BaseModule):
                 "motion_gate_trace",
                 "[MOTION_GATE_TRACE] "
                 f"state={trace['state']} control_source={trace['control_source']} "
+                f"control_phase={trace['control_phase']} phase_reason={trace['phase_reason']} "
                 f"yaw_source={yaw_source} forward_source={forward_source} stop_source={stop_source} "
                 f"allow_forward={int(trace['allow_forward'])} allow_rotate={int(trace['allow_rotate'])} "
                 f"vx_mps={vx:.3f} vy_mps={vy:.3f} wz_radps={wz:.3f} block_reason={block_reason} "
