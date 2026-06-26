@@ -358,17 +358,22 @@ class MotionController:
         if not bool(getattr(self.cfg, "yolo_table_control_enable", True)):
             return self.search_table_cmd(turn_sign=turn_sign)
         cx = self._clamp(float(getattr(obs, "table_cx_norm", 0.0) or 0.0), -1.0, 1.0)
+        bbox_cx = getattr(obs, "yolo_bbox_center_x_norm", None) if obs is not None else None
+        if bbox_cx is not None:
+            center_error = self._clamp(float(bbox_cx) - 0.5, -0.5, 0.5)
+        else:
+            center_error = float(cx * 0.5)
         gain = float(getattr(self.car_cfg, "yolo_table_yaw_gain", 0.20) or 0.20)
         max_wz = abs(float(getattr(self.car_cfg, "yolo_table_max_wz_radps", 0.06) or 0.06))
-        sign = float(getattr(self.car_cfg, "table_view_wz_sign", -1.0))
-        wz_raw = cx * gain * sign
+        # Positive yaw speed is a right/clockwise turn. A bbox right of image
+        # center therefore must produce a positive yaw command.
+        wz_raw = center_error * 2.0 * gain
         wz = self._clamp(wz_raw, -max_wz, max_wz)
         if abs(wz) < 0.02:
             wz = 0.0
         mode_name = str(mode or "SEARCH_TABLE").upper().strip() or "SEARCH_TABLE"
         source_name = normalize_control_source(control_source or "yolo_forward")
         assist_vx = 0.0
-        center_error = float(cx * 0.5)
         touch_left = bool(getattr(obs, "table_bbox_touch_left", getattr(obs, "yolo_bbox_touch_left", False))) if obs is not None else False
         touch_right = bool(getattr(obs, "table_bbox_touch_right", getattr(obs, "yolo_bbox_touch_right", False))) if obs is not None else False
         touch_side = bool(touch_left or touch_right)
@@ -426,8 +431,8 @@ class MotionController:
                 "yolo_yaw_cmd": float(wz),
                 "edge_yaw_cmd": 0.0,
                 "final_yaw_cmd": float(wz),
-                "wz_sign_basis": "wz = table_cx_norm_signed * yolo_table_yaw_gain * table_view_wz_sign",
-                "table_view_wz_sign": float(sign),
+                "wz_sign_basis": "wz = bbox_center_error_control * 2 * yolo_table_yaw_gain",
+                "table_view_wz_sign": 1.0,
                 "final_wz": float(wz),
                 "vx_mps": float(assist_vx),
                 "vy_mps": 0.0,

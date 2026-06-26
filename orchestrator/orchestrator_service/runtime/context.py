@@ -140,6 +140,8 @@ class RuntimeContext:
     edge_handoff_complete: bool = False
     edge_handoff_timeout: bool = False
     bbox_fov_violation_streak: int = 0
+    bbox_lost_since_mono: float = 0.0
+    bbox_lost_hold_active: bool = False
     search_wz_sign_latched: int = 0
     search_wz_latch_until_mono: float = 0.0
     target_found_frames: int = 0
@@ -215,6 +217,8 @@ class RuntimeContext:
         self.edge_handoff_complete = False
         self.edge_handoff_timeout = False
         self.bbox_fov_violation_streak = 0
+        self.bbox_lost_since_mono = 0.0
+        self.bbox_lost_hold_active = False
         self.search_wz_sign_latched = 0
         self.search_wz_latch_until_mono = 0.0
         self.target_found_frames = 0

@@ -16,7 +16,11 @@ from orchestrator.orchestrator_service.runtime.control_authority import decide_t
 from orchestrator.orchestrator_service.runtime.perception_semantics import TablePerceptionSemantics
 from orchestrator.orchestrator_service.runtime.states.table_docking import TableDockingMixin
 from orchestrator.orchestrator_service.runtime.common import monotonic_ts
-from orchestrator.orchestrator_service.ipc.protocol import TableEdgeObs
+from orchestrator.orchestrator_service.runtime.context import RuntimeContext, State
+from orchestrator.orchestrator_service.runtime.controller import MotionDecision
+from orchestrator.orchestrator_service.config.schema import CarMotionConfig, ControlThresholds
+from orchestrator.orchestrator_service.control.motion_controller import MotionController
+from orchestrator.orchestrator_service.ipc.protocol import TableEdgeObs, now_ts
 from vision_module.backend.table_roi_depth import table_roi_depth_statistics
 from vision_module.app.stages.search.table_edge_obs_builder import merge_table_bbox_from_local_perception
 
@@ -62,6 +66,87 @@ def main() -> None:
     assert auth("YOLO_APPROACH", bbox=True, edge=True, phase="BBOX_ACQUIRE").yaw_source == "bbox"
     assert auth("YOLO_APPROACH", bbox=True, edge=True, phase="EDGE_HANDOFF_CONFIRM").allow_forward is False
     assert auth("YOLO_APPROACH", bbox=True, edge=True, phase="EDGE_GUIDED_APPROACH").yaw_source == "edge"
+
+    class DockingProbe(TableDockingMixin):
+        def __init__(self):
+            self.cfg = ControlThresholds()
+            self.car_cfg = CarMotionConfig()
+            self.ctx = RuntimeContext(state=State.YOLO_APPROACH)
+            self.controller = MotionController(self.cfg, self.car_cfg)
+
+        def _transition(self, state, _reason):
+            self.ctx.prev_state = self.ctx.state
+            self.ctx.state = state
+
+        def _table_visible(self, _obs):
+            return True
+
+        def _start_loss_timer(self, attr):
+            if getattr(self.ctx, attr, 0.0) <= 0.0:
+                setattr(self.ctx, attr, monotonic_ts())
+
+        def _loss_elapsed(self, started):
+            return max(0.0, monotonic_ts() - float(started or 0.0)) if started else 0.0
+
+    def bbox_obs(center: float, *, soft_stale: bool = False, found: bool = True) -> TableEdgeObs:
+        ts = now_ts() - (0.35 if soft_stale else 0.01)
+        return TableEdgeObs.from_dict({
+            "ts": ts,
+            "frame_capture_ts": ts,
+            "table_found": found,
+            "table_bbox_current_found": found,
+            "yolo_table_visible": found,
+            "yolo_table_fresh": True,
+            "yolo_table_control_valid": found,
+            "yolo_table_age_ms": 350.0 if soft_stale else 10.0,
+            "yolo_bbox_center_x_norm": center,
+            "table_bbox_xyxy": [100, 20, 300, 200] if found else None,
+            "rgb_shape": [480, 640],
+            "edge_found": False,
+            "depth_valid": True,
+        })
+
+    def authority_decision(probe: DockingProbe, obs: TableEdgeObs, raw_wz: float) -> MotionDecision:
+        cmd = probe.controller._cmd("YOLO_APPROACH", vx=0.02, wz=raw_wz)
+        return probe._apply_control_authority(
+            MotionDecision(cmd=cmd, control_summary=probe.controller._summary("YOLO_APPROACH", cmd, obs)),
+            obs,
+        )
+
+    # BBOX_ACQUIRE owns final yaw. Right side is positive/right turn even when
+    # the raw/search command asks for the opposite turn.
+    probe = DockingProbe()
+    right = authority_decision(probe, bbox_obs(0.70), raw_wz=-0.10)
+    assert right.control_summary["control_phase"] == "BBOX_ACQUIRE"
+    assert right.control_summary["bbox_yaw_cmd"] > 0.0
+    assert right.cmd.wz_radps > 0.0 and right.cmd.vx_mps == 0.0
+    assert right.control_summary["bbox_yaw_owner_enforced"]
+
+    probe = DockingProbe()
+    left = authority_decision(probe, bbox_obs(0.30), raw_wz=0.10)
+    assert left.control_summary["bbox_yaw_cmd"] < 0.0
+    assert left.cmd.wz_radps < 0.0 and left.cmd.vx_mps == 0.0
+
+    probe = DockingProbe()
+    soft = authority_decision(probe, bbox_obs(0.70, soft_stale=True), raw_wz=-0.10)
+    assert soft.control_summary["stale_level"] == "soft_stale"
+    assert soft.control_summary["control_phase"] == "BBOX_ACQUIRE"
+    assert soft.cmd.wz_radps == soft.control_summary["bbox_yaw_cmd"] > 0.0
+    assert soft.cmd.vx_mps == 0.0
+
+    probe = DockingProbe()
+    probe.ctx.bbox_valid_streak = 3
+    probe.ctx.edge_handoff_complete = True
+    lost = bbox_obs(0.5, found=False)
+    held = probe._bbox_lost_hold_or_search(lost, "YOLO_APPROACH")
+    assert held.control_summary["bbox_lost_hold_active"]
+    assert probe.ctx.state == State.YOLO_APPROACH
+    assert probe.ctx.bbox_valid_streak == 3 and probe.ctx.edge_handoff_complete
+    probe.ctx.bbox_lost_since_mono = monotonic_ts() - float(probe.cfg.table_loss_hold_s) - 0.1
+    expired = probe._bbox_lost_hold_or_search(lost, "YOLO_APPROACH")
+    assert probe.ctx.state == State.SEARCH_TABLE
+    assert not probe.ctx.edge_handoff_complete and probe.ctx.bbox_valid_streak == 0
+    assert expired.cmd.mode == "SEARCH_TABLE"
 
     depth = np.full((100, 100), 1000, dtype=np.uint16)
     stats = table_roi_depth_statistics(depth, 0.001, [10, 10, 90, 90])
