@@ -27,7 +27,8 @@ from ...utils.target_utils import target_to_class_id
 from ..common import monotonic_ts
 from ..context import RuntimeContext, State
 from ..controller import MotionController, MotionDecision
-from ..control_authority import decide_table_control_authority
+from ..control_authority import decide_table_control_authority, ControlAuthority
+from ..perception_semantics import build_table_perception_semantics
 from ..core_types import (
     KNOWN_VISION_STATUS,
     MOVING_STATES,
@@ -46,6 +47,59 @@ from ..core_types import (
 
 
 class TableDockingMixin:
+    def _get_control_authority(self, obs: Optional[TableEdgeObs], depth_roi_stop_active: bool = False, explicit_stop_active: bool = False) -> ControlAuthority:
+        sem = build_table_perception_semantics(obs, self.cfg)
+        return decide_table_control_authority(
+            state=self.ctx.state.value if hasattr(self.ctx.state, "value") else str(self.ctx.state),
+            sem=sem,
+            cfg=self.cfg,
+            depth_roi_stop_active=depth_roi_stop_active,
+            explicit_stop_active=explicit_stop_active,
+        )
+
+    def _tick_search_table(self) -> MotionDecision:
+        decision = self._tick_search_table_impl()
+        obs = self._fresh_table_obs()
+        explicit = "warmup" in str(decision.control_summary.get("control_source", "")) or "recovery" in str(decision.control_summary.get("control_source", "")) or "failed" in str(decision.control_summary.get("control_source", ""))
+        auth = self._get_control_authority(obs, explicit_stop_active=explicit)
+        decision.control_summary.update(auth.to_dict())
+        return decision
+
+    def _tick_yolo_acquire_align(self) -> MotionDecision:
+        decision = self._tick_yolo_acquire_align_impl()
+        obs = self._fresh_table_obs()
+        auth = self._get_control_authority(obs)
+        decision.control_summary.update(auth.to_dict())
+        return decision
+
+    def _tick_yolo_approach(self) -> MotionDecision:
+        decision = self._tick_yolo_approach_impl()
+        obs = self._fresh_table_obs()
+        auth = self._get_control_authority(obs)
+        decision.control_summary.update(auth.to_dict())
+        return decision
+
+    def _tick_edge_adjust(self) -> MotionDecision:
+        decision = self._tick_edge_adjust_impl()
+        obs = self._fresh_table_obs()
+        auth = self._get_control_authority(obs)
+        decision.control_summary.update(auth.to_dict())
+        return decision
+
+    def _tick_final_slow_stop(self) -> MotionDecision:
+        decision = self._tick_final_slow_stop_impl()
+        obs = self._fresh_table_obs()
+        auth = self._get_control_authority(obs)
+        decision.control_summary.update(auth.to_dict())
+        return decision
+
+    def _tick_at_table_edge(self) -> MotionDecision:
+        decision = self._tick_at_table_edge_impl()
+        obs = self._fresh_table_obs()
+        auth = self._get_control_authority(obs)
+        decision.control_summary.update(auth.to_dict())
+        return decision
+
     def _get_memory_search_params(self) -> Tuple[int, str, str]:
         turn_sign = self.ctx.relocate_turn_sign
         search_src = "default"
@@ -162,18 +216,23 @@ class TableDockingMixin:
                         "hard_yaw_elapsed_ms": float(getattr(obs, "hard_yaw_elapsed_ms", 0.0) or 0.0),
                     }
                 )
+            auth = self._get_control_authority(obs)
+            decision.control_summary.update(auth.to_dict())
             return decision
         if self.ctx.state != State.YOLO_APPROACH:
             self._transition(State.YOLO_APPROACH, reason)
-        return self.controller.yolo_table_search_cmd(
+        decision = self.controller.yolo_table_search_cmd(
             obs,
             turn_sign=self.ctx.relocate_turn_sign,
             mode="YOLO_APPROACH",
             reason=reason,
             control_source="yolo_track_forward",
         )
+        auth = self._get_control_authority(obs)
+        decision.control_summary.update(auth.to_dict())
+        return decision
 
-    def _tick_yolo_acquire_align(self) -> MotionDecision:
+    def _tick_yolo_acquire_align_impl(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
         obs = self._fresh_table_obs()
         if not self._table_yolo_reliable(obs):
@@ -212,6 +271,8 @@ class TableDockingMixin:
                     "transition_reason": self.ctx.last_enter_reason,
                 }
             )
+            auth = self._get_control_authority(obs)
+            decision.control_summary.update(auth.to_dict())
             return decision
         
         # Rotate in place towards center
@@ -243,9 +304,11 @@ class TableDockingMixin:
             "speed_profile": "search",
             "speed_limit_reason": "yolo_align",
         })
+        auth = self._get_control_authority(obs)
+        decision.control_summary.update(auth.to_dict())
         return decision
 
-    def _tick_yolo_approach(self) -> MotionDecision:
+    def _tick_yolo_approach_impl(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
         obs = self._fresh_table_obs()
         if not self._table_yolo_reliable(obs):
@@ -269,6 +332,8 @@ class TableDockingMixin:
                         "edge_trusted_yolo_approach_handoff": True,
                     }
                 )
+            auth = self._get_control_authority(obs)
+            decision.control_summary.update(auth.to_dict())
             return decision
             
         decision = self.controller.yolo_table_search_cmd(
@@ -278,9 +343,11 @@ class TableDockingMixin:
             reason="yolo_approach_forward",
             control_source="yolo_forward",
         )
+        auth = self._get_control_authority(obs)
+        decision.control_summary.update(auth.to_dict())
         return decision
 
-    def _tick_search_table(self) -> MotionDecision:
+    def _tick_search_table_impl(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
         obs = self._fresh_table_obs()
         yolo_status = self._yolo_table_status(obs)
@@ -303,6 +370,8 @@ class TableDockingMixin:
                     "transition_reason": "perception_warmup_waiting",
                 }
             )
+            auth = self._get_control_authority(obs, explicit_stop_active=True)
+            decision.control_summary.update(auth.to_dict())
             return decision
         local_search_active = bool(
             self.ctx.prev_state in TABLE_APPROACH_STATES
@@ -373,6 +442,8 @@ class TableDockingMixin:
                         "stop_reason": self.ctx.last_fail_reason,
                     }
                 )
+                auth = self._get_control_authority(obs, explicit_stop_active=True)
+                decision.control_summary.update(auth.to_dict())
                 return decision
         level = self._control_level(obs)
         if obs is not None and self._table_motion_signal_available(obs):
@@ -405,14 +476,19 @@ class TableDockingMixin:
                             "edge_trusted_search_handoff": True,
                         }
                     )
+                auth = self._get_control_authority(obs)
+                decision.control_summary.update(auth.to_dict())
                 return decision
-            return self.controller.yolo_table_search_cmd(
+            decision = self.controller.yolo_table_search_cmd(
                 obs,
                 turn_sign=self.ctx.relocate_turn_sign,
                 mode=next_state.value,
                 reason="search_table_yolo_track_forward" if next_state == State.YOLO_APPROACH else "search_table_yolo_rotate_only",
                 control_source="yolo_track_forward" if next_state == State.YOLO_APPROACH else "local_rotate_search",
             )
+            auth = self._get_control_authority(obs)
+            decision.control_summary.update(auth.to_dict())
+            return decision
         # Without table bbox, docking/edge must not drive state transitions.
         # It can still be logged by vision, but control falls back to local rotate search.
         self.ctx.table_found_frames = 0
@@ -439,35 +515,52 @@ class TableDockingMixin:
                 "search_table_stale_gate_bypass": True,
             }
         )
+        auth = self._get_control_authority(obs)
+        decision.control_summary.update(auth.to_dict())
         return decision
 
-    def _tick_edge_adjust(self) -> MotionDecision:
+    def _tick_edge_adjust_impl(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
         obs = self._fresh_table_obs()
         if not self._table_yolo_reliable(obs):
             self._transition(State.SEARCH_TABLE, "EDGE_ADJUST未检测到table bbox，进入本地旋转搜索")
-            return self.controller.search_table_cmd(*self._get_memory_search_params())
+            decision = self.controller.search_table_cmd(*self._get_memory_search_params())
+            auth = self._get_control_authority(obs)
+            decision.control_summary.update(auth.to_dict())
+            return decision
         self._reset_table_loss()
         if self._table_yolo_reliable(obs) and not self.controller._edge_trusted(obs):
             self._transition(State.YOLO_APPROACH, "EDGE_ADJUST被阻止：table bbox存在但edge未trusted，回到YOLO默认前进")
-            return self.controller.yolo_table_search_cmd(
+            decision = self.controller.yolo_table_search_cmd(
                 obs,
                 mode="YOLO_APPROACH",
                 reason="edge_adjust_blocked_edge_not_trusted",
                 control_source="yolo_forward",
             )
+            auth = self._get_control_authority(obs)
+            decision.control_summary.update(auth.to_dict())
+            return decision
         level = self._control_level(obs)
         if level == "none":
             if self._table_yolo_reliable(obs):
-                return self.controller.yolo_table_search_cmd(
+                decision = self.controller.yolo_table_search_cmd(
                     obs,
                     mode="EDGE_ADJUST",
                     reason="edge_adjust_level_none_yolo_forward",
                     control_source="yolo_forward",
                 )
-            return self.controller.stop_cmd("EDGE_ADJUST")
+                auth = self._get_control_authority(obs)
+                decision.control_summary.update(auth.to_dict())
+                return decision
+            decision = self.controller.stop_cmd("EDGE_ADJUST")
+            auth = self._get_control_authority(obs)
+            decision.control_summary.update(auth.to_dict())
+            return decision
         if level == "stop" or self._edge_ready(obs):
-            return self._enter_final_slow_stop_or_keep_approach(obs, "满足最终停车条件，进入慢速停车")
+            decision = self._enter_final_slow_stop_or_keep_approach(obs, "满足最终停车条件，进入慢速停车")
+            auth = self._get_control_authority(obs)
+            decision.control_summary.update(auth.to_dict())
+            return decision
 
         if not self.ctx.table_dock_phase:
             self.ctx.table_dock_phase = "aligning"
@@ -509,7 +602,10 @@ class TableDockingMixin:
                 self.ctx.table_motion_pending_transition_reason = "approach_to_align_pending"
 
         if self._check_approach_progress(obs):
-            return self._enter_no_progress_recovery_or_next("微调阶段无进展超时")
+            decision = self._enter_no_progress_recovery_or_next("微调阶段无进展超时")
+            auth = self._get_control_authority(obs)
+            decision.control_summary.update(auth.to_dict())
+            return decision
 
         pending_reason = self.ctx.table_motion_pending_transition_reason
 
@@ -520,9 +616,11 @@ class TableDockingMixin:
             decision = self._table_approach_decision(obs, phase="PLANE_APPROACH")
             decision.control_summary["control_intent"] = "edge_parallel"
         decision = self._annotate_table_motion_hysteresis(decision, pending_reason=pending_reason)
+        auth = self._get_control_authority(obs)
+        decision.control_summary.update(auth.to_dict())
         return decision
 
-    def _tick_final_slow_stop(self) -> MotionDecision:
+    def _tick_final_slow_stop_impl(self) -> MotionDecision:
         elapsed_ms = self._state_elapsed() * 1000.0
         is_holding = elapsed_ms < self.cfg.final_lock_min_hold_ms
 
@@ -694,7 +792,7 @@ class TableDockingMixin:
         self._queue_tts("已完成桌边停靠")
         return self._annotate_final_lock_decision(self.controller.stop_cmd("AT_TABLE_EDGE"), status)
 
-    def _tick_at_table_edge(self) -> MotionDecision:
+    def _tick_at_table_edge_impl(self) -> MotionDecision:
         if self._table_edge_only_test_enabled():
             if self._state_elapsed() < float(self.cfg.edge_settle_s):
                 return self.controller.stop_cmd("AT_TABLE_EDGE")
