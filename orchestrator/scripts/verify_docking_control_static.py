@@ -90,6 +90,14 @@ def main() -> None:
         def _table_visible(self, _obs):
             return True
 
+        def _log(self, *_args):
+            pass
+
+        def _enter_no_progress_recovery_or_next(self, reason: str):
+            self.ctx.state = State.NO_PROGRESS_RECOVERY
+            cmd = self.controller._cmd("NO_PROGRESS_RECOVERY", vx=0.0, wz=0.0)
+            return MotionDecision(cmd=cmd, control_summary={"control_source": "no_progress_recovery", "state": "NO_PROGRESS_RECOVERY"})
+
         def _start_loss_timer(self, attr):
             if getattr(self.ctx, attr, 0.0) <= 0.0:
                 setattr(self.ctx, attr, monotonic_ts())
@@ -248,6 +256,57 @@ def main() -> None:
     assert probe.ctx.dist_missing_started_mono > 0.0
     probe.ctx.dist_missing_started_mono = monotonic_ts() - 5.1
     assert probe._check_approach_progress(None)
+
+    # 1. BBOX_ACQUIRE phase, vx=0, wz!=0. Ensure no-progress is NOT triggered even after 5s
+    p_acquire = DockingProbe()
+    p_acquire.ctx.control_phase = "BBOX_ACQUIRE"
+    obs_acq = bbox_obs(0.70)
+    obs_acq.dist_err_m = 0.5
+    obs_acq.target_dist_m = 0.5
+    # Call authority_decision multiple times, or manually simulate time elapsed
+    dec = authority_decision(p_acquire, obs_acq, raw_wz=0.10)
+    assert dec.cmd.vx_mps == 0.0
+    assert dec.cmd.wz_radps > 0.0
+    # Simulate 5s elapsed
+    p_acquire.ctx.dist_missing_started_mono = monotonic_ts() - 6.0
+    p_acquire.ctx.dist_progress_last_refreshed_mono = monotonic_ts() - 6.0
+    # Call again
+    dec = authority_decision(p_acquire, obs_acq, raw_wz=0.10)
+    assert p_acquire.ctx.state != State.NO_PROGRESS_RECOVERY  # Should NOT trigger recovery
+
+    # 2. EDGE_HANDOFF_CONFIRM phase, vx=0. Ensure no-progress is NOT triggered
+    p_confirm = DockingProbe()
+    p_confirm.ctx.control_phase = "EDGE_HANDOFF_CONFIRM"
+    obs_conf = bbox_obs(0.50)
+    obs_conf.dist_err_m = 0.5
+    # Simulate 5s elapsed
+    p_confirm.ctx.dist_missing_started_mono = monotonic_ts() - 6.0
+    p_confirm.ctx.dist_progress_last_refreshed_mono = monotonic_ts() - 6.0
+    dec = authority_decision(p_confirm, obs_conf, raw_wz=0.10)
+    assert p_confirm.ctx.state != State.NO_PROGRESS_RECOVERY  # Should NOT trigger recovery
+
+    # 3. EDGE_GUIDED_APPROACH phase, vx=0.02. Ensure no-progress IS triggered when distance is constant
+    p_approach = DockingProbe()
+    p_approach.force_edge_guided = True
+    p_approach.ctx.edge_handoff_complete = True
+    p_approach.ctx.control_phase = "EDGE_GUIDED_APPROACH"
+    obs_app = bbox_obs(0.50)
+    obs_app.edge_found = True
+    obs_app.edge_trusted = True
+    obs_app.dist_err_m = 0.5
+    obs_app.target_dist_m = 0.5
+    
+    # First call resets/initializes min_dist_seen
+    dec = edge_guided_decision(p_approach, obs_app)
+    assert dec.cmd.vx_mps == 0.02
+    assert p_approach.ctx.state != State.NO_PROGRESS_RECOVERY
+    
+    # Set the last refreshed timestamp to 6 seconds ago to simulate no progress
+    p_approach.ctx.dist_progress_last_refreshed_mono = monotonic_ts() - 6.0
+    
+    # Second call should trigger no-progress recovery
+    dec = edge_guided_decision(p_approach, obs_app)
+    assert p_approach.ctx.state == State.NO_PROGRESS_RECOVERY
     print("docking static verification: PASS")
 
 

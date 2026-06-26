@@ -365,6 +365,23 @@ class TableDockingMixin:
                 bbox_owner_active = True
                 summary["bbox_yaw_owner_enforced"] = True
 
+        # Check approach progress if phase is EDGE_GUIDED_APPROACH and vx > 0
+        if phase == "EDGE_GUIDED_APPROACH" and decision.cmd.vx_mps > 0.0:
+            if self._check_approach_progress(obs):
+                decision = self._enter_no_progress_recovery_or_next("接近无进展超时")
+                summary.update(decision.control_summary)
+                summary["final_vx"] = float(decision.cmd.vx_mps)
+                summary["final_vy"] = float(decision.cmd.vy_mps)
+                summary["final_wz"] = float(decision.cmd.wz_radps)
+                summary["vx_mps"] = float(decision.cmd.vx_mps)
+                summary["vy_mps"] = float(decision.cmd.vy_mps)
+                summary["wz_radps"] = float(decision.cmd.wz_radps)
+                return decision
+        else:
+            self.ctx.min_dist_seen = 999.0
+            self.ctx.dist_progress_last_refreshed_mono = 0.0
+            self.ctx.dist_missing_started_mono = 0.0
+
         # Always expose the final axis values, including a pre-existing safety stop.
         summary["final_vx"] = float(decision.cmd.vx_mps)
         summary["final_vy"] = float(decision.cmd.vy_mps)
@@ -639,8 +656,6 @@ class TableDockingMixin:
         self.ctx.bbox_lost_hold_active = False
         self.ctx.bbox_lost_since_mono = 0.0
         self._reset_table_loss()
-        if self._check_approach_progress(obs):
-            return self._enter_no_progress_recovery_or_next("YOLO接近无进展超时")
         if self.controller._edge_trusted(obs):
             decision = self.controller.fov_table_approach_cmd(
                 obs,
@@ -904,9 +919,6 @@ class TableDockingMixin:
             else:
                 self.ctx.table_motion_pending_transition_reason = "approach_to_align_pending"
 
-        if self._check_approach_progress(obs):
-            decision = self._enter_no_progress_recovery_or_next("微调阶段无进展超时")
-            return decision
 
         pending_reason = self.ctx.table_motion_pending_transition_reason
 
@@ -978,9 +990,6 @@ class TableDockingMixin:
                 self._enter_table_dock_phase("STOP_AND_SETTLE", "[TABLE_DOCK][STOP] final lock/stop condition reached")
                 self._log("info", "[TABLE_DOCK][SETTLE] begin after STOP")
                 return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_SLOW_STOP"), status)
-            if self._check_approach_progress(obs):
-                if not is_holding:
-                    return self._enter_no_progress_recovery_or_next(f"最终慢速停车无进展超时:{status['reason']}")
             self._maybe_resend_req(self._active_req_payload())
             if level == "none":
                 return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_SLOW_STOP"), status)
@@ -1045,11 +1054,6 @@ class TableDockingMixin:
             if decision is not None:
                 return decision
 
-        if self._check_approach_progress(obs):
-            if not is_holding:
-                status = self._final_lock_status(obs, stable_count=self.ctx.table_lock_frames)
-                self._log_final_lock_summary(obs, lock_ready=False, reason=str(status["reason"]), stable_count=self.ctx.table_lock_frames)
-                return self._enter_no_progress_recovery_or_next(f"最终停靠无进展超时:{status['reason']}")
         self._maybe_resend_req(self._active_req_payload())
         return self._annotate_final_lock_decision(
             self.controller.stop_cmd("FINAL_SLOW_STOP"),
