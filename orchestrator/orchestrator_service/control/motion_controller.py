@@ -677,14 +677,9 @@ class MotionController:
     def _yolo_view_err_norm(self, obs: Optional[TableEdgeObs]) -> float:
         if obs is None:
             return 0.0
-        for name in ("view_err_norm", "table_cx_norm"):
-            value = getattr(obs, name, None)
-            if value is None:
-                continue
-            try:
-                return self._clamp(float(value), -1.0, 1.0)
-            except Exception:
-                continue
+        geom = compute_bbox_control_geometry(obs)
+        if geom["bbox_center_valid"]:
+            return self._clamp((float(geom["bbox_cx_norm_control"]) - 0.5) * 2.0, -1.0, 1.0)
         return 0.0
 
     def _yolo_table_bbox_area_ratio(self, obs: Optional[TableEdgeObs]) -> float:
@@ -817,8 +812,10 @@ class MotionController:
             self._last_view_err_norm = err
             self._last_view_ts = time.time()
             return err, "plane", True
-        if self._yolo_reliable(obs) and obs.table_cx_norm is not None:
-            err = self._clamp(float(obs.table_cx_norm), -1.0, 1.0)
+        geom = compute_bbox_control_geometry(obs)
+        if self._yolo_reliable(obs) and geom["bbox_center_valid"]:
+            err = (float(geom["bbox_cx_norm_control"]) - 0.5) * 2.0
+            err = self._clamp(err, -1.0, 1.0)
             self._last_view_err_norm = err
             self._last_view_ts = time.time()
             return err, "yolo", True

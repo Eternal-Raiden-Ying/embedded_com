@@ -820,23 +820,8 @@ class TableDockingMixin:
                     getattr(obs, "table_bbox_touch_left", getattr(obs, "yolo_bbox_touch_left", False))
                     or getattr(obs, "table_bbox_touch_right", getattr(obs, "yolo_bbox_touch_right", False))
                 )
-                edge_guided = bool((getattr(obs, "edge_valid", False) or getattr(obs, "edge_trusted", False)) and yaw_err <= hard_yaw)
-                if edge_guided:
-                    next_state = State.EDGE_ADJUST
-                else:
-                    next_state = State.YOLO_APPROACH if abs(center_error) <= hard_limit else State.YOLO_ACQUIRE_ALIGN
+                next_state = State.YOLO_APPROACH if abs(center_error) <= hard_limit else State.YOLO_ACQUIRE_ALIGN
                 self._transition(next_state, f"table signal found cx_norm={cx_norm:.3f} center_error={center_error:.3f}")
-                if next_state == State.EDGE_ADJUST:
-                    decision = self.controller.fov_table_approach_cmd(obs, phase="PLANE_APPROACH", mode="EDGE_ADJUST")
-                    if decision.control_summary is not None:
-                        decision.control_summary.update(
-                            {
-                                "control_source": "edge_guided_forward",
-                                "transition_reason": self.ctx.last_enter_reason,
-                                "edge_trusted_search_handoff": True,
-                            }
-                        )
-                    return decision
                 decision = self.controller.yolo_table_search_cmd(
                     obs,
                     turn_sign=self.ctx.relocate_turn_sign,
@@ -881,15 +866,7 @@ class TableDockingMixin:
         self.ctx.bbox_lost_hold_active = False
         self.ctx.bbox_lost_since_mono = 0.0
         self._reset_table_loss()
-        if self._table_yolo_reliable(obs) and not self.controller._edge_trusted(obs):
-            self._transition(State.YOLO_APPROACH, "EDGE_ADJUST被阻止：table bbox存在但edge未trusted，回到YOLO默认前进")
-            decision = self.controller.yolo_table_search_cmd(
-                obs,
-                mode="YOLO_APPROACH",
-                reason="edge_adjust_blocked_edge_not_trusted",
-                control_source="yolo_forward",
-            )
-            return decision
+
         level = self._control_level(obs)
         if level == "none":
             if self._table_yolo_reliable(obs):
