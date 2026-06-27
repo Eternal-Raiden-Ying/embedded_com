@@ -1043,7 +1043,28 @@ class OrchestratorService(BaseModule):
                 self._last_valid_motion_ts = now
                 last_age_ms = 0.0
             else:
-                last_age_ms = self._last_valid_motion_age_ms(now)
+                final_yaw_cmd = 0.0
+                if bool(summary.get("final_yaw_align_active", False)) or str(summary.get("final_cmd_source") or "") == "arbiter_final_yaw_align":
+                    try:
+                        final_yaw_cmd = float(summary.get("final_yaw_align_yaw_cmd", summary.get("final_wz", 0.0)) or 0.0)
+                    except Exception:
+                        final_yaw_cmd = 0.0
+                if abs(final_yaw_cmd) > 1e-9:
+                    effective = CmdVel(
+                        ts=float(now),
+                        mode=str(getattr(cmd, "mode", "") or "YOLO_APPROACH"),
+                        vx_mps=0.0,
+                        vy_mps=0.0,
+                        wz_radps=float(final_yaw_cmd),
+                        hold_ms=int(getattr(cmd, "hold_ms", hold_ms) or hold_ms),
+                        brake=False,
+                    )
+                    emit_reason = "arbiter_final_yaw_align"
+                    self._last_valid_motion_cmd = self._cmd_dict(effective)
+                    self._last_valid_motion_ts = now
+                    last_age_ms = 0.0
+                else:
+                    last_age_ms = self._last_valid_motion_age_ms(now)
 
             service_override = bool(self._cmd_dict(effective) != self._cmd_dict(cmd))
             return effective, {

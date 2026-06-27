@@ -72,11 +72,24 @@ class TableDockingMixin:
         decision.cmd.vy_mps = float(result.final_vy)
         decision.cmd.wz_radps = float(result.final_wz)
         summary.update(result.summary)
+        final_yaw_align_cmd = bool(result.reason == "final_yaw_align" or summary.get("final_yaw_align_active", False))
+        if final_yaw_align_cmd:
+            decision.cmd.vx_mps = 0.0
+            decision.cmd.vy_mps = 0.0
+            decision.cmd.wz_radps = float(result.final_wz)
+            summary.update(
+                {
+                    "final_cmd_source": "arbiter_final_yaw_align",
+                    "rotate_allowed": True,
+                    "allow_rotate": True,
+                    "rotate_block_reason": "",
+                }
+            )
         summary.update(
             {
                 "arbiter_applied": True,
-                "motion_intent_type": intent.intent_type,
-                "yaw_owner": intent.yaw_owner,
+                "motion_intent_type": summary.get("motion_intent_type", intent.intent_type),
+                "yaw_owner": summary.get("yaw_owner", intent.yaw_owner),
                 "arbitration_reason": result.reason,
                 "motion_class": result.motion_class,
                 "stop_class": result.stop_class,
@@ -91,8 +104,8 @@ class TableDockingMixin:
                 "wz_radps": float(result.final_wz),
             }
         )
-        self.ctx.motion_intent_type = str(intent.intent_type or "")
-        self.ctx.yaw_owner = str(intent.yaw_owner or "")
+        self.ctx.motion_intent_type = str(summary.get("motion_intent_type") or intent.intent_type or "")
+        self.ctx.yaw_owner = str(summary.get("yaw_owner") or intent.yaw_owner or "")
         self.ctx.arbitration_reason = str(result.reason or "")
         self.ctx.motion_class = str(result.motion_class or "")
         self.ctx.stop_class = str(result.stop_class or "none")

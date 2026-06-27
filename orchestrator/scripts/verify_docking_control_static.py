@@ -21,9 +21,10 @@ from orchestrator.orchestrator_service.runtime.states.recovery import RecoveryMi
 from orchestrator.orchestrator_service.runtime.common import monotonic_ts
 from orchestrator.orchestrator_service.runtime.context import RuntimeContext, State
 from orchestrator.orchestrator_service.runtime.controller import MotionDecision
+from orchestrator.orchestrator_service.runtime.service import OrchestratorService
 from orchestrator.orchestrator_service.config.schema import CarMotionConfig, ControlThresholds
 from orchestrator.orchestrator_service.control.motion_controller import MotionController
-from orchestrator.orchestrator_service.ipc.protocol import TableEdgeObs, now_ts
+from orchestrator.orchestrator_service.ipc.protocol import CmdVel, TableEdgeObs, now_ts
 from orchestrator.orchestrator_service.bridge.uart_bridge import UartBridge
 from vision_module.backend.table_roi_depth import table_roi_depth_statistics
 from vision_module.app.stages.search.table_edge_obs_builder import merge_table_bbox_from_local_perception
@@ -448,6 +449,33 @@ def main() -> None:
     assert final_yaw.control_summary["arbitration_reason"] == "final_yaw_align"
     assert abs(final_yaw.control_summary["final_yaw_align_yaw_cmd"]) > 0.0
 
+    # Final yaw align must be applied to the actual CmdVel, not only summary.
+    probe = DockingProbe()
+    final_align_cmd = probe.controller._cmd("YOLO_APPROACH", vx=0.02, wz=0.0)
+    final_align_decision = MotionDecision(
+        cmd=final_align_cmd,
+        control_summary={
+            "control_phase": "DEPTH_FINAL_STOP",
+            "control_source": "depth_roi_stop",
+            "final_depth_latched": True,
+            "final_yaw_align_active": True,
+            "final_locked": False,
+            "edge_yaw": 0.30,
+            "final_yaw_deadband_rad": 0.08,
+            "edge_yaw_cmd_for_final_align": -0.15,
+            "allow_forward": False,
+            "allow_rotate": False,
+            "rotate_block_reason": "allow_rotate_false_intercept",
+        },
+    )
+    final_align_applied = probe._arbitrate_table_motion_decision(final_align_decision, final_yaw_obs)
+    assert final_align_applied.cmd.vx_mps == 0.0
+    assert final_align_applied.cmd.vy_mps == 0.0
+    assert abs(final_align_applied.cmd.wz_radps + 0.15) < 1e-6
+    assert final_align_applied.control_summary["final_cmd_source"] == "arbiter_final_yaw_align"
+    assert final_align_applied.control_summary["rotate_allowed"]
+    assert final_align_applied.control_summary["rotate_block_reason"] != "allow_rotate_false_intercept"
+
     # Final depth latch + stable small yaw: become locked instead of returning
     # to SEARCH_TABLE.
     probe = DockingProbe()
@@ -485,6 +513,7 @@ def main() -> None:
     coast_blocked = authority_decision(probe, final_yaw_obs, raw_wz=0.04)
     assert coast_blocked.cmd.vx_mps == 0.0
     assert coast_blocked.control_summary["final_depth_latched"]
+    assert coast_blocked.cmd.vy_mps == 0.0
 
     # Emergency/explicit hard safety clears near/final latches.
     probe = DockingProbe()
@@ -495,7 +524,39 @@ def main() -> None:
         final_yaw_obs,
     )
     assert emergency_clear.cmd.vx_mps == 0.0
+    assert emergency_clear.cmd.wz_radps == 0.0
     assert not probe.ctx.near_table_latched and not probe.ctx.final_depth_latched
+
+    # Service must not overwrite the arbiter final yaw align CmdVel.
+    service_probe = OrchestratorService.__new__(OrchestratorService)
+    service_probe.cfg = SimpleNamespace(
+        car=SimpleNamespace(
+            motion_hold_ms=150,
+            cmd_hold_ms=150,
+            hard_stale_stop_ms=800,
+            soft_stale_hold_enable=True,
+        )
+    )
+    service_probe.core = SimpleNamespace(ctx=RuntimeContext(state=State.YOLO_APPROACH))
+    service_probe._last_valid_motion_cmd = None
+    service_probe._last_valid_motion_ts = 0.0
+    arbiter_final_cmd = CmdVel(ts=now_ts(), mode="YOLO_APPROACH", vx_mps=0.0, vy_mps=0.0, wz_radps=-0.15, hold_ms=150, brake=False)
+    effective_final_yaw, service_meta = service_probe._arbitrate_uart_motion_cmd(
+        arbiter_final_cmd,
+        {
+            "arbiter_applied": True,
+            "final_cmd_source": "arbiter_final_yaw_align",
+            "final_yaw_align_active": True,
+            "final_yaw_align_yaw_cmd": -0.15,
+            "final_wz": -0.15,
+            "motion_class": "normal",
+            "stop_class": "none",
+        },
+    )
+    assert effective_final_yaw.vx_mps == 0.0 and effective_final_yaw.vy_mps == 0.0
+    assert abs(effective_final_yaw.wz_radps + 0.15) < 1e-6
+    assert not service_meta["service_override"]
+    assert service_meta["effective_cmd_after_service"]["wz_radps"] == -0.15
 
     # Extreme center error remains a hard guard.
     probe = DockingProbe()
