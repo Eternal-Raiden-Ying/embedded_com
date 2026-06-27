@@ -13,6 +13,8 @@ from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+from .docking_model import build_docking_observation, update_docking_stage
+
 
 class FovGuardLevel(str, Enum):
     NONE = "none"
@@ -238,6 +240,14 @@ def arbitrate_table_docking_motion(
     hard/soft FOV guard, acquire/search rotate, zero watchdog escape.
     """
     summary = dict(current_summary or {})
+    docking_obs = build_docking_observation(ctx, obs, summary)
+    docking_stage = update_docking_stage(ctx, docking_obs)
+    summary.update(
+        {
+            "docking_stage": docking_stage.value,
+            "docking_observation": docking_obs.to_dict(),
+        }
+    )
     state = _state_value(ctx)
     fov_level = _fov_level(summary)
     fov_reason = str(summary.get("bbox_fov_guard_reason") or summary.get("fov_guard_reason") or "")
