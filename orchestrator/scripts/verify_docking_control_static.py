@@ -718,6 +718,148 @@ def main() -> None:
     multi_table_probe._enter_no_progress_recovery_or_next("static no progress")
     assert multi_table_probe.ctx.state == State.NEXT_TABLE
 
+    # Required docking motion invariants for the typed arbiter.
+    inv1 = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_ACQUIRE_ALIGN),
+        None,
+        MotionIntent("yolo_acquire_align", desired_vx=0.0, desired_wz=0.06, yaw_owner="bbox", rotate_allowed_by_behavior=True),
+        {
+            "control_phase": "BBOX_ACQUIRE",
+            "bbox_center_valid": True,
+            "bbox_center_error_control": 0.45,
+            "bbox_yaw_cmd": 0.06,
+            "bbox_fov_guard_level": "hard",
+            "bbox_fov_guard_reason": "bbox_center_extreme",
+        },
+    )
+    assert inv1.summary["docking_action"] == "BBOX_REACQUIRE_ROTATE"
+    assert inv1.final_vx == 0.0 and abs(inv1.final_wz) > 0.0
+    assert inv1.stop_class == "none"
+
+    inv2 = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("edge_guided_forward", desired_vx=0.02, desired_wz=0.0, yaw_owner="edge", forward_allowed_by_behavior=True),
+        {
+            "control_phase": "EDGE_GUIDED_APPROACH",
+            "edge_guided_commit_block_reason": "bbox_fov_guard_hard",
+            "bbox_yaw_cmd": -0.05,
+            "bbox_fov_guard_level": "hard",
+            "bbox_fov_guard_reason": "side_touch_center_error_streak",
+        },
+    )
+    assert inv2.summary["docking_action"] == "CONTROL_RECOVERY_ROTATE"
+    assert inv2.final_vx == 0.0 and abs(inv2.final_wz) > 0.0
+    assert inv2.stop_class == "none"
+
+    inv3 = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("final_align", desired_vx=0.02, desired_wz=0.0, yaw_owner="edge"),
+        {
+            "control_phase": "DEPTH_FINAL_STOP",
+            "final_depth_latched": True,
+            "final_yaw_align_active": True,
+            "edge_yaw": 0.30,
+            "final_yaw_deadband_rad": 0.08,
+            "edge_yaw_cmd_for_final_align": -0.12,
+        },
+    )
+    assert inv3.summary["docking_action"] == "FINAL_YAW_ALIGN"
+    assert inv3.final_vx == 0.0 and inv3.final_vy == 0.0 and abs(inv3.final_wz) > 0.0
+
+    inv4 = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("final_hold", desired_vx=0.02, desired_wz=0.0),
+        {
+            "control_phase": "DEPTH_FINAL_STOP",
+            "final_depth_latched": True,
+            "final_locked": True,
+            "edge_yaw": 0.01,
+            "final_yaw_deadband_rad": 0.08,
+        },
+    )
+    assert inv4.summary["docking_action"] == "FINAL_LOCKED_STOP"
+    assert inv4.final_vx == 0.0 and inv4.final_vy == 0.0 and inv4.final_wz == 0.0
+
+    inv5 = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("local_rotate_search", desired_vx=0.0, desired_wz=0.10, yaw_owner="search", rotate_allowed_by_behavior=True),
+        {
+            "control_phase": "SEARCH_SCAN",
+            "near_table_latched": True,
+            "last_good_edge_yaw_cmd": 0.04,
+        },
+    )
+    assert inv5.summary["docking_stage"] != "SEARCH"
+    assert inv5.summary["docking_action"] != "SEARCH_ROTATE"
+    assert inv5.reason == "near_latch_suppressed_far_fallback"
+
+    inv6 = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("local_rotate_search", desired_vx=0.0, desired_wz=0.10, yaw_owner="search", rotate_allowed_by_behavior=True),
+        {
+            "control_phase": "SEARCH_SCAN",
+            "near_table_latched": True,
+            "final_depth_latched": True,
+            "final_yaw_align_active": True,
+            "edge_yaw": 0.30,
+            "final_yaw_deadband_rad": 0.08,
+            "last_good_edge_yaw_cmd": 0.05,
+            "last_good_edge_yaw_age_ms": 100.0,
+        },
+    )
+    assert inv6.summary["docking_stage"] != "SEARCH"
+    assert inv6.summary["docking_action"] != "SEARCH_ROTATE"
+
+    inv7_uart = UartBridge(port="COM_DRY_RUN", baudrate=115200, timeout_s=0.1, dry_run=True)
+    assert inv7_uart._writer_discard_reason({
+        "line": "V 0.000 0.000 -0.100",
+        "tx_meta": {"stop_class": "none", "estop_cooldown_applied": False},
+        "publish_mono": time.monotonic(),
+    }) == ""
+
+    inv8 = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("edge_guided_forward", desired_vx=0.0, desired_wz=0.0, yaw_owner="edge"),
+        {
+            "control_phase": "EDGE_GUIDED_APPROACH",
+            "zero_cmd_age_ms": 1200.0,
+            "bbox_center_valid": True,
+            "bbox_yaw_cmd": 0.05,
+        },
+    )
+    assert inv8.summary["docking_action"] in {"BBOX_REACQUIRE_ROTATE", "SEARCH_ROTATE", "NEAR_EDGE_FORWARD"}
+    assert inv8.final_vx != 0.0 or inv8.final_wz != 0.0
+    assert inv8.stop_class == "none"
+
+    inv9 = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("approach_commit_dropout_hold", desired_vx=0.02, desired_wz=0.03, yaw_owner="edge_hold", forward_allowed_by_behavior=True),
+        {
+            "control_phase": "EDGE_GUIDED_APPROACH",
+            "perception_dropout_hold_active": True,
+            "stale_hold_policy": "approach_commit_short_dropout",
+            "last_edge_yaw_cmd": 0.03,
+        },
+    )
+    assert inv9.summary["docking_action"] == "PERCEPTION_DROPOUT_HOLD"
+    assert inv9.stop_class == "none"
+
+    inv10 = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("edge_guided_forward", desired_vx=0.02, desired_wz=0.0, forward_allowed_by_behavior=True),
+        {"emergency_stop_active": True},
+    )
+    assert inv10.summary["docking_action"] == "EMERGENCY_STOP"
+    assert inv10.stop_class == "emergency"
+
     # Dwell fallback tests
     def touch_obs(center: float, touch: bool = True) -> TableEdgeObs:
         obs = bbox_obs(center)
