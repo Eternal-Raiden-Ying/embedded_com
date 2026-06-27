@@ -18,6 +18,7 @@ from orchestrator.orchestrator_service.runtime.motion_arbiter import MotionInten
 from orchestrator.orchestrator_service.runtime.perception_semantics import TablePerceptionSemantics
 from orchestrator.orchestrator_service.runtime.states.table_docking import TableDockingMixin
 from orchestrator.orchestrator_service.runtime.states.recovery import RecoveryMixin
+from orchestrator.orchestrator_service.runtime.safety.stale_guard import StaleGuardMixin
 from orchestrator.orchestrator_service.runtime.common import monotonic_ts
 from orchestrator.orchestrator_service.runtime.context import RuntimeContext, State
 from orchestrator.orchestrator_service.runtime.controller import MotionDecision
@@ -130,7 +131,7 @@ def main() -> None:
     assert auth("YOLO_APPROACH", bbox=True, edge=True, phase="EDGE_HANDOFF_CONFIRM").allow_forward is False
     assert auth("YOLO_APPROACH", bbox=True, edge=True, phase="EDGE_GUIDED_APPROACH").yaw_source == "edge"
 
-    class DockingProbe(TableDockingMixin):
+    class DockingProbe(TableDockingMixin, StaleGuardMixin):
         def __init__(self):
             self.cfg = ControlThresholds()
             self.car_cfg = CarMotionConfig()
@@ -1002,6 +1003,57 @@ def main() -> None:
     assert inv_q2_d.summary["docking_stage"] == "FINAL_DISTANCE_HOLD"
     assert inv_q2_d.final_vx == 0.0 and inv_q2_d.final_wz == 0.0
     assert inv_q2_d.reason == "edge_yaw_stale"
+
+    # Queue 3: Full workflow smoke test (SEARCH -> BBOX -> EDGE -> FINAL_YAW -> FINAL_LOCKED)
+    probe_smoke = DockingProbe()
+    probe_smoke.ctx.state = State.SEARCH_TABLE
+    probe_smoke.ctx.table_lost_frames = 0
+
+    # Step 1: SEARCH_TABLE with no observations -> Rotational search
+    obs_s1 = bbox_obs(0.5, found=False)
+    dec_s1 = edge_guided_decision(probe_smoke, obs_s1)
+    assert probe_smoke.ctx.state == State.SEARCH_TABLE
+    assert dec_s1.cmd.vx_mps == 0.0 and abs(dec_s1.cmd.wz_radps) > 0.0
+
+    # Step 2: BBOX found, transition to YOLO_APPROACH / APPROACH
+    probe_smoke.ctx.state = State.YOLO_APPROACH
+    obs_s2 = TableEdgeObs.from_dict({
+        "ts": now_ts(), "table_found": True, "edge_found": False, "edge_valid": False, "edge_trusted": False,
+        "table_bbox_control_valid": True, "yolo_table_control_valid": True, "yolo_bbox_center_x_norm": 0.50,
+        "table_bbox_area_ratio": 0.02, "table_roi_depth_valid": False,
+    })
+    dec_s2 = edge_guided_decision(probe_smoke, obs_s2)
+    assert probe_smoke.ctx.state == State.YOLO_APPROACH
+
+    # Step 3: Edge found at near distance -> near_table_latched becomes True
+    probe_smoke.ctx.state = State.EDGE_ADJUST
+    obs_s3 = TableEdgeObs.from_dict({
+        "ts": now_ts(), "table_found": True, "edge_found": True, "edge_valid": True, "edge_trusted": True,
+        "yaw_err_rad": 0.15, "dist_err_m": 0.40, "table_roi_depth_valid": True, "table_roi_depth_p10": 0.40,
+    })
+    dec_s3 = edge_guided_decision(probe_smoke, obs_s3)
+    assert probe_smoke.ctx.near_table_latched is True
+
+    # Step 4: Final depth latched at < 0.25m -> final_depth_latched becomes True, final_locked is False
+    probe_smoke.ctx.state = State.FINAL_SLOW_STOP
+    for _ in range(3):
+        obs_s4 = TableEdgeObs.from_dict({
+            "ts": now_ts(), "table_found": True, "edge_found": True, "edge_valid": True, "edge_trusted": True,
+            "yaw_err_rad": 0.15, "dist_err_m": 0.20, "table_roi_depth_valid": True, "table_roi_depth_p10": 0.20,
+        })
+        dec_s4 = edge_guided_decision(probe_smoke, obs_s4)
+    assert probe_smoke.ctx.final_depth_latched is True
+    assert probe_smoke.ctx.final_locked is False
+
+    # Step 5: Stable small yaw for 6 frames -> final_locked becomes True
+    probe_smoke.ctx.final_yaw_align_start_mono = monotonic_ts() - 2.0
+    for _ in range(6):
+        obs_s5 = TableEdgeObs.from_dict({
+            "ts": now_ts(), "table_found": True, "edge_found": True, "edge_valid": True, "edge_trusted": True,
+            "yaw_err_rad": 0.05, "dist_err_m": 0.20, "table_roi_depth_valid": True, "table_roi_depth_p10": 0.20,
+        })
+        dec_s5 = edge_guided_decision(probe_smoke, obs_s5)
+    assert probe_smoke.ctx.final_locked is True
 
     print("docking static verification: PASS")
 

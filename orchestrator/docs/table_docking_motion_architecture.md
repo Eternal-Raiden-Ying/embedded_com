@@ -65,19 +65,42 @@ They should map to `BBOX_REACQUIRE_ROTATE`, `CONTROL_RECOVERY_ROTATE`, `PERCEPTI
 
 ## Final And Near Rules
 
+- **Authoritative Status**: `DockingStage` and `DockingAction` are the sole authoritative sources of table docking status. The legacy runtime `State` enum is kept for internal state machine transitions only and is downgraded to compatibility-only (displayed as `legacy_state` under diagnostics).
 - Final depth latch blocks `vx/vy`; it does not block final yaw align.
 - `FINAL_DEPTH_LATCHED + yaw large` must emit nonzero `wz` when edge or last-good yaw is available.
 - Near/final latch downgrades YOLO bbox to diagnostic/FOV guard.
 - After near/final latch, bbox lost must not transition docking back to `SEARCH_TABLE`.
 - Active docking must not remain long-term `vx=0,wz=0` unless final hold, final locked, safety, or emergency is active.
 
+## Final Yaw Lock and Realignment Hysteresis
+
+To enter `FINAL_LOCKED`:
+1. `final_depth_latched` must be True.
+2. The absolute edge yaw error `abs(yaw_err_rad)` must be `<= final_yaw_deadband_rad` (default 0.12).
+3. The yaw error must remain within the deadband for consecutive stability of at least `final_yaw_stable_frames` (default 6).
+4. The system must undergo yaw alignment for at least `final_yaw_align_min_duration_ms` (default 1000ms), unless yaw error was already within deadband when final depth was latched.
+
+To trigger Realignment:
+- If currently `FINAL_LOCKED`, but subsequent fresh edge yaw shows `abs(yaw_err_rad) >= final_yaw_realign_rad` (default 0.18) consecutively for at least 3 frames, the system will break lock and re-enter `FINAL_YAW_ALIGN` (`vx=0, vy=0, wz!=0`).
+- If edge data goes completely stale (age > `final_yaw_last_good_hold_s`), the vehicle will hold position (`vx=0, vy=0, wz=0`) under `FINAL_DISTANCE_HOLD` stage with reason `edge_yaw_stale` rather than rotating blindly or returning to SEARCH.
+
+## Logging and Terminal Output
+
+- **Console Display**: Active table docking terminal print prefers the low-frequency `[DOCK]` summary line (printed immediately on stage/action changes, or throttled to 0.5s):
+  `[DOCK] stage=... action=... vx=... vy=... wz=... yaw=... depth_p10=... near=... final_depth=... locked=... uart_ok=... legacy_state=...`
+- **Differentiated Commands**: Differentiated commands are logged inside structured run logs (`control_summary` and `motion_gate_trace` JSONL):
+  - `candidate_cmd`: initial velocity command before table arbitration.
+  - `arbiter_final_cmd`: output velocity command after table docking arbiter calculations.
+  - `service_effective_cmd`: velocity command after service-level limits/safety/dry-run overrides.
+  - `uart_tx_cmd`: velocity command actually written to serial (suppressed to 0 if transmission not allowed).
+
 ## Real-Robot Log Checklist
 
 Watch these fields during the next table docking run:
 
 - Observation: `docking_observation`, `table_bbox_control_valid`, `yolo_bbox_center_x_norm`, `bbox_center_error_control`, `table_bbox_touch_left`, `table_bbox_touch_right`, `edge_found`, `edge_trusted`, `yaw_err_rad`, `table_roi_depth_valid`, `table_roi_depth_p10`.
-- Stage/action: `docking_stage`, `docking_action`, `motion_intent_type`, `yaw_owner`, `arbitration_reason`, `blocked_by`.
-- Final command: `final_vx`, `final_vy`, `final_wz`, `vx_mps`, `vy_mps`, `wz_radps`.
-- Recovery: `fov_guard_level`, `fov_guard_reason`, `bbox_fov_guard_level`, `bbox_fov_guard_reason`, `perception_dropout_hold_active`, `zero_escape_reason`.
+- Stage/action: `docking_stage`, `docking_action`, `docking_reason`, `yaw_owner`, `arbitration_reason`, `blocked_by`.
+- Commands: `candidate_cmd`, `arbiter_final_cmd`, `service_effective_cmd`, `uart_tx_cmd`, `final_vx`, `final_vy`, `final_wz`, `vx_mps`, `vy_mps`, `wz_radps`.
+- Recovery & Diagnostics: `fov_guard_level`, `fov_guard_reason`, `bbox_fov_guard_level`, `bbox_fov_guard_reason`, `perception_dropout_hold_active`, `zero_escape_reason`, `final_yaw_deadband_rad`, `final_yaw_realign_rad`, `final_yaw_stable_count`, `final_yaw_align_elapsed_ms`, `final_yaw_lock_block_reason`, `final_realign_triggered`, `final_yaw_source`.
 - Latches: `near_table_latched`, `near_table_latch_reason`, `final_depth_latched`, `final_depth_latch_reason`, `final_yaw_align_active`, `final_locked`.
-- Service/UART: `active_table_docking`, `service_override`, `service_override_reason`, `effective_cmd_before_service`, `effective_cmd_after_service`, `estop_cooldown_applied`, `writer_accept_cmd`, `writer_discard_reason`, `serial_write_ok`, `uart_tx_ok`.
+- Service/UART: `active_table_docking`, `service_override`, `estop_cooldown_applied`, `uart_tx_ok`.

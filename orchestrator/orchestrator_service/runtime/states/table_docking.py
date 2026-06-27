@@ -52,6 +52,11 @@ class TableDockingMixin:
     def _arbitrate_table_motion_decision(self, decision: MotionDecision, obs: Optional[TableEdgeObs]) -> MotionDecision:
         summary = decision.control_summary if decision.control_summary is not None else {}
         decision.control_summary = summary
+        summary["candidate_cmd"] = {
+            "vx_mps": float(getattr(decision.cmd, "vx_mps", 0.0) or 0.0),
+            "vy_mps": float(getattr(decision.cmd, "vy_mps", 0.0) or 0.0),
+            "wz_radps": float(getattr(decision.cmd, "wz_radps", 0.0) or 0.0),
+        }
         intent = MotionIntent(
             intent_type=str(summary.get("control_source") or summary.get("control_intent") or decision.cmd.mode or ""),
             desired_vx=float(getattr(decision.cmd, "vx_mps", 0.0) or 0.0),
@@ -85,6 +90,11 @@ class TableDockingMixin:
                     "rotate_block_reason": "",
                 }
             )
+        summary["arbiter_final_cmd"] = {
+            "vx_mps": float(decision.cmd.vx_mps),
+            "vy_mps": float(decision.cmd.vy_mps),
+            "wz_radps": float(decision.cmd.wz_radps),
+        }
         summary.update(
             {
                 "arbiter_applied": True,

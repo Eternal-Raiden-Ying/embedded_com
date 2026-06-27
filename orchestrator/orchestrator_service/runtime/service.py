@@ -2774,6 +2774,10 @@ class OrchestratorService(BaseModule):
             "vx_mps": vx,
             "vy_mps": vy,
             "wz_radps": wz,
+            "candidate_cmd": summary.get("candidate_cmd"),
+            "arbiter_final_cmd": summary.get("arbiter_final_cmd"),
+            "service_effective_cmd": summary.get("service_effective_cmd"),
+            "uart_tx_cmd": summary.get("uart_tx_cmd"),
             "forward_block_reason": summary.get("forward_block_reason") or "",
             "rotate_block_reason": summary.get("rotate_block_reason") or "",
             "block_reason": block_reason,
@@ -3141,10 +3145,49 @@ class OrchestratorService(BaseModule):
             self._emit_jog_motion(decision, jog_action)
             return
         cmd = decision.cmd
+        summary = dict(getattr(decision, "control_summary", None) or {})
+        
+        # Populate candidate_cmd and arbiter_final_cmd if not set (e.g. non-docking phases)
+        if "candidate_cmd" not in summary:
+            summary["candidate_cmd"] = {
+                "vx_mps": float(getattr(cmd, "vx_mps", 0.0) or 0.0),
+                "vy_mps": float(getattr(cmd, "vy_mps", 0.0) or 0.0),
+                "wz_radps": float(getattr(cmd, "wz_radps", 0.0) or 0.0),
+            }
+        if "arbiter_final_cmd" not in summary:
+            summary["arbiter_final_cmd"] = {
+                "vx_mps": float(getattr(cmd, "vx_mps", 0.0) or 0.0),
+                "vy_mps": float(getattr(cmd, "vy_mps", 0.0) or 0.0),
+                "wz_radps": float(getattr(cmd, "wz_radps", 0.0) or 0.0),
+            }
+
+        effective_cmd, uart_arbitration = self._arbitrate_uart_motion_cmd(cmd, summary)
+        summary.update(uart_arbitration)
+        
+        summary["service_effective_cmd"] = {
+            "vx_mps": float(effective_cmd.vx_mps),
+            "vy_mps": float(effective_cmd.vy_mps),
+            "wz_radps": float(effective_cmd.wz_radps),
+        }
+        
+        allow_send = bool(summary.get("allow_uart_send", True))
+        if allow_send:
+            summary["uart_tx_cmd"] = {
+                "vx_mps": float(effective_cmd.vx_mps),
+                "vy_mps": float(effective_cmd.vy_mps),
+                "wz_radps": float(effective_cmd.wz_radps),
+            }
+        else:
+            summary["uart_tx_cmd"] = {
+                "vx_mps": 0.0,
+                "vy_mps": 0.0,
+                "wz_radps": 0.0,
+            }
+            
+        decision.control_summary = summary
+
         self._emit_operator_control(decision)
         self._flush_state_traces(decision)
-        summary = dict(getattr(decision, "control_summary", None) or {})
-        effective_cmd, uart_arbitration = self._arbitrate_uart_motion_cmd(cmd, summary)
         car_cmd = self.mapper.from_cmd_vel(effective_cmd, cx_norm_abs=decision.cx_norm_abs, distance_ratio=decision.distance_ratio)
         tx_meta = self._build_uart_tx_meta(car_cmd)
         stop_class = str(uart_arbitration.get("stop_class") or "").strip()
