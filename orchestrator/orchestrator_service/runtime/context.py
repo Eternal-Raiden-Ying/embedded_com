@@ -175,6 +175,9 @@ class RuntimeContext:
     near_dist_stable_frames: int = 0
     final_depth_stable_frames: int = 0
     final_yaw_aligned_frames: int = 0
+    final_yaw_align_start_mono: float = 0.0
+    final_yaw_initially_small: bool = False
+    final_yaw_realign_count: int = 0
     bbox_fov_violation_streak: int = 0
     bbox_lost_since_mono: float = 0.0
     bbox_lost_hold_active: bool = False
@@ -289,6 +292,10 @@ class RuntimeContext:
         self.near_dist_stable_frames = 0
         self.final_depth_stable_frames = 0
         self.final_yaw_aligned_frames = 0
+        self.final_yaw_align_mono = 0.0
+        self.final_yaw_align_start_mono = 0.0
+        self.final_yaw_initially_small = False
+        self.final_yaw_realign_count = 0
         self.bbox_fov_violation_streak = 0
         self.bbox_lost_since_mono = 0.0
         self.bbox_lost_hold_active = False

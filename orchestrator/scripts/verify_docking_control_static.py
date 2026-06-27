@@ -482,7 +482,7 @@ def main() -> None:
     probe.ctx.near_table_latched = True
     probe.ctx.final_depth_latched = True
     probe.ctx.final_depth_latch_reason = "static_final_depth"
-    probe.ctx.final_yaw_aligned_frames = 1
+    probe.ctx.final_yaw_aligned_frames = 5
     small_yaw = min(final_yaw_deadband * 0.5, 0.10)
     final_lock_obs = near_depth_obs(0.50, 0.50, yaw=small_yaw)
     final_lock = edge_guided_decision(probe, final_lock_obs)
@@ -763,6 +763,7 @@ def main() -> None:
             "edge_yaw": 0.30,
             "final_yaw_deadband_rad": 0.08,
             "edge_yaw_cmd_for_final_align": -0.12,
+            "edge_usable": True,
         },
     )
     assert inv3.summary["docking_action"] == "FINAL_YAW_ALIGN"
@@ -810,6 +811,7 @@ def main() -> None:
             "final_yaw_deadband_rad": 0.08,
             "last_good_edge_yaw_cmd": 0.05,
             "last_good_edge_yaw_age_ms": 100.0,
+            "edge_usable": True,
         },
     )
     assert inv6.summary["docking_stage"] != "SEARCH"
@@ -896,6 +898,110 @@ def main() -> None:
     obs_fallback_3 = touch_obs(0.90)  # error 0.40 > 0.35
     dec_fallback_3 = authority_decision(p_fallback_3, obs_fallback_3, raw_wz=0.10)
     assert dec_fallback_3.control_summary["control_phase"] == "BBOX_ACQUIRE"
+
+    # Queue 2: Final yaw lock & realignment static tests
+    # Case A: final_depth_latched=True + yaw_err=0.20 (which is > deadband 0.12)
+    # Action must be FINAL_YAW_ALIGN, wz != 0, final_locked=False
+    ctx_q2_a = RuntimeContext(state=State.FINAL_SLOW_STOP)
+    ctx_q2_a.final_depth_latched = True
+    ctx_q2_a.final_yaw_align_start_mono = 1.0
+    inv_q2_a = arbitrate_table_docking_motion(
+        ctx_q2_a,
+        None,
+        MotionIntent("final_align", desired_vx=0.0, desired_wz=0.0, yaw_owner="edge"),
+        {
+            "control_phase": "DEPTH_FINAL_STOP",
+            "final_depth_latched": True,
+            "final_yaw_align_active": True,
+            "edge_yaw": 0.20,
+            "yaw_err_rad": 0.20,
+            "final_yaw_deadband_rad": 0.12,
+            "final_lock_yaw_rad": 0.12,
+            "edge_yaw_cmd_for_final_align": 0.10,
+            "last_good_edge_yaw_age_ms": 10.0,
+            "edge_usable": True,
+        },
+    )
+    assert inv_q2_a.summary["docking_action"] == "FINAL_YAW_ALIGN"
+    assert inv_q2_a.summary["docking_stage"] == "FINAL_YAW_ALIGN"
+    assert inv_q2_a.final_vx == 0.0 and inv_q2_a.final_vy == 0.0 and abs(inv_q2_a.final_wz) > 0.0
+    assert inv_q2_a.summary["final_locked"] is False
+
+    # Case B: final_depth_latched=True + yaw_err=0.05 consecutively stable for 6 frames (final_yaw_stable_frames=6)
+    probe_q2_b = DockingProbe()
+    probe_q2_b.ctx.state = State.FINAL_SLOW_STOP
+    probe_q2_b.ctx.final_depth_latched = True
+    probe_q2_b.ctx.final_yaw_align_start_mono = 1.0
+    # Simulate 6 ticks with small yaw error
+    for _ in range(6):
+        obs_b = TableEdgeObs.from_dict({
+            "ts": time.time(), "table_found": True, "edge_found": True, "edge_valid": True, "edge_trusted": True,
+            "yaw_err_rad": 0.05, "table_roi_depth_valid": True, "table_roi_depth_p10": 0.30,
+        })
+        summary_b = {
+            "control_phase": "DEPTH_FINAL_STOP",
+            "final_depth_latched": True,
+            "yaw_err_rad": 0.05,
+            "edge_yaw_cmd": 0.0,
+            "last_good_edge_yaw_cmd": 0.0,
+            "last_good_edge_yaw_age_ms": 10.0,
+        }
+        probe_q2_b._refresh_near_final_latches(obs_b, {"depth_roi_stop_ready": True}, summary_b)
+    assert probe_q2_b.ctx.final_locked is True
+    # Now run arbiter to assert
+    inv_q2_b = arbitrate_table_docking_motion(
+        probe_q2_b.ctx,
+        None,
+        MotionIntent("final_hold", desired_vx=0.0, desired_wz=0.0),
+        {
+            "control_phase": "DEPTH_FINAL_STOP",
+            "final_depth_latched": True,
+            "final_locked": True,
+            "yaw_err_rad": 0.05,
+            "final_yaw_deadband_rad": 0.12,
+        },
+    )
+    assert inv_q2_b.summary["docking_action"] == "FINAL_LOCKED_STOP"
+    assert inv_q2_b.summary["docking_stage"] == "FINAL_LOCKED"
+    assert inv_q2_b.final_vx == 0.0 and inv_q2_b.final_wz == 0.0
+
+    # Case C: Already FINAL_LOCKED, yaw err exceeds realignment threshold 0.18 for 3 frames -> realign
+    for _ in range(3):
+        obs_c = TableEdgeObs.from_dict({
+            "ts": time.time(), "table_found": True, "edge_found": True, "edge_valid": True, "edge_trusted": True,
+            "yaw_err_rad": 0.20, "table_roi_depth_valid": True, "table_roi_depth_p10": 0.30,
+        })
+        summary_c = {
+            "control_phase": "DEPTH_FINAL_STOP",
+            "final_depth_latched": True,
+            "yaw_err_rad": 0.20,
+            "edge_yaw_cmd": 0.12,
+            "last_good_edge_yaw_cmd": 0.12,
+            "last_good_edge_yaw_age_ms": 10.0,
+        }
+        probe_q2_b._refresh_near_final_latches(obs_c, {"depth_roi_stop_ready": True}, summary_c)
+    assert probe_q2_b.ctx.final_locked is False
+    assert probe_q2_b.ctx.final_yaw_align_active is True
+
+    # Case D: final depth + edge yaw stale (age > hold_timeout) -> action=FINAL_LOCKED_STOP, wz=0, vx=0, reason=edge_yaw_stale
+    ctx_q2_d = RuntimeContext(state=State.FINAL_SLOW_STOP)
+    ctx_q2_d.final_depth_latched = True
+    inv_q2_d = arbitrate_table_docking_motion(
+        ctx_q2_d,
+        None,
+        MotionIntent("final_align", desired_vx=0.0, desired_wz=0.0),
+        {
+            "control_phase": "DEPTH_FINAL_STOP",
+            "final_depth_latched": True,
+            "final_yaw_align_active": True,
+            "yaw_err_rad": 0.25,
+            "last_good_edge_yaw_age_ms": 5000.0, # stale!
+        },
+    )
+    assert inv_q2_d.summary["docking_action"] == "FINAL_LOCKED_STOP"
+    assert inv_q2_d.summary["docking_stage"] == "FINAL_DISTANCE_HOLD"
+    assert inv_q2_d.final_vx == 0.0 and inv_q2_d.final_wz == 0.0
+    assert inv_q2_d.reason == "edge_yaw_stale"
 
     print("docking static verification: PASS")
 

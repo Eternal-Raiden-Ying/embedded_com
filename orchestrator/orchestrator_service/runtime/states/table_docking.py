@@ -322,32 +322,79 @@ class TableDockingMixin:
                 self.ctx.near_table_latched_mono = now
                 self.ctx.near_table_latch_reason = "final_depth_latched"
 
-        yaw_deadband = abs(float(getattr(self.cfg, "final_lock_yaw_tol_rad", getattr(self.cfg, "table_yaw_tol_rad", 0.08)) or 0.08))
+        yaw_deadband = abs(float(getattr(self.cfg, "final_lock_yaw_rad", getattr(self.cfg, "final_yaw_deadband_rad", 0.12)) or 0.12))
+        yaw_realign_rad = abs(float(getattr(self.cfg, "final_yaw_realign_rad", 0.18) or 0.18))
+        aligned_required = max(1, int(getattr(self.cfg, "final_yaw_stable_frames", 6) or 6))
+        min_align_duration_s = float(getattr(self.cfg, "final_yaw_align_min_duration_ms", 1000.0) or 1000.0) / 1000.0
+
         yaw_err = getattr(obs, "yaw_err_rad", None) if obs is not None else None
         last_yaw_age_s = max(0.0, now - float(self.ctx.last_good_edge_yaw_mono or now)) if self.ctx.last_good_edge_yaw_mono else 999.0
         last_yaw_fresh = bool(last_yaw_age_s <= float(getattr(self.cfg, "final_yaw_last_good_hold_s", 1.2) or 1.2))
         yaw_abs = abs(float(yaw_err)) if yaw_err is not None else None
+
+        final_yaw_lock_block_reason = "none"
+        final_realign_triggered = False
+
         if self.ctx.final_depth_latched:
+            if self.ctx.final_yaw_align_start_mono <= 0.0:
+                self.ctx.final_yaw_align_start_mono = now
+                if yaw_abs is not None and yaw_abs <= yaw_deadband:
+                    self.ctx.final_yaw_initially_small = True
+                else:
+                    self.ctx.final_yaw_initially_small = False
+
             if yaw_abs is not None and yaw_abs <= yaw_deadband:
                 self.ctx.final_yaw_aligned_frames += 1
             elif yaw_abs is None and last_yaw_fresh and abs(float(self.ctx.last_good_edge_yaw_cmd)) <= abs(float(getattr(self.car_cfg, "table_wz_deadband_radps", 0.006) or 0.006)):
                 self.ctx.final_yaw_aligned_frames += 1
             else:
                 self.ctx.final_yaw_aligned_frames = 0
-            aligned_required = max(1, int(getattr(self.cfg, "final_yaw_align_stable_frames", 2) or 2))
-            if self.ctx.final_yaw_aligned_frames >= aligned_required:
-                self.ctx.final_locked = True
-                self.ctx.final_yaw_align_active = False
-                self.ctx.final_lock_reason = "final_yaw_aligned"
-            elif yaw_abs is not None and yaw_abs > yaw_deadband:
-                self.ctx.final_yaw_align_active = True
-                self.ctx.final_lock_reason = "final_yaw_aligning"
-            elif yaw_abs is None and last_yaw_fresh:
-                self.ctx.final_yaw_align_active = True
-                self.ctx.final_lock_reason = "final_yaw_last_good_hold"
-            else:
-                self.ctx.final_yaw_align_active = False
-                self.ctx.final_lock_reason = "final_hold_edge_lost"
+
+            if self.ctx.final_locked:
+                if yaw_abs is not None and yaw_abs >= yaw_realign_rad:
+                    self.ctx.final_yaw_realign_count += 1
+                else:
+                    self.ctx.final_yaw_realign_count = 0
+
+                if self.ctx.final_yaw_realign_count >= 3:
+                    self.ctx.final_locked = False
+                    self.ctx.final_yaw_align_active = True
+                    self.ctx.final_yaw_align_start_mono = now
+                    self.ctx.final_yaw_initially_small = False
+                    self.ctx.final_yaw_aligned_frames = 0
+                    self.ctx.final_yaw_realign_count = 0
+                    self.ctx.final_lock_reason = "final_yaw_realigning"
+                    final_realign_triggered = True
+
+            if not self.ctx.final_locked:
+                elapsed_s = now - self.ctx.final_yaw_align_start_mono
+                duration_ok = (elapsed_s >= min_align_duration_s) or self.ctx.final_yaw_initially_small
+                stable_ok = self.ctx.final_yaw_aligned_frames >= aligned_required
+                yaw_ok = (yaw_abs is not None and yaw_abs <= yaw_deadband) or (yaw_abs is None and last_yaw_fresh and abs(float(self.ctx.last_good_edge_yaw_cmd)) <= abs(float(getattr(self.car_cfg, "table_wz_deadband_radps", 0.006) or 0.006)))
+
+                if stable_ok and duration_ok and yaw_ok:
+                    self.ctx.final_locked = True
+                    self.ctx.final_yaw_align_active = False
+                    self.ctx.final_lock_reason = "final_yaw_aligned"
+                else:
+                    self.ctx.final_locked = False
+                    if yaw_abs is not None and yaw_abs > yaw_deadband:
+                        self.ctx.final_yaw_align_active = True
+                        self.ctx.final_lock_reason = "final_yaw_aligning"
+                        if not yaw_ok:
+                            final_yaw_lock_block_reason = "yaw_error_large"
+                        elif not stable_ok:
+                            final_yaw_lock_block_reason = "yaw_not_stable"
+                        else:
+                            final_yaw_lock_block_reason = "align_duration_insufficient"
+                    elif yaw_abs is None and last_yaw_fresh:
+                        self.ctx.final_yaw_align_active = True
+                        self.ctx.final_lock_reason = "final_yaw_last_good_hold"
+                        final_yaw_lock_block_reason = "edge_yaw_stale_hold"
+                    else:
+                        self.ctx.final_yaw_align_active = False
+                        self.ctx.final_lock_reason = "final_hold_edge_lost"
+                        final_yaw_lock_block_reason = "edge_lost"
 
         summary.update(
             {
@@ -362,12 +409,19 @@ class TableDockingMixin:
                 "yolo_control_enabled": not bool(self.ctx.near_table_latched or self.ctx.final_depth_latched),
                 "last_good_edge_yaw_cmd": float(self.ctx.last_good_edge_yaw_cmd),
                 "last_good_edge_yaw_age_ms": last_yaw_age_s * 1000.0 if last_yaw_age_s < 900.0 else None,
+                "final_yaw_last_good_hold_s": float(getattr(self.cfg, "final_yaw_last_good_hold_s", 1.2) or 1.2),
                 "last_good_near_depth_age_ms": max(0.0, (now - float(self.ctx.last_good_near_depth_mono or now)) * 1000.0) if self.ctx.last_good_near_depth_mono else None,
                 "near_depth_stable_frames": int(self.ctx.near_depth_stable_frames),
                 "near_dist_stable_frames": int(self.ctx.near_dist_stable_frames),
                 "final_depth_stable_frames": int(self.ctx.final_depth_stable_frames),
                 "final_yaw_aligned_frames": int(self.ctx.final_yaw_aligned_frames),
                 "final_yaw_deadband_rad": float(yaw_deadband),
+                "final_yaw_realign_rad": float(yaw_realign_rad),
+                "final_yaw_stable_count": int(self.ctx.final_yaw_aligned_frames),
+                "final_yaw_align_elapsed_ms": float((now - self.ctx.final_yaw_align_start_mono) * 1000.0) if self.ctx.final_yaw_align_start_mono > 0.0 else 0.0,
+                "final_yaw_lock_block_reason": str(final_yaw_lock_block_reason),
+                "final_realign_triggered": bool(final_realign_triggered),
+                "final_yaw_source": str(summary.get("final_yaw_align_yaw_source") or summary.get("near_stage_yaw_source") or ""),
                 "near_depth_threshold_m": float(self._near_depth_threshold_m(obs)),
                 "near_dist_err_threshold_m": float(self._near_dist_err_threshold_m()),
                 "bbox_lost_ignored_due_to_near_latch": False,
@@ -390,6 +444,9 @@ class TableDockingMixin:
         self.ctx.near_dist_stable_frames = 0
         self.ctx.final_depth_stable_frames = 0
         self.ctx.final_yaw_aligned_frames = 0
+        self.ctx.final_yaw_align_start_mono = 0.0
+        self.ctx.final_yaw_initially_small = False
+        self.ctx.final_yaw_realign_count = 0
 
     def _bbox_lost_hold_or_search(self, obs: Optional[TableEdgeObs], mode: str) -> MotionDecision:
         """Hold table docking state before clearing handoff/searching for bbox loss."""

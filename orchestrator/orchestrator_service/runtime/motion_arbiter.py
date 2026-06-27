@@ -329,6 +329,7 @@ def arbitrate_table_docking_motion(
                 "bbox_fov_guard_reason": fov_reason,
                 "stale_policy": stale_policy.value,
                 "active_table_docking": bool(_active_table_docking(ctx)),
+                "final_locked": bool(getattr(ctx, "final_locked", False)),
             }
         )
         if extra:
@@ -338,28 +339,26 @@ def arbitrate_table_docking_motion(
     def edge_final_wz() -> tuple[float, str]:
         edge_wz = 0.0
         yaw_source = ""
-        for key, source in (
-            ("edge_yaw_cmd_for_final_align", "edge"),
-            ("edge_yaw_cmd", "edge"),
-            ("wz_from_plane", "edge"),
-        ):
-            candidate = _float(summary, key, 0.0)
-            if abs(candidate) > 1e-9:
-                edge_wz = candidate
-                yaw_source = source
-                break
-        if abs(edge_wz) <= 1e-9 and str(intent.yaw_owner or "").strip().lower() in {"edge", "edge_hold", "last_good_edge", "final_align"} and abs(desired_wz) > 1e-9:
-            edge_wz = desired_wz
-            yaw_source = str(intent.yaw_owner or "edge")
+        # 1. Use fresh yaw only if edge is usable
+        if docking_obs.edge_usable and docking_obs.yaw_err_rad is not None:
+            for key, source in (
+                ("edge_yaw_cmd_for_final_align", "edge"),
+                ("edge_yaw_cmd", "edge"),
+                ("wz_from_plane", "edge"),
+            ):
+                candidate = _float(summary, key, 0.0)
+                if abs(candidate) > 1e-9:
+                    edge_wz = candidate
+                    yaw_source = source
+                    break
+        # 2. Fall back to last_good_edge only if it is fresh
         last_good_age_ms = summary.get("last_good_edge_yaw_age_ms")
-        last_good_fresh = bool(last_good_age_ms is not None and float(last_good_age_ms) <= 1200.0)
+        hold_timeout_ms = float(summary.get("final_yaw_last_good_hold_s") or getattr(getattr(ctx, "cfg", None), "final_yaw_last_good_hold_s", 1.2) or 1.2) * 1000.0
+        last_good_fresh = bool(last_good_age_ms is not None and float(last_good_age_ms) <= hold_timeout_ms)
         if abs(edge_wz) <= 1e-9 and last_good_fresh and abs(float(getattr(ctx, "last_good_edge_yaw_cmd", 0.0) or 0.0)) > 1e-9:
             edge_wz = float(getattr(ctx, "last_good_edge_yaw_cmd", 0.0) or 0.0)
             yaw_source = "last_good_edge"
-        if abs(edge_wz) <= 1e-9 and abs(float(getattr(ctx, "last_edge_yaw_cmd", 0.0) or 0.0)) > 1e-9:
-            edge_wz = float(getattr(ctx, "last_edge_yaw_cmd", 0.0) or 0.0)
-            yaw_source = "last_edge"
-        return edge_wz, str(summary.get("near_stage_yaw_source") or yaw_source or ("hold" if abs(edge_wz) <= 1e-9 else "edge"))
+        return edge_wz, str(summary.get("near_stage_yaw_source") or yaw_source or "hold")
 
     def bbox_recovery_wz() -> float:
         for key in ("bbox_yaw_cmd", "desired_wz", "wz_radps"):
@@ -450,6 +449,7 @@ def arbitrate_table_docking_motion(
                 blocked_by="final_depth_latched",
                 reason="final_yaw_align",
             )
+        stale_reason = "edge_yaw_stale" if (yaw_large and abs(edge_wz) <= 1e-9) else str(summary.get("final_lock_reason") or "final_hold_edge_lost")
         return _docking_result(
             action=DockingAction.FINAL_LOCKED_STOP,
             stage=DockingStage.FINAL_DISTANCE_HOLD,
@@ -462,13 +462,13 @@ def arbitrate_table_docking_motion(
                 "yaw_owner": yaw_source,
                 "near_stage_yaw_source": yaw_source,
                 "forward_block_reason": "final_depth_latched",
-                "rotate_block_reason": str(summary.get("final_lock_reason") or "edge_lost_hold"),
+                "rotate_block_reason": stale_reason,
                 }
             ),
             yaw_owner=yaw_source,
             stop_class=StopClass.NONE,
             blocked_by="final_depth_latched",
-            reason=str(summary.get("final_lock_reason") or "final_hold_edge_lost"),
+            reason=stale_reason,
         )
 
     final_stop = bool(

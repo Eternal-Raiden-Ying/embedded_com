@@ -154,6 +154,11 @@ class ControlThresholds:
     enable_micro_adjust: bool = False
     final_lock_enter_dist_th_m: float = 0.08
     final_lock_enter_yaw_th_rad: float = 0.10
+    final_yaw_deadband_rad: float = 0.12
+    final_lock_yaw_rad: float = 0.12
+    final_yaw_realign_rad: float = 0.18
+    final_yaw_stable_frames: int = 6
+    final_yaw_align_min_duration_ms: int = 1000
     edge_settle_s: float = 0.80
     dock_retry_limit: int = 2
     dock_retry_backoff_s: float = 0.60
