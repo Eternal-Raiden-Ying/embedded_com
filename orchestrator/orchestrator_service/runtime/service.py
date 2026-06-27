@@ -1026,12 +1026,19 @@ class OrchestratorService(BaseModule):
         if arbiter_applied:
             hold_ms = max(0, int(getattr(self.cfg.car, "motion_hold_ms", getattr(self.cfg.car, "cmd_hold_ms", 150)) or 0))
             emergency_or_safety = bool(arbiter_stop_class in {"emergency", "safety"} or arbiter_motion_class in {"emergency_stop", "safety_stop"})
-            explicit_stop = bool(getattr(cmd, "brake", False) or mode in {"STOP", "IDLE", "DONE", "ERROR", "ERROR_RECOVERY"} or state in {"IDLE", "STOP"})
+            active_table_docking = bool(
+                summary.get("active_table_docking", False)
+                or state in {"SEARCH_TABLE", "YOLO_ACQUIRE_ALIGN", "YOLO_APPROACH", "EDGE_ADJUST", "FINAL_SLOW_STOP", "AT_TABLE_EDGE"}
+            )
+            explicit_idle_shutdown = bool(
+                not active_table_docking
+                and (getattr(cmd, "brake", False) or mode in {"STOP", "IDLE", "DONE", "ERROR", "ERROR_RECOVERY"} or state in {"IDLE", "STOP", "DONE"})
+            )
             effective = cmd
             emit_reason = "arbiter_direct"
             stop_class = "none" if arbiter_stop_class in {"", "none"} else arbiter_stop_class
-            if emergency_or_safety or explicit_stop:
-                emit_reason = "arbiter_hard_stop" if emergency_or_safety else "explicit_stop"
+            if emergency_or_safety or explicit_idle_shutdown:
+                emit_reason = "arbiter_hard_stop" if emergency_or_safety else "explicit_idle_shutdown"
                 effective = self._make_stop_cmd(now, hold_ms=int(getattr(cmd, "hold_ms", self.cfg.car.cmd_hold_ms) or self.cfg.car.cmd_hold_ms))
                 self._last_valid_motion_cmd = None
                 self._last_valid_motion_ts = 0.0
@@ -1043,28 +1050,8 @@ class OrchestratorService(BaseModule):
                 self._last_valid_motion_ts = now
                 last_age_ms = 0.0
             else:
-                final_yaw_cmd = 0.0
-                if bool(summary.get("final_yaw_align_active", False)) or str(summary.get("final_cmd_source") or "") == "arbiter_final_yaw_align":
-                    try:
-                        final_yaw_cmd = float(summary.get("final_yaw_align_yaw_cmd", summary.get("final_wz", 0.0)) or 0.0)
-                    except Exception:
-                        final_yaw_cmd = 0.0
-                if abs(final_yaw_cmd) > 1e-9:
-                    effective = CmdVel(
-                        ts=float(now),
-                        mode=str(getattr(cmd, "mode", "") or "YOLO_APPROACH"),
-                        vx_mps=0.0,
-                        vy_mps=0.0,
-                        wz_radps=float(final_yaw_cmd),
-                        hold_ms=int(getattr(cmd, "hold_ms", hold_ms) or hold_ms),
-                        brake=False,
-                    )
-                    emit_reason = "arbiter_final_yaw_align"
-                    self._last_valid_motion_cmd = self._cmd_dict(effective)
-                    self._last_valid_motion_ts = now
-                    last_age_ms = 0.0
-                else:
-                    last_age_ms = self._last_valid_motion_age_ms(now)
+                # diagnostic only; final motion is decided by docking motion arbiter
+                last_age_ms = self._last_valid_motion_age_ms(now)
 
             service_override = bool(self._cmd_dict(effective) != self._cmd_dict(cmd))
             return effective, {
@@ -1099,6 +1086,7 @@ class OrchestratorService(BaseModule):
                 "effective_cmd_after_service": self._cmd_dict(effective),
                 "perception_dropout_hold_active": bool(summary.get("perception_dropout_hold_active", False)),
                 "service_may_override": bool(summary.get("service_may_override", False)),
+                "active_table_docking": bool(active_table_docking),
             }
         # Legacy fallback for non-table-docking or pre-arbiter commands.
         # Table docking commands with arbiter_applied=True bypass this visual
