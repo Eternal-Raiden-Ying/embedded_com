@@ -78,9 +78,10 @@ def main() -> None:
     assert not invalid_geom["bbox_center_valid"]
     assert invalid_geom["bbox_cx_norm_control"] is None
     assert invalid_geom["bbox_center_error_control"] is None
-    # Edge/depth facts without a current bbox must remain a rotate-only search.
+    # Queue 2: final/depth stop no longer depends on a current bbox once the
+    # depth/final path owns near docking.
     a = auth("YOLO_APPROACH", bbox=False, edge=True, depth_stop=True)
-    assert (a.control_source, a.allow_forward, a.allow_rotate) == ("local_rotate_search", False, True)
+    assert (a.control_source, a.allow_forward, a.allow_rotate) == ("depth_roi_stop", False, False)
     a = auth("YOLO_APPROACH", bbox=True, error=0.3)
     assert (a.control_source, a.allow_forward, a.allow_rotate) == ("yolo_acquire_align", False, True)
     a = auth("YOLO_APPROACH", bbox=True, edge=False)
@@ -157,6 +158,20 @@ def main() -> None:
             "edge_found": False,
             "depth_valid": True,
         })
+
+    def near_depth_obs(center: float, depth_m: float, *, yaw: float = 0.10) -> TableEdgeObs:
+        obs = bbox_obs(center)
+        obs.edge_found = True
+        obs.edge_valid = True
+        obs.edge_trusted = True
+        obs.usable_for_approach = True
+        obs.yaw_err_rad = yaw
+        obs.table_roi_depth_valid = True
+        obs.table_roi_depth_p10 = depth_m
+        obs.table_roi_depth_median = depth_m
+        obs.table_roi_depth_valid_ratio = 0.80
+        obs.table_roi_depth_sample_count = 120
+        return obs
 
     def authority_decision(probe: DockingProbe, obs: TableEdgeObs, raw_wz: float) -> MotionDecision:
         cmd = probe.controller._cmd("YOLO_APPROACH", vx=0.02, wz=raw_wz)
@@ -360,6 +375,84 @@ def main() -> None:
     assert soft_fov.control_summary["approach_commit_active"]
     assert soft_fov.control_summary["motion_class"] == "normal"
     assert soft_fov.control_summary["stop_class"] == "none"
+
+    # Near-table latch: depth ROI is near but not yet final, so edge/near owns
+    # yaw and YOLO is downgraded from primary control.
+    probe = DockingProbe()
+    near_obs = near_depth_obs(0.50, 0.58, yaw=0.08)
+    edge_guided_decision(probe, near_obs)
+    near_latched = edge_guided_decision(probe, near_obs)
+    assert near_latched.control_summary["near_table_latched"]
+    assert not near_latched.control_summary["yolo_control_enabled"]
+    assert near_latched.control_summary["near_stage_yaw_source"] in {"edge", "last_good_edge"}
+    assert near_latched.control_summary["yaw_owner"] not in {"bbox", "yolo"}
+
+    # Final depth latch + large yaw: forward is permanently blocked but yaw
+    # alignment may continue in place.
+    probe = DockingProbe()
+    probe.ctx.near_table_latched = True
+    probe.ctx.final_depth_latched = True
+    probe.ctx.final_depth_latch_reason = "static_final_depth"
+    final_yaw_deadband = abs(float(getattr(probe.cfg, "final_lock_yaw_tol_rad", getattr(probe.cfg, "table_yaw_tol_rad", 0.08)) or 0.08))
+    large_yaw = max(final_yaw_deadband + 0.05, 0.30)
+    final_yaw_obs = near_depth_obs(0.50, 0.50, yaw=large_yaw)
+    final_yaw = edge_guided_decision(probe, final_yaw_obs)
+    assert final_yaw.cmd.vx_mps == 0.0
+    assert abs(final_yaw.cmd.wz_radps) > 0.0
+    assert final_yaw.control_summary["final_depth_latched"]
+    assert final_yaw.control_summary["final_yaw_align_active"]
+    assert not final_yaw.control_summary["final_locked"]
+    assert final_yaw.control_summary["arbitration_reason"] == "final_yaw_align"
+    assert abs(final_yaw.control_summary["final_yaw_align_yaw_cmd"]) > 0.0
+
+    # Final depth latch + stable small yaw: become locked instead of returning
+    # to SEARCH_TABLE.
+    probe = DockingProbe()
+    probe.ctx.near_table_latched = True
+    probe.ctx.final_depth_latched = True
+    probe.ctx.final_depth_latch_reason = "static_final_depth"
+    probe.ctx.final_yaw_aligned_frames = 1
+    small_yaw = min(final_yaw_deadband * 0.5, 0.10)
+    final_lock_obs = near_depth_obs(0.50, 0.50, yaw=small_yaw)
+    final_lock = edge_guided_decision(probe, final_lock_obs)
+    assert final_lock.cmd.vx_mps == 0.0 and final_lock.cmd.wz_radps == 0.0
+    assert final_lock.control_summary["final_depth_latched"]
+    assert final_lock.control_summary["final_locked"]
+    assert not final_lock.control_summary["final_yaw_align_active"]
+    assert probe.ctx.state != State.SEARCH_TABLE
+
+    # Near latch + bbox lost: do not transition back to SEARCH_TABLE and do not
+    # allow SEARCH_SCAN to take ownership.
+    probe = DockingProbe()
+    probe.ctx.near_table_latched = True
+    probe.ctx.near_table_latch_reason = "static_near"
+    lost_near = bbox_obs(0.50, found=False)
+    held_near = probe._bbox_lost_hold_or_search(lost_near, "YOLO_APPROACH")
+    assert probe.ctx.state == State.YOLO_APPROACH
+    assert held_near.control_summary["bbox_lost_ignored_due_to_near_latch"]
+    assert held_near.control_summary["control_phase"] != "SEARCH_SCAN"
+
+    # Final depth latch outranks an already-active forward coast.
+    probe = DockingProbe()
+    probe.ctx.near_table_latched = True
+    probe.ctx.final_depth_latched = True
+    probe.ctx.final_depth_latch_reason = "static_final_depth"
+    probe.ctx.approach_commit_active = True
+    probe.ctx.last_edge_yaw_cmd = 0.04
+    coast_blocked = authority_decision(probe, final_yaw_obs, raw_wz=0.04)
+    assert coast_blocked.cmd.vx_mps == 0.0
+    assert coast_blocked.control_summary["final_depth_latched"]
+
+    # Emergency/explicit hard safety clears near/final latches.
+    probe = DockingProbe()
+    probe.ctx.near_table_latched = True
+    probe.ctx.final_depth_latched = True
+    emergency_clear = probe._apply_control_authority(
+        MotionDecision(cmd=probe.controller._cmd("YOLO_APPROACH", vx=0.0, wz=0.0), control_summary={"emergency_stop_active": True}),
+        final_yaw_obs,
+    )
+    assert emergency_clear.cmd.vx_mps == 0.0
+    assert not probe.ctx.near_table_latched and not probe.ctx.final_depth_latched
 
     # Extreme center error remains a hard guard.
     probe = DockingProbe()

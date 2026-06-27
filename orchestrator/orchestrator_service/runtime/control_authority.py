@@ -113,7 +113,7 @@ def decide_table_control_authority(
     if state in {"FINAL_SLOW_STOP", "AT_TABLE_EDGE"}:
         return make("final_slow_stop", "edge" if sem.edge_trusted else "last_stable", "none", "final_lock", False, False, "final_slow_stop_state", "DEPTH_FINAL_STOP")
 
-    if depth_roi_stop_active and sem.table_bbox_current_found:
+    if depth_roi_stop_active:
         return make("depth_roi_stop", "none", "none", "roi_depth", False, False, "depth_roi_stop_active", "DEPTH_FINAL_STOP")
 
     if control_phase == "BBOX_ACQUIRE":
@@ -129,9 +129,6 @@ def decide_table_control_authority(
     # blocked.
     if not sem.table_bbox_current_found:
         return make("local_rotate_search", "search", "none", "none", False, True, "table_bbox_unavailable", "SEARCH_SCAN")
-
-    if depth_roi_stop_active:
-        return make("depth_roi_stop", "none", "none", "roi_depth", False, False, "depth_roi_stop_active", "DEPTH_FINAL_STOP")
 
     hard_limit = abs(float(getattr(getattr(cfg, "car", cfg), "yolo_forward_center_hard_limit", 0.25) or 0.25))
     if state == "YOLO_ACQUIRE_ALIGN" or (bbox_center_error is not None and abs(float(bbox_center_error)) > hard_limit):

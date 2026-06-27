@@ -148,8 +148,275 @@ class TableDockingMixin:
         stale_level = str(self.controller._stale_guard(obs).get("stale_level") or "fresh")
         return stale_level not in {"hard_stale", "dead"}
 
+    def _near_table_latch_frames(self) -> int:
+        return max(1, int(getattr(self.cfg, "near_table_latch_frames", 2) or 2))
+
+    def _final_depth_latch_frames(self) -> int:
+        return max(1, int(getattr(self.cfg, "final_depth_latch_frames", self._final_lock_required_ready_obs()) or self._final_lock_required_ready_obs()))
+
+    def _near_depth_threshold_m(self, obs: Optional[TableEdgeObs]) -> float:
+        target = self._table_target_dist_m(obs) if hasattr(self, "_table_target_dist_m") else float(getattr(self.cfg, "table_target_dist_m", 0.50) or 0.50)
+        margin = max(
+            float(getattr(self.cfg, "near_table_depth_margin_m", 0.12) or 0.12),
+            float(getattr(self.cfg, "table_stop_margin_m", 0.05) or 0.05),
+        )
+        return float(target) + margin
+
+    def _near_dist_err_threshold_m(self) -> float:
+        return max(0.0, float(getattr(self.cfg, "near_table_dist_err_th_m", getattr(self.cfg, "final_lock_enter_dist_th_m", 0.12)) or 0.12))
+
+    def _edge_yaw_cmd_from_obs(self, obs: Optional[TableEdgeObs], summary: Optional[Dict[str, object]] = None) -> float:
+        summary = summary or {}
+        if summary.get("edge_yaw_cmd") is not None:
+            try:
+                return float(summary.get("edge_yaw_cmd") or 0.0)
+            except Exception:
+                return 0.0
+        if summary.get("wz_from_plane") is not None:
+            try:
+                return float(summary.get("wz_from_plane") or 0.0)
+            except Exception:
+                return 0.0
+        if obs is not None and getattr(obs, "yaw_err_rad", None) is not None:
+            yaw = float(getattr(obs, "yaw_err_rad", 0.0) or 0.0)
+            kp = float(getattr(self.car_cfg, "table_plane_yaw_kp_radps_per_rad", 0.60) or 0.60)
+            sign = float(getattr(self.car_cfg, "table_plane_yaw_sign", 1.0) or 1.0)
+            max_wz = abs(float(getattr(self.car_cfg, "table_wz_plane_max_radps", 0.14) or 0.14))
+            return max(-max_wz, min(max_wz, yaw * kp * sign))
+        return 0.0
+
+    def _prepare_final_yaw_candidate(self, obs: Optional[TableEdgeObs], summary: Dict[str, object], decision: Optional[MotionDecision] = None) -> None:
+        now = monotonic_ts()
+        edge_usable = bool(obs is not None and (getattr(obs, "edge_found", False) or getattr(obs, "usable_for_approach", False) or getattr(obs, "edge_trusted", False)))
+        yaw_err_valid = bool(obs is not None and getattr(obs, "yaw_err_rad", None) is not None)
+        yaw_cmd = 0.0
+        yaw_source = ""
+
+        for key, source in (("edge_yaw_cmd_for_final_align", "edge"), ("edge_yaw_cmd", "edge"), ("wz_from_plane", "edge")):
+            try:
+                candidate = float(summary.get(key, 0.0) or 0.0)
+            except Exception:
+                candidate = 0.0
+            if abs(candidate) > 1e-9:
+                yaw_cmd = candidate
+                yaw_source = source
+                break
+
+        if abs(yaw_cmd) <= 1e-9 and decision is not None:
+            raw_owner = str(summary.get("yaw_source") or summary.get("yaw_owner") or "").strip().lower()
+            if raw_owner in {"edge", "edge_hold", "last_good_edge", "final_align"}:
+                try:
+                    candidate = float(getattr(decision.cmd, "wz_radps", 0.0) or 0.0)
+                except Exception:
+                    candidate = 0.0
+                if abs(candidate) > 1e-9:
+                    yaw_cmd = candidate
+                    yaw_source = raw_owner
+
+        if edge_usable and yaw_err_valid:
+            current_yaw_cmd = self._edge_yaw_cmd_from_obs(obs, {})
+            if abs(current_yaw_cmd) > 1e-9:
+                yaw_cmd = current_yaw_cmd
+                yaw_source = "edge"
+                self.ctx.last_good_edge_yaw_cmd = float(current_yaw_cmd)
+                self.ctx.last_good_edge_yaw_mono = now
+                summary["edge_yaw_cmd_for_final_align"] = float(current_yaw_cmd)
+                summary["near_stage_yaw_source"] = "edge"
+
+        last_yaw_age_s = max(0.0, now - float(self.ctx.last_good_edge_yaw_mono or now)) if self.ctx.last_good_edge_yaw_mono else 999.0
+        last_yaw_fresh = bool(last_yaw_age_s <= float(getattr(self.cfg, "final_yaw_last_good_hold_s", 1.2) or 1.2))
+        if abs(yaw_cmd) <= 1e-9 and last_yaw_fresh and abs(float(self.ctx.last_good_edge_yaw_cmd)) > 1e-9:
+            yaw_cmd = float(self.ctx.last_good_edge_yaw_cmd)
+            yaw_source = "last_good_edge"
+            summary["near_stage_yaw_source"] = "last_good_edge"
+        if abs(yaw_cmd) <= 1e-9 and abs(float(getattr(self.ctx, "last_edge_yaw_cmd", 0.0) or 0.0)) > 1e-9:
+            yaw_cmd = float(self.ctx.last_edge_yaw_cmd)
+            yaw_source = "last_edge"
+
+        if abs(yaw_cmd) > 1e-9:
+            summary["edge_yaw_cmd_for_final_align"] = float(yaw_cmd)
+            summary["final_yaw_align_yaw_source"] = yaw_source or str(summary.get("near_stage_yaw_source") or "edge")
+        summary["last_good_edge_yaw_cmd"] = float(self.ctx.last_good_edge_yaw_cmd)
+        summary["last_good_edge_yaw_mono"] = float(self.ctx.last_good_edge_yaw_mono)
+        summary["last_good_edge_yaw_age_ms"] = last_yaw_age_s * 1000.0 if last_yaw_age_s < 900.0 else None
+
+    def _refresh_near_final_latches(self, obs: Optional[TableEdgeObs], depth_status: Dict[str, object], summary: Dict[str, object]) -> Dict[str, object]:
+        now = monotonic_ts()
+        edge_usable = bool(obs is not None and (getattr(obs, "edge_found", False) or getattr(obs, "usable_for_approach", False) or getattr(obs, "edge_trusted", False)))
+        edge_yaw_cmd = self._edge_yaw_cmd_from_obs(obs, summary)
+        if edge_usable and abs(edge_yaw_cmd) > 1e-9:
+            self.ctx.last_good_edge_yaw_cmd = float(edge_yaw_cmd)
+            self.ctx.last_good_edge_yaw_mono = now
+            summary["edge_yaw_cmd_for_final_align"] = float(edge_yaw_cmd)
+
+        depth_valid = bool(getattr(obs, "table_roi_depth_valid", False)) if obs is not None else False
+        depth_p10 = getattr(obs, "table_roi_depth_p10", None) if obs is not None else None
+        depth_median = getattr(obs, "table_roi_depth_median", None) if obs is not None else None
+        depth_value = depth_p10 if depth_p10 is not None else depth_median
+        near_depth = bool(depth_valid and depth_value is not None and float(depth_value) <= self._near_depth_threshold_m(obs))
+        near_dist = bool(obs is not None and getattr(obs, "dist_err_m", None) is not None and abs(float(obs.dist_err_m)) <= self._near_dist_err_threshold_m())
+        bbox_area = float(getattr(obs, "table_bbox_area_ratio", getattr(obs, "yolo_bbox_area_norm", 0.0)) or 0.0) if obs is not None else 0.0
+        bbox_touch_bottom = bool(getattr(obs, "table_bbox_touch_bottom", getattr(obs, "yolo_bbox_touch_bottom", False))) if obs is not None else False
+        near_bbox_depth = bool((bbox_area >= 0.35 or bbox_touch_bottom) and depth_valid and edge_usable)
+        depth_stop_ready = bool(depth_status.get("depth_roi_stop_ready", False))
+        control_source = str(summary.get("control_source") or summary.get("motion_intent_type") or "").strip().lower()
+        phase = str(summary.get("control_phase") or self.ctx.control_phase or "").strip().upper()
+        edge_guided_phase = bool(phase == "EDGE_GUIDED_APPROACH" or control_source in {"edge_guided_forward", "near_edge_approach", "near_edge_hold"})
+        forward_commit_age_s = max(0.0, now - float(self.ctx.last_forward_cmd_mono or now)) if self.ctx.last_forward_cmd_mono else 999.0
+        candidate_vx = 0.0
+        try:
+            candidate_vx = float(summary.get("final_vx", summary.get("vx_mps", 0.0)) or 0.0)
+        except Exception:
+            candidate_vx = 0.0
+        approach_depth_near = bool(
+            edge_guided_phase
+            and (self.ctx.approach_commit_active or candidate_vx > 0.0 or self.ctx.last_forward_cmd_mono > 0.0)
+            and (forward_commit_age_s <= 3.0 or candidate_vx > 0.0)
+            and depth_valid
+            and depth_value is not None
+        )
+
+        self.ctx.near_depth_stable_frames = self.ctx.near_depth_stable_frames + 1 if near_depth else 0
+        self.ctx.near_dist_stable_frames = self.ctx.near_dist_stable_frames + 1 if near_dist else 0
+        if near_depth or depth_stop_ready:
+            self.ctx.last_good_near_depth_mono = now
+
+        near_reason = ""
+        if depth_stop_ready or phase == "DEPTH_FINAL_STOP" or str(depth_status.get("reason") or "") == "stable_dynamic_roi_depth":
+            near_reason = "stable_dynamic_roi_depth"
+        elif self.ctx.near_depth_stable_frames >= self._near_table_latch_frames():
+            near_reason = "near_depth_stable"
+        elif self.ctx.near_dist_stable_frames >= self._near_table_latch_frames():
+            near_reason = "near_dist_stable"
+        elif near_bbox_depth:
+            near_reason = "bbox_large_touch_depth_edge"
+        elif approach_depth_near:
+            near_reason = "edge_guided_forward_depth_seen"
+
+        if near_reason and not self.ctx.near_table_latched:
+            self.ctx.near_table_latched = True
+            self.ctx.near_table_latched_mono = now
+            self.ctx.near_table_latch_reason = near_reason
+
+        self.ctx.final_depth_stable_frames = self.ctx.final_depth_stable_frames + 1 if depth_stop_ready else 0
+        if depth_stop_ready and self.ctx.final_depth_stable_frames >= self._final_depth_latch_frames():
+            if not self.ctx.final_depth_latched:
+                self.ctx.final_depth_latched = True
+                self.ctx.final_depth_latched_mono = now
+                self.ctx.final_depth_latch_reason = str(depth_status.get("reason") or "stable_dynamic_roi_depth")
+            if not self.ctx.near_table_latched:
+                self.ctx.near_table_latched = True
+                self.ctx.near_table_latched_mono = now
+                self.ctx.near_table_latch_reason = "final_depth_latched"
+
+        yaw_deadband = abs(float(getattr(self.cfg, "final_lock_yaw_tol_rad", getattr(self.cfg, "table_yaw_tol_rad", 0.08)) or 0.08))
+        yaw_err = getattr(obs, "yaw_err_rad", None) if obs is not None else None
+        last_yaw_age_s = max(0.0, now - float(self.ctx.last_good_edge_yaw_mono or now)) if self.ctx.last_good_edge_yaw_mono else 999.0
+        last_yaw_fresh = bool(last_yaw_age_s <= float(getattr(self.cfg, "final_yaw_last_good_hold_s", 1.2) or 1.2))
+        yaw_abs = abs(float(yaw_err)) if yaw_err is not None else None
+        if self.ctx.final_depth_latched:
+            if yaw_abs is not None and yaw_abs <= yaw_deadband:
+                self.ctx.final_yaw_aligned_frames += 1
+            elif yaw_abs is None and last_yaw_fresh and abs(float(self.ctx.last_good_edge_yaw_cmd)) <= abs(float(getattr(self.car_cfg, "table_wz_deadband_radps", 0.006) or 0.006)):
+                self.ctx.final_yaw_aligned_frames += 1
+            else:
+                self.ctx.final_yaw_aligned_frames = 0
+            aligned_required = max(1, int(getattr(self.cfg, "final_yaw_align_stable_frames", 2) or 2))
+            if self.ctx.final_yaw_aligned_frames >= aligned_required:
+                self.ctx.final_locked = True
+                self.ctx.final_yaw_align_active = False
+                self.ctx.final_lock_reason = "final_yaw_aligned"
+            elif yaw_abs is not None and yaw_abs > yaw_deadband:
+                self.ctx.final_yaw_align_active = True
+                self.ctx.final_lock_reason = "final_yaw_aligning"
+            elif yaw_abs is None and last_yaw_fresh:
+                self.ctx.final_yaw_align_active = True
+                self.ctx.final_lock_reason = "final_yaw_last_good_hold"
+            else:
+                self.ctx.final_yaw_align_active = False
+                self.ctx.final_lock_reason = "final_hold_edge_lost"
+
+        summary.update(
+            {
+                "near_table_latched": bool(self.ctx.near_table_latched),
+                "near_table_latch_reason": str(self.ctx.near_table_latch_reason or near_reason),
+                "final_depth_latched": bool(self.ctx.final_depth_latched),
+                "final_depth_latch_reason": str(self.ctx.final_depth_latch_reason),
+                "final_yaw_align_active": bool(self.ctx.final_yaw_align_active),
+                "final_locked": bool(self.ctx.final_locked),
+                "final_lock_reason": str(self.ctx.final_lock_reason),
+                "near_stage_yaw_source": "edge" if edge_usable and yaw_err is not None else ("last_good_edge" if last_yaw_fresh else "hold"),
+                "yolo_control_enabled": not bool(self.ctx.near_table_latched or self.ctx.final_depth_latched),
+                "last_good_edge_yaw_cmd": float(self.ctx.last_good_edge_yaw_cmd),
+                "last_good_edge_yaw_age_ms": last_yaw_age_s * 1000.0 if last_yaw_age_s < 900.0 else None,
+                "last_good_near_depth_age_ms": max(0.0, (now - float(self.ctx.last_good_near_depth_mono or now)) * 1000.0) if self.ctx.last_good_near_depth_mono else None,
+                "near_depth_stable_frames": int(self.ctx.near_depth_stable_frames),
+                "near_dist_stable_frames": int(self.ctx.near_dist_stable_frames),
+                "final_depth_stable_frames": int(self.ctx.final_depth_stable_frames),
+                "final_yaw_aligned_frames": int(self.ctx.final_yaw_aligned_frames),
+                "final_yaw_deadband_rad": float(yaw_deadband),
+                "near_depth_threshold_m": float(self._near_depth_threshold_m(obs)),
+                "near_dist_err_threshold_m": float(self._near_dist_err_threshold_m()),
+                "bbox_lost_ignored_due_to_near_latch": False,
+            }
+        )
+        return summary
+
+    def _clear_near_final_latches(self, reason: str) -> None:
+        del reason
+        self.ctx.near_table_latched = False
+        self.ctx.near_table_latched_mono = 0.0
+        self.ctx.final_depth_latched = False
+        self.ctx.final_depth_latched_mono = 0.0
+        self.ctx.final_yaw_align_active = False
+        self.ctx.final_locked = False
+        self.ctx.near_table_latch_reason = ""
+        self.ctx.final_depth_latch_reason = ""
+        self.ctx.final_lock_reason = ""
+        self.ctx.near_depth_stable_frames = 0
+        self.ctx.near_dist_stable_frames = 0
+        self.ctx.final_depth_stable_frames = 0
+        self.ctx.final_yaw_aligned_frames = 0
+
     def _bbox_lost_hold_or_search(self, obs: Optional[TableEdgeObs], mode: str) -> MotionDecision:
         """Hold table docking state before clearing handoff/searching for bbox loss."""
+        if bool(getattr(self.ctx, "near_table_latched", False) or getattr(self.ctx, "final_depth_latched", False)):
+            wz = 0.0
+            yaw_source = "hold"
+            if bool(getattr(self.ctx, "final_depth_latched", False)):
+                age_s = max(0.0, monotonic_ts() - float(getattr(self.ctx, "last_good_edge_yaw_mono", 0.0) or monotonic_ts()))
+                if age_s <= float(getattr(self.cfg, "final_yaw_last_good_hold_s", 1.2) or 1.2):
+                    wz = float(getattr(self.ctx, "last_good_edge_yaw_cmd", 0.0) or 0.0)
+                    yaw_source = "last_good_edge"
+            cmd = self.controller._cmd(mode, vx=0.0, wz=wz)
+            decision = MotionDecision(
+                cmd=cmd,
+                control_summary=self.controller._summary(mode, cmd, obs, reason="bbox_lost_ignored_due_to_near_latch"),
+            )
+            decision.control_summary.update(
+                {
+                    "bbox_lost_ignored_due_to_near_latch": True,
+                    "near_table_latched": bool(self.ctx.near_table_latched),
+                    "near_table_latch_reason": str(self.ctx.near_table_latch_reason or ""),
+                    "final_depth_latched": bool(self.ctx.final_depth_latched),
+                    "final_depth_latch_reason": str(self.ctx.final_depth_latch_reason or ""),
+                    "control_phase": "DEPTH_FINAL_STOP" if self.ctx.final_depth_latched else "EDGE_GUIDED_APPROACH",
+                    "control_source": "final_align" if self.ctx.final_depth_latched else "near_edge_hold",
+                    "motion_intent_type": "final_align" if self.ctx.final_depth_latched else "near_edge_hold",
+                    "yaw_source": yaw_source,
+                    "yaw_owner": yaw_source,
+                    "near_stage_yaw_source": yaw_source,
+                    "allow_forward": False,
+                    "allow_rotate": bool(abs(wz) > 1e-9),
+                    "forward_block_reason": "final_depth_latched" if self.ctx.final_depth_latched else "near_table_latched",
+                    "rotate_block_reason": "" if abs(wz) > 1e-9 else "edge_lost_hold",
+                    "yolo_control_enabled": False,
+                    "vx_mps": 0.0,
+                    "vy_mps": 0.0,
+                    "wz_radps": float(wz),
+                }
+            )
+            return decision
         self._start_loss_timer("bbox_lost_since_mono")
         self.ctx.bbox_lost_hold_active = True
         hold_age_s = self._loss_elapsed(self.ctx.bbox_lost_since_mono)
@@ -217,8 +484,16 @@ class TableDockingMixin:
         self.ctx.edge_conf_score = max(0.0, min(1.0, float(self.ctx.edge_conf_score) + edge_score_delta))
         if edge_trusted:
             self.ctx.last_edge_good_mono = now
+        if bool(getattr(self.ctx, "final_depth_latched", False)):
+            phase, reason = "DEPTH_FINAL_STOP", "final_depth_latched"
+        elif bool(getattr(self.ctx, "near_table_latched", False)) and not current_bbox:
+            phase, reason = "EDGE_GUIDED_APPROACH", "near_latch_bbox_lost"
         if not current_bbox:
-            if bool(self.ctx.bbox_lost_hold_active):
+            if bool(getattr(self.ctx, "final_depth_latched", False)):
+                phase, reason = "DEPTH_FINAL_STOP", "final_depth_latched"
+            elif bool(getattr(self.ctx, "near_table_latched", False)):
+                phase, reason = "EDGE_GUIDED_APPROACH", "near_latch_bbox_lost"
+            elif bool(self.ctx.bbox_lost_hold_active):
                 phase = self.ctx.control_phase if self.ctx.control_phase else "BBOX_ACQUIRE"
                 reason = "bbox_lost_hold"
             else:
@@ -270,9 +545,14 @@ class TableDockingMixin:
                         if edge_available and not_severe and no_safety:
                             dwell_fallback = True
 
-            if depth_stop_ready:
+            if bool(getattr(self.ctx, "final_depth_latched", False)):
+                phase, reason = "DEPTH_FINAL_STOP", "final_depth_latched"
+                self.ctx.approach_commit_active = False
+            elif depth_stop_ready:
                 phase, reason = "DEPTH_FINAL_STOP", "stable_dynamic_roi_depth"
                 self.ctx.approach_commit_active = False
+            elif bool(getattr(self.ctx, "near_table_latched", False)):
+                phase, reason = "EDGE_GUIDED_APPROACH", "near_table_latched_edge" if edge_usable else "near_table_latched_hold"
             elif commit_coast_ready and not edge_trusted:
                 phase, reason = "EDGE_GUIDED_APPROACH", "forward_coast_edge_unstable"
             elif not stable_bbox and not dwell_fallback:
@@ -366,7 +646,23 @@ class TableDockingMixin:
             return self._arbitrate_table_motion_decision(decision, obs)
         raw_forward_reason = str(summary.get("forward_block_reason") or "")
         raw_rotate_reason = str(summary.get("rotate_block_reason") or "")
+        if bool(
+            explicit_stop_active
+            or any(bool(summary.get(key, False)) for key in (
+                "emergency_stop_active", "car_estop", "estop_active", "obstacle_active", "obstacle_stop_active",
+                "base_depth_hard_safety", "base_depth_stop_active", "base_depth_emergency_active", "depth_hard_stop_active", "safety_stop_active",
+            ))
+        ):
+            self._clear_near_final_latches("explicit_or_emergency_stop")
         depth_status = self._depth_roi_stop_status(obs)
+        self._refresh_near_final_latches(obs, depth_status, summary)
+        if bool(self.ctx.final_depth_latched):
+            depth_status.update(
+                {
+                    "depth_roi_stop_ready": True,
+                    "reason": str(self.ctx.final_depth_latch_reason or "final_depth_latched"),
+                }
+            )
         now_mono = monotonic_ts()
         geom_before_auth = self._bbox_control_geometry(obs)
         fov_before_auth = self._bbox_fov_guard_status(obs, geom_before_auth, summary)
@@ -467,6 +763,15 @@ class TableDockingMixin:
         )
         summary.update(auth.to_dict())
         summary.update(depth_status)
+        self._refresh_near_final_latches(obs, depth_status, summary)
+        if bool(self.ctx.final_depth_latched):
+            depth_status.update(
+                {
+                    "depth_roi_stop_ready": True,
+                    "reason": str(self.ctx.final_depth_latch_reason or "final_depth_latched"),
+                }
+            )
+            summary.update(depth_status)
         phase = auth.control_phase
         # Pick one yaw owner after raw controller safety/limit generation; never blend.
         search_sign = int(self.ctx.search_wz_sign_latched or self.ctx.relocate_turn_sign or 1)
@@ -489,6 +794,9 @@ class TableDockingMixin:
             bbox_wz = max(-max_wz, min(max_wz, bbox_wz))
             self.ctx.last_bbox_yaw_cmd = bbox_wz
         edge_wz = float(summary.get("edge_yaw_cmd", summary.get("wz_from_plane", 0.0)) or 0.0)
+        if edge_usable_before_auth and abs(edge_wz) > 1e-9:
+            self.ctx.last_good_edge_yaw_cmd = float(edge_wz)
+            self.ctx.last_good_edge_yaw_mono = monotonic_ts()
         sign = lambda value: 0 if abs(value) < deadband else (1 if value > 0.0 else -1)
         bbox_sign, edge_sign = sign(bbox_wz), sign(edge_wz)
         yaw_conflict = bool(bbox_sign and edge_sign and bbox_sign != edge_sign)
@@ -496,6 +804,7 @@ class TableDockingMixin:
         stale_level = str(summary.get("stale_level") or "fresh").lower()
         bbox_owner_active = bool(
             phase == "BBOX_ACQUIRE"
+            and not bool(getattr(self.ctx, "near_table_latched", False) or getattr(self.ctx, "final_depth_latched", False))
             and bool(geom["bbox_center_valid"])
             and center_error is not None
             and abs(float(center_error)) > deadband
@@ -622,6 +931,8 @@ class TableDockingMixin:
             "forward_coast_active": bool(forward_coast_active),
             "edge_conf_score": float(self.ctx.edge_conf_score),
             "last_edge_yaw_cmd": float(self.ctx.last_edge_yaw_cmd),
+            "last_good_edge_yaw_cmd": float(self.ctx.last_good_edge_yaw_cmd),
+            "last_good_edge_yaw_mono": float(self.ctx.last_good_edge_yaw_mono),
             "coast_reason": coast_reason,
             "zero_cmd_age_ms": 0.0,
             "zero_escape_reason": "",
@@ -646,7 +957,7 @@ class TableDockingMixin:
             summary["block_reason"] = raw_rotate_reason
 
         # Force bbox acquire yaw owner enforcement
-        if phase == "BBOX_ACQUIRE" and center_error is not None and abs(float(center_error)) > deadband:
+        if phase == "BBOX_ACQUIRE" and not bool(getattr(self.ctx, "near_table_latched", False) or getattr(self.ctx, "final_depth_latched", False)) and center_error is not None and abs(float(center_error)) > deadband:
             safety_stop = (
                 explicit_stop_active
                 or bool(decision.cmd.brake)
@@ -734,6 +1045,7 @@ class TableDockingMixin:
             self.ctx.last_edge_yaw_cmd = float(decision.cmd.wz_radps)
         summary["approach_commit_active"] = bool(self.ctx.approach_commit_active)
         summary["last_edge_yaw_cmd"] = float(self.ctx.last_edge_yaw_cmd)
+        self._prepare_final_yaw_candidate(obs, summary, decision)
 
         # Always expose the final axis values, including a pre-existing safety stop.
         summary["final_vx"] = float(decision.cmd.vx_mps)
@@ -1895,33 +2207,37 @@ class TableDockingMixin:
         if obs is None:
             status["reason"] = "no_recent_obs"
             return status
-        if not self._table_yolo_reliable(obs):
+        edge_usable = bool(getattr(obs, "edge_found", False) or getattr(obs, "usable_for_approach", False) or getattr(obs, "edge_trusted", False))
+        near_or_final = bool(getattr(self.ctx, "near_table_latched", False) or getattr(self.ctx, "final_depth_latched", False))
+        if not self._table_yolo_reliable(obs) and not edge_usable and not near_or_final:
             status["reason"] = "no_current_table_bbox"
             return status
         
         # Check table visibility
-        if not self._table_visible(obs):
+        if not self._table_visible(obs) and not edge_usable and not near_or_final:
             status["reason"] = "table_not_visible"
             return status
             
         depth_valid = bool(getattr(obs, "table_roi_depth_valid", False))
         depth_p10 = getattr(obs, "table_roi_depth_p10", None)
+        depth_median = getattr(obs, "table_roi_depth_median", None)
+        depth_value = depth_p10 if depth_p10 is not None else depth_median
         ratio = getattr(obs, "table_roi_depth_valid_ratio", None)
         samples = getattr(obs, "table_roi_depth_sample_count", None)
-        if not depth_valid or depth_p10 is None:
+        if not depth_valid or depth_value is None:
             status["reason"] = "depth_roi_invalid"
             return status
             
         target_dist = self._table_target_dist_m(obs)
         margin = max(0.0, float(getattr(self.cfg, "table_stop_margin_m", 0.05)))
-        status["roi_depth_stat"] = float(depth_p10)
+        status["roi_depth_stat"] = float(depth_value)
         status["roi_depth_valid_ratio"] = ratio
         status["roi_depth_sample_count"] = samples
         status["target_dist"] = float(target_dist)
         status["margin"] = float(margin)
         status["roi_depth_threshold"] = float(target_dist + margin)
         
-        if float(depth_p10) > target_dist + margin:
+        if float(depth_value) > target_dist + margin:
             status["reason"] = "distance_too_far"
             return status
             

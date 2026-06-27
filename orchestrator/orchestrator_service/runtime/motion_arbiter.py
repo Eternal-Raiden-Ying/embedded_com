@@ -261,6 +261,108 @@ def arbitrate_table_docking_motion(
     if hard_safety:
         return _stop_result(ctx=ctx, summary=summary, motion_class="safety_stop", stop_class="safety", blocked_by="hard_safety", reason="hard_safety")
 
+    if bool(summary.get("final_depth_latched", False)):
+        final_locked = bool(summary.get("final_locked", False))
+        yaw_align_active = bool(summary.get("final_yaw_align_active", False))
+        edge_wz = 0.0
+        yaw_source = ""
+        for key, source in (
+            ("edge_yaw_cmd_for_final_align", "edge"),
+            ("edge_yaw_cmd", "edge"),
+            ("wz_from_plane", "edge"),
+        ):
+            candidate = _float(summary, key, 0.0)
+            if abs(candidate) > 1e-9:
+                edge_wz = candidate
+                yaw_source = source
+                break
+        if abs(edge_wz) <= 1e-9 and str(intent.yaw_owner or "").strip().lower() in {"edge", "edge_hold", "last_good_edge", "final_align"} and abs(desired_wz) > 1e-9:
+            edge_wz = desired_wz
+            yaw_source = str(intent.yaw_owner or "edge")
+        last_good_age_ms = summary.get("last_good_edge_yaw_age_ms")
+        last_good_fresh = bool(last_good_age_ms is not None and float(last_good_age_ms) <= 1200.0)
+        if abs(edge_wz) <= 1e-9 and last_good_fresh and abs(float(getattr(ctx, "last_good_edge_yaw_cmd", 0.0) or 0.0)) > 1e-9:
+            edge_wz = float(getattr(ctx, "last_good_edge_yaw_cmd", 0.0) or 0.0)
+            yaw_source = "last_good_edge"
+        if abs(edge_wz) <= 1e-9 and abs(float(getattr(ctx, "last_edge_yaw_cmd", 0.0) or 0.0)) > 1e-9:
+            edge_wz = float(getattr(ctx, "last_edge_yaw_cmd", 0.0) or 0.0)
+            yaw_source = "last_edge"
+        yaw_source = str(summary.get("near_stage_yaw_source") or yaw_source or ("hold" if abs(edge_wz) <= 1e-9 else "edge"))
+        yaw_abs: Optional[float] = None
+        for key in ("edge_yaw", "yaw_err_rad", "yaw_err"):
+            if summary.get(key) is not None:
+                yaw_abs = abs(_float(summary, key, 0.0))
+                break
+        yaw_deadband = abs(_float(summary, "final_yaw_deadband_rad", _float(summary, "table_yaw_tol_rad", 0.08)))
+        yaw_large = bool(yaw_align_active or (yaw_abs is not None and yaw_abs > yaw_deadband))
+        if final_locked:
+            return _result(
+                ctx=ctx,
+                intent=MotionIntent("final_edge_locked", 0.0, 0.0, yaw_source, False, False, "final_locked"),
+                summary={
+                    **summary,
+                    "motion_intent_type": "final_edge_locked",
+                    "yaw_owner": yaw_source,
+                    "near_stage_yaw_source": yaw_source,
+                    "forward_block_reason": "final_depth_latched",
+                },
+                final_vx=0.0,
+                final_vy=0.0,
+                final_wz=0.0,
+                motion_class="safety_stop",
+                stop_class="safety",
+                blocked_by="final_locked",
+                reason=str(summary.get("final_lock_reason") or "final_locked"),
+                service_may_override=True,
+            )
+        if yaw_large and abs(edge_wz) > 1e-9:
+            return _result(
+                ctx=ctx,
+                intent=MotionIntent("final_align", 0.0, edge_wz, yaw_source, False, True, "final_yaw_align"),
+                summary={
+                    **summary,
+                    "final_depth_latched": True,
+                    "final_yaw_align_active": True,
+                    "final_yaw_align_yaw_source": yaw_source,
+                    "final_yaw_align_yaw_cmd": float(edge_wz),
+                    "final_hold_edge_lost": False,
+                    "motion_intent_type": "final_align",
+                    "yaw_owner": yaw_source,
+                    "near_stage_yaw_source": yaw_source,
+                    "forward_block_reason": "final_depth_latched",
+                    "rotate_block_reason": "",
+                },
+                final_vx=0.0,
+                final_vy=0.0,
+                final_wz=edge_wz,
+                motion_class="normal",
+                stop_class="none",
+                blocked_by="final_depth_latched",
+                reason="final_yaw_align",
+            )
+        return _result(
+            ctx=ctx,
+            intent=MotionIntent("final_hold_edge_lost", 0.0, 0.0, yaw_source, False, False, "final_hold"),
+            summary={
+                **summary,
+                "final_depth_latched": True,
+                "final_yaw_align_active": False,
+                "final_hold_edge_lost": True,
+                "motion_intent_type": "final_hold_edge_lost",
+                "yaw_owner": yaw_source,
+                "near_stage_yaw_source": yaw_source,
+                "forward_block_reason": "final_depth_latched",
+                "rotate_block_reason": str(summary.get("final_lock_reason") or "edge_lost_hold"),
+            },
+            final_vx=0.0,
+            final_vy=0.0,
+            final_wz=0.0,
+            motion_class="control_stop",
+            stop_class="control_recovery",
+            blocked_by="final_depth_latched",
+            reason=str(summary.get("final_lock_reason") or "final_hold_edge_lost"),
+        )
+
     final_stop = bool(
         summary.get("depth_roi_stop_ready", False)
         or phase == "DEPTH_FINAL_STOP"
@@ -323,6 +425,31 @@ def arbitrate_table_docking_motion(
             stop_class="safety",
             blocked_by="bbox_fov_guard_hard",
             reason=fov_reason or "bbox_fov_guard_hard",
+        )
+
+    if bool(summary.get("near_table_latched", False)) and (phase in {"BBOX_ACQUIRE", "EDGE_HANDOFF_CONFIRM", "SEARCH_SCAN"} or intent_type in {"local_rotate_search", "search"}):
+        edge_wz = _float(summary, "edge_yaw_cmd", _float(summary, "wz_from_plane", 0.0))
+        if abs(edge_wz) <= 1e-9:
+            edge_wz = _float(summary, "last_good_edge_yaw_cmd", 0.0)
+        yaw_source = str(summary.get("near_stage_yaw_source") or ("last_good_edge" if abs(edge_wz) > 1e-9 else "hold"))
+        return _result(
+            ctx=ctx,
+            intent=MotionIntent("near_edge_hold", 0.0, edge_wz, yaw_source, False, abs(edge_wz) > 1e-9, "near_table_latched"),
+            summary={
+                **summary,
+                "motion_intent_type": "near_edge_hold",
+                "yaw_owner": yaw_source,
+                "near_stage_yaw_source": yaw_source,
+                "forward_block_reason": "near_table_latched",
+                "bbox_lost_ignored_due_to_near_latch": bool(intent_type in {"local_rotate_search", "search"} or phase == "SEARCH_SCAN"),
+            },
+            final_vx=0.0,
+            final_vy=0.0,
+            final_wz=edge_wz,
+            motion_class="recovery" if abs(edge_wz) > 1e-9 else "control_stop",
+            stop_class="none" if abs(edge_wz) > 1e-9 else "control_recovery",
+            blocked_by="near_table_latched",
+            reason="near_latch_suppressed_far_fallback",
         )
 
     if phase == "EDGE_GUIDED_APPROACH" and intent.forward_allowed_by_behavior:
