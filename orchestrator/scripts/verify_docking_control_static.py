@@ -29,6 +29,7 @@ from orchestrator.orchestrator_service.ipc.protocol import CmdVel, TableEdgeObs,
 from orchestrator.orchestrator_service.bridge.uart_bridge import UartBridge
 from vision_module.backend.table_roi_depth import table_roi_depth_statistics
 from vision_module.app.stages.search.table_edge_obs_builder import merge_table_bbox_from_local_perception
+from orchestrator.orchestrator_service.runtime.docking_model import DockingAction, DockingStage
 
 
 def auth(state: str, *, bbox: bool, edge: bool = False, error: float = 0.0, depth_stop: bool = False, phase: str = ""):
@@ -192,6 +193,10 @@ def main() -> None:
             "rgb_shape": [480, 640],
             "edge_found": False,
             "depth_valid": True,
+            "depth_p10": 0.60,
+            "table_roi_depth_valid": True,
+            "table_roi_depth_p10": 0.60,
+            "table_roi_depth_median": 0.60,
         })
 
     def near_depth_obs(center: float, depth_m: float, *, yaw: float = 0.10) -> TableEdgeObs:
@@ -1029,7 +1034,7 @@ def main() -> None:
     probe_smoke.ctx.state = State.EDGE_ADJUST
     obs_s3 = TableEdgeObs.from_dict({
         "ts": now_ts(), "table_found": True, "edge_found": True, "edge_valid": True, "edge_trusted": True,
-        "yaw_err_rad": 0.15, "dist_err_m": 0.40, "table_roi_depth_valid": True, "table_roi_depth_p10": 0.40,
+        "table_bbox_control_valid": True, "yaw_err_rad": 0.15, "dist_err_m": 0.40, "table_roi_depth_valid": True, "table_roi_depth_p10": 0.40,
     })
     dec_s3 = edge_guided_decision(probe_smoke, obs_s3)
     assert probe_smoke.ctx.near_table_latched is True
@@ -1039,7 +1044,7 @@ def main() -> None:
     for _ in range(3):
         obs_s4 = TableEdgeObs.from_dict({
             "ts": now_ts(), "table_found": True, "edge_found": True, "edge_valid": True, "edge_trusted": True,
-            "yaw_err_rad": 0.15, "dist_err_m": 0.20, "table_roi_depth_valid": True, "table_roi_depth_p10": 0.20,
+            "table_bbox_control_valid": True, "yaw_err_rad": 0.15, "dist_err_m": 0.20, "table_roi_depth_valid": True, "table_roi_depth_p10": 0.20,
         })
         dec_s4 = edge_guided_decision(probe_smoke, obs_s4)
     assert probe_smoke.ctx.final_depth_latched is True
@@ -1050,7 +1055,7 @@ def main() -> None:
     for _ in range(6):
         obs_s5 = TableEdgeObs.from_dict({
             "ts": now_ts(), "table_found": True, "edge_found": True, "edge_valid": True, "edge_trusted": True,
-            "yaw_err_rad": 0.05, "dist_err_m": 0.20, "table_roi_depth_valid": True, "table_roi_depth_p10": 0.20,
+            "table_bbox_control_valid": True, "yaw_err_rad": 0.05, "dist_err_m": 0.20, "table_roi_depth_valid": True, "table_roi_depth_p10": 0.20,
         })
         dec_s5 = edge_guided_decision(probe_smoke, obs_s5)
     assert probe_smoke.ctx.final_locked is True
@@ -1082,6 +1087,54 @@ def main() -> None:
     apply_base_motion_safety(mock_decision, ctx=mock_ctx, cfg=mock_cfg)
     assert mock_decision.cmd.vx_mps <= 0.020
     assert mock_decision.cmd.vy_mps == 0.0
+
+    # Tests B & C: arbitrate_table_docking_motion checks
+    intent = MotionIntent(
+        intent_type="edge_guided_forward",
+        desired_vx=0.02,
+        desired_wz=0.05,
+        forward_allowed_by_behavior=True,
+        rotate_allowed_by_behavior=True,
+    )
+
+    # Test B: final yaw align cmd -> docking_action=FINAL_YAW_ALIGN, wz!=0
+    obs_b = TableEdgeObs.from_dict({
+        "ts": now_ts(), "table_found": True, "edge_found": True, "edge_valid": True, "edge_trusted": True,
+        "yaw_err_rad": 0.15, "dist_err_m": 0.20, "table_roi_depth_valid": True, "table_roi_depth_p10": 0.20,
+    })
+    summary_b = {
+        "state": "FINAL_SLOW_STOP",
+        "control_phase": "DEPTH_FINAL_STOP",
+        "final_depth_latched": True,
+        "final_yaw_align_active": True,
+        "edge_yaw_cmd": 0.05,
+        "edge_yaw_cmd_for_final_align": 0.05,
+        "near_stage_yaw_source": "edge",
+        "stale_level": "fresh",
+        "current_obs_healthy": True,
+        "last_good_obs_healthy": True,
+        "last_good_obs_age_ms": 0.0,
+    }
+    test_ctx = RuntimeContext(state=State.YOLO_APPROACH)
+    test_ctx.cfg = probe_smoke.cfg
+    res_b = arbitrate_table_docking_motion(test_ctx, obs_b, intent, summary_b)
+    assert res_b.summary["docking_action"] == "FINAL_YAW_ALIGN" or res_b.summary["docking_action"] == DockingAction.FINAL_YAW_ALIGN
+    assert res_b.summary["docking_stage"] == "FINAL_YAW_ALIGN" or res_b.summary["docking_stage"] == DockingStage.FINAL_YAW_ALIGN
+    assert abs(res_b.final_wz) > 1e-9
+
+    # Test C: dead stale with no healthy history -> choose recovery/hold (vx=0)
+    summary_c = {
+        "state": "YOLO_APPROACH",
+        "control_phase": "EDGE_GUIDED_APPROACH",
+        "stale_level": "dead",
+        "current_obs_healthy": False,
+        "last_good_obs_healthy": False,
+        "last_good_obs_age_ms": 999999.0,
+    }
+    res_c = arbitrate_table_docking_motion(test_ctx, obs_b, intent, summary_c)
+    assert res_c.summary["docking_action"] in {"CONTROL_RECOVERY_ROTATE", "SEARCH_ROTATE", DockingAction.CONTROL_RECOVERY_ROTATE, DockingAction.SEARCH_ROTATE}
+    assert res_c.final_vx == 0.0
+    assert res_c.final_vy == 0.0
 
     print("docking static verification: PASS")
 

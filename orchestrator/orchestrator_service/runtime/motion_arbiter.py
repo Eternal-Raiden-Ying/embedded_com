@@ -508,6 +508,47 @@ def arbitrate_table_docking_motion(
             reason="final_distance_hold",
         )
 
+    last_good_obs_healthy = bool(summary.get("last_good_obs_healthy", False))
+    last_good_obs_age_ms = float(summary.get("last_good_obs_age_ms", 999999.0))
+    last_good_expired = bool(not last_good_obs_healthy or last_good_obs_age_ms > 2500.0)
+    stale_level = str(summary.get("stale_level") or "fresh").strip().lower()
+    is_dead_no_last_good = bool(stale_level == "dead" and last_good_expired)
+
+    if is_dead_no_last_good:
+        if bool(summary.get("final_depth_latched", False)):
+            edge_wz, yaw_source = edge_final_wz()
+            return _docking_result(
+                action=DockingAction.FINAL_LOCKED_STOP,
+                stage=DockingStage.FINAL_DISTANCE_HOLD,
+                summary=with_common({
+                    "forward_block_reason": "stale_dead_no_last_good",
+                    "near_latch_block_reason": "stale_dead_no_last_good",
+                }),
+                vx=0.0,
+                vy=0.0,
+                wz=edge_wz if abs(edge_wz) > 1e-9 else 0.0,
+                yaw_owner=yaw_source if abs(edge_wz) > 1e-9 else "hold",
+                blocked_by="stale_dead_no_last_good",
+                reason="stale_dead_no_last_good_final_hold",
+            )
+        else:
+            wz = bbox_recovery_wz()
+            return _docking_result(
+                action=DockingAction.CONTROL_RECOVERY_ROTATE if abs(wz) > 1e-9 else DockingAction.SEARCH_ROTATE,
+                stage=DockingStage.RECOVERY_ROTATE,
+                summary=with_common({
+                    "forward_block_reason": "stale_dead_no_last_good",
+                    "near_latch_block_reason": "stale_dead_no_last_good",
+                }),
+                vx=0.0,
+                vy=0.0,
+                wz=wz,
+                yaw_owner="last_good_edge" if abs(wz) > 1e-9 else "search",
+                stop_class=StopClass.STALE_RECOVERY if abs(wz) <= 1e-9 else StopClass.NONE,
+                blocked_by="stale_dead_no_last_good",
+                reason="stale_dead_no_last_good_recovery",
+            )
+
     if stale_policy == StalePolicy.DROPOUT_HOLD:
         vx = max(abs(desired_vx), _float(summary, "forward_commit_vx", 0.020))
         wz = desired_wz if abs(desired_wz) > 1e-9 else _float(summary, "last_edge_yaw_cmd", 0.0)
@@ -516,6 +557,7 @@ def arbitrate_table_docking_motion(
             stage=DockingStage.RECOVERY_ROTATE,
             summary=with_common({"perception_dropout_hold_active": True}),
             vx=vx,
+            vy=0.0,
             wz=wz,
             reason="perception_dropout_hold",
         )

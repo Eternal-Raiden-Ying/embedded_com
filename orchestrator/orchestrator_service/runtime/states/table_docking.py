@@ -263,6 +263,44 @@ class TableDockingMixin:
         summary["last_good_edge_yaw_mono"] = float(self.ctx.last_good_edge_yaw_mono)
         summary["last_good_edge_yaw_age_ms"] = last_yaw_age_s * 1000.0 if last_yaw_age_s < 900.0 else None
 
+    def _is_obs_healthy(self, obs: Optional[TableEdgeObs], summary: Dict[str, Any]) -> bool:
+        if obs is None:
+            return False
+        
+        # 1. stale_level is not hard_stale or dead
+        stale_level = str(summary.get("stale_level") or self.controller._stale_guard(obs).get("stale_level") or "fresh").lower()
+        if stale_level in {"hard_stale", "dead"}:
+            return False
+            
+        # 2. no emergency / obstacle / hard safety stops active
+        has_estop = any(bool(summary.get(k, False)) for k in (
+            "emergency_stop_active", "car_estop", "estop_active", "obstacle_active", "obstacle_stop_active",
+            "base_depth_hard_safety", "base_depth_stop_active", "base_depth_emergency_active", "depth_hard_stop_active", "safety_stop_active"
+        ))
+        if has_estop:
+            return False
+            
+        # 3. bbox valid/control_valid 或 near/final 已经 latch
+        bbox_valid = bool(getattr(obs, "table_bbox_control_valid", False) or getattr(obs, "yolo_table_control_valid", False))
+        near_or_final = bool(self.ctx.near_table_latched or self.ctx.final_depth_latched)
+        if not bbox_valid and not near_or_final:
+            return False
+            
+        edge_usable = bool(getattr(obs, "edge_found", False) or getattr(obs, "usable_for_approach", False) or getattr(obs, "edge_trusted", False))
+        has_yaw_cmd = bool(self.ctx.last_good_edge_yaw_cmd is not None and abs(float(self.ctx.last_good_edge_yaw_cmd)) > 1e-9)
+        if not edge_usable and not has_yaw_cmd:
+            return False
+            
+        # 5. depth ROI valid，且 table_roi_depth_p10 或 median 有效
+        depth_valid = bool(getattr(obs, "table_roi_depth_valid", False))
+        depth_p10 = getattr(obs, "table_roi_depth_p10", None)
+        depth_median = getattr(obs, "table_roi_depth_median", None)
+        depth_value = depth_p10 if depth_p10 is not None else depth_median
+        if not depth_valid or depth_value is None:
+            return False
+            
+        return True
+
     def _refresh_near_final_latches(self, obs: Optional[TableEdgeObs], depth_status: Dict[str, object], summary: Dict[str, object]) -> Dict[str, object]:
         now = monotonic_ts()
         edge_usable = bool(obs is not None and (getattr(obs, "edge_found", False) or getattr(obs, "usable_for_approach", False) or getattr(obs, "edge_trusted", False)))
@@ -271,6 +309,21 @@ class TableDockingMixin:
             self.ctx.last_good_edge_yaw_cmd = float(edge_yaw_cmd)
             self.ctx.last_good_edge_yaw_mono = now
             summary["edge_yaw_cmd_for_final_align"] = float(edge_yaw_cmd)
+
+        # Separate health tracking
+        current_obs_healthy = self._is_obs_healthy(obs, summary)
+        if current_obs_healthy:
+            self.ctx.last_good_table_obs_mono = now
+            if self.ctx.last_good_table_obs_summary is None or not isinstance(self.ctx.last_good_table_obs_summary, dict):
+                self.ctx.last_good_table_obs_summary = {}
+            self.ctx.last_good_table_obs_summary.update({
+                "edge_yaw_cmd": float(summary.get("edge_yaw_cmd", summary.get("wz_from_plane", 0.0)) or 0.0),
+                "bbox_cx_norm_control": summary.get("bbox_cx_norm_control"),
+            })
+
+        last_good_obs_healthy = bool(self.ctx.last_good_table_obs_mono > 0.0)
+        last_good_obs_age_ms = max(0.0, (now - float(self.ctx.last_good_table_obs_mono or now)) * 1000.0) if self.ctx.last_good_table_obs_mono else 999999.0
+        last_good_unexpired = bool(last_good_obs_healthy and last_good_obs_age_ms <= 2500.0)
 
         depth_valid = bool(getattr(obs, "table_roi_depth_valid", False)) if obs is not None else False
         depth_p10 = getattr(obs, "table_roi_depth_p10", None) if obs is not None else None
@@ -316,10 +369,23 @@ class TableDockingMixin:
         elif approach_depth_near:
             near_reason = "edge_guided_forward_depth_seen"
 
+        # Separate near latch gating
+        final_ok = bool(self.ctx.final_depth_latched or depth_stop_ready or phase == "DEPTH_FINAL_STOP" or str(depth_status.get("reason") or "") == "stable_dynamic_roi_depth")
+        if self.ctx.near_table_latched:
+            near_allowed = True
+            block_near = False
+        else:
+            near_allowed = bool(current_obs_healthy or last_good_unexpired or final_ok)
+            block_near = not near_allowed
+
+        near_latch_block_reason = "no_healthy_obs_and_no_valid_last_good" if block_near else ""
+        near_latch_source = near_reason if (near_reason and not block_near) else ""
+
         if near_reason and not self.ctx.near_table_latched:
-            self.ctx.near_table_latched = True
-            self.ctx.near_table_latched_mono = now
-            self.ctx.near_table_latch_reason = near_reason
+            if not block_near:
+                self.ctx.near_table_latched = True
+                self.ctx.near_table_latched_mono = now
+                self.ctx.near_table_latch_reason = near_reason
 
         self.ctx.final_depth_stable_frames = self.ctx.final_depth_stable_frames + 1 if depth_stop_ready else 0
         if depth_stop_ready and self.ctx.final_depth_stable_frames >= self._final_depth_latch_frames():
@@ -328,9 +394,29 @@ class TableDockingMixin:
                 self.ctx.final_depth_latched_mono = now
                 self.ctx.final_depth_latch_reason = str(depth_status.get("reason") or "stable_dynamic_roi_depth")
             if not self.ctx.near_table_latched:
-                self.ctx.near_table_latched = True
-                self.ctx.near_table_latched_mono = now
-                self.ctx.near_table_latch_reason = "final_depth_latched"
+                if not block_near:
+                    self.ctx.near_table_latched = True
+                    self.ctx.near_table_latched_mono = now
+                    self.ctx.near_table_latch_reason = "final_depth_latched"
+
+        # Populate summary fields
+        dropout_allowed = bool(self.ctx.approach_commit_active and last_good_unexpired)
+        dropout_block_reason = ""
+        if not self.ctx.approach_commit_active:
+            dropout_block_reason = "approach_commit_inactive"
+        elif not last_good_unexpired:
+            if not last_good_obs_healthy:
+                dropout_block_reason = "no_last_good_obs"
+            else:
+                dropout_block_reason = f"last_good_obs_expired_age_{last_good_obs_age_ms:.1f}ms"
+
+        summary["current_obs_healthy"] = bool(current_obs_healthy)
+        summary["last_good_obs_healthy"] = bool(last_good_obs_healthy)
+        summary["last_good_obs_age_ms"] = float(last_good_obs_age_ms)
+        summary["near_latch_block_reason"] = near_latch_block_reason
+        summary["near_latch_source"] = near_latch_source
+        summary["dropout_hold_allowed"] = dropout_allowed
+        summary["dropout_hold_block_reason"] = dropout_block_reason
 
         yaw_deadband = abs(float(getattr(self.cfg, "final_lock_yaw_rad", getattr(self.cfg, "final_yaw_deadband_rad", 0.12)) or 0.12))
         yaw_realign_rad = abs(float(getattr(self.cfg, "final_yaw_realign_rad", 0.18) or 0.18))
@@ -744,6 +830,7 @@ class TableDockingMixin:
                 }
             )
         now_mono = monotonic_ts()
+        dropout_window_s = 2.5
         geom_before_auth = self._bbox_control_geometry(obs)
         fov_before_auth = self._bbox_fov_guard_status(obs, geom_before_auth, summary)
         stale_level_before_auth = str(summary.get("stale_level") or self.controller._stale_guard(obs).get("stale_level") or "fresh").lower()
@@ -760,33 +847,21 @@ class TableDockingMixin:
             ))
         )
         active_docking_before_auth = str(getattr(self.ctx.state, "value", self.ctx.state) or "") in {"YOLO_APPROACH", "EDGE_ADJUST"}
-        healthy_table_obs = bool(
-            active_docking_before_auth
-            and bbox_usable_before_auth
-            and edge_usable_before_auth
-            and not bool(depth_status.get("depth_roi_stop_ready"))
-            and not hard_safety_before_auth
-            and str(fov_before_auth["level"]) != "hard"
-            and (self.ctx.control_phase == "EDGE_GUIDED_APPROACH" or self.ctx.approach_commit_active)
-            and stale_level_before_auth not in {"hard_stale", "dead"}
-        )
+        # Use health parameters pre-computed in _refresh_near_final_latches
+        healthy_table_obs = bool(summary.get("current_obs_healthy", False))
         if healthy_table_obs:
-            self.ctx.last_good_table_obs_mono = now_mono
-            self.ctx.last_good_table_obs_summary = {
-                "edge_yaw_cmd": float(summary.get("edge_yaw_cmd", summary.get("wz_from_plane", 0.0)) or 0.0),
-                "bbox_cx_norm_control": geom_before_auth.get("bbox_cx_norm_control"),
-            }
             self.ctx.perception_dropout_hold_active = False
             self.ctx.perception_dropout_hold_started_mono = 0.0
             self.ctx.perception_dropout_hold_reason = ""
 
-        last_good_age_ms = max(0.0, (now_mono - float(self.ctx.last_good_table_obs_mono or now_mono)) * 1000.0) if self.ctx.last_good_table_obs_mono else 0.0
-        dropout_window_s = 2.5
+        last_good_obs_healthy = bool(summary.get("last_good_obs_healthy", False))
+        last_good_age_ms = float(summary.get("last_good_obs_age_ms", 999999.0))
+        last_good_unexpired = bool(last_good_obs_healthy and last_good_age_ms <= 2500.0)
+
         dropout_active = bool(
             self.ctx.approach_commit_active
             and stale_level_before_auth in {"hard_stale", "dead"}
-            and self.ctx.last_good_table_obs_mono > 0.0
-            and last_good_age_ms <= dropout_window_s * 1000.0
+            and last_good_unexpired
             and not hard_safety_before_auth
             and not bool(depth_status.get("depth_roi_stop_ready"))
             and str(fov_before_auth["level"]) != "hard"
