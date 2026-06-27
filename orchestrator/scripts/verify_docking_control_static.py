@@ -28,7 +28,7 @@ from orchestrator.orchestrator_service.control.motion_controller import MotionCo
 from orchestrator.orchestrator_service.ipc.protocol import CmdVel, TableEdgeObs, now_ts
 from orchestrator.orchestrator_service.bridge.uart_bridge import UartBridge
 from vision_module.backend.table_roi_depth import table_roi_depth_statistics
-from vision_module.app.stages.search.table_edge_obs_builder import merge_table_bbox_from_local_perception
+from vision_module.app.stages.search.table_edge_obs_builder import annotate_table_edge_obs, merge_table_bbox_from_local_perception
 from orchestrator.orchestrator_service.runtime.docking_model import DockingAction, DockingStage
 
 
@@ -83,6 +83,27 @@ def main() -> None:
     assert contract_obs.edge_confidence == 0.82
     assert contract_obs.table_roi_depth_mean == 0.52
     assert contract_obs.obs_parse_missing_fields == []
+    confidence_regression = annotate_table_edge_obs(
+        {"edge_found": True, "edge_valid": True, "confidence": 0.82, "edge_conf": 0.0, "edge_confidence": 0.0},
+        tick_ts=1.0,
+        source="results",
+        source_mode="FIND_EDGE",
+    )
+    assert abs(confidence_regression["edge_conf"] - 0.82) < 1e-6
+    assert abs(confidence_regression["edge_confidence"] - 0.82) < 1e-6
+    parser_confidence_regression = TableEdgeObs.from_dict({"ts": 1.0, "confidence": 0.82, "edge_conf": 0.0, "edge_confidence": 0.0})
+    assert abs((parser_confidence_regression.edge_conf or 0.0) - 0.82) < 1e-6
+    assert abs((parser_confidence_regression.edge_confidence or 0.0) - 0.82) < 1e-6
+    lateral_regression = annotate_table_edge_obs(
+        {"edge_found": True, "edge_valid": True, "confidence": 0.82, "dist_err_m": 1.2},
+        tick_ts=1.0,
+        source="results",
+        source_mode="FIND_EDGE",
+    )
+    assert lateral_regression["lateral_err_m"] is None
+    assert lateral_regression["lateral"] is None
+    parser_lateral_regression = TableEdgeObs.from_dict({"ts": 1.0, "dist_err_m": 1.2})
+    assert parser_lateral_regression.lateral_err_m is None
     partial_contract_obs = TableEdgeObs.from_dict({"ts": 1.0, "table_found": True, "edge_found": False})
     assert "yolo_bbox_center_x_norm" in partial_contract_obs.obs_parse_missing_fields
     xyxy_obs = TableEdgeObs.from_dict({"ts": 1.0, "table_found": True, "edge_found": False,
@@ -238,6 +259,59 @@ def main() -> None:
         )
         return probe._apply_control_authority(MotionDecision(cmd=cmd, control_summary=summary), obs)
 
+    far_touch_probe = DockingProbe()
+    far_touch_obs = bbox_obs(0.50)
+    far_touch_obs.edge_found = True
+    far_touch_obs.edge_valid = True
+    far_touch_obs.edge_trusted = True
+    far_touch_obs.usable_for_approach = True
+    far_touch_obs.table_bbox_touch_bottom = True
+    far_touch_obs.table_roi_depth_valid = True
+    far_touch_obs.table_roi_depth_p10 = 1.20
+    far_touch_obs.table_roi_depth_median = 1.36
+    far_touch_summary = {"control_phase": "BBOX_ACQUIRE"}
+    far_touch_probe._refresh_near_final_latches(far_touch_obs, {"depth_roi_stop_ready": False}, far_touch_summary)
+    assert far_touch_probe.ctx.near_table_latched is False
+    assert far_touch_summary["near_bbox_touch_hint"] is True
+
+    unsafe_edge_obs = bbox_obs(0.50)
+    unsafe_edge_obs.edge_found = True
+    unsafe_edge_obs.edge_valid = False
+    unsafe_edge_obs.edge_trusted = False
+    unsafe_edge = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        unsafe_edge_obs,
+        MotionIntent("edge_guided_forward", desired_vx=0.02, desired_wz=0.02, yaw_owner="edge", forward_allowed_by_behavior=True),
+        {
+            "control_phase": "EDGE_GUIDED_APPROACH",
+            "edge_handoff_complete": False,
+            "edge_readiness_score": 0.0,
+            "edge_readiness_enter_score": 0.65,
+            "yolo_forward_allowed": True,
+            "bbox_yaw_cmd": 0.02,
+        },
+    )
+    assert unsafe_edge.summary["docking_action"] != "EDGE_APPROACH_FORWARD"
+    assert unsafe_edge.final_vx <= 0.015
+
+    final_consume_probe = DockingProbe()
+    final_consume_probe.ctx.state = State.YOLO_APPROACH
+    final_consume_probe.ctx.final_depth_latched = True
+    final_consume_probe.ctx.final_depth_latched_mono = monotonic_ts() - 2.0
+    final_consume_probe.ctx.final_depth_stable_frames = final_consume_probe._final_depth_latch_frames()
+    final_consume_obs = bbox_obs(0.50)
+    final_consume_obs.yaw_err_rad = None
+    final_cmd = final_consume_probe.controller._cmd("YOLO_APPROACH", vx=0.0, wz=0.0)
+    final_decision = final_consume_probe._apply_control_authority(
+        MotionDecision(cmd=final_cmd, control_summary=final_consume_probe.controller._summary("YOLO_APPROACH", final_cmd, final_consume_obs)),
+        final_consume_obs,
+    )
+    assert final_consume_probe.ctx.state in {State.FINAL_SLOW_STOP, State.AT_TABLE_EDGE}
+    assert final_consume_probe.ctx.state != State.YOLO_APPROACH
+    assert final_consume_probe.ctx.final_locked is True
+    assert final_consume_probe.ctx.final_lock_reason in {"final_depth_only_lock", "final_depth_latched_edge_yaw_unavailable"}
+    assert final_decision.control_summary["docking_action"] == "FINAL_LOCKED_STOP"
+
     # BBOX_ACQUIRE owns final yaw. Right side is positive/right turn even when
     # the raw/search command asks for the opposite turn.
     probe = DockingProbe()
@@ -326,8 +400,8 @@ def main() -> None:
     assert timeout_phase["control_phase"] == "EDGE_GUIDED_APPROACH"
     assert timeout_phase["phase_reason"] == "forward_coast_edge_unstable"
 
-    # The watchdog revives a committed, safe double-zero command even when no
-    # current edge is usable enough for the normal coast branch.
+    # A committed double-zero command no longer revives edge forward motion when
+    # the edge handoff/readiness gate is not satisfied.
     probe = DockingProbe()
     probe.force_edge_guided = True
     probe.ctx.approach_commit_active = True
@@ -335,8 +409,8 @@ def main() -> None:
     probe.ctx.zero_cmd_started_mono = monotonic_ts() - 0.9
     watchdog_obs = bbox_obs(0.50)
     watchdog = authority_decision(probe, watchdog_obs, raw_wz=0.0)
-    assert watchdog.cmd.vx_mps == 0.020
-    assert watchdog.control_summary["zero_escape_reason"] == "forward_coast"
+    assert watchdog.cmd.vx_mps <= 0.015
+    assert watchdog.control_summary["docking_action"] != "EDGE_APPROACH_FORWARD"
     assert watchdog.control_summary["stop_class"] == "none"
 
     # An emergency remains a hard forward-coast blocker.
@@ -429,7 +503,7 @@ def main() -> None:
     # Near-table latch: depth ROI is near but not yet final, so edge/near owns
     # yaw and YOLO is downgraded from primary control.
     probe = DockingProbe()
-    near_obs = near_depth_obs(0.50, 0.58, yaw=0.08)
+    near_obs = near_depth_obs(0.50, 0.35, yaw=0.08)
     edge_guided_decision(probe, near_obs)
     near_latched = edge_guided_decision(probe, near_obs)
     assert near_latched.control_summary["near_table_latched"]
@@ -887,6 +961,52 @@ def main() -> None:
     assert abs(inv9_bbox_track.final_vx - 0.012) < 1e-9
     assert abs(inv9_bbox_track.final_wz) <= 0.06
 
+    inv9_handoff_bbox_track = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("yolo_track_forward", desired_vx=0.012, desired_wz=0.02, yaw_owner="bbox", forward_allowed_by_behavior=True),
+        {
+            "control_phase": "EDGE_HANDOFF_CONFIRM",
+            "edge_readiness_score": 0.0,
+            "edge_readiness_enter_score": 0.65,
+            "bbox_center_valid": True,
+            "bbox_center_error": 0.02,
+            "bbox_yaw_cmd": 0.02,
+            "yolo_forward_allowed": True,
+            "bbox_fov_guard_level": "none",
+            "table_roi_depth_valid": True,
+            "table_roi_depth_p10": 0.80,
+            "cmd": {"vx_mps": 0.012},
+        },
+    )
+    assert inv9_handoff_bbox_track.summary["docking_action"] == "BBOX_TRACK_FORWARD"
+    assert inv9_handoff_bbox_track.summary["docking_action"] != "BBOX_REACQUIRE_ROTATE"
+    assert 0.0 < inv9_handoff_bbox_track.final_vx <= 0.015
+
+    inv9_guided_gate_bbox_track = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("edge_guided_forward", desired_vx=0.020, desired_wz=0.02, yaw_owner="edge", forward_allowed_by_behavior=True),
+        {
+            "control_phase": "EDGE_GUIDED_APPROACH",
+            "edge_handoff_complete": False,
+            "edge_readiness_score": 0.0,
+            "edge_readiness_enter_score": 0.65,
+            "edge_trusted": False,
+            "bbox_center_valid": True,
+            "bbox_center_error": 0.02,
+            "bbox_yaw_cmd": 0.02,
+            "yolo_forward_allowed": True,
+            "bbox_fov_guard_level": "none",
+            "table_roi_depth_valid": True,
+            "table_roi_depth_p10": 0.80,
+            "cmd": {"vx_mps": 0.012},
+        },
+    )
+    assert inv9_guided_gate_bbox_track.summary["docking_action"] == "BBOX_TRACK_FORWARD"
+    assert inv9_guided_gate_bbox_track.summary["docking_action"] != "EDGE_APPROACH_FORWARD"
+    assert 0.0 < inv9_guided_gate_bbox_track.final_vx <= 0.015
+
     inv9_bbox_large_err = arbitrate_table_docking_motion(
         RuntimeContext(state=State.YOLO_APPROACH),
         None,
@@ -921,6 +1041,23 @@ def main() -> None:
     assert inv9_bbox_fov_hard.summary["docking_action"] in {"BBOX_REACQUIRE_ROTATE", "CONTROL_RECOVERY_ROTATE"}
     assert inv9_bbox_fov_hard.final_vx == 0.0
     assert inv9_bbox_fov_hard.summary["bbox_track_exit_reason"] == "bbox_fov_guard_hard"
+
+    inv9_handoff_fov_hard = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("yolo_track_forward", desired_vx=0.012, desired_wz=0.05, yaw_owner="bbox", forward_allowed_by_behavior=True),
+        {
+            "control_phase": "EDGE_HANDOFF_CONFIRM",
+            "bbox_center_valid": True,
+            "bbox_center_error": 0.02,
+            "bbox_yaw_cmd": 0.05,
+            "yolo_forward_allowed": True,
+            "bbox_fov_guard_level": "hard",
+            "cmd": {"vx_mps": 0.012},
+        },
+    )
+    assert inv9_handoff_fov_hard.summary["docking_action"] in {"BBOX_REACQUIRE_ROTATE", "CONTROL_RECOVERY_ROTATE"}
+    assert inv9_handoff_fov_hard.final_vx == 0.0
 
     inv9_bbox_final = arbitrate_table_docking_motion(
         RuntimeContext(state=State.YOLO_APPROACH),
@@ -1022,6 +1159,31 @@ def main() -> None:
         phase_readiness = probe_readiness._control_phase_status(obs_readiness, depth_stop_ready=False)
     assert phase_readiness["edge_readiness_score"] >= phase_readiness["edge_readiness_enter_score"]
     assert phase_readiness["control_phase"] in {"EDGE_HANDOFF_CONFIRM", "EDGE_GUIDED_APPROACH"}
+
+    probe_sparse_readiness = DockingProbe()
+    probe_sparse_readiness.cfg.edge_readiness_rise = 0.20
+    probe_sparse_readiness.ctx.bbox_centered_streak = 2
+    obs_sparse = bbox_obs(0.50)
+    obs_sparse.edge_found = True
+    obs_sparse.edge_valid = True
+    obs_sparse.edge_trusted = False
+    obs_sparse.usable_for_approach = False
+    obs_sparse.edge_confidence = 0.80
+    obs_sparse.edge_inlier_count = 3
+    obs_sparse.valid_edge_points = 4
+    obs_sparse.yaw_err_rad = 0.10
+    obs_sparse.table_roi_depth_valid = True
+    obs_sparse.table_roi_depth_p10 = 0.80
+    obs_sparse.table_roi_depth_median = 0.80
+    sparse_readiness = probe_sparse_readiness._refresh_edge_readiness(
+        obs_sparse,
+        {},
+        current_bbox=True,
+        stable_bbox=True,
+        depth_stop_ready=False,
+    )
+    assert sparse_readiness["edge_readiness_score"] > 0.0
+    assert sparse_readiness["edge_readiness_reason"] == "fast_sparse_edge_candidate_healthy"
 
     lateral_disabled = arbitrate_table_docking_motion(
         RuntimeContext(state=State.YOLO_APPROACH),

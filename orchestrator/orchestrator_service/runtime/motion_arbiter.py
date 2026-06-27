@@ -341,6 +341,14 @@ def arbitrate_table_docking_motion(
     edge_readiness_enter = _float(summary, "edge_readiness_enter_score", 0.65)
     edge_readiness_exit = _float(summary, "edge_readiness_exit_score", 0.35)
     edge_readiness_ready = bool(edge_readiness_score >= edge_readiness_enter)
+    edge_handoff_complete = bool(summary.get("edge_handoff_complete", False) or getattr(ctx, "edge_handoff_complete", False))
+    edge_readiness_level = str(summary.get("edge_readiness_level") or getattr(ctx, "edge_readiness_level", "") or "").strip().lower()
+    edge_approach_gate_ready = bool(
+        docking_obs.edge_trusted
+        or edge_handoff_complete
+        or edge_readiness_ready
+        or edge_readiness_level in {"ready", "trusted", "handoff_ready", "approach_ready"}
+    )
 
     def with_common(extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         bbox_track_started = float(getattr(ctx, "bbox_track_entered_mono", 0.0) or 0.0)
@@ -716,7 +724,7 @@ def arbitrate_table_docking_motion(
             reason="near_latch_suppressed_far_fallback",
         )
 
-    if phase == "EDGE_GUIDED_APPROACH" and intent.forward_allowed_by_behavior:
+    if phase == "EDGE_GUIDED_APPROACH" and intent.forward_allowed_by_behavior and edge_approach_gate_ready:
         vx = desired_vx
         if bool(summary.get("approach_commit_active", False)) or _edge_usable(obs, summary):
             vx = max(abs(vx), _float(summary, "forward_commit_vx", 0.020))
@@ -742,6 +750,9 @@ def arbitrate_table_docking_motion(
                 lateral_owner="none",
                 reason="edge_guided_approach_soft_fov" if fov_level == FovGuardLevel.SOFT else "edge_guided_approach",
             )
+    elif phase == "EDGE_GUIDED_APPROACH" and intent.forward_allowed_by_behavior:
+        summary["edge_handoff_block_reason"] = "edge_approach_gate_not_ready"
+        summary["edge_handoff_source"] = str(summary.get("edge_handoff_source") or "readiness_score")
 
     if phase in {"BBOX_ACQUIRE", "EDGE_HANDOFF_CONFIRM"} and edge_readiness_ready:
         handoff_wz = _float(summary, "edge_yaw_cmd", _float(summary, "wz_from_plane", 0.0))
@@ -788,10 +799,20 @@ def arbitrate_table_docking_motion(
     bbox_track_elapsed_if_active_ms = max(0.0, (now_track - bbox_track_active_since) * 1000.0) if bbox_track_active_since > 0.0 else 0.0
     bbox_track_hold_active = bool(bbox_track_active_since > 0.0 and bbox_track_elapsed_if_active_ms < bbox_track_min_hold_ms)
     bbox_track_hold_band = max(bbox_track_center_band, abs(_float(summary, "yolo_forward_center_hard_limit", 0.25)))
+    bbox_track_phase_allowed = bool(
+        phase in {"BBOX_ACQUIRE", "EDGE_HANDOFF_CONFIRM"}
+        or (phase == "EDGE_GUIDED_APPROACH" and not edge_approach_gate_ready)
+    )
+    roi_depth_valid = bool(summary.get("table_roi_depth_valid", getattr(obs, "table_roi_depth_valid", False) if obs is not None else False))
+    roi_depth_value = summary.get("table_roi_depth_p10", getattr(obs, "table_roi_depth_p10", None) if obs is not None else None)
+    if roi_depth_value is None:
+        roi_depth_value = summary.get("table_roi_depth_median", getattr(obs, "table_roi_depth_median", None) if obs is not None else None)
+    near_depth_floor = _float(summary, "bbox_track_forward_min_depth_m", _float(summary, "near_depth_threshold_m", 0.40))
+    roi_depth_too_near = bool(roi_depth_valid and roi_depth_value is not None and float(roi_depth_value) <= near_depth_floor)
     if not bbox_track_enabled:
         bbox_track_block = "bbox_track_disabled"
-    elif phase != "BBOX_ACQUIRE":
-        bbox_track_block = "not_bbox_acquire"
+    elif not bbox_track_phase_allowed:
+        bbox_track_block = "not_bbox_track_phase"
     elif not docking_obs.bbox_control_valid:
         bbox_track_block = "bbox_invalid"
     elif bbox_err is None:
@@ -806,6 +827,8 @@ def arbitrate_table_docking_motion(
         bbox_track_block = "final_depth_latched"
     elif bool(summary.get("depth_roi_stop_ready", False)):
         bbox_track_block = "depth_final_stop"
+    elif roi_depth_too_near:
+        bbox_track_block = "roi_depth_too_near"
     elif edge_readiness_ready:
         bbox_track_block = "edge_readiness_ready"
     elif emergency_active or explicit_stop:
@@ -869,11 +892,19 @@ def arbitrate_table_docking_motion(
         summary["bbox_track_exit_reason"] = bbox_track_block
         summary["bbox_track_elapsed_ms"] = 0.0
 
-    if phase in {"BBOX_ACQUIRE", "EDGE_HANDOFF_CONFIRM"} and (intent.rotate_allowed_by_behavior or abs(bbox_recovery_wz()) > 1e-9):
+    bbox_reacquire_needed = bool(
+        bbox_err is None
+        or abs(float(bbox_err)) > bbox_track_center_band
+        or fov_level == FovGuardLevel.HARD
+    )
+    if (
+        phase in {"BBOX_ACQUIRE", "EDGE_HANDOFF_CONFIRM"}
+        or (phase == "EDGE_GUIDED_APPROACH" and not edge_approach_gate_ready and docking_obs.bbox_control_valid)
+    ) and bbox_reacquire_needed and (intent.rotate_allowed_by_behavior or abs(bbox_recovery_wz()) > 1e-9):
         wz = bbox_recovery_wz()
         return _docking_result(
             action=DockingAction.BBOX_REACQUIRE_ROTATE,
-            stage=DockingStage.BBOX_ACQUIRE if phase == "BBOX_ACQUIRE" else DockingStage.EDGE_HANDOFF,
+            stage=DockingStage.BBOX_ACQUIRE if phase in {"BBOX_ACQUIRE", "EDGE_GUIDED_APPROACH"} else DockingStage.EDGE_HANDOFF,
             summary=with_common({"rotate_block_reason": "", "allow_rotate": True, "forward_block_reason": "bbox_acquire"}),
             wz=wz,
             yaw_owner="bbox",

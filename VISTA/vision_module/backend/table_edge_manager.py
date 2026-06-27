@@ -1743,7 +1743,7 @@ class TableEdgeManager:
             payload.get("inlier_count", payload.get("edge_inlier_count")),
             payload.get("yaw_err_rad"),
             payload.get("dist_err_m"),
-            payload.get("lateral_err_m", payload.get("dist_err_m")),
+            payload.get("lateral_err_m"),
             payload.get("publish_reason") or payload.get("reason") or payload.get("reject_reason"),
         )
 
