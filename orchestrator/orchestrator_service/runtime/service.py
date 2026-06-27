@@ -136,6 +136,8 @@ class OrchestratorService(BaseModule):
             "last_rx_time": None,
         }
         self._stopped = False
+        self._last_service_override = False
+        self._last_uart_tx_ok = True
         self.uart = UartBridge(
             cfg.serial.port,
             cfg.serial.baudrate,
@@ -537,7 +539,8 @@ class OrchestratorService(BaseModule):
             state_value = ctx.state.value
         except Exception:
             state_value = "DONE"
-        result = "success" if state_value == "DONE" else "failed"
+        result = "success" if state_value in {"DONE", "AT_TABLE_EDGE"} else "failed"
+        display_state = "docked_at_table_edge" if state_value == "AT_TABLE_EDGE" else state_value
         total_time_s = 0.0
         if getattr(ctx, "task_start_wall_ts", 0.0):
             total_time_s = max(0.0, time.time() - float(ctx.task_start_wall_ts))
@@ -549,7 +552,7 @@ class OrchestratorService(BaseModule):
             f"session_id={getattr(ctx, 'active_session_id', '') or 'n/a'} "
             f"target={getattr(ctx, 'active_target', '') or 'n/a'} "
             f"result={result} "
-            f"final_state={state_value} "
+            f"final_state={display_state} "
             f"reason={reason or 'task_done'} "
             f"total_time_s={total_time_s:.1f} "
             f"edge_retries={int(getattr(ctx, 'dock_retry_count', 0) + getattr(ctx, 'edge_transition_count', 0))} "
@@ -1054,6 +1057,7 @@ class OrchestratorService(BaseModule):
                 last_age_ms = self._last_valid_motion_age_ms(now)
 
             service_override = bool(self._cmd_dict(effective) != self._cmd_dict(cmd))
+            self._last_service_override = service_override
             return effective, {
                 "uart_emit_reason": emit_reason,
                 "last_valid_motion_cmd": dict(self._last_valid_motion_cmd or {}),
@@ -1552,6 +1556,8 @@ class OrchestratorService(BaseModule):
 
     def _on_uart_tx(self, raw_line: str, dry_run: bool, tx_meta: Optional[Dict[str, Any]] = None):
         self._last_uart_tx_ts = time.time()
+        if tx_meta is not None and "uart_tx_ok" in tx_meta:
+            self._last_uart_tx_ok = bool(tx_meta.get("uart_tx_ok", False))
         payload = {
             "ts": self._last_uart_tx_ts,
             "dry_run": bool(dry_run),
@@ -2523,11 +2529,31 @@ class OrchestratorService(BaseModule):
             summary["reason"] = block.get("stop_reason")
         else:
             summary.setdefault("reason", summary.get("lock_reason") or self.core.ctx.last_enter_reason or "")
+        
+        # Populate unified table docking status fields
+        summary["docking_stage"] = summary.get("docking_stage") or ""
+        summary["docking_action"] = summary.get("docking_action") or ""
+        summary["docking_reason"] = summary.get("docking_reason") or summary.get("arbitration_reason") or ""
+        summary["final_vx"] = float(summary.get("final_vx", decision.cmd.vx_mps) or 0.0)
+        summary["final_vy"] = float(summary.get("final_vy", decision.cmd.vy_mps) or 0.0)
+        summary["final_wz"] = float(summary.get("final_wz", decision.cmd.wz_radps) or 0.0)
+        summary["near_table_latched"] = bool(summary.get("near_table_latched") or self.core.ctx.near_table_latched)
+        summary["final_depth_latched"] = bool(summary.get("final_depth_latched") or self.core.ctx.final_depth_latched)
+        summary["final_yaw_align_active"] = bool(summary.get("final_yaw_align_active") or self.core.ctx.final_yaw_align_active)
+        summary["final_locked"] = bool(summary.get("final_locked") or self.core.ctx.final_locked)
+        summary["stop_class"] = summary.get("stop_class") or "none"
+        summary["service_override"] = bool(getattr(self, "_last_service_override", False))
+        summary["uart_tx_ok"] = bool(getattr(self, "_last_uart_tx_ok", True))
+        
         return summary
 
     def _operator_control_line(self, summary: Dict[str, Any]) -> str:
         cmd = dict(summary.get("cmd") or {})
         state = str(summary.get("state") or self.core.ctx.state.value)
+        is_docking = state in {"SEARCH_TABLE", "YOLO_ACQUIRE_ALIGN", "YOLO_APPROACH", "EDGE_ADJUST", "FINAL_SLOW_STOP", "AT_TABLE_EDGE"}
+        docking_stage = summary.get("docking_stage")
+        if is_docking and docking_stage:
+            state = str(docking_stage)
         reason = str(summary.get("reason") or summary.get("lock_reason") or "").strip() or "n/a"
         speed_profile = str(summary.get("speed_profile") or "n/a")
         speed_limit = str(summary.get("speed_limit_reason") or "n/a")
@@ -2555,7 +2581,7 @@ class OrchestratorService(BaseModule):
             f"cmd vx_mps={self._fmt_float(cmd.get('vx'))} vy_mps={self._fmt_float(cmd.get('vy'))} wz_radps={self._fmt_float(cmd.get('wz'))} "
             f"vx_mps={self._fmt_float(vx_mps)} vy_mps={self._fmt_float(vy_mps)} wz_radps={self._fmt_float(wz_radps)}"
         )
-        if state == "FINAL_SLOW_STOP":
+        if summary.get("state") == "FINAL_SLOW_STOP" or state in {"FINAL_DISTANCE_HOLD", "FINAL_YAW_ALIGN", "FINAL_LOCKED"}:
             stable = int(self.core.ctx.table_lock_frames)
             needed = int(self.cfg.control.final_lock_frames_to_arrive)
             return (
@@ -2811,34 +2837,67 @@ class OrchestratorService(BaseModule):
             "wz_sign_final": summary.get("wz_sign_final", 0),
         }
         self.run_logger.write_jsonl("motion_gate_trace", trace)
-        sig = (
-            trace["state"],
-            trace["control_source"],
-            round(vx, 3),
-            round(vy, 3),
-            round(wz, 3),
-            trace["block_reason"],
-        )
+        is_docking = trace["state"] in {"SEARCH_TABLE", "YOLO_ACQUIRE_ALIGN", "YOLO_APPROACH", "EDGE_ADJUST", "FINAL_SLOW_STOP", "AT_TABLE_EDGE"}
+        if is_docking:
+            sig = (
+                summary.get("docking_stage") or "SEARCH",
+                summary.get("docking_action") or "SEARCH_ROTATE",
+                round(vx, 3),
+                round(vy, 3),
+                round(wz, 3),
+            )
+        else:
+            sig = (
+                trace["state"],
+                trace["control_source"],
+                round(vx, 3),
+                round(vy, 3),
+                round(wz, 3),
+                trace["block_reason"],
+            )
         now = time.time()
         last_sig = getattr(self, "_last_motion_gate_trace_sig", None)
         last_ts = float(getattr(self, "_last_motion_gate_trace_ts", 0.0) or 0.0)
-        if sig != last_sig or now - last_ts >= 1.0:
+        if sig != last_sig or now - last_ts >= 0.5:
             self._last_motion_gate_trace_sig = sig
             self._last_motion_gate_trace_ts = now
-            self.operator_console.emit_rate_limited(
-                "motion_gate_trace",
-                "[MOTION_GATE_TRACE] "
-                f"state={trace['state']} control_source={trace['control_source']} "
-                f"control_phase={trace['control_phase']} phase_reason={trace['phase_reason']} "
-                f"search_latch={trace['search_wz_sign_latched']} latch_age_ms={trace['search_latch_age_ms']:.0f} wz_sign_final={trace['wz_sign_final']} "
-                f"commit={int(trace['approach_commit_active'])} coast={int(trace['forward_coast_active'])} edge_conf={trace['edge_conf_score']:.2f} "
-                f"yaw_source={yaw_source} forward_source={forward_source} stop_source={stop_source} "
-                f"allow_forward={int(trace['allow_forward'])} allow_rotate={int(trace['allow_rotate'])} "
-                f"vx_mps={vx:.3f} vy_mps={vy:.3f} wz_radps={wz:.3f} block_reason={block_reason} "
-                f"forward_block_reason={trace['forward_block_reason']} rotate_block_reason={trace['rotate_block_reason']} "
-                f"roi_p10={trace['table_roi_depth_p10']} roi_ratio={trace['table_roi_depth_valid_ratio']} roi_samples={trace['table_roi_depth_sample_count']}",
-                interval_s=0.5,
-            )
+            if is_docking:
+                stage = summary.get("docking_stage") or "SEARCH"
+                action = summary.get("docking_action") or "SEARCH_ROTATE"
+                yaw_val = summary.get("yaw_err_rad")
+                yaw_str = self._fmt_float(yaw_val, 2) if yaw_val is not None else "None"
+                depth_val = summary.get("table_roi_depth_p10")
+                depth_str = self._fmt_float(depth_val, 2) if depth_val is not None else "None"
+                near_val = int(bool(summary.get("near_table_latched")))
+                final_depth_val = int(bool(summary.get("final_depth_latched")))
+                locked_val = int(bool(summary.get("final_locked")))
+                uart_ok_val = int(bool(summary.get("uart_tx_ok", True)))
+                
+                line = (
+                    f"[DOCK] stage={stage} action={action} "
+                    f"vx={vx:.3f} vy={vy:.3f} wz={wz:.3f} "
+                    f"yaw={yaw_str} depth_p10={depth_str} "
+                    f"near={near_val} final_depth={final_depth_val} locked={locked_val} uart_ok={uart_ok_val} "
+                    f"legacy_state={trace['state']}"
+                )
+            else:
+                line = (
+                    "[MOTION_GATE_TRACE] "
+                    f"state={trace['state']} control_source={trace['control_source']} "
+                    f"control_phase={trace['control_phase']} phase_reason={trace['phase_reason']} "
+                    f"search_latch={trace['search_wz_sign_latched']} latch_age_ms={trace['search_latch_age_ms']:.0f} wz_sign_final={trace['wz_sign_final']} "
+                    f"commit={int(trace['approach_commit_active'])} coast={int(trace['forward_coast_active'])} edge_conf={trace['edge_conf_score']:.2f} "
+                    f"yaw_source={yaw_source} forward_source={forward_source} stop_source={stop_source} "
+                    f"allow_forward={int(trace['allow_forward'])} allow_rotate={int(trace['allow_rotate'])} "
+                    f"vx_mps={vx:.3f} vy_mps={vy:.3f} wz_radps={wz:.3f} block_reason={block_reason} "
+                    f"forward_block_reason={trace['forward_block_reason']} rotate_block_reason={trace['rotate_block_reason']} "
+                    f"roi_p10={trace['table_roi_depth_p10']} roi_ratio={trace['table_roi_depth_valid_ratio']} roi_samples={trace['table_roi_depth_sample_count']}"
+                )
+            if sig != last_sig:
+                self.operator_console.emit(line)
+                self.operator_console._last_ts_by_key["motion_gate_trace"] = now
+            else:
+                self.operator_console.emit_rate_limited("motion_gate_trace", line, interval_s=0.5)
         should_forward = bool(
             (yolo_visible or bbox_valid or edge_trusted)
             and dist_err > target_dist + tolerance

@@ -349,6 +349,7 @@ class DockingMotionResult:
             {
                 "docking_action": self.action.value,
                 "docking_stage": self.stage.value,
+                "docking_reason": str(self.reason or ""),
                 "motion_intent_type": self.action.value.lower(),
                 "yaw_owner": str(self.yaw_owner or ""),
                 "arbitration_reason": str(self.reason or ""),

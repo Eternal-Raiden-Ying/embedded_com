@@ -170,6 +170,10 @@ class RecoveryMixin:
         lost_hold_ok = self._loss_elapsed(self.ctx.table_loss_since_mono) >= float(self.cfg.table_loss_hold_s)
         min_dwell_ok = self._state_elapsed() >= float(self.cfg.approach_min_dwell_s)
         if lost_frames_ok and lost_hold_ok and min_dwell_ok:
+            if fallback_state == State.SEARCH_TABLE and (bool(getattr(self.ctx, "near_table_latched", False)) or bool(getattr(self.ctx, "final_depth_latched", False))):
+                # Keep holding final slow stop or near edge approach, do not fall back to search.
+                # compatibility only; table docking semantic state is DockingStage
+                return self.controller.stop_cmd(hold_mode)
             self._transition(fallback_state, reason)
             decision = self.controller.search_table_cmd(*self._get_memory_search_params())
             if fallback_state == State.SEARCH_TABLE:
