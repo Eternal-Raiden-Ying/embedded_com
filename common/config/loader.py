@@ -495,6 +495,18 @@ def _load_and_merge_stage_params(config: SystemGlobalConfig, file_path: Path) ->
             ctrl.edge_readiness_yaw_max_rad = _sf(td["edge_readiness_yaw_max_rad"])
         if "edge_handoff_min_hold_ms" in td:
             ctrl.edge_handoff_min_hold_ms = _si(td["edge_handoff_min_hold_ms"])
+        if "lateral_enabled" in td:
+            ctrl.lateral_enabled = _sb(td["lateral_enabled"])
+        if "lateral_vy_max_mps" in td:
+            ctrl.lateral_vy_max_mps = _sf(td["lateral_vy_max_mps"])
+        if "lateral_deadband_norm" in td:
+            ctrl.lateral_deadband_norm = _sf(td["lateral_deadband_norm"])
+        if "lateral_kp" in td:
+            ctrl.lateral_kp = _sf(td["lateral_kp"])
+        if "lateral_target_center_x_norm" in td:
+            ctrl.lateral_target_center_x_norm = _sf(td["lateral_target_center_x_norm"])
+        if "lateral_owner_default" in td:
+            ctrl.lateral_owner_default = str(td["lateral_owner_default"])
         if "final_yaw_deadband_rad" in td:
             ctrl.final_yaw_deadband_rad = _sf(td["final_yaw_deadband_rad"])
         if "final_lock_yaw_rad" in td:

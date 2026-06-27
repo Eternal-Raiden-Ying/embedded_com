@@ -1023,6 +1023,83 @@ def main() -> None:
     assert phase_readiness["edge_readiness_score"] >= phase_readiness["edge_readiness_enter_score"]
     assert phase_readiness["control_phase"] in {"EDGE_HANDOFF_CONFIRM", "EDGE_GUIDED_APPROACH"}
 
+    lateral_disabled = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("yolo_track_forward", desired_vx=0.012, desired_wz=0.02, yaw_owner="bbox", forward_allowed_by_behavior=True),
+        {
+            "control_phase": "BBOX_ACQUIRE",
+            "bbox_center_valid": True,
+            "bbox_center_error": 0.02,
+            "bbox_yaw_cmd": 0.02,
+            "yolo_forward_allowed": True,
+            "cmd": {"vx_mps": 0.012},
+            "desired_vy": 0.008,
+            "lateral_enabled": False,
+            "lateral_err_norm": 0.20,
+            "lateral_source": "synthetic",
+        },
+    )
+    assert lateral_disabled.final_vy == 0.0
+    assert lateral_disabled.summary["vy_enabled"] is False
+    assert lateral_disabled.summary["vy_block_reason"] == "lateral_disabled"
+    assert lateral_disabled.summary["vy_cmd_limited"] == 0.0
+
+    lateral_uncalibrated = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("edge_guided_forward", desired_vx=0.02, desired_wz=0.02, yaw_owner="edge", forward_allowed_by_behavior=True),
+        {
+            "control_phase": "EDGE_GUIDED_APPROACH",
+            "edge_readiness_score": 0.80,
+            "edge_readiness_enter_score": 0.65,
+            "edge_found": True,
+            "edge_valid": True,
+            "usable_for_approach": True,
+            "lateral_enabled": True,
+            "lateral_err_norm": 0.20,
+            "lateral_source": "synthetic",
+            "desired_vy": 0.008,
+        },
+    )
+    assert lateral_uncalibrated.final_vy == 0.0
+    assert lateral_uncalibrated.summary["vy_enabled"] is False
+    assert lateral_uncalibrated.summary["vy_block_reason"] == "vy_direction_uncalibrated"
+
+    no_lateral_fallback = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("yolo_track_forward", desired_vx=0.012, desired_wz=0.02, yaw_owner="bbox", forward_allowed_by_behavior=True),
+        {
+            "control_phase": "BBOX_ACQUIRE",
+            "bbox_center_valid": True,
+            "bbox_center_error": 0.02,
+            "bbox_yaw_cmd": 0.02,
+            "yolo_forward_allowed": True,
+            "cmd": {"vx_mps": 0.012},
+            "dist_err_m": 0.30,
+        },
+    )
+    assert no_lateral_fallback.summary["lateral_err_norm"] is None
+    assert no_lateral_fallback.summary["lateral_source"] == ""
+    assert no_lateral_fallback.final_vy == 0.0
+
+    final_lateral_block = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("final_hold", desired_vx=0.0, desired_wz=0.0),
+        {
+            "control_phase": "DEPTH_FINAL_STOP",
+            "final_depth_latched": True,
+            "final_locked": True,
+            "desired_vy": 0.008,
+            "lateral_enabled": True,
+            "lateral_err_norm": 0.20,
+        },
+    )
+    assert final_lateral_block.summary["docking_action"] == "FINAL_LOCKED_STOP"
+    assert final_lateral_block.final_vy == 0.0
+
     inv10 = arbitrate_table_docking_motion(
         RuntimeContext(state=State.YOLO_APPROACH),
         None,

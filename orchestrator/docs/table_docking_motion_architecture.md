@@ -73,6 +73,8 @@ They should map to `BBOX_REACQUIRE_ROTATE`, `CONTROL_RECOVERY_ROTATE`, `PERCEPTI
 - `edge_readiness_score` is a pre-final handoff signal only. It may move BBOX tracking into `EDGE_READINESS_HANDOFF` / `EDGE_APPROACH_FORWARD`, but it must never override final depth latch, final yaw align, final locked stop, emergency, obstacle, explicit stop, or hard safety.
 - Readiness uses enter/exit hysteresis: enter at `edge_readiness_enter_score`, remain stable between enter/exit, and fall back only at or below `edge_readiness_exit_score`.
 - Final depth latch blocks `vx/vy`; it does not block final yaw align.
+- The Y-axis interface is present through `lateral_owner`, `lateral_err_norm`, `lateral_err_m`, `lateral_source`, `vy_enabled`, `vy_block_reason`, `vy_cmd_raw`, and `vy_cmd_limited`. In this round `lateral_enabled=false` and all automatic table docking actions must keep `final_vy=0.0`.
+- Before enabling nonzero automatic `vy`, run real-car direction calibration with manual commands `V 0.000 +0.008 0.000` and `V 0.000 -0.008 0.000`, then document the positive/negative direction convention.
 - `FINAL_DEPTH_LATCHED + yaw large` must emit nonzero `wz` when edge or last-good yaw is available.
 - Near/final latch downgrades YOLO bbox to diagnostic/FOV guard.
 - After near/final latch, bbox lost must not transition docking back to `SEARCH_TABLE`.

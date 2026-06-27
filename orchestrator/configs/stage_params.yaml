@@ -45,6 +45,12 @@ table_docking:
   edge_readiness_min_inliers: 30
   edge_readiness_yaw_max_rad: 0.35
   edge_handoff_min_hold_ms: 800
+  lateral_enabled: false
+  lateral_vy_max_mps: 0.006
+  lateral_deadband_norm: 0.05
+  lateral_kp: 0.02
+  lateral_target_center_x_norm: 0.5
+  lateral_owner_default: none
 
 yolo_table:
   yolo_table_control_enable: true

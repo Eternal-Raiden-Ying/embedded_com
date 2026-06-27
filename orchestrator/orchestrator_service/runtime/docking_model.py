@@ -105,6 +105,9 @@ class DockingObservation:
     table_roi_depth_median: Optional[float] = None
     table_roi_depth_mean: Optional[float] = None
     dist_err_m: Optional[float] = None
+    lateral_err_norm: Optional[float] = None
+    lateral_err_m: Optional[float] = None
+    lateral_source: str = ""
     final_depth_latched: bool = False
     near_table_latched: bool = False
     final_yaw_align_active: bool = False
@@ -234,6 +237,9 @@ def build_docking_observation(ctx: Any, obs: Any, summary: Optional[Dict[str, An
         table_roi_depth_median=_optional_float(summary.get("table_roi_depth_median", _obs_value(obs, "table_roi_depth_median"))),
         table_roi_depth_mean=_optional_float(summary.get("table_roi_depth_mean", _obs_value(obs, "table_roi_depth_mean"))),
         dist_err_m=_optional_float(summary.get("dist_err_m", _obs_value(obs, "dist_err_m"))),
+        lateral_err_norm=_optional_float(summary.get("lateral_err_norm")),
+        lateral_err_m=_optional_float(summary.get("lateral_err_m", _obs_value(obs, "lateral_err_m"))),
+        lateral_source=str(summary.get("lateral_source") or ("edge_lateral_err_m" if _obs_value(obs, "lateral_err_m") is not None else "")),
         final_depth_latched=bool(summary.get("final_depth_latched") or getattr(ctx, "final_depth_latched", False)),
         near_table_latched=bool(summary.get("near_table_latched") or getattr(ctx, "near_table_latched", False)),
         final_yaw_align_active=bool(summary.get("final_yaw_align_active") or getattr(ctx, "final_yaw_align_active", False)),
@@ -385,6 +391,13 @@ class DockingMotionResult:
                 "yaw_owner": yaw_owner,
                 "forward_owner": forward_owner,
                 "lateral_owner": lateral_owner,
+                "lateral_err_norm": out.get("lateral_err_norm"),
+                "lateral_err_m": out.get("lateral_err_m"),
+                "lateral_source": str(out.get("lateral_source") or ""),
+                "vy_enabled": bool(out.get("vy_enabled", False)),
+                "vy_block_reason": str(out.get("vy_block_reason") or "lateral_disabled"),
+                "vy_cmd_raw": float(out.get("vy_cmd_raw", self.vy) or 0.0),
+                "vy_cmd_limited": 0.0,
                 "advance_condition": str(self.advance_condition or out.get("advance_condition") or ""),
                 "fallback_condition": str(self.fallback_condition or out.get("fallback_condition") or ""),
                 "arbitration_reason": str(self.reason or ""),

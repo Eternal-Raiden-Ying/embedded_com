@@ -273,12 +273,17 @@ def _docking_result(
     service_may_override: bool = False,
     not_overridden_by: Optional[List[str]] = None,
 ) -> ArbitrationResult:
+    safe_summary = dict(summary or {})
+    safe_summary.setdefault("vy_cmd_raw", float(vy))
+    safe_summary["vy_cmd_limited"] = 0.0
+    safe_summary["vy_enabled"] = False
+    safe_summary.setdefault("vy_block_reason", "lateral_disabled")
     return _from_docking_result(
         DockingMotionResult(
             action=action,
             stage=stage,
             vx=float(vx),
-            vy=float(vy),
+            vy=0.0,
             wz=float(wz),
             yaw_owner=str(yaw_owner or ""),
             forward_owner=str(forward_owner or ""),
@@ -287,7 +292,7 @@ def _docking_result(
             safety_class=str(safety_class or ""),
             blocked_by=str(blocked_by or ""),
             reason=str(reason or action.value.lower()),
-            summary=dict(summary or {}),
+            summary=safe_summary,
             service_may_override=bool(service_may_override),
             not_overridden_by=list(not_overridden_by or []),
         )
@@ -327,6 +332,11 @@ def arbitrate_table_docking_motion(
     emergency_active = bool(_as_bool(summary, "explicit_stop_active") or any(_as_bool(summary, key) for key in _EMERGENCY_KEYS))
     explicit_stop = bool(summary.get("explicit_stop_active", False))
     hard_safety = bool(any(_as_bool(summary, key) for key in _HARD_SAFETY_KEYS))
+    lateral_enabled = bool(summary.get("lateral_enabled", False))
+    lateral_err_m = docking_obs.lateral_err_m
+    lateral_err_norm = docking_obs.lateral_err_norm
+    lateral_source = str(docking_obs.lateral_source or "")
+    vy_block_reason = "lateral_disabled" if not lateral_enabled else "vy_direction_uncalibrated"
     edge_readiness_score = max(0.0, min(1.0, _float(summary, "edge_readiness_score", float(getattr(ctx, "edge_readiness_score", 0.0) or 0.0))))
     edge_readiness_enter = _float(summary, "edge_readiness_enter_score", 0.65)
     edge_readiness_exit = _float(summary, "edge_readiness_exit_score", 0.35)
@@ -352,6 +362,15 @@ def arbitrate_table_docking_motion(
                 "edge_readiness_exit_score": float(edge_readiness_exit),
                 "edge_handoff_block_reason": str(summary.get("edge_handoff_block_reason") or ""),
                 "edge_handoff_source": str(summary.get("edge_handoff_source") or ""),
+                "lateral_enabled": bool(lateral_enabled),
+                "lateral_err_norm": lateral_err_norm,
+                "lateral_err_m": lateral_err_m,
+                "lateral_source": lateral_source,
+                "lateral_owner": "none",
+                "vy_enabled": False,
+                "vy_block_reason": vy_block_reason,
+                "vy_cmd_raw": float(desired_vy),
+                "vy_cmd_limited": 0.0,
             }
         )
         if extra:

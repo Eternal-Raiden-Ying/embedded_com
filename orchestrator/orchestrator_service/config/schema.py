@@ -184,6 +184,12 @@ class ControlThresholds:
     edge_readiness_min_inliers: int = 30
     edge_readiness_yaw_max_rad: float = 0.35
     edge_handoff_min_hold_ms: int = 800
+    lateral_enabled: bool = False
+    lateral_vy_max_mps: float = 0.006
+    lateral_deadband_norm: float = 0.05
+    lateral_kp: float = 0.02
+    lateral_target_center_x_norm: float = 0.5
+    lateral_owner_default: str = "none"
 
     # Final lock stabilization thresholds
     final_lock_min_hold_ms: int = 800
