@@ -176,6 +176,14 @@ class ControlThresholds:
     bbox_track_forward_center_band: float = 0.14
     bbox_track_forward_min_hold_ms: int = 800
     bbox_track_forward_max_wz_radps: float = 0.06
+    edge_readiness_enabled: bool = True
+    edge_readiness_enter_score: float = 0.65
+    edge_readiness_exit_score: float = 0.35
+    edge_readiness_rise: float = 0.15
+    edge_readiness_decay: float = 0.10
+    edge_readiness_min_inliers: int = 30
+    edge_readiness_yaw_max_rad: float = 0.35
+    edge_handoff_min_hold_ms: int = 800
 
     # Final lock stabilization thresholds
     final_lock_min_hold_ms: int = 800

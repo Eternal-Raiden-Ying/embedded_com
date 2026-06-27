@@ -70,6 +70,8 @@ They should map to `BBOX_REACQUIRE_ROTATE`, `CONTROL_RECOVERY_ROTATE`, `PERCEPTI
 ## Final And Near Rules
 
 - **Authoritative Status**: `DockingStage` and `DockingAction` are the sole authoritative sources of table docking status. The legacy runtime `State` enum is kept for internal state machine transitions only and is downgraded to compatibility-only (displayed as `legacy_state` under diagnostics).
+- `edge_readiness_score` is a pre-final handoff signal only. It may move BBOX tracking into `EDGE_READINESS_HANDOFF` / `EDGE_APPROACH_FORWARD`, but it must never override final depth latch, final yaw align, final locked stop, emergency, obstacle, explicit stop, or hard safety.
+- Readiness uses enter/exit hysteresis: enter at `edge_readiness_enter_score`, remain stable between enter/exit, and fall back only at or below `edge_readiness_exit_score`.
 - Final depth latch blocks `vx/vy`; it does not block final yaw align.
 - `FINAL_DEPTH_LATCHED + yaw large` must emit nonzero `wz` when edge or last-good yaw is available.
 - Near/final latch downgrades YOLO bbox to diagnostic/FOV guard.

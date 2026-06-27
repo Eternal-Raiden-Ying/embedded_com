@@ -945,6 +945,84 @@ def main() -> None:
             assert owner_key in motion_result.summary
             assert str(motion_result.summary[owner_key]) != ""
 
+    readiness_handoff = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("yolo_acquire_align", desired_vx=0.0, desired_wz=0.03, yaw_owner="edge_candidate", rotate_allowed_by_behavior=True),
+        {
+            "control_phase": "EDGE_HANDOFF_CONFIRM",
+            "edge_readiness_score": 0.70,
+            "edge_readiness_enter_score": 0.65,
+            "edge_readiness_exit_score": 0.35,
+            "edge_yaw_cmd": 0.03,
+            "edge_found": True,
+            "edge_valid": True,
+            "edge_trusted": False,
+            "table_roi_depth_valid": True,
+        },
+    )
+    assert readiness_handoff.summary["docking_action"] == "EDGE_READINESS_HANDOFF"
+    assert readiness_handoff.summary["yaw_owner"] == "edge_candidate"
+    assert readiness_handoff.final_vx == 0.0
+
+    readiness_approach = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("edge_guided_forward", desired_vx=0.02, desired_wz=0.03, yaw_owner="edge", forward_allowed_by_behavior=True),
+        {
+            "control_phase": "EDGE_GUIDED_APPROACH",
+            "edge_readiness_score": 0.70,
+            "edge_readiness_enter_score": 0.65,
+            "edge_readiness_exit_score": 0.35,
+            "edge_found": True,
+            "edge_valid": True,
+            "edge_trusted": False,
+            "usable_for_approach": True,
+            "table_roi_depth_valid": True,
+            "forward_commit_vx": 0.020,
+        },
+    )
+    assert readiness_approach.summary["docking_action"] == "EDGE_APPROACH_FORWARD"
+    assert readiness_approach.final_vx > 0.0
+    assert readiness_approach.summary["forward_owner"] == "edge_approach"
+
+    readiness_final = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("edge_guided_forward", desired_vx=0.02, desired_wz=0.03, yaw_owner="edge", forward_allowed_by_behavior=True),
+        {
+            "control_phase": "EDGE_GUIDED_APPROACH",
+            "edge_readiness_score": 1.0,
+            "edge_readiness_enter_score": 0.65,
+            "final_depth_latched": True,
+            "final_locked": True,
+            "edge_found": True,
+            "edge_valid": True,
+        },
+    )
+    assert readiness_final.summary["docking_action"] == "FINAL_LOCKED_STOP"
+    assert readiness_final.final_vx == 0.0 and readiness_final.final_wz == 0.0
+
+    probe_readiness = DockingProbe()
+    probe_readiness.cfg.edge_readiness_min_inliers = 0
+    probe_readiness.cfg.edge_readiness_rise = 0.35
+    probe_readiness.cfg.edge_readiness_decay = 0.05
+    probe_readiness.ctx.bbox_centered_streak = 2
+    obs_readiness = bbox_obs(0.50)
+    obs_readiness.edge_found = True
+    obs_readiness.edge_valid = True
+    obs_readiness.edge_trusted = False
+    obs_readiness.usable_for_approach = True
+    obs_readiness.edge_confidence = 0.80
+    obs_readiness.yaw_err_rad = 0.10
+    obs_readiness.table_roi_depth_valid = True
+    obs_readiness.table_roi_depth_p10 = 0.70
+    obs_readiness.table_roi_depth_median = 0.70
+    for _ in range(3):
+        phase_readiness = probe_readiness._control_phase_status(obs_readiness, depth_stop_ready=False)
+    assert phase_readiness["edge_readiness_score"] >= phase_readiness["edge_readiness_enter_score"]
+    assert phase_readiness["control_phase"] in {"EDGE_HANDOFF_CONFIRM", "EDGE_GUIDED_APPROACH"}
+
     inv10 = arbitrate_table_docking_motion(
         RuntimeContext(state=State.YOLO_APPROACH),
         None,

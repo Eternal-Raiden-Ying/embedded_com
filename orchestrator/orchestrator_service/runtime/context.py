@@ -147,6 +147,10 @@ class RuntimeContext:
     bbox_track_entered_mono: float = 0.0
     bbox_track_last_exit_reason: str = ""
     edge_conf_score: float = 0.0
+    edge_readiness_score: float = 0.0
+    edge_readiness_last_update_mono: float = 0.0
+    edge_readiness_level: str = ""
+    edge_handoff_entered_mono: float = 0.0
     last_good_table_obs_mono: float = 0.0
     last_good_table_obs_summary: Dict[str, object] = field(default_factory=dict)
     perception_dropout_hold_active: bool = False
@@ -268,6 +272,10 @@ class RuntimeContext:
         self.bbox_track_entered_mono = 0.0
         self.bbox_track_last_exit_reason = ""
         self.edge_conf_score = 0.0
+        self.edge_readiness_score = 0.0
+        self.edge_readiness_last_update_mono = 0.0
+        self.edge_readiness_level = ""
+        self.edge_handoff_entered_mono = 0.0
         self.last_good_table_obs_mono = 0.0
         self.last_good_table_obs_summary.clear()
         self.perception_dropout_hold_active = False

@@ -177,6 +177,108 @@ class TableDockingMixin:
         stale_level = str(self.controller._stale_guard(obs).get("stale_level") or "fresh")
         return stale_level not in {"hard_stale", "dead"}
 
+    def _refresh_edge_readiness(self, obs: Optional[TableEdgeObs], summary: Dict[str, object], *, current_bbox: bool, stable_bbox: bool, depth_stop_ready: bool) -> Dict[str, object]:
+        now = monotonic_ts()
+        enabled = bool(getattr(self.cfg, "edge_readiness_enabled", True))
+        enter_score = float(getattr(self.cfg, "edge_readiness_enter_score", 0.65) or 0.65)
+        exit_score = float(getattr(self.cfg, "edge_readiness_exit_score", 0.35) or 0.35)
+        rise = abs(float(getattr(self.cfg, "edge_readiness_rise", 0.15) or 0.15))
+        decay = abs(float(getattr(self.cfg, "edge_readiness_decay", 0.10) or 0.10))
+        raw_min_inliers = getattr(self.cfg, "edge_readiness_min_inliers", 30)
+        min_inliers = max(0, int(30 if raw_min_inliers is None else raw_min_inliers))
+        yaw_max = abs(float(getattr(self.cfg, "edge_readiness_yaw_max_rad", 0.35) or 0.35))
+
+        state_name = str(getattr(self.ctx.state, "value", self.ctx.state) or "").upper()
+        explicit_or_hard = bool(
+            summary.get("explicit_stop_active")
+            or summary.get("emergency_stop_active")
+            or summary.get("car_estop")
+            or summary.get("estop_active")
+            or summary.get("obstacle_active")
+            or summary.get("obstacle_stop_active")
+            or summary.get("base_depth_hard_safety")
+            or summary.get("base_depth_stop_active")
+            or summary.get("base_depth_emergency_active")
+            or summary.get("depth_hard_stop_active")
+            or summary.get("safety_stop_active")
+        )
+        if state_name == "IDLE" or explicit_or_hard:
+            self.ctx.edge_readiness_score = 0.0
+            self.ctx.edge_readiness_level = "reset"
+            self.ctx.edge_readiness_last_update_mono = now
+            self.ctx.edge_handoff_entered_mono = 0.0
+            return {
+                "edge_readiness_score": 0.0,
+                "edge_readiness_level": "reset",
+                "edge_readiness_reason": "idle_or_stop_reset",
+                "edge_handoff_block_reason": "idle_or_stop_reset",
+                "edge_handoff_source": "reset",
+                "edge_readiness_enter_score": enter_score,
+                "edge_readiness_exit_score": exit_score,
+            }
+
+        edge_found = bool(obs is not None and getattr(obs, "edge_found", False))
+        edge_valid = bool(edge_found or (obs is not None and getattr(obs, "edge_valid", False)))
+        edge_trusted = bool(obs is not None and getattr(obs, "edge_trusted", False))
+        edge_usable = bool(obs is not None and getattr(obs, "usable_for_approach", False))
+        confidence = float(getattr(obs, "edge_confidence", 0.0) or 0.0) if obs is not None else 0.0
+        inliers = int(
+            getattr(obs, "edge_inlier_count", getattr(obs, "inlier_count", getattr(obs, "edge_support_count", 0))) or 0
+        ) if obs is not None else 0
+        yaw = getattr(obs, "yaw_err_rad", None) if obs is not None else None
+        yaw_ok = bool(yaw is not None and abs(float(yaw)) <= yaw_max)
+        depth_valid = bool(obs is not None and getattr(obs, "table_roi_depth_valid", False))
+        stale_level = str(summary.get("stale_level") or self.controller._stale_guard(obs).get("stale_level") or "fresh").lower()
+        last_good_ok = bool(summary.get("last_good_obs_healthy", False) and float(summary.get("last_good_obs_age_ms", 999999.0) or 999999.0) <= 2500.0)
+
+        score = float(getattr(self.ctx, "edge_readiness_score", 0.0) or 0.0)
+        reason = "disabled"
+        if not enabled or depth_stop_ready or bool(getattr(self.ctx, "near_table_latched", False) or getattr(self.ctx, "final_depth_latched", False)):
+            reason = "disabled_or_not_prefinal"
+        elif stale_level in {"hard_stale", "dead"} and not last_good_ok:
+            score -= decay
+            reason = "stale_dead_no_last_good"
+        else:
+            positive = bool(
+                current_bbox
+                and stable_bbox
+                and edge_valid
+                and (edge_trusted or edge_usable or confidence >= float(getattr(self.cfg, "edge_trusted_min_conf", 0.60) or 0.60))
+                and yaw_ok
+                and depth_valid
+                and (min_inliers <= 0 or inliers >= min_inliers or edge_trusted)
+            )
+            if positive:
+                bonus = rise + (0.05 if edge_trusted else 0.0)
+                score += bonus
+                reason = "edge_candidate_healthy"
+            else:
+                score -= decay
+                reason = "edge_candidate_incomplete"
+
+        score = max(0.0, min(1.0, score))
+        if score >= enter_score:
+            level = "ready"
+            block = ""
+        elif score <= exit_score:
+            level = "low"
+            block = reason
+        else:
+            level = "hold"
+            block = "hysteresis_hold"
+        self.ctx.edge_readiness_score = score
+        self.ctx.edge_readiness_level = level
+        self.ctx.edge_readiness_last_update_mono = now
+        return {
+            "edge_readiness_score": float(score),
+            "edge_readiness_level": level,
+            "edge_readiness_reason": reason,
+            "edge_handoff_block_reason": block,
+            "edge_handoff_source": "readiness_score",
+            "edge_readiness_enter_score": float(enter_score),
+            "edge_readiness_exit_score": float(exit_score),
+        }
+
     def _near_table_latch_frames(self) -> int:
         return max(1, int(getattr(self.cfg, "near_table_latch_frames", 2) or 2))
 
@@ -690,6 +792,12 @@ class TableDockingMixin:
                 self.ctx.edge_yaw_ema = yaw if self.ctx.edge_yaw_ema is None else (0.7 * self.ctx.edge_yaw_ema + 0.3 * yaw)
             stable_bbox = self.ctx.bbox_centered_streak >= 2
             fov_guard = self._bbox_fov_guard_status(obs, geom)
+            readiness = self._refresh_edge_readiness(obs, {}, current_bbox=current_bbox, stable_bbox=stable_bbox, depth_stop_ready=depth_stop_ready)
+            edge_readiness_score = float(readiness["edge_readiness_score"])
+            edge_readiness_enter = float(readiness["edge_readiness_enter_score"])
+            edge_readiness_exit = float(readiness["edge_readiness_exit_score"])
+            edge_readiness_ready = bool(edge_readiness_score >= edge_readiness_enter)
+            edge_readiness_hold = bool(edge_readiness_exit < edge_readiness_score < edge_readiness_enter)
             commit_bbox_safe = bool(
                 center_error is not None
                 and abs(float(center_error)) <= 0.35
@@ -730,9 +838,22 @@ class TableDockingMixin:
             elif not stable_bbox and not dwell_fallback:
                 self.ctx.edge_handoff_complete = False
                 self.ctx.edge_handoff_started_mono = 0.0
+                self.ctx.edge_handoff_entered_mono = 0.0
                 phase, reason = "BBOX_ACQUIRE", "bbox_not_centered_or_not_stable"
-            elif self.ctx.edge_handoff_complete and edge_trusted:
+            elif self.ctx.edge_handoff_complete and (edge_trusted or edge_readiness_score > edge_readiness_exit):
                 phase, reason = "EDGE_GUIDED_APPROACH", "bbox_safe_edge_handoff_complete"
+            elif edge_readiness_ready:
+                if self.ctx.edge_handoff_entered_mono <= 0.0:
+                    self.ctx.edge_handoff_entered_mono = now
+                hold_ms = max(0.0, float(getattr(self.cfg, "edge_handoff_min_hold_ms", 800) or 800))
+                handoff_elapsed_ms = max(0.0, (now - float(self.ctx.edge_handoff_entered_mono or now)) * 1000.0)
+                if handoff_elapsed_ms < hold_ms:
+                    phase, reason = "EDGE_HANDOFF_CONFIRM", "edge_readiness_handoff_hold"
+                else:
+                    self.ctx.edge_handoff_complete = True
+                    phase, reason = "EDGE_GUIDED_APPROACH", "edge_readiness_confirmed"
+            elif edge_readiness_hold and self.ctx.control_phase in {"EDGE_HANDOFF_CONFIRM", "EDGE_GUIDED_APPROACH"}:
+                phase, reason = self.ctx.control_phase, "edge_readiness_hysteresis_hold"
             else:
                 if self.ctx.edge_handoff_started_mono <= 0.0:
                     self.ctx.edge_handoff_started_mono = now
@@ -763,6 +884,12 @@ class TableDockingMixin:
                 "phase_dwell_ms": dwell_ms, "edge_handoff_complete": self.ctx.edge_handoff_complete,
                 "handoff_timeout": self.ctx.edge_handoff_timeout,
                 "edge_conf_score": float(self.ctx.edge_conf_score),
+                "edge_readiness_score": float(getattr(self.ctx, "edge_readiness_score", 0.0) or 0.0),
+                "edge_readiness_level": str(getattr(self.ctx, "edge_readiness_level", "") or ""),
+                "edge_readiness_enter_score": float(getattr(self.cfg, "edge_readiness_enter_score", 0.65) or 0.65),
+                "edge_readiness_exit_score": float(getattr(self.cfg, "edge_readiness_exit_score", 0.35) or 0.35),
+                "edge_handoff_block_reason": "" if float(getattr(self.ctx, "edge_readiness_score", 0.0) or 0.0) >= float(getattr(self.cfg, "edge_readiness_enter_score", 0.65) or 0.65) else str(getattr(self.ctx, "edge_readiness_level", "") or ""),
+                "edge_handoff_source": "readiness_score",
                 "approach_commit_active": bool(self.ctx.approach_commit_active)}
 
     def _get_control_authority(self, obs: Optional[TableEdgeObs], depth_roi_stop_active: bool = False, explicit_stop_active: bool = False) -> ControlAuthority:
@@ -826,6 +953,10 @@ class TableDockingMixin:
             ))
         ):
             self._clear_near_final_latches("explicit_or_emergency_stop")
+            self.ctx.edge_readiness_score = 0.0
+            self.ctx.edge_readiness_level = "reset"
+            self.ctx.edge_readiness_last_update_mono = monotonic_ts()
+            self.ctx.edge_handoff_entered_mono = 0.0
         depth_status = self._depth_roi_stop_status(obs)
         self._refresh_near_final_latches(obs, depth_status, summary)
         if bool(self.ctx.final_depth_latched):
@@ -923,6 +1054,19 @@ class TableDockingMixin:
             explicit_stop_active=explicit_stop_active,
         )
         summary.update(auth.to_dict())
+        edge_readiness_score = float(getattr(self.ctx, "edge_readiness_score", 0.0) or 0.0)
+        edge_readiness_enter_score = float(getattr(self.cfg, "edge_readiness_enter_score", 0.65) or 0.65)
+        edge_readiness_exit_score = float(getattr(self.cfg, "edge_readiness_exit_score", 0.35) or 0.35)
+        summary.update(
+            {
+                "edge_readiness_score": edge_readiness_score,
+                "edge_readiness_level": str(getattr(self.ctx, "edge_readiness_level", "") or ""),
+                "edge_readiness_enter_score": edge_readiness_enter_score,
+                "edge_readiness_exit_score": edge_readiness_exit_score,
+                "edge_handoff_block_reason": "" if edge_readiness_score >= edge_readiness_enter_score else ("below_exit_score" if edge_readiness_score <= edge_readiness_exit_score else "hysteresis_hold"),
+                "edge_handoff_source": "readiness_score",
+            }
+        )
         summary.update(depth_status)
         self._refresh_near_final_latches(obs, depth_status, summary)
         if bool(self.ctx.final_depth_latched):
@@ -986,11 +1130,15 @@ class TableDockingMixin:
                 decision.cmd.wz_radps = edge_wz
 
         forward_commit_vx = 0.020
+        edge_readiness_ready = bool(
+            float(summary.get("edge_readiness_score", 0.0) or 0.0)
+            >= float(summary.get("edge_readiness_enter_score", getattr(self.cfg, "edge_readiness_enter_score", 0.65)) or 0.65)
+        )
         edge_guided_candidate = bool(
             phase == "EDGE_GUIDED_APPROACH"
             and bool(self.ctx.edge_handoff_complete)
             and bool(auth.allow_forward)
-            and bool(getattr(obs, "edge_trusted", False))
+            and bool(getattr(obs, "edge_trusted", False) or edge_readiness_ready)
         )
         forward_coast_candidate = bool(
             phase == "EDGE_GUIDED_APPROACH"

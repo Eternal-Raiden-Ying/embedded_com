@@ -327,6 +327,10 @@ def arbitrate_table_docking_motion(
     emergency_active = bool(_as_bool(summary, "explicit_stop_active") or any(_as_bool(summary, key) for key in _EMERGENCY_KEYS))
     explicit_stop = bool(summary.get("explicit_stop_active", False))
     hard_safety = bool(any(_as_bool(summary, key) for key in _HARD_SAFETY_KEYS))
+    edge_readiness_score = max(0.0, min(1.0, _float(summary, "edge_readiness_score", float(getattr(ctx, "edge_readiness_score", 0.0) or 0.0))))
+    edge_readiness_enter = _float(summary, "edge_readiness_enter_score", 0.65)
+    edge_readiness_exit = _float(summary, "edge_readiness_exit_score", 0.35)
+    edge_readiness_ready = bool(edge_readiness_score >= edge_readiness_enter)
 
     def with_common(extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         bbox_track_started = float(getattr(ctx, "bbox_track_entered_mono", 0.0) or 0.0)
@@ -342,6 +346,12 @@ def arbitrate_table_docking_motion(
                 "final_locked": bool(getattr(ctx, "final_locked", False)),
                 "bbox_track_elapsed_ms": max(0.0, (time.monotonic() - bbox_track_started) * 1000.0) if bbox_track_started > 0.0 else 0.0,
                 "bbox_track_exit_reason": str(getattr(ctx, "bbox_track_last_exit_reason", "") or summary.get("bbox_track_exit_reason") or ""),
+                "edge_readiness_score": float(edge_readiness_score),
+                "edge_readiness_level": str(summary.get("edge_readiness_level") or getattr(ctx, "edge_readiness_level", "") or ""),
+                "edge_readiness_enter_score": float(edge_readiness_enter),
+                "edge_readiness_exit_score": float(edge_readiness_exit),
+                "edge_handoff_block_reason": str(summary.get("edge_handoff_block_reason") or ""),
+                "edge_handoff_source": str(summary.get("edge_handoff_source") or ""),
             }
         )
         if extra:
@@ -709,8 +719,39 @@ def arbitrate_table_docking_motion(
                 vx=vx,
                 wz=desired_wz,
                 yaw_owner=str(intent.yaw_owner or "edge"),
+                forward_owner="edge_approach",
+                lateral_owner="none",
                 reason="edge_guided_approach_soft_fov" if fov_level == FovGuardLevel.SOFT else "edge_guided_approach",
             )
+
+    if phase in {"BBOX_ACQUIRE", "EDGE_HANDOFF_CONFIRM"} and edge_readiness_ready:
+        handoff_wz = _float(summary, "edge_yaw_cmd", _float(summary, "wz_from_plane", 0.0))
+        yaw_owner = "edge_candidate" if abs(handoff_wz) > 1e-9 else "bbox_hold"
+        if abs(handoff_wz) <= 1e-9:
+            handoff_wz = bbox_recovery_wz()
+        return _docking_result(
+            action=DockingAction.EDGE_READINESS_HANDOFF,
+            stage=DockingStage.EDGE_HANDOFF,
+            summary=with_common(
+                {
+                    "forward_block_reason": "edge_readiness_handoff",
+                    "rotate_block_reason": "",
+                    "advance_condition": "edge_readiness_enter_score",
+                    "fallback_condition": "edge_readiness_exit_score",
+                    "edge_handoff_source": "readiness_score",
+                    "edge_handoff_block_reason": "",
+                    "allow_forward": False,
+                    "allow_rotate": bool(abs(handoff_wz) > 1e-9),
+                }
+            ),
+            vx=0.0,
+            vy=0.0,
+            wz=handoff_wz,
+            yaw_owner=yaw_owner,
+            forward_owner="none",
+            lateral_owner="none",
+            reason="edge_readiness_handoff",
+        )
 
     bbox_err = docking_obs.bbox_center_error
     bbox_forward_vx = raw_cmd_vx()
@@ -746,6 +787,8 @@ def arbitrate_table_docking_motion(
         bbox_track_block = "final_depth_latched"
     elif bool(summary.get("depth_roi_stop_ready", False)):
         bbox_track_block = "depth_final_stop"
+    elif edge_readiness_ready:
+        bbox_track_block = "edge_readiness_ready"
     elif emergency_active or explicit_stop:
         bbox_track_block = "emergency_or_explicit_stop"
     elif hard_safety:

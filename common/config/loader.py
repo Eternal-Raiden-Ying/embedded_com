@@ -479,6 +479,22 @@ def _load_and_merge_stage_params(config: SystemGlobalConfig, file_path: Path) ->
             ctrl.bbox_track_forward_min_hold_ms = _si(td["bbox_track_forward_min_hold_ms"])
         if "bbox_track_forward_max_wz_radps" in td:
             ctrl.bbox_track_forward_max_wz_radps = _sf(td["bbox_track_forward_max_wz_radps"])
+        if "edge_readiness_enabled" in td:
+            ctrl.edge_readiness_enabled = _sb(td["edge_readiness_enabled"])
+        if "edge_readiness_enter_score" in td:
+            ctrl.edge_readiness_enter_score = _sf(td["edge_readiness_enter_score"])
+        if "edge_readiness_exit_score" in td:
+            ctrl.edge_readiness_exit_score = _sf(td["edge_readiness_exit_score"])
+        if "edge_readiness_rise" in td:
+            ctrl.edge_readiness_rise = _sf(td["edge_readiness_rise"])
+        if "edge_readiness_decay" in td:
+            ctrl.edge_readiness_decay = _sf(td["edge_readiness_decay"])
+        if "edge_readiness_min_inliers" in td:
+            ctrl.edge_readiness_min_inliers = _si(td["edge_readiness_min_inliers"])
+        if "edge_readiness_yaw_max_rad" in td:
+            ctrl.edge_readiness_yaw_max_rad = _sf(td["edge_readiness_yaw_max_rad"])
+        if "edge_handoff_min_hold_ms" in td:
+            ctrl.edge_handoff_min_hold_ms = _si(td["edge_handoff_min_hold_ms"])
         if "final_yaw_deadband_rad" in td:
             ctrl.final_yaw_deadband_rad = _sf(td["final_yaw_deadband_rad"])
         if "final_lock_yaw_rad" in td:
