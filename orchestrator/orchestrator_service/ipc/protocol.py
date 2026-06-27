@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import math
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -47,26 +48,55 @@ def compute_bbox_control_geometry(obs: Optional["TableEdgeObs"]) -> Dict[str, An
     }
     if obs is None:
         return out
+
+    def _finite_norm(value: Any) -> Optional[float]:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if math.isfinite(number) and 0.0 <= number <= 1.0:
+            return number
+        return None
+
     center = getattr(obs, "yolo_bbox_center_x_norm", None)
-    if center is not None:
-        out.update(bbox_cx_norm_control=float(center), bbox_center_source="yolo_bbox_center_x_norm", bbox_center_valid=True)
-    else:
-        bbox = getattr(obs, "table_bbox_xyxy", None)
+    center_norm = _finite_norm(center)
+    if center_norm is not None:
+        out.update(bbox_cx_norm_control=center_norm, bbox_center_source="yolo_bbox_center_x_norm", bbox_center_valid=True)
+
+    bbox = getattr(obs, "table_bbox_xyxy", None)
+    if not out["bbox_center_valid"] and isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+        try:
+            x0, y0, x1, y1 = [float(v) for v in bbox[:4]]
+        except (TypeError, ValueError):
+            x0 = y0 = x1 = y1 = math.nan
+        if all(math.isfinite(v) for v in (x0, y0, x1, y1)):
+            if all(0.0 <= v <= 1.5 for v in (x0, y0, x1, y1)):
+                cx_norm = (x0 + x1) * 0.5
+                if 0.0 <= cx_norm <= 1.0:
+                    out.update(bbox_cx_norm_control=cx_norm,
+                               bbox_width_norm_control=max(0.0, x1 - x0),
+                               bbox_center_source="table_bbox_xyxy_normalized",
+                               bbox_xyxy_for_control=list(bbox[:4]), bbox_center_valid=True)
         shape = getattr(obs, "rgb_shape", None)
-        if isinstance(bbox, (list, tuple)) and len(bbox) >= 4 and isinstance(shape, (list, tuple)) and len(shape) >= 2:
-            w = float(shape[1])
+        if not out["bbox_center_valid"] and isinstance(shape, (list, tuple)) and len(shape) >= 2:
+            try:
+                w = float(shape[1])
+            except (TypeError, ValueError):
+                w = 0.0
             if w > 0.0:
-                x0, x1 = float(bbox[0]), float(bbox[2])
-                out.update(bbox_cx_norm_control=(x0 + x1) * 0.5 / w,
-                           bbox_width_norm_control=max(0.0, (x1 - x0) / w),
-                           bbox_center_source="table_bbox_xyxy_rgb_shape",
-                           bbox_xyxy_for_control=list(bbox[:4]), bbox_center_valid=True)
-        if not out["bbox_center_valid"]:
-            table_cx = getattr(obs, "table_cx_norm", None)
-            if table_cx is not None:
-                out.update(bbox_cx_norm_control=float(table_cx) * 0.5 + 0.5,
-                           bbox_center_source="table_cx_norm_fallback",
-                           bbox_center_valid=True)
+                cx_norm = (x0 + x1) * 0.5 / w
+                if 0.0 <= cx_norm <= 1.0:
+                    out.update(bbox_cx_norm_control=cx_norm,
+                               bbox_width_norm_control=max(0.0, (x1 - x0) / w),
+                               bbox_center_source="table_bbox_xyxy_rgb_shape",
+                               bbox_xyxy_for_control=list(bbox[:4]), bbox_center_valid=True)
+
+    if not out["bbox_center_valid"]:
+        table_cx_norm = _finite_norm(getattr(obs, "table_cx_norm", None))
+        if table_cx_norm is not None:
+            out.update(bbox_cx_norm_control=table_cx_norm,
+                       bbox_center_source="table_cx_norm_fallback",
+                       bbox_center_valid=True)
     if out["bbox_center_valid"]:
         out["bbox_center_error_control"] = float(out["bbox_cx_norm_control"]) - 0.5
     return out

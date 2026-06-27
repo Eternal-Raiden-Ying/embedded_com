@@ -14,10 +14,53 @@ if str(ORCH_ROOT) not in sys.path:
 
 from orchestrator_service.config.schema import CarMotionConfig, ControlThresholds
 from orchestrator_service.control.motion_controller import MotionController
-from orchestrator_service.ipc.protocol import TableEdgeObs
+from orchestrator_service.ipc.protocol import TableEdgeObs, compute_bbox_control_geometry
 from orchestrator_service.runtime.context import State
 from orchestrator_service.runtime.common import monotonic_ts
 from orchestrator_service.runtime.state_machine import OrchestratorCore
+
+
+def test_bbox_control_geometry_prefers_bbox_over_legacy_table_cx_placeholder():
+    obs = TableEdgeObs.from_dict(
+        {
+            "ts": 1.0,
+            "table_bbox_xyxy": [0.25, 0.35, 0.75, 0.90],
+            "table_cx_norm": 0.0,
+        }
+    )
+
+    geom = compute_bbox_control_geometry(obs)
+
+    assert geom["bbox_center_valid"] is True
+    assert geom["bbox_center_source"] == "table_bbox_xyxy_normalized"
+    assert abs(geom["bbox_cx_norm_control"] - 0.5) < 1e-6
+    assert abs(geom["bbox_center_error_control"]) < 1e-6
+
+
+def test_bbox_control_geometry_uses_table_cx_norm_as_last_fallback():
+    obs = TableEdgeObs.from_dict({"ts": 1.0, "table_cx_norm": 0.7})
+
+    geom = compute_bbox_control_geometry(obs)
+
+    assert geom["bbox_center_valid"] is True
+    assert geom["bbox_center_source"] == "table_cx_norm_fallback"
+    assert abs(geom["bbox_cx_norm_control"] - 0.7) < 1e-6
+
+
+def test_bbox_control_geometry_normalizes_pixel_bbox_with_rgb_width():
+    obs = TableEdgeObs.from_dict(
+        {
+            "ts": 1.0,
+            "table_bbox_xyxy": [320, 20, 640, 200],
+            "rgb_shape": [480, 640],
+        }
+    )
+
+    geom = compute_bbox_control_geometry(obs)
+
+    assert geom["bbox_center_valid"] is True
+    assert geom["bbox_center_source"] == "table_bbox_xyxy_rgb_shape"
+    assert abs(geom["bbox_cx_norm_control"] - 0.75) < 1e-6
 
 
 def test_fov_approach_uses_yolo_forward_when_bbox_exists_but_edge_not_trusted():

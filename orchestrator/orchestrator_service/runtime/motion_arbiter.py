@@ -369,6 +369,12 @@ def arbitrate_table_docking_motion(
             return desired_wz
         return _search_wz(ctx, summary)
 
+    def raw_cmd_vx() -> float:
+        cmd = summary.get("cmd")
+        if isinstance(cmd, dict):
+            return _float(cmd, "vx", _float(cmd, "vx_mps", 0.0))
+        return 0.0
+
     if emergency_active or explicit_stop:
         reason = "explicit_stop" if explicit_stop else "emergency_or_obstacle"
         return _docking_result(
@@ -684,6 +690,34 @@ def arbitrate_table_docking_motion(
                 yaw_owner=str(intent.yaw_owner or "edge"),
                 reason="edge_guided_approach_soft_fov" if fov_level == FovGuardLevel.SOFT else "edge_guided_approach",
             )
+
+    bbox_err = docking_obs.bbox_center_error
+    bbox_forward_vx = raw_cmd_vx()
+    if (
+        phase == "BBOX_ACQUIRE"
+        and bool(summary.get("yolo_forward_allowed", False))
+        and bbox_err is not None
+        and abs(float(bbox_err)) <= _float(summary, "yolo_forward_center_good_limit", 0.15)
+        and abs(bbox_forward_vx) > 1e-9
+    ):
+        return _docking_result(
+            action=DockingAction.EDGE_APPROACH_FORWARD,
+            stage=DockingStage.BBOX_ACQUIRE,
+            summary=with_common(
+                {
+                    "control_source": "yolo_track_forward",
+                    "allow_forward": True,
+                    "allow_rotate": bool(abs(desired_wz) > 1e-9),
+                    "forward_block_reason": "",
+                    "rotate_block_reason": "yolo_track_forward" if abs(desired_wz) <= 1e-9 else "",
+                    "fallback_action": "yolo_assist",
+                }
+            ),
+            vx=bbox_forward_vx,
+            wz=desired_wz,
+            yaw_owner="yolo",
+            reason="bbox_track_forward_compatible",
+        )
 
     if phase in {"BBOX_ACQUIRE", "EDGE_HANDOFF_CONFIRM"} and (intent.rotate_allowed_by_behavior or abs(bbox_recovery_wz()) > 1e-9):
         wz = bbox_recovery_wz()
