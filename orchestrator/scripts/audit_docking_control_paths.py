@@ -15,6 +15,7 @@ from typing import Dict, Iterable, List, Tuple
 ROOT = Path(__file__).resolve().parents[2]
 
 SCAN_FILES = (
+    "orchestrator/orchestrator_service/runtime/docking_model.py",
     "orchestrator/orchestrator_service/runtime/motion_arbiter.py",
     "orchestrator/orchestrator_service/runtime/states/table_docking.py",
     "orchestrator/orchestrator_service/runtime/service.py",
@@ -28,6 +29,10 @@ KEYWORDS = (
     "vx_mps =",
     "wz_radps =",
     "forward_block_reason",
+    "rotate_block_reason",
+    "allow_forward",
+    "allow_rotate",
+    "bbox_fov_guard",
     "stale_level",
     "hard_stale",
     "dead",
@@ -35,10 +40,10 @@ KEYWORDS = (
     "send_stm32_stop",
     "_clear_motion_queues_for_estop",
     "_last_estop_mono",
-    "bbox_fov_guard",
+    "last_valid_expired",
     "approach_commit",
     "zero_cmd_reason",
-    "last_valid_expired",
+    "service_override",
 )
 
 
@@ -48,6 +53,8 @@ def _matches(line: str) -> List[str]:
 
 def _category(rel: str, line: str) -> str:
     text = line.strip()
+    if "docking_model.py" in rel:
+        return "allowed central arbiter paths"
     if "motion_arbiter.py" in rel:
         return "allowed central arbiter paths"
     if "table_docking.py" in rel and ("decision.cmd.vx_mps" in text or "decision.cmd.wz_radps" in text):
