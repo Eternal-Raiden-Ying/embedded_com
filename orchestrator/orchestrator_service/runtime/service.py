@@ -902,6 +902,15 @@ class OrchestratorService(BaseModule):
         }
         context = dict(getattr(self, "_last_motion_tx_context", {}) or {})
         for key in (
+            "docking_stage",
+            "docking_action",
+            "docking_reason",
+            "candidate_cmd",
+            "arbiter_final_cmd",
+            "service_effective_cmd",
+            "uart_tx_cmd",
+            "writer_accept_cmd",
+            "uart_tx_ok",
             "speed_profile",
             "speed_limit_reason",
             "forward_block_reason",
@@ -2744,6 +2753,13 @@ class OrchestratorService(BaseModule):
         trace = {
             "ts": time.time(),
             "state": str(summary.get("state") or self.core.ctx.state.value),
+            "docking_stage": summary.get("docking_stage") or "",
+            "docking_action": summary.get("docking_action") or "",
+            "docking_reason": summary.get("docking_reason") or "",
+            "candidate_cmd": summary.get("candidate_cmd"),
+            "arbiter_final_cmd": summary.get("arbiter_final_cmd"),
+            "service_effective_cmd": summary.get("service_effective_cmd"),
+            "uart_tx_cmd": summary.get("uart_tx_cmd"),
             "control_source": summary.get("control_source") or "",
             "motion_intent_type": summary.get("motion_intent_type") or summary.get("control_source") or "",
             "control_phase": summary.get("control_phase") or "",
@@ -3195,6 +3211,16 @@ class OrchestratorService(BaseModule):
         velocity = self.motion_adapter.cmd_vel_to_velocity(effective_cmd)
         speed_profile = str(summary.get("speed_profile") or ("stop" if car_cmd.kind in {"stop", "brake"} else "search"))
         self._last_motion_tx_context = {
+            "docking_stage": summary.get("docking_stage") or "",
+            "docking_action": summary.get("docking_action") or "",
+            "docking_reason": summary.get("docking_reason") or "",
+            "candidate_cmd": summary.get("candidate_cmd"),
+            "arbiter_final_cmd": summary.get("arbiter_final_cmd"),
+            "service_effective_cmd": summary.get("service_effective_cmd"),
+            "uart_tx_cmd": summary.get("uart_tx_cmd"),
+            "service_override": bool(summary.get("service_override", False)),
+            "writer_accept_cmd": bool(summary.get("allow_uart_send", True)),
+            "uart_tx_ok": bool(getattr(self, "_last_uart_tx_ok", True)),
             "speed_profile": speed_profile,
             "speed_limit_reason": summary.get("speed_limit_reason") or "",
             "forward_block_reason": summary.get("forward_block_reason") or "",
@@ -3230,6 +3256,17 @@ class OrchestratorService(BaseModule):
             "wz_radps": float(velocity[2]),
         }
         self._last_motion_tx_context.update(uart_arbitration)
+        tx_meta.update({
+            "docking_stage": summary.get("docking_stage") or "",
+            "docking_action": summary.get("docking_action") or "",
+            "docking_reason": summary.get("docking_reason") or "",
+            "candidate_cmd": summary.get("candidate_cmd"),
+            "arbiter_final_cmd": summary.get("arbiter_final_cmd"),
+            "service_effective_cmd": summary.get("service_effective_cmd"),
+            "uart_tx_cmd": summary.get("uart_tx_cmd"),
+            "writer_accept_cmd": bool(summary.get("allow_uart_send", True)),
+            "uart_tx_ok": bool(getattr(self, "_last_uart_tx_ok", True)),
+        })
         tx_meta.update(uart_arbitration)
         seq = self.motion_adapter.send_cmd_vel(effective_cmd, reason=reason)
         self.motion_status["last_seq"] = seq

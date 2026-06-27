@@ -61,6 +61,12 @@ def compute_bbox_control_geometry(obs: Optional["TableEdgeObs"]) -> Dict[str, An
                            bbox_width_norm_control=max(0.0, (x1 - x0) / w),
                            bbox_center_source="table_bbox_xyxy_rgb_shape",
                            bbox_xyxy_for_control=list(bbox[:4]), bbox_center_valid=True)
+        if not out["bbox_center_valid"]:
+            table_cx = getattr(obs, "table_cx_norm", None)
+            if table_cx is not None:
+                out.update(bbox_cx_norm_control=float(table_cx) * 0.5 + 0.5,
+                           bbox_center_source="table_cx_norm_fallback",
+                           bbox_center_valid=True)
     if out["bbox_center_valid"]:
         out["bbox_center_error_control"] = float(out["bbox_cx_norm_control"]) - 0.5
     return out
