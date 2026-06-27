@@ -149,6 +149,8 @@ def should_use_console_color(
     mode = _color_mode() if color_mode is None else str(color_mode or "auto").strip().lower()
     if mode == "never":
         return False
+    if _env_truthy("FORCE_COLOR") or mode == "always":
+        return True
     if sink_provided and stream is None:
         return False
     stream = stream if stream is not None else sys.stdout
@@ -158,10 +160,6 @@ def should_use_console_color(
         return False
     if not is_tty:
         return False
-    if _env_truthy("FORCE_COLOR"):
-        return True
-    if mode == "always":
-        return True
     return True
 
 

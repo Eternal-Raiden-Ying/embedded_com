@@ -1,0 +1,58 @@
+window.ROBOT_TROUBLESHOOTING = {
+  "troubleshootings": [
+    {
+      "id": "vista_not_starting",
+      "title": "VISTA 进程起不来",
+      "symptom": "运行 start_robot_stack.sh 时，输出 '[FAIL] vision ready-check 超时' 且 vision 进程未运行。",
+      "cause": "1. 依赖库缺失 (如 opencv-python, msgpack)。\n2. LD_PRELOAD 指向的 libGLdispatch.so.0 路径错误。\n3. Windows 开发端尝试加载 Linux 专有的 .so 库。\n4. 端口被抢占。",
+      "check_command": "# 1. 检查 vision 运行日志\ntail -n 50 VISTA/vision_module/logs/vision.out\n# 2. 检查 Python 依赖缺失情况\npython3 -c \"import msgpack, cv2; print('OK')\"\n# 3. 检查 OpenGL 预加载库是否存在\nls -l /lib/aarch64-linux-gnu/libGLdispatch.so.0",
+      "fix": "1. 在板端安装依赖：pip3 install msgpack opencv-python\n2. 确认 system_config.yaml 中 profile 激活是否与平台对应。\n3. 在 start_robot_stack.sh 中将 LD_PRELOAD 更改为系统中实际存在的 libGLdispatch.so.0 路径。",
+      "keywords": "ImportError, ModuleNotFoundError, Cannot open shared object file, Address already in use"
+    },
+    {
+      "id": "orch_not_starting",
+      "title": "Orchestrator 进程起不来",
+      "symptom": "Orchestrator 启动失败或 ready-check 超时，退出码非零，未生成 /tmp/robot_stack/task_cmd.sock。",
+      "cause": "1. 串口权限不足，无法打开 /dev/ttyHS1 等物理设备。\n2. YAML 配置文件 (stage_params.yaml 或 car_cmd_params.yaml) 格式不正确。\n3. PYTHONPATH 未包含工作空间目录，导致 Python 导入错误。",
+      "check_command": "# 1. 查看 orchestrator 运行日志\ntail -n 50 orchestrator/logs/orchestrator.out\n# 2. 查看串口设备权限\nls -l /dev/ttyHS1\n# 3. 确认配置文件加载\npython3 -c \"import yaml; yaml.safe_load(open('orchestrator/configs/stage_params.yaml'))\"",
+      "fix": "1. 运行 `chmod 666 /dev/ttyHS1` 或使用 `sudo` 运行 `start_robot_stack.sh` 以获得串口读写权限。\n2. 校验 YAML 配置文件的格式，确保缩进为 2 或 4 个空格。\n3. 启动脚本中会自动以 `sudo` 启动 orchestrator (当 `ORCH_USE_SUDO=auto` 且处于 `full` 模式时)，确保已授权过免密或正确输入 sudo 密码。",
+      "keywords": "PermissionError: [Errno 13] Permission denied, serial.serialutil.SerialException, yaml.parser.ParserError"
+    },
+    {
+      "id": "uds_not_connectable",
+      "title": "UDS socket 不可连接 / 权限错误",
+      "symptom": "VISTA/Orchestrator 报告已就绪但 UDS 无法连接，或者 Mobile Gateway 启动前连接检查失败：'PermissionError: [Errno 13] Permission denied: .../task_cmd.sock'。",
+      "cause": "1. 上一次异常退出残留了无效的 socket 文件导致无法绑定 (stale sockets)。\n2. Orchestrator 以 root (sudo) 权限创建了 /tmp/robot_stack 目录或 socket，而 Mobile Gateway 以普通用户 (aidlux) 身份运行，没有读取/写入该 UDS socket 文件的权限。",
+      "check_command": "# 1. 检查 socket 文件所有者与权限\nls -la /tmp/robot_stack\n# 2. 检查残留 socket 文件\nfile /tmp/robot_stack/*.sock",
+      "fix": "1. 在启动脚本中先彻底清理 stale 缓存：`rm -f /tmp/robot_stack/*.sock`。\n2. 改变目录与 socket 文件的权限：`sudo chmod 777 /tmp/robot_stack` 和 `sudo chmod 777 /tmp/robot_stack/*.sock`。\n3. 确认 system_config.yaml 中配置 of UDS 存储路径可被当前运行用户读写。",
+      "keywords": "ConnectionRefusedError, FileNotFoundError: [Errno 2], PermissionError: [Errno 13] Permission denied"
+    },
+    {
+      "id": "gateway_not_forwarding",
+      "title": "Mobile Gateway 不转发任务",
+      "symptom": "小程序已发送取物指令，但车辆不动。查看 gateway 日志看到 MQTT 收到指令，却未触发 task_cmd 发送，或者显示 task_cmd 连接异常。",
+      "cause": "1. Mobile Gateway 未能连接到 MQTT 代理服务器（如鉴权失效、网络超时）。\n2. 目标 /tmp/robot_stack/task_cmd.sock 无法连接或写入超时。\n3. 小程序发送的主题不正确，或命令格式非 fetch_object 或 stop。",
+      "check_command": "# 1. 检查 Gateway 状态日志\ntail -n 50 logs/mobile_gateway.out\n# 2. 验证 MQTT 主题订阅\nmosquitto_sub -h <mqtt_host> -t \"robot/+/task_cmd\" -v",
+      "fix": "1. 检查 configs/system_config.yaml 中的 `mqtt` 配置，确保服务器 IP、用户名和密码正确且网络可达。\n2. 重启 mobile gateway 保证 UDS 连接重连。\n3. 发送测试命令触发校验：`python3 -m orchestrator_service.mobile_gateway.runtime.service --test-cmd`",
+      "keywords": "mqtt connection failed, BrokenPipeError, ConnectionResetError, invalid mobile cmd"
+    },
+    {
+      "id": "uart_no_stop",
+      "title": "UART 不发送 STOP / 安全刹车失效",
+      "symptom": "触发急停后车辆无响应，串口输出未见 STOP 字节，或者小车继续以之前速度行进。",
+      "cause": "1. 串口缓冲区被积压的速度命令 (VEL) 堵塞。\n2. 急停触发逻辑未走最高优先级通道 (Emergency Stop Policy)，被普通 Tick 转移覆盖。\n3. UART 桥接线程 (uart_bridge) 死锁或因异常崩溃停止运行。",
+      "check_command": "# 1. 搜索日志中是否有 STOP 协议下发记录\ngrep -E \"[CAR] SEND STOP|STOP policy\" logs/runs/latest/orchestrator/orchestrator.out\n# 2. 串口数据流监听\npython3 -m serial.tools.miniterm /dev/ttyHS1 115200",
+      "fix": "1. 确认 `emergency_stop_policy.py` 中的 `STOP` 指令具有直接中断物理发送队列 (highest priority preemption) 的特性。\n2. 确保在串口发送循环中清空积压的 VEL 指令，并立即插队发送 STOP 命令字符。\n3. 重启车辆底盘并重新进行 Dry-run 仿真验证。",
+      "keywords": "emergency stop override, queue block, serial write failure"
+    },
+    {
+      "id": "vision_obs_stale",
+      "title": "vision_obs stale (感知观测数据停滞)",
+      "symptom": "状态机在桌边停靠中因 YOLO_APPROACH 状态超时或目标丢失报警，日志显示 'stale observation guard active'，车辆自动执行安全缓停 (SSTOP)。",
+      "cause": "1. VISTA 的摄像头传感器掉线或帧缓冲区爆满延时。\n2. UDS obs 通道 (vision_obs.sock) 被诊断数据阻塞。\n3. 图像对比太差，YOLO 目标连续丢帧超过 `stale_guard_timeout_s` 阈值。",
+      "check_command": "# 1. 检查是否发生连续丢帧\ngrep \"stale_guard\" logs/runs/latest/orchestrator/orchestrator.out\n# 2. 查看 VISTA 图像计算帧率\ngrep \"vision_obs latency\" logs/runs/latest/vision/vision.out\n# 3. 检查 Realsense USB 连接是否降级为 2.1 导致深度图输出丢失\nrs-enumerate-devices",
+      "fix": "1. 重新插拔 RealSense 摄像头 USB 数据线，确保连接至 USB 3.0 蓝色接口。\n2. 在 `stage_params.yaml` 中适当增大 `stale_obs_keepalive_s` 的容错限制时间。\n3. 限制 VISTA 只通过 `obs_class=\"control\"` 窄通道发送目标对齐坐标，将诊断类图片与大体积 Bounding Box 数据引流至诊断日志。",
+      "keywords": "stale_guard triggered, keepalive timeout, frame drop, realsense error"
+    }
+  ]
+};

@@ -1,0 +1,767 @@
+### === Layered Configuration Entry Point === ###
+# Merge order:
+#   1. schema dataclass defaults in common/config/schema.py
+#   2. defaults below
+#   3. project config sections in this file
+#   4. configs/profiles/<profile>.yaml
+#   5. runtime_overrides below
+#   6. environment variables
+profile: "windows_dev"
+defaults:
+  orchestrator:
+    runtime:
+      stage_params_file: "orchestrator/configs/stage_params.yaml"
+      car_cmd_params_file: "orchestrator/configs/car_cmd_params.yaml"
+    serial:
+      dry_run: true
+runtime_overrides:
+  orchestrator:
+    runtime:
+      stage_params_file: "orchestrator/configs/stage_params.yaml"
+      car_cmd_params_file: "orchestrator/configs/car_cmd_params.yaml"
+
+### === Vision Module Configuration === ###
+vision:
+  runtime:
+    project_root: "" # Root directory of vision project
+    log_dir: "" # Directory where log files are stored
+    log_file: "" # Path to the active log file
+    runs_dir: "" # Runs output directory
+    pid_dir: "" # PID file directory
+    pid_file: "" # PID file path
+    vision_params_file: "" # Path to runtime configuration file
+    loaded_config_files: [] # List of loaded config paths
+    stack_run_id: "" # Stack run execution ID
+    loop_hz: 8.0 # Frequency of main perception loop
+    send_hz: 5.0 # IPC send frequency
+    track_local_send_hz: 8.0 # Local tracking IPC send frequency
+    stale_req_s: 3.0 # Duration to consider incoming request stale
+    hot_standby_s: 30.0 # Hot standby timeout duration
+    keep_preview_after_stop: true # Keep debug preview active after stop
+    keep_vision_alive_after_task: true # Keep cameras/preview alive after task failure or completion
+    keep_preview_alive_after_task: true # Keep preview window alive after task failure or completion
+    release_model_on_idle: false # Do not release model on normal task idle
+    keep_model_hot_in_standby: true # Keep YOLO model in memory during standby
+    enable_infer_during_hot_standby: false # Run inference in standby
+    capability_placeholder: false # Capability sink indicator
+    heartbeat_enabled: false # Heartbeat message enabled
+    heartbeat_interval_s: 5.0 # Heartbeat message interval
+    heartbeat_console: false # Enable console logging for heartbeat
+    console_mode: "operator" # Mode for console interface
+    operator_summary_interval_s: 1.0 # Operator summary log interval
+    ipc_console: false # Allow control console over IPC
+    log_mode: "concise" # Logging details mode
+    log_enabled: true # Enable/disable logging
+    debug: false # Debug flag
+  camera:
+    streams:
+      rgb:
+        source: "6" # Camera identifier for rgb stream
+        in_w: 1280 # Input frame width
+        in_h: 720 # Input frame height
+        out_w: 640 # Output processed width
+        out_h: 640 # Output processed height
+        in_format: "YUY2" # Video format from camera
+        format: "BGR" # Color space target
+        fps: 30 # Frame rate
+        crop_x: 280 # Horizontal crop start pixel
+        crop_y: 0 # Vertical crop start pixel
+        crop_w: 720 # Crop width
+        crop_h: 720 # Crop height
+        enable: true # Stream enabled status
+        auto_exposure: true # Enable auto exposure
+        exposure: null # Fixed exposure value if auto is false
+        brightness: null # Camera brightness level
+      depth:
+        source: "2" # Camera identifier for depth stream
+        height: 240 # Depth frame height
+        width: 424 # Depth frame width
+        fps: 15 # Depth frame rate
+        enable: false # Depth stream enabled status
+      grey:
+        source: "4" # Camera identifier for IR stream
+        in_w: 640 # Input IR width
+        in_h: 480 # Input IR height
+        out_w: 640 # Output IR width
+        out_h: 480 # Output IR height
+        in_format: "GRAY8" # Input IR format
+        format: "BGR" # Target color space
+        fps: 30 # IR frame rate
+        crop_x: 0 # Horizontal crop offset
+        crop_y: 0 # Vertical crop offset
+        crop_w: 0 # Crop width
+        crop_h: 0 # Crop height
+        enable: false # IR stream enabled status
+    max_fps: 30 # System wide camera frame rate limit
+  model:
+    active_model: "yolo26s_detect" # YOLO model identifier currently active
+    profiles: {} # Predefined YOLO profiling targets
+    enable_yolo26: true # Enable YOLO26 custom detector
+    enable_yolo_table_search: false # Enable YOLO based table search task
+  debug:
+    preview: false # GUI display window active
+    draw_boxes: true # Draw YOLO bounding boxes on frames
+    draw_masks: false # Draw segmentation masks on frames
+    edge_debug_enabled: false # Print edge detector debug trace
+    edge_debug_period_s: 1.0 # Edge debug print period
+    table_det_enabled: false # YOLO table detection print active
+    table_det_min_conf: 0.25 # Table detection minimum confidence
+    table_det_center_tol: 0.12 # Center alignment tolerance
+    table_bbox_enabled: true # Enable bbox overlay
+    mock_table_bbox: "" # Hardcoded mock bbox coordinates
+  table_edge:
+    roi_preset: "" # ROI preset coordinate profiles
+    yolo_table_roi_enable: true # Scale ROI from YOLO bounding box
+    yolo_table_class_id: 0 # YOLO class id corresponding to table
+    yolo_table_conf_min: 0.25 # Minimum confidence to trust table bbox
+    yolo_table_roi_use_rgb_depth_mapping: true # Apply FOV mapping coordinates
+    yolo_table_roi_mode: "centered_bbox_scale" # Bounding box extraction strategy
+    yolo_table_roi_scale_x: 0.50 # Horizontal scale factor for ROI
+    yolo_table_roi_scale_y: 0.50 # Vertical scale factor for ROI
+    rgb_depth_mapping_mode: "centered_scale" # FOV scale conversion mode
+    rgb_fov_in_depth_scale_x: 0.75 # RGB relative horizontal FOV ratio
+    rgb_fov_in_depth_scale_y: 0.75 # RGB relative vertical FOV ratio
+    rgb_depth_center_offset_x: 0.0 # Center offset correction in pixels
+    rgb_depth_center_offset_y: 0.0 # Center offset correction in pixels
+    yolo_table_bbox_hold_enable: true # Hold previous bbox upon detection loss
+    yolo_table_bbox_hold_frames: 8 # Number of frames to hold bbox history
+    yolo_table_roi_hold_enable: true # Persist ROI to avoid frame gaps
+    yolo_table_roi_boundary_extend_enable: true # Extend ROI to edge if boundary is reached
+    yolo_table_roi_boundary_margin_norm: 0.03 # Margin to trigger extension
+    yolo_table_edge_stable_frames: 5 # Frames to confirm stable edge detection
+    edge_trusted_min_conf: 0.60 # Minimum confidence for control alignment
+    edge_trusted_max_residual: 0.0 # Residual threshold (0 to disable)
+    edge_trusted_min_support_count: 0 # Minimum points supporting fit line
+    edge_trusted_min_inlier_count: 0 # Minimum inliers required for fit
+    edge_trusted_min_x_span_m: 0.0 # Minimum lateral line size
+    edge_trusted_max_background_penalty: 0.0 # Background penalty gate limit
+    yolo_table_near_dist_m: 0.45 # Threshold to categorize table as near
+    yolo_table_near_bottom_norm: 0.60 # Normalized y value boundary for near
+    profile_log_interval_s: 2.0 # Log processing profiles rate
+    save_debug_frames: false # Save frame image captures to disk
+    target_hz: 10.0 # Target rate of edge detector execution
+    preview_hz: 2.0 # Debug layout rendering frequency
+    fast_debug_pixels: true # Store point cloud coordinate maps in debug logs
+    fast_debug_pixels_online: false # Collect pixels during active runs
+    fast_debug_pixels_offline: true # Save debug pixels for offline replays
+    fast_debug_pixel_cap: 300 # Limit maximum debug points saved
+    fast_candidate_point_cap: 1800 # Cap input raw points
+    fast_front_edge_col_step: 2 # Column stride for edge search
+    fast_front_edge_row_step: 2 # Row stride for edge search
+    depth_stride: 2 # Column and row downsample stride for fast plane depth map
+    detector_mode: "lightweight" # Perception process mode: lightweight, full, fast_plane_only
+    update_hz: 5.0 # Perception thread loop frequency
+    light_stride: 4 # Processing step for lightweight mode
+    fast_plane_stride: 4 # Processing step for fast plane mode
+    require_yolo_confirm: true # Block edge perception if YOLO has no table bbox
+    static_roi_enabled: false # Use static fallback ROI instead of dynamic YOLO ROI
+    camera_pitch_deg: 15.0 # Pitch angle of camera in degrees
+    camera_height_m: 0.70 # Height of camera optical center from ground
+    camera_roll_deg: 0.0 # Roll angle of camera in degrees
+    camera_yaw_deg: 0.0 # Yaw angle of camera in degrees
+    table_height_m: 0.40 # Ground truth table height in meters
+    front_face_z_min_m: 0.03 # Minimum Z to consider front table face
+    front_face_z_max_m: 0.43 # Maximum Z to consider front table face
+    min_vertical_z_span_m: 0.12 # Minimum vertical size to filter background
+    min_vertical_support_points: 3 # Minimum height profile support points
+    x_bin_width_m: 0.04 # Grid resolution for birdview clustering
+    y_cluster_bin_m: 0.04 # Bin size for cluster extraction
+    min_front_face_columns: 3 # Minimum horizontal columns representing edge
+    min_front_face_x_span_m: 0.07 # Minimum horizontal span of the edge
+    front_cluster_gap_m: 0.10 # Gap to segment separate tables/objects
+    max_yaw_abs_rad: 0.75 # Heading error safety threshold
+    enable_yolo_in_plane_only: false # Mask pixels using YOLO bbox
+    yolo_table_min_conf: 0.25 # YOLO table confidence minimum threshold
+    edge_sync_threshold_s: 0.25 # Timestamp sync threshold between edge and local perception
+  preview:
+    mode_layouts:
+      IDLE: "rgb_minimal" # Layout for IDLE state
+      FIND_EDGE: "rgb_depth_edge" # Layout for FIND_EDGE state
+      FIND_OBJECT: "rgb_yolo_edge_overlay" # Layout for FIND_OBJECT state
+      MICRO_ADJUST: "rgb_minimal" # Layout for MICRO_ADJUST state
+      GRASP_REMOTE: "rgb_depth_edge" # Layout for GRASP_REMOTE state
+      IDLE_HOT: "rgb_hot_preview" # Layout for IDLE_HOT state
+    debug_four_panel_in_track_local: false # Render 4 panel layout in local tracking
+    show_edge_overlay_in_track_local: true # Draw detected edge markers
+    show_age_ms: true # Display frame processing latency text
+    clear_overlay_on_mode_switch: true # Erase overlay lines when mode changes
+    scale: 1.0 # Display scaling factor
+    canvas_w: 1280 # Rendering width
+    canvas_h: 720 # Rendering height
+    show_rgb: true # Render rgb streams
+    show_depth: true # Render depth overlay
+    show_edge: true # Render edge line fit overlays
+    destroy_all_on_close: true # Close all OpenCV windows on exit
+  mode_profiles: {} # Parameter adjustments per execution mode
+  req_in:
+    transport: "uds" # Incoming IPC channel mode
+    ipc_socket_path: "" # Socket file path
+  obs_out:
+    transport: "uds" # Outgoing IPC channel mode
+    ipc_socket_path: "" # Socket file path
+
+### === Orchestrator Configuration === ###
+orchestrator:
+  runtime:
+    project_root: "" # Root path of orchestrator stack
+    log_dir: "" # Orchestrator logs folder
+    log_file: "" # Active orchestrator log file
+    runs_dir: "" # Task run histories directory
+    pid_dir: "" # Folder for pid files
+    pid_file: "" # Pid path
+    stack_run_id: "" # Multi process stack execution identifier
+    tick_hz: 10.0 # Orchestrator state machine update rate
+    log_mode: "concise" # Level of details in stdout/file logs
+    log_enabled: true # Enable orchestrator logs output
+    debug: false # Debug level traces enabled
+    state_block_period_s: 1.0 # State report publish period
+    heartbeat_period_s: 1.0 # State machine heartbeat period
+    stage_params_file: "orchestrator/configs/stage_params.yaml" # Dynamic state configuration override yaml
+    car_cmd_params_file: "orchestrator/configs/car_cmd_params.yaml" # Velocity limits override yaml
+    loaded_config_files: [] # List of config files loaded during boot
+  serial:
+    port: "/dev/ttyHS1" # Serial port device descriptor
+    baudrate: 115200 # Baud rate for STM32 communication
+    timeout_s: 0.10 # Read write timeout duration
+    dry_run: false # Run serial port in mock mode
+    readback_enabled: true # Read back echoed commands from STM32
+    dry_run_echo_stdout: false # Write dry run outputs to console
+    dry_run_echo_on_change_only: true # Output only when speed changes
+    dry_run_echo_summary_period_s: 5.0 # Print speed summary period
+    dry_run_quiet_idle_stop: true # Suppress log output when speed is zero
+    uart_lowfreq_period_s: 5.0 # Frequency of status requests in sleep
+    stm32_status_enabled: false # Periodically query STM32 hardware flags
+    stm32_status_period_s: 1.0 # Query STM32 hardware status period
+  control:
+    cmd_confidence_th: 0.60 # Confidence threshold for aligning/docking
+    target_obs_max_age_s: 1.00 # Max age of target tag observation
+    table_obs_max_age_s: 1.00 # Max age of table edge observation
+    home_obs_max_age_s: 1.00 # Max age of home tag observation
+    search_table_timeout_s: 20.0 # Timeout for table bbox search phase
+    approach_timeout_s: 14.0 # Timeout for table approach phase
+    target_search_timeout_s: 10.0 # Timeout for target search phase
+    return_search_timeout_s: 15.0 # Timeout for return trip tag search phase
+    req_resend_period_s: 1.0 # Re-trigger command send rate
+    table_found_frames_to_approach: 2 # Bbox frames to confirm and approach
+    table_lost_frames_to_reacquire: 4 # Frames to transition from track to search
+    table_loss_hold_s: 1.20 # Timeout to preserve last direction on table loss
+    approach_min_dwell_s: 0.80 # Minimum duration in approach state
+    table_approach_warmup_s: 2.0 # Warmup duration for approach filter
+    table_approach_warmup_min_fresh_obs: 1 # Minimum observations to end warmup
+    coarse_align_frames_to_advance: 2 # Stable frames to enter approach
+    coarse_align_done_rad: 0.25 # Alignment angle error threshold
+    align_to_approach_yaw_rad: 0.08 # Yaw tolerance to start moving forward
+    approach_to_align_yaw_rad: 0.16 # Yaw error that forces realigning
+    align_to_approach_stable_obs: 2 # Consistent obs required for forward
+    approach_to_align_stable_obs: 2 # Consistent obs required for correction
+    coarse_align_min_dwell_s: 0.80 # Minimum coarse align duration
+    controlled_approach_min_dwell_s: 0.80 # Minimum controlled approach duration
+    final_lock_frames_to_arrive: 3 # Frames of stable target to complete task
+    final_lock_yaw_tol_rad: 0.25 # Heading error threshold for final stop
+    final_lock_dist_tol_m: 0.03 # Forward distance error threshold for final stop
+    final_lock_lateral_tol_m: 0.03 # Lateral alignment error threshold for final stop
+    table_edge_only_test: false # Perceive table edge without active motion
+    table_target_dist_m: 0.50 # Desired docking offset distance from table
+    table_dist_tol_m: 0.05 # Distance tolerance for stopping
+    table_yaw_tol_rad: 0.25 # Heading alignment tolerance for stopping
+    table_stop_margin_m: 0.05 # Stop margin offset safety factor
+    table_settle_s: 0.50 # Settle time after stopping
+    table_stable_frames: 5 # Number of stable frames to declare stop ready
+    yolo_table_control_enable: true # Utilize YOLO table detections
+    yolo_table_conf_min: 0.25 # Trust threshold for YOLO table bbox
+    yolo_table_edge_stable_frames: 5 # Frames to confirm table edge stability
+    edge_trusted_stable_frames: 5 # Legacy alias of stable frames
+    edge_trusted_min_conf: 0.60 # Minimum confidence for control gating
+    edge_trusted_max_residual: 0.05 # Maximum fit residual tolerance
+    edge_trusted_min_support_count: 0 # Minimum height profile support points
+    edge_trusted_min_inlier_count: 0 # Minimum inlier points required
+    edge_trusted_min_x_span_m: 0.0 # Minimum horizontal size of fit edge
+    edge_trusted_max_background_penalty: 0.0 # Max background noise allowed
+    yolo_table_near_dist_m: 0.45 # Lateral distance threshold for near stage
+    yolo_table_lost_to_search_frames: 8 # Frame drop threshold to trigger search
+    no_table_bbox_timeout_s: 10.0 # Timeout only when YOLO table bbox is also absent
+    edge_geometry_timeout_s: 10.0 # Time to degrade edge geometry before YOLO assist fallback
+    table_memory_timeout_sec: 3.0 # Maximum age of search with memory cache
+    table_center_loss_hold_sec: 1.0 # Duration to keep rotating in center direction
+    rotate_search_timeout_s: 10.0 # Timeout for blind rotate search
+    rotate_require_edge_stable_frames: 5 # Stable frames to reacquire table
+    rotate_yaw_threshold_rad: 0.20 # Align error threshold during rotation
+    yolo_edge_conflict_block_rotate: true # Do not spin if edge/YOLO disagree
+    final_lock_required_ready_obs: 3 # Target observations before lock
+    final_lock_window_ms: 1000 # Time window for target updates
+    final_lock_max_consecutive_lost: 2 # Allowed consecutive lost target frames
+    final_lock_soft_stale_hold: true # Keep command active on brief loss
+    table_max_micro_adjust: 3 # Limit search iterations near table
+    enable_final_lock: true # Enable final adjustment phase
+    enable_micro_adjust: false # Enable micro adjust search loop
+    final_lock_enter_dist_th_m: 0.08 # Distance threshold to enter final lock
+    final_lock_enter_yaw_th_rad: 0.10 # Heading threshold to enter final lock
+    edge_settle_s: 0.80 # Settle time for edge confirmation
+    dock_retry_limit: 2 # Retries limit upon docking failure
+    dock_retry_backoff_s: 0.60 # Wait time before backing up
+    search_target_init_hold_s: 0.25 # Pause duration before target search
+    target_found_frames_to_confirm: 3 # Frames to lock target bounding box
+    target_confirm_conf_th: 0.30 # Target trust threshold
+    target_confirm_dwell_s: 0.0 # Minimum dwell time in confirm state
+    target_confirm_min_s: 0.80 # Minimum search duration before confirming
+    target_confirm_timeout_s: 3.00 # Target confirm search timeout
+    target_confirm_lost_frames: 2 # Target loss frame count
+    target_confirm_lost_hold_s: 1.20 # Target loss memory duration
+    target_confirm_min_bbox_area: 0.0 # Minimum target box area ratio
+    target_confirm_window_s: 1.50 # Sliding window size for target detection
+    target_confirm_found_ratio_th: 0.50 # Ratio of successful detections in window
+    target_lock_conf_th: 0.40 # Trust limit for locking target tag
+    target_lock_found_ratio_th: 0.60 # Detections ratio required to lock tag
+    target_lock_settle_s: 0.50 # Delay after locking target tag
+    target_lock_stable_s: 1.20 # Target tag stable confirmation period
+    target_lock_center_jitter_th: 0.08 # Tag position jitter filter threshold
+    target_lock_lost_hold_s: 1.50 # Target tag loss memory duration
+    target_locked_freeze_after_s: 1.00 # Tag freeze lock delay
+    freeze_settle_s: 0.60 # Delay after freezing vehicle position
+    edge_slide_pause_s: 0.20 # Settle delay between slide segments
+    edge_slide_segment_s: 1.20 # Segment time during side slide motion
+    edge_slide_dist_tolerance_m: 0.05 # Lateral alignment limit during slide
+    edge_slide_fallback_state: "FINAL_LOCK" # State to fallback on slide fail
+    edge_slide_pause_hold_s: 0.80 # Slide pause memory duration
+    edge_slide_dist_out_of_range_hold_s: 0.80 # Slide error hold duration
+    edge_slide_max_relock_attempts: 3 # Relock attempts limit
+    edge_slide_relock_failure_is_fatal: true # Fail task on relock fail
+    edge_slide_recover_timeout_s: 2.50 # Slide recover state timeout
+    edge_slide_direct_fallback_to_controlled_approach: false # Skip relock
+    table_edge_obs_max_age_ms: 500 # Obs packet age timeout in ms
+    table_obs_stale_soft_ms: 300 # Warning duration for packet delays
+    table_obs_stale_stop_ms: 500 # Stop vehicle if packet delay is large
+    table_obs_stale_hard_ms: 800 # Disconnect control if delay is critical
+    table_step_mode_enable: false # Move vehicle by discrete steps
+    table_step_burst_ms: 150 # Duration of step velocity burst
+    table_step_hold_until_new_obs: true # Wait for fresh packet to trigger step
+    edge_follow_log_period_ms: 500 # Log update rate in edge tracking
+    edge_follow_min_edge_conf: 0.60 # Edge trust limit
+    edge_follow_min_edge_conf_table_edge_perception: 0.60 # Perception trust limit
+    edge_follow_min_edge_conf_track_local: 0.20 # Tracking trust limit
+    edge_follow_weak_edge_conf_track_local: 0.15 # Minimum local tracking trust limit
+    edge_follow_strong_edge_conf_track_local: 0.35 # High confidence tracking limit
+    edge_follow_low_conf_hold_s: 2.00 # Loss memory duration
+    edge_follow_low_conf_exit_s: 3.00 # Timeout to exit tracking
+    edge_follow_recover_conf_th: 0.25 # Reacquire threshold
+    edge_identity_yaw_mismatch_rad: 0.15 # Yaw change filter threshold
+    edge_identity_dist_mismatch_m: 0.04 # Dist change filter threshold
+    edge_follow_stale_fallback_state: "FINAL_LOCK" # Fallback state
+    edge_follow_stale_hold_s: 1.20 # Fallback delay
+    edge_follow_track_local_edge_update_hz: 5.0 # Track local output frequency
+    edge_handoff_min_s: 0.50 # Minimum handoff check duration
+    edge_handoff_max_s: 1.00 # Maximum handoff check duration
+    edge_handoff_samples: 3 # Sample count for handoff filter
+    edge_relocate_enabled: true # Enable table relocation search
+    max_edge_transitions_per_task: 3 # Limit relocations per task
+    leave_edge_backoff_s: 0.80 # Backup time when leaving edge
+    relocate_turn_s: 1.10 # Spin time during relocation search
+    reacquire_timeout_s: 8.0 # Reacquire edge timeout
+    next_table_dwell_s: 1.50 # Dwell time after docking
+    tag_lost_frames_to_search: 4 # Tag frames dropped to trigger search
+    return_lost_hold_s: 1.00 # Return tag loss memory duration
+    return_min_dwell_s: 0.60 # Minimum duration in return state
+    return_done_distance_m: 0.35 # Arrived threshold for return tag
+    tag_arrived_frames_to_stop: 2 # Frames to declare arrival
+    avoid_clear_frames_to_resume: 2 # Clear frames to resume path
+    avoid_timeout_s: 4.0 # Obstacle avoid timeout
+    avoid_retry_limit: 3 # Retries limit
+    done_hold_s: 1.20 # Settle time after completion
+    error_recovery_hold_s: 1.20 # Recovery wait time
+    car_timeout_to_stop: true # Stop if serial communication times out
+    car_fault_to_fail: true # Fail task if hardware reports error
+    car_estop_to_stop: true # Stop vehicle if estop is pressed
+    post_stop_ignore_s: 0.80 # Quiet time after e-stop/hardware stop
+    vision_req_fail_to_stop: true # Stop if vision request fails
+    vision_req_fail_threshold: 2 # Fail limit
+    keep_vision_alive_after_task: true # Do not send vision STOP on normal task done/error
+    task_done_shutdown_vision: false # Only explicit stack stop should close vision/preview
+    enable_pick_pipeline: false # Enable picker robot subsystem integration
+    assume_grasp_success_for_test: false # Bypass hardware checks during test
+  car:
+    search_table_wz_radps: 0.10 # Rotational velocity to search for table
+    fallback_align_turn_wz_min_radps: 0.10 # Minimum rotation velocity in fallback
+    fallback_align_turn_wz_max_radps: 0.45 # Maximum rotation velocity in fallback
+    fallback_forward_vx_mps_min: 0.06 # Minimum forward velocity in fallback
+    fallback_forward_vx_mps_max: 0.28 # Maximum forward velocity in fallback
+    fallback_dead_zone_x: 0.10 # Horizontal alignment deadband
+    fallback_spin_only_x_th: 0.82 # Lateral error that triggers pure rotation
+    fallback_forward_align_exp: 2.0 # Scaling exponent for fallback velocity
+    table_fov_soft_th: 0.25 # FOV limit warning
+    table_fov_hard_th: 0.40 # FOV limit threshold
+    table_view_memory_ttl_s: 0.80 # Bbox position tracking memory TTL
+    table_coarse_align_vx_max_mps: 0.000 # Forward velocity in coarse align
+    table_coarse_align_vy_min_mps: 0.000 # Minimum lateral velocity in coarse align
+    table_coarse_align_vy_max_mps: 0.000 # Maximum lateral velocity in coarse align
+    table_coarse_align_wz_min_radps: 0.080 # Minimum rotation velocity in coarse align
+    table_coarse_align_wz_max_radps: 0.150 # Maximum rotation velocity in coarse align
+    table_controlled_vx_min_mps: 0.020 # Minimum forward velocity in controlled approach
+    table_controlled_vx_max_mps: 0.035 # Maximum forward velocity in controlled approach
+    table_controlled_vy_min_mps: 0.000 # Minimum lateral velocity in controlled approach
+    table_controlled_vy_max_mps: 0.000 # Maximum lateral velocity in controlled approach
+    table_controlled_wz_min_radps: 0.000 # Minimum rotation velocity in controlled approach
+    table_controlled_wz_max_radps: 0.150 # Maximum rotation velocity in controlled approach
+    table_approach_safe_vx_mps: 0.020 # Safe forward velocity limit in approach
+    table_approach_max_vx_mps: 0.035 # Maximum forward velocity limit in approach
+    table_approach_yaw_deadband_rad: 0.08 # Deadband for heading corrections
+    table_approach_yaw_realign_rad: 0.16 # Heading error forcing stop and align
+    table_approach_allow_wz: false # Enable heading correction during approach
+    table_approach_allow_vy: false # Enable lateral correction during approach
+    table_pose_missing_safe_vx_mps: 0.020 # Safe speed on brief perception loss
+    table_pose_missing_max_hold_s: 3.0 # Duration to keep moving on loss
+    table_final_lock_vx_min_mps: 0.000 # Minimum forward speed in final lock
+    table_final_lock_vx_max_mps: 0.008 # Maximum forward speed in final lock
+    table_final_lock_vy_min_mps: 0.006 # Minimum lateral speed in final lock
+    table_final_lock_vy_max_mps: 0.012 # Maximum lateral speed in final lock
+    table_final_lock_wz_min_radps: 0.010 # Minimum rotation speed in final lock
+    table_final_lock_wz_max_radps: 0.025 # Maximum rotation speed in final lock
+    table_vx_deadband_mps: 0.004 # Forward speed deadband
+    table_vy_deadband_mps: 0.001 # Lateral speed deadband
+    table_wz_deadband_radps: 0.006 # Rotation speed deadband
+    table_stage_a_wz_radps: 0.04 # Alignment phase angular velocity
+    table_stage_b_vx_max_mps: 0.03 # Approach phase forward velocity limit
+    table_stage_c_vx_max_mps: 0.03 # Docking phase forward velocity limit
+    table_stage_c_vx_min_mps: 0.0 # Docking phase minimum forward velocity
+    table_min_forward_dist_err_m: 0.07 # Minimum distance to target
+    table_vx_mps_min: 0.040 # Base forward speed
+    table_vx_mps_max: 0.100 # Peak forward speed
+    table_vx_kp_mps_per_m: 0.30 # Forward speed gain factor
+    table_yaw_slow_th_rad: 0.12 # Heading error requiring deceleration
+    table_yaw_stop_th_rad: 0.45 # Heading error forcing stop
+    table_near_dist_err_th_m: 0.10 # Near table distance threshold
+    table_vy_max_mps: 0.067 # Maximum lateral velocity
+    table_wz_view_max_radps: 0.05 # Maximum rotation velocity during tag search
+    table_wz_plane_max_radps: 0.06 # Maximum rotation velocity during edge search
+    table_dist_kp_mps_per_m: 0.12 # Distance error gain factor
+    yolo_table_yaw_gain: 0.20 # Tag heading error gain factor
+    yolo_table_max_wz_radps: 0.06 # Maximum rotation speed for tag tracking
+    yolo_table_forward_vx_mps: 0.015 # Tag search forward speed
+    table_view_wz_kp: 0.18 # tag yaw tracking gain
+    table_view_vy_kp: 0.04 # tag lateral tracking gain
+    table_view_recover_vy_mps: 0.008 # Sidelong recovery speed
+    table_view_recover_wz_radps: 0.04 # Rotation recovery speed
+    table_plane_yaw_kp_radps_per_rad: 0.60 # Edge yaw error gain
+    table_view_wz_sign: -1.0 # tag yaw sign scalar
+    table_view_vy_sign: -1.0 # tag lateral sign scalar
+    table_plane_yaw_sign: -1.0 # Edge yaw sign scalar
+    table_vx_slew_per_s: 0.12 # Forward acceleration limit
+    table_vy_slew_per_s: 0.06 # Lateral acceleration limit
+    table_wz_slew_per_s: 0.18 # Rotation acceleration limit
+    return_turn_wz_min_radps: 0.20 # Return trip minimum rotation speed
+    return_turn_wz_max_radps: 0.75 # Return trip maximum rotation speed
+    return_vx_mps_min: 0.10 # Return trip minimum forward speed
+    return_vx_mps_max: 0.45 # Return trip maximum forward speed
+    edge_slide_vy_mps: 0.14 # Lateral slide speed
+    edge_slide_dist_kp_mps_per_m: 1.20 # Distance error gain during slide
+    edge_slide_yaw_kp_radps_per_rad: 1.20 # Heading error gain during slide
+    edge_slide_max_vx_mps: 0.10 # Forward velocity limit during slide
+    edge_slide_max_wz_radps: 0.12 # Rotation velocity limit during slide
+    edge_slide_weak_vy_mps: 0.05 # Slide speed on weak detection
+    leave_edge_vx_mps: -0.12 # Reverse backing up speed when leaving table
+    relocate_turn_wz_radps: 0.28 # Rotation speed for relocating table
+    avoid_turn_wz_radps: 0.38 # Rotation speed for obstacle avoidance
+    avoid_reverse_vx_mps: 0.12 # Reverse speed for obstacle avoidance
+    cmd_hold_ms: 150 # Duration to hold motor commands in ms
+    send_period_ms: 100 # Period of serial command send task
+    uart_keepalive_hz: 10.0 # Frequency of serial keepalive pings
+    min_uart_keepalive_hz: 7.0 # Disconnect limit for keepalive pings
+    motion_hold_ms: 400 # Command watchdog safety timeout
+    hard_stale_stop_ms: 800 # Emergency stop watchdog safety timeout
+    soft_stale_hold_enable: true # Preserve last command on small gaps
+    max_vx_mps: 1.0 # Absolute forward speed limit
+    max_vy_mps: 1.0 # Absolute lateral speed limit
+    max_wz_radps: 1.0 # Absolute rotation speed limit
+    stm32_wheel_speed_limit: 100 # Hardware limit for wheel speed
+    stm32_vx_scale: 100.0 # Scaling divisor for forward velocity
+    stm32_vy_scale: 100.0 # Scaling divisor for lateral velocity
+    stm32_wz_scale: 100.0 # Scaling divisor for rotation velocity
+    jog_forward_speed: 0.02 # Forward step velocity for manual jog
+    jog_turn_speed: 0.05 # Rotation step velocity for manual jog
+    jog_duration_ms: 100 # Duration of manual jog command
+    stop_on_state_enter: false # Send stop command when entering states
+    mode_line_on_change: true # Write mode change message to serial logs
+    mode_line_every_cmd: false # Write mode message on every packet
+    serial_float_digits: 3 # Float serialization decimal precision
+  docking:
+    min_confidence: 0.55 # Minimum detection confidence for docking control
+    obs_timeout_s: 0.35 # Observation packet age limit
+    dt_min_s: 0.02 # Minimum sampling interval for PID updates
+    reset_on_mode_change: true # Reset PID integrals on mode transitions
+    coarse_align_enter_rad: 0.18 # Enter coarse align heading error limit
+    coarse_align_exit_rad: 0.08 # Exit coarse align heading error limit
+    spin_only_yaw_rad: 0.18 # Heading error to pause forward motion
+    precise_yaw_tol_rad: 0.025 # Heading error stop precision tolerance
+    precise_dist_tol_m: 0.015 # Distance error stop precision tolerance
+    precise_lateral_tol_m: 0.015 # Lateral error stop precision tolerance
+    precise_stable_s: 0.50 # Settle time to confirm docking complete
+    coarse_max_wz_radps: 0.45 # Max coarse align angular speed
+    approach_max_vx_mps: 0.28 # Max approach forward speed
+    approach_max_vy_mps: 0.18 # Max approach lateral speed
+    approach_max_wz_radps: 0.32 # Max approach angular speed
+    final_max_vx_mps: 0.12 # Max docking forward speed
+    final_max_vy_mps: 0.12 # Max docking lateral speed
+    final_max_wz_radps: 0.18 # Max docking angular speed
+    vx_slew_per_s: 0.80 # Forward acceleration limit in docking
+    vy_slew_per_s: 0.80 # Lateral acceleration limit in docking
+    wz_slew_per_s: 1.20 # Angular acceleration limit in docking
+    enable_lateral_control: true # Enable side adjustments during docking
+    yaw_pid:
+      kp: 1.8 # Proportional gain
+      ki: 0.02 # Integral gain
+      kd: 0.10 # Derivative gain
+      integral_limit: 0.40 # Integral windup limit
+      output_limit: 0.80 # Output speed limit
+      derivative_alpha: 0.35 # Derivative filter constant
+      deadband: 0.010 # Control deadband
+      min_abs_output: 0.06 # Minimum starting output speed
+    dist_pid:
+      kp: 1.4 # Proportional gain
+      ki: 0.03 # Integral gain
+      kd: 0.08 # Derivative gain
+      integral_limit: 0.35 # Integral windup limit
+      output_limit: 0.40 # Output speed limit
+      derivative_alpha: 0.30 # Derivative filter constant
+      deadband: 0.004 # Control deadband
+      min_abs_output: 0.04 # Minimum starting output speed
+    lateral_pid:
+      kp: 1.2 # Proportional gain
+      ki: 0.02 # Integral gain
+      kd: 0.08 # Derivative gain
+      integral_limit: 0.30 # Integral windup limit
+      output_limit: 0.30 # Output speed limit
+      derivative_alpha: 0.30 # Derivative filter constant
+      deadband: 0.004 # Control deadband
+      min_abs_output: 0.04 # Minimum starting output speed
+  task_cmd_in:
+    transport: "tcp" # Task cmd input channel mode
+    ipc_socket_path: "/tmp/robot_stack/task_cmd.sock" # Socket file path
+    tcp_host: "127.0.0.1" # TCP bind host
+    tcp_port: 19101 # TCP bind port
+  task_ack_out:
+    transport: "tcp" # Task ack output channel mode
+    ipc_socket_path: "/tmp/robot_stack/task_ack.sock" # Socket file path
+    tcp_host: "127.0.0.1" # TCP connect host
+    tcp_port: 19102 # TCP connect port
+    send_mode: "oneshot" # Socket persistence mode
+  vision_obs_in:
+    transport: "tcp" # Vision observations input channel mode
+    ipc_socket_path: "/tmp/robot_stack/vision_obs.sock" # Socket file path
+    tcp_host: "127.0.0.1" # TCP bind host
+    tcp_port: 19103 # TCP bind port
+  vision_req_out:
+    transport: "tcp" # Vision requests output channel mode
+    ipc_socket_path: "/tmp/robot_stack/vision_req.sock" # Socket file path
+    tcp_host: "127.0.0.1" # TCP connect host
+    tcp_port: 19104 # TCP connect port
+    send_mode: "oneshot" # Socket persistence mode
+    async_enabled: true # Enable async socket operations
+  tts_event_out:
+    transport: "disabled" # Audio TTS event output channel mode
+    ipc_socket_path: "/tmp/robot_stack/tts_event.sock" # Socket file path
+    async_enabled: true # Enable async socket operations
+  frozen_targets:
+    bottle: ["瓶子", "水瓶", "饮料瓶"]
+    key: ["钥匙", "钥匙串"]
+    keys: ["钥匙", "钥匙串"]
+    apple: ["苹果"]
+    banana: ["香蕉"]
+    basket: ["篮子"]
+    grape: ["葡萄"]
+    kiwi fruit: ["猕猴桃", "奇异果"]
+    kiwi: ["猕猴桃", "奇异果"]
+    lemon: ["柠檬"]
+    mango: ["芒果"]
+    mouse: ["鼠标"]
+    orange: ["橙子"]
+    peach: ["桃子"]
+    star fruit: ["杨桃"]
+    starfruit: ["杨桃"]
+    strawberry: ["草莓"]
+
+### === Mobile Gateway Configuration === ###
+gateway:
+  config_file: "" # Mobile gateway yaml override path
+  runtime:
+    project_root: "" # Root path of gateway stack
+    repo_root: "" # Repository folder root
+    log_dir: "" # Gateway logs folder
+    log_file: "" # Active gateway log file
+    runs_dir: "" # Task run histories directory
+    pid_dir: "" # Folder for pid files
+    pid_file: "" # Pid path
+    stack_run_id: "" # Multi process stack execution identifier
+    mode: "production" # Runtime execution mode
+    log_level: "INFO" # Log severity filter level
+    tick_hz: 10.0 # Gateway ticks loop frequency
+    heartbeat_period_s: 1.0 # Heartbeat message send period
+    heartbeat_log_interval_s: 30.0 # Frequency of heartbeat log outputs
+    suppress_heartbeat_success_log: true # Avoid spamming console with success heartbeats
+    enable_raw_mqtt_debug: false # Output raw MQTT messages to stdout
+    enable_legacy_command_compat: true # Support legacy raw command mappings
+    cmd_dedup_cache_size: 64 # Deduplicate incoming commands buffer size
+    log_mode: "concise" # Concise or verbose logs
+    log_enabled: true # Enable gateway logs
+    status_stdout: true # Write status payload logs to console stdout
+    stdin_enabled: false # Read tasks from terminal stdin
+  backend:
+    mode: "tcp_no_ack" # Backend gateway operations mode: mock, orchestrator_tcp, tcp_no_ack
+    default_robot_id: "sc171_car_01" # Robot serial number identifier
+    default_confidence: 0.99 # Mock confidence level default
+    mock_step_interval_s: 0.20 # Period of mock state changes
+    enforce_single_flight: true # Restrict execution to one active task
+    observer_enabled: true # Monitor files and process status
+    observer_poll_interval_s: 0.25 # File watchdog check rate
+    orchestrator_runs_dir: "" # Orchestrator runs output path
+    state_blocks_path: "" # State blocks status output path
+    state_block_log_mode: "summary" # Detail of status report logging
+    state_block_log_period_s: 1.0 # Status report logging frequency
+    stop_cooldown_s: 1.0 # Cooldown wait duration after stop command
+  mqtt:
+    enabled: false # Enable cloud MQTT bridge
+    transport: "websocket" # Bridge protocol transport mode: websocket, tcp
+    use_tls: true # Apply SSL/TLS connections
+    broker_host: "" # MQTT server broker domain address
+    broker_port: 443 # Port number of bridge connection
+    websocket_path: "/mqtt" # WS path
+    username: "" # Auth user credentials
+    password: "" # Auth user credentials
+    client_id: "sc171_car_01" # MQTT bridge connection identifier
+    robot_id: "sc171_car_01" # Robot target serial number
+    cmd_qos: 1 # Quality of service grade for commands
+    ack_qos: 1 # Quality of service grade for acknowledgments
+    status_qos: 0 # Quality of service grade for status
+    heartbeat_qos: 0 # Quality of service grade for heartbeat
+    retain_status: false # Retain flag for status updates
+    retain_heartbeat: false # Retain flag for heartbeat updates
+    keepalive_s: 60 # Connection keepalive ping interval in seconds
+    connect_timeout_s: 5.0 # Timeout duration of connection attempts
+    topics:
+      cmd: "robot/sc171_car_01/cmd" # CMD topic path
+      ack: "robot/sc171_car_01/ack" # ACK topic path
+      status: "robot/sc171_car_01/status" # Status topic path
+      heartbeat: "robot/sc171_car_01/heartbeat" # Heartbeat topic path
+  command_in:
+    transport: "http" # Gateway external command mode: http, tcp, uds, disabled
+    ipc_socket_path: "/tmp/robot_stack/mobile_gateway_cmd.sock" # Socket file path
+    tcp_host: "0.0.0.0" # HTTP/TCP bind host for real mobile entry
+    tcp_port: 9001 # HTTP/TCP bind port for real mobile entry
+  status_out:
+    transport: "disabled" # Gateway outgoing status IPC mode
+    ipc_socket_path: "/tmp/robot_stack/mobile_gateway_status.sock" # Socket file path
+    send_mode: "oneshot" # Socket persistence mode
+  orchestrator_task_cmd_out:
+    transport: "uds" # Gateway outgoing orchestrator command IPC mode
+    ipc_socket_path: "/tmp/robot_stack/task_cmd.sock" # Socket file path
+    send_mode: "oneshot" # Socket persistence mode
+  orchestrator_task_ack_in:
+    transport: "disabled" # Gateway incoming orchestrator ack IPC mode
+    ipc_socket_path: "/tmp/robot_stack/mobile_gateway_ack.sock" # Socket file path
+
+### === Online Edge Detector Configuration === ###
+online_edge:
+  runtime:
+    project_root: "" # Directory of online edge detector module
+    log_dir: "" # Online edge logs folder
+    log_file: "" # Active log path
+    runs_dir: "" # Runs output path
+    pid_dir: "" # Folder for pid files
+    pid_file: "" # Pid file path
+    stack_run_id: "" # Stack execution run ID
+    loop_hz: 10.0 # Frequency of main detector tick loop
+    preview: true # Enable/disable OpenCV display windows
+    save_snapshot_period_s: 0.0 # Snapshot capture period (0 to disable)
+    snapshot_dir: "" # Folder to store snapshot images
+    log_mode: "concise" # Concise or verbose logs
+    log_enabled: true # Enable logging output
+  output:
+    transport: "disabled" # Observation output transport mode: uds, tcp, disabled
+    host: "127.0.0.1" # Host address
+    port: 9102 # Port number
+    uds_path: "/tmp/robot_stack/table_edge_obs.sock" # Socket file path
+    send_interval_s: 0.20 # Minimum period between packets
+  camera:
+    bag_path: "" # Replays bag file if not empty
+    align_to_color: true # Align depth frames to color frames FOV
+    depth_enabled: true # Enable depth stream
+    depth_width: 424 # Depth sensor width
+    depth_height: 240 # Depth sensor height
+    depth_fps: 15 # Depth sensor frame rate
+    color_enabled: true # Enable color RGB stream
+    color_width: 1280 # Color sensor width
+    color_height: 720 # Color sensor height
+    color_fps: 15 # Color sensor frame rate
+  detector:
+    calib_json: "" # Path to calib.json camera metrics file
+    target_dist_m_override: 0.50 # Override target distance parameter if > 0
+    roi_y0: 100 # ROI vertical start pixel
+    roi_y1: 380 # ROI vertical end pixel
+    roi_x0: 100 # ROI horizontal start pixel
+    roi_x1: 540 # ROI horizontal end pixel
+    z_min: 0.2 # Minimum distance to filter depth points
+    z_max: 2.0 # Maximum distance to filter depth points
+    table_y_min: -0.2 # Table bounding box width minimum boundary
+    table_y_max: 0.2 # Table bounding box width maximum boundary
+    min_all_points: 1000 # Minimum total points to execute fit
+    min_table_points: 500 # Minimum table segment points to fit
+    ransac_iters: 120 # Maximum iterations for RANSAC line fitting
+    residual_threshold_m: 0.05 # Max residual distance to classify inliers
+    random_seed: 42 # Seed for random number generator
+    depth_median_ksize: 5 # Median filter kernel size
+    plane_only_mode: true # Skip crease line detection
+    enable_crease_line: false # Enable crease line search
+    trend_window_px: 12 # Sliding window size to calculate depth gradients
+    trend_col_step_px: 6 # Column stride for gradient search
+    trend_min_valid_ratio: 0.70 # Minimum gradient ratio to keep candidate
+    trend_min_slope_delta: 0.0025 # Minimum slope delta for table edge crease
+    trend_min_candidate_count: 35 # Minimum candidates required to trigger fit
+    trend_topk_per_col: 3 # Maximum candidates selected per column
+    upper_line_y_norm_min: 0.12 # Vertical bounds normalized for top crease line search
+    upper_line_y_norm_max: 0.62 # Vertical bounds normalized for top crease line search
+    lower_line_y_norm_min: 0.42 # Vertical bounds normalized for bottom crease line search
+    lower_line_y_norm_max: 0.92 # Vertical bounds normalized for bottom crease line search
+    line_min_x_span_m: 0.18 # Minimum horizontal span of candidate line
+    line_max_residual_m: 0.035 # Maximum residual allowed for crease line
+    line_select_min_confidence: 0.35 # Trust threshold for line fit
+    line_select_min_x_span_m: 0.16 # Minimum horizontal span of selected line
+    line_select_max_residual_m: 0.040 # Max residual to select candidate line
+    line_select_max_plane_yaw_diff_rad: 0.22 # Max angle difference between crease and plane
+    line_plane_boundary_soft_dist_px: 14.0 # Distance threshold to reward line/plane overlap
+    line_plane_boundary_max_dist_px: 32.0 # Maximum distance allowed to associate line/plane
+    line_plane_boundary_weight: 0.20 # Weight factor for boundary alignment overlap
+    line_object_like_max_score: 0.68 # Threshold to reject objects like lines
+    line_object_like_penalty_weight: 0.25 # Score penalty for object like fits
+    plane_min_inliers: 220 # Minimum inliers to fit plane
+    plane_min_x_span_m: 0.20 # Minimum horizontal size of fit plane
+    plane_max_residual_m: 0.035 # Maximum residual allowed for plane fit
+    front_plane_min_score: 0.45 # Minimum score to trust plane segment
+    front_plane_min_area_ratio: 0.03 # Minimum plane area relative to ROI size
+    front_plane_min_x_span_m: 0.20 # Minimum horizontal size of front plane
+    front_plane_max_residual_m: 0.035 # Maximum residual allowed for front plane
+    plane_max_abs_normal_y: 0.70 # Normal Y threshold filter
+    plane_min_abs_normal_z: 0.25 # Normal Z threshold filter
+    front_face_min_area_ratio: 0.03 # Area ratio representing front table face
+    fusion_yaw_consistency_rad: 0.18 # Consistency threshold between line and plane
+    table_geometry_approach_score: 0.35 # Approach score threshold in fusion
+    table_geometry_alignment_score: 0.55 # Alignment score threshold in fusion
+    table_geometry_stop_score: 0.70 # Stop score threshold in fusion
+    front_plane_score_weight: 0.35 # Weight of front plane in fusion
+    line_score_weight: 0.25 # Weight of crease line in fusion
+    plane_line_consistency_weight: 0.15 # Weight of angle consistency in fusion
+    roi_boundary_score_weight: 0.10 # Weight of boundary margin in fusion
+    temporal_score_weight: 0.15 # Weight of temporal stability in fusion
+    roi_boundary_margin_px: 8 # Margin in pixels from ROI border
+    roi_boundary_max_touch_ratio: 0.25 # Limit of margin touching points ratio
+    fusion_line_min_boundary_consistency: 0.45 # Line consistency score threshold
+    fusion_plane_prefer_boundary_consistency: 0.65 # Plane consistency score threshold
+    control_min_confidence: 0.45 # Minimum confidence to permit movement control
+    control_approach_min_score: 0.35 # Approach minimum score threshold
+    control_alignment_min_score: 0.55 # Alignment minimum score threshold
+    control_stop_min_score: 0.70 # Stop minimum score threshold
+    control_min_stable_frames: 3 # Persistence frames to confirm lock
+    control_max_yaw_jump_rad: 0.18 # Maximum jump in heading before discarding packet
+    control_max_dist_jump_m: 0.12 # Maximum jump in distance before discarding packet
+    control_max_yaw_rad: 0.70 # Maximum heading error allowed in control
+    control_approach_min_stable_frames: 1 # Stable frames before approach task
+    control_alignment_min_stable_frames: 3 # Stable frames before alignment task
+    control_stop_min_stable_frames: 5 # Stable frames before stop task
+    control_stop_dist_abs_max_m: 0.08 # Distance threshold to trigger stop task

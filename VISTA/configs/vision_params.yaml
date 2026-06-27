@@ -172,6 +172,7 @@ table_edge:
   fast_candidate_point_cap: 1800
   fast_front_edge_col_step: 2
   fast_front_edge_row_step: 2
+  depth_stride: 2
 
 preview:
   # 可选 layout 见 preview/manager 和 opencv_sink 支持项。
@@ -226,6 +227,7 @@ mode_profiles:
         max_yaw_abs_rad: 0.75
         enable_yolo_in_plane_only: false
         yolo_table_min_conf: 0.25
+        depth_stride: 2
       rgb:
         fps: 24
 
@@ -256,6 +258,7 @@ mode_profiles:
         max_yaw_abs_rad: 0.75
         enable_yolo_in_plane_only: false
         yolo_table_min_conf: 0.25
+        depth_stride: 2
       rgb:
         fps: 24
 
@@ -301,12 +304,8 @@ mode_profiles:
 
 ipc:
   req_in:
-    transport: tcp
-    host: 127.0.0.1
-    port: 9003
-    uds_path: /tmp/robot_stack/vision_req.sock
+    transport: uds
+    ipc_socket_path: /tmp/robot_stack/vision_req.sock
   obs_out:
-    transport: tcp
-    host: 127.0.0.1
-    port: 9002
-    uds_path: /tmp/robot_stack/vision_obs.sock
+    transport: uds
+    ipc_socket_path: /tmp/robot_stack/vision_obs.sock

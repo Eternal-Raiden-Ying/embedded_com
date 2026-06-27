@@ -147,6 +147,15 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
         str(k).strip().upper(): str(v).strip()
         for k, v in dict(getattr(getattr(cfg, "preview", None), "mode_layouts", preview_layout_defaults) or preview_layout_defaults).items()
     }
+    runtime_cfg = getattr(cfg, "runtime", None)
+    keep_model_hot_in_idle = bool(
+        runtime_cfg is not None
+        and getattr(runtime_cfg, "keep_model_hot_in_standby", True)
+        and not getattr(runtime_cfg, "release_model_on_idle", False)
+    )
+    infer_during_hot_standby = bool(
+        keep_model_hot_in_idle and getattr(runtime_cfg, "enable_infer_during_hot_standby", False)
+    )
 
     def preview_profile(mode: str, *, enabled: bool, sink_name: str = "opencv") -> PreviewProfile:
         mode_name = str(mode or "IDLE").strip().upper() or "IDLE"
@@ -202,6 +211,7 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
                 update_hz=5.0,
                 light_stride=4,
                 fast_plane_stride=4,
+                depth_stride=2,
                 require_yolo_confirm=True,
                 static_roi_enabled=False,
                 camera_pitch_deg=15.0,
@@ -247,6 +257,7 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
                 update_hz=10.0,
                 light_stride=4,
                 fast_plane_stride=4,
+                depth_stride=2,
                 require_yolo_confirm=True,
                 static_roi_enabled=False,
                 camera_pitch_deg=15.0,
@@ -354,12 +365,15 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             name="IDLE_HOT",
             enabled_cameras=("rgb",),
             camera_overrides={"rgb": idle_hot_rgb},
-            predictor_enabled=False,
-            predictor_model=None,
+            predictor_enabled=infer_during_hot_standby,
+            predictor_model=active_model if keep_model_hot_in_idle else None,
             remote=_default_remote_profile(enabled=False),
             preview=preview_profile("IDLE_HOT", enabled=True),
             release_cooldown_s=5.0,
-            metadata={"contract": {"stage": "IDLE_HOT"}},
+            metadata={
+                "contract": {"stage": "IDLE_HOT"},
+                "keep_model_loaded": keep_model_hot_in_idle,
+            },
         ),
     }
 
@@ -400,6 +414,8 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
                 profile.table_edge.light_stride = int(te.get("light_stride"))
             if "fast_plane_stride" in te and te.get("fast_plane_stride") is not None:
                 profile.table_edge.fast_plane_stride = int(te.get("fast_plane_stride"))
+            if "depth_stride" in te and te.get("depth_stride") is not None:
+                profile.table_edge.depth_stride = int(te.get("depth_stride"))
             if "require_yolo_confirm" in te:
                 profile.table_edge.require_yolo_confirm = bool(te.get("require_yolo_confirm"))
             if "static_roi_enabled" in te:

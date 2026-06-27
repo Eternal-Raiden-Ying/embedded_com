@@ -12,15 +12,20 @@ from .base import ICamera
 logger = logging.getLogger("vision.camera")
 
 _CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+_VISION_MODULE_DIR = os.path.abspath(os.path.join(_CURRENT_DIR, "..", ".."))
+_AARCH64_LIB_DIR = os.path.join(_VISION_MODULE_DIR, "libs", "aarch64")
 if _CURRENT_DIR not in sys.path:
     sys.path.insert(0, _CURRENT_DIR)
+if _AARCH64_LIB_DIR not in sys.path:
+    sys.path.insert(0, _AARCH64_LIB_DIR)
 
 try:
     import fast_cam
 except ImportError as e:
     raise ImportError(
-        f"Failed to import fast_cam from {_CURRENT_DIR}: {e}\n"
-        "Build the camera backend in backend/camera/csrc and copy the generated fast_cam module here."
+        f"Failed to import fast_cam from {_AARCH64_LIB_DIR}: {e}\n"
+        "Build the camera backend in backend/camera/cxx and copy the generated fast_cam module "
+        "to VISTA/vision_module/libs/aarch64."
     )
 
 

@@ -10,6 +10,7 @@ from .runtime_logging import configure_stream_logger
 
 class BaseModule(ABC):
     LOG_ENABLED: bool = True
+    _log: Optional[logging.Logger] = None
 
     def __init__(self, module_name: str, log_enabled: bool = True, log_mode: str = "concise"):
         self._module_name = module_name

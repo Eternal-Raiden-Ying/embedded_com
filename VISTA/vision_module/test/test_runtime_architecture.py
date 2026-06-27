@@ -15,10 +15,11 @@ except ImportError:
     from test_support import PrintLogger, build_test_config, import_camera_classes, import_predictor_class
 
 from vision_module.app.stage_controller import StageController
-from vision_module.app.stages.base import StageContext, StageTickInput
+from vision_module.app.stages.base import StageContext, StageOutput, StageTickInput
 from vision_module.app.stages.grasp import GraspStagePlan
 from vision_module.app.stages.return_home import ReturnStagePlan
 from vision_module.app.stages.search import SearchStagePlan
+from vision_module.app.stages.search.table_edge_obs_builder import merge_table_bbox_from_local_perception
 from vision_module.backend.camera_manager import CameraManager
 from vision_module.backend.mode_controller import ModeController
 from vision_module.backend.preview import NullPreviewSink, PreviewFrame, PreviewSink
@@ -29,6 +30,7 @@ from vision_module.backend.runtime_supervisor import RuntimeSupervisor
 from vision_module.backend.table_edge_manager import TableEdgeManager
 from vision_module.backend.predictor_manager import PredictorManager
 from vision_module.backend.scheduler import Scheduler
+from vision_module.backend.vision_semantics import standardize_table_edge_payload
 from vision_module.config.mode_defaults import build_default_mode_profiles
 from vision_module.ipc.protocol import VisionReq
 try:
@@ -87,6 +89,7 @@ class GraspStageRemoteFlowTest(unittest.TestCase):
             op="START",
             stage="GRASP",
             target="bottle",
+            mode_hint="MICRO_ADJUST",
             payload={"remote_grasp": True, "need_depth": True, "class_id": 4},
         )
         plan.on_enter(start_req, ctx)
@@ -113,6 +116,9 @@ class GraspStageRemoteFlowTest(unittest.TestCase):
         self.assertIsNotNone(respond_out)
         self.assertEqual(respond_out.effects, [])
 
+        ctx.current_mode = "GRASP_REMOTE_INIT"
+        ctx.server_status = "unknown"
+
         request_id = ctx.stage_state["remote_request_id"]
         retry_tick = plan.tick(
             StageTickInput(
@@ -133,8 +139,9 @@ class GraspStageRemoteFlowTest(unittest.TestCase):
         )
         self.assertIsNotNone(retry_tick)
         self.assertEqual(retry_tick.vision_obs["status"], "RUNNING")
-        self.assertEqual(retry_tick.vision_obs["result"]["remote_state"], "retrying_init")
+        self.assertEqual(retry_tick.vision_obs["result"]["remote_state"], "initializing")
 
+        ctx.server_status = "ready"
         init_ready_tick = plan.tick(
             StageTickInput(
                 ts=time.time(),
@@ -153,7 +160,7 @@ class GraspStageRemoteFlowTest(unittest.TestCase):
         )
         self.assertIsNotNone(init_ready_tick)
         self.assertEqual(init_ready_tick.vision_obs["status"], "RUNNING")
-        self.assertEqual(init_ready_tick.vision_obs["result"]["remote_state"], "awaiting_fresh_frames")
+        self.assertEqual(init_ready_tick.vision_obs["result"]["remote_state"], "init_ok_switching_to_predict")
 
         predict_tick = plan.tick(
             StageTickInput(
@@ -178,6 +185,7 @@ class GraspStageRemoteFlowTest(unittest.TestCase):
         )
         self.assertIsNotNone(predict_tick)
         self.assertEqual(predict_tick.vision_obs["status"], "RUNNING")
+        self.assertEqual(predict_tick.vision_obs["result"]["remote_state"], "awaiting_predict")
 
         final_tick = plan.tick(
             StageTickInput(
@@ -210,6 +218,7 @@ class GraspStageRemoteFlowTest(unittest.TestCase):
             op="START",
             stage="GRASP",
             target="bottle",
+            mode_hint="MICRO_ADJUST",
             payload={"remote_grasp": True, "need_depth": True, "class_id": 4},
         )
         plan.on_enter(start_req, ctx)
@@ -229,6 +238,9 @@ class GraspStageRemoteFlowTest(unittest.TestCase):
             response={"decision": "ACCEPT"},
         )
         plan.on_respond(respond_req, ctx)
+
+        ctx.current_mode = "GRASP_REMOTE_INIT"
+        ctx.server_status = "unknown"
 
         for service_attempts in (1, 2, 3):
             tick = plan.tick(
@@ -251,6 +263,7 @@ class GraspStageRemoteFlowTest(unittest.TestCase):
             self.assertIsNotNone(tick)
             self.assertEqual(tick.vision_obs["status"], "RUNNING")
 
+        ctx.server_status = "error"
         failed_tick = plan.tick(
             StageTickInput(
                 ts=time.time(),
@@ -270,9 +283,8 @@ class GraspStageRemoteFlowTest(unittest.TestCase):
         )
         self.assertIsNotNone(failed_tick)
         self.assertEqual(failed_tick.vision_obs["status"], "FAILED")
-        self.assertEqual(failed_tick.vision_obs["result"]["reason"], "remote_init_failed")
-        self.assertEqual(failed_tick.vision_obs["result"]["init_attempts"], 3)
-        self.assertFalse(failed_tick.vision_obs["result"]["init_confirmed"])
+        self.assertEqual(failed_tick.vision_obs["result"]["reason"], "init_failed")
+        self.assertEqual(failed_tick.vision_obs["result"]["server_status"], "error")
         self.assertEqual(failed_tick.effects, [])
 
 
@@ -285,6 +297,7 @@ class ReturnStageDetectContractTest(unittest.TestCase):
             op="START",
             stage="RETURN",
             target="cup",
+            mode_hint="FIND_OBJECT",
         )
         plan.on_enter(start_req, ctx)
 
@@ -317,6 +330,7 @@ class ReturnStageDetectContractTest(unittest.TestCase):
             ts=time.time(),
             op="START",
             stage="RETURN",
+            mode_hint="FIND_OBJECT",
         )
         plan.on_enter(start_req, ctx)
 
@@ -479,6 +493,336 @@ class SearchStagePlanKindTest(unittest.TestCase):
         self.assertEqual(sorted(perception.keys()), ["table_edge_obs"])
         self.assertTrue(perception["table_edge_obs"]["edge_found"])
 
+    def test_table_edge_search_preserves_yolo_table_bbox_without_depth_edge_result(self):
+        plan, ctx = self._enter("TABLE_EDGE")
+        tick_ts = time.time()
+        output = plan.tick(
+            StageTickInput(
+                ts=tick_ts,
+                generation=1,
+                results={
+                    "local_perception": {
+                        "has_infer": True,
+                        "rgb_shape": [640, 640, 3],
+                        "table_bbox": [0, 198, 208, 360],
+                        "table_quadrant": "LT",
+                        "rgb_search_roi": [0, 0, 320, 320],
+                        "table_roi_source": "yolo_table_bbox",
+                    },
+                },
+            ),
+            ctx,
+        )
+
+        table_obs = output.vision_obs["perception"]["table_edge_obs"]
+        self.assertTrue(table_obs["table_found"])
+        self.assertTrue(table_obs["table_bbox_found"])
+        self.assertTrue(table_obs["table_bbox_current_found"])
+        self.assertTrue(table_obs["table_bbox_control_valid"])
+        self.assertTrue(table_obs["yolo_table_control_valid"])
+        self.assertFalse(table_obs["edge_found"])
+        self.assertFalse(table_obs["edge_valid"])
+        self.assertFalse(table_obs["is_stale"])
+        self.assertEqual(table_obs["table_bbox_xyxy"], [0.0, 198.0, 208.0, 360.0])
+        self.assertEqual(table_obs["roi_source"], "yolo_table_bbox")
+        self.assertEqual(table_obs["source"], "local_perception_table_bbox")
+        self.assertEqual(table_obs["reason"], "table_bbox_from_local_perception_no_edge_result")
+
+    def test_table_edge_search_replaces_stale_stage_bbox_with_current_local_bbox(self):
+        plan, ctx = self._enter("TABLE_EDGE")
+        output = plan.tick(
+            StageTickInput(
+                ts=200.0,
+                generation=8,
+                results={
+                    "table_edge_obs": {
+                        "edge_found": False,
+                        "table_bbox_found": True,
+                        "table_bbox_xyxy": [1, 2, 3, 4],
+                        "obs_ts": 100.0,
+                        "frame_id": 4,
+                    },
+                    "local_perception": {
+                        "has_infer": True,
+                        "rgb_shape": [640, 640, 3],
+                        "table_bbox": [80, 220, 520, 620],
+                        "table_bbox_current_found": True,
+                        "frame_seq": 18,
+                        "obs_ts": 199.5,
+                        "yolo_table_conf": 0.82,
+                    },
+                },
+            ),
+            ctx,
+        )
+
+        table_obs = output.vision_obs["perception"]["table_edge_obs"]
+        self.assertEqual(table_obs["table_bbox_xyxy"], [80.0, 220.0, 520.0, 620.0])
+        self.assertEqual(table_obs["obs_ts"], 199.5)
+        self.assertEqual(table_obs["frame_id"], 18)
+        self.assertEqual(table_obs["seq"], 18)
+        self.assertTrue(table_obs["yolo_table_visible"])
+        self.assertTrue(table_obs["yolo_table_fresh"])
+        self.assertEqual(table_obs["yolo_table_age_ms"], 0.0)
+        self.assertEqual(table_obs["table_conf"], 0.82)
+
+    def test_table_edge_search_preserves_edge_candidate_when_merging_current_bbox(self):
+        plan, ctx = self._enter("TABLE_EDGE")
+        output = plan.tick(
+            StageTickInput(
+                ts=250.0,
+                generation=8,
+                results={
+                    "table_edge_obs": {
+                        "edge_found": True,
+                        "edge_detected": True,
+                        "edge_valid": False,
+                        "edge_geometry_valid": False,
+                        "edge_trusted": False,
+                        "point_count": 160,
+                        "support_count": 22,
+                        "inlier_count": 6,
+                        "reason": "edge_candidate_not_trusted",
+                        "obs_ts": 249.5,
+                        "frame_id": 20,
+                    },
+                    "local_perception": {
+                        "has_infer": True,
+                        "rgb_shape": [640, 640, 3],
+                        "table_bbox": [360, 320, 630, 635],
+                        "table_bbox_current_found": True,
+                        "frame_seq": 20,
+                        "obs_ts": 249.5,
+                    },
+                },
+            ),
+            ctx,
+        )
+
+        table_obs = output.vision_obs["perception"]["table_edge_obs"]
+        self.assertTrue(table_obs["edge_found"])
+        self.assertFalse(table_obs["edge_valid"])
+        self.assertFalse(table_obs["edge_trusted"])
+        self.assertEqual(table_obs["point_count"], 160)
+        self.assertEqual(table_obs["support_count"], 22)
+        self.assertEqual(table_obs["inlier_count"], 6)
+        self.assertEqual(table_obs["reason"], "edge_candidate_rejected")
+
+    def test_search_stage_prioritizes_results_table_edge_obs_over_stage_state(self):
+        class GetOnlyPayload:
+            __slots__ = ("_data",)
+
+            def __init__(self, data):
+                self._data = dict(data)
+
+            def get(self, key, default=None):
+                return self._data.get(key, default)
+
+        plan, ctx = self._enter("TABLE_EDGE")
+        now = time.time()
+        ctx.stage_state["table_edge_obs"] = {
+            "frame_id": 33,
+            "edge_found": False,
+            "edge_valid": False,
+            "edge_trusted": False,
+            "point_count": 0,
+            "reason": "table_bbox_from_local_perception_no_edge_result",
+        }
+        output = plan.tick(
+            StageTickInput(
+                ts=now,
+                generation=3,
+                results={
+                    "table_edge_obs": GetOnlyPayload({
+                        "frame_id": 33,
+                        "edge_found": True,
+                        "edge_valid": True,
+                        "edge_trusted": True,
+                        "point_count": 91,
+                        "table_point_count": 91,
+                        "yaw_err_rad": 0.079,
+                        "dist_err_m": 0.473,
+                        "reason": "edge_trusted",
+                        "source": "table_edge_detector",
+                        "obs_ts": now,
+                    }),
+                    "local_perception": {
+                        "frame_seq": 33,
+                        "obs_ts": now,
+                        "rgb_shape": [640, 640, 3],
+                        "table_bbox": [80, 220, 520, 620],
+                        "table_bbox_current_found": True,
+                    },
+                },
+            ),
+            ctx,
+        )
+        table_obs = output.vision_obs["perception"]["table_edge_obs"]
+        self.assertEqual(table_obs["selected_source"], "results")
+        self.assertEqual(table_obs["source"], "results")
+        self.assertTrue(table_obs["edge_found"])
+        self.assertTrue(table_obs["edge_valid"])
+        self.assertTrue(table_obs["edge_trusted"])
+        self.assertEqual(table_obs["point_count"], 91)
+        self.assertEqual(table_obs["reason"], "edge_trusted")
+
+    def test_local_perception_merge_does_not_overwrite_edge_result(self):
+        now = time.time()
+        base_obs = {
+            "type": "table_edge_obs",
+            "selected_source": "results",
+            "source": "results",
+            "frame_id": 33,
+            "seq": 33,
+            "obs_ts": now,
+            "edge_found": True,
+            "edge_valid": True,
+            "edge_trusted": True,
+            "valid_for_control": True,
+            "edge_control_allowed": True,
+            "point_count": 91,
+            "table_point_count": 91,
+            "yaw_err_rad": 0.079,
+            "dist_err_m": 0.473,
+            "reason": "edge_trusted",
+        }
+        merged = merge_table_bbox_from_local_perception(
+            base_obs,
+            {
+                "frame_seq": 33,
+                "obs_ts": now,
+                "rgb_shape": [640, 640, 3],
+                "table_bbox": [80, 220, 520, 620],
+                "table_bbox_current_found": True,
+                "table_roi_source": "yolo_table_bbox",
+                "yolo_table_conf": 0.82,
+            },
+            tick_ts=now,
+        )
+        self.assertTrue(merged["edge_found"])
+        self.assertTrue(merged["edge_valid"])
+        self.assertTrue(merged["edge_trusted"])
+        self.assertEqual(merged["point_count"], 91)
+        self.assertEqual(merged["table_point_count"], 91)
+        self.assertEqual(merged["reason"], "edge_trusted")
+        self.assertEqual(merged["source"], "results")
+        self.assertEqual(merged["table_bbox_xyxy"], [80.0, 220.0, 520.0, 620.0])
+        self.assertEqual(merged["table_bbox_source"], "yolo_table_bbox")
+        self.assertTrue(merged["yolo_table_visible"])
+
+    def test_edge_result_reaches_final_payload(self):
+        from vision_module.app.app import VistaApp
+
+        class _Sender:
+            def __init__(self):
+                self.sent_payloads = []
+
+            def send(self, payload):
+                self.sent_payloads.append(payload)
+                return True
+
+            def close(self):
+                pass
+
+        scheduler = Scheduler()
+        scheduler.start_runtime()
+        plan = {
+            "mode": "FIND_EDGE",
+            "routes": {
+                "table_edge_obs": {"policy": "slot", "scope": "stage"},
+                "frame_meta": {"policy": "slot", "scope": "stage"},
+                "local_perception": {"policy": "slot", "scope": "stage"},
+                "runtime_status": {"policy": "slot", "scope": "backend"},
+            },
+        }
+        now = time.time()
+        scheduler.configure(plan, generation=3)
+        scheduler.publish_result("frame_meta", {"frame_seq": 33, "frame_capture_ts": now}, generation=3)
+        scheduler.publish_result(
+            "local_perception",
+            {
+                "frame_seq": 33,
+                "obs_ts": now,
+                "rgb_shape": [640, 640, 3],
+                "table_bbox": [80, 220, 520, 620],
+                "table_bbox_current_found": True,
+            },
+            generation=3,
+        )
+        scheduler.publish_result(
+            "table_edge_obs",
+            {
+                "frame_id": 33,
+                "edge_found": True,
+                "edge_valid": True,
+                "edge_trusted": True,
+                "point_count": 91,
+                "table_point_count": 91,
+                "reason": "edge_trusted",
+                "obs_ts": now,
+            },
+            generation=3,
+        )
+        try:
+            search_plan = SearchStagePlan()
+            tick_input = scheduler.collect_tick_input(
+                ts=now,
+                route_filter=set(search_plan.subscribed_routes("FIND_EDGE")),
+            )
+            ctx = StageContext(current_stage="SEARCH", current_mode="FIND_EDGE", stage_state={"search_kind": "TABLE_EDGE"})
+            stage_output = search_plan.tick(tick_input, ctx)
+
+            app = VistaApp()
+            app.scheduler = scheduler
+            app.obs_sender = _Sender()
+            app.diag_sender = _Sender()
+            queued = app._apply_stage_output(stage_output, now=time.time(), force_send=True)
+            self.assertTrue(queued)
+            final_edge = app.obs_sender.sent_payloads[0]["perception"]["table_edge_obs"]
+            self.assertTrue(final_edge["edge_found"])
+            self.assertTrue(final_edge["edge_valid"])
+            self.assertTrue(final_edge["edge_trusted"])
+            self.assertGreater(final_edge["point_count"], 0)
+            self.assertGreater(final_edge["table_point_count"], 0)
+        finally:
+            scheduler.stop_runtime()
+
+    def test_table_edge_search_clears_stale_bbox_when_current_frame_has_no_table(self):
+        plan, ctx = self._enter("TABLE_EDGE")
+        output = plan.tick(
+            StageTickInput(
+                ts=300.0,
+                generation=9,
+                results={
+                    "table_edge_obs": {
+                        "edge_found": False,
+                        "table_bbox_found": True,
+                        "table_bbox_xyxy": [1, 2, 3, 4],
+                        "obs_ts": 100.0,
+                        "frame_id": 4,
+                    },
+                    "local_perception": {
+                        "has_infer": True,
+                        "rgb_shape": [640, 640, 3],
+                        "table_bbox_current_found": False,
+                        "frame_seq": 19,
+                        "obs_ts": 299.5,
+                    },
+                },
+            ),
+            ctx,
+        )
+
+        table_obs = output.vision_obs["perception"]["table_edge_obs"]
+        self.assertFalse(table_obs["table_bbox_found"])
+        self.assertFalse(table_obs["table_bbox_current_found"])
+        self.assertFalse(table_obs["yolo_table_visible"])
+        self.assertFalse(table_obs["yolo_table_fresh"])
+        self.assertIsNone(table_obs.get("table_bbox_xyxy"))
+        self.assertEqual(table_obs["obs_ts"], 299.5)
+        self.assertEqual(table_obs["frame_id"], 19)
+        self.assertEqual(table_obs["reason"], "no_current_table_bbox")
+
     def test_edge_follow_target_outputs_both_and_keeps_partial_results(self):
         plan, ctx = self._enter("EDGE_FOLLOW_TARGET")
         self.assertEqual(ctx.current_mode, "FIND_EDGE")
@@ -513,7 +857,78 @@ class StageControllerStatusTest(unittest.TestCase):
         self.assertEqual(status["target"], "apple")
 
 
+class TableEdgeSemanticsPublishTest(unittest.TestCase):
+    def test_standardize_syncs_legacy_found_valid_trusted_fields(self):
+        obs = standardize_table_edge_payload(
+            {
+                "edge_detected": True,
+                "edge_geometry_valid": False,
+                "edge_obs_unavailable": False,
+                "fast_candidate_point_count": 80,
+                "fast_support_point_count": 12,
+                "fast_rep_inlier_count": 3,
+                "edge_conf": 0.45,
+                "table_bbox_current_found": True,
+                "table_bbox_xyxy": [120, 220, 520, 620],
+            },
+            edge_stable_required_frames=3,
+        ).to_dict()
+
+        self.assertTrue(obs["edge_found"])
+        self.assertFalse(obs["edge_valid"])
+        self.assertFalse(obs["edge_trusted"])
+        self.assertFalse(obs["valid_for_control"])
+        self.assertEqual(obs["edge_quality"]["support_count"], 12)
+        self.assertEqual(obs["edge_quality"]["inlier_count"], 3)
+
+
 class RuntimeSupervisorModeApplyTest(unittest.TestCase):
+    def test_idle_hot_uses_keep_model_hot_config(self):
+        args = SimpleNamespace(
+            rgb_device="mock_rgb",
+            depth_device="mock_depth",
+            ir_device="mock_ir",
+            rgb_in_w=1280,
+            rgb_in_h=720,
+            rgb_out_w=640,
+            rgb_out_h=640,
+            rgb_fps=30,
+            depth_width=424,
+            depth_height=240,
+            depth_fps=15,
+            ir_in_w=640,
+            ir_in_h=480,
+            ir_out_w=640,
+            ir_out_h=480,
+            ir_fps=30,
+            model_path="",
+            model_width=640,
+            model_height=640,
+            conf_thres=0.25,
+            iou_thres=0.15,
+            class_num=20,
+        )
+        cfg = build_test_config(args)
+        cfg.runtime.keep_model_hot_in_standby = True
+        cfg.runtime.release_model_on_idle = False
+
+        profiles = build_default_mode_profiles(cfg.model.active_model, cfg=cfg)
+        self.assertFalse(profiles["IDLE_HOT"].predictor_enabled)
+        self.assertEqual(profiles["IDLE_HOT"].predictor_model, "test_model")
+        self.assertTrue(profiles["IDLE_HOT"].metadata["keep_model_loaded"])
+
+        cfg.runtime.enable_infer_during_hot_standby = True
+        profiles = build_default_mode_profiles(cfg.model.active_model, cfg=cfg)
+        self.assertTrue(profiles["IDLE_HOT"].predictor_enabled)
+        self.assertEqual(profiles["IDLE_HOT"].predictor_model, "test_model")
+
+        cfg.runtime.enable_infer_during_hot_standby = False
+        cfg.runtime.release_model_on_idle = True
+        profiles = build_default_mode_profiles(cfg.model.active_model, cfg=cfg)
+        self.assertFalse(profiles["IDLE_HOT"].predictor_enabled)
+        self.assertIsNone(profiles["IDLE_HOT"].predictor_model)
+        self.assertFalse(profiles["IDLE_HOT"].metadata["keep_model_loaded"])
+
     def test_runtime_supervisor_reconciles_managers_from_mode(self):
         args = SimpleNamespace(
             rgb_device="mock_rgb",
@@ -556,6 +971,51 @@ class RuntimeSupervisorModeApplyTest(unittest.TestCase):
             snapshot = mode_controller.runtime_snapshot()
             self.assertEqual(snapshot["runtime_supervisor"]["camera"]["enabled_cameras"], [])
             self.assertIsNone(snapshot["runtime_supervisor"]["predictor"]["active_model_name"])
+        finally:
+            mode_controller.stop_runtime()
+
+    def test_idle_hot_keeps_model_loaded_without_running_inference_by_default(self):
+        args = SimpleNamespace(
+            rgb_device="mock_rgb",
+            depth_device="mock_depth",
+            ir_device="mock_ir",
+            rgb_in_w=1280,
+            rgb_in_h=720,
+            rgb_out_w=640,
+            rgb_out_h=640,
+            rgb_fps=30,
+            depth_width=424,
+            depth_height=240,
+            depth_fps=15,
+            ir_in_w=640,
+            ir_in_h=480,
+            ir_out_w=640,
+            ir_out_h=480,
+            ir_fps=30,
+            model_path="",
+            model_width=640,
+            model_height=640,
+            conf_thres=0.25,
+            iou_thres=0.15,
+            class_num=20,
+        )
+        cfg = build_test_config(args)
+        cfg.runtime.capability_placeholder = True
+        cfg.runtime.keep_model_hot_in_standby = True
+        cfg.runtime.release_model_on_idle = False
+        cfg.runtime.enable_infer_during_hot_standby = False
+        _patch_managers("mock")
+
+        mode_controller, _, stage_controller = build_runtime_stack(cfg, PrintLogger("idle_hot"))
+        try:
+            mode_controller.start_runtime()
+            self.assertTrue(stage_controller.set_runtime_mode("FIND_OBJECT", reason="load_model", force=True))
+            self.assertTrue(stage_controller.set_runtime_mode("IDLE_HOT", reason="hot_idle", force=True))
+            snapshot = mode_controller.runtime_snapshot()["runtime_supervisor"]
+            self.assertEqual(snapshot["predictor"]["active_model_name"], "test_model")
+            self.assertFalse(snapshot["predictor"]["runtime_running"])
+            self.assertFalse(snapshot["predictor"]["inference_enabled"])
+            self.assertEqual(snapshot["camera"]["enabled_cameras"], ["rgb"])
         finally:
             mode_controller.stop_runtime()
 
@@ -759,6 +1219,100 @@ class SchedulerIsolationTest(unittest.TestCase):
         self.assertFalse(self.scheduler.publish_result("test_event", {"bad": True}, generation=1))
         self.assertFalse(self.scheduler.publish_event("local_perception", {"bad": True}, generation=1))
         self.assertFalse(self.scheduler.publish_result("unknown_route", {"bad": True}, generation=1))
+
+    def test_scheduler_publish_result_accepts_current_generation_table_edge_obs(self):
+        plan = {
+            "mode": "FIND_EDGE",
+            "routes": {
+                "table_edge_obs": {"policy": "slot", "scope": "stage"},
+                "frame_meta": {"policy": "slot", "scope": "stage"},
+                "local_perception": {"policy": "slot", "scope": "stage"},
+                "runtime_status": {"policy": "slot", "scope": "backend"},
+            },
+        }
+        self.scheduler.configure(plan, generation=3)
+        success = self.scheduler.publish_result(
+            "table_edge_obs",
+            {"frame_id": 33, "edge_found": True, "edge_valid": True, "point_count": 91},
+            generation=3,
+        )
+        tick_input = self.scheduler.collect_tick_input(ts=time.time())
+        self.assertTrue(success)
+        self.assertIn("table_edge_obs", self.scheduler.result_slots)
+        self.assertIn("table_edge_obs", tick_input.results)
+
+    def test_scheduler_publish_result_rejects_stale_generation_with_reason(self):
+        plan = {
+            "mode": "FIND_EDGE",
+            "routes": {
+                "table_edge_obs": {"policy": "slot", "scope": "stage"},
+                "frame_meta": {"policy": "slot", "scope": "stage"},
+                "local_perception": {"policy": "slot", "scope": "stage"},
+                "runtime_status": {"policy": "slot", "scope": "backend"},
+            },
+        }
+        self.scheduler.configure(plan, generation=3)
+        success = self.scheduler.publish_result(
+            "table_edge_obs",
+            {"frame_id": 33, "edge_found": True, "edge_valid": True, "point_count": 91},
+            generation=1,
+        )
+        self.assertFalse(success)
+        self.assertEqual(self.scheduler.last_snapshot["publish_reject_reason"], "generation_mismatch")
+
+    def test_table_edge_manager_publish_uses_scheduler_active_generation_when_getter_stale(self):
+        class FakeScheduler:
+            active_generation = 3
+            routes = {"table_edge_obs": {"policy": "slot", "scope": "stage"}}
+
+            def __init__(self):
+                self.calls = []
+
+            def publish_result(self, route, payload, generation=None):
+                self.calls.append((route, payload, generation))
+                return generation == self.active_generation
+
+        scheduler = FakeScheduler()
+        manager = TableEdgeManager(logger=PrintLogger("table_edge_publish_generation"))
+        manager.bind_runtime(scheduler, lambda: 1)
+        payload = {"frame_id": 33, "edge_found": True, "edge_valid": True, "point_count": 91}
+        manager._publish_result("table_edge_obs", payload)
+        self.assertEqual(len(scheduler.calls), 1)
+        self.assertEqual(scheduler.calls[0][0], "table_edge_obs")
+        self.assertEqual(scheduler.calls[0][2], 3)
+
+    def test_search_stage_receives_table_edge_obs_after_scheduler_publish(self):
+        plan = {
+            "mode": "FIND_EDGE",
+            "routes": {
+                "table_edge_obs": {"policy": "slot", "scope": "stage"},
+                "frame_meta": {"policy": "slot", "scope": "stage"},
+                "local_perception": {"policy": "slot", "scope": "stage"},
+                "runtime_status": {"policy": "slot", "scope": "backend"},
+            },
+        }
+        self.scheduler.configure(plan, generation=3)
+        edge_payload = {
+            "frame_id": 33,
+            "edge_found": True,
+            "edge_valid": True,
+            "edge_trusted": True,
+            "point_count": 91,
+            "table_point_count": 91,
+            "obs_ts": time.time(),
+        }
+        self.assertTrue(self.scheduler.publish_result("table_edge_obs", edge_payload, generation=3))
+        search_plan = SearchStagePlan()
+        tick_input = self.scheduler.collect_tick_input(
+            ts=time.time(),
+            route_filter=set(search_plan.subscribed_routes("FIND_EDGE")),
+        )
+        self.assertIn("table_edge_obs", tick_input.results)
+        ctx = StageContext(current_stage="SEARCH", current_mode="FIND_EDGE", stage_state={"search_kind": "TABLE_EDGE"})
+        output = search_plan.tick(tick_input, ctx)
+        self.assertIsNotNone(output)
+        table_obs = output.vision_obs["perception"]["table_edge_obs"]
+        self.assertTrue(table_obs["edge_found"])
 
 
 class PreviewBehaviorTest(unittest.TestCase):
@@ -1412,19 +1966,12 @@ class ModeProfileCameraContractTest(unittest.TestCase):
         profiles = build_default_mode_profiles("test_model", cfg)
 
         track_rgb = dict(profiles["FIND_OBJECT"].camera_overrides["rgb"])
-        micro_rgb = dict(profiles["MICRO_ADJUST"].camera_overrides["rgb"])
         grasp_rgb = dict(profiles["GRASP_REMOTE"].camera_overrides["rgb"])
 
         self.assertEqual(track_rgb["format"], "BGR")
-        self.assertEqual(micro_rgb["format"], "BGR")
         self.assertEqual(grasp_rgb["format"], "BGR")
         self.assertEqual(track_rgb["fps"], 24)
-        self.assertEqual(micro_rgb["fps"], 30)
         self.assertEqual(grasp_rgb["fps"], 15)
-        self.assertNotEqual(
-            (track_rgb["crop_x"], track_rgb["crop_y"], track_rgb["crop_w"], track_rgb["crop_h"]),
-            (micro_rgb["crop_x"], micro_rgb["crop_y"], micro_rgb["crop_w"], micro_rgb["crop_h"]),
-        )
         self.assertIn("depth", profiles["GRASP_REMOTE"].camera_overrides)
 
 
@@ -1578,10 +2125,10 @@ class GenerationAwareFrameConsumptionTest(unittest.TestCase):
             while time.time() < deadline:
                 payload = scheduler.read_result("table_edge_obs", default=None)
                 snapshot = manager.snapshot()
-                if isinstance(payload, dict) and snapshot["last_camera_generation"] == 2:
+                if payload is not None and snapshot["last_camera_generation"] == 2:
                     break
                 time.sleep(0.05)
-            self.assertIsInstance(payload, dict)
+            self.assertIsNotNone(payload)
             self.assertEqual(payload["source_mode"], "FIND_OBJECT")
             self.assertEqual(manager.snapshot()["last_camera_generation"], 2)
         finally:

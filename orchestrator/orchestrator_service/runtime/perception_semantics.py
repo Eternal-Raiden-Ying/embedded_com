@@ -138,7 +138,7 @@ def table_bbox_current_found(obs: Any) -> bool:
     )
     if explicit is not None:
         return bool(explicit) or _list_bbox(bbox) is not None
-    if bool(getattr(obs, "table_bbox_found", False)):
+    if bool(getattr(obs, "table_bbox_found", False)) or bool(getattr(obs, "table_found", False)):
         return True
     return _list_bbox(bbox) is not None
 

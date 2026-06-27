@@ -18,19 +18,9 @@
 
 import json
 import re
-from dataclasses import dataclass
 from typing import Optional
 
-from ..config.schema import CarMotionConfig
-from ..ipc.protocol import CarState, CmdVel, now_ts
-
-
-def _clamp_int(v, lo: int, hi: int) -> int:
-    try:
-        value = int(round(float(v)))
-    except Exception:
-        value = 0
-    return max(lo, min(hi, value))
+from ..ipc.protocol import CarState, now_ts
 
 
 WIRE_MOTION_MODES = {"SEARCH", "RETURN"}
@@ -80,6 +70,14 @@ def encode_stm32_stop(*_) -> str:
     return encode_stop()
 
 
+def encode_emergency_stop(*_) -> str:
+    return "STOP"
+
+
+def encode_soft_stop(*_) -> str:
+    return "SSTOP"
+
+
 def encode_jog(vx_mps, vy_mps, wz_radps, duration_ms=None, *_, digits: int = 3) -> str:
     del duration_ms
     return encode_vel(vx_mps, vy_mps, wz_radps, digits=digits)
@@ -95,83 +93,6 @@ def encode_status() -> str:
 
 def encode_stm32_status() -> str:
     return encode_status()
-
-
-@dataclass
-class SimpleCarCommand:
-    raw_line: str
-    kind: str
-    mode: str
-    vx_mps: float = 0.0
-    vy_mps: float = 0.0
-    wz_radps: float = 0.0
-    hold_ms: int = 0
-    brake: bool = False
-
-
-class SimpleCarMapper:
-    def __init__(self, cfg: CarMotionConfig):
-        self.cfg = cfg
-        self._last_mode_sent: Optional[str] = None
-
-    def _fmt(self, v: float) -> str:
-        digits = max(0, int(self.cfg.serial_float_digits))
-        return f"{float(v):.{digits}f}"
-
-    @staticmethod
-    def _clamp_abs(v: float, limit: float) -> float:
-        limit = abs(float(limit or 0.0))
-        if limit <= 0.0:
-            return 0.0
-        return max(-limit, min(limit, float(v)))
-
-    def _mode_prefix(self, mode: str) -> str:
-        mode = normalize_wire_mode(mode)
-        if mode == "STOP":
-            return ""
-        send_mode = bool(self.cfg.mode_line_every_cmd) or (
-            bool(self.cfg.mode_line_on_change) and mode != self._last_mode_sent
-        )
-        if not send_mode:
-            return ""
-        self._last_mode_sent = mode
-        return f"MODE {mode}\r\n"
-
-    def from_cmd_vel(self, cmd: CmdVel, cx_norm_abs: Optional[float] = None, distance_ratio: Optional[float] = None) -> SimpleCarCommand:
-        del cx_norm_abs, distance_ratio
-        mode = normalize_wire_mode(cmd.mode or "IDLE")
-        vx = self._clamp_abs(float(cmd.vx_mps), getattr(self.cfg, "max_vx_mps", 1.0))
-        vy = self._clamp_abs(float(cmd.vy_mps), getattr(self.cfg, "max_vy_mps", 1.0))
-        wz = self._clamp_abs(float(cmd.wz_radps), getattr(self.cfg, "max_wz_radps", 1.0))
-        hold_ms = int(max(0, int(getattr(cmd, "hold_ms", self.cfg.cmd_hold_ms))))
-        brake = bool(getattr(cmd, "brake", False))
-        prefix = self._mode_prefix(mode)
-
-        if brake:
-            return SimpleCarCommand(
-                raw_line="STOP\r\n",
-                kind="stop",
-                mode=mode,
-                hold_ms=hold_ms,
-                brake=True,
-            )
-
-        if mode == "STOP":
-            line = "STOP\r\n"
-            return SimpleCarCommand(raw_line=line, kind="stop", mode=mode, hold_ms=hold_ms)
-
-        if mode not in WIRE_MOTION_MODES:
-            return SimpleCarCommand(raw_line=prefix, kind="mode", mode=mode, hold_ms=hold_ms)
-
-        return SimpleCarCommand(
-            raw_line=prefix + f"V {self._fmt(vx)} {self._fmt(vy)} {self._fmt(wz)}\r\n",
-            kind="cmd_vel",
-            mode=mode,
-            vx_mps=vx,
-            vy_mps=vy,
-            wz_radps=wz,
-            hold_ms=hold_ms,
-        )
 
 
 def parse_car_state_line(line: str) -> Optional[CarState]:
@@ -323,7 +244,7 @@ def _parse_stm32_feedback(raw: str, upper: str) -> Optional[CarState]:
                 wz = float(v_match.group(3))
             except Exception:
                 vx = vy = wz = None
-        if echoed_upper == "STOP":
+        if echoed_upper in {"STOP", "SSTOP"}:
             mode = "STOP"
 
     ack_match = re.match(r"^(ACK_START|ACK_DONE)\b(?:\s+(.*))?$", raw, re.IGNORECASE)

@@ -1,50 +1,50 @@
-## Model Information
-### Source model
-- Input shape: 640x640
-- Number of parameters: 35.19M
-- Model size: 144.73M
-- Output shape: 1x25200x85
+## 模型信息 (Model Information)
+### 原始模型 (Source model)
+- 输入尺寸 (Input shape): 640x640
+- 参数数量 (Number of parameters): 35.19M
+- 模型大小 (Model size): 144.73M
+- 输出尺寸 (Output shape): 1x25200x85
 
-Source model repository: [yolov7](https://github.com/WongKinYiu/yolov7)
+原始模型仓库: [yolov7](https://github.com/WongKinYiu/yolov7)
 
-### Converted model
+### 转换后的模型 (Converted model)
 
-- Precision: INT8
-- Backend: QNN2.16
-- Target Device: FV01 QCS6490
+- 精度 (Precision): INT8
+- 后端 (Backend): QNN2.16
+- 目标设备 (Target Device): FV01 QCS6490
 
-## Inference with AidLite SDK
+## 使用 AidLite SDK 进行推理 (Inference with AidLite SDK)
 
-### SDK installation
-Model Farm uses AidLite SDK as the model inference SDK. For details, please refer to the [AidLite Developer Documentation](https://v2.docs.aidlux.com/en/sdk-api/aidlite-sdk/)
+### SDK 安装 (SDK installation)
+Model Farm 使用 AidLite SDK 作为模型推理 SDK。详情请参考 [AidLite 开发者文档](https://v2.docs.aidlux.com/en/sdk-api/aidlite-sdk/)
 
-- install AidLite SDK
+- 安装 AidLite SDK：
 
 ```bash
-# Install the appropriate version of the aidlite sdk
+# 安装合适版本的 aidlite sdk
 sudo aid-pkg update
 sudo aid-pkg install aidlite-sdk
-# Download the qnn version that matches the above backend. Eg Install QNN2.23 Aidlite: sudo aid-pkg install aidlite-qnn223
+# 下载与上述后端匹配的 qnn 版本。例如安装 QNN2.23 Aidlite: sudo aid-pkg install aidlite-qnn223
 sudo aid-pkg install aidlite-{QNN VERSION}
 ```
 
-- Verify AidLite SDK
+- 验证 AidLite SDK：
 
 ```bash
-# aidlite sdk c++ check
+# aidlite sdk C++ 检查
 python3 -c "import aidlite ; print(aidlite.get_library_version())"
 
-# aidlite sdk python check
+# aidlite sdk Python 检查
 python3 -c "import aidlite ; print(aidlite.get_py_library_version())"
 ```
 
-### Run python Demo
+### 运行 Python Demo (Run python Demo)
 ```bash
 cd yolov7/model_farm_yolov7_qcs6490_qnn2.16_int8_aidlite
 python3  python/run_test.py --target_model ./models/cutoff_yolov7_w8a8.qnn216.ctx.bin --imgs ./python/bus.jpg  --invoke_nums 10
 ```
 
-### Run c++ demo
+### 运行 C++ Demo (Run c++ demo)
 
 ```bash
 cd yolov7/model_farm_yolov7_qcs6490_qnn2.16_int8_aidlite/cpp

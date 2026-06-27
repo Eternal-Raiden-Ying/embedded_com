@@ -2,12 +2,16 @@
 # -*- coding: utf-8 -*-
 
 import json
+import os
 import queue
 import socket
 import threading
 import time
+
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+
+from .protocol import pack_msg, unpack_msg
 
 Logger = Optional[Callable[[Dict[str, Any]], None]]
 ResultCallback = Optional[Callable[[Dict[str, Any]], None]]
@@ -53,19 +57,26 @@ class JsonlClientSender:
             self._sock = None
 
     def _make_socket(self) -> socket.socket:
+        if self.mode == "disabled":
+            raise RuntimeError("disabled mode does not create socket")
         if self.mode == "tcp":
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             sock.settimeout(self.send_timeout)
             sock.connect((self.tcp_host, self.tcp_port))
             return sock
-        if self.mode == "uds":
-            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            sock.settimeout(self.send_timeout)
-            sock.connect(self.uds_path)
-            return sock
-        raise RuntimeError("disabled mode does not create socket")
+        if os.name == "nt":
+            raise RuntimeError("uds transport is not supported on Windows")
+        if not hasattr(socket, "AF_UNIX"):
+            raise RuntimeError("uds transport requested but socket.AF_UNIX is unavailable")
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(self.send_timeout)
+        path_str = self.uds_path
+        if not path_str and self.tcp_port:
+            path_str = f"/tmp/robot_ipc_{self.tcp_port}.sock"
+        if not path_str:
+            raise ValueError("uds transport requires uds_path or tcp_port-derived path")
+        sock.connect(path_str)
+        return sock
 
     def _ensure_connected(self) -> bool:
         if self.mode == "disabled":
@@ -94,16 +105,17 @@ class JsonlClientSender:
         if self.mode == "disabled":
             self.link_state = "DISABLED"
             return False
-        line = json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+        packed = pack_msg(payload)
+        data = len(packed).to_bytes(4, byteorder="big") + packed
         with self._lock:
-            self._log("info", "send_attempt", size=len(line), transport=self.mode)
+            self._log("info", "send_attempt", size=len(packed), transport=self.mode)
             for _ in range(2):
                 if not self._ensure_connected():
                     time.sleep(self.reconnect_interval)
                     continue
                 try:
                     assert self._sock is not None
-                    self._sock.sendall(line.encode("utf-8", errors="ignore"))
+                    self._sock.sendall(data)
                     self.fail_count = 0
                     self.last_send_ok_ts = time.time()
                     self.link_state = "CONNECTED"
@@ -266,7 +278,7 @@ class AsyncJsonlClientSender:
 class JsonlInboundServer:
     def __init__(self, mode: str = "tcp", tcp_host: str = "127.0.0.1", tcp_port: int = 0,
                  uds_path: str = "", name: str = "jsonl_server", logger: Logger = None):
-        if mode not in {"tcp", "uds"}:
+        if mode not in {"disabled", "tcp", "uds"}:
             raise ValueError(f"unsupported server mode: {mode}")
         self.mode = mode
         self.tcp_host = tcp_host
@@ -292,24 +304,105 @@ class JsonlInboundServer:
             payload.update(kwargs)
             self.logger(payload)
 
+    def _fix_uds_socket_permissions(self, path: str) -> None:
+        if os.name == "nt":
+            return
+        try:
+            import pwd
+
+            sudo_uid = os.environ.get("SUDO_UID")
+            sudo_gid = os.environ.get("SUDO_GID")
+
+            target_uid = None
+            target_gid = None
+
+            if sudo_uid and sudo_gid:
+                target_uid = int(sudo_uid)
+                target_gid = int(sudo_gid)
+            else:
+                try:
+                    user_info = pwd.getpwnam("aidlux")
+                    target_uid = user_info.pw_uid
+                    target_gid = user_info.pw_gid
+                except KeyError:
+                    pass
+
+            if target_uid is not None and target_gid is not None:
+                os.chown(path, target_uid, target_gid)
+                os.chmod(path, 0o660)
+            else:
+                os.chmod(path, 0o666)
+                self._log("warn", "ownership_not_resolved_fallback_666", path=path)
+        except Exception as exc:
+            self._log("warn", "failed_to_fix_uds_socket_permission", path=path, error=repr(exc))
+            try:
+                os.chmod(path, 0o666)
+            except Exception:
+                pass
+
     def _bind_socket(self) -> socket.socket:
+        if self.mode == "disabled":
+            raise RuntimeError("disabled mode does not create socket")
         if self.mode == "tcp":
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind((self.tcp_host, self.tcp_port))
-        else:
-            path = Path(self.uds_path)
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind((self.tcp_host, self.tcp_port))
+                self.tcp_host, self.tcp_port = sock.getsockname()[:2]
+                sock.listen(4)
+                sock.settimeout(1.0)
+                return sock
+            except Exception as exc:
+                print(
+                    f"[IPC] server bind failed mode=tcp host={self.tcp_host} port={self.tcp_port} exception={exc!r}",
+                    flush=True,
+                )
+                raise
+        if os.name == "nt":
+            raise RuntimeError("uds transport is not supported on Windows")
+        if not hasattr(socket, "AF_UNIX"):
+            raise RuntimeError("uds transport requested but socket.AF_UNIX is unavailable")
+        path_str = self.uds_path
+        if not path_str and self.tcp_port:
+            path_str = f"/tmp/robot_ipc_{self.tcp_port}.sock"
+        if not path_str:
+            raise ValueError("uds transport requires uds_path or tcp_port-derived path")
+        try:
+            path = Path(path_str)
+            parent_existed = path.parent.exists()
             path.parent.mkdir(parents=True, exist_ok=True)
+            if not parent_existed and os.name != "nt":
+                try:
+                    os.chmod(str(path.parent), 0o1777)
+                except Exception:
+                    try:
+                        os.chmod(str(path.parent), 0o777)
+                    except Exception:
+                        pass
             if path.exists():
-                path.unlink()
+                try:
+                    path.unlink()
+                except Exception:
+                    pass
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             sock.bind(str(path))
-        sock.listen(4)
-        sock.settimeout(1.0)
-        return sock
+            self._fix_uds_socket_permissions(str(path))
+            sock.listen(4)
+            sock.settimeout(1.0)
+            return sock
+        except Exception as exc:
+            print(
+                f"[IPC] server bind failed mode=uds path={path_str} exception={exc!r}",
+                flush=True,
+            )
+            raise
 
     def start(self):
         if self._accept_thread is not None:
+            return
+        if self.mode == "disabled":
+            self.listening = False
+            self._log("info", "disabled", transport=self.mode)
             return
         self._server_sock = self._bind_socket()
         self._accept_thread = threading.Thread(target=self._accept_loop, daemon=True, name=f"{self.name}_accept")
@@ -317,7 +410,20 @@ class JsonlInboundServer:
         self.listening = True
         self.start_ts = time.time()
         desc = self.uds_path if self.mode == "uds" else f"{self.tcp_host}:{self.tcp_port}"
-        self._log("info", "listening", transport=self.mode, bind=desc)
+        if self.mode == "uds":
+            owner = "unknown"
+            perm = "unknown"
+            try:
+                st = os.stat(self.uds_path)
+                owner = f"{st.st_uid}:{st.st_gid}"
+                perm = oct(st.st_mode & 0o777)
+                print(f"[IPC] server listening mode=uds path={self.uds_path} owner={owner} perm={perm}", flush=True)
+            except Exception:
+                pass
+            self._log("info", "listening", transport=self.mode, bind=desc, owner=owner, perm=perm)
+        else:
+            print(f"[IPC] server listening mode=tcp host={self.tcp_host} port={self.tcp_port}", flush=True)
+            self._log("info", "listening", transport=self.mode, bind=desc)
 
     def close(self):
         self._stop.set()
@@ -331,8 +437,13 @@ class JsonlInboundServer:
             self._accept_thread.join(timeout=1.5)
         for th in self._client_threads:
             th.join(timeout=0.5)
-        if self.mode == "uds" and self.uds_path:
-            path = Path(self.uds_path)
+        path_str = ""
+        if self.mode == "uds":
+            path_str = self.uds_path
+            if not path_str and self.tcp_port:
+                path_str = f"/tmp/robot_ipc_{self.tcp_port}.sock"
+        if path_str:
+            path = Path(path_str)
             if path.exists():
                 try:
                     path.unlink()
@@ -380,26 +491,36 @@ class JsonlInboundServer:
     def _client_loop(self, conn: socket.socket, peer: str):
         with conn:
             conn.settimeout(1.0)
-            file_obj = conn.makefile("r", encoding="utf-8", newline="\n")
+            buffer = b""
+            bytes_received = 0
             while not self._stop.is_set():
                 try:
-                    line = file_obj.readline()
+                    chunk = conn.recv(4096)
                 except socket.timeout:
                     continue
                 except Exception:
                     break
-                if not line:
-                    self._log("warn", "peer_closed", peer=peer)
+                if not chunk:
+                    if bytes_received > 0:
+                        self._log("warn", "peer_closed", peer=peer)
+                    else:
+                        self._log("info", "peer_closed_empty", peer=peer)
                     break
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    payload = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    self.invalid_json_count += 1
-                    self._log("warn", "invalid_json", peer=peer, error=str(exc), raw=line[:200], invalid_json_count=self.invalid_json_count)
-                    continue
-                self.last_recv_ts = time.time()
-                self.total_recv_count += 1
-                self._queue.put({"peer": peer, "payload": payload, "recv_ts": self.last_recv_ts})
+                bytes_received += len(chunk)
+                buffer += chunk
+                while len(buffer) >= 4:
+                    msg_len = int.from_bytes(buffer[:4], byteorder="big")
+                    if len(buffer) >= 4 + msg_len:
+                        raw = buffer[4:4+msg_len]
+                        buffer = buffer[4+msg_len:]
+                        try:
+                            payload = unpack_msg(raw)
+                        except Exception as exc:
+                            self.invalid_json_count += 1
+                            self._log("warn", "invalid_msgpack", peer=peer, error=str(exc), raw=raw[:200], invalid_json_count=self.invalid_json_count)
+                            continue
+                        self.last_recv_ts = time.time()
+                        self.total_recv_count += 1
+                        self._queue.put({"peer": peer, "payload": payload, "recv_ts": self.last_recv_ts})
+                    else:
+                        break

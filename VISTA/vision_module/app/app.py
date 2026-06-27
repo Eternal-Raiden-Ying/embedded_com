@@ -31,6 +31,7 @@ from ..config.board_config import CONFIG
 from ..diagnostics.operator_console import OperatorConsole
 from ..ipc.protocol import VisionReq
 from ..ipc.transport import JsonlClientSender, JsonlInboundServer
+from .observation import ObservationMetrics, ObservationRouter
 from .stage_controller import StageController
 from .stages import GraspStagePlan, InitStagePlan, ReturnStagePlan, SearchStagePlan
 
@@ -81,18 +82,22 @@ class VistaApp(BaseModule):
         self.mode_controller.register_profiles(build_default_mode_profiles(CONFIG.model.active_model, CONFIG).values())
         self.req_server = JsonlInboundServer(
             mode=CONFIG.req_in.transport,
-            tcp_host=CONFIG.req_in.host,
-            tcp_port=CONFIG.req_in.port,
-            uds_path=CONFIG.req_in.uds_path,
+            uds_path=CONFIG.req_in.ipc_socket_path,
             name="req_in",
             logger=self._log_ipc_event,
         )
         self.obs_sender = JsonlClientSender(
             mode=CONFIG.obs_out.transport,
-            tcp_host=CONFIG.obs_out.host,
-            tcp_port=CONFIG.obs_out.port,
-            uds_path=CONFIG.obs_out.uds_path,
+            uds_path=CONFIG.obs_out.ipc_socket_path,
             name="obs_out",
+            logger=self._log_ipc_event,
+            queue_size=1,
+            latest_only=True,
+        )
+        self.diag_sender = JsonlClientSender(
+            mode=CONFIG.obs_out.transport,
+            uds_path=CONFIG.obs_out.ipc_socket_path,
+            name="obs_diag",
             logger=self._log_ipc_event,
             queue_size=1,
             latest_only=True,
@@ -144,6 +149,15 @@ class VistaApp(BaseModule):
         self._system_metrics = SystemMetricsSampler("vision", interval_s=float(os.getenv("VISION_SYSTEM_METRICS_INTERVAL_S", "1.0") or 1.0))
         self._last_preview_timing_log_ts = 0.0
         self._last_main_loop_ms = 0.0
+        self.obs_skip_count = 0
+        self.obs_drop_count = 0
+        self.obs_total_age_ms = 0.0
+        self.same_frame_reuse_count = 0
+        self._last_processed_frame_id = None
+        self._last_diag_send_ts = 0.0
+        self._rate_diag_send_ts = deque(maxlen=256)
+        self.obs_metrics = ObservationMetrics()
+        self.obs_router = ObservationRouter(metrics=self.obs_metrics, control_send_interval_s=self._control_send_interval_s())
         self._warn_deprecated_env()
 
     def _warn_deprecated_env(self):
@@ -188,15 +202,11 @@ class VistaApp(BaseModule):
             "heartbeat_interval_s": CONFIG.runtime.heartbeat_interval_s,
             "req_in": {
                 "transport": CONFIG.req_in.transport,
-                "host": CONFIG.req_in.host,
-                "port": CONFIG.req_in.port,
-                "uds_path": CONFIG.req_in.uds_path,
+                "ipc_socket_path": CONFIG.req_in.ipc_socket_path,
             },
             "obs_out": {
                 "transport": CONFIG.obs_out.transport,
-                "host": CONFIG.obs_out.host,
-                "port": CONFIG.obs_out.port,
-                    "uds_path": CONFIG.obs_out.uds_path,
+                "ipc_socket_path": CONFIG.obs_out.ipc_socket_path,
             },
             "structured_logs": self.log_paths,
             "yolo26_enabled": bool(CONFIG.model.enable_yolo26),
@@ -379,6 +389,10 @@ class VistaApp(BaseModule):
             parts.append(f"peer={details.get('peer')}")
         if details.get("error"):
             parts.append(f"error={details.get('error')}")
+        if details.get("owner") is not None:
+            parts.append(f"owner={details.get('owner')}")
+        if details.get("perm") is not None:
+            parts.append(f"perm={details.get('perm')}")
         return " ".join(str(p) for p in parts)
 
     def _log_ipc_event(self, payload):
@@ -441,7 +455,9 @@ class VistaApp(BaseModule):
     def _task_key_for(self, req_stage: str, target, session_id, epoch: int):
         return (req_stage, target, session_id, int(epoch))
 
-    def _send_obs(self, out_payload):
+    def _send_obs(self, out_payload, sender=None, obs_class="control", priority=0):
+        if sender is None:
+            sender = self.obs_sender
         now = time.time()
         min_send_interval_ms = self._send_interval_s() * 1000.0
         send_interval_ms = (
@@ -451,23 +467,26 @@ class VistaApp(BaseModule):
         )
         send_hz = 1000.0 / float(send_interval_ms) if send_interval_ms and send_interval_ms > 0.0 else 0.0
         perception = out_payload.get("perception") if isinstance(out_payload, dict) else None
-        edge_obs = perception.get("table_edge_obs") if isinstance(perception, dict) else None
-        if isinstance(edge_obs, dict):
-            edge_obs["obs_out_send_ts_ms"] = int(round(now * 1000.0))
-            edge_obs["obs_out_send_interval_ms"] = send_interval_ms
-            edge_obs["obs_out_send_hz"] = float(send_hz)
-            edge_obs["obs_out_drop_or_skip_count"] = int(self._obs_out_drop_or_skip_count)
-            edge_obs["obs_out_skip_reason"] = str(self._obs_out_skip_reason or "")
-            edge_obs["send_hz_config"] = float(CONFIG.runtime.send_hz)
-            edge_obs["track_local_send_hz_config"] = float(CONFIG.runtime.track_local_send_hz)
-            edge_obs["min_send_interval_ms"] = float(min_send_interval_ms)
-        queued = self.obs_sender.send(out_payload)
+        if isinstance(perception, dict):
+            for obs_key in ("table_edge_obs", "target_obs", "home_tag_obs"):
+                obs = perception.get(obs_key)
+                if isinstance(obs, dict):
+                    obs["obs_out_send_ts_ms"] = int(round(now * 1000.0))
+                    obs["obs_out_send_interval_ms"] = send_interval_ms
+                    obs["obs_out_send_hz"] = float(send_hz)
+                    obs["obs_out_drop_or_skip_count"] = int(self._obs_out_drop_or_skip_count)
+                    obs["obs_out_skip_reason"] = str(self._obs_out_skip_reason or "")
+                    obs["send_hz_config"] = float(CONFIG.runtime.send_hz)
+                    obs["track_local_send_hz_config"] = float(CONFIG.runtime.track_local_send_hz)
+                    obs["min_send_interval_ms"] = float(min_send_interval_ms)
+        queued = sender.send(out_payload)
         if not queued:
             self._obs_out_drop_or_skip_count += 1
+            self.obs_drop_count += 1
             self._obs_out_skip_reason = "enqueue_failed"
             self._record_ipc(
                 direction="TX",
-                channel="obs_out",
+                channel="obs_out" if sender == self.obs_sender else "obs_diag",
                 event="enqueue_failed",
                 level="warn",
                 ok=queued,
@@ -479,12 +498,11 @@ class VistaApp(BaseModule):
                 msg_type=out_payload.get("type"),
                 status=out_payload.get("status"),
             )
-        if not queued:
-            self.log_warn("runtime", "obs_out queue busy; skipped enqueue")
+            self.log_warn("runtime", f"{sender.name} queue busy ({obs_class}); skipped enqueue")
         elif self._ipc_console_enabled():
             self.log_info(
                 "ipc",
-                "obs_out enqueue_ok",
+                f"{sender.name} enqueue_ok",
                 {
                     "req_id": out_payload.get("req_id"),
                     "epoch": out_payload.get("epoch"),
@@ -493,7 +511,10 @@ class VistaApp(BaseModule):
             )
         if queued:
             self._last_obs_out_send_ts = now
-            self._rate_obs_out_send_ts.append(now)
+            if obs_class == "control":
+                self._rate_obs_out_send_ts.append(now)
+            else:
+                self._rate_diag_send_ts.append(now)
             self._obs_out_skip_reason = ""
         return queued
 
@@ -560,7 +581,8 @@ class VistaApp(BaseModule):
         if str(out_payload.get("type") or "") != "vision_obs":
             return
         self._record_perf_timing(out_payload, sent_ts)
-        if str(out_payload.get("mode") or "").strip().upper() != "FIND_OBJECT":
+        mode = str(out_payload.get("mode") or "").strip().upper()
+        if mode not in {"FIND_OBJECT", "FIND_EDGE"}:
             return
         perception = out_payload.get("perception")
         if not isinstance(perception, dict):
@@ -619,6 +641,19 @@ class VistaApp(BaseModule):
                 "frame_id": edge_obs.get("frame_id"),
                 "seq": edge_obs.get("seq"),
                 "obs_ts": edge_obs.get("obs_ts"),
+                "age_ms": edge_obs.get("age_ms"),
+                "table_bbox_xyxy": edge_obs.get("table_bbox_xyxy"),
+                "table_cx_norm": edge_obs.get("table_cx_norm"),
+                "table_cy_norm": edge_obs.get("table_cy_norm"),
+                "table_size_norm": edge_obs.get("table_size_norm"),
+                "table_conf": edge_obs.get("table_conf", edge_obs.get("yolo_table_conf")),
+                "yolo_table_bbox": edge_obs.get("yolo_table_bbox"),
+                "yolo_table_visible": edge_obs.get("yolo_table_visible"),
+                "yolo_table_fresh": edge_obs.get("yolo_table_fresh"),
+                "yolo_table_age_ms": edge_obs.get("yolo_table_age_ms"),
+                "edge_found": edge_obs.get("edge_found"),
+                "edge_valid": edge_obs.get("edge_valid"),
+                "edge_trusted": edge_obs.get("edge_trusted"),
                 "obs_seq": edge_obs.get("obs_seq"),
                 "camera_frame_seq": edge_obs.get("camera_frame_seq"),
                 "frame_capture_ts": edge_obs.get("frame_capture_ts"),
@@ -762,6 +797,12 @@ class VistaApp(BaseModule):
             },
             "table_edge": {
                 "process_ms": edge_process_ms,
+                "table_bbox_xyxy": (edge_obs or {}).get("table_bbox_xyxy") if isinstance(edge_obs, dict) else None,
+                "yolo_table_visible": (edge_obs or {}).get("yolo_table_visible") if isinstance(edge_obs, dict) else None,
+                "yolo_table_fresh": (edge_obs or {}).get("yolo_table_fresh") if isinstance(edge_obs, dict) else None,
+                "yolo_table_age_ms": (edge_obs or {}).get("yolo_table_age_ms") if isinstance(edge_obs, dict) else None,
+                "edge_valid": (edge_obs or {}).get("edge_valid") if isinstance(edge_obs, dict) else None,
+                "edge_trusted": (edge_obs or {}).get("edge_trusted") if isinstance(edge_obs, dict) else None,
                 "latest_frame_lag_ms": (edge_obs or {}).get("latest_frame_lag_ms") if isinstance(edge_obs, dict) else None,
                 "obs_total_age_ms": obs_total_age_ms,
                 "scheduler_read_ms": (edge_obs or {}).get("scheduler_read_ms") if isinstance(edge_obs, dict) else None,
@@ -793,7 +834,8 @@ class VistaApp(BaseModule):
         self.run_logger.write_jsonl("perf_timing", record)
 
     def _emit_rate_summary_if_needed(self, force: bool = False) -> None:
-        if self._safe_mode_text(self._ctx().current_mode) != "FIND_OBJECT":
+        mode = self._safe_mode_text(self._ctx().current_mode)
+        if mode not in {"FIND_OBJECT", "FIND_EDGE"}:
             return
         now = time.time()
         period_s = max(5.0, float(CONFIG.runtime.operator_summary_interval_s))
@@ -863,7 +905,7 @@ class VistaApp(BaseModule):
         self.operator_console.emit_rate_limited(
             "vision_rate",
             "[VISION][RATE] "
-            f"mode=FIND_OBJECT "
+            f"mode={mode} "
             f"request_rate_hz={self._fmt_rate_value(request_hz)} "
             f"mode_request_rate_hz={self._fmt_rate_value(mode_request_hz)} "
             f"target_update_rate_hz={self._fmt_rate_value(target_update_hz)} "
@@ -915,12 +957,22 @@ class VistaApp(BaseModule):
 
     def _enter_hot_standby(self, current_mode: str, target_name, epoch: int):
         self.stage_controller.set_runtime_mode("IDLE_HOT", reason="enter_hot_standby", force=True)
-        new_until = time.time() + float(CONFIG.runtime.hot_standby_s)
+        keep_hot = bool(
+            getattr(CONFIG.runtime, "keep_vision_alive_after_task", True)
+            or getattr(CONFIG.runtime, "keep_preview_alive_after_task", True)
+        )
+        new_until = 0.0 if keep_hot else time.time() + float(CONFIG.runtime.hot_standby_s)
         self.hot_until_ts = new_until
         self.log_info(
             "runtime",
             "enter hot standby",
-            {"prev_mode": current_mode, "prev_target": target_name, "until_ts": new_until},
+            {
+                "prev_mode": current_mode,
+                "prev_target": target_name,
+                "until_ts": new_until,
+                "keep_hot": keep_hot,
+                "release_model_on_idle": bool(getattr(CONFIG.runtime, "release_model_on_idle", False)),
+            },
         )
         self._record_event(
             "ENTER_HOT_STANDBY",
@@ -929,6 +981,7 @@ class VistaApp(BaseModule):
                 "prev_mode": current_mode,
                 "prev_target": target_name,
                 "until_ts": new_until,
+                "keep_hot": keep_hot,
             },
             epoch=int(epoch),
         )
@@ -991,6 +1044,70 @@ class VistaApp(BaseModule):
             send_hz = max(send_hz, float(getattr(CONFIG.runtime, "track_local_send_hz", send_hz) or send_hz))
         return 1.0 / max(0.5, send_hz)
 
+    def _control_send_interval_s(self) -> float:
+        send_hz = float(CONFIG.runtime.send_hz)
+        if self._safe_mode_text(self._ctx().current_mode) in {"FIND_OBJECT", "FIND_EDGE"}:
+            send_hz = max(send_hz, float(getattr(CONFIG.runtime, "track_local_send_hz", send_hz) or send_hz))
+        # Ensure the control send interval is at most 0.10 to support 8-10 Hz control loop
+        send_hz = max(10.0, send_hz)
+        return 1.0 / send_hz
+
+    def _should_force_send_stage_output(self, output) -> bool:
+        if output is None or not isinstance(getattr(output, "vision_obs", None), dict):
+            return False
+        obs = output.vision_obs
+        status = str(obs.get("status") or "").strip().upper()
+        if status in {"START", "STOP", "FAILED", "FATAL"}:
+            return True
+        signals = getattr(output, "signals", {}) or {}
+        request_op = str(signals.get("request_op") or "").strip().upper()
+        if request_op in {"START", "STOP"}:
+            return True
+        if str(signals.get("transition") or "").strip():
+            return True
+        if bool(signals.get("urgent") or signals.get("force_send") or signals.get("fatal")):
+            return True
+        if bool(signals.get("mode_apply_failed", False)):
+            return True
+        result = obs.get("result")
+        if isinstance(result, dict) and bool(result.get("urgent") or result.get("fatal")):
+            return True
+        return False
+
+    def _check_freq_and_reason(self, now: float) -> Optional[str]:
+        mode = self._safe_mode_text(self._ctx().current_mode)
+        if mode not in {"FIND_OBJECT", "FIND_EDGE"}:
+            return None
+        if CONFIG.runtime.loop_hz < 8.0:
+            return "config loop_hz too low"
+        send_hz = float(CONFIG.runtime.send_hz)
+        track_send_hz = float(getattr(CONFIG.runtime, "track_local_send_hz", send_hz) or send_hz)
+        if track_send_hz < 8.0:
+            return "config send_hz too low"
+        actual_hz = self._hz_for_samples(self._rate_obs_out_send_ts, now)
+        if len(self._rate_obs_out_send_ts) >= 5 and actual_hz < 7.8:
+            local = None
+            try:
+                local = self.scheduler.read_result("local_perception", default=None)
+            except Exception:
+                pass
+            yolo_ms = float(local.get("yolo_infer_ms") or 0.0) if isinstance(local, dict) else 0.0
+            edge_obs = None
+            try:
+                edge_obs = self.scheduler.read_result("table_edge_obs", default=None)
+            except Exception:
+                pass
+            edge_ms = float(edge_obs.get("vision_process_ms") or 0.0) if isinstance(edge_obs, dict) else 0.0
+            if yolo_ms > 80.0:
+                return f"high inference latency ({yolo_ms:.1f} ms)"
+            if edge_ms > 80.0:
+                return f"high edge detection latency ({edge_ms:.1f} ms)"
+            main_loop_ms = float(getattr(self, "_last_main_loop_ms", 0.0) or 0.0)
+            if main_loop_ms > 100.0:
+                return f"main loop blocked ({main_loop_ms:.1f} ms)"
+            return "camera frame rate or queue delay"
+        return None
+
     def _sync_runtime_from_stage_context(self, reason: str = ""):
         ctx = self._ctx()
         stage = self._safe_stage_text(ctx.current_stage)
@@ -1049,16 +1166,115 @@ class VistaApp(BaseModule):
             return False
         if output.vision_obs is None:
             return False
-        if not force_send and (now - self.last_send_ts) < self._send_interval_s():
+
+        frame_meta = {}
+        try:
+            frame_meta = self.scheduler.read_result("frame_meta") or {}
+        except Exception:
+            pass
+
+        self.obs_router.update_intervals(control_send_interval_s=self._control_send_interval_s())
+        route_result = self.obs_router.route(
+            vision_obs=output.vision_obs,
+            frame_meta=frame_meta,
+            now=now,
+            force_send=force_send,
+            freq_warning_reason=self._check_freq_and_reason(now) or "",
+        )
+        self._sync_observation_metrics_from_router()
+        if route_result.skipped:
             self._obs_out_drop_or_skip_count += 1
-            self._obs_out_skip_reason = "send_hz_limit"
+            self._obs_out_skip_reason = route_result.skip_reason
             return False
-        queued = self._send_obs(output.vision_obs)
+
+        control_obs = route_result.control_obs
+        if control_obs is None:
+            return False
+
+        if isinstance(control_obs, dict):
+            perception = control_obs.get("perception") or {}
+            edge_obs = perception.get("table_edge_obs")
+            if isinstance(edge_obs, dict):
+                # Log EDGE_OBS_PAYLOAD_FINAL using self.log_info
+                payload_msg = (
+                    f"[EDGE_OBS_PAYLOAD_FINAL]\n"
+                    f"frame_id={edge_obs.get('frame_id')}\n"
+                    f"edge_found={str(bool(edge_obs.get('edge_found', False))).lower()}\n"
+                    f"edge_valid={str(bool(edge_obs.get('edge_valid', False))).lower()}\n"
+                    f"edge_trusted={str(bool(edge_obs.get('edge_trusted', False))).lower()}\n"
+                    f"point_count={edge_obs.get('point_count')}\n"
+                    f"table_point_count={edge_obs.get('table_point_count')}\n"
+                    f"reason={edge_obs.get('reason')}\n"
+                    f"source={edge_obs.get('source')}\n"
+                    f"obs_ts={edge_obs.get('obs_ts')}\n"
+                    f"send_allowed={str(not route_result.skipped).lower()}\n"
+                    f"force_send={str(force_send).lower()}"
+                )
+                self.log_info("runtime", payload_msg)
+
+                # Check mapping mismatch against the debug_publish fields
+                pub_found = bool(edge_obs.get("debug_publish_found", False))
+                pub_valid = bool(edge_obs.get("debug_publish_valid", False))
+                pub_trusted = bool(edge_obs.get("debug_publish_trusted", False))
+                pub_point_count = int(edge_obs.get("debug_publish_point_count", 0) or 0)
+
+                pay_found = bool(edge_obs.get("edge_found", False))
+                pay_valid = bool(edge_obs.get("edge_valid", False))
+                pay_trusted = bool(edge_obs.get("edge_trusted", False))
+                pay_point_count = int(edge_obs.get("point_count", 0) or 0)
+
+                mismatch = (
+                    (pub_found and not pay_found) or
+                    (pub_valid and not pay_valid) or
+                    (pub_trusted and not pay_trusted)
+                )
+                if mismatch:
+                    mismatch_msg = (
+                        f"[EDGE_MAPPING_MISMATCH_FINAL]\n"
+                        f"frame_id={edge_obs.get('frame_id')}\n"
+                        f"publish_found={int(pub_found)}\n"
+                        f"publish_valid={int(pub_valid)}\n"
+                        f"publish_trusted={int(pub_trusted)}\n"
+                        f"publish_point_count={pub_point_count}\n"
+                        f"payload_found={int(pay_found)}\n"
+                        f"payload_valid={int(pay_valid)}\n"
+                        f"payload_trusted={int(pay_trusted)}\n"
+                        f"payload_point_count={pay_point_count}\n"
+                        f"payload_reason={edge_obs.get('reason')}"
+                    )
+                    self.log_warn("runtime", mismatch_msg)
+
+        queued = self._send_obs(control_obs, sender=self.obs_sender, obs_class="control")
         if queued:
             self.last_send_ts = now
-            self._record_rate_sample(output.vision_obs, now)
+            self.obs_router.mark_control_sent(now)
+            self._sync_observation_metrics_from_router()
+            self._record_rate_sample(control_obs, now)
             self._emit_rate_summary_if_needed()
+        else:
+            self.obs_router.mark_drop()
+            self._sync_observation_metrics_from_router()
+
+        diagnostic_obs = route_result.diagnostic_obs
+        if diagnostic_obs is not None:
+            diag_queued = self._send_obs(diagnostic_obs, sender=self.diag_sender, obs_class="diagnostic")
+            if diag_queued:
+                self.obs_router.mark_diagnostic_sent(now)
+                self._last_diag_send_ts = now
+                self._sync_observation_metrics_from_router()
+            else:
+                self.obs_router.mark_drop()
+                self._sync_observation_metrics_from_router()
+
         return queued
+
+    def _sync_observation_metrics_from_router(self) -> None:
+        metrics = self.obs_router.metrics
+        self.obs_skip_count = int(metrics.obs_skip_count)
+        self.obs_drop_count = int(metrics.obs_drop_count)
+        self.obs_total_age_ms = float(metrics.obs_total_age_ms)
+        self.same_frame_reuse_count = int(metrics.same_frame_reuse_count)
+        self._last_processed_frame_id = metrics.last_processed_frame_id
 
     def _handle_stop_request(self, stage: str, stop_state=None):
         self._record_event("VISION_STOP", trigger="request:STOP", stage=stage)
@@ -1067,7 +1283,12 @@ class VistaApp(BaseModule):
         prev_mode = str(state.get("mode") or self._safe_mode_text(ctx.current_mode) or "IDLE").strip().upper()
         prev_target = state.get("target_name", ctx.target_name)
         stop_epoch = int(state.get("epoch", int(getattr(ctx, "epoch", 0) or 0)))
-        if CONFIG.runtime.keep_preview_after_stop and float(CONFIG.runtime.hot_standby_s) > 0.0:
+        keep_after_stop = bool(
+            CONFIG.runtime.keep_preview_after_stop
+            or getattr(CONFIG.runtime, "keep_vision_alive_after_task", True)
+            or getattr(CONFIG.runtime, "keep_preview_alive_after_task", True)
+        )
+        if keep_after_stop and float(CONFIG.runtime.hot_standby_s) >= 0.0:
             self._enter_hot_standby(prev_mode, prev_target, stop_epoch)
         else:
             self.log_info("runtime", "enter idle", {"reason": stage})
@@ -1142,7 +1363,11 @@ class VistaApp(BaseModule):
             interaction_id=req.interaction_id,
             data=req_event_data,
         )
-        obs_sent = self._apply_stage_output(stage_output, now=time.time(), force_send=bool(stage_output and stage_output.vision_obs))
+        obs_sent = self._apply_stage_output(
+            stage_output,
+            now=time.time(),
+            force_send=self._should_force_send_stage_output(stage_output),
+        )
         if not obs_sent:
             self.last_send_ts = 0.0
 
@@ -1161,14 +1386,23 @@ class VistaApp(BaseModule):
         }
         stage_output = self.stage_controller.tick(tick_input)
         self._sync_runtime_from_stage_context(reason="tick")
-        self._apply_stage_output(stage_output, now=now)
+        self._apply_stage_output(stage_output, now=now, force_send=self._should_force_send_stage_output(stage_output))
 
     def _expire_hot_standby(self, now: float):
+        if bool(
+            getattr(CONFIG.runtime, "keep_vision_alive_after_task", True)
+            or getattr(CONFIG.runtime, "keep_preview_alive_after_task", True)
+        ):
+            return
         if self._safe_mode_text(self._ctx().current_mode) != "IDLE_HOT" or self.hot_until_ts <= 0 or now < self.hot_until_ts:
             return
         self._enter_cold_idle(int(getattr(self._ctx(), "epoch", 0) or 0))
 
     def start(self):
+        print(f"[VISTA_TABLE_EDGE_SCHEDULER_FIX_ACTIVE] version=20260626_table_edge_scheduler_route_v1 file={__file__}", flush=True)
+        self.log_info("runtime", f"[VISTA_TABLE_EDGE_SCHEDULER_FIX_ACTIVE] version=20260626_table_edge_scheduler_route_v1 file={__file__}")
+        print(f"[VISTA_EDGE_MAPPING_FIX_ACTIVE] version=20260626_edge_payload_path_v2 file={__file__}", flush=True)
+        self.log_info("runtime", f"[VISTA_EDGE_MAPPING_FIX_ACTIVE] version=20260626_edge_payload_path_v2 file={__file__}")
         cfg_dump = self._config_dump()
         self.run_logger.write_meta(
             {
@@ -1185,7 +1419,18 @@ class VistaApp(BaseModule):
         self.operator_console.emit(f"[VISTA] SERVICE_STARTING run={self.run_logger.stack_run_id}")
         if self._console_is_full():
             self.log_info("runtime", "structured logs ready", self.log_paths)
+        req_mode = str(CONFIG.req_in.transport or "disabled").strip().lower()
+        req_path = str(CONFIG.req_in.ipc_socket_path or "")
+        req_desc = (
+            f"mode=uds path={req_path}"
+            if req_mode == "uds"
+            else f"mode={req_mode}"
+        )
+        self.operator_console.emit(f"[VISTA] request server endpoint {req_desc}")
         self.req_server.start()
+        self.operator_console.emit(
+            f"[VISTA] request server listening mode={self.req_server.mode} ready={int(bool(self.req_server.listening))}"
+        )
         self.mode_controller.start_runtime()
         # Activate INIT stage — non-blocking, task worker starts via mode plan
         init_req = VisionReq(ts=time.time(), op="START", stage="INIT", mode_hint="INIT")
@@ -1193,7 +1438,9 @@ class VistaApp(BaseModule):
         self._sync_runtime_from_stage_context(reason="service_start")
         self._running = True
         self._record_event("SERVICE_READY", trigger="start")
-        self.operator_console.emit(f"[VISTA] READY mode=INIT run={self.run_logger.stack_run_id}")
+        self.operator_console.emit(
+            f"[VISTA] READY mode=INIT request_server_ready={int(bool(self.req_server.listening))} run={self.run_logger.stack_run_id}"
+        )
         if self._console_is_full():
             self.log_info(
                 "runtime",
@@ -1217,6 +1464,7 @@ class VistaApp(BaseModule):
         self._record_event("SERVICE_STOPPING", trigger="stop")
         self.req_server.close()
         self.obs_sender.close()
+        self.diag_sender.close()
         self.mode_controller.stop_runtime()
         self._emit_system_metrics_if_needed(force=True)
         self._record_event("SERVICE_STOPPED", trigger="stop")

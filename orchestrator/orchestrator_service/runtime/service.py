@@ -14,10 +14,11 @@ from common.console_presenter import DemoConsolePresenter
 from common.base_module import BaseModule
 from common.runtime_logging import OperatorConsole
 from common.system_metrics import SystemMetricsSampler
-from ..bridge.simple_car_protocol import SimpleCarMapper, parse_car_state_line
+from ..bridge.simple_car_protocol import parse_car_state_line
 from ..bridge.uart_bridge import UartBridge
 from ..config.schema import OrchestratorConfig, SocketEndpoint
 from ..control.motion_adapter import Stm32MotionAdapter
+from ..control.motion.velocity_limits import SimpleCarMapper
 from ..ipc.protocol import (
     HomeTagObs,
     TableEdgeObs,
@@ -74,6 +75,7 @@ class OrchestratorService(BaseModule):
         self._last_heartbeat_ts = 0.0
         self._last_task_cmd_recv_ts = 0.0
         self._last_vision_obs_recv_ts = 0.0
+        self._last_diagnostic_obs_metrics: Dict[str, Any] = {}
         self._last_home_obs_recv_ts = 0.0
         self._last_uart_tx_ts = 0.0
         self._edge_obs_rate_ts = deque(maxlen=128)
@@ -134,6 +136,8 @@ class OrchestratorService(BaseModule):
             "last_rx_time": None,
         }
         self._stopped = False
+        self._last_service_override = False
+        self._last_uart_tx_ok = True
         self.uart = UartBridge(
             cfg.serial.port,
             cfg.serial.baudrate,
@@ -181,8 +185,8 @@ class OrchestratorService(BaseModule):
             "seq",
             "frame_id",
             "edge_found",
-            "valid_for_control",
-            "control_level",
+            "edge_geometry_valid",
+            "edge_trusted",
             "yaw_err_rad",
             "dist_err_m",
             "edge_conf",
@@ -239,6 +243,7 @@ class OrchestratorService(BaseModule):
             "session_id": env.session_id,
             "req_id": env.req_id,
             "epoch": int(env.epoch),
+            "obs_class": env.obs_class,
             "source": env.source,
             "perception": lite_perception,
             "type": "vision_obs",
@@ -300,7 +305,7 @@ class OrchestratorService(BaseModule):
         boxes = payload.get("boxes_count", payload.get("box_count", payload.get("boxes", 0)))
         if isinstance(boxes, list):
             boxes = len(boxes)
-        mode = str(payload.get("vision_mode") or payload.get("mode") or self.core.ctx.active_vision_mode or "").strip() or "n/a"
+        mode = str(payload.get("vision_mode") or payload.get("mode") or self.core.ctx.confirmed_vision_mode or "").strip() or "n/a"
         return f"[ORCH] OBS target={target} found=0 boxes={int(boxes or 0)} mode={mode}"
 
     def _vision_req_console_summary(self, payload: Dict[str, Any]) -> Optional[str]:
@@ -407,11 +412,11 @@ class OrchestratorService(BaseModule):
         if ep.transport == "tcp":
             return [f"host={ep.host}", f"port={ep.port}"]
         if ep.transport == "uds":
-            return [f"path={ep.uds_path}"]
+            return [f"path={ep.ipc_socket_path}"]
         return [f"transport={ep.transport}"]
 
     def _operator_ipc_line(self, channel: str, event: str, details: Dict[str, Any]) -> str:
-        level = "ERROR" if event in {"send_failed", "invalid_json"} else ("WARN" if "failed" in event or "closed" in event else "IPC")
+        level = "ERROR" if event in {"send_failed", "invalid_json"} else ("WARN" if ("failed" in event or "closed" in event) and event != "peer_closed_empty" else "IPC")
         parts = [f"[ORCH] {level} {channel} {event}"]
         parts.extend(self._endpoint_parts(channel))
         if details.get("peer"):
@@ -420,6 +425,10 @@ class OrchestratorService(BaseModule):
             parts.append(f"err={self._short_err(details.get('error'))}")
         if details.get("fail_count") is not None:
             parts.append(f"retry={details.get('fail_count')}")
+        if details.get("owner") is not None:
+            parts.append(f"owner={details.get('owner')}")
+        if details.get("perm") is not None:
+            parts.append(f"perm={details.get('perm')}")
         return " ".join(parts)
 
     def _operator_ipc_event(self, channel: str, event: str, details: Dict[str, Any]) -> None:
@@ -476,6 +485,9 @@ class OrchestratorService(BaseModule):
             self.operator_console.emit_change("task_done", self._task_done_summary_line(reason))
             self._emit_demo_task_finished(success=True, reason=reason)
         if new_state == "ERROR_RECOVERY":
+            self.log("warn", "service", f"Immediate transition to ERROR_RECOVERY due to: {reason}, triggering emergency stop")
+            self.uart.send_emergency_stop()
+            self.motion_adapter.cancel_active_jogs()
             self._emit_demo_task_finished(success=False, reason=reason)
         if old_state == "DONE" and new_state == "IDLE":
             self.operator_console.emit_change("idle_after_done", "[ORCH][IDLE] task finished, waiting for next command")
@@ -487,11 +499,13 @@ class OrchestratorService(BaseModule):
         target = getattr(self.core.ctx, "active_target", "") or "target"
         if new_state == "SEARCH_TABLE":
             self.demo_console.table_phase("searching")
-        elif new_state == "COARSE_ALIGN":
-            self.demo_console.table_phase("aligning")
-        elif new_state == "CONTROLLED_APPROACH":
-            self.demo_console.table_phase("approaching")
-        elif new_state == "FINAL_LOCK":
+        elif new_state == "EDGE_ADJUST":
+            phase = getattr(self.core.ctx, "table_dock_phase", "aligning")
+            if phase == "aligning":
+                self.demo_console.table_phase("aligning")
+            else:
+                self.demo_console.table_phase("approaching")
+        elif new_state == "FINAL_SLOW_STOP":
             self.demo_console.table_phase("final_locking")
             if "edge_distance_out_of_tolerance" in str(reason or ""):
                 self.demo_console.recover("edge distance out of range, re-locking table edge")
@@ -525,7 +539,8 @@ class OrchestratorService(BaseModule):
             state_value = ctx.state.value
         except Exception:
             state_value = "DONE"
-        result = "success" if state_value == "DONE" else "failed"
+        result = "success" if state_value in {"DONE", "AT_TABLE_EDGE"} else "failed"
+        display_state = "docked_at_table_edge" if state_value == "AT_TABLE_EDGE" else state_value
         total_time_s = 0.0
         if getattr(ctx, "task_start_wall_ts", 0.0):
             total_time_s = max(0.0, time.time() - float(ctx.task_start_wall_ts))
@@ -537,7 +552,7 @@ class OrchestratorService(BaseModule):
             f"session_id={getattr(ctx, 'active_session_id', '') or 'n/a'} "
             f"target={getattr(ctx, 'active_target', '') or 'n/a'} "
             f"result={result} "
-            f"final_state={state_value} "
+            f"final_state={display_state} "
             f"reason={reason or 'task_done'} "
             f"total_time_s={total_time_s:.1f} "
             f"edge_retries={int(getattr(ctx, 'dock_retry_count', 0) + getattr(ctx, 'edge_transition_count', 0))} "
@@ -887,6 +902,15 @@ class OrchestratorService(BaseModule):
         }
         context = dict(getattr(self, "_last_motion_tx_context", {}) or {})
         for key in (
+            "docking_stage",
+            "docking_action",
+            "docking_reason",
+            "candidate_cmd",
+            "arbiter_final_cmd",
+            "service_effective_cmd",
+            "uart_tx_cmd",
+            "writer_accept_cmd",
+            "uart_tx_ok",
             "speed_profile",
             "speed_limit_reason",
             "forward_block_reason",
@@ -920,6 +944,35 @@ class OrchestratorService(BaseModule):
             "zero_cmd_reason",
             "original_cmd",
             "effective_cmd",
+            "stop_class",
+            "motion_class",
+            "motion_intent_type",
+            "yaw_owner",
+            "arbitration_reason",
+            "blocked_by",
+            "fov_guard_level",
+            "fov_guard_reason",
+            "approach_commit_active",
+            "perception_dropout_hold_active",
+            "zero_escape_reason",
+            "allow_uart_send",
+            "service_may_override",
+            "near_table_latched",
+            "near_table_latch_reason",
+            "final_depth_latched",
+            "final_depth_latch_reason",
+            "final_yaw_align_active",
+            "final_locked",
+            "final_lock_reason",
+            "near_stage_yaw_source",
+            "yolo_control_enabled",
+            "bbox_lost_ignored_due_to_near_latch",
+            "estop_cooldown_applied",
+            "estop_cooldown_reason",
+            "service_override",
+            "service_override_reason",
+            "effective_cmd_before_service",
+            "effective_cmd_after_service",
         ):
             if context.get(key) is not None:
                 meta[key] = context.get(key)
@@ -979,6 +1032,78 @@ class OrchestratorService(BaseModule):
         now = time.time()
         state = str(getattr(self.core.ctx.state, "value", self.core.ctx.state) or "").strip().upper()
         mode = str(getattr(cmd, "mode", "") or "").strip().upper()
+        arbiter_applied = bool(summary.get("arbiter_applied", False))
+        arbiter_stop_class = str(summary.get("stop_class") or "none").strip().lower()
+        arbiter_motion_class = str(summary.get("motion_class") or "").strip().lower()
+        if arbiter_applied:
+            hold_ms = max(0, int(getattr(self.cfg.car, "motion_hold_ms", getattr(self.cfg.car, "cmd_hold_ms", 150)) or 0))
+            emergency_or_safety = bool(arbiter_stop_class in {"emergency", "safety"} or arbiter_motion_class in {"emergency_stop", "safety_stop"})
+            active_table_docking = bool(
+                summary.get("active_table_docking", False)
+                or state in {"SEARCH_TABLE", "YOLO_ACQUIRE_ALIGN", "YOLO_APPROACH", "EDGE_ADJUST", "FINAL_SLOW_STOP", "AT_TABLE_EDGE"}
+            )
+            explicit_idle_shutdown = bool(
+                not active_table_docking
+                and (getattr(cmd, "brake", False) or mode in {"STOP", "IDLE", "DONE", "ERROR", "ERROR_RECOVERY"} or state in {"IDLE", "STOP", "DONE"})
+            )
+            effective = cmd
+            emit_reason = "arbiter_direct"
+            stop_class = "none" if arbiter_stop_class in {"", "none"} else arbiter_stop_class
+            if emergency_or_safety or explicit_idle_shutdown:
+                emit_reason = "arbiter_hard_stop" if emergency_or_safety else "explicit_idle_shutdown"
+                effective = self._make_stop_cmd(now, hold_ms=int(getattr(cmd, "hold_ms", self.cfg.car.cmd_hold_ms) or self.cfg.car.cmd_hold_ms))
+                self._last_valid_motion_cmd = None
+                self._last_valid_motion_ts = 0.0
+                last_age_ms = None
+                if not stop_class:
+                    stop_class = "emergency" if arbiter_motion_class == "emergency_stop" else "safety"
+            elif self._cmd_has_motion(cmd):
+                self._last_valid_motion_cmd = self._cmd_dict(cmd)
+                self._last_valid_motion_ts = now
+                last_age_ms = 0.0
+            else:
+                # diagnostic only; final motion is decided by docking motion arbiter
+                last_age_ms = self._last_valid_motion_age_ms(now)
+
+            service_override = bool(self._cmd_dict(effective) != self._cmd_dict(cmd))
+            self._last_service_override = service_override
+            return effective, {
+                "uart_emit_reason": emit_reason,
+                "last_valid_motion_cmd": dict(self._last_valid_motion_cmd or {}),
+                "last_valid_motion_age_ms": last_age_ms,
+                "soft_stale_hold_active": False,
+                "zero_cmd_reason": "" if self._cmd_has_motion(effective) else str(summary.get("zero_escape_reason") or ""),
+                "original_cmd": self._cmd_dict(cmd),
+                "effective_cmd": self._cmd_dict(effective),
+                "motion_hold_ms": int(hold_ms),
+                "hard_stale_stop_ms": int(getattr(self.cfg.car, "hard_stale_stop_ms", 800) or 800),
+                "soft_stale_hold_enable": bool(getattr(self.cfg.car, "soft_stale_hold_enable", True)),
+                "edge_stale_dead": False,
+                "table_bbox_stale": False,
+                "perception_dead": False,
+                "stale_source": "",
+                "yolo_allows_edge_stale": False,
+                "search_allows_edge_stale": False,
+                "search_table_stale_gate_bypass": bool(summary.get("search_table_stale_gate_bypass", False)),
+                "stale_gate_stop_source_state": "",
+                "stop_class": stop_class or "none",
+                "motion_class": summary.get("motion_class") or "",
+                "estop_cooldown_applied": (
+                    True if (stop_class or "").lower() in {"emergency", "safety"}
+                    else (False if (stop_class or "").lower() in {"control_recovery", "stale_recovery"} else None)
+                ),
+                "estop_cooldown_reason": "hard_stop" if (stop_class or "").lower() in {"emergency", "safety"} else "",
+                "service_override": service_override,
+                "service_override_reason": emit_reason if service_override else "",
+                "effective_cmd_before_service": self._cmd_dict(cmd),
+                "effective_cmd_after_service": self._cmd_dict(effective),
+                "perception_dropout_hold_active": bool(summary.get("perception_dropout_hold_active", False)),
+                "service_may_override": bool(summary.get("service_may_override", False)),
+                "active_table_docking": bool(active_table_docking),
+            }
+        # Legacy fallback for non-table-docking or pre-arbiter commands.
+        # Table docking commands with arbiter_applied=True bypass this visual
+        # stale gate; final motion is decided by table docking motion arbiter.
         control_source = str(summary.get("control_source") or "").strip().lower()
         stale_level = str(summary.get("stale_level") or "").strip().lower()
         stale_reason = str(summary.get("stale_guard_reason") or summary.get("reason") or "").strip().lower()
@@ -994,7 +1119,7 @@ class OrchestratorService(BaseModule):
             or "system_perception_dead" in stale_reason
         )
         yolo_allows_edge_stale = bool(
-            control_source in {"yolo_forward"}
+            control_source in {"yolo_forward", "yolo_track_forward", "edge_guided_forward"}
             and bool(summary.get("yolo_table_control_valid", False))
             and not perception_dead
         )
@@ -1010,7 +1135,11 @@ class OrchestratorService(BaseModule):
             or "perception_dead" in stale_reason
             or soft_stale_timed_out
         )
-        hard_stale = bool(hard_stale_raw and not search_allows_edge_stale and not yolo_allows_edge_stale)
+        bbox_lost_hold_active = bool(summary.get("bbox_lost_hold_active", False))
+        hard_stale = bool(hard_stale_raw and not search_allows_edge_stale and not yolo_allows_edge_stale and not bbox_lost_hold_active)
+        dropout_hold_active = bool(summary.get("perception_dropout_hold_active", False))
+        if dropout_hold_active:
+            hard_stale = False
         if perception_dead:
             stale_source = "vision"
         elif stale_level or stale_reason:
@@ -1034,11 +1163,13 @@ class OrchestratorService(BaseModule):
         )
         zero_cmd_reason = ""
         emit_reason = "controller_update"
+        stop_class = ""
         effective = cmd
 
         if explicit_stop:
             emit_reason = "explicit_stop"
             zero_cmd_reason = "explicit_stop"
+            stop_class = "emergency" if any(bool(summary.get(key, False)) for key in ("emergency_stop_active", "car_estop", "estop_active")) else "safety"
             effective = self._make_stop_cmd(now, hold_ms=int(getattr(cmd, "hold_ms", self.cfg.car.cmd_hold_ms) or self.cfg.car.cmd_hold_ms))
             self._last_valid_motion_cmd = None
             self._last_valid_motion_ts = 0.0
@@ -1046,6 +1177,7 @@ class OrchestratorService(BaseModule):
         elif hard_stale:
             emit_reason = "hard_stale_stop"
             zero_cmd_reason = "soft_stale_timeout" if soft_stale_timed_out else (stale_level or "hard_stale")
+            stop_class = "stale_recovery"
             effective = self._make_stop_cmd(now, hold_ms=int(getattr(cmd, "hold_ms", self.cfg.car.cmd_hold_ms) or self.cfg.car.cmd_hold_ms))
             self._last_valid_motion_cmd = None
             self._last_valid_motion_ts = 0.0
@@ -1063,15 +1195,18 @@ class OrchestratorService(BaseModule):
             else:
                 emit_reason = "no_valid_cmd_stop"
                 zero_cmd_reason = "last_valid_unavailable"
+                stop_class = "control_recovery"
                 effective = self._make_stop_cmd(now, hold_ms=int(getattr(cmd, "hold_ms", self.cfg.car.cmd_hold_ms) or self.cfg.car.cmd_hold_ms))
         else:
             emit_reason = "no_valid_cmd_stop"
             zero_cmd_reason = "last_valid_expired" if self._last_valid_motion_cmd else "no_last_valid_motion"
+            stop_class = "control_recovery"
             effective = self._make_stop_cmd(now, hold_ms=int(getattr(cmd, "hold_ms", self.cfg.car.cmd_hold_ms) or self.cfg.car.cmd_hold_ms))
             self._last_valid_motion_cmd = None
             self._last_valid_motion_ts = 0.0
             last_age_ms = None
 
+        service_override = bool(self._cmd_dict(effective) != self._cmd_dict(cmd))
         return effective, {
             "uart_emit_reason": emit_reason,
             "last_valid_motion_cmd": dict(self._last_valid_motion_cmd or {}),
@@ -1091,6 +1226,17 @@ class OrchestratorService(BaseModule):
             "search_allows_edge_stale": bool(search_allows_edge_stale),
             "search_table_stale_gate_bypass": bool(search_allows_edge_stale and hard_stale_raw),
             "stale_gate_stop_source_state": state if hard_stale else "",
+            "stop_class": stop_class,
+            "estop_cooldown_applied": (
+                True if stop_class in {"emergency", "safety"}
+                else (False if stop_class in {"control_recovery", "stale_recovery"} else None)
+            ),
+            "estop_cooldown_reason": "hard_stop" if stop_class in {"emergency", "safety"} else "",
+            "service_override": service_override,
+            "service_override_reason": emit_reason if service_override else "",
+            "effective_cmd_before_service": self._cmd_dict(cmd),
+            "effective_cmd_after_service": self._cmd_dict(effective),
+            "perception_dropout_hold_active": dropout_hold_active,
         }
 
     def _render_uart_line(self, payload: Dict[str, Any]) -> str:
@@ -1419,6 +1565,8 @@ class OrchestratorService(BaseModule):
 
     def _on_uart_tx(self, raw_line: str, dry_run: bool, tx_meta: Optional[Dict[str, Any]] = None):
         self._last_uart_tx_ts = time.time()
+        if tx_meta is not None and "uart_tx_ok" in tx_meta:
+            self._last_uart_tx_ok = bool(tx_meta.get("uart_tx_ok", False))
         payload = {
             "ts": self._last_uart_tx_ts,
             "dry_run": bool(dry_run),
@@ -1467,6 +1615,13 @@ class OrchestratorService(BaseModule):
             f"edge_conf={self.cfg.docking.min_confidence:.2f} "
             f"slide_vy={self.cfg.car.edge_slide_vy_mps:.2f}"
         )
+        
+        # Effective config dump to standard output
+        from common.config.effective_dump import print_effective_config
+        from common.config_loader import get_config
+        effective_dry = bool(getattr(self.uart, "dry_run", self.cfg.serial.dry_run))
+        print_effective_config(get_config(), effective_dry_run=effective_dry)
+        
         self.uart.start()
         self.task_server.start()
         self.vision_server.start()
@@ -1595,6 +1750,10 @@ class OrchestratorService(BaseModule):
             state = parse_car_state_line(raw)
             if state is not None:
                 self._update_stm32_motion_status(state)
+                if state.estop and self.cfg.car_estop_to_stop:
+                    self.log("warn", "service", f"Immediate user ESTOP detected: {state.message or state.state}, triggering emergency stop")
+                    self.uart.send_emergency_stop()
+                    self.motion_adapter.cancel_active_jogs()
                 self.core.handle_car_state(state)
                 self.run_logger.write_jsonl("car_state", state.to_dict())
                 self.run_logger.write_jsonl("motion_status", dict(self.motion_status))
@@ -1727,12 +1886,13 @@ class OrchestratorService(BaseModule):
 
     def _send_task_ack(self, cmd: TaskCmd, accepted: bool, reason: str):
         ack = make_task_ack(cmd, accepted=accepted, reason=reason, state=self.core.ctx.state.value)
-        sent = self.task_ack_sender.send(ack)
+        disabled = str(getattr(self.cfg.task_ack_out, "transport", "") or "").lower() == "disabled"
+        sent = True if disabled else self.task_ack_sender.send(ack)
         self._last_tx_summary["task_ack_out"] = time.time()
         self.run_logger.write_jsonl("task_ack", ack)
         self.run_logger.write_ipc(
             "task_ack_out",
-            "ack_sent" if sent else "ack_send_failed",
+            "disabled" if disabled else ("ack_sent" if sent else "ack_send_failed"),
             direction="TX",
             cmd_id=cmd.cmd_id,
             session_id=cmd.session_id,
@@ -1743,10 +1903,10 @@ class OrchestratorService(BaseModule):
         )
         self._operator_ipc_event(
             "task_ack_out",
-            "ack_sent" if sent else "ack_send_failed",
+            "disabled" if disabled else ("ack_sent" if sent else "ack_send_failed"),
             {"cmd_id": cmd.cmd_id, "accepted": accepted, "error": "" if sent else reason},
         )
-        self.log_ipc("TX", "task_ack", "sent" if sent else "failed", {"cmd_id": cmd.cmd_id, "accepted": accepted})
+        self.log_ipc("TX", "task_ack", "disabled" if disabled else ("sent" if sent else "failed"), {"cmd_id": cmd.cmd_id, "accepted": accepted})
 
     def _drain_task_cmds(self):
         for item in self.task_server.drain():
@@ -1774,6 +1934,10 @@ class OrchestratorService(BaseModule):
                 continue
             if cmd.intent in {"FIND", "RETURN"}:
                 self._demo_start_pending_target = cmd.target or ("return_home" if cmd.intent == "RETURN" else "n/a")
+            if cmd.intent == "STOP":
+                self.log("warn", "service", "Immediate task_cmd STOP received: triggering emergency stop")
+                self.uart.send_emergency_stop()
+                self.motion_adapter.cancel_active_jogs()
             accepted, reason = self.core.handle_task_cmd(cmd)
             if accepted and cmd.intent in {"FIND", "RETURN"}:
                 self.demo_console.dry_run = bool(getattr(self.cfg.serial, "dry_run", False))
@@ -1806,6 +1970,38 @@ class OrchestratorService(BaseModule):
         if msg_type == "vision_obs":
             env = VisionObsEnvelope.from_dict(payload)
             self.run_logger.write_jsonl("vision_obs", env.to_dict() if self._vision_full_obs_log else self._lite_vision_obs(env))
+            if env.obs_class == "diagnostic":
+                metrics = payload.get("metrics")
+                if not isinstance(metrics, dict):
+                    perception = env.perception if isinstance(env.perception, dict) else {}
+                    metrics = perception.get("metrics")
+                self._last_diagnostic_obs_metrics = dict(metrics) if isinstance(metrics, dict) else {}
+                self.log_ipc("RX", "vision_obs", "diagnostic_metrics", {
+                    "req_id": env.req_id,
+                    "stage": env.stage,
+                    "mode": env.mode,
+                    "status": env.status,
+                    "session_id": env.session_id,
+                    "epoch": env.epoch,
+                    "obs_class": env.obs_class,
+                    "metrics_keys": sorted(self._last_diagnostic_obs_metrics.keys()),
+                })
+                self.run_logger.write_ipc(
+                    "vision_obs_in",
+                    "diagnostic_metrics",
+                    direction="RX",
+                    req_id=env.req_id,
+                    session_id=env.session_id,
+                    epoch=env.epoch,
+                    ok=True,
+                    stage=env.stage,
+                    mode=env.mode,
+                    status=env.status,
+                    obs_class=env.obs_class,
+                    metrics=safe_dump(self._last_diagnostic_obs_metrics),
+                )
+                return []
+            self.core.confirm_vision_state(env.stage, env.mode, source="vision_obs")
             perception = dict(env.perception or {})
             has_table_edge = isinstance(perception.get("table_edge_obs"), dict)
             has_target = isinstance(perception.get("target_obs"), dict)
@@ -1821,6 +2017,7 @@ class OrchestratorService(BaseModule):
                 "status": env.status,
                 "session_id": env.session_id,
                 "epoch": env.epoch,
+                "obs_class": env.obs_class,
                 "has_table_edge_obs": has_table_edge,
                 "has_target_obs": has_target,
             })
@@ -1835,6 +2032,7 @@ class OrchestratorService(BaseModule):
                 stage=env.stage,
                 mode=env.mode,
                 status=env.status,
+                obs_class=env.obs_class,
                 has_table_edge_obs=has_table_edge,
                 has_target_obs=has_target,
             )
@@ -2117,6 +2315,30 @@ class OrchestratorService(BaseModule):
                 if key != self._last_target_search_req_console_key:
                     self._last_target_search_req_console_key = key
                     self.operator_console.emit(summary_line)
+            if str(getattr(self.cfg.vision_req_out, "transport", "") or "").lower() == "disabled":
+                self._last_tx_summary["vision_req_out"] = time.time()
+                self.core.handle_vision_req_send_result(True, msg)
+                self.run_logger.write_ipc(
+                    "vision_req_out",
+                    "disabled",
+                    direction="TX",
+                    req_id=msg.get("req_id"),
+                    session_id=msg.get("session_id"),
+                    epoch=msg.get("epoch"),
+                    ok=True,
+                    op=msg.get("op"),
+                    stage=msg.get("stage"),
+                    mode_hint=msg.get("mode_hint"),
+                )
+                self.run_logger.write_timeline(
+                    "VISION_REQ_DISABLED",
+                    req_id=msg.get("req_id"),
+                    op=msg.get("op"),
+                    stage=msg.get("stage"),
+                    mode_hint=msg.get("mode_hint"),
+                    session_id=msg.get("session_id"),
+                )
+                continue
             if isinstance(self.vision_req_sender, AsyncJsonlClientSender):
                 queued = self._enqueue_async_or_fail(self.vision_req_sender, "vision_req_out", msg)
                 if not queued:
@@ -2312,15 +2534,35 @@ class OrchestratorService(BaseModule):
             summary["fallback_reason"] = summary.get("reason") or self.core.ctx.last_fail_reason or ""
             summary["control_reason"] = summary.get("reason") or ""
             summary["edge_loss_elapsed_s"] = self.core._loss_elapsed(self.core.ctx.table_loss_since_mono)
-        if block.get("lock_reason") and str(summary.get("state")) in {"CONTROLLED_APPROACH", "FINAL_LOCK", "COARSE_ALIGN"}:
-            summary["reason"] = block.get("lock_reason")
+        if block.get("stop_reason") and str(summary.get("state")) in {"EDGE_ADJUST", "FINAL_SLOW_STOP"}:
+            summary["reason"] = block.get("stop_reason")
         else:
             summary.setdefault("reason", summary.get("lock_reason") or self.core.ctx.last_enter_reason or "")
+        
+        # Populate unified table docking status fields
+        summary["docking_stage"] = summary.get("docking_stage") or ""
+        summary["docking_action"] = summary.get("docking_action") or ""
+        summary["docking_reason"] = summary.get("docking_reason") or summary.get("arbitration_reason") or ""
+        summary["final_vx"] = float(summary.get("final_vx", decision.cmd.vx_mps) or 0.0)
+        summary["final_vy"] = float(summary.get("final_vy", decision.cmd.vy_mps) or 0.0)
+        summary["final_wz"] = float(summary.get("final_wz", decision.cmd.wz_radps) or 0.0)
+        summary["near_table_latched"] = bool(summary.get("near_table_latched") or self.core.ctx.near_table_latched)
+        summary["final_depth_latched"] = bool(summary.get("final_depth_latched") or self.core.ctx.final_depth_latched)
+        summary["final_yaw_align_active"] = bool(summary.get("final_yaw_align_active") or self.core.ctx.final_yaw_align_active)
+        summary["final_locked"] = bool(summary.get("final_locked") or self.core.ctx.final_locked)
+        summary["stop_class"] = summary.get("stop_class") or "none"
+        summary["service_override"] = bool(getattr(self, "_last_service_override", False))
+        summary["uart_tx_ok"] = bool(getattr(self, "_last_uart_tx_ok", True))
+        
         return summary
 
     def _operator_control_line(self, summary: Dict[str, Any]) -> str:
         cmd = dict(summary.get("cmd") or {})
         state = str(summary.get("state") or self.core.ctx.state.value)
+        is_docking = state in {"SEARCH_TABLE", "YOLO_ACQUIRE_ALIGN", "YOLO_APPROACH", "EDGE_ADJUST", "FINAL_SLOW_STOP", "AT_TABLE_EDGE"}
+        docking_stage = summary.get("docking_stage")
+        if is_docking and docking_stage:
+            state = str(docking_stage)
         reason = str(summary.get("reason") or summary.get("lock_reason") or "").strip() or "n/a"
         speed_profile = str(summary.get("speed_profile") or "n/a")
         speed_limit = str(summary.get("speed_limit_reason") or "n/a")
@@ -2348,7 +2590,7 @@ class OrchestratorService(BaseModule):
             f"cmd vx_mps={self._fmt_float(cmd.get('vx'))} vy_mps={self._fmt_float(cmd.get('vy'))} wz_radps={self._fmt_float(cmd.get('wz'))} "
             f"vx_mps={self._fmt_float(vx_mps)} vy_mps={self._fmt_float(vy_mps)} wz_radps={self._fmt_float(wz_radps)}"
         )
-        if state == "FINAL_LOCK":
+        if summary.get("state") == "FINAL_SLOW_STOP" or state in {"FINAL_DISTANCE_HOLD", "FINAL_YAW_ALIGN", "FINAL_LOCKED"}:
             stable = int(self.core.ctx.table_lock_frames)
             needed = int(self.cfg.control.final_lock_frames_to_arrive)
             return (
@@ -2425,7 +2667,7 @@ class OrchestratorService(BaseModule):
             if self.core.ctx.last_target_obs is None:
                 return "waiting_first_target_obs"
             return "target_search_hold"
-        if str(self.core.ctx.active_vision_mode or "").upper() == "FIND_OBJECT" and self.core.ctx.last_table_obs is None:
+        if str(self.core.ctx.confirmed_vision_mode or "").upper() == "FIND_OBJECT" and self.core.ctx.last_table_obs is None:
             return "no_table_edge_obs_in_track_local"
         if not bool(getattr(self.cfg.control, "edge_relocate_enabled", True)):
             return "config_disabled"
@@ -2451,25 +2693,248 @@ class OrchestratorService(BaseModule):
             age = max(0.0, time.time() - float(getattr(last_obs, "ts", 0.0) or 0.0))
         else:
             age = max(0.0, float(elapsed))
-        mode = str(getattr(self.core.ctx, "active_vision_mode", "") or "n/a").strip() or "n/a"
+        desired = str(getattr(self.core.ctx, "desired_vision_mode", "") or "n/a").strip() or "n/a"
+        confirmed = str(getattr(self.core.ctx, "confirmed_vision_mode", "") or "n/a").strip() or "n/a"
         self.operator_console.emit_rate_limited(
             "target_obs_missing",
-            f"[ORCH] WARN target_obs_missing mode={mode} age={age:.1f}s",
+            f"[ORCH] WARN target_obs_missing desired_mode={desired} confirmed_mode={confirmed} age={age:.1f}s",
             self.operator_console.default_interval_s,
         )
 
     def _emit_operator_control(self, decision) -> None:
         summary = self._control_summary_with_context(decision)
         self.run_logger.write_jsonl("control_summary", summary)
+        self._emit_motion_gate_trace(summary)
         state = str(summary.get("state") or self.core.ctx.state.value)
         self._emit_demo_health(summary)
         if state in {"IDLE", "DONE", "ERROR_RECOVERY"} and not self.operator_console.full:
             return
         line = self._operator_control_line(summary)
-        key = "lock" if state == "FINAL_LOCK" else ("slide" if state == "EDGE_SLIDE_SEARCH" else "ctrl")
+        key = "lock" if state == "FINAL_SLOW_STOP" else ("slide" if state == "EDGE_SLIDE_SEARCH" else "ctrl")
         period_s = 5.0
         self.operator_console.emit_rate_limited(key, line, period_s)
         self._emit_target_obs_missing_warning()
+
+    @staticmethod
+    def _motion_num(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except Exception:
+            return float(default)
+
+    def _emit_motion_gate_trace(self, summary: Dict[str, Any]) -> None:
+        cmd = dict(summary.get("cmd") or {})
+        vx = self._motion_num(summary.get("vx_mps", cmd.get("vx", 0.0)))
+        wz = self._motion_num(summary.get("wz_radps", cmd.get("wz", 0.0)))
+        vy = self._motion_num(summary.get("vy_mps", cmd.get("vy", 0.0)))
+        cx_norm = summary.get("bbox_cx_norm")
+        if cx_norm is None:
+            cx_norm = summary.get("yolo_bbox_center_x_norm")
+        if cx_norm is None:
+            raw_cx = summary.get("table_cx_norm")
+            cx_norm = (self._motion_num(raw_cx) + 1.0) * 0.5 if raw_cx is not None else None
+        center_error = summary.get("center_error")
+        if center_error is None and cx_norm is not None:
+            center_error = self._motion_num(cx_norm) - 0.5
+        yaw_err = self._motion_num(summary.get("yaw_err_rad", summary.get("yaw_err", 0.0)))
+        dist_err = self._motion_num(summary.get("dist_err_m", 0.0))
+        target_dist = self._motion_num(summary.get("target_dist_m", getattr(self.cfg.control, "table_target_dist_m", 0.5)), 0.5)
+        hard_yaw = abs(self._motion_num(summary.get("hard_rotate_only_yaw_rad", getattr(self.cfg.car, "table_edge_hard_rotate_only_yaw_rad", 0.45)), 0.45))
+        tolerance = max(0.0, self._motion_num(getattr(self.cfg.control, "final_lock_dist_tol_m", 0.02), 0.02))
+        yolo_visible = bool(summary.get("yolo_table_visible") or summary.get("table_bbox_found"))
+        bbox_valid = bool(summary.get("table_bbox_control_valid") or summary.get("yolo_table_control_valid") or summary.get("yolo_reliable"))
+        edge_trusted = bool(summary.get("edge_trusted") or summary.get("valid_for_control"))
+        
+        yaw_source = summary.get("yaw_source") or ""
+        forward_source = summary.get("forward_source") or ""
+        stop_source = summary.get("stop_source") or ""
+        block_reason = summary.get("block_reason") or summary.get("forward_block_reason") or ""
+
+        trace = {
+            "ts": time.time(),
+            "state": str(summary.get("state") or self.core.ctx.state.value),
+            "docking_stage": summary.get("docking_stage") or "",
+            "docking_action": summary.get("docking_action") or "",
+            "docking_reason": summary.get("docking_reason") or "",
+            "candidate_cmd": summary.get("candidate_cmd"),
+            "arbiter_final_cmd": summary.get("arbiter_final_cmd"),
+            "service_effective_cmd": summary.get("service_effective_cmd"),
+            "uart_tx_cmd": summary.get("uart_tx_cmd"),
+            "control_source": summary.get("control_source") or "",
+            "motion_intent_type": summary.get("motion_intent_type") or summary.get("control_source") or "",
+            "control_phase": summary.get("control_phase") or "",
+            "phase_reason": summary.get("phase_reason") or "",
+            "arbitration_reason": summary.get("arbitration_reason") or "",
+            "motion_class": summary.get("motion_class") or "",
+            "stop_class": summary.get("stop_class") or "none",
+            "blocked_by": summary.get("blocked_by") or "",
+            "yaw_owner": summary.get("yaw_owner") or yaw_source,
+            "yaw_source": yaw_source,
+            "forward_source": forward_source,
+            "stop_source": stop_source,
+            "yolo_table_visible": yolo_visible,
+            "table_bbox_control_valid": bbox_valid,
+            "edge_found": bool(summary.get("edge_found")),
+            "edge_valid": bool(summary.get("edge_valid")),
+            "edge_trusted": edge_trusted,
+            "edge_control_allowed": bool(summary.get("edge_control_allowed") or summary.get("usable_for_approach")),
+            "edge_stable_count": summary.get("yolo_table_edge_stable_count"),
+            "cx_norm": cx_norm,
+            "center_error": center_error,
+            "yaw_err_rad": yaw_err,
+            "dist_err_m": dist_err,
+            "target_dist_m": target_dist,
+            "stale_level": summary.get("stale_level") or "",
+            "allow_forward": bool(summary.get("allow_forward", summary.get("forward_allowed", False))),
+            "allow_rotate": bool(summary.get("allow_rotate", abs(wz) > 1e-9)),
+            "vx_mps": vx,
+            "vy_mps": vy,
+            "wz_radps": wz,
+            "candidate_cmd": summary.get("candidate_cmd"),
+            "arbiter_final_cmd": summary.get("arbiter_final_cmd"),
+            "service_effective_cmd": summary.get("service_effective_cmd"),
+            "uart_tx_cmd": summary.get("uart_tx_cmd"),
+            "forward_block_reason": summary.get("forward_block_reason") or "",
+            "rotate_block_reason": summary.get("rotate_block_reason") or "",
+            "block_reason": block_reason,
+            "table_roi_depth_valid": bool(summary.get("table_roi_depth_valid", False)),
+            "table_roi_depth_p10": summary.get("table_roi_depth_p10", summary.get("roi_depth_stat")),
+            "table_roi_depth_median": summary.get("table_roi_depth_median"),
+            "table_roi_depth_valid_ratio": summary.get("table_roi_depth_valid_ratio", summary.get("roi_depth_valid_ratio")),
+            "table_roi_depth_sample_count": summary.get("table_roi_depth_sample_count", summary.get("roi_depth_sample_count")),
+            "table_roi_depth_coord_space": summary.get("table_roi_depth_coord_space", ""),
+            "roi_depth_window_ready": bool(summary.get("roi_depth_window_ready", False)),
+            "transition_reason": summary.get("transition_reason") or summary.get("reason") or "",
+            "bbox_wz_sign": summary.get("bbox_wz_sign", 0),
+            "edge_wz_sign": summary.get("edge_wz_sign", 0),
+            "yaw_conflict": bool(summary.get("yaw_conflict", False)),
+            "search_wz_sign_latched": summary.get("search_wz_sign_latched", 0),
+            "handoff_complete": bool(summary.get("edge_handoff_complete", False)),
+            "handoff_timeout": bool(summary.get("handoff_timeout", False)),
+            "phase_dwell_ms": summary.get("phase_dwell_ms", 0.0),
+            "approach_commit_active": bool(summary.get("approach_commit_active", False)),
+            "forward_coast_active": bool(summary.get("forward_coast_active", False)),
+            "edge_conf_score": summary.get("edge_conf_score", 0.0),
+            "last_edge_yaw_cmd": summary.get("last_edge_yaw_cmd", 0.0),
+            "zero_cmd_age_ms": summary.get("zero_cmd_age_ms", 0.0),
+            "zero_escape_reason": summary.get("zero_escape_reason", ""),
+            "coast_reason": summary.get("coast_reason", ""),
+            "progress_window_ms": summary.get("progress_window_ms", 0.0),
+            "min_progress_m": summary.get("min_progress_m", 0.0),
+            "no_progress_warning": bool(summary.get("no_progress_warning", False)),
+            "no_progress_elapsed_ms": summary.get("no_progress_elapsed_ms", 0.0),
+            "no_progress_policy": summary.get("no_progress_policy", ""),
+            "progress_recovery_allowed": bool(summary.get("progress_recovery_allowed", False)),
+            "progress_recovery_block_reason": summary.get("progress_recovery_block_reason", ""),
+            "bbox_fov_guard_level": summary.get("bbox_fov_guard_level", "none"),
+            "bbox_fov_guard_reason": summary.get("bbox_fov_guard_reason", ""),
+            "bbox_fov_soft_allowed_forward": bool(summary.get("bbox_fov_soft_allowed_forward", False)),
+            "bbox_fov_hard_block": bool(summary.get("bbox_fov_hard_block", False)),
+            "perception_dropout_hold_active": bool(summary.get("perception_dropout_hold_active", False)),
+            "perception_dropout_hold_age_ms": summary.get("perception_dropout_hold_age_ms", 0.0),
+            "last_good_table_obs_age_ms": summary.get("last_good_table_obs_age_ms", 0.0),
+            "stale_hold_policy": summary.get("stale_hold_policy", ""),
+            "near_table_latched": bool(summary.get("near_table_latched", False)),
+            "near_table_latch_reason": summary.get("near_table_latch_reason", ""),
+            "final_depth_latched": bool(summary.get("final_depth_latched", False)),
+            "final_depth_latch_reason": summary.get("final_depth_latch_reason", ""),
+            "final_yaw_align_active": bool(summary.get("final_yaw_align_active", False)),
+            "final_locked": bool(summary.get("final_locked", False)),
+            "final_lock_reason": summary.get("final_lock_reason", ""),
+            "near_stage_yaw_source": summary.get("near_stage_yaw_source", ""),
+            "yolo_control_enabled": bool(summary.get("yolo_control_enabled", True)),
+            "bbox_lost_ignored_due_to_near_latch": bool(summary.get("bbox_lost_ignored_due_to_near_latch", False)),
+            "bbox_cx_norm_control": summary.get("bbox_cx_norm_control"),
+            "bbox_center_error_control": summary.get("bbox_center_error_control"),
+            "bbox_center_source": summary.get("bbox_center_source", ""),
+            "bbox_xyxy_for_control": summary.get("bbox_xyxy_for_control"),
+            "bbox_yaw_cmd": summary.get("bbox_yaw_cmd", 0.0),
+            "bbox_lost_hold_active": bool(summary.get("bbox_lost_hold_active", False)),
+            "bbox_lost_hold_age_ms": summary.get("bbox_lost_hold_age_ms", 0.0),
+            "phase_reset_reason": summary.get("phase_reset_reason", ""),
+            "search_latch_age_ms": summary.get("search_latch_age_ms", 0.0),
+            "search_latch_reason": summary.get("search_latch_reason", ""),
+            "wz_sign_final": summary.get("wz_sign_final", 0),
+        }
+        self.run_logger.write_jsonl("motion_gate_trace", trace)
+        is_docking = trace["state"] in {"SEARCH_TABLE", "YOLO_ACQUIRE_ALIGN", "YOLO_APPROACH", "EDGE_ADJUST", "FINAL_SLOW_STOP", "AT_TABLE_EDGE"}
+        if is_docking:
+            sig = (
+                summary.get("docking_stage") or "SEARCH",
+                summary.get("docking_action") or "SEARCH_ROTATE",
+                round(vx, 3),
+                round(vy, 3),
+                round(wz, 3),
+            )
+        else:
+            sig = (
+                trace["state"],
+                trace["control_source"],
+                round(vx, 3),
+                round(vy, 3),
+                round(wz, 3),
+                trace["block_reason"],
+            )
+        now = time.time()
+        last_sig = getattr(self, "_last_motion_gate_trace_sig", None)
+        last_ts = float(getattr(self, "_last_motion_gate_trace_ts", 0.0) or 0.0)
+        if sig != last_sig or now - last_ts >= 0.5:
+            self._last_motion_gate_trace_sig = sig
+            self._last_motion_gate_trace_ts = now
+            if is_docking:
+                stage = summary.get("docking_stage") or "SEARCH"
+                action = summary.get("docking_action") or "SEARCH_ROTATE"
+                yaw_val = summary.get("yaw_err_rad")
+                yaw_str = self._fmt_float(yaw_val, 2) if yaw_val is not None else "None"
+                depth_val = summary.get("table_roi_depth_p10")
+                depth_str = self._fmt_float(depth_val, 2) if depth_val is not None else "None"
+                near_val = int(bool(summary.get("near_table_latched")))
+                final_depth_val = int(bool(summary.get("final_depth_latched")))
+                locked_val = int(bool(summary.get("final_locked")))
+                uart_ok_val = int(bool(summary.get("uart_tx_ok", True)))
+                
+                line = (
+                    f"[DOCK] stage={stage} action={action} "
+                    f"vx={vx:.3f} vy={vy:.3f} wz={wz:.3f} "
+                    f"yaw={yaw_str} depth_p10={depth_str} "
+                    f"near={near_val} final_depth={final_depth_val} locked={locked_val} uart_ok={uart_ok_val} "
+                    f"legacy_state={trace['state']}"
+                )
+            else:
+                line = (
+                    "[MOTION_GATE_TRACE] "
+                    f"state={trace['state']} control_source={trace['control_source']} "
+                    f"control_phase={trace['control_phase']} phase_reason={trace['phase_reason']} "
+                    f"search_latch={trace['search_wz_sign_latched']} latch_age_ms={trace['search_latch_age_ms']:.0f} wz_sign_final={trace['wz_sign_final']} "
+                    f"commit={int(trace['approach_commit_active'])} coast={int(trace['forward_coast_active'])} edge_conf={trace['edge_conf_score']:.2f} "
+                    f"yaw_source={yaw_source} forward_source={forward_source} stop_source={stop_source} "
+                    f"allow_forward={int(trace['allow_forward'])} allow_rotate={int(trace['allow_rotate'])} "
+                    f"vx_mps={vx:.3f} vy_mps={vy:.3f} wz_radps={wz:.3f} block_reason={block_reason} "
+                    f"forward_block_reason={trace['forward_block_reason']} rotate_block_reason={trace['rotate_block_reason']} "
+                    f"roi_p10={trace['table_roi_depth_p10']} roi_ratio={trace['table_roi_depth_valid_ratio']} roi_samples={trace['table_roi_depth_sample_count']}"
+                )
+            if sig != last_sig:
+                self.operator_console.emit(line)
+                self.operator_console._last_ts_by_key["motion_gate_trace"] = now
+            else:
+                self.operator_console.emit_rate_limited("motion_gate_trace", line, interval_s=0.5)
+        should_forward = bool(
+            (yolo_visible or bbox_valid or edge_trusted)
+            and dist_err > target_dist + tolerance
+            and abs(yaw_err) < hard_yaw
+            and abs(vx) <= 1e-9
+            and str(trace["forward_block_reason"]).lower() not in {"soft_stale", "hard_stale", "dead", "vision_stale"}
+            and str(trace["stale_level"]).lower() not in {"soft_stale", "hard_stale", "dead"}
+        )
+        if should_forward:
+            self.run_logger.write_jsonl("motion_forward_block_bug", trace)
+            self.operator_console.emit_rate_limited(
+                "motion_forward_block_bug",
+                "[MOTION_FORWARD_BLOCK_BUG] "
+                f"reason={trace['forward_block_reason']} state={trace['state']} control_source={trace['control_source']} "
+                f"dist_err_m={dist_err:.3f} target_dist_m={target_dist:.3f} yaw_err_rad={yaw_err:.3f} hard_rotate_only_yaw_rad={hard_yaw:.3f}",
+                interval_s=0.5,
+            )
 
     def _rate_hz(self, samples, window_s: float = 5.0) -> float:
         now = time.time()
@@ -2687,6 +3152,7 @@ class OrchestratorService(BaseModule):
                 arm.pitch_deg, arm.roll_deg,
                 arm.claw_deg, arm.time_ms,
             )
+            self.motion_adapter.cancel_active_jogs()
             self.uart.send_arm_command(arm_line)
             self.run_logger.write_jsonl("arm_cmd", arm.to_dict())
             return
@@ -2695,20 +3161,93 @@ class OrchestratorService(BaseModule):
             self._emit_jog_motion(decision, jog_action)
             return
         cmd = decision.cmd
+        summary = dict(getattr(decision, "control_summary", None) or {})
+        
+        # Populate candidate_cmd and arbiter_final_cmd if not set (e.g. non-docking phases)
+        if "candidate_cmd" not in summary:
+            summary["candidate_cmd"] = {
+                "vx_mps": float(getattr(cmd, "vx_mps", 0.0) or 0.0),
+                "vy_mps": float(getattr(cmd, "vy_mps", 0.0) or 0.0),
+                "wz_radps": float(getattr(cmd, "wz_radps", 0.0) or 0.0),
+            }
+        if "arbiter_final_cmd" not in summary:
+            summary["arbiter_final_cmd"] = {
+                "vx_mps": float(getattr(cmd, "vx_mps", 0.0) or 0.0),
+                "vy_mps": float(getattr(cmd, "vy_mps", 0.0) or 0.0),
+                "wz_radps": float(getattr(cmd, "wz_radps", 0.0) or 0.0),
+            }
+
+        effective_cmd, uart_arbitration = self._arbitrate_uart_motion_cmd(cmd, summary)
+        summary.update(uart_arbitration)
+        
+        summary["service_effective_cmd"] = {
+            "vx_mps": float(effective_cmd.vx_mps),
+            "vy_mps": float(effective_cmd.vy_mps),
+            "wz_radps": float(effective_cmd.wz_radps),
+        }
+        
+        allow_send = bool(summary.get("allow_uart_send", True))
+        if allow_send:
+            summary["uart_tx_cmd"] = {
+                "vx_mps": float(effective_cmd.vx_mps),
+                "vy_mps": float(effective_cmd.vy_mps),
+                "wz_radps": float(effective_cmd.wz_radps),
+            }
+        else:
+            summary["uart_tx_cmd"] = {
+                "vx_mps": 0.0,
+                "vy_mps": 0.0,
+                "wz_radps": 0.0,
+            }
+            
+        decision.control_summary = summary
+
         self._emit_operator_control(decision)
         self._flush_state_traces(decision)
-        summary = dict(getattr(decision, "control_summary", None) or {})
-        effective_cmd, uart_arbitration = self._arbitrate_uart_motion_cmd(cmd, summary)
         car_cmd = self.mapper.from_cmd_vel(effective_cmd, cx_norm_abs=decision.cx_norm_abs, distance_ratio=decision.distance_ratio)
         tx_meta = self._build_uart_tx_meta(car_cmd)
-        reason = str(tx_meta.get("reason") or car_cmd.kind or "").strip()
+        stop_class = str(uart_arbitration.get("stop_class") or "").strip()
+        reason = (stop_class if stop_class and stop_class != "none" else "") or str(tx_meta.get("reason") or car_cmd.kind or "").strip()
         velocity = self.motion_adapter.cmd_vel_to_velocity(effective_cmd)
         speed_profile = str(summary.get("speed_profile") or ("stop" if car_cmd.kind in {"stop", "brake"} else "search"))
         self._last_motion_tx_context = {
+            "docking_stage": summary.get("docking_stage") or "",
+            "docking_action": summary.get("docking_action") or "",
+            "docking_reason": summary.get("docking_reason") or "",
+            "candidate_cmd": summary.get("candidate_cmd"),
+            "arbiter_final_cmd": summary.get("arbiter_final_cmd"),
+            "service_effective_cmd": summary.get("service_effective_cmd"),
+            "uart_tx_cmd": summary.get("uart_tx_cmd"),
+            "service_override": bool(summary.get("service_override", False)),
+            "writer_accept_cmd": bool(summary.get("allow_uart_send", True)),
+            "uart_tx_ok": bool(getattr(self, "_last_uart_tx_ok", True)),
             "speed_profile": speed_profile,
             "speed_limit_reason": summary.get("speed_limit_reason") or "",
             "forward_block_reason": summary.get("forward_block_reason") or "",
             "table_approach_phase": summary.get("table_approach_phase") or "",
+            "motion_intent_type": summary.get("motion_intent_type") or "",
+            "yaw_owner": summary.get("yaw_owner") or summary.get("yaw_source") or "",
+            "arbitration_reason": summary.get("arbitration_reason") or "",
+            "motion_class": summary.get("motion_class") or "",
+            "stop_class": summary.get("stop_class") or "none",
+            "blocked_by": summary.get("blocked_by") or "",
+            "fov_guard_level": summary.get("fov_guard_level") or summary.get("bbox_fov_guard_level") or "none",
+            "fov_guard_reason": summary.get("fov_guard_reason") or summary.get("bbox_fov_guard_reason") or "",
+            "approach_commit_active": bool(summary.get("approach_commit_active", False)),
+            "perception_dropout_hold_active": bool(summary.get("perception_dropout_hold_active", False)),
+            "zero_escape_reason": summary.get("zero_escape_reason") or "",
+            "allow_uart_send": bool(summary.get("allow_uart_send", True)),
+            "service_may_override": bool(summary.get("service_may_override", False)),
+            "near_table_latched": bool(summary.get("near_table_latched", False)),
+            "near_table_latch_reason": summary.get("near_table_latch_reason") or "",
+            "final_depth_latched": bool(summary.get("final_depth_latched", False)),
+            "final_depth_latch_reason": summary.get("final_depth_latch_reason") or "",
+            "final_yaw_align_active": bool(summary.get("final_yaw_align_active", False)),
+            "final_locked": bool(summary.get("final_locked", False)),
+            "final_lock_reason": summary.get("final_lock_reason") or "",
+            "near_stage_yaw_source": summary.get("near_stage_yaw_source") or "",
+            "yolo_control_enabled": bool(summary.get("yolo_control_enabled", True)),
+            "bbox_lost_ignored_due_to_near_latch": bool(summary.get("bbox_lost_ignored_due_to_near_latch", False)),
             "vx_mps": float(getattr(effective_cmd, "vx_mps", 0.0) or 0.0),
             "vy_mps": float(getattr(effective_cmd, "vy_mps", 0.0) or 0.0),
             "wz_radps": float(getattr(effective_cmd, "wz_radps", 0.0) or 0.0),
@@ -2717,6 +3256,17 @@ class OrchestratorService(BaseModule):
             "wz_radps": float(velocity[2]),
         }
         self._last_motion_tx_context.update(uart_arbitration)
+        tx_meta.update({
+            "docking_stage": summary.get("docking_stage") or "",
+            "docking_action": summary.get("docking_action") or "",
+            "docking_reason": summary.get("docking_reason") or "",
+            "candidate_cmd": summary.get("candidate_cmd"),
+            "arbiter_final_cmd": summary.get("arbiter_final_cmd"),
+            "service_effective_cmd": summary.get("service_effective_cmd"),
+            "uart_tx_cmd": summary.get("uart_tx_cmd"),
+            "writer_accept_cmd": bool(summary.get("allow_uart_send", True)),
+            "uart_tx_ok": bool(getattr(self, "_last_uart_tx_ok", True)),
+        })
         tx_meta.update(uart_arbitration)
         seq = self.motion_adapter.send_cmd_vel(effective_cmd, reason=reason)
         self.motion_status["last_seq"] = seq
@@ -2778,7 +3328,7 @@ class OrchestratorService(BaseModule):
         self.motion_status["jog_running"] = True
         self.run_logger.write_jsonl("car_cmd", {
             "ts": time.time(),
-            "mode": str(getattr(cmd, "mode", "FINAL_LOCK") or "FINAL_LOCK"),
+            "mode": str(getattr(cmd, "mode", "FINAL_SLOW_STOP") or "FINAL_SLOW_STOP"),
             "kind": "stm32_jog",
             "jog_action": jog_action,
             "stm32_seq": seq,
@@ -3063,50 +3613,30 @@ class OrchestratorService(BaseModule):
             for key in (
                 "ts",
                 "state",
-                "prev_state",
-                "task_intent",
-                "active_target",
-                "session_id",
-                "epoch",
-                "req_id",
-                "vision_stage",
-                "vision_mode",
-                "current_edge_id",
-                "edge_visit_index",
-                "last_enter_reason",
-                "last_fail_reason",
-                "yaw_err_rad",
-                "dist_err_m",
-                "obs_total_age_ms",
-                "valid_for_control",
-                "usable_for_approach",
-                "control_level",
-                "reject_reason",
-                "control_reject_reason",
-                "confidence",
-                "final_lock_yaw_ok",
-                "final_lock_dist_ok",
-                "final_lock_age_ok",
-                "final_lock_confidence_ok",
-                "stable_lock_count",
-                "required_lock_count",
-                "lock_ready_obs_count",
-                "window_ready_count",
-                "required_ready_obs",
-                "final_lock_window_ms",
-                "same_obs_reuse_count",
-                "consecutive_lost_count",
-                "lock_count_inc_reason",
-                "lock_count_hold_reason",
-                "lock_count_reset_reason",
-                "final_lock_transition_block_reason",
-                "final_lock_transition_reason",
-                "lock_ready",
-                "lock_reason",
-                "lock_reset_reason",
-                "vision_stale_reason",
-                "stale_level",
-                "stale_guard_reason",
+                "control_source",
+                "control_intent",
+                "table_bbox_current_found",
+                "table_bbox_control_valid",
+                "yolo_table_visible",
+                "yolo_table_fresh",
+                "yolo_table_age_ms",
+                "edge_geometry_valid",
+                "edge_valid",
+                "edge_trusted",
+                "edge_age_ms",
+                "selected_timeout_reason",
+                "fallback_action",
+                "no_table_bbox_timeout",
+                "edge_geometry_timeout",
+                "bbox_visible_but_edge_invalid",
+                "table_lost_search_timeout",
+                "allow_forward",
+                "allow_rotate",
+                "allow_lateral",
+                "forward_block_reason",
+                "rotate_block_reason",
+                "lateral_block_reason",
+                "stop_reason",
             )
             if block.get(key) is not None
         }

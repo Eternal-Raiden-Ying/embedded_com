@@ -16,14 +16,38 @@ _DEFAULT_PID_DIR = _DEFAULT_PROJECT_ROOT / "pids"
 
 @dataclass
 class SocketEndpoint:
-    transport: str = "tcp"
-    host: str = "127.0.0.1"
-    port: int = 0
-    uds_path: str = ""
+    transport: str = "uds"
+    ipc_socket_path: str = ""
+    tcp_host: str = "127.0.0.1"
+    tcp_port: int = 0
     send_mode: str = "persistent"
     async_enabled: bool = False
     async_queue_size: int = 64
     async_drop_oldest: bool = True
+
+    @property
+    def uds_path(self) -> str:
+        return self.ipc_socket_path
+
+    @uds_path.setter
+    def uds_path(self, value: str) -> None:
+        self.ipc_socket_path = value
+
+    @property
+    def host(self) -> str:
+        return self.tcp_host
+
+    @host.setter
+    def host(self, value: str) -> None:
+        self.tcp_host = value
+
+    @property
+    def port(self) -> int:
+        return self.tcp_port
+
+    @port.setter
+    def port(self, value: int) -> None:
+        self.tcp_port = int(value)
 
 
 @dataclass
@@ -92,13 +116,13 @@ class ControlThresholds:
     controlled_approach_min_dwell_s: float = 0.80
     final_lock_frames_to_arrive: int = 3
     final_lock_yaw_tol_rad: float = 0.25
-    final_lock_dist_tol_m: float = 0.03
+    final_lock_dist_tol_m: float = 0.03  # Strict distance tolerance for declaring final lock stop condition
     final_lock_lateral_tol_m: float = 0.03
     table_edge_only_test: bool = False
-    table_target_dist_m: float = 0.50
-    table_dist_tol_m: float = 0.05
-    table_yaw_tol_rad: float = 0.25
-    table_stop_margin_m: float = 0.05
+    table_target_dist_m: float = 0.30  # Nominal target docking distance (stopped position relative to table edge)
+    table_dist_tol_m: float = 0.05     # Allowable distance error tolerance during docking/alignment
+    table_yaw_tol_rad: float = 0.13962634015954636  # Target yaw alignment error threshold (8 degrees in radians)
+    table_stop_margin_m: float = 0.05  # Safety stop margin added to target distance in stop conditions checking
     table_settle_s: float = 0.50
     table_stable_frames: int = 5
     yolo_table_control_enable: bool = True
@@ -113,6 +137,10 @@ class ControlThresholds:
     edge_trusted_max_background_penalty: float = 0.0
     yolo_table_near_dist_m: float = 0.45
     yolo_table_lost_to_search_frames: int = 8
+    no_table_bbox_timeout_s: float = 10.0
+    edge_geometry_timeout_s: float = 10.0
+    table_memory_timeout_sec: float = 3.0
+    table_center_loss_hold_sec: float = 1.0
     rotate_search_timeout_s: float = 10.0
     rotate_require_edge_stable_frames: int = 5
     rotate_yaw_threshold_rad: float = 0.20
@@ -126,9 +154,29 @@ class ControlThresholds:
     enable_micro_adjust: bool = False
     final_lock_enter_dist_th_m: float = 0.08
     final_lock_enter_yaw_th_rad: float = 0.10
+    final_yaw_deadband_rad: float = 0.12
+    final_lock_yaw_rad: float = 0.12
+    final_yaw_realign_rad: float = 0.18
+    final_yaw_stable_frames: int = 6
+    final_yaw_align_min_duration_ms: int = 1000
+    final_yaw_last_good_hold_s: float = 1.2
     edge_settle_s: float = 0.80
     dock_retry_limit: int = 2
     dock_retry_backoff_s: float = 0.60
+
+    # Depth safety thresholds
+    near_slow_depth_m: float = 0.40
+    near_stop_depth_m: float = 0.25
+    near_slow_max_vx_mps: float = 0.020
+    near_slow_max_vy_mps: float = 0.0
+    near_slow_max_wz_radps: float = 0.04
+
+    # Final lock stabilization thresholds
+    final_lock_min_hold_ms: int = 800
+    final_lock_lost_timeout_ms: int = 1000
+    progress_window_ms: float = 15000.0
+    min_progress_m: float = 0.010
+    multi_table_enabled: bool = False
 
     search_target_init_hold_s: float = 0.25
     target_found_frames_to_confirm: int = 3
@@ -210,12 +258,16 @@ class ControlThresholds:
     post_stop_ignore_s: float = 0.80
     vision_req_fail_to_stop: bool = True
     vision_req_fail_threshold: int = 2
+    keep_vision_alive_after_task: bool = True
+    task_done_shutdown_vision: bool = False
     enable_pick_pipeline: bool = False
     assume_grasp_success_for_test: bool = False
 
 
 @dataclass
 class CarMotionConfig:
+    grasp_reposition_speed_cm_s: float = 10.0
+    pre_arm_stop_settle_ms: int = 150
     search_table_wz_radps: float = 0.10
     fallback_align_turn_wz_min_radps: float = 0.10
     fallback_align_turn_wz_max_radps: float = 0.45
@@ -238,12 +290,16 @@ class CarMotionConfig:
     table_controlled_vy_min_mps: float = 0.000
     table_controlled_vy_max_mps: float = 0.000
     table_controlled_wz_min_radps: float = 0.000
-    table_controlled_wz_max_radps: float = 0.000
+    table_controlled_wz_max_radps: float = 0.120
     table_approach_safe_vx_mps: float = 0.020
     table_approach_max_vx_mps: float = 0.035
     table_approach_yaw_deadband_rad: float = 0.08
     table_approach_yaw_realign_rad: float = 0.16
-    table_approach_allow_wz: bool = False
+    table_edge_hard_rotate_only_yaw_rad: float = 0.45
+    table_edge_hard_yaw_rotate_only_frames: int = 3
+    table_edge_hard_yaw_rotate_only_ms: int = 350
+    table_perception_warmup_s: float = 1.0
+    table_approach_allow_wz: bool = True
     table_approach_allow_vy: bool = False
     table_pose_missing_safe_vx_mps: float = 0.020
     table_pose_missing_max_hold_s: float = 3.0
@@ -334,36 +390,30 @@ class OrchestratorConfig:
     docking: DockingControlConfig = field(default_factory=DockingControlConfig)
     task_cmd_in: SocketEndpoint = field(default_factory=lambda: SocketEndpoint(
         transport="tcp",
-        host="127.0.0.1",
-        port=9001,
-        uds_path="/tmp/robot_stack/task_cmd.sock",
+        ipc_socket_path="/tmp/robot_stack/task_cmd.sock",
+        tcp_port=19101,
     ))
     task_ack_out: SocketEndpoint = field(default_factory=lambda: SocketEndpoint(
         transport="tcp",
-        host="127.0.0.1",
-        port=9012,
-        uds_path="/tmp/robot_stack/task_ack.sock",
+        ipc_socket_path="/tmp/robot_stack/task_ack.sock",
+        tcp_port=19102,
         send_mode="oneshot",
     ))
     vision_obs_in: SocketEndpoint = field(default_factory=lambda: SocketEndpoint(
         transport="tcp",
-        host="127.0.0.1",
-        port=9002,
-        uds_path="/tmp/robot_stack/vision_obs.sock",
+        ipc_socket_path="/tmp/robot_stack/vision_obs.sock",
+        tcp_port=19103,
     ))
     vision_req_out: SocketEndpoint = field(default_factory=lambda: SocketEndpoint(
         transport="tcp",
-        host="127.0.0.1",
-        port=9003,
-        uds_path="/tmp/robot_stack/vision_req.sock",
+        ipc_socket_path="/tmp/robot_stack/vision_req.sock",
+        tcp_port=19104,
         send_mode="oneshot",
         async_enabled=True,
     ))
     tts_event_out: SocketEndpoint = field(default_factory=lambda: SocketEndpoint(
         transport="disabled",
-        host="127.0.0.1",
-        port=9011,
-        uds_path="/tmp/robot_stack/tts_event.sock",
+        ipc_socket_path="/tmp/robot_stack/tts_event.sock",
         async_enabled=True,
     ))
     frozen_targets: Dict[str, List[str]] = field(default_factory=lambda: {

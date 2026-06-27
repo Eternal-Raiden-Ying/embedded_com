@@ -8,9 +8,9 @@ import time
 from typing import Any, Callable, Dict, List, Optional
 
 from .simple_car_protocol import (
-    SimpleCarCommand,
+    encode_emergency_stop,
     encode_mode,
-    encode_stop,
+    encode_soft_stop,
     encode_vel,
 )
 
@@ -50,6 +50,8 @@ class UartBridge:
         self._tx_thread: Optional[threading.Thread] = None
         self._tx_event = threading.Event()
         self._pending_lock = threading.Lock()
+        self._write_lock = threading.RLock()
+        self._last_estop_mono = 0.0
         self._pending_tx: Optional[Dict[str, Any]] = None
         self._fifo_tx: "queue.Queue[Dict[str, Any]]" = queue.Queue()
         self._rx_queue: "queue.Queue[str]" = queue.Queue()
@@ -105,7 +107,7 @@ class UartBridge:
                 pass
             self._ser = None
 
-    def send_car_command(self, cmd: SimpleCarCommand, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
+    def send_car_command(self, cmd: Any, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
         if not str(cmd.raw_line or "").strip():
             return False
         return self._publish_latest(cmd.raw_line, tx_meta=tx_meta)
@@ -116,10 +118,19 @@ class UartBridge:
         line = str(command_line).strip()
         if latest_override:
             return self._publish_latest(line, tx_meta=tx_meta)
+        meta = dict(tx_meta or {})
+        meta.update({
+            "uart_enqueue_ok": True,
+            "writer_accept_cmd": None,
+            "writer_discard_reason": "",
+            "serial_write_attempted": False,
+            "serial_write_ok": None,
+        })
         self._fifo_tx.put({
             "line": line,
-            "tx_meta": dict(tx_meta or {}),
+            "tx_meta": meta,
             "publish_ts": time.time(),
+            "publish_mono": time.monotonic(),
         })
         self.published_count += 1
         self._tx_event.set()
@@ -131,7 +142,7 @@ class UartBridge:
 
     def send_stm32_stop(self, seq, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
         del seq
-        return self.send_motion_line(encode_stop(), tx_meta=tx_meta)
+        return self.send_emergency_stop(tx_meta=tx_meta)
 
     def send_stm32_jog(self, vx_mps, vy_mps, wz_radps, _unused, duration_ms, seq, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
         del _unused, duration_ms, seq
@@ -142,7 +153,76 @@ class UartBridge:
         return False
 
     def send_stop(self, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
-        return self._publish_latest("STOP\r\n", tx_meta=tx_meta)
+        return self.send_emergency_stop(tx_meta=tx_meta)
+
+    def send_soft_stop(self, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
+        return self._publish_latest(encode_soft_stop() + "\r\n", tx_meta=tx_meta)
+
+    def send_emergency_stop_mcu(self, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
+        return self.send_emergency_stop(tx_meta=tx_meta)
+
+    def send_emergency_stop(self, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
+        meta = dict(tx_meta or {})
+        meta["emergency_stop"] = True
+        with self._write_lock:
+            self._clear_motion_queues_for_estop()
+            self._write_line(encode_emergency_stop() + "\r\n", tx_meta=meta)
+        return True
+
+    def _clear_motion_queues_for_estop(self) -> None:
+        with self._pending_lock:
+            self._pending_tx = None
+            while not self._fifo_tx.empty():
+                try:
+                    self._fifo_tx.get_nowait()
+                except queue.Empty:
+                    break
+            self._last_estop_mono = time.monotonic()
+
+    def flush_and_write_stop(self, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
+        return self.send_emergency_stop(tx_meta)
+
+    def is_velocity_command(self, line: str, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
+        if tx_meta and "vel" in str(tx_meta.get("kind") or "").lower():
+            return True
+        if not line:
+            return False
+        for subline in line.splitlines():
+            subline = subline.strip()
+            if subline.startswith("V ") or subline.startswith("V\t") or subline == "V":
+                return True
+        return False
+
+    def _should_suppress_vel(self, item: Dict[str, Any]) -> bool:
+        return bool(self._writer_discard_reason(item))
+
+    def _writer_discard_reason(self, item: Dict[str, Any]) -> str:
+        line = item.get("line", "")
+        tx_meta = item.get("tx_meta")
+        if str(line or "").strip().upper() == "MODE SEARCH":
+            return "non_velocity_line"
+        if not self.is_velocity_command(line, tx_meta):
+            return ""
+        now_mono = time.monotonic()
+        publish_mono = item.get("publish_mono", 0.0)
+        if publish_mono < self._last_estop_mono:
+            return "estop_superseded"
+        cooldown_marked = (tx_meta or {}).get("estop_cooldown_applied")
+        cooldown_applies = bool(cooldown_marked is not False)
+        if now_mono - self._last_estop_mono < 0.5 and cooldown_applies:
+            return "estop_cooldown"
+        return ""
+
+    def _emit_writer_discard(self, item: Dict[str, Any], reason: str) -> None:
+        meta = dict(item.get("tx_meta") or {})
+        meta.update({
+            "writer_accept_cmd": False,
+            "writer_discard_reason": str(reason),
+            "serial_write_attempted": False,
+            "serial_write_ok": False,
+            "uart_tx_ok": False,
+        })
+        self._emit_tx_callback(str(item.get("line") or ""), self.dry_run, meta)
 
     def send_mode(self, mode: str, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
         return self.send_motion_line(encode_mode(mode), tx_meta=tx_meta)
@@ -158,7 +238,12 @@ class UartBridge:
         """
         if not str(command_line or "").strip():
             return False
-        with self._pending_lock:
+        with self._write_lock:
+            self._clear_motion_queues_for_estop()
+            self._write_line(
+                encode_emergency_stop() + "\r\n",
+                tx_meta={"reason": "pre_arm_stop", "emergency_stop": True},
+            )
             self._write_line(command_line, tx_meta=tx_meta)
         return True
 
@@ -203,10 +288,19 @@ class UartBridge:
     def _publish_latest(self, line: str, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
         if not line:
             return False
+        meta = dict(tx_meta or {})
+        meta.update({
+            "uart_enqueue_ok": True,
+            "writer_accept_cmd": None,
+            "writer_discard_reason": "",
+            "serial_write_attempted": False,
+            "serial_write_ok": None,
+        })
         item = {
             "line": str(line),
-            "tx_meta": dict(tx_meta or {}),
+            "tx_meta": meta,
             "publish_ts": time.time(),
+            "publish_mono": time.monotonic(),
         }
         with self._pending_lock:
             if self._pending_tx is not None:
@@ -242,7 +336,14 @@ class UartBridge:
             if item is None:
                 self._tx_event.clear()
                 continue
-            self._write_line(item["line"], tx_meta=item.get("tx_meta"))
+            discard_reason = self._writer_discard_reason(item)
+            if discard_reason:
+                self._log("warn", f"Discarding velocity command in writer loop: {item['line']}")
+                self._emit_writer_discard(item, discard_reason)
+                if not self._has_pending_tx():
+                    self._tx_event.clear()
+                continue
+            self._write_line(item["line"], tx_meta=item.get("tx_meta"), publish_mono=item.get("publish_mono"))
             if not self._has_pending_tx():
                 self._tx_event.clear()
 
@@ -268,40 +369,58 @@ class UartBridge:
             except Exception:
                 pass
 
-    def _write_line(self, line: str, tx_meta: Optional[Dict[str, Any]] = None):
+    def _write_line(self, line: str, tx_meta: Optional[Dict[str, Any]] = None, publish_mono: Optional[float] = None):
         if not line:
             return
-        raw_line = str(line).rstrip("\r\n")
-        wire_line = raw_line.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r\n") + "\r\n"
-        self._last_line = raw_line
-        self.last_tx_ts = time.time()
-        meta = dict(tx_meta or {})
-        ok = False
-        error = ""
-        if self.dry_run:
-            ok = True
-            if self.dry_run_echo_stdout:
-                for part in raw_line.splitlines() or [raw_line]:
-                    text = part.strip()
-                    if text:
-                        print(f"[MOTION][DRYRUN_TX] {text}", flush=True)
-        else:
-            if self._ser is None:
-                error = "UART not started"
+        with self._write_lock:
+            if publish_mono is not None or tx_meta is not None:
+                item_to_check = {
+                    "line": line,
+                    "tx_meta": tx_meta,
+                    "publish_mono": publish_mono if publish_mono is not None else time.monotonic()
+                }
+                discard_reason = self._writer_discard_reason(item_to_check)
+                if discard_reason:
+                    self._log("warn", f"Discarding velocity command under write lock: {line}")
+                    self._emit_writer_discard(item_to_check, discard_reason)
+                    return
+            raw_line = str(line).rstrip("\r\n")
+            wire_line = raw_line.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r\n") + "\r\n"
+            self._last_line = raw_line
+            self.last_tx_ts = time.time()
+            meta = dict(tx_meta or {})
+            meta.update({
+                "writer_accept_cmd": True,
+                "writer_discard_reason": "",
+                "serial_write_attempted": True,
+            })
+            ok = False
+            error = ""
+            if self.dry_run:
+                ok = True
+                if self.dry_run_echo_stdout:
+                    for part in raw_line.splitlines() or [raw_line]:
+                        text = part.strip()
+                        if text:
+                            print(f"[MOTION][DRYRUN_TX] {text}", flush=True)
             else:
-                try:
-                    self._ser.write(wire_line.encode("utf-8"))
-                    ok = True
-                except Exception as exc:
-                    error = str(exc)
-                    self._log("warn", f"UART send failed: {exc}")
-        if ok:
-            self.sent_count += 1
-            self.last_tx_error = ""
-        else:
-            self.send_fail_count += 1
-            self.last_tx_error = error or "unknown error"
-        meta["uart_tx_ok"] = ok
-        if error:
-            meta["uart_tx_error"] = error
-        self._emit_tx_callback(wire_line, self.dry_run, meta)
+                if self._ser is None:
+                    error = "UART not started"
+                else:
+                    try:
+                        self._ser.write(wire_line.encode("utf-8"))
+                        ok = True
+                    except Exception as exc:
+                        error = str(exc)
+                        self._log("warn", f"UART send failed: {exc}")
+            if ok:
+                self.sent_count += 1
+                self.last_tx_error = ""
+            else:
+                self.send_fail_count += 1
+                self.last_tx_error = error or "unknown error"
+            meta["uart_tx_ok"] = ok
+            meta["serial_write_ok"] = ok
+            if error:
+                meta["uart_tx_error"] = error
+            self._emit_tx_callback(wire_line, self.dry_run, meta)

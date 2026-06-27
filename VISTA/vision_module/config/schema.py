@@ -31,6 +31,9 @@ class RuntimeConfig:
     stale_req_s: float = 3.0
     hot_standby_s: float = 30.0
     keep_preview_after_stop: bool = True
+    keep_vision_alive_after_task: bool = True
+    keep_preview_alive_after_task: bool = True
+    release_model_on_idle: bool = False
     keep_model_hot_in_standby: bool = True
     enable_infer_during_hot_standby: bool = False
     capability_placeholder: bool = False
@@ -47,10 +50,8 @@ class RuntimeConfig:
 
 @dataclass
 class IPCConfig:
-    transport: str = "tcp"  # tcp / uds / disabled
-    host: str = "127.0.0.1"
-    port: int = 0
-    uds_path: str = ""
+    transport: str = "uds"  # uds / disabled
+    ipc_socket_path: str = ""
 
 
 @dataclass
@@ -192,6 +193,31 @@ class TableEdgeConfig:
     fast_candidate_point_cap: int = 1800
     fast_front_edge_col_step: int = 2
     fast_front_edge_row_step: int = 2
+    depth_stride: int = 2
+    detector_mode: str = "lightweight"
+    update_hz: float = 10.0
+    light_stride: int = 4
+    fast_plane_stride: int = 4
+    require_yolo_confirm: bool = True
+    static_roi_enabled: bool = False
+    camera_pitch_deg: float = 15.0
+    camera_height_m: float = 0.70
+    camera_roll_deg: float = 0.0
+    camera_yaw_deg: float = 0.0
+    table_height_m: float = 0.40
+    front_face_z_min_m: float = 0.03
+    front_face_z_max_m: float = 0.43
+    min_vertical_z_span_m: float = 0.12
+    min_vertical_support_points: int = 3
+    x_bin_width_m: float = 0.04
+    y_cluster_bin_m: float = 0.04
+    min_front_face_columns: int = 3
+    min_front_face_x_span_m: float = 0.07
+    front_cluster_gap_m: float = 0.10
+    max_yaw_abs_rad: float = 0.75
+    enable_yolo_in_plane_only: bool = False
+    yolo_table_min_conf: float = 0.25
+
 
 
 @dataclass

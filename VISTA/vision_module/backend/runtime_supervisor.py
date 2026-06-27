@@ -229,6 +229,7 @@ class RuntimeSupervisor:
             return True
         enabled = bool(payload.get("enabled", False))
         model_name = payload.get("model_name")
+        keep_loaded = bool(payload.get("keep_loaded", False))
         ok = True
         setter = getattr(self.predictor_manager, "set_inference_enabled", None)
         if callable(setter):
@@ -244,6 +245,16 @@ class RuntimeSupervisor:
                 ok = False
             try:
                 self.predictor_manager.start_runtime()
+            except Exception:
+                ok = False
+        elif keep_loaded and model_name:
+            try:
+                prepared = self.predictor_manager.ensure_model(str(model_name))
+                ok = bool(prepared or self.predictor_manager.is_ready()) and ok
+            except Exception:
+                ok = False
+            try:
+                self.predictor_manager.stop_runtime()
             except Exception:
                 ok = False
         else:

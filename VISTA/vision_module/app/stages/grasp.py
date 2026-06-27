@@ -296,7 +296,7 @@ class GraspStagePlan(BaseStagePlan):
             remote_error = str(remote.get("last_error") or "")
 
             # Waiting for PREDICT task to complete
-            if last_action != "predict":
+            if last_action != "PREDICT":
                 return StageOutput(
                     vision_obs=self.build_obs(ctx, status="RUNNING",
                                                perception={"target_obs": target_obs},
@@ -334,8 +334,8 @@ class GraspStagePlan(BaseStagePlan):
             server_detection = server_response.get("detection") if isinstance(server_response.get("detection"), dict) else {}
             server_reason = str(server_response.get("reason") or "")
 
-            if server_status == "success":
-                targets = server_response.get("targets")
+            if server_status == "success" or "grasps" in server_response:
+                targets = server_response.get("targets") or server_response.get("grasps")
                 first_target = dict(targets[0]) if isinstance(targets, (list, tuple)) and targets else {}
                 result = {
                     "grasp": first_target,

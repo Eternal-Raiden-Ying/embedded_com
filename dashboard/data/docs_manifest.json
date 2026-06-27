@@ -1,0 +1,1041 @@
+[
+  {
+    "id": "log_standard_md",
+    "title": "日志标准规范说明文档 (Logging Standard)",
+    "group": "Root Docs",
+    "source_path": "LOG_STANDARD.md",
+    "tags": [
+      "Root"
+    ],
+    "summary": "本文档定义了 Robot Stack 2026 软件栈的统一日志规范（Schema），旨在规范部署于 ARM/AidLux 端侧环境下的各组件调试与诊断输出。 所有落盘的结构化运行日志必须采用 JSON 或 JSONL（每行一个完整 JSON 字典）格式： 日志行对应的顶层通用字段结构如下：",
+    "headings": [
+      {
+        "level": 2,
+        "text": "1. 概述 (Overview)"
+      },
+      {
+        "level": 2,
+        "text": "2. 当前各组件日志审计现状 (Current Audit)"
+      },
+      {
+        "level": 3,
+        "text": "2.1 状态机控制服务 (Orchestrator)"
+      },
+      {
+        "level": 3,
+        "text": "2.2 视觉感知服务 (VISTA)"
+      },
+      {
+        "level": 3,
+        "text": "2.3 语音控制服务 (Voice)"
+      },
+      {
+        "level": 2,
+        "text": "3. 统一日志规范结构 (Unified Logging Schema)"
+      },
+      {
+        "level": 3,
+        "text": "3.1 结构化日志文件格式"
+      },
+      {
+        "level": 3,
+        "text": "3.2 结构化字段定义 (Common Fields)"
+      },
+      {
+        "level": 3,
+        "text": "3.3 VISTA 运行事件字段顺序 (`event.jsonl` Field Order)"
+      },
+      {
+        "level": 3,
+        "text": "3.4 跨进程通信字段顺序 (`ipc.jsonl` Field Order)"
+      },
+      {
+        "level": 2,
+        "text": "4. 日志分级指南 (Level Guidelines)"
+      },
+      {
+        "level": 2,
+        "text": "5. 日志保存与轮转策略 (Rotation Policy)"
+      }
+    ]
+  },
+  {
+    "id": "readme_md",
+    "title": "嵌入式机器人软件栈 (Embedded Robot Stack)",
+    "group": "Root Docs",
+    "source_path": "README.md",
+    "tags": [
+      "Root"
+    ],
+    "summary": "本仓库包含嵌入式机器人软件栈的 Windows 开发代码和 SC171 板端运行代码。 移动端 App / MQTT orchestrator_service.mobile_gateway",
+    "headings": [
+      {
+        "level": 2,
+        "text": "运行架构布局 (Runtime Layout)"
+      },
+      {
+        "level": 2,
+        "text": "Python 环境 (Python Environments)"
+      },
+      {
+        "level": 2,
+        "text": "Windows PYTHONPATH"
+      },
+      {
+        "level": 2,
+        "text": "最小主机验证 (Minimal Host Verification)"
+      },
+      {
+        "level": 2,
+        "text": "当前状态与模式名称 (Current State And Mode Names)"
+      },
+      {
+        "level": 2,
+        "text": "修改代码的位置 (Where To Change Things)"
+      }
+    ]
+  },
+  {
+    "id": "robot_motion_contract_md",
+    "title": "ROBOT_MOTION_CONTRACT",
+    "group": "Root Docs",
+    "source_path": "ROBOT_MOTION_CONTRACT.md",
+    "tags": [
+      "Root"
+    ],
+    "summary": "小车用于盲人取物平台。当前重点不是高速运动，而是： 当前采用成熟稳定的三轴速度协议，不使用四轮 `VEL/JOG/STATUS` 协议作为主线。 SC171 → STM32：",
+    "headings": [
+      {
+        "level": 2,
+        "text": "1. 当前目标"
+      },
+      {
+        "level": 2,
+        "text": "2. 当前 STM32 主协议"
+      },
+      {
+        "level": 2,
+        "text": "3. STM32 回传协议"
+      },
+      {
+        "level": 2,
+        "text": "4. 当前 STM32 内部执行机制"
+      },
+      {
+        "level": 2,
+        "text": "5. 建议 SC171 发送频率"
+      },
+      {
+        "level": 2,
+        "text": "6. SC171 侧控制原则"
+      },
+      {
+        "level": 2,
+        "text": "7. 终点微调策略"
+      },
+      {
+        "level": 2,
+        "text": "8. 近期必须实测 / 回填的参数"
+      },
+      {
+        "level": 2,
+        "text": "9. SC171 测试顺序"
+      },
+      {
+        "level": 2,
+        "text": "10. 已暂停 / 非当前主线"
+      },
+      {
+        "level": 2,
+        "text": "11. 当前一句话说明"
+      }
+    ]
+  },
+  {
+    "id": "docs_architecture_md",
+    "title": "系统架构 (Architecture)",
+    "group": "System Docs",
+    "source_path": "docs/architecture.md",
+    "tags": [
+      "System"
+    ],
+    "summary": "本文档将运行时层映射到当前源码树中。旨在阐明后续进行代码修改时的合理位置。",
+    "headings": [
+      {
+        "level": 2,
+        "text": "1. 应用交互层 (Application Interaction Layer)"
+      },
+      {
+        "level": 2,
+        "text": "2. 任务编排层 (Task Orchestration Layer)"
+      },
+      {
+        "level": 2,
+        "text": "3. 感知算法层 (Perception Algorithm Layer)"
+      },
+      {
+        "level": 2,
+        "text": "4. 数据通信层 (Data Communication Layer)"
+      },
+      {
+        "level": 2,
+        "text": "5. 物理执行层 (Physical Execution Layer)"
+      }
+    ]
+  },
+  {
+    "id": "docs_config_md",
+    "title": "配置系统指南 (Configuration Guide)",
+    "group": "System Docs",
+    "source_path": "docs/config.md",
+    "tags": [
+      "System"
+    ],
+    "summary": "本文档说明了机器人软件栈（Orchestrator 与 VISTA）的配置层级模型、关键配置文件以及运行时配置覆盖方式。 配置系统采用多层叠加模型，以兼顾保守默认值、特定运行环境（主机开发/板端部署）及运行时调参的需求： 1.  **Dataclass 基础默认值 (Schema Defaults)**",
+    "headings": [
+      {
+        "level": 2,
+        "text": "1. 配置层级 (Configuration Layers)"
+      },
+      {
+        "level": 2,
+        "text": "2. 核心配置文件与参数修改位置 (Key Files & Configuration Tuning)"
+      },
+      {
+        "level": 3,
+        "text": "2.1 状态机运行时参数 (`orchestrator/configs/stage_params.yaml`)"
+      },
+      {
+        "level": 3,
+        "text": "2.2 底盘命令参数 (`orchestrator/configs/car_cmd_params.yaml`)"
+      },
+      {
+        "level": 3,
+        "text": "2.3 系统运行 Profile (`configs/system_config.yaml`)"
+      },
+      {
+        "level": 2,
+        "text": "3. 启动打印与有效配置信息 (Effective Dump)"
+      },
+      {
+        "level": 2,
+        "text": "4. 安全机制与危险默认值校验 (Dangerous Defaults Guard)"
+      },
+      {
+        "level": 2,
+        "text": "5. VISTA 视觉配置要点 (VISTA Config Notes)"
+      }
+    ]
+  },
+  {
+    "id": "docs_docking_refactor_notes_md",
+    "title": "Docking Refactor Notes",
+    "group": "System Docs",
+    "source_path": "docs/docking_refactor_notes.md",
+    "tags": [
+      "System"
+    ],
+    "summary": "This file is a legacy note for previous docking refactor work. It is not the source of truth for current state names or runtime ownership. SEARCH_TABLE YOLO_ACQUIRE_ALIGN",
+    "headings": [
+      {
+        "level": 2,
+        "text": "Current State Names"
+      },
+      {
+        "level": 2,
+        "text": "Current Ownership"
+      },
+      {
+        "level": 2,
+        "text": "Notes For Future Refactors"
+      }
+    ]
+  },
+  {
+    "id": "docs_ipc_refactor_notes_md",
+    "title": "IPC 通信机制重构说明文档（TCP/JSON -> UDS/MessagePack）",
+    "group": "System Docs",
+    "source_path": "docs/ipc_refactor_notes.md",
+    "tags": [
+      "System"
+    ],
+    "summary": "为了提升系统性能、降低同机（On-device）跨进程通信延迟并减少 CPU 开销，我们对系统内的 Vision 模块与 Orchestrator 模块之间的 IPC 机制进行了底层重构。 本篇文档详细说明了本次重构的设计方案、修改内容、边界处理以及板端运行与验证方法。 重构前后的通信协议堆栈对比如下：",
+    "headings": [
+      {
+        "level": 2,
+        "text": "1. 核心架构变更"
+      },
+      {
+        "level": 2,
+        "text": "2. 修改文件清单"
+      },
+      {
+        "level": 3,
+        "text": "2.1 序列化与帧解析层"
+      },
+      {
+        "level": 3,
+        "text": "2.2 配置与业务适配层"
+      },
+      {
+        "level": 3,
+        "text": "2.3 测试用例适配"
+      },
+      {
+        "level": 2,
+        "text": "3. 逻辑正确性与鲁棒性保证"
+      },
+      {
+        "level": 2,
+        "text": "4. 运行与验证建议"
+      }
+    ]
+  },
+  {
+    "id": "docs_mobile_gateway_runbook_md",
+    "title": "移动端网关运行手册与协议说明 (Mobile Gateway Runbook & Protocol)",
+    "group": "System Docs",
+    "source_path": "docs/mobile_gateway_runbook.md",
+    "tags": [
+      "System"
+    ],
+    "summary": "本文档将小车移动端网关（`mobile_gateway`）的设计设计、运行模式、配置变量、MQTT 北向协议以及南向 Orchestrator 的映射逻辑合并整理，作为唯一的开发运行参考规范。 网关支持两种运行日志级别： 网关的南向（Orchestrator 连接）支持以下三种通信模式（由 `MOBILE_GATEWAY_BACKEND` 环境变量配置）：",
+    "headings": [
+      {
+        "level": 2,
+        "text": "1. 概述与设计意图 (Overview & Design Intent)"
+      },
+      {
+        "level": 2,
+        "text": "2. 运行模式与配置 (Runtime & Environment Config)"
+      },
+      {
+        "level": 3,
+        "text": "2.1 网关运行级别 (Runtime Styles)"
+      },
+      {
+        "level": 3,
+        "text": "2.2 南向后端类型 (Southbound Backends)"
+      },
+      {
+        "level": 3,
+        "text": "2.3 关键环境变量与配置参考 (Environment Overrides)"
+      },
+      {
+        "level": 2,
+        "text": "3. 固定 MQTT 北向主题与安全规范 (Fixed MQTT Topics & Security)"
+      },
+      {
+        "level": 3,
+        "text": "安全建议 (Security Notes)"
+      },
+      {
+        "level": 2,
+        "text": "4. 移动端指令协议格式与南向映射 (Command Payloads & Southbound Mapping)"
+      },
+      {
+        "level": 3,
+        "text": "4.1 北向命令格式"
+      },
+      {
+        "level": 3,
+        "text": "4.2 南向 `task_cmd` 映射格式"
+      },
+      {
+        "level": 2,
+        "text": "5. ACK、状态与心跳语义映射 (ACK, Status, Heartbeat Semantics)"
+      },
+      {
+        "level": 3,
+        "text": "5.1 网关应答级别 (ACK Kinds)"
+      },
+      {
+        "level": 3,
+        "text": "5.2 状态流映射 (Mobile Status)"
+      },
+      {
+        "level": 3,
+        "text": "5.3 网关心跳 (Heartbeat)"
+      },
+      {
+        "level": 2,
+        "text": "6. 指令去重与可靠机制 (Deduplication & Reliable Handshaking)"
+      },
+      {
+        "level": 2,
+        "text": "7. 运行调试与验证指南 (Debugging & Runbook Steps)"
+      },
+      {
+        "level": 3,
+        "text": "7.1 本地测试方法 (无物理硬件，Windows/Host 环境)"
+      },
+      {
+        "level": 3,
+        "text": "7.2 板端部署与真实对接启动顺序 (SC171 环境)"
+      },
+      {
+        "level": 2,
+        "text": "8. 后续工作与展望 (Next Steps & Future Refactors)"
+      }
+    ]
+  },
+  {
+    "id": "docs_offline_bag_edge_debug_md",
+    "title": "离线数据包与桌边感知调试指南 (Offline Bag & Table Edge Debugging)",
+    "group": "System Docs",
+    "source_path": "docs/offline_bag_edge_debug.md",
+    "tags": [
+      "System"
+    ],
+    "summary": "本文档将 RealSense 离线 `.bag` 数据包的回放检测、参数验证、ROI 设定以及桌面场景的深度图获取与录制逻辑进行合并整理，作为板端离线感知调试的统一指导。 在不连接真实相机硬件时，我们可以利用录制好的 RealSense `.bag` 二进制包回放 RGB + Depth 图像流，输入给在线的桌边检测算法以调试 table edge、ROI ...",
+    "headings": [
+      {
+        "level": 2,
+        "text": "1. 概述与核心工具 (Overview & Core Tools)"
+      },
+      {
+        "level": 2,
+        "text": "2. 离线回放与调试命令 (Run & Debug Commands)"
+      },
+      {
+        "level": 3,
+        "text": "2.1 基础回放预览"
+      },
+      {
+        "level": 3,
+        "text": "2.2 不显示 GUI 窗口，直接保存调试分析图片"
+      },
+      {
+        "level": 3,
+        "text": "2.3 加载 YOLO 目标检测框进行对比预览"
+      },
+      {
+        "level": 2,
+        "text": "3. ROI 预设选项与控制台输出解析 (ROI Presets & Outputs)"
+      },
+      {
+        "level": 3,
+        "text": "3.1 ROI 预设列表"
+      },
+      {
+        "level": 3,
+        "text": "3.2 控制台关键日志解读"
+      },
+      {
+        "level": 2,
+        "text": "4. 真实数据包录制与常见问题诊断 (Bag Recording & Verification)"
+      },
+      {
+        "level": 3,
+        "text": "4.1 离线回放时 TableEdgeDetector 报错或提示跳过深度图？"
+      },
+      {
+        "level": 3,
+        "text": "4.2 使用 RealSense Viewer 录制完整数据包的最佳步骤"
+      },
+      {
+        "level": 3,
+        "text": "4.3 使用 Python 脚本进行自动化录制"
+      },
+      {
+        "level": 3,
+        "text": "4.4 依赖项配置说明"
+      }
+    ]
+  },
+  {
+    "id": "docs_system_runbook_md",
+    "title": "系统部署与运行手册 (System Runbook)",
+    "group": "System Docs",
+    "source_path": "docs/system_runbook.md",
+    "tags": [
+      "System"
+    ],
+    "summary": "本手册记录了当前系统的运行机制，主要侧重于如何在正确配置的环境中安全地启动和操作整套服务。 当前车辆运行的默认业务主链拓扑： 微信小程序 / 云端 MQTT ──> mobile_gateway ──> Orchestrator ──> VISTA ──> STM32 / 底盘",
+    "headings": [
+      {
+        "level": 2,
+        "text": "1. 业务主链路概述 (Scope)"
+      },
+      {
+        "level": 2,
+        "text": "2. Windows 开发环境 (Windows Development)"
+      },
+      {
+        "level": 2,
+        "text": "3. SC171 开发板端启动说明 (SC171 Board Runtime)"
+      },
+      {
+        "level": 2,
+        "text": "4. 默认端点、通信端口与主题清单 (Ports & Topics)"
+      },
+      {
+        "level": 2,
+        "text": "5. Orchestrator 状态机状态语义 (Orchestrator States)"
+      },
+      {
+        "level": 3,
+        "text": "5.1 桌边停靠主链路状态"
+      },
+      {
+        "level": 3,
+        "text": "5.2 目标定位与抓取主链路状态"
+      },
+      {
+        "level": 2,
+        "text": "6. VISTA 感知模式定义 (VISTA Modes)"
+      },
+      {
+        "level": 2,
+        "text": "7. 日志与诊断系统说明 (Logs)"
+      },
+      {
+        "level": 2,
+        "text": "8. 端到端本地最小验证流程 (Host Verification)"
+      }
+    ]
+  },
+  {
+    "id": "docs_testing_md",
+    "title": "测试体系 (Testing)",
+    "group": "System Docs",
+    "source_path": "docs/testing.md",
+    "tags": [
+      "System"
+    ],
+    "summary": "默认的测试策略是**“仅限必要测试”**。避免在 Windows 主机开发期间运行广泛、缓慢且依赖真实硬件的集成测试。 只允许使用以下环境执行测试： 在运行前，必须配置环境变量 `PYTHONPATH`：",
+    "headings": [
+      {
+        "level": 2,
+        "text": "1. Windows 主机测试环境 (Windows Host Environment)"
+      },
+      {
+        "level": 2,
+        "text": "2. 必要测试项 (Necessary Tests)"
+      },
+      {
+        "level": 2,
+        "text": "3. 主机端最小校验指令 (Minimal Host Commands)"
+      },
+      {
+        "level": 2,
+        "text": "4. 手动与历史测试脚本 (Manual Tests)"
+      },
+      {
+        "level": 2,
+        "text": "5. 硬件依赖测试项 (Hardware Tests)"
+      },
+      {
+        "level": 2,
+        "text": "6. 开发板物理测试规范 (Board Tests)"
+      }
+    ]
+  },
+  {
+    "id": "orchestrator_control_refactor_notes_md",
+    "title": "控制层语义与调速重构说明文档 (Control Layer Semantics & Speed Unification Refactor)",
+    "group": "Orchestrator Docs",
+    "source_path": "orchestrator/CONTROL_REFACTOR_NOTES.md",
+    "tags": [
+      "Orchestrator"
+    ],
+    "summary": "本文档整理了小车控制层（Orchestrator）在进行语义清理、视觉-控制语义统一以及物理速度单位归一化时的核心重构说明。 1.  **清理控制字段语义**：保留清晰、必要且可解释的字段，剔除历史重构中遗留的模糊或冗余的控制机制。 2.  **移除历史模糊逻辑**：完全移除如 `yolo_assist`、`yolo_edge_blend` 以及旧版 `0....",
+    "headings": [
+      {
+        "level": 2,
+        "text": "1. 核心目标 (Core Goals)"
+      },
+      {
+        "level": 2,
+        "text": "2. 控制语义字段说明 (Unified Control Semantics Fields)"
+      },
+      {
+        "level": 2,
+        "text": "3. 热修复与兼容层说明 (Hotfixes & Backward Compatibility)"
+      },
+      {
+        "level": 2,
+        "text": "4. 物理速度调参参考 (Tunable Velocity Parameters)"
+      }
+    ]
+  },
+  {
+    "id": "orchestrator_readme_md",
+    "title": "Orchestrator",
+    "group": "Orchestrator Docs",
+    "source_path": "orchestrator/README.md",
+    "tags": [
+      "Orchestrator"
+    ],
+    "summary": "Orchestrator 是板端状态机与底盘控制服务。当前接收 `mobile_gateway` 转发的任务命令，向 VISTA 发送视觉请求，接收视觉观测后通过 UART 控制 STM32。 +--UART /dev/ttyHS1--> STM32 cd /home/aidlux/embedded_com/orchestrator",
+    "headings": [
+      {
+        "level": 2,
+        "text": "链路"
+      },
+      {
+        "level": 2,
+        "text": "运行"
+      },
+      {
+        "level": 2,
+        "text": "端口"
+      },
+      {
+        "level": 2,
+        "text": "状态机"
+      },
+      {
+        "level": 2,
+        "text": "关键配置"
+      },
+      {
+        "level": 2,
+        "text": "日志"
+      }
+    ]
+  },
+  {
+    "id": "vista_architecture_md",
+    "title": "VISTA 架构设计与外部接口规范说明 (VISTA Architecture, Interfaces & Requirements)",
+    "group": "VISTA Vision Docs",
+    "source_path": "VISTA/ARCHITECTURE.md",
+    "tags": [
+      "VISTA"
+    ],
+    "summary": "本文档将 VISTA 的系统架构拓扑、上下游接口协议、产品功能要求、桌前平面检测算法（Full / Fast 模式对比）以及动态 ROI 映射逻辑合并整理，作为唯一的开发与架构参考规范。 VISTA 是端侧运行的视觉感知模块，主要负责目标检索定位、桌边感知对齐和远程抓取图像采样。其内部运行拓扑如下： Orchestrator ──(vision_req)──...",
+    "headings": [
+      {
+        "level": 2,
+        "text": "1. 总体架构拓扑 (Overall Architecture Topology)"
+      },
+      {
+        "level": 3,
+        "text": "1.1 业务阶段 (Stages)"
+      },
+      {
+        "level": 3,
+        "text": "1.2 活跃感知模式 (Modes)"
+      },
+      {
+        "level": 2,
+        "text": "2. 上下游 IPC 接口协议 (External IPC Interfaces)"
+      },
+      {
+        "level": 3,
+        "text": "2.1 输入请求：`vision_req`"
+      },
+      {
+        "level": 3,
+        "text": "2.2 输出观测：`vision_obs`"
+      },
+      {
+        "level": 2,
+        "text": "3. 桌边拟合检测算法分析 (Table Edge Detector Modes)"
+      },
+      {
+        "level": 3,
+        "text": "3.1 完整面检测模式 (`full` mode)"
+      },
+      {
+        "level": 3,
+        "text": "3.2 轻量快速面检测模式 (`fast_plane_only` mode)"
+      },
+      {
+        "level": 2,
+        "text": "4. ROI 动态映射补丁规范 (Simplified ROI Mapping)"
+      }
+    ]
+  },
+  {
+    "id": "vista_event_description_md",
+    "title": "VISTA Event Description",
+    "group": "VISTA Vision Docs",
+    "source_path": "VISTA/EVENT_DESCRIPTION.md",
+    "tags": [
+      "VISTA"
+    ],
+    "summary": "本文档描述当前代码会写入 `VISTA/runs/<stack_run_id>/event.jsonl` 的事件。 1. App 事件 2. Stage 事件",
+    "headings": [
+      {
+        "level": 2,
+        "text": "范围"
+      },
+      {
+        "level": 2,
+        "text": "写入路径"
+      },
+      {
+        "level": 2,
+        "text": "当前事件清单"
+      },
+      {
+        "level": 2,
+        "text": "事件顺序说明"
+      },
+      {
+        "level": 3,
+        "text": "1. 请求与 stage 切换"
+      },
+      {
+        "level": 3,
+        "text": "2. mode 真值"
+      },
+      {
+        "level": 3,
+        "text": "3. mode 失败"
+      },
+      {
+        "level": 2,
+        "text": "`CAPABILITY_CHANGED` 说明"
+      },
+      {
+        "level": 2,
+        "text": "交互事件说明"
+      },
+      {
+        "level": 2,
+        "text": "字段约定"
+      }
+    ]
+  },
+  {
+    "id": "vista_logging_rules_md",
+    "title": "VISTA Logging Rules",
+    "group": "VISTA Vision Docs",
+    "source_path": "VISTA/LOGGING_RULES.md",
+    "tags": [
+      "VISTA"
+    ],
+    "summary": "VISTA keeps console output for operators, but all structured debugging data is written into a small fixed set of files under one `runs/<stack_run_id>/` directory. 1. `ts` 2. `level...",
+    "headings": [
+      {
+        "level": 2,
+        "text": "Goal"
+      },
+      {
+        "level": 2,
+        "text": "Directory Split"
+      },
+      {
+        "level": 2,
+        "text": "Console Rules"
+      },
+      {
+        "level": 2,
+        "text": "Structured File Rules"
+      },
+      {
+        "level": 3,
+        "text": "Current writer entrypoints"
+      },
+      {
+        "level": 3,
+        "text": "`meta.json`"
+      },
+      {
+        "level": 3,
+        "text": "`event.jsonl`"
+      },
+      {
+        "level": 3,
+        "text": "`ipc.jsonl`"
+      },
+      {
+        "level": 3,
+        "text": "`heartbeat.jsonl`"
+      },
+      {
+        "level": 2,
+        "text": "Insertion Rules"
+      },
+      {
+        "level": 3,
+        "text": "Write to `event.jsonl` when"
+      },
+      {
+        "level": 3,
+        "text": "Write to `ipc.jsonl` when"
+      },
+      {
+        "level": 3,
+        "text": "Do not log by default when"
+      },
+      {
+        "level": 2,
+        "text": "Writer Contract"
+      },
+      {
+        "level": 2,
+        "text": "Environment Variables"
+      },
+      {
+        "level": 2,
+        "text": "Operator Workflow"
+      }
+    ]
+  },
+  {
+    "id": "vista_readme_md",
+    "title": "VISTA",
+    "group": "VISTA Vision Docs",
+    "source_path": "VISTA/ReadMe.md",
+    "tags": [
+      "VISTA"
+    ],
+    "summary": "VISTA 是板端视觉服务，接收 Orchestrator 的 `vision_req`，按 stage/mode 调度摄像头、模型、桌边感知、远程抓取能力，并输出 `vision_obs`。 当前整车链路见 [docs/system_runbook.md](/home/aidlux/embedded_com/docs/system_runbook.md)。...",
+    "headings": [
+      {
+        "level": 2,
+        "text": "主链路"
+      },
+      {
+        "level": 2,
+        "text": "Stage 与 Mode"
+      },
+      {
+        "level": 2,
+        "text": "Runtime Baseline"
+      },
+      {
+        "level": 2,
+        "text": "运行"
+      },
+      {
+        "level": 2,
+        "text": "日志"
+      },
+      {
+        "level": 2,
+        "text": "验收"
+      }
+    ]
+  },
+  {
+    "id": "vista_vision_module_structure_md",
+    "title": "视觉感知模块源码结构说明 (VISTA Structure)",
+    "group": "VISTA Vision Docs",
+    "source_path": "VISTA/vision_module/STRUCTURE.md",
+    "tags": [
+      "VISTA"
+    ],
+    "summary": "本轮结构清理工作在保持当前运行时布局（Runtime Layout）完全不被破坏的前提下，为调试脚本、ROI 辅助逻辑和未来手动控制工具划分了更清晰的文件归宿。",
+    "headings": [
+      {
+        "level": 2,
+        "text": "1. 当前各目录职责分工 (Current Responsibilities)"
+      },
+      {
+        "level": 2,
+        "text": "2. 结构调整兼容性底线规则 (Compatibility Rules)"
+      },
+      {
+        "level": 2,
+        "text": "3. 长期演进架构设计建议 (Long-Term Direction)"
+      }
+    ]
+  },
+  {
+    "id": "vista_vision_module_vision_semantics_refactor_notes_md",
+    "title": "VISTA 视觉语义字段与重构说明文档 (Vision Semantics & Refactor Notes)",
+    "group": "VISTA Vision Docs",
+    "source_path": "VISTA/vision_module/VISION_SEMANTICS_REFACTOR_NOTES.md",
+    "tags": [
+      "VISTA"
+    ],
+    "summary": "本文档说明了 VISTA 视觉感知链路输出的语义字段标准化规范、视觉-控制语义统一以及 BBox-Size Driven ROI（基于边界框尺寸驱动的 ROI）的实现说明。 1.  **标准化视觉输出字段**：对视觉链路产生的检测量进行分层标准化，确保 Orchestrator 控制层能够安全稳定地消费。 2.  **统一桌子边界框（Table BBox）语...",
+    "headings": [
+      {
+        "level": 2,
+        "text": "1. 核心目标 (Core Goals)"
+      },
+      {
+        "level": 2,
+        "text": "2. 统一字段规范定义 (Unified Field Dictionary)"
+      },
+      {
+        "level": 2,
+        "text": "3. 历史兼容字段映射 (Backward Compatibility Aliases)"
+      }
+    ]
+  },
+  {
+    "id": "vista_vision_module_backend_camera_camera_info_md",
+    "title": "相机设备参数能力信息 (Camera Capability Info)",
+    "group": "VISTA Vision Docs",
+    "source_path": "VISTA/vision_module/backend/camera/camera_info.md",
+    "tags": [
+      "VISTA"
+    ],
+    "summary": "Smart Voice Retrieval Robot project documentation: camera_info.md.",
+    "headings": [
+      {
+        "level": 2,
+        "text": "摘要 (Summary)"
+      },
+      {
+        "level": 2,
+        "text": "1. 深度相机能力 (Depth Cam Capabilities)"
+      },
+      {
+        "level": 2,
+        "text": "2. 红外相机能力 (IR Cam Capabilities)"
+      },
+      {
+        "level": 2,
+        "text": "3. 彩色相机能力 (Color Cam Capabilities)"
+      }
+    ]
+  },
+  {
+    "id": "vista_vision_module_backend_camera_readme_md",
+    "title": "VISTA 摄像头后端 (VISTA Camera Backend)",
+    "group": "VISTA Vision Docs",
+    "source_path": "VISTA/vision_module/backend/camera/README.md",
+    "tags": [
+      "VISTA"
+    ],
+    "summary": "此目录包含 VISTA 运行时管理器所使用的摄像头后端。 它不是一个独立的 Demo 包，而是当前 VISTA stage/mode 架构的一部分。 摄像头后端提供由 `CameraManager` 选择的底层摄像头实现。",
+    "headings": [
+      {
+        "level": 2,
+        "text": "当前角色"
+      },
+      {
+        "level": 2,
+        "text": "当前目录内容"
+      },
+      {
+        "level": 2,
+        "text": "构建路径 (Build Path)"
+      },
+      {
+        "level": 2,
+        "text": "当前架构说明 (Current Architectural Notes)"
+      },
+      {
+        "level": 2,
+        "text": "当前限制 (Current Limitations)"
+      },
+      {
+        "level": 2,
+        "text": "相关文档 (Related Docs)"
+      }
+    ]
+  },
+  {
+    "id": "vista_vision_module_libs_aarch64_readme_md",
+    "title": "VISTA aarch64 原生库 (VISTA aarch64 Native Libraries)",
+    "group": "VISTA Vision Docs",
+    "source_path": "VISTA/vision_module/libs/aarch64/README.md",
+    "tags": [
+      "VISTA"
+    ],
+    "summary": "此目录存储 VISTA 使用的仅适用于板端的原生二进制文件。 请将原生目标二进制文件保留在此处，而不是混入 Python 摄像头源码目录中。",
+    "headings": [
+      {
+        "level": 2,
+        "text": "fast_cam"
+      }
+    ]
+  },
+  {
+    "id": "vista_vision_module_model_qnn216_model_farm_yolov7_qcs6490_qnn2_16_int8_aidlite_readme_md",
+    "title": "安装合适版本的 aidlite sdk",
+    "group": "VISTA Vision Docs",
+    "source_path": "VISTA/vision_module/model/qnn216/model_farm_yolov7_qcs6490_qnn2.16_int8_aidlite/README.md",
+    "tags": [
+      "VISTA"
+    ],
+    "summary": "sudo aid-pkg update sudo aid-pkg install aidlite-sdk sudo aid-pkg install aidlite-{QNN VERSION}",
+    "headings": [
+      {
+        "level": 2,
+        "text": "模型信息 (Model Information)"
+      },
+      {
+        "level": 3,
+        "text": "原始模型 (Source model)"
+      },
+      {
+        "level": 3,
+        "text": "转换后的模型 (Converted model)"
+      },
+      {
+        "level": 2,
+        "text": "使用 AidLite SDK 进行推理 (Inference with AidLite SDK)"
+      },
+      {
+        "level": 3,
+        "text": "SDK 安装 (SDK installation)"
+      },
+      {
+        "level": 3,
+        "text": "运行 Python Demo (Run python Demo)"
+      },
+      {
+        "level": 3,
+        "text": "运行 C++ Demo (Run c++ demo)"
+      }
+    ]
+  },
+  {
+    "id": "vista_vision_module_tools_readme_md",
+    "title": "vision_module 工具目录 (vision_module tools)",
+    "group": "VISTA Vision Docs",
+    "source_path": "VISTA/vision_module/tools/README.md",
+    "tags": [
+      "VISTA"
+    ],
+    "summary": "此目录预留用于手动调试脚本和操作员运行的辅助工具。 推荐的下一步工作：",
+    "headings": []
+  },
+  {
+    "id": "tools_readme_tools_md",
+    "title": "离线控制分析与 replay 工具说明",
+    "group": "Tool & Script Docs",
+    "source_path": "tools/README_TOOLS.md",
+    "tags": [
+      "Tool"
+    ],
+    "summary": "这些工具的目的不是替代真实小车联调，而是把真实小车联调从“调代码”变成“采日志 + 验证候选参数”。大部分状态切换、滤波、速度平滑、抖动风险判断，都可以先在电脑上离线完成。 | 文件 | 作用 | |---|---|",
+    "headings": [
+      {
+        "level": 2,
+        "text": "目录文件"
+      },
+      {
+        "level": 2,
+        "text": "1. 先做纯控制器仿真"
+      },
+      {
+        "level": 2,
+        "text": "2. 用真实视觉日志 replay"
+      },
+      {
+        "level": 2,
+        "text": "3. 画图分析"
+      },
+      {
+        "level": 2,
+        "text": "4. 粗略预测运行抖动"
+      },
+      {
+        "level": 2,
+        "text": "5. 扫参数，选候选方案"
+      },
+      {
+        "level": 2,
+        "text": "6. 底盘开环测试"
+      },
+      {
+        "level": 2,
+        "text": "推荐调试顺序"
+      },
+      {
+        "level": 2,
+        "text": "常用参数覆盖"
+      }
+    ]
+  }
+]

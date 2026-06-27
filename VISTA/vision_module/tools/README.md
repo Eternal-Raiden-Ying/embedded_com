@@ -1,17 +1,14 @@
-# vision_module tools
+# vision_module 工具目录 (vision_module tools)
 
-This directory is reserved for manual debugging scripts and operator-run helper
-tools.
+此目录预留用于手动调试脚本和操作员运行的辅助工具。
 
-Current state:
+当前状态：
 
-- Historical scripts such as `debug_send_req.py`, `debug_recv_obj.py`,
-  `debug_protocol_tools.py`, and `demo_camera.py` still live in `test/`.
-- They are intentionally not moved in this cleanup pass so existing board-side
-  habits and shell commands keep working.
+- 历史脚本（如 `debug_send_req.py`、`debug_recv_obj.py`、`debug_protocol_tools.py` 和 `demo_camera.py`）仍保留在 `test/` 中。
+- 在本次清理过程中特意没有移动它们，以便板端的现有使用习惯和 Shell 命令能够继续正常工作。
 
-Recommended next step:
+推荐的下一步工作：
 
-- Move manual tools from `test/` into this directory one script at a time.
-- Leave a small compatibility shim at the old path when a script is moved.
-- Keep automated unit and regression tests in `test/`.
+- 每次将一个脚本逐步从 `test/` 移入此目录。
+- 移动脚本时，在原路径保留一个小的兼容性垫片（compatibility shim）。
+- 自动化单元测试和回归测试请保留在 `test/` 中。

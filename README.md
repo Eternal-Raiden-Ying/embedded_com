@@ -1,91 +1,100 @@
-# Robot Stack 2026
+# 嵌入式机器人软件栈 (Embedded Robot Stack)
 
-AidLux/QCS6490 板端机器人主链路。当前入口为手机小程序或云端 MQTT，经 `mobile_gateway` 转成 Orchestrator 任务，再由 Orchestrator 驱动 VISTA 与 STM32 底盘。
+本仓库包含嵌入式机器人软件栈的 Windows 开发代码和 SC171 板端运行代码。
 
-## 主链路
+## 运行架构布局 (Runtime Layout)
 
 ```text
-小程序 / 云 MQTT
+移动端 App / MQTT
         |
         v
-mobile_gateway --task_cmd:9001--> Orchestrator --vision_req:9003--> VISTA
-        ^                         |   ^                            |
-        |                         |   |                            |
-        +--task_ack/status:9012---+   +------vision_obs:9002-------+
-                                  |
-                                  +--UART /dev/ttyHS1--> STM32
+orchestrator_service.mobile_gateway
+        |
+        v
+Orchestrator  <---- vision_obs ----  VISTA
+        | ---- vision_req ---->       |
+        v
+STM32 底盘 + 机械臂串口协议
 ```
 
-`Voice/ASR` 不在当前启动链路内。`tts_event` 是历史兼容输出，默认 `disabled`。
+主要目录：
 
-## 入口与端口
+- `common/`: 共享的配置加载器、Schema、校验、日志以及协议助手。
+- `configs/`: 项目配置与运行时 Profile。
+- `orchestrator/`: 任务编排、状态运行时、底盘控制、UART 桥接以及移动端网关。
+- `VISTA/`: 视觉服务、Stage 控制器、观测路由器、摄像头/模型后端。
+- `tests/`: 仅限必要的主机测试。
+- `scripts/manual/`: 手动、历史或交互式脚本。
+- `docs/`: 架构、配置、测试和运行手册（Runbook）文档。
 
-| 模块 | 路径 | 入口 | 日志 |
-|------|------|------|------|
-| mobile_gateway | repo root / `orchestrator_service.mobile_gateway` | `./start_robot_stack.sh` 或 `python3 -m orchestrator_service.mobile_gateway.runtime.service --config configs/mobile_gateway.mqtt.yaml` | `logs/mobile_gateway.out` |
-| Orchestrator | `orchestrator/` | `python3 -m orchestrator_service.app.main` | `orchestrator/logs/orchestrator.out`, `orchestrator/runs/run_*/` |
-| VISTA | `VISTA/` | `/usr/bin/python3 -m vision_module.app.app` | `VISTA/logs/vision.out`, `VISTA/runs/run_*/` |
-| STM32 | UART | `/dev/ttyHS1 @ 115200` | Orchestrator `cmd_vel.jsonl` / `ipc.jsonl` |
+## Python 环境 (Python Environments)
 
-| 链路 | 默认地址 |
-|------|----------|
-| mobile_gateway -> Orchestrator `task_cmd` | `127.0.0.1:9001` |
-| VISTA -> Orchestrator `vision_obs` | `127.0.0.1:9002` |
-| Orchestrator -> VISTA `vision_req` | `127.0.0.1:9003` |
-| Orchestrator -> mobile_gateway `task_ack` | `127.0.0.1:9012` |
-| Orchestrator `tts_event` 兼容口 | `127.0.0.1:9011`, 默认禁用 |
+Windows 开发必须使用：
 
-## 快速运行
-
-```bash
-# dry-run：不连真实车，只打印 UART 控制输出
-STACK_PROFILE=dryrun ./start_robot_stack.sh
-
-# 真实车：连接 STM32 串口
-STACK_PROFILE=full UART_DEV=/dev/ttyHS1 ./start_robot_stack.sh
-
-# 查看 / 停止
-./start_robot_stack.sh status
-./start_robot_stack.sh stop
+```powershell
+D:\anaconda\Anaconda\envs\embed_sc171\python.exe
 ```
 
-启动脚本会拉起 `VISTA -> Orchestrator -> mobile_gateway`，并等待端口或日志 ready-check。
+SC171 板端运行时使用设备上安装的板端 Python 环境。请勿将 Windows 开发命令指向板端路径。
 
-## 状态机主线
+请勿使用 Base Anaconda、MSYS2 Python 或 `PATH` 中找到的任意 `python`。
 
-`FIND target` 的主路径：
+## Windows PYTHONPATH
+
+在运行主机检查前设置此环境变量：
+
+```powershell
+$env:PYTHONPATH="D:\55495\workspace\embedded_com;D:\55495\workspace\embedded_com\orchestrator;D:\55495\workspace\embedded_com\VISTA"
+```
+
+## 最小主机验证 (Minimal Host Verification)
+
+使用针对性的测试。请勿在后台运行完整的 pytest。
+
+```powershell
+D:\anaconda\Anaconda\envs\embed_sc171\python.exe -m compileall -q common orchestrator\orchestrator_service VISTA\vision_module
+
+D:\anaconda\Anaconda\envs\embed_sc171\python.exe -m pytest tests\orchestrator tests\common VISTA\vision_module\test\test_observation_router.py VISTA\vision_module\test\test_stage_contract.py -q --tb=short --disable-warnings
+```
+
+## 当前状态与模式名称 (Current State And Mode Names)
+
+当前的 Orchestrator 停靠路径：
 
 ```text
-IDLE
- -> SEARCH_TABLE
- -> COARSE_ALIGN
- -> CONTROLLED_APPROACH
- -> FINAL_LOCK
- -> AT_TABLE_EDGE
- -> SEARCH_TARGET_INIT
- -> EDGE_SLIDE_SEARCH
- -> TARGET_CONFIRM
- -> TARGET_LOCKED
- -> FREEZE_BASE
- -> DONE
+SEARCH_TABLE
+YOLO_ACQUIRE_ALIGN
+YOLO_APPROACH
+EDGE_ADJUST
+FINAL_SLOW_STOP
+AT_TABLE_EDGE
 ```
 
-异常与换边状态包括 `DOCK_RETRY`, `LEAVE_EDGE`, `RELOCATE_TO_EDGE`, `REACQUIRE_EDGE`, `NEXT_TABLE`, `AVOID_OBSTACLE`, `ERROR_RECOVERY`。返航使用 `RETURN_HOME`。
+当前的 VISTA 搜索模式（search modes）：
 
-VISTA 当前主要 mode：
+- `FIND_OBJECT`: 目标搜索与目标观测路径。
+- `FIND_EDGE`: 桌边观测路径。
 
-| mode | 用途 |
-|------|------|
-| `TRACK_LOCAL` | RGB + 本地模型，输出 `target_obs` 或返航 tag 观测 |
-| `DEPTH_PERCEPTION` | 深度为主的桌边感知，输出 `table_edge_obs` |
-| `TABLE_EDGE_PERCEPTION` | RGB + depth + 本地模型，用于沿边目标搜索时同时输出桌边和目标信息 |
+仅为了兼容性而接受的遗留别名：
 
-## 工程验收
+- `TRACK_LOCAL` -> `FIND_OBJECT`
+- `DEPTH_PERCEPTION` -> `FIND_EDGE`
 
-详细步骤见 [docs/system_runbook.md](/home/aidlux/embedded_com/docs/system_runbook.md)。
+## 修改代码的位置 (Where To Change Things)
 
-最低验收：
+- 配置默认值与校验: `common/config/`
+- 项目 Profile 与运行时配置: `configs/`
+- Orchestrator 状态/运行时流程: `orchestrator/orchestrator_service/runtime/`
+- 基础运动、停止策略（STOP policy）、速度限制: `orchestrator/orchestrator_service/control/`
+- UART 与协议编码: `orchestrator/orchestrator_service/bridge/`
+- VISTA 生命周期与阶段（stages）: `VISTA/vision_module/app/`
+- VISTA 观测路由: `VISTA/vision_module/app/observation/`
+- VISTA 搜索阶段（search stage）: `VISTA/vision_module/app/stages/search/`
+- 手动脚本: `scripts/manual/`
 
-- dry-run：`mobile_gateway` 收到 `fetch_object` 后，Orchestrator 进入 `SEARCH_TABLE`，`orchestrator/runs/run_*/ipc.jsonl` 有 `task_cmd/task_ack/vision_req`。
-- 手持相机：VISTA 能切到 `DEPTH_PERCEPTION` 或 `TRACK_LOCAL`，`VISTA/runs/run_*/ipc.jsonl` 持续输出 `vision_obs`。
-- 真实车低速：`STACK_PROFILE=full` 下 UART 有 `MODE`/`V`/`STOP`，STOP 后底盘停止，日志可回放状态切换。
+另请参阅：
+
+- `docs/architecture.md`
+- `docs/config.md`
+- `docs/testing.md`
+- `docs/system_runbook.md`

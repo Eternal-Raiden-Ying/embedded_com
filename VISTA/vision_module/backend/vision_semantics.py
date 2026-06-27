@@ -10,7 +10,194 @@ layer can then consume those fields without guessing legacy names.
 """
 from __future__ import annotations
 
+import dataclasses
+from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Sequence
+
+
+@dataclass
+class TableEdgeObservation:
+    """Canonical visual-semantics observation for table docking.
+
+    This dataclass encapsulates perception facts and metrics computed by the
+    vision process to allow control layers or state machines to access
+    strictly-typed fields without guessing raw dictionary keys.
+
+    Attributes:
+        edge_detected: True if the algorithm detected a candidate geometric edge.
+        edge_geometry_valid: True if a single-frame geometric result is valid in current ROI.
+        edge_stable: True if the detection is stable over consecutive frames.
+        edge_trusted: True if stable and passes all quality/confidence gates.
+        edge_quality: Dictionary grouping raw geometric quality features.
+        edge_trust_reason: Reason why the edge is trusted.
+        edge_reject_for_control_reason: Semi-colon separated reasons why edge control is blocked.
+        edge_stable_required_frames: Minimum frames of persistence required for stability.
+        edge_trusted_min_conf: Minimum confidence threshold for trusting an edge.
+        edge_trusted_min_support_count: Minimum support points for trusting an edge.
+        edge_trusted_min_inlier_count: Minimum inlier points for trusting an edge.
+        edge_trusted_min_x_span_m: Minimum x span in meters for trusting an edge.
+        edge_valid: Legacy compatibility alias for edge_geometry_valid.
+        valid_for_control: Legacy compatibility alias for edge_trusted.
+        edge_control_allowed: Legacy compatibility alias for edge_trusted.
+        edge_control_block_reason: Legacy compatibility alias for edge_reject_for_control_reason.
+
+        table_bbox_current_found: True if table bounding box is detected in current frame.
+        table_bbox_control_valid: True if control may use a bbox (includes hold/history).
+        table_bbox_hold_active: True if the bounding box is currently held from history.
+        table_bbox_hold_age_frames: Number of frames the bounding box has been held.
+        table_bbox_xyxy: Normalized bbox coordinates [x1, y1, x2, y2].
+        table_bbox_source: Source identifier of the bounding box (e.g., 'yolo_table_bbox').
+        table_bbox_invalid_reason: Description of why the bounding box is invalid.
+        table_bbox_conf_raw: Raw detection confidence from YOLO.
+        table_bbox_conf_used_for_gate: Flag indicating if confidence is used for gating.
+        table_bbox_area_ratio: Ratio of bounding box area relative to image shape.
+        table_bbox_center: Center [cx, cy] of bounding box.
+        table_bbox_center_norm: Normalized center [cx, cy] of bounding box.
+        table_bbox_found: Legacy alias for table_bbox_current_found.
+        table_bbox_detected: Legacy alias for table_bbox_current_found.
+        yolo_table_control_valid: Legacy alias for table_bbox_control_valid.
+        table_confirmed_by_yolo: Legacy alias for table_bbox_current_found.
+        yolo_valid_reason: Legacy validity reason description.
+        yolo_invalid_reason: Legacy invalid reason description.
+        docking_enabled_by_yolo: Legacy alias for table_bbox_control_valid.
+
+        dist_err_m: Lateral distance error in meters to the table edge.
+        yaw_err_rad: Yaw alignment error in radians to the table edge.
+        roi_source: Source ROI method (e.g., local_perception_table_bbox).
+        table_quadrant: Quadrant of the table relative to the vehicle (e.g., LT, RT).
+        fast_raw_dist_err_m: Raw lateral distance error in meters from fast fit.
+        plane_dist_err_m: Lateral distance error from plane detection in meters.
+        line_dist_err_m: Lateral distance error from line detection in meters.
+        upper_line_dist_err_m: Lateral distance error from upper line detection in meters.
+        lower_line_dist_err_m: Lateral distance error from lower line detection in meters.
+        target_dist_m: Target docking distance in meters.
+        dist_err: Alias for dist_err_m.
+
+        extra_fields: Dynamic dictionary holding any other payload-specific fields
+            not explicitly declared as properties, for full backward compatibility.
+    """
+    # 桌子边界检测与控制状态
+    edge_detected: bool = False
+    edge_geometry_valid: bool = False
+    edge_stable: bool = False
+    edge_trusted: bool = False
+    edge_quality: dict[str, Any] = field(default_factory=dict)
+    edge_trust_reason: str = ""
+    edge_reject_for_control_reason: str = ""
+    edge_stable_required_frames: int = 5
+    edge_trusted_min_conf: float = 0.60
+    edge_trusted_min_support_count: int = 0
+    edge_trusted_min_inlier_count: int = 0
+    edge_trusted_min_x_span_m: float = 0.0
+
+
+    # 桌子 Bounding Box 相关的语义
+    table_bbox_current_found: bool = False
+    table_bbox_control_valid: bool = False
+    table_bbox_hold_active: bool = False
+    table_bbox_hold_age_frames: int = 0
+    table_bbox_xyxy: Optional[list[float]] = None
+    table_bbox_source: str = ""
+    table_bbox_invalid_reason: str = ""
+    table_bbox_conf_raw: Optional[float] = None
+    table_bbox_conf_used_for_gate: bool = False
+    table_bbox_area_ratio: Optional[float] = None
+    table_bbox_center: Optional[list[float]] = None
+    table_bbox_center_norm: Optional[list[float]] = None
+
+
+    # 测量误差/控制所需的目标观测值
+    dist_err_m: Optional[float] = None
+    yaw_err_rad: Optional[float] = None
+    roi_source: Optional[str] = None
+    table_quadrant: Optional[str] = None
+    fast_raw_dist_err_m: Optional[float] = None
+    plane_dist_err_m: Optional[float] = None
+    line_dist_err_m: Optional[float] = None
+    upper_line_dist_err_m: Optional[float] = None
+    lower_line_dist_err_m: Optional[float] = None
+    target_dist_m: Optional[float] = None
+    dist_err: Optional[float] = None
+    table_roi_depth_valid: bool = False
+    table_roi_depth_p10: Optional[float] = None
+    table_roi_depth_median: Optional[float] = None
+    table_roi_depth_valid_ratio: Optional[float] = None
+    table_roi_depth_sample_count: Optional[int] = None
+    table_roi_depth_bbox: Optional[list[float]] = None
+    table_roi_depth_bbox_norm: Optional[list[float]] = None
+    table_roi_depth_coord_space: Optional[str] = None
+    table_roi_depth_mapping_source: Optional[str] = None
+
+    # Depth safety stop metrics
+    depth_p10: Optional[float] = None
+    close_depth_ratio: Optional[float] = None
+
+    # 未明确声明的动态字段
+    extra_fields: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert the observation to a dictionary for backward compatibility.
+
+        Merges all strictly typed attributes and any extra fields stored in extra_fields.
+        """
+        out = {}
+        for f in dataclasses.fields(self):
+            if f.name == "extra_fields":
+                continue
+            out[f.name] = getattr(self, f.name)
+        out.update(self.extra_fields)
+        return out
+
+    def __getitem__(self, key: str) -> Any:
+        if hasattr(self, key):
+            return getattr(self, key)
+        if key in self.extra_fields:
+            return self.extra_fields[key]
+        raise KeyError(key)
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        if hasattr(self, key):
+            setattr(self, key, value)
+        else:
+            self.extra_fields[key] = value
+
+    def __contains__(self, key: str) -> bool:
+        if hasattr(self, key):
+            return not key.startswith("_") and not callable(getattr(self, key))
+        return key in self.extra_fields
+
+    def get(self, key: str, default: Any = None) -> Any:
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def setdefault(self, key: str, default: Any = None) -> Any:
+        if key not in self:
+            self[key] = default
+            return default
+        return self[key]
+
+    def keys(self):
+        fields = {f.name for f in dataclasses.fields(self) if f.name != "extra_fields"}
+        return fields.union(self.extra_fields.keys())
+
+    def values(self):
+        return [self[k] for k in self.keys()]
+
+    def items(self):
+        return [(k, self[k]) for k in self.keys()]
+
+    def update(self, other: Any) -> None:
+        if isinstance(other, dict):
+            for k, v in other.items():
+                self[k] = v
+        elif hasattr(other, "keys"):
+            for k in other.keys():
+                self[k] = other[k]
+        else:
+            for k, v in other:
+                self[k] = v
 
 
 def _to_float(value: Any) -> Optional[float]:
@@ -167,6 +354,7 @@ def local_table_bbox_semantics(payload: Dict[str, Any], *, rgb_shape: Any = None
         "edge_control_block_reason": "" if control_valid else "table_bbox_unavailable",
     }
 
+
 def edge_quality_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Collect fast/full edge quality features into a single dictionary.
 
@@ -220,6 +408,7 @@ def edge_quality_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "reject_reason": str(payload.get("reject_reason") or payload.get("reason") or ""),
     }
 
+
 def standardize_table_edge_payload(
     payload: Dict[str, Any],
     *,
@@ -230,7 +419,7 @@ def standardize_table_edge_payload(
     edge_trusted_min_inlier_count: int = 0,
     edge_trusted_min_x_span_m: float = 0.0,
     edge_trusted_max_background_penalty: Optional[float] = None,
-) -> Dict[str, Any]:
+) -> TableEdgeObservation:
     """Add canonical table/edge semantic fields to a table_edge_obs payload.
 
     Important semantic split:
@@ -245,8 +434,6 @@ def standardize_table_edge_payload(
 
     unavailable = bool(out.get("edge_obs_unavailable", False))
     edge_detected = bool(out.get("edge_detected", out.get("edge_found", False)))
-    # If the legacy payload already says edge_geometry_valid, respect it; otherwise
-    # edge detection + usable depth is the perception-level validity.
     if "edge_geometry_valid" in payload:
         edge_geometry_valid = bool(payload.get("edge_geometry_valid")) and not unavailable
     else:
@@ -291,26 +478,33 @@ def standardize_table_edge_payload(
 
     out.update(
         {
+            "edge_found": bool(edge_detected),
             "edge_detected": bool(edge_detected),
             "edge_geometry_valid": bool(edge_geometry_valid),
+            "edge_valid": bool(edge_geometry_valid),
             "edge_stable": bool(edge_stable),
             "edge_trusted": bool(edge_trusted),
+            "valid_for_control": bool(edge_trusted),
+            "edge_control_allowed": bool(edge_trusted),
             "edge_quality": quality,
             "edge_trust_reason": edge_trust_reason,
             "edge_reject_for_control_reason": block_reason,
+            "edge_control_block_reason": block_reason,
             "edge_stable_required_frames": int(stable_required),
             "edge_trusted_min_conf": float(edge_trusted_min_conf),
             "edge_trusted_min_support_count": int(edge_trusted_min_support_count or 0),
             "edge_trusted_min_inlier_count": int(edge_trusted_min_inlier_count or 0),
             "edge_trusted_min_x_span_m": float(edge_trusted_min_x_span_m or 0.0),
-            # Compatibility aliases. `edge_valid` now means geometric validity;
-            # `valid_for_control` and `edge_control_allowed` follow edge_trusted.
-            "edge_valid": bool(edge_geometry_valid),
-            "valid_for_control": bool(edge_trusted),
-            "edge_control_allowed": bool(edge_trusted),
-            "docking_enabled_by_yolo": bool(out.get("table_bbox_control_valid", False)),
-            "edge_control_block_reason": block_reason,
         }
     )
-    return out
 
+    field_names = {f.name for f in dataclasses.fields(TableEdgeObservation) if f.name != "extra_fields"}
+    init_kwargs = {}
+    extra_fields = {}
+    for k, v in out.items():
+        if k in field_names:
+            init_kwargs[k] = v
+        else:
+            extra_fields[k] = v
+
+    return TableEdgeObservation(extra_fields=extra_fields, **init_kwargs)
