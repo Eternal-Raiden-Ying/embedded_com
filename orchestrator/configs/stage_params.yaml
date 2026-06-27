@@ -29,6 +29,8 @@ table_docking:
   approach_to_align_stable_obs: 2
   coarse_align_min_dwell_s: 0.8
   controlled_approach_min_dwell_s: 0.8
+  near_slow_max_vx_mps: 0.020
+  near_slow_max_vy_mps: 0.0
 
 yolo_table:
   yolo_table_control_enable: true

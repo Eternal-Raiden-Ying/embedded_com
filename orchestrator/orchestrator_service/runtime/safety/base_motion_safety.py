@@ -123,7 +123,8 @@ def apply_base_motion_safety(decision: Any, *, ctx: Any, cfg: Any, log_fn: Optio
     obs = get_fresh_table_obs(ctx, cfg)
     if obs is not None and obs.depth_p10 is not None:
         depth_p10 = obs.depth_p10
-        if depth_p10 < cfg.near_stop_depth_m:
+        near_stop_depth_m = getattr(cfg, "near_stop_depth_m", 0.25)
+        if depth_p10 < near_stop_depth_m:
             if decision.cmd.vx_mps != 0.0 or decision.cmd.vy_mps != 0.0 or decision.cmd.wz_radps != 0.0:
                 decision.cmd.vx_mps = 0.0
                 decision.cmd.vy_mps = 0.0
@@ -134,17 +135,17 @@ def apply_base_motion_safety(decision: Any, *, ctx: Any, cfg: Any, log_fn: Optio
                 summary["stop_reason"] = "depth_p10_too_close"
                 if log_fn:
                     try:
-                        log_fn("warn", f"Depth safety stop triggered: depth_p10={depth_p10:.3f}m < {cfg.near_stop_depth_m:.3f}m")
+                        log_fn("warn", f"Depth safety stop triggered: depth_p10={depth_p10:.3f}m < {near_stop_depth_m:.3f}m")
                     except Exception:
                         pass
             allow_forward = False
             allow_rotate = False
             allow_lateral = False
 
-        elif depth_p10 < cfg.near_slow_depth_m:
-            max_vx = cfg.near_slow_max_vx_mps
-            max_wz = cfg.near_slow_max_wz_radps
-            max_vy = getattr(cfg, "near_slow_max_vy_mps", cfg.near_slow_max_vx_mps)
+        elif depth_p10 < getattr(cfg, "near_slow_depth_m", 0.40):
+            max_vx = getattr(cfg, "near_slow_max_vx_mps", 0.020)
+            max_wz = getattr(cfg, "near_slow_max_wz_radps", 0.04)
+            max_vy = getattr(cfg, "near_slow_max_vy_mps", 0.0)
 
             if decision.cmd.vx_mps > max_vx:
                 decision.cmd.vx_mps = max_vx

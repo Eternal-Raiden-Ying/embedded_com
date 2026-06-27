@@ -463,6 +463,22 @@ def _load_and_merge_stage_params(config: SystemGlobalConfig, file_path: Path) ->
             ctrl.coarse_align_min_dwell_s = _sf(td["coarse_align_min_dwell_s"])
         if "controlled_approach_min_dwell_s" in td:
             ctrl.controlled_approach_min_dwell_s = _sf(td["controlled_approach_min_dwell_s"])
+        if "near_slow_max_vx_mps" in td:
+            ctrl.near_slow_max_vx_mps = _sf(td["near_slow_max_vx_mps"])
+        if "near_slow_max_vy_mps" in td:
+            ctrl.near_slow_max_vy_mps = _sf(td["near_slow_max_vy_mps"])
+        if "final_yaw_deadband_rad" in td:
+            ctrl.final_yaw_deadband_rad = _sf(td["final_yaw_deadband_rad"])
+        if "final_lock_yaw_rad" in td:
+            ctrl.final_lock_yaw_rad = _sf(td["final_lock_yaw_rad"])
+        if "final_yaw_realign_rad" in td:
+            ctrl.final_yaw_realign_rad = _sf(td["final_yaw_realign_rad"])
+        if "final_yaw_stable_frames" in td:
+            ctrl.final_yaw_stable_frames = _si(td["final_yaw_stable_frames"])
+        if "final_yaw_align_min_duration_ms" in td:
+            ctrl.final_yaw_align_min_duration_ms = _si(td["final_yaw_align_min_duration_ms"])
+        if "final_yaw_last_good_hold_s" in td:
+            ctrl.final_yaw_last_good_hold_s = _sf(td["final_yaw_last_good_hold_s"])
 
     yt = yaml_data.get("yolo_table", {})
     if yt:

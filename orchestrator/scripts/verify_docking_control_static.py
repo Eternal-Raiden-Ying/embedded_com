@@ -1055,6 +1055,34 @@ def main() -> None:
         dec_s5 = edge_guided_decision(probe_smoke, obs_s5)
     assert probe_smoke.ctx.final_locked is True
 
+    # Bugfix 1 synthetic test: missing near_slow_max_vx_mps configuration
+    class MinimalOldConfig:
+        near_slow_depth_m = 0.40
+        near_slow_max_wz_radps = 0.04
+        table_obs_max_age_s = 1.0
+        # near_slow_max_vx_mps is missing!
+        # near_slow_max_vy_mps is missing!
+
+    from orchestrator.orchestrator_service.runtime.safety.base_motion_safety import apply_base_motion_safety
+
+    mock_cfg = MinimalOldConfig()
+    mock_cmd = CmdVel(ts=now_ts(), mode="YOLO_APPROACH", vx_mps=0.03, vy_mps=0.0, wz_radps=0.0)
+    mock_decision = MotionDecision(cmd=mock_cmd, control_summary={"allow_forward": True, "allow_rotate": True, "allow_lateral": True})
+    mock_obs = TableEdgeObs.from_dict({
+        "ts": now_ts(), "table_roi_depth_valid": True, "depth_p10": 0.30, "table_roi_depth_p10": 0.30
+    })
+    mock_ctx = SimpleNamespace(
+        state=State.YOLO_APPROACH,
+        last_table_obs=mock_obs,
+        task_start_wall_ts=0,
+        active_session_id=""
+    )
+
+    # This should not raise AttributeError and should successfully enforce limits using fallbacks
+    apply_base_motion_safety(mock_decision, ctx=mock_ctx, cfg=mock_cfg)
+    assert mock_decision.cmd.vx_mps <= 0.020
+    assert mock_decision.cmd.vy_mps == 0.0
+
     print("docking static verification: PASS")
 
 

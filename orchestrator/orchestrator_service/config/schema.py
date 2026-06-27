@@ -159,6 +159,7 @@ class ControlThresholds:
     final_yaw_realign_rad: float = 0.18
     final_yaw_stable_frames: int = 6
     final_yaw_align_min_duration_ms: int = 1000
+    final_yaw_last_good_hold_s: float = 1.2
     edge_settle_s: float = 0.80
     dock_retry_limit: int = 2
     dock_retry_backoff_s: float = 0.60
@@ -166,8 +167,8 @@ class ControlThresholds:
     # Depth safety thresholds
     near_slow_depth_m: float = 0.40
     near_stop_depth_m: float = 0.25
-    near_slow_max_vx_mps: float = 0.010
-    near_slow_max_vy_mps: float = 0.010
+    near_slow_max_vx_mps: float = 0.020
+    near_slow_max_vy_mps: float = 0.0
     near_slow_max_wz_radps: float = 0.04
 
     # Final lock stabilization thresholds
