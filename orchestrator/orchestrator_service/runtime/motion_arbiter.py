@@ -13,7 +13,14 @@ from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from .docking_model import build_docking_observation, update_docking_stage
+from .docking_model import (
+    DockingAction,
+    DockingMotionResult,
+    DockingStage,
+    StopClass,
+    build_docking_observation,
+    update_docking_stage,
+)
 
 
 class FovGuardLevel(str, Enum):
@@ -227,6 +234,57 @@ def _result(
     )
 
 
+def _from_docking_result(result: DockingMotionResult) -> ArbitrationResult:
+    summary = result.legacy_summary()
+    return ArbitrationResult(
+        final_vx=float(result.vx),
+        final_vy=float(result.vy),
+        final_wz=float(result.wz),
+        motion_class=str(summary.get("motion_class") or result.motion_class),
+        stop_class=result.stop_class.value,
+        blocked_by=str(result.blocked_by or ""),
+        reason=str(result.reason or ""),
+        allow_uart_send=bool(result.allow_uart_send),
+        service_may_override=bool(result.service_may_override),
+        summary=summary,
+    )
+
+
+def _docking_result(
+    *,
+    action: DockingAction,
+    stage: DockingStage,
+    summary: Dict[str, Any],
+    vx: float = 0.0,
+    vy: float = 0.0,
+    wz: float = 0.0,
+    yaw_owner: str = "",
+    stop_class: StopClass = StopClass.NONE,
+    safety_class: str = "",
+    blocked_by: str = "",
+    reason: str = "",
+    service_may_override: bool = False,
+    not_overridden_by: Optional[List[str]] = None,
+) -> ArbitrationResult:
+    return _from_docking_result(
+        DockingMotionResult(
+            action=action,
+            stage=stage,
+            vx=float(vx),
+            vy=float(vy),
+            wz=float(wz),
+            yaw_owner=str(yaw_owner or ""),
+            stop_class=stop_class,
+            safety_class=str(safety_class or ""),
+            blocked_by=str(blocked_by or ""),
+            reason=str(reason or action.value.lower()),
+            summary=dict(summary or {}),
+            service_may_override=bool(service_may_override),
+            not_overridden_by=list(not_overridden_by or []),
+        )
+    )
+
+
 def arbitrate_table_docking_motion(
     ctx: Any,
     obs: Any,
@@ -236,8 +294,8 @@ def arbitrate_table_docking_motion(
     """Return the single final table-docking motion command.
 
     Priority order:
-    emergency/hard safety, final stop, dropout hold, committed approach,
-    hard/soft FOV guard, acquire/search rotate, zero watchdog escape.
+    emergency, hard safety, final locked, final yaw, final hold, near/edge
+    approach, bbox/search recovery, and zero escape.
     """
     summary = dict(current_summary or {})
     docking_obs = build_docking_observation(ctx, obs, summary)
@@ -257,23 +315,27 @@ def arbitrate_table_docking_motion(
     desired_vx = float(intent.desired_vx or 0.0)
     desired_vy = _float(summary, "desired_vy", _float(summary, "vy_mps", 0.0))
     desired_wz = float(intent.desired_wz or 0.0)
-    zero_escape_reason = ""
-
-    blocked: List[str] = []
     emergency_active = bool(_as_bool(summary, "explicit_stop_active") or any(_as_bool(summary, key) for key in _EMERGENCY_KEYS))
     explicit_stop = bool(summary.get("explicit_stop_active", False))
     hard_safety = bool(any(_as_bool(summary, key) for key in _HARD_SAFETY_KEYS))
 
-    if emergency_active or explicit_stop:
-        reason = "explicit_stop" if explicit_stop else "emergency_or_obstacle"
-        return _stop_result(ctx=ctx, summary=summary, motion_class="emergency_stop", stop_class="emergency", blocked_by=reason, reason=reason)
+    def with_common(extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        out = dict(summary)
+        out.update(
+            {
+                "fov_guard_level": fov_level.value,
+                "fov_guard_reason": fov_reason,
+                "bbox_fov_guard_level": fov_level.value,
+                "bbox_fov_guard_reason": fov_reason,
+                "stale_policy": stale_policy.value,
+                "active_table_docking": bool(_active_table_docking(ctx)),
+            }
+        )
+        if extra:
+            out.update(extra)
+        return out
 
-    if hard_safety:
-        return _stop_result(ctx=ctx, summary=summary, motion_class="safety_stop", stop_class="safety", blocked_by="hard_safety", reason="hard_safety")
-
-    if bool(summary.get("final_depth_latched", False)):
-        final_locked = bool(summary.get("final_locked", False))
-        yaw_align_active = bool(summary.get("final_yaw_align_active", False))
+    def edge_final_wz() -> tuple[float, str]:
         edge_wz = 0.0
         yaw_source = ""
         for key, source in (
@@ -297,7 +359,46 @@ def arbitrate_table_docking_motion(
         if abs(edge_wz) <= 1e-9 and abs(float(getattr(ctx, "last_edge_yaw_cmd", 0.0) or 0.0)) > 1e-9:
             edge_wz = float(getattr(ctx, "last_edge_yaw_cmd", 0.0) or 0.0)
             yaw_source = "last_edge"
-        yaw_source = str(summary.get("near_stage_yaw_source") or yaw_source or ("hold" if abs(edge_wz) <= 1e-9 else "edge"))
+        return edge_wz, str(summary.get("near_stage_yaw_source") or yaw_source or ("hold" if abs(edge_wz) <= 1e-9 else "edge"))
+
+    def bbox_recovery_wz() -> float:
+        for key in ("bbox_yaw_cmd", "desired_wz", "wz_radps"):
+            candidate = _float(summary, key, 0.0)
+            if abs(candidate) > 1e-9:
+                return candidate
+        if abs(desired_wz) > 1e-9:
+            return desired_wz
+        return _search_wz(ctx, summary)
+
+    if emergency_active or explicit_stop:
+        reason = "explicit_stop" if explicit_stop else "emergency_or_obstacle"
+        return _docking_result(
+            action=DockingAction.EMERGENCY_STOP,
+            stage=DockingStage.EMERGENCY_STOP,
+            summary=with_common(),
+            stop_class=StopClass.EMERGENCY,
+            safety_class="emergency",
+            blocked_by=reason,
+            reason=reason,
+            service_may_override=True,
+        )
+
+    if hard_safety:
+        return _docking_result(
+            action=DockingAction.SAFETY_STOP,
+            stage=DockingStage.SAFETY_STOP,
+            summary=with_common(),
+            stop_class=StopClass.SAFETY,
+            safety_class="hard_safety",
+            blocked_by="hard_safety",
+            reason="hard_safety",
+            service_may_override=True,
+        )
+
+    if bool(summary.get("final_depth_latched", False)):
+        final_locked = bool(summary.get("final_locked", False))
+        yaw_align_active = bool(summary.get("final_yaw_align_active", False))
+        edge_wz, yaw_source = edge_final_wz()
         yaw_abs: Optional[float] = None
         for key in ("edge_yaw", "yaw_err_rad", "yaw_err"):
             if summary.get(key) is not None:
@@ -306,31 +407,28 @@ def arbitrate_table_docking_motion(
         yaw_deadband = abs(_float(summary, "final_yaw_deadband_rad", _float(summary, "table_yaw_tol_rad", 0.08)))
         yaw_large = bool(yaw_align_active or (yaw_abs is not None and yaw_abs > yaw_deadband))
         if final_locked:
-            return _result(
-                ctx=ctx,
-                intent=MotionIntent("final_edge_locked", 0.0, 0.0, yaw_source, False, False, "final_locked"),
-                summary={
-                    **summary,
+            return _docking_result(
+                action=DockingAction.FINAL_LOCKED_STOP,
+                stage=DockingStage.FINAL_LOCKED,
+                summary=with_common(
+                    {
                     "motion_intent_type": "final_edge_locked",
                     "yaw_owner": yaw_source,
                     "near_stage_yaw_source": yaw_source,
                     "forward_block_reason": "final_depth_latched",
-                },
-                final_vx=0.0,
-                final_vy=0.0,
-                final_wz=0.0,
-                motion_class="safety_stop",
-                stop_class="safety",
+                    }
+                ),
+                yaw_owner=yaw_source,
+                stop_class=StopClass.NONE,
                 blocked_by="final_locked",
                 reason=str(summary.get("final_lock_reason") or "final_locked"),
-                service_may_override=True,
             )
         if yaw_large and abs(edge_wz) > 1e-9:
-            return _result(
-                ctx=ctx,
-                intent=MotionIntent("final_align", 0.0, edge_wz, yaw_source, False, True, "final_yaw_align"),
-                summary={
-                    **summary,
+            return _docking_result(
+                action=DockingAction.FINAL_YAW_ALIGN,
+                stage=DockingStage.FINAL_YAW_ALIGN,
+                summary=with_common(
+                    {
                     "final_depth_latched": True,
                     "final_yaw_align_active": True,
                     "final_yaw_align_yaw_source": yaw_source,
@@ -344,20 +442,19 @@ def arbitrate_table_docking_motion(
                     "rotate_block_reason": "",
                     "allow_rotate": True,
                     "rotate_allowed": True,
-                },
-                final_vx=0.0,
-                final_vy=0.0,
-                final_wz=edge_wz,
-                motion_class="normal",
-                stop_class="none",
+                    }
+                ),
+                wz=edge_wz,
+                yaw_owner=yaw_source,
+                stop_class=StopClass.NONE,
                 blocked_by="final_depth_latched",
                 reason="final_yaw_align",
             )
-        return _result(
-            ctx=ctx,
-            intent=MotionIntent("final_hold_edge_lost", 0.0, 0.0, yaw_source, False, False, "final_hold"),
-            summary={
-                **summary,
+        return _docking_result(
+            action=DockingAction.FINAL_LOCKED_STOP,
+            stage=DockingStage.FINAL_DISTANCE_HOLD,
+            summary=with_common(
+                {
                 "final_depth_latched": True,
                 "final_yaw_align_active": False,
                 "final_hold_edge_lost": True,
@@ -366,12 +463,10 @@ def arbitrate_table_docking_motion(
                 "near_stage_yaw_source": yaw_source,
                 "forward_block_reason": "final_depth_latched",
                 "rotate_block_reason": str(summary.get("final_lock_reason") or "edge_lost_hold"),
-            },
-            final_vx=0.0,
-            final_vy=0.0,
-            final_wz=0.0,
-            motion_class="control_stop",
-            stop_class="control_recovery",
+                }
+            ),
+            yaw_owner=yaw_source,
+            stop_class=StopClass.NONE,
             blocked_by="final_depth_latched",
             reason=str(summary.get("final_lock_reason") or "final_hold_edge_lost"),
         )
@@ -383,59 +478,118 @@ def arbitrate_table_docking_motion(
         or str(summary.get("stop_source") or "").strip().lower() in {"roi_depth", "final_lock"}
     )
     if final_stop:
-        return _stop_result(ctx=ctx, summary=summary, motion_class="safety_stop", stop_class="safety", blocked_by="final_depth_stop", reason="final_depth_stop")
+        edge_wz, yaw_source = edge_final_wz()
+        if abs(edge_wz) > 1e-9:
+            return _docking_result(
+                action=DockingAction.FINAL_YAW_ALIGN,
+                stage=DockingStage.FINAL_YAW_ALIGN,
+                summary=with_common(
+                    {
+                        "final_depth_latched": True,
+                        "final_yaw_align_active": True,
+                        "final_yaw_align_yaw_cmd": float(edge_wz),
+                        "final_cmd_source": "arbiter_final_yaw_align",
+                        "forward_block_reason": "final_depth_latched",
+                        "rotate_block_reason": "",
+                        "allow_rotate": True,
+                        "rotate_allowed": True,
+                    }
+                ),
+                wz=edge_wz,
+                yaw_owner=yaw_source,
+                blocked_by="final_depth_stop",
+                reason="final_yaw_align",
+            )
+        return _docking_result(
+            action=DockingAction.FINAL_LOCKED_STOP,
+            stage=DockingStage.FINAL_DISTANCE_HOLD,
+            summary=with_common({"forward_block_reason": "final_depth_latched"}),
+            blocked_by="final_depth_stop",
+            reason="final_distance_hold",
+        )
 
     if stale_policy == StalePolicy.DROPOUT_HOLD:
         vx = max(abs(desired_vx), _float(summary, "forward_commit_vx", 0.020))
         wz = desired_wz if abs(desired_wz) > 1e-9 else _float(summary, "last_edge_yaw_cmd", 0.0)
-        return _result(
-            ctx=ctx,
-            intent=intent,
-            summary={**summary, "stale_policy": stale_policy.value, "perception_dropout_hold_active": True},
-            final_vx=vx,
-            final_vy=0.0,
-            final_wz=wz,
-            motion_class="recovery",
-            stop_class="none",
-            blocked_by="",
+        return _docking_result(
+            action=DockingAction.PERCEPTION_DROPOUT_HOLD,
+            stage=DockingStage.RECOVERY_ROTATE,
+            summary=with_common({"perception_dropout_hold_active": True}),
+            vx=vx,
+            wz=wz,
             reason="perception_dropout_hold",
         )
 
     if stale_policy == StalePolicy.HARD_STOP and state not in {"SEARCH_TABLE"} and not bool(summary.get("search_table_stale_gate_bypass", False)):
-        return _stop_result(
-            ctx=ctx,
-            summary={**summary, "stale_policy": stale_policy.value},
-            motion_class="recovery",
-            stop_class="stale_recovery",
+        wz = _float(summary, "last_edge_yaw_cmd", _float(summary, "last_good_edge_yaw_cmd", 0.0))
+        if abs(wz) <= 1e-9:
+            wz = bbox_recovery_wz()
+        return _docking_result(
+            action=DockingAction.CONTROL_RECOVERY_ROTATE if abs(wz) > 1e-9 else DockingAction.SEARCH_ROTATE,
+            stage=DockingStage.RECOVERY_ROTATE,
+            summary=with_common({"forward_block_reason": str(summary.get("stale_level") or "hard_stale")}),
+            wz=wz,
+            yaw_owner="last_good_edge" if abs(wz) > 1e-9 else "search",
+            stop_class=StopClass.STALE_RECOVERY if abs(wz) <= 1e-9 else StopClass.NONE,
             blocked_by=str(summary.get("stale_hold_policy") or summary.get("stale_level") or "hard_stale"),
             reason="stale_recovery",
-            service_may_override=False,
         )
 
     edge_block = str(summary.get("edge_guided_commit_block_reason") or "").strip().lower()
     if edge_block in {"explicit_stop", "base_safety"}:
         stop_class = "emergency" if edge_block == "explicit_stop" else "safety"
-        motion_class = "emergency_stop" if stop_class == "emergency" else "safety_stop"
-        return _stop_result(ctx=ctx, summary=summary, motion_class=motion_class, stop_class=stop_class, blocked_by=edge_block, reason=edge_block)
-    if edge_block in {"hard_stale", "perception_dropout_hold_expired"}:
-        return _stop_result(
-            ctx=ctx,
-            summary={**summary, "stale_policy": stale_policy.value},
-            motion_class="recovery",
-            stop_class="stale_recovery",
+        return _docking_result(
+            action=DockingAction.EMERGENCY_STOP if stop_class == "emergency" else DockingAction.SAFETY_STOP,
+            stage=DockingStage.EMERGENCY_STOP if stop_class == "emergency" else DockingStage.SAFETY_STOP,
+            summary=with_common(),
+            stop_class=StopClass.EMERGENCY if stop_class == "emergency" else StopClass.SAFETY,
+            safety_class=stop_class,
             blocked_by=edge_block,
             reason=edge_block,
-            service_may_override=False,
+            service_may_override=True,
         )
-    if edge_block in {"depth_final_stop", "bbox_fov_guard_hard", "edge_yaw_too_large"}:
-        return _stop_result(ctx=ctx, summary=summary, motion_class="safety_stop", stop_class="safety", blocked_by=edge_block, reason=edge_block)
+    if edge_block in {"hard_stale", "perception_dropout_hold_expired"}:
+        wz = _float(summary, "last_edge_yaw_cmd", _float(summary, "last_good_edge_yaw_cmd", 0.0))
+        if abs(wz) <= 1e-9:
+            wz = bbox_recovery_wz()
+        return _docking_result(
+            action=DockingAction.CONTROL_RECOVERY_ROTATE,
+            stage=DockingStage.RECOVERY_ROTATE,
+            summary=with_common({"forward_block_reason": edge_block}),
+            wz=wz,
+            yaw_owner="last_good_edge" if abs(wz) > 1e-9 else "search",
+            stop_class=StopClass.NONE,
+            blocked_by=edge_block,
+            reason=edge_block,
+        )
+    if edge_block == "depth_final_stop":
+        return _docking_result(
+            action=DockingAction.FINAL_LOCKED_STOP,
+            stage=DockingStage.FINAL_DISTANCE_HOLD,
+            summary=with_common({"forward_block_reason": "final_depth_latched"}),
+            blocked_by=edge_block,
+            reason="final_distance_hold",
+        )
+    if edge_block in {"bbox_fov_guard_hard", "edge_yaw_too_large"}:
+        wz = bbox_recovery_wz() if edge_block == "bbox_fov_guard_hard" else _float(summary, "edge_yaw_cmd", _float(summary, "wz_from_plane", desired_wz))
+        return _docking_result(
+            action=DockingAction.CONTROL_RECOVERY_ROTATE,
+            stage=DockingStage.RECOVERY_ROTATE,
+            summary=with_common({"forward_block_reason": edge_block, "rotate_block_reason": ""}),
+            wz=wz,
+            yaw_owner="bbox" if edge_block == "bbox_fov_guard_hard" else "edge",
+            blocked_by=edge_block,
+            reason=edge_block,
+        )
 
     if fov_level == FovGuardLevel.HARD:
-        return _stop_result(
-            ctx=ctx,
-            summary={**summary, "fov_guard_level": fov_level.value, "fov_guard_reason": fov_reason},
-            motion_class="safety_stop",
-            stop_class="safety",
+        wz = bbox_recovery_wz()
+        return _docking_result(
+            action=DockingAction.BBOX_REACQUIRE_ROTATE if abs(wz) > 1e-9 else DockingAction.CONTROL_RECOVERY_ROTATE,
+            stage=DockingStage.RECOVERY_ROTATE,
+            summary=with_common({"forward_block_reason": "bbox_fov_guard_hard", "rotate_block_reason": ""}),
+            wz=wz,
+            yaw_owner="bbox",
             blocked_by="bbox_fov_guard_hard",
             reason=fov_reason or "bbox_fov_guard_hard",
         )
@@ -445,22 +599,21 @@ def arbitrate_table_docking_motion(
         if abs(edge_wz) <= 1e-9:
             edge_wz = _float(summary, "last_good_edge_yaw_cmd", 0.0)
         yaw_source = str(summary.get("near_stage_yaw_source") or ("last_good_edge" if abs(edge_wz) > 1e-9 else "hold"))
-        return _result(
-            ctx=ctx,
-            intent=MotionIntent("near_edge_hold", 0.0, edge_wz, yaw_source, False, abs(edge_wz) > 1e-9, "near_table_latched"),
-            summary={
-                **summary,
+        return _docking_result(
+            action=DockingAction.NEAR_EDGE_FORWARD if abs(edge_wz) > 1e-9 else DockingAction.PERCEPTION_DROPOUT_HOLD,
+            stage=DockingStage.NEAR_EDGE_APPROACH,
+            summary=with_common(
+                {
                 "motion_intent_type": "near_edge_hold",
                 "yaw_owner": yaw_source,
                 "near_stage_yaw_source": yaw_source,
                 "forward_block_reason": "near_table_latched",
                 "bbox_lost_ignored_due_to_near_latch": bool(intent_type in {"local_rotate_search", "search"} or phase == "SEARCH_SCAN"),
-            },
-            final_vx=0.0,
-            final_vy=0.0,
-            final_wz=edge_wz,
-            motion_class="recovery" if abs(edge_wz) > 1e-9 else "control_stop",
-            stop_class="none" if abs(edge_wz) > 1e-9 else "control_recovery",
+                }
+            ),
+            wz=edge_wz,
+            yaw_owner=yaw_source,
+            stop_class=StopClass.NONE,
             blocked_by="near_table_latched",
             reason="near_latch_suppressed_far_fallback",
         )
@@ -473,52 +626,42 @@ def arbitrate_table_docking_motion(
             max_soft_vx = max(0.0, _float(summary, "forward_commit_vx", 0.020))
             vx = min(max(abs(vx), max_soft_vx), max_soft_vx)
         if abs(vx) > 1e-9:
-            return _result(
-                ctx=ctx,
-                intent=intent,
-                summary={
-                    **summary,
+            return _docking_result(
+                action=DockingAction.EDGE_APPROACH_FORWARD,
+                stage=DockingStage.EDGE_APPROACH,
+                summary=with_common(
+                    {
                     "fov_guard_level": fov_level.value,
                     "fov_guard_reason": fov_reason,
                     "bbox_fov_soft_allowed_forward": bool(fov_level == FovGuardLevel.SOFT),
                     "stale_policy": stale_policy.value,
-                },
-                final_vx=vx,
-                final_vy=0.0,
-                final_wz=desired_wz,
-                motion_class="normal" if stale_policy == StalePolicy.FRESH else "recovery",
-                stop_class="none",
-                blocked_by="",
+                    }
+                ),
+                vx=vx,
+                wz=desired_wz,
+                yaw_owner=str(intent.yaw_owner or "edge"),
                 reason="edge_guided_approach_soft_fov" if fov_level == FovGuardLevel.SOFT else "edge_guided_approach",
             )
-        blocked.append(str(summary.get("forward_block_reason") or "forward_not_available"))
 
-    if phase in {"BBOX_ACQUIRE", "EDGE_HANDOFF_CONFIRM"} and intent.rotate_allowed_by_behavior:
-        return _result(
-            ctx=ctx,
-            intent=intent,
-            summary={**summary, "fov_guard_level": fov_level.value, "fov_guard_reason": fov_reason, "stale_policy": stale_policy.value},
-            final_vx=0.0,
-            final_vy=0.0,
-            final_wz=desired_wz,
-            motion_class="recovery" if stale_policy != StalePolicy.FRESH else "normal",
-            stop_class="none",
-            blocked_by="",
+    if phase in {"BBOX_ACQUIRE", "EDGE_HANDOFF_CONFIRM"} and (intent.rotate_allowed_by_behavior or abs(bbox_recovery_wz()) > 1e-9):
+        wz = bbox_recovery_wz()
+        return _docking_result(
+            action=DockingAction.BBOX_REACQUIRE_ROTATE,
+            stage=DockingStage.BBOX_ACQUIRE if phase == "BBOX_ACQUIRE" else DockingStage.EDGE_HANDOFF,
+            summary=with_common({"rotate_block_reason": "", "allow_rotate": True, "forward_block_reason": "bbox_acquire"}),
+            wz=wz,
+            yaw_owner="bbox",
             reason="bbox_acquire_rotate",
         )
 
     if state == "SEARCH_TABLE" or intent_type in {"local_rotate_search", "search"} or phase == "SEARCH_SCAN":
         wz = desired_wz if abs(desired_wz) > 1e-9 else _search_wz(ctx, summary)
-        return _result(
-            ctx=ctx,
-            intent=intent,
-            summary={**summary, "stale_policy": stale_policy.value},
-            final_vx=0.0,
-            final_vy=0.0,
-            final_wz=wz,
-            motion_class="recovery" if stale_policy != StalePolicy.FRESH else "normal",
-            stop_class="none",
-            blocked_by="",
+        return _docking_result(
+            action=DockingAction.SEARCH_ROTATE,
+            stage=DockingStage.SEARCH,
+            summary=with_common({"search_table_stale_gate_bypass": True}),
+            wz=wz,
+            yaw_owner="search",
             reason="search_rotate",
         )
 
@@ -526,48 +669,35 @@ def arbitrate_table_docking_motion(
         zero_age_ms = _float(summary, "zero_cmd_age_ms", 0.0)
         if zero_age_ms >= 800.0:
             if bool(summary.get("approach_commit_active", False)):
-                zero_escape_reason = "forward_coast"
-                return _result(
-                    ctx=ctx,
-                    intent=intent,
-                    summary={**summary, "zero_escape_reason": zero_escape_reason, "stale_policy": stale_policy.value},
-                    final_vx=_float(summary, "forward_commit_vx", 0.020),
-                    final_vy=0.0,
-                    final_wz=_float(summary, "last_edge_yaw_cmd", 0.0),
-                    motion_class="recovery",
-                    stop_class="none",
-                    blocked_by="",
+                return _docking_result(
+                    action=DockingAction.NEAR_EDGE_FORWARD,
+                    stage=DockingStage.RECOVERY_ROTATE,
+                    summary=with_common({"zero_escape_reason": "forward_coast"}),
+                    vx=_float(summary, "forward_commit_vx", 0.020),
+                    wz=_float(summary, "last_edge_yaw_cmd", 0.0),
+                    yaw_owner="last_good_edge",
                     reason="zero_watchdog_forward_coast",
                 )
-            zero_escape_reason = "search_rotate"
-            return _result(
-                ctx=ctx,
-                intent=intent,
-                summary={**summary, "zero_escape_reason": zero_escape_reason, "stale_policy": stale_policy.value},
-                final_vx=0.0,
-                final_vy=0.0,
-                final_wz=_search_wz(ctx, summary),
-                motion_class="recovery",
-                stop_class="none",
-                blocked_by="",
+            wz = bbox_recovery_wz()
+            action = DockingAction.BBOX_REACQUIRE_ROTATE if summary.get("bbox_center_valid") else DockingAction.SEARCH_ROTATE
+            return _docking_result(
+                action=action,
+                stage=DockingStage.RECOVERY_ROTATE,
+                summary=with_common({"zero_escape_reason": "bbox_reacquire_rotate" if action == DockingAction.BBOX_REACQUIRE_ROTATE else "search_rotate"}),
+                wz=wz,
+                yaw_owner="bbox" if action == DockingAction.BBOX_REACQUIRE_ROTATE else "search",
                 reason="zero_watchdog_search_rotate",
             )
 
-    return _result(
-        ctx=ctx,
-        intent=intent,
-        summary={
-            **summary,
-            "fov_guard_level": fov_level.value,
-            "fov_guard_reason": fov_reason,
-            "stale_policy": stale_policy.value,
-            "zero_escape_reason": zero_escape_reason,
-        },
-        final_vx=desired_vx,
-        final_vy=desired_vy,
-        final_wz=desired_wz,
-        motion_class="normal" if (abs(desired_vx) > 1e-9 or abs(desired_wz) > 1e-9) else "control_stop",
-        stop_class="none" if (abs(desired_vx) > 1e-9 or abs(desired_wz) > 1e-9) else "control_recovery",
-        blocked_by=";".join(item for item in blocked if item),
+    return _docking_result(
+        action=DockingAction.EDGE_APPROACH_FORWARD if abs(desired_vx) > 1e-9 else DockingAction.CONTROL_RECOVERY_ROTATE,
+        stage=docking_stage,
+        summary=with_common({"zero_escape_reason": ""}),
+        vx=desired_vx,
+        vy=desired_vy,
+        wz=desired_wz,
+        yaw_owner=str(intent.yaw_owner or summary.get("yaw_owner") or ""),
+        stop_class=StopClass.NONE if (abs(desired_vx) > 1e-9 or abs(desired_wz) > 1e-9) else StopClass.CONTROL_RECOVERY,
+        blocked_by=str(summary.get("forward_block_reason") or ""),
         reason=str(intent.reason or summary.get("reason") or "candidate_intent"),
     )
