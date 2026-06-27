@@ -9,6 +9,7 @@ Table docking motion is a one-way pipeline:
 - `DockingObservation` describes perception and safety facts only.
 - `DockingStage` describes task phase only.
 - `DockingMotionResult` is the single source of truth for final `vx/vy/wz`, `DockingAction`, `StopClass`, and log-compatible summary fields.
+- `yaw_owner`, `forward_owner`, and `lateral_owner` name the subsystem that owns each axis for the emitted action. Use `none` when an axis is intentionally blocked.
 - Legacy summary fields are derived from `DockingMotionResult`; they must not drive final table-docking motion.
 - Service only applies emergency/safety stops, explicit idle/shutdown outside active docking, and send/write metadata.
 - UART only sends protocol lines and suppresses velocity during emergency/safety cooldown.
@@ -31,8 +32,11 @@ Table docking motion is a one-way pipeline:
 
 - `SEARCH_ROTATE`: `vx=0`, `vy=0`, `wz=search_wz`.
 - `BBOX_REACQUIRE_ROTATE`: `vx=0`, `vy=0`, `wz=bbox_yaw_cmd`.
+- `BBOX_TRACK_FORWARD`: far/mid-range bbox-assisted forward motion; `yaw_owner=bbox`, `forward_owner=bbox_track`, `lateral_owner=none`.
+- `EDGE_READINESS_HANDOFF`: pre-approach edge handoff stabilization; `yaw_owner=edge_candidate` or `bbox_hold`, `forward_owner=none` or slow, `lateral_owner=none`.
 - `EDGE_APPROACH_FORWARD`: low forward velocity plus edge yaw correction.
 - `NEAR_EDGE_FORWARD`: near-stage low forward or near hold with edge/last-good yaw.
+- `NEAR_EDGE_LATERAL_ALIGN`: reserved future Y-axis action; defined for logs/config only and must not emit nonzero `vy` in this round.
 - `PERCEPTION_DROPOUT_HOLD`: short approach dropout hold, not STOP.
 - `FINAL_YAW_ALIGN`: `vx=0`, `vy=0`, `wz=edge_yaw_cmd` or last-good edge yaw.
 - `FINAL_LOCKED_STOP`: final locked or final distance hold; all axes zero.
@@ -99,7 +103,7 @@ To trigger Realignment:
 Watch these fields during the next table docking run:
 
 - Observation: `docking_observation`, `table_bbox_control_valid`, `yolo_bbox_center_x_norm`, `bbox_center_error_control`, `table_bbox_touch_left`, `table_bbox_touch_right`, `edge_found`, `edge_trusted`, `yaw_err_rad`, `table_roi_depth_valid`, `table_roi_depth_p10`.
-- Stage/action: `docking_stage`, `docking_action`, `docking_reason`, `yaw_owner`, `arbitration_reason`, `blocked_by`.
+- Stage/action: `docking_stage`, `docking_action`, `docking_reason`, `yaw_owner`, `forward_owner`, `lateral_owner`, `advance_condition`, `fallback_condition`, `arbitration_reason`, `blocked_by`.
 - Commands: `candidate_cmd`, `arbiter_final_cmd`, `service_effective_cmd`, `uart_tx_cmd`, `final_vx`, `final_vy`, `final_wz`, `vx_mps`, `vy_mps`, `wz_radps`.
 - Recovery & Diagnostics: `fov_guard_level`, `fov_guard_reason`, `bbox_fov_guard_level`, `bbox_fov_guard_reason`, `perception_dropout_hold_active`, `zero_escape_reason`, `final_yaw_deadband_rad`, `final_yaw_realign_rad`, `final_yaw_stable_count`, `final_yaw_align_elapsed_ms`, `final_yaw_lock_block_reason`, `final_realign_triggered`, `final_yaw_source`.
 - Latches: `near_table_latched`, `near_table_latch_reason`, `final_depth_latched`, `final_depth_latch_reason`, `final_yaw_align_active`, `final_locked`.

@@ -857,7 +857,38 @@ def main() -> None:
         },
     )
     assert inv9.summary["docking_action"] == "PERCEPTION_DROPOUT_HOLD"
+    assert inv9.summary["docking_stage"] == "PERCEPTION_DROPOUT_HOLD"
     assert inv9.stop_class == "none"
+
+    inv9_bbox_track = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("yolo_track_forward", desired_vx=0.012, desired_wz=0.03, yaw_owner="bbox", forward_allowed_by_behavior=True),
+        {
+            "control_phase": "BBOX_ACQUIRE",
+            "bbox_center_valid": True,
+            "bbox_center_error": 0.02,
+            "bbox_yaw_cmd": 0.03,
+            "yolo_forward_allowed": True,
+            "yolo_forward_center_good_limit": 0.15,
+            "bbox_fov_guard_level": "none",
+            "cmd": {"vx_mps": 0.012},
+            "table_roi_depth_valid": True,
+            "table_roi_depth_p10": 0.80,
+        },
+    )
+    assert inv9_bbox_track.summary["docking_stage"] == "BBOX_ACQUIRE"
+    assert inv9_bbox_track.summary["docking_action"] == "BBOX_TRACK_FORWARD"
+    assert inv9_bbox_track.summary["docking_action"] != "EDGE_APPROACH_FORWARD"
+    assert inv9_bbox_track.final_vx > 0.0 and inv9_bbox_track.final_vy == 0.0
+    assert inv9_bbox_track.summary["yaw_owner"] == "bbox"
+    assert inv9_bbox_track.summary["forward_owner"] == "bbox_track"
+    assert inv9_bbox_track.summary["lateral_owner"] == "none"
+
+    for motion_result in (inv3, inv4, inv5, inv6, inv8, inv9, inv9_bbox_track):
+        for owner_key in ("yaw_owner", "forward_owner", "lateral_owner"):
+            assert owner_key in motion_result.summary
+            assert str(motion_result.summary[owner_key]) != ""
 
     inv10 = arbitrate_table_docking_motion(
         RuntimeContext(state=State.YOLO_APPROACH),

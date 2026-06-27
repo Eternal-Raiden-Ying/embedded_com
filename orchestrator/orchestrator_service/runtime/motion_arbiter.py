@@ -42,6 +42,8 @@ class MotionIntent:
     desired_vx: float = 0.0
     desired_wz: float = 0.0
     yaw_owner: str = ""
+    forward_owner: str = ""
+    lateral_owner: str = "none"
     forward_allowed_by_behavior: bool = False
     rotate_allowed_by_behavior: bool = False
     reason: str = ""
@@ -205,6 +207,8 @@ def _result(
         {
             "motion_intent_type": str(intent.intent_type or ""),
             "yaw_owner": str(intent.yaw_owner or ""),
+            "forward_owner": str(intent.forward_owner or ""),
+            "lateral_owner": str(intent.lateral_owner or "none"),
             "arbitration_reason": str(reason or ""),
             "motion_class": str(motion_class or "normal"),
             "stop_class": str(stop_class or "none"),
@@ -259,6 +263,8 @@ def _docking_result(
     vy: float = 0.0,
     wz: float = 0.0,
     yaw_owner: str = "",
+    forward_owner: str = "",
+    lateral_owner: str = "",
     stop_class: StopClass = StopClass.NONE,
     safety_class: str = "",
     blocked_by: str = "",
@@ -274,6 +280,8 @@ def _docking_result(
             vy=float(vy),
             wz=float(wz),
             yaw_owner=str(yaw_owner or ""),
+            forward_owner=str(forward_owner or ""),
+            lateral_owner=str(lateral_owner or ""),
             stop_class=stop_class,
             safety_class=str(safety_class or ""),
             blocked_by=str(blocked_by or ""),
@@ -560,11 +568,20 @@ def arbitrate_table_docking_motion(
         wz = desired_wz if abs(desired_wz) > 1e-9 else _float(summary, "last_edge_yaw_cmd", 0.0)
         return _docking_result(
             action=DockingAction.PERCEPTION_DROPOUT_HOLD,
-            stage=DockingStage.RECOVERY_ROTATE,
-            summary=with_common({"perception_dropout_hold_active": True}),
+            stage=DockingStage.PERCEPTION_DROPOUT_HOLD,
+            summary=with_common({
+                "perception_dropout_hold_active": True,
+                "forward_owner": "approach_commit",
+                "lateral_owner": "none",
+                "advance_condition": "last_good_obs_unexpired",
+                "fallback_condition": "dropout_hold_expired",
+            }),
             vx=vx,
             vy=0.0,
             wz=wz,
+            yaw_owner="edge_hold",
+            forward_owner="approach_commit",
+            lateral_owner="none",
             reason="perception_dropout_hold",
         )
 
@@ -701,7 +718,7 @@ def arbitrate_table_docking_motion(
         and abs(bbox_forward_vx) > 1e-9
     ):
         return _docking_result(
-            action=DockingAction.EDGE_APPROACH_FORWARD,
+            action=DockingAction.BBOX_TRACK_FORWARD,
             stage=DockingStage.BBOX_ACQUIRE,
             summary=with_common(
                 {
@@ -711,11 +728,18 @@ def arbitrate_table_docking_motion(
                     "forward_block_reason": "",
                     "rotate_block_reason": "yolo_track_forward" if abs(desired_wz) <= 1e-9 else "",
                     "fallback_action": "yolo_assist",
+                    "forward_owner": "bbox_track",
+                    "lateral_owner": "none",
+                    "advance_condition": "bbox_centered_depth_far",
+                    "fallback_condition": "bbox_track_exit",
                 }
             ),
             vx=bbox_forward_vx,
+            vy=0.0,
             wz=desired_wz,
-            yaw_owner="yolo",
+            yaw_owner="bbox",
+            forward_owner="bbox_track",
+            lateral_owner="none",
             reason="bbox_track_forward_compatible",
         )
 

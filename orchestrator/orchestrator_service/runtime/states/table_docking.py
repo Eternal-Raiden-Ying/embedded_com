@@ -62,6 +62,8 @@ class TableDockingMixin:
             desired_vx=float(getattr(decision.cmd, "vx_mps", 0.0) or 0.0),
             desired_wz=float(getattr(decision.cmd, "wz_radps", 0.0) or 0.0),
             yaw_owner=str(summary.get("yaw_source") or summary.get("yaw_owner") or ""),
+            forward_owner=str(summary.get("forward_source") or summary.get("forward_owner") or "none"),
+            lateral_owner=str(summary.get("lateral_owner") or "none"),
             forward_allowed_by_behavior=bool(
                 summary.get("allow_forward", summary.get("forward_allowed", False))
                 or abs(float(getattr(decision.cmd, "vx_mps", 0.0) or 0.0)) > 1e-9
@@ -100,6 +102,8 @@ class TableDockingMixin:
                 "arbiter_applied": True,
                 "motion_intent_type": summary.get("motion_intent_type", intent.intent_type),
                 "yaw_owner": summary.get("yaw_owner", intent.yaw_owner),
+                "forward_owner": summary.get("forward_owner", intent.forward_owner or "none"),
+                "lateral_owner": summary.get("lateral_owner", intent.lateral_owner or "none"),
                 "arbitration_reason": result.reason,
                 "motion_class": result.motion_class,
                 "stop_class": result.stop_class,
@@ -116,6 +120,8 @@ class TableDockingMixin:
         )
         self.ctx.motion_intent_type = str(summary.get("motion_intent_type") or intent.intent_type or "")
         self.ctx.yaw_owner = str(summary.get("yaw_owner") or intent.yaw_owner or "")
+        self.ctx.forward_owner = str(summary.get("forward_owner") or intent.forward_owner or "none")
+        self.ctx.lateral_owner = str(summary.get("lateral_owner") or intent.lateral_owner or "none")
         self.ctx.arbitration_reason = str(result.reason or "")
         self.ctx.motion_class = str(result.motion_class or "")
         self.ctx.stop_class = str(result.stop_class or "none")
