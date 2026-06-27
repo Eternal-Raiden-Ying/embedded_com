@@ -884,8 +884,63 @@ def main() -> None:
     assert inv9_bbox_track.summary["yaw_owner"] == "bbox"
     assert inv9_bbox_track.summary["forward_owner"] == "bbox_track"
     assert inv9_bbox_track.summary["lateral_owner"] == "none"
+    assert abs(inv9_bbox_track.final_vx - 0.012) < 1e-9
+    assert abs(inv9_bbox_track.final_wz) <= 0.06
 
-    for motion_result in (inv3, inv4, inv5, inv6, inv8, inv9, inv9_bbox_track):
+    inv9_bbox_large_err = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("yolo_acquire_align", desired_vx=0.012, desired_wz=0.05, yaw_owner="bbox", rotate_allowed_by_behavior=True),
+        {
+            "control_phase": "BBOX_ACQUIRE",
+            "bbox_center_valid": True,
+            "bbox_center_error": 0.30,
+            "bbox_yaw_cmd": 0.05,
+            "yolo_forward_allowed": True,
+            "cmd": {"vx_mps": 0.012},
+        },
+    )
+    assert inv9_bbox_large_err.summary["docking_action"] == "BBOX_REACQUIRE_ROTATE"
+    assert inv9_bbox_large_err.final_vx == 0.0 and abs(inv9_bbox_large_err.final_wz) > 0.0
+    assert inv9_bbox_large_err.summary["bbox_track_exit_reason"] == "bbox_center_error_large"
+
+    inv9_bbox_fov_hard = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("yolo_track_forward", desired_vx=0.012, desired_wz=0.05, yaw_owner="bbox", forward_allowed_by_behavior=True),
+        {
+            "control_phase": "BBOX_ACQUIRE",
+            "bbox_center_valid": True,
+            "bbox_center_error": 0.02,
+            "bbox_yaw_cmd": 0.05,
+            "yolo_forward_allowed": True,
+            "bbox_fov_guard_level": "hard",
+            "cmd": {"vx_mps": 0.012},
+        },
+    )
+    assert inv9_bbox_fov_hard.summary["docking_action"] in {"BBOX_REACQUIRE_ROTATE", "CONTROL_RECOVERY_ROTATE"}
+    assert inv9_bbox_fov_hard.final_vx == 0.0
+    assert inv9_bbox_fov_hard.summary["bbox_track_exit_reason"] == "bbox_fov_guard_hard"
+
+    inv9_bbox_final = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("yolo_track_forward", desired_vx=0.012, desired_wz=0.05, yaw_owner="bbox", forward_allowed_by_behavior=True),
+        {
+            "control_phase": "BBOX_ACQUIRE",
+            "bbox_center_valid": True,
+            "bbox_center_error": 0.02,
+            "bbox_yaw_cmd": 0.05,
+            "yolo_forward_allowed": True,
+            "final_depth_latched": True,
+            "final_locked": True,
+            "cmd": {"vx_mps": 0.012},
+        },
+    )
+    assert inv9_bbox_final.summary["docking_action"] == "FINAL_LOCKED_STOP"
+    assert inv9_bbox_final.final_vx == 0.0 and inv9_bbox_final.final_vy == 0.0
+
+    for motion_result in (inv3, inv4, inv5, inv6, inv8, inv9, inv9_bbox_track, inv9_bbox_large_err, inv9_bbox_fov_hard, inv9_bbox_final):
         for owner_key in ("yaw_owner", "forward_owner", "lateral_owner"):
             assert owner_key in motion_result.summary
             assert str(motion_result.summary[owner_key]) != ""

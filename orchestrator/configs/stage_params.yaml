@@ -31,6 +31,12 @@ table_docking:
   controlled_approach_min_dwell_s: 0.8
   near_slow_max_vx_mps: 0.020
   near_slow_max_vy_mps: 0.0
+  bbox_track_forward_enabled: true
+  bbox_track_forward_vx_mps: 0.012
+  bbox_track_forward_max_vx_mps: 0.015
+  bbox_track_forward_center_band: 0.14
+  bbox_track_forward_min_hold_ms: 800
+  bbox_track_forward_max_wz_radps: 0.06
 
 yolo_table:
   yolo_table_control_enable: true

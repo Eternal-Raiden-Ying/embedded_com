@@ -170,6 +170,12 @@ class ControlThresholds:
     near_slow_max_vx_mps: float = 0.020
     near_slow_max_vy_mps: float = 0.0
     near_slow_max_wz_radps: float = 0.04
+    bbox_track_forward_enabled: bool = True
+    bbox_track_forward_vx_mps: float = 0.012
+    bbox_track_forward_max_vx_mps: float = 0.015
+    bbox_track_forward_center_band: float = 0.14
+    bbox_track_forward_min_hold_ms: int = 800
+    bbox_track_forward_max_wz_radps: float = 0.06
 
     # Final lock stabilization thresholds
     final_lock_min_hold_ms: int = 800

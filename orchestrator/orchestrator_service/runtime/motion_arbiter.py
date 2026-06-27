@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from enum import Enum
+import time
 from typing import Any, Dict, List, Optional
 
 from .docking_model import (
@@ -328,6 +329,7 @@ def arbitrate_table_docking_motion(
     hard_safety = bool(any(_as_bool(summary, key) for key in _HARD_SAFETY_KEYS))
 
     def with_common(extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        bbox_track_started = float(getattr(ctx, "bbox_track_entered_mono", 0.0) or 0.0)
         out = dict(summary)
         out.update(
             {
@@ -338,6 +340,8 @@ def arbitrate_table_docking_motion(
                 "stale_policy": stale_policy.value,
                 "active_table_docking": bool(_active_table_docking(ctx)),
                 "final_locked": bool(getattr(ctx, "final_locked", False)),
+                "bbox_track_elapsed_ms": max(0.0, (time.monotonic() - bbox_track_started) * 1000.0) if bbox_track_started > 0.0 else 0.0,
+                "bbox_track_exit_reason": str(getattr(ctx, "bbox_track_last_exit_reason", "") or summary.get("bbox_track_exit_reason") or ""),
             }
         )
         if extra:
@@ -652,7 +656,7 @@ def arbitrate_table_docking_motion(
         return _docking_result(
             action=DockingAction.BBOX_REACQUIRE_ROTATE if abs(wz) > 1e-9 else DockingAction.CONTROL_RECOVERY_ROTATE,
             stage=DockingStage.RECOVERY_ROTATE,
-            summary=with_common({"forward_block_reason": "bbox_fov_guard_hard", "rotate_block_reason": ""}),
+            summary=with_common({"forward_block_reason": "bbox_fov_guard_hard", "rotate_block_reason": "", "bbox_track_exit_reason": "bbox_fov_guard_hard"}),
             wz=wz,
             yaw_owner="bbox",
             blocked_by="bbox_fov_guard_hard",
@@ -710,13 +714,57 @@ def arbitrate_table_docking_motion(
 
     bbox_err = docking_obs.bbox_center_error
     bbox_forward_vx = raw_cmd_vx()
+    bbox_track_enabled = bool(summary.get("bbox_track_forward_enabled", True))
+    bbox_track_center_band = abs(_float(summary, "bbox_track_forward_center_band", _float(summary, "yolo_forward_center_good_limit", 0.14)))
+    bbox_track_vx = abs(_float(summary, "bbox_track_forward_vx_mps", 0.012))
+    bbox_track_max_vx = abs(_float(summary, "bbox_track_forward_max_vx_mps", 0.015))
+    if bbox_track_max_vx > 0.0:
+        bbox_track_vx = min(bbox_track_vx, bbox_track_max_vx)
+    bbox_track_max_wz = abs(_float(summary, "bbox_track_forward_max_wz_radps", 0.06))
+    bbox_track_min_hold_ms = max(0.0, _float(summary, "bbox_track_forward_min_hold_ms", 800.0))
+    bbox_track_block = ""
+    now_track = time.monotonic()
+    bbox_track_active_since = float(getattr(ctx, "bbox_track_entered_mono", 0.0) or 0.0)
+    bbox_track_elapsed_if_active_ms = max(0.0, (now_track - bbox_track_active_since) * 1000.0) if bbox_track_active_since > 0.0 else 0.0
+    bbox_track_hold_active = bool(bbox_track_active_since > 0.0 and bbox_track_elapsed_if_active_ms < bbox_track_min_hold_ms)
+    bbox_track_hold_band = max(bbox_track_center_band, abs(_float(summary, "yolo_forward_center_hard_limit", 0.25)))
+    if not bbox_track_enabled:
+        bbox_track_block = "bbox_track_disabled"
+    elif phase != "BBOX_ACQUIRE":
+        bbox_track_block = "not_bbox_acquire"
+    elif not docking_obs.bbox_control_valid:
+        bbox_track_block = "bbox_invalid"
+    elif bbox_err is None:
+        bbox_track_block = "bbox_center_missing"
+    elif abs(float(bbox_err)) > bbox_track_center_band and not (bbox_track_hold_active and abs(float(bbox_err)) <= bbox_track_hold_band):
+        bbox_track_block = "bbox_center_error_large"
+    elif fov_level == FovGuardLevel.HARD:
+        bbox_track_block = "bbox_fov_guard_hard"
+    elif bool(summary.get("near_table_latched", False)):
+        bbox_track_block = "near_table_latched"
+    elif bool(summary.get("final_depth_latched", False)):
+        bbox_track_block = "final_depth_latched"
+    elif bool(summary.get("depth_roi_stop_ready", False)):
+        bbox_track_block = "depth_final_stop"
+    elif emergency_active or explicit_stop:
+        bbox_track_block = "emergency_or_explicit_stop"
+    elif hard_safety:
+        bbox_track_block = "hard_safety"
+    elif bbox_track_vx <= 1e-9:
+        bbox_track_block = "bbox_track_zero_vx"
     if (
-        phase == "BBOX_ACQUIRE"
-        and bool(summary.get("yolo_forward_allowed", False))
-        and bbox_err is not None
-        and abs(float(bbox_err)) <= _float(summary, "yolo_forward_center_good_limit", 0.15)
-        and abs(bbox_forward_vx) > 1e-9
+        not bbox_track_block
+        and bool(summary.get("yolo_forward_allowed", abs(bbox_forward_vx) > 1e-9))
     ):
+        if float(getattr(ctx, "bbox_track_entered_mono", 0.0) or 0.0) <= 0.0:
+            try:
+                ctx.bbox_track_entered_mono = now_track
+            except Exception:
+                pass
+        elapsed_ms = max(0.0, (now_track - float(getattr(ctx, "bbox_track_entered_mono", now_track) or now_track)) * 1000.0)
+        desired_bbox_wz = desired_wz if abs(desired_wz) > 1e-9 else _float(summary, "bbox_yaw_cmd", 0.0)
+        if bbox_track_max_wz > 0.0:
+            desired_bbox_wz = max(-bbox_track_max_wz, min(bbox_track_max_wz, desired_bbox_wz))
         return _docking_result(
             action=DockingAction.BBOX_TRACK_FORWARD,
             stage=DockingStage.BBOX_ACQUIRE,
@@ -728,20 +776,36 @@ def arbitrate_table_docking_motion(
                     "forward_block_reason": "",
                     "rotate_block_reason": "yolo_track_forward" if abs(desired_wz) <= 1e-9 else "",
                     "fallback_action": "yolo_assist",
+                    "bbox_track_forward_enabled": bool(bbox_track_enabled),
+                    "bbox_track_forward_vx_mps": float(bbox_track_vx),
+                    "bbox_track_forward_max_vx_mps": float(bbox_track_max_vx),
+                    "bbox_track_forward_center_band": float(bbox_track_center_band),
+                    "bbox_track_forward_min_hold_ms": float(bbox_track_min_hold_ms),
+                    "bbox_track_forward_max_wz_radps": float(bbox_track_max_wz),
+                    "bbox_track_elapsed_ms": float(elapsed_ms),
+                    "bbox_track_exit_reason": "",
                     "forward_owner": "bbox_track",
                     "lateral_owner": "none",
                     "advance_condition": "bbox_centered_depth_far",
                     "fallback_condition": "bbox_track_exit",
                 }
             ),
-            vx=bbox_forward_vx,
+            vx=bbox_track_vx,
             vy=0.0,
-            wz=desired_wz,
+            wz=desired_bbox_wz,
             yaw_owner="bbox",
             forward_owner="bbox_track",
             lateral_owner="none",
             reason="bbox_track_forward_compatible",
         )
+    if bbox_track_block:
+        try:
+            ctx.bbox_track_last_exit_reason = bbox_track_block
+            ctx.bbox_track_entered_mono = 0.0
+        except Exception:
+            pass
+        summary["bbox_track_exit_reason"] = bbox_track_block
+        summary["bbox_track_elapsed_ms"] = 0.0
 
     if phase in {"BBOX_ACQUIRE", "EDGE_HANDOFF_CONFIRM"} and (intent.rotate_allowed_by_behavior or abs(bbox_recovery_wz()) > 1e-9):
         wz = bbox_recovery_wz()

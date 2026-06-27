@@ -467,6 +467,18 @@ def _load_and_merge_stage_params(config: SystemGlobalConfig, file_path: Path) ->
             ctrl.near_slow_max_vx_mps = _sf(td["near_slow_max_vx_mps"])
         if "near_slow_max_vy_mps" in td:
             ctrl.near_slow_max_vy_mps = _sf(td["near_slow_max_vy_mps"])
+        if "bbox_track_forward_enabled" in td:
+            ctrl.bbox_track_forward_enabled = _sb(td["bbox_track_forward_enabled"])
+        if "bbox_track_forward_vx_mps" in td:
+            ctrl.bbox_track_forward_vx_mps = _sf(td["bbox_track_forward_vx_mps"])
+        if "bbox_track_forward_max_vx_mps" in td:
+            ctrl.bbox_track_forward_max_vx_mps = _sf(td["bbox_track_forward_max_vx_mps"])
+        if "bbox_track_forward_center_band" in td:
+            ctrl.bbox_track_forward_center_band = _sf(td["bbox_track_forward_center_band"])
+        if "bbox_track_forward_min_hold_ms" in td:
+            ctrl.bbox_track_forward_min_hold_ms = _si(td["bbox_track_forward_min_hold_ms"])
+        if "bbox_track_forward_max_wz_radps" in td:
+            ctrl.bbox_track_forward_max_wz_radps = _sf(td["bbox_track_forward_max_wz_radps"])
         if "final_yaw_deadband_rad" in td:
             ctrl.final_yaw_deadband_rad = _sf(td["final_yaw_deadband_rad"])
         if "final_lock_yaw_rad" in td:

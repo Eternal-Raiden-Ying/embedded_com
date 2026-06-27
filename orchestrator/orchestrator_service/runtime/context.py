@@ -144,6 +144,8 @@ class RuntimeContext:
     last_edge_yaw_cmd: float = 0.0
     last_edge_good_mono: float = 0.0
     zero_cmd_started_mono: float = 0.0
+    bbox_track_entered_mono: float = 0.0
+    bbox_track_last_exit_reason: str = ""
     edge_conf_score: float = 0.0
     last_good_table_obs_mono: float = 0.0
     last_good_table_obs_summary: Dict[str, object] = field(default_factory=dict)
@@ -263,6 +265,8 @@ class RuntimeContext:
         self.last_edge_yaw_cmd = 0.0
         self.last_edge_good_mono = 0.0
         self.zero_cmd_started_mono = 0.0
+        self.bbox_track_entered_mono = 0.0
+        self.bbox_track_last_exit_reason = ""
         self.edge_conf_score = 0.0
         self.last_good_table_obs_mono = 0.0
         self.last_good_table_obs_summary.clear()
