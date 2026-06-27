@@ -113,6 +113,49 @@ def _pick_optional_int(payload: Dict[str, Any], *keys: str) -> Optional[int]:
     return None
 
 
+_TABLE_EDGE_CONTRACT_FIELDS = (
+    "table_bbox_xyxy",
+    "rgb_shape",
+    "yolo_bbox_center_x_norm",
+    "table_bbox_control_valid",
+    "yolo_table_control_valid",
+    "yolo_table_visible",
+    "yolo_table_fresh",
+    "table_bbox_touch_left",
+    "table_bbox_touch_right",
+    "table_bbox_touch_bottom",
+    "edge_found",
+    "edge_valid",
+    "edge_trusted",
+    "yaw_err_rad",
+    "dist_err_m",
+    "table_roi_depth_valid",
+    "table_roi_depth_p10",
+    "table_roi_depth_median",
+    "table_roi_depth_mean",
+    "table_roi_depth_sample_count",
+    "table_roi_depth_valid_ratio",
+)
+
+
+def _table_edge_contract_missing_fields(payload: Dict[str, Any]) -> List[str]:
+    aliases = {
+        "table_bbox_xyxy": ("table_bbox_xyxy", "yolo_table_bbox", "table_bbox", "detected_table_bbox"),
+        "yolo_bbox_center_x_norm": ("yolo_bbox_center_x_norm",),
+        "edge_found": ("edge_found", "table_edge_found"),
+        "yaw_err_rad": ("yaw_err_rad", "yaw_err", "edge_yaw_err_rad", "yaw_error_rad"),
+        "dist_err_m": ("dist_err_m", "dist_err", "edge_dist_err_m", "distance_error_m", "table_edge_distance_m", "edge_distance_m"),
+    }
+    missing: List[str] = []
+    for field in _TABLE_EDGE_CONTRACT_FIELDS:
+        keys = aliases.get(field, (field,))
+        if not any(key in payload and payload.get(key) is not None for key in keys):
+            missing.append(field)
+    if "edge_confidence" not in payload and "edge_conf" not in payload and "confidence" not in payload:
+        missing.append("edge_confidence")
+    return missing
+
+
 def _pick_optional_dict(payload: Dict[str, Any], *keys: str) -> Optional[Dict[str, Any]]:
     for key in keys:
         value = payload.get(key)
@@ -384,6 +427,7 @@ class TableEdgeObs:
     edge_valid: Optional[bool] = None
     confidence: float = 0.0
     edge_conf: Optional[float] = None
+    edge_confidence: Optional[float] = None
     obs_ts: Optional[float] = None
     age_ms: Optional[float] = None
     frame_id: Optional[int] = None
@@ -447,6 +491,7 @@ class TableEdgeObs:
     table_roi_depth_valid: bool = False
     table_roi_depth_p10: Optional[float] = None
     table_roi_depth_median: Optional[float] = None
+    table_roi_depth_mean: Optional[float] = None
     table_roi_depth_valid_ratio: Optional[float] = None
     table_roi_depth_sample_count: Optional[int] = None
     table_roi_depth_bbox: Optional[list] = None
@@ -542,6 +587,7 @@ class TableEdgeObs:
     session_id: Optional[str] = None
     epoch: int = 0
     source: Optional[str] = None
+    obs_parse_missing_fields: Optional[List[str]] = None
     type: str = "table_edge_obs"
 
     def __post_init__(self):
@@ -558,6 +604,20 @@ class TableEdgeObs:
         edge_found = bool(payload.get("edge_found", payload.get("table_edge_found", edge_valid if edge_valid is not None else table_found)))
         confidence = _pick_optional_float(payload, "confidence", "edge_conf", "score", "edge_confidence", "table_confidence") or 0.0
         obs_ts = _pick_optional_float(payload, "obs_ts", "observation_ts", "frame_ts", "ts")
+        table_bbox_value = _pick_optional_bbox(payload, "table_bbox_xyxy", "yolo_table_bbox", "table_bbox", "detected_table_bbox")
+        table_bbox_present = bool(
+            table_bbox_value is not None
+            or payload.get("table_bbox_found", False)
+            or payload.get("table_bbox_current_found", False)
+            or payload.get("table_bbox_control_valid", False)
+            or payload.get("yolo_table_visible", False)
+            or payload.get("yolo_table_control_valid", False)
+            or payload.get("yolo_reliable", False)
+        )
+        yolo_control_valid = bool(payload.get("yolo_table_control_valid", payload.get("table_bbox_control_valid", table_bbox_present)))
+        yolo_visible = bool(payload.get("yolo_table_visible", payload.get("table_bbox_current_found", table_bbox_present)))
+        table_bbox_current = bool(payload.get("table_bbox_current_found", yolo_visible and yolo_control_valid))
+        table_bbox_control = bool(payload.get("table_bbox_control_valid", yolo_control_valid))
         return cls(
             ts=float(obs_ts) if obs_ts is not None else _payload_ts(payload),
             table_found=table_found,
@@ -565,6 +625,7 @@ class TableEdgeObs:
             edge_valid=edge_valid if edge_valid is not None else edge_found,
             confidence=float(confidence),
             edge_conf=_pick_optional_float(payload, "edge_conf", "confidence", "edge_confidence"),
+            edge_confidence=_pick_optional_float(payload, "edge_confidence", "edge_conf", "confidence"),
             obs_ts=obs_ts,
             age_ms=_pick_optional_float(payload, "age_ms", "edge_obs_age_ms"),
             frame_id=_pick_optional_int(payload, "frame_id"),
@@ -628,6 +689,7 @@ class TableEdgeObs:
             table_roi_depth_valid=bool(payload.get("table_roi_depth_valid", False)),
             table_roi_depth_p10=_pick_optional_float(payload, "table_roi_depth_p10"),
             table_roi_depth_median=_pick_optional_float(payload, "table_roi_depth_median"),
+            table_roi_depth_mean=_pick_optional_float(payload, "table_roi_depth_mean"),
             table_roi_depth_valid_ratio=_pick_optional_float(payload, "table_roi_depth_valid_ratio"),
             table_roi_depth_sample_count=_pick_optional_int(payload, "table_roi_depth_sample_count"),
             table_roi_depth_bbox=_pick_optional_bbox(payload, "table_roi_depth_bbox"),
@@ -654,19 +716,19 @@ class TableEdgeObs:
             view_reliable=bool(payload.get("view_reliable", False)),
             fov_guard_active=bool(payload.get("fov_guard_active", False)),
             fov_guard_reason=_pick_optional_str(payload, "fov_guard_reason"),
-            table_bbox_found=bool(payload.get("table_bbox_found", _pick_optional_bbox(payload, "table_bbox_xyxy", "yolo_table_bbox", "table_bbox", "detected_table_bbox") is not None)),
-            table_bbox_current_found=bool(payload.get("table_bbox_current_found", payload.get("yolo_table_visible", False) and payload.get("yolo_table_control_valid", False))),
-            table_bbox_control_valid=bool(payload.get("table_bbox_control_valid", payload.get("yolo_table_control_valid", False))),
-            table_bbox_xyxy=_pick_optional_bbox(payload, "table_bbox_xyxy", "yolo_table_bbox", "table_bbox", "detected_table_bbox"),
+            table_bbox_found=bool(payload.get("table_bbox_found", table_bbox_present)),
+            table_bbox_current_found=table_bbox_current,
+            table_bbox_control_valid=table_bbox_control,
+            table_bbox_xyxy=table_bbox_value,
             rgb_shape=payload.get("rgb_shape") if isinstance(payload.get("rgb_shape"), (list, tuple)) else None,
             table_bbox_area_ratio=_pick_bbox_area_ratio(payload),
             table_bbox_conf_raw=_pick_optional_float(payload, "table_bbox_conf_raw", "yolo_table_conf"),
             table_bbox_conf_used_for_gate=bool(payload.get("table_bbox_conf_used_for_gate", False)),
-            yolo_reliable=bool(payload.get("yolo_reliable", payload.get("table_bbox_found", _pick_optional_bbox(payload, "table_bbox_xyxy", "yolo_table_bbox", "table_bbox", "detected_table_bbox") is not None))),
+            yolo_reliable=bool(payload.get("yolo_reliable", table_bbox_present)),
             yolo_valid_reason=_pick_optional_str(payload, "yolo_valid_reason"),
             yolo_invalid_reason=_pick_optional_str(payload, "yolo_invalid_reason"),
-            docking_enabled_by_yolo=bool(payload.get("docking_enabled_by_yolo", payload.get("table_bbox_found", _pick_optional_bbox(payload, "table_bbox_xyxy", "yolo_table_bbox", "table_bbox", "detected_table_bbox") is not None))),
-            edge_control_allowed=bool(payload.get("edge_control_allowed", payload.get("table_bbox_found", _pick_optional_bbox(payload, "table_bbox_xyxy", "yolo_table_bbox", "table_bbox", "detected_table_bbox") is not None))),
+            docking_enabled_by_yolo=bool(payload.get("docking_enabled_by_yolo", table_bbox_present)),
+            edge_control_allowed=bool(payload.get("edge_control_allowed", table_bbox_present)),
             edge_control_block_reason=_pick_optional_str(payload, "edge_control_block_reason"),
             yolo_bbox_area_norm=_pick_bbox_area_ratio(payload),
             yolo_bbox_touch_left=bool(payload.get("yolo_bbox_touch_left", False)),
@@ -677,8 +739,8 @@ class TableEdgeObs:
             table_bbox_touch_right=bool(payload.get("table_bbox_touch_right", payload.get("yolo_bbox_touch_right", False))),
             table_bbox_touch_bottom=bool(payload.get("table_bbox_touch_bottom", payload.get("yolo_bbox_touch_bottom", False))),
             table_bbox_boundary_allowed=bool(payload.get("table_bbox_boundary_allowed", False)),
-            yolo_table_control_valid=bool(payload.get("yolo_table_control_valid", payload.get("table_bbox_found", _pick_optional_bbox(payload, "table_bbox_xyxy", "yolo_table_bbox", "table_bbox", "detected_table_bbox") is not None or payload.get("yolo_reliable", False)))),
-            yolo_table_visible=bool(payload.get("yolo_table_visible", payload.get("table_bbox_current_found", payload.get("table_bbox_found", False)))),
+            yolo_table_control_valid=yolo_control_valid,
+            yolo_table_visible=yolo_visible,
             yolo_table_fresh=(bool(payload["yolo_table_fresh"]) if "yolo_table_fresh" in payload else None),
             yolo_table_age_ms=_pick_optional_float(payload, "yolo_table_age_ms"),
             yolo_table_roi_valid=bool(payload.get("yolo_table_roi_valid", False)),
@@ -723,6 +785,7 @@ class TableEdgeObs:
             session_id=_pick_optional_str(payload, "session_id", "task_id"),
             epoch=int(payload.get("epoch", 0) or 0),
             source=_pick_optional_str(payload, "source"),
+            obs_parse_missing_fields=_table_edge_contract_missing_fields(payload),
             type=str(payload.get("type", "table_edge_obs") or "table_edge_obs"),
         )
 

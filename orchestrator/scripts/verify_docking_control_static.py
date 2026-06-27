@@ -50,10 +50,43 @@ def main() -> None:
     assert vista_obs.yolo_bbox_center_x_norm == 0.70 and vista_obs.table_bbox_touch_right
     probe_geom = TableDockingMixin._bbox_control_geometry(SimpleNamespace(), vista_obs)
     assert probe_geom["bbox_center_valid"] and abs(probe_geom["bbox_center_error_control"] - 0.20) < 1e-6
+    contract_obs = TableEdgeObs.from_dict({
+        "ts": 1.0,
+        "table_bbox_xyxy": [100, 20, 300, 200],
+        "rgb_shape": [480, 640],
+        "yolo_bbox_center_x_norm": 0.3125,
+        "table_bbox_control_valid": True,
+        "yolo_table_control_valid": True,
+        "yolo_table_visible": True,
+        "yolo_table_fresh": True,
+        "table_bbox_touch_left": False,
+        "table_bbox_touch_right": False,
+        "table_bbox_touch_bottom": False,
+        "edge_found": True,
+        "edge_valid": True,
+        "edge_trusted": True,
+        "edge_confidence": 0.82,
+        "yaw_err_rad": 0.10,
+        "dist_err_m": 0.20,
+        "table_roi_depth_valid": True,
+        "table_roi_depth_p10": 0.45,
+        "table_roi_depth_median": 0.50,
+        "table_roi_depth_mean": 0.52,
+        "table_roi_depth_sample_count": 96,
+        "table_roi_depth_valid_ratio": 0.75,
+    })
+    assert contract_obs.table_bbox_current_found and contract_obs.table_bbox_control_valid
+    assert contract_obs.yolo_table_control_valid and contract_obs.yolo_table_visible
+    assert contract_obs.edge_confidence == 0.82
+    assert contract_obs.table_roi_depth_mean == 0.52
+    assert contract_obs.obs_parse_missing_fields == []
+    partial_contract_obs = TableEdgeObs.from_dict({"ts": 1.0, "table_found": True, "edge_found": False})
+    assert "yolo_bbox_center_x_norm" in partial_contract_obs.obs_parse_missing_fields
     xyxy_obs = TableEdgeObs.from_dict({"ts": 1.0, "table_found": True, "edge_found": False,
         "table_bbox_xyxy": [320, 20, 640, 200], "rgb_shape": [480, 640]})
     xyxy_geom = TableDockingMixin._bbox_control_geometry(SimpleNamespace(), xyxy_obs)
     assert xyxy_geom["bbox_center_valid"] and abs(xyxy_geom["bbox_cx_norm_control"] - 0.75) < 1e-6
+    assert xyxy_obs.table_bbox_control_valid and xyxy_obs.yolo_table_control_valid
 
     yolo_search_obs = TableEdgeObs.from_dict({
         "ts": 1.0,
@@ -318,6 +351,7 @@ def main() -> None:
     assert uart_probe._writer_discard_reason({"line": "V 0.020 0.000 0.010", "tx_meta": {}}) == ""
     assert uart_probe._writer_discard_reason({"line": "V 0.000 0.000 0.100", "tx_meta": {}}) == ""
     assert uart_probe._writer_discard_reason({"line": "MODE SEARCH", "tx_meta": {}}) == "non_velocity_line"
+    assert uart_probe._writer_discard_reason({"line": "V 0.000 0.000 0.100", "tx_meta": {}, "publish_mono": time.monotonic()}) == ""
     uart_probe._last_estop_mono = time.monotonic()
     assert uart_probe._writer_discard_reason({"line": "V 0.000 0.000 0.100", "tx_meta": {}, "publish_mono": time.monotonic()}) == "estop_cooldown"
     assert uart_probe._writer_discard_reason({
@@ -325,6 +359,15 @@ def main() -> None:
         "tx_meta": {"stop_class": "stale_recovery", "estop_cooldown_applied": False},
         "publish_mono": time.monotonic(),
     }) == ""
+    uart_events = []
+    uart_tx_probe = UartBridge(port="COM_DRY_RUN", baudrate=115200, timeout_s=0.1, dry_run=True, dry_run_echo_stdout=False, tx_callback=lambda line, dry, meta: uart_events.append((line, dry, meta)))
+    assert uart_tx_probe.send_velocity(0.020, 0.0, 0.010, tx_meta={"kind": "vel"})
+    queued = uart_tx_probe._pop_pending_tx()
+    assert queued is not None and queued["tx_meta"]["uart_enqueue_ok"]
+    uart_tx_probe._write_line(queued["line"], tx_meta=queued["tx_meta"], publish_mono=queued["publish_mono"])
+    assert uart_events[-1][2]["writer_accept_cmd"]
+    assert uart_events[-1][2]["serial_write_attempted"] and uart_events[-1][2]["serial_write_ok"]
+    assert uart_events[-1][2]["uart_tx_ok"]
 
     search_result = arbitrate_table_docking_motion(
         RuntimeContext(state=State.SEARCH_TABLE),
@@ -501,6 +544,7 @@ def main() -> None:
     depth = np.full((100, 100), 1000, dtype=np.uint16)
     stats = table_roi_depth_statistics(depth, 0.001, [10, 10, 90, 90])
     assert stats["table_roi_depth_valid"] and stats["table_roi_depth_p10"] == 1.0
+    assert stats["table_roi_depth_mean"] == 1.0
     assert stats["table_roi_depth_bbox"] and stats["table_roi_depth_coord_space"] == "depth_frame_xyxy"
     depth[:] = 0
     invalid = table_roi_depth_statistics(depth, 0.001, [10, 10, 90, 90])
@@ -512,6 +556,13 @@ def main() -> None:
         {"table_bbox_current_found": False, "table_found": False}, tick_ts=1.0,
     )
     assert not merged["table_roi_depth_valid"] and merged["table_roi_depth_p10"] is None
+    merged_bbox = merge_table_bbox_from_local_perception(
+        {"edge_found": True, "edge_valid": True, "edge_trusted": True, "edge_conf": 0.9},
+        {"table_bbox_current_found": True, "table_found": True, "table_bbox_xyxy": [100, 20, 300, 200], "rgb_shape": [480, 640]},
+        tick_ts=1.0,
+    )
+    assert merged_bbox["table_bbox_control_valid"] and merged_bbox["yolo_table_control_valid"]
+    assert abs(float(merged_bbox["yolo_bbox_center_x_norm"]) - 0.3125) < 1e-6
 
     class ProgressProbe(TableDockingMixin):
         def __init__(self):

@@ -1079,6 +1079,9 @@ class OrchestratorService(BaseModule):
                 "perception_dropout_hold_active": bool(summary.get("perception_dropout_hold_active", False)),
                 "service_may_override": bool(summary.get("service_may_override", False)),
             }
+        # Legacy fallback for non-table-docking or pre-arbiter commands.
+        # Table docking commands with arbiter_applied=True bypass this visual
+        # stale gate; final motion is decided by table docking motion arbiter.
         control_source = str(summary.get("control_source") or "").strip().lower()
         stale_level = str(summary.get("stale_level") or "").strip().lower()
         stale_reason = str(summary.get("stale_guard_reason") or summary.get("reason") or "").strip().lower()

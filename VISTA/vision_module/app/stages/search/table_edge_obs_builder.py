@@ -20,6 +20,7 @@ def default_table_edge_obs() -> Dict[str, object]:
         "edge_valid": False,
         "confidence": 0.0,
         "edge_conf": 0.0,
+        "edge_confidence": 0.0,
         "yaw_err_rad": None,
         "yaw_err": None,
         "dist_err_m": None,
@@ -30,6 +31,7 @@ def default_table_edge_obs() -> Dict[str, object]:
         "table_roi_depth_valid": False,
         "table_roi_depth_p10": None,
         "table_roi_depth_median": None,
+        "table_roi_depth_mean": None,
         "table_roi_depth_valid_ratio": 0.0,
         "table_roi_depth_sample_count": 0,
         "table_roi_depth_bbox": None,
@@ -44,6 +46,16 @@ def default_table_edge_obs() -> Dict[str, object]:
         "seq": None,
         "source_mode": "",
         "is_stale": True,
+        "table_bbox_xyxy": None,
+        "rgb_shape": None,
+        "yolo_bbox_center_x_norm": None,
+        "table_bbox_control_valid": False,
+        "yolo_table_control_valid": False,
+        "yolo_table_visible": False,
+        "yolo_table_fresh": False,
+        "table_bbox_touch_left": False,
+        "table_bbox_touch_right": False,
+        "table_bbox_touch_bottom": False,
         "source": "vision_table_edge_manager",
         "type": "table_edge_obs",
     }
@@ -88,6 +100,7 @@ def _bbox_metrics(bbox: Sequence[float], shape: object) -> Dict[str, object]:
     bw = max(0.0, x1 - x0)
     bh = max(0.0, y1 - y0)
     cx_norm = (((x0 + x1) * 0.5) / max(1.0, w) - 0.5) * 2.0
+    yolo_cx_norm = ((x0 + x1) * 0.5) / max(1.0, w)
     cy_norm = (((y0 + y1) * 0.5) / max(1.0, h) - 0.5) * 2.0
     area_ratio = (bw * bh) / max(1.0, w * h)
     touch_left = x0 <= max(2.0, w * 0.02)
@@ -96,6 +109,7 @@ def _bbox_metrics(bbox: Sequence[float], shape: object) -> Dict[str, object]:
     return {
         "table_cx_norm": max(-1.0, min(1.0, float(cx_norm))),
         "table_cy_norm": max(-1.0, min(1.0, float(cy_norm))),
+        "yolo_bbox_center_x_norm": max(0.0, min(1.0, float(yolo_cx_norm))),
         "table_size_norm": max(0.0, min(1.0, float(area_ratio))),
         "table_bbox_area_ratio": max(0.0, min(1.0, float(area_ratio))),
         "table_bbox_touch_left": bool(touch_left),
@@ -346,6 +360,7 @@ def merge_table_bbox_from_local_perception(
                 "table_roi_depth_valid": False,
                 "table_roi_depth_p10": None,
                 "table_roi_depth_median": None,
+                "table_roi_depth_mean": None,
                 "table_roi_depth_valid_ratio": 0.0,
                 "table_roi_depth_sample_count": 0,
                 "table_roi_depth_bbox": None,
@@ -456,6 +471,7 @@ def merge_table_bbox_from_local_perception(
                 "table_roi_depth_valid": False,
                 "table_roi_depth_p10": None,
                 "table_roi_depth_median": None,
+                "table_roi_depth_mean": None,
                 "table_roi_depth_valid_ratio": 0.0,
                 "table_roi_depth_sample_count": 0,
                 "table_roi_depth_bbox": None,
@@ -563,6 +579,7 @@ def merge_table_bbox_from_local_perception(
             "yolo_table_fresh": True,
             "yolo_table_age_ms": 0.0,
             "yolo_table_conf": conf,
+            "yolo_bbox_center_x_norm": local_perception.get("yolo_bbox_center_x_norm"),
             "roi_source": source,
             "roi_reason": local_perception.get("table_roi_reason") or "local_perception_table_bbox",
             "table_quadrant": local_perception.get("table_quadrant"),
@@ -595,6 +612,7 @@ def merge_table_bbox_from_local_perception(
                 "yolo_table_fresh": True,
                 "yolo_table_age_ms": 0.0,
                 "yolo_table_conf": conf,
+                "yolo_bbox_center_x_norm": local_perception.get("yolo_bbox_center_x_norm"),
                 "roi_source": source,
                 "roi_reason": local_perception.get("table_roi_reason") or "local_perception_table_bbox",
                 "table_quadrant": local_perception.get("table_quadrant"),
@@ -609,6 +627,8 @@ def merge_table_bbox_from_local_perception(
         out["depth_valid"] = False
 
     out.update(metrics)
+    if out.get("yolo_bbox_center_x_norm") is None:
+        out["yolo_bbox_center_x_norm"] = metrics.get("yolo_bbox_center_x_norm")
     out["yolo_bbox_area_norm"] = out.get("table_bbox_area_ratio")
     out["yolo_bbox_touch_left"] = out.get("table_bbox_touch_left")
     out["yolo_bbox_touch_right"] = out.get("table_bbox_touch_right")
@@ -787,6 +807,7 @@ def annotate_table_edge_obs(
     out["lateral_err_m"] = lateral
 
     out["edge_conf"] = float(out.get("edge_conf", out.get("confidence", 0.0)) or 0.0)
+    out["edge_confidence"] = float(out.get("edge_confidence", out.get("edge_conf", 0.0)) or 0.0)
 
     obs_ts = out.get("obs_ts", out.get("ts"))
     age_ms = None

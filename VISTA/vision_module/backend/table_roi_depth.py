@@ -26,6 +26,7 @@ def table_roi_depth_statistics(
         "table_roi_depth_valid": False,
         "table_roi_depth_p10": None,
         "table_roi_depth_median": None,
+        "table_roi_depth_mean": None,
         "table_roi_depth_valid_ratio": 0.0,
         "table_roi_depth_sample_count": 0,
         "table_roi_depth_bbox": None,
@@ -69,5 +70,6 @@ def table_roi_depth_statistics(
         "table_roi_depth_valid": True,
         "table_roi_depth_p10": float(np.percentile(values, 10)),
         "table_roi_depth_median": float(np.median(values)),
+        "table_roi_depth_mean": float(np.mean(values)),
     })
     return out
