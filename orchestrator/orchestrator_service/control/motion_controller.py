@@ -154,11 +154,9 @@ class MotionController:
         edge_found: Optional[bool] = None,
     ) -> Dict[str, Any]:
         measured_distance = None
-        target_distance = None
-        if obs is not None:
-            target_distance = obs.target_dist_m
-            if obs.dist_err_m is not None and target_distance is not None:
-                measured_distance = float(target_distance) + float(obs.dist_err_m)
+        target_distance = float(getattr(self.cfg, "table_target_dist_m", 0.30) or 0.30)
+        if obs is not None and obs.dist_err_m is not None:
+            measured_distance = float(target_distance) + float(obs.dist_err_m)
         timing = self._stale_guard(obs, cmd.ts)
         stale_level = str(timing.get("stale_level") or "")
         yolo_table_visible = (
@@ -245,9 +243,6 @@ class MotionController:
             **semantic_fields,
             "yolo_table_roi_valid": bool(getattr(obs, "yolo_table_roi_valid", False)) if obs is not None else False,
             "yolo_table_conf": (float(getattr(obs, "yolo_table_conf")) if obs is not None and getattr(obs, "yolo_table_conf", None) is not None else None),
-            "table_bbox_touch_left": bool(getattr(obs, "table_bbox_touch_left", getattr(obs, "yolo_bbox_touch_left", False))) if obs is not None else False,
-            "table_bbox_touch_right": bool(getattr(obs, "table_bbox_touch_right", getattr(obs, "yolo_bbox_touch_right", False))) if obs is not None else False,
-            "table_bbox_touch_bottom": bool(getattr(obs, "table_bbox_touch_bottom", getattr(obs, "yolo_bbox_touch_bottom", False))) if obs is not None else False,
             "table_bbox_boundary_allowed": bool(getattr(obs, "table_bbox_boundary_allowed", False)) if obs is not None else False,
             "roi_source": str(getattr(obs, "roi_source", "") or "") if obs is not None else "",
             "roi_reason": str(getattr(obs, "roi_reason", "") or "") if obs is not None else "",
@@ -263,8 +258,6 @@ class MotionController:
             "yolo_table_edge_stable_count": getattr(obs, "yolo_table_edge_stable_count", None) if obs is not None else None,
             "plane_cx_norm": (float(getattr(obs, "plane_cx_norm")) if obs is not None and getattr(obs, "plane_cx_norm", None) is not None else None),
             "plane_width_norm": (float(getattr(obs, "plane_width_norm")) if obs is not None and getattr(obs, "plane_width_norm", None) is not None else None),
-            "plane_touch_left": bool(getattr(obs, "plane_touch_left", False)) if obs is not None else False,
-            "plane_touch_right": bool(getattr(obs, "plane_touch_right", False)) if obs is not None else False,
             "table_view_wz_sign": float(getattr(self.car_cfg, "table_view_wz_sign", -1.0)),
             "table_view_vy_sign": float(getattr(self.car_cfg, "table_view_vy_sign", -1.0)),
             "table_plane_yaw_sign": float(getattr(self.car_cfg, "table_plane_yaw_sign", 1.0)),
@@ -380,25 +373,21 @@ class MotionController:
         mode_name = str(mode or "SEARCH_TABLE").upper().strip() or "SEARCH_TABLE"
         source_name = normalize_control_source(control_source or "yolo_forward")
         assist_vx = 0.0
-        touch_left = bool(getattr(obs, "table_bbox_touch_left", getattr(obs, "yolo_bbox_touch_left", False))) if obs is not None else False
-        touch_right = bool(getattr(obs, "table_bbox_touch_right", getattr(obs, "yolo_bbox_touch_right", False))) if obs is not None else False
-        touch_side = bool(touch_left or touch_right)
-        motion_touch_side = False
         edge_guidance_available = bool(
             obs is not None
             and bool(getattr(obs, "edge_trusted", False) or getattr(obs, "usable_for_approach", False) or getattr(obs, "edge_control_allowed", False))
         )
         center_good_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_good_limit", 0.06) or 0.06))
         center_hard_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.40) or 0.40))
-        forward_vx = abs(float(getattr(self.cfg, "yolo_forward_vx_mps", 0.015) or 0.015))
-        slow_vx = max(
-            abs(float(getattr(self.car_cfg, "table_vx_deadband_mps", 0.004) or 0.004)) * 2.0,
-            min(forward_vx, forward_vx * 0.75),
+        forward_vx = max(
+            abs(float(getattr(self.car_cfg, "yolo_table_forward_vx_mps", 0.015) or 0.015)),
+            abs(float(getattr(self.cfg, "min_forward_vx_mps", 0.04) or 0.04)),
         )
+        slow_vx = min(forward_vx, abs(float(getattr(self.cfg, "min_forward_vx_mps", 0.04) or 0.04)))
         yolo_forward_allowed = bool(center_error is not None and abs(center_error) <= center_hard_limit)
         if source_name in {"yolo_forward", "yolo_track_forward"}:
             if yolo_forward_allowed:
-                assist_vx = forward_vx if abs(center_error) <= center_good_limit and not motion_touch_side else slow_vx
+                assist_vx = forward_vx if abs(center_error) <= center_good_limit else slow_vx
                 source_name = "yolo_track_forward"
             else:
                 assist_vx = 0.0
@@ -408,7 +397,7 @@ class MotionController:
             # edge_adjust is generated by edge/docking paths, not by pure YOLO.
             # Fall back to forward-safe semantics if called here accidentally.
             if yolo_forward_allowed:
-                assist_vx = forward_vx if abs(center_error) <= center_good_limit and not motion_touch_side else slow_vx
+                assist_vx = forward_vx if abs(center_error) <= center_good_limit else slow_vx
                 source_name = "yolo_track_forward"
             else:
                 assist_vx = 0.0
@@ -448,7 +437,7 @@ class MotionController:
                 "control_intent": "forward" if assist_vx > 0.0 else "search",
                 "allow_forward": bool(assist_vx > 0.0),
                 "allow_rotate": bool(abs(wz) > 1e-9),
-                "forward_block_reason": "" if assist_vx > 0.0 else ("yolo_bbox_touch_side_rotate_only" if motion_touch_side else "yolo_center_error_too_large_rotate_only" if center_error is not None else "center_unavailable"),
+                "forward_block_reason": "" if assist_vx > 0.0 else ("yolo_center_error_too_large_rotate_only" if center_error is not None else "center_unavailable"),
                 "edge_guidance_available": bool(edge_guidance_available),
                 "rotate_block_reason": "" if abs(wz) > 1e-9 else "yolo_track_forward",
                 "bbox_visible_but_edge_invalid": bool(source_name in {"yolo_forward", "yolo_track_forward"} and not bool(getattr(obs, "edge_trusted", False))),
@@ -1001,7 +990,7 @@ class MotionController:
             abs(float(getattr(self.car_cfg, "table_edge_hard_rotate_only_yaw_rad", 0.45) or 0.45)),
         )
         dist_err = float(getattr(obs, "dist_err_m", 0.0) or 0.0) if obs is not None else 0.0
-        target_dist = float(getattr(obs, "target_dist_m", getattr(self.cfg, "table_target_dist_m", 0.5)) or getattr(self.cfg, "table_target_dist_m", 0.5))
+        target_dist = float(getattr(self.cfg, "table_target_dist_m", 0.30) or 0.30)
         final_lock_tol = max(0.0, float(getattr(self.cfg, "final_lock_dist_tol_m", 0.02) or 0.02))
         if stale_level == "fresh" and yaw_abs <= hard_rotate_only_yaw and dist_err > final_lock_tol:
             decision = self._compose_fov_table_cmd(
@@ -1126,12 +1115,10 @@ class MotionController:
         near_measured = False
         if obs is not None and obs.dist_err_m is not None:
             try:
-                near_measured = (float(obs.target_dist_m or self.cfg.table_target_dist_m) + float(obs.dist_err_m)) <= float(getattr(self.cfg, "yolo_table_near_dist_m", 0.45) or 0.45)
+                near_measured = (float(self.cfg.table_target_dist_m) + float(obs.dist_err_m)) <= float(getattr(self.cfg, "yolo_table_near_dist_m", 0.45) or 0.45)
             except Exception:
                 near_measured = False
         pose_found = bool(getattr(obs, "pose_found", False)) if obs is not None else False
-        plane_touch_left = bool(getattr(obs, "plane_touch_left", False)) if obs is not None else False
-        plane_touch_right = bool(getattr(obs, "plane_touch_right", False)) if obs is not None else False
         obs_stale = stale_level != "fresh"
         guard_view_err = view_err
         if obs is not None and getattr(obs, "view_err_norm", None) is not None:
@@ -1140,11 +1127,7 @@ class MotionController:
             except Exception:
                 guard_view_err = view_err
         fov_guard_reason = ""
-        if plane_touch_right:
-            fov_guard_reason = "plane_touch_right"
-        elif plane_touch_left:
-            fov_guard_reason = "plane_touch_left"
-        elif abs(float(guard_view_err)) > hard_th:
+        if abs(float(guard_view_err)) > hard_th:
             fov_guard_reason = "view_err_hard"
         hard_guard = bool(fov_guard_reason)
 
@@ -1185,10 +1168,12 @@ class MotionController:
         elif phase_name in {"PLANE_ACQUIRE", "PLANE_STOP"}:
             forward_block_reason = f"phase_{phase_name.lower()}"
         if forward_allowed:
+            min_forward_vx = abs(float(getattr(self.cfg, "min_forward_vx_mps", 0.04) or 0.04))
+            cruise_forward_vx = abs(float(getattr(self.cfg, "bbox_track_forward_vx_mps", 0.10) or 0.10))
             if dist_err > 0.15:
-                vx_from_dist = 0.020
+                vx_from_dist = cruise_forward_vx
             else:
-                vx_from_dist = 0.008
+                vx_from_dist = min_forward_vx
 
         wz_from_plane = 0.0
         if base_wz is not None:
@@ -1270,10 +1255,6 @@ class MotionController:
         if hard_guard:
             vx = 0.0
             recover_err = float(guard_view_err)
-            if plane_touch_right and recover_err <= 0.0:
-                recover_err = 1.0
-            elif plane_touch_left and recover_err >= 0.0:
-                recover_err = -1.0
             recover_vy = abs(float(getattr(self.car_cfg, "table_view_recover_vy_mps", 0.008) or 0.008))
             recover_wz = abs(float(getattr(self.car_cfg, "table_view_recover_wz_radps", 0.04) or 0.04))
             recover_vy = min(recover_vy, abs(float(getattr(self.car_cfg, "table_vy_max_mps", 0.02) or 0.02)))
@@ -1337,7 +1318,7 @@ class MotionController:
 
         final_lock_dist_tol = max(0.0, float(self.cfg.final_lock_dist_tol_m))
         pose_missing_hold_s = max(0.0, float(getattr(self.car_cfg, "table_pose_missing_max_hold_s", 3.0) or 3.0))
-        pose_missing_safe_vx_mps = abs(float(getattr(self.car_cfg, "table_pose_missing_safe_vx_mps", 0.010) or 0.010))
+        pose_missing_safe_vx_mps = abs(float(getattr(self.car_cfg, "table_pose_missing_safe_vx_mps", getattr(self.cfg, "min_forward_vx_mps", 0.04)) or getattr(self.cfg, "min_forward_vx_mps", 0.04)))
         pose_missing_safe_vx_mps = float(pose_missing_safe_vx_mps)
         approach_speed_mode = "profile"
         approach_safe_vx_mps = abs(float(getattr(self.car_cfg, "table_approach_safe_vx_mps", pose_missing_safe_vx_mps) or pose_missing_safe_vx_mps))
@@ -1538,14 +1519,9 @@ class MotionController:
                 "yolo_table_control_valid": bool(getattr(obs, "yolo_table_control_valid", getattr(obs, "yolo_reliable", False))) if obs is not None else False,
                 "yolo_table_roi_valid": bool(getattr(obs, "yolo_table_roi_valid", False)) if obs is not None else False,
                 "yolo_gate_open": bool(getattr(obs, "yolo_gate_open", False)) if obs is not None else False,
-                "table_bbox_touch_left": bool(getattr(obs, "table_bbox_touch_left", getattr(obs, "yolo_bbox_touch_left", False))) if obs is not None else False,
-                "table_bbox_touch_right": bool(getattr(obs, "table_bbox_touch_right", getattr(obs, "yolo_bbox_touch_right", False))) if obs is not None else False,
-                "table_bbox_touch_bottom": bool(getattr(obs, "table_bbox_touch_bottom", getattr(obs, "yolo_bbox_touch_bottom", False))) if obs is not None else False,
                 "table_bbox_boundary_allowed": bool(getattr(obs, "table_bbox_boundary_allowed", False)) if obs is not None else False,
                 "plane_cx_norm": getattr(obs, "plane_cx_norm", None) if obs is not None else None,
                 "plane_width_norm": getattr(obs, "plane_width_norm", None) if obs is not None else None,
-                "plane_touch_left": bool(getattr(obs, "plane_touch_left", False)) if obs is not None else False,
-                "plane_touch_right": bool(getattr(obs, "plane_touch_right", False)) if obs is not None else False,
             }
         )
         summary.update(rotate_gate)

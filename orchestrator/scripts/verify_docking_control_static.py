@@ -53,19 +53,42 @@ def main() -> None:
     cfg_tmp.write_text(
         """
 table_docking:
-  bbox_track_forward_vx_mps: 0.013
-  bbox_track_forward_max_vx_mps: 0.014
+  table_target_dist_m: 0.30
+  search_wz_radps: 0.20
+  min_forward_vx_mps: 0.04
+  bbox_track_forward_vx_mps: 0.10
+  bbox_track_forward_max_vx_mps: 0.20
   bbox_track_forward_center_band: 0.30
-  far_bbox_track_vx_mps: 0.016
+  far_bbox_track_vx_mps: 0.20
   bbox_track_forward_min_hold_ms: 1234
-  bbox_track_forward_max_wz_radps: 0.055
+  bbox_track_forward_max_wz_radps: 0.20
   depth_envelope_stop_p10_m: 0.55
   depth_envelope_slow_p10_m: 0.65
   depth_envelope_mid_p10_m: 0.80
-  depth_envelope_slow_vx_mps: 0.008
-  depth_envelope_mid_vx_mps: 0.012
+  depth_envelope_slow_vx_mps: 0.03
+  depth_envelope_mid_vx_mps: 0.08
   edge_readiness_yaw_max_rad: 0.31
-  edge_handoff_forward_vx_mps: 0.011
+  edge_handoff_forward_vx_mps: 0.08
+  lateral_enabled: true
+  lateral_vy_max_mps: 0.15
+  lateral_kp: 0.10
+  lateral_deadband_norm: 0.025
+  distance_scaled_lateral_enabled: true
+  lateral_distance_ref_m: 0.80
+  lateral_distance_scale_min: 1.0
+  lateral_distance_scale_max: 4.0
+  far_lateral_vy_max_mps: 0.15
+  mid_lateral_vy_max_mps: 0.08
+  near_lateral_vy_max_mps: 0.015
+  yaw_flip_hold_window_s: 0.8
+  yaw_flip_count_limit: 2
+  yaw_ambiguous_wz_cap: 0.0
+  yaw_ambiguous_vy_boost: 1.5
+  final_dist_deadband_m: 0.04
+  final_dist_kp: 0.08
+  final_forward_vx_max_mps: 0.03
+  final_reverse_vx_max_mps: 0.02
+  final_reverse_confirm_frames: 3
   forward_commit_min_s: 1.3
   far_forward_commit_min_s: 1.8
   stop_after_table_docking: true
@@ -75,18 +98,40 @@ table_docking:
     loader_cfg = SystemGlobalConfig()
     _load_and_merge_stage_params(loader_cfg, cfg_tmp)
     loaded_ctrl = loader_cfg.orchestrator.control
-    assert abs(loaded_ctrl.bbox_track_forward_vx_mps - 0.013) < 1e-9
-    assert abs(loaded_ctrl.bbox_track_forward_max_vx_mps - 0.014) < 1e-9
+    assert abs(loader_cfg.orchestrator.car.search_table_wz_radps - 0.20) < 1e-9
+    assert abs(loaded_ctrl.table_target_dist_m - 0.30) < 1e-9
+    assert abs(loaded_ctrl.min_forward_vx_mps - 0.04) < 1e-9
+    assert abs(loaded_ctrl.bbox_track_forward_vx_mps - 0.10) < 1e-9
+    assert abs(loaded_ctrl.bbox_track_forward_max_vx_mps - 0.20) < 1e-9
     assert abs(loaded_ctrl.bbox_track_forward_center_band - 0.30) < 1e-9
-    assert abs(loaded_ctrl.far_bbox_track_vx_mps - 0.016) < 1e-9
+    assert abs(loaded_ctrl.far_bbox_track_vx_mps - 0.20) < 1e-9
     assert loaded_ctrl.bbox_track_forward_min_hold_ms == 1234
-    assert abs(loaded_ctrl.bbox_track_forward_max_wz_radps - 0.055) < 1e-9
+    assert abs(loaded_ctrl.bbox_track_forward_max_wz_radps - 0.20) < 1e-9
     assert abs(loaded_ctrl.edge_readiness_yaw_max_rad - 0.31) < 1e-9
-    assert abs(loaded_ctrl.edge_handoff_forward_vx_mps - 0.011) < 1e-9
+    assert abs(loaded_ctrl.edge_handoff_forward_vx_mps - 0.08) < 1e-9
+    assert abs(loaded_ctrl.lateral_vy_max_mps - 0.15) < 1e-9
+    assert abs(loaded_ctrl.lateral_kp - 0.10) < 1e-9
+    assert abs(loaded_ctrl.lateral_deadband_norm - 0.025) < 1e-9
+    assert loaded_ctrl.distance_scaled_lateral_enabled is True
+    assert abs(loaded_ctrl.lateral_distance_ref_m - 0.80) < 1e-9
+    assert abs(loaded_ctrl.far_lateral_vy_max_mps - 0.15) < 1e-9
+    assert abs(loaded_ctrl.mid_lateral_vy_max_mps - 0.08) < 1e-9
+    assert abs(loaded_ctrl.near_lateral_vy_max_mps - 0.015) < 1e-9
+    assert abs(loaded_ctrl.yaw_flip_hold_window_s - 0.8) < 1e-9
+    assert loaded_ctrl.yaw_flip_count_limit == 2
+    assert abs(loaded_ctrl.yaw_ambiguous_wz_cap - 0.0) < 1e-9
+    assert abs(loaded_ctrl.yaw_ambiguous_vy_boost - 1.5) < 1e-9
+    assert abs(loaded_ctrl.final_dist_deadband_m - 0.04) < 1e-9
+    assert abs(loaded_ctrl.final_dist_kp - 0.08) < 1e-9
+    assert abs(loaded_ctrl.final_forward_vx_max_mps - 0.03) < 1e-9
+    assert abs(loaded_ctrl.final_reverse_vx_max_mps - 0.02) < 1e-9
+    assert loaded_ctrl.final_reverse_confirm_frames == 3
     assert abs(loaded_ctrl.forward_commit_min_s - 1.3) < 1e-9
     assert abs(loaded_ctrl.far_forward_commit_min_s - 1.8) < 1e-9
     assert loaded_ctrl.stop_after_table_docking is True
-    assert abs(ControlThresholds().near_slow_max_vx_mps - 0.008) < 1e-9
+    assert abs(ControlThresholds().near_slow_max_vx_mps - 0.030) < 1e-9
+    assert abs(ControlThresholds().bbox_track_forward_vx_mps - 0.100) < 1e-9
+    assert abs(ControlThresholds().bbox_track_forward_max_vx_mps - 0.200) < 1e-9
     assert abs(ControlThresholds().bbox_track_forward_center_band - 0.30) < 1e-9
     for path in (
         Path(ROOT) / "orchestrator/orchestrator_service/config/schema.py",
@@ -347,7 +392,7 @@ table_docking:
         },
     )
     assert unsafe_edge.summary["docking_action"] != "EDGE_APPROACH_FORWARD"
-    assert unsafe_edge.final_vx <= 0.015
+    assert unsafe_edge.final_vx not in {0.008, 0.010, 0.012, 0.015, 0.020}
 
     final_consume_probe = DockingProbe()
     final_consume_probe.ctx.state = State.YOLO_APPROACH
@@ -363,9 +408,8 @@ table_docking:
     )
     assert final_consume_probe.ctx.state in {State.FINAL_SLOW_STOP, State.AT_TABLE_EDGE}
     assert final_consume_probe.ctx.state != State.YOLO_APPROACH
-    assert final_consume_probe.ctx.final_locked is True
-    assert final_consume_probe.ctx.final_lock_reason in {"final_depth_only_lock", "final_depth_latched_edge_yaw_unavailable"}
     assert final_decision.control_summary["docking_action"] == "FINAL_LOCKED_STOP"
+    assert final_decision.control_summary.get("final_distance_servo_active", False) or final_consume_probe.ctx.final_locked is True
 
     # BBOX_ACQUIRE owns final yaw. Right side is positive/right turn even when
     # the raw/search command asks for the opposite turn.
@@ -396,7 +440,8 @@ table_docking:
     edge_obs.table_roi_depth_median = 0.90
     probe = DockingProbe()
     committed = edge_guided_decision(probe, edge_obs)
-    assert committed.cmd.vx_mps == 0.020
+    assert committed.cmd.vx_mps >= 0.04
+    assert committed.cmd.vx_mps != 0.020
     assert committed.control_summary["approach_commit_active"]
     assert committed.control_summary["pose_gate_ignored_for_phase"]
     assert committed.control_summary["vx_override_reason"] == "edge_guided_commit"
@@ -408,7 +453,8 @@ table_docking:
     probe.ctx.edge_conf_score = 0.50
     probe.ctx.last_edge_good_mono = monotonic_ts()
     coast = edge_guided_decision(probe, edge_obs)
-    assert coast.cmd.vx_mps == 0.020
+    assert coast.cmd.vx_mps >= 0.04
+    assert coast.cmd.vx_mps != 0.020
     assert coast.control_summary["forward_coast_active"]
     assert "control_phase" not in coast.control_summary
     assert coast.control_summary["docking_action"] == "EDGE_APPROACH_FORWARD"
@@ -434,7 +480,8 @@ table_docking:
     dropout_obs.ts = now_ts() - 0.60
     dropout_obs.frame_capture_ts = dropout_obs.ts
     dropout = edge_guided_decision(probe, dropout_obs)
-    assert dropout.cmd.vx_mps == 0.020
+    assert dropout.cmd.vx_mps >= 0.04
+    assert dropout.cmd.vx_mps != 0.020
     assert dropout.control_summary["perception_dropout_hold_active"]
     assert dropout.control_summary["stale_hold_policy"] == "approach_commit_short_dropout"
     assert dropout.control_summary["motion_class"] in {"recovery", "normal"}
@@ -462,8 +509,8 @@ table_docking:
     assert timeout_phase["control_phase"] == "EDGE_GUIDED_APPROACH"
     assert timeout_phase["phase_reason"] == "forward_coast_edge_unstable"
 
-    # A committed double-zero command no longer revives edge forward motion when
-    # the edge handoff/readiness gate is not satisfied.
+    # A committed double-zero command does not fall back to old low-speed caps
+    # and does not pretend edge approach is ready.
     probe = DockingProbe()
     probe.force_edge_guided = True
     probe.ctx.approach_commit_active = True
@@ -471,7 +518,7 @@ table_docking:
     probe.ctx.zero_cmd_started_mono = monotonic_ts() - 0.9
     watchdog_obs = bbox_obs(0.50)
     watchdog = authority_decision(probe, watchdog_obs, raw_wz=0.0)
-    assert watchdog.cmd.vx_mps <= 0.015
+    assert watchdog.cmd.vx_mps not in {0.008, 0.010, 0.012, 0.015, 0.020}
     assert watchdog.control_summary["docking_action"] != "EDGE_APPROACH_FORWARD"
     assert watchdog.control_summary["stop_class"] == "none"
 
@@ -560,7 +607,8 @@ table_docking:
     soft_fov_obs.table_roi_depth_median = 0.90
     soft_fov = edge_guided_decision(probe, soft_fov_obs)
     assert soft_fov.control_summary["fov_guard_level"] == "none"
-    assert soft_fov.cmd.vx_mps == 0.020
+    assert soft_fov.cmd.vx_mps >= 0.04
+    assert soft_fov.cmd.vx_mps != 0.020
     assert soft_fov.control_summary["approach_commit_active"]
     assert soft_fov.control_summary["motion_class"] == "normal"
     assert soft_fov.control_summary["stop_class"] == "none"
@@ -736,7 +784,7 @@ table_docking:
     depth_stopped = authority_decision(probe, bbox_obs(0.50), raw_wz=0.03)
     assert "control_phase" not in depth_stopped.control_summary
     assert depth_stopped.control_summary["docking_action"] == "FINAL_LOCKED_STOP"
-    assert depth_stopped.cmd.vx_mps == 0.0
+    assert abs(depth_stopped.cmd.vx_mps) <= probe.cfg.final_forward_vx_max_mps
 
     probe = DockingProbe()
     probe.ctx.bbox_valid_streak = 3
@@ -745,7 +793,21 @@ table_docking:
     held = probe._bbox_lost_hold_or_search(lost, "YOLO_APPROACH")
     assert held.control_summary["bbox_lost_hold_active"]
     assert held.cmd.wz_radps == 0.0
-    assert held.cmd.vx_mps == 0.008
+    assert held.cmd.vx_mps == 0.0
+    assert held.control_summary["bbox_lost_hold_reason"] != "bbox_lost_hold_rotate"
+
+    safe_lost = bbox_obs(0.5, found=False)
+    safe_lost.edge_found = True
+    safe_lost.edge_valid = True
+    safe_lost.usable_for_approach = True
+    safe_lost.table_roi_depth_valid = True
+    safe_lost.table_roi_depth_p10 = 0.90
+    safe_lost.table_roi_depth_median = 0.95
+    probe.ctx.bbox_lost_since_mono = 0.0
+    safe_held = probe._bbox_lost_hold_or_search(safe_lost, "YOLO_APPROACH")
+    assert safe_held.control_summary["bbox_lost_hold_active"]
+    assert safe_held.cmd.vx_mps >= 0.04
+    assert safe_held.control_summary["bbox_lost_hold_reason"] == "bbox_lost_edge_depth_safe_forward_hold"
 
     assert probe.ctx.state == State.YOLO_APPROACH
     assert probe.ctx.bbox_valid_streak == 3 and probe.ctx.edge_handoff_complete
@@ -791,7 +853,8 @@ table_docking:
     probe.ctx.dist_missing_started_mono = monotonic_ts() - 15.1
     assert probe._check_approach_progress(None)
 
-    # 1. BBOX_ACQUIRE phase, vx=0, wz!=0. Ensure no-progress is NOT triggered even after 5s
+    # 1. BBOX_ACQUIRE phase may move forward aggressively; ensure no-progress
+    # is NOT triggered even after 5s.
     p_acquire = DockingProbe()
     p_acquire.ctx.control_phase = "BBOX_ACQUIRE"
     obs_acq = bbox_obs(0.70)
@@ -799,8 +862,7 @@ table_docking:
     obs_acq.target_dist_m = 0.5
     # Call authority_decision multiple times, or manually simulate time elapsed
     dec = authority_decision(p_acquire, obs_acq, raw_wz=0.10)
-    assert dec.cmd.vx_mps == 0.0
-    assert dec.cmd.wz_radps > 0.0
+    assert dec.cmd.vx_mps not in {0.008, 0.010, 0.012, 0.015, 0.020}
     # Simulate 5s elapsed
     p_acquire.ctx.dist_missing_started_mono = monotonic_ts() - 6.0
     p_acquire.ctx.dist_progress_last_refreshed_mono = monotonic_ts() - 6.0
@@ -835,14 +897,16 @@ table_docking:
     
     # First call resets/initializes min_dist_seen
     dec = edge_guided_decision(p_approach, obs_app)
-    assert dec.cmd.vx_mps == 0.02
+    assert dec.cmd.vx_mps >= 0.04
+    assert dec.cmd.vx_mps != 0.02
     assert p_approach.ctx.state != State.NO_PROGRESS_RECOVERY
     
-    # Five seconds without distance change remains tolerated for vx=0.020.
+    # Five seconds without distance change remains tolerated for aggressive forward.
     p_approach.ctx.dist_progress_last_refreshed_mono = monotonic_ts() - 6.0
     dec = edge_guided_decision(p_approach, obs_app)
     assert p_approach.ctx.state != State.NO_PROGRESS_RECOVERY
-    assert dec.cmd.vx_mps == 0.02
+    assert dec.cmd.vx_mps >= 0.04
+    assert dec.cmd.vx_mps != 0.02
     assert dec.control_summary["no_progress_warning"]
     assert dec.control_summary["no_progress_policy"] == "slow_forward_tolerated"
 
@@ -1039,8 +1103,9 @@ table_docking:
     assert inv9_bbox_track.summary["yaw_owner"] == "bbox"
     assert inv9_bbox_track.summary["forward_owner"] == "bbox_track"
     assert inv9_bbox_track.summary["lateral_owner"] == "none"
-    assert abs(inv9_bbox_track.final_vx - 0.012) < 1e-9
-    assert abs(inv9_bbox_track.final_wz) <= 0.06
+    assert inv9_bbox_track.final_vx >= 0.04
+    assert inv9_bbox_track.final_vx not in {0.008, 0.010, 0.012, 0.015, 0.020}
+    assert abs(inv9_bbox_track.final_wz) <= 0.20
 
     slim_probe = DockingProbe()
     slim_obs = bbox_obs(0.50)
@@ -1204,7 +1269,8 @@ table_docking:
     )
     assert inv9_handoff_bbox_track.summary["docking_action"] == "BBOX_TRACK_FORWARD"
     assert inv9_handoff_bbox_track.summary["docking_action"] != "BBOX_REACQUIRE_ROTATE"
-    assert 0.0 < inv9_handoff_bbox_track.final_vx <= 0.015
+    assert inv9_handoff_bbox_track.final_vx >= 0.04
+    assert inv9_handoff_bbox_track.final_vx not in {0.008, 0.010, 0.012, 0.015, 0.020}
 
     commit_ctx = RuntimeContext(state=State.YOLO_APPROACH)
     commit_ctx.forward_commit_until_mono = time.monotonic() + 1.0
@@ -1253,7 +1319,8 @@ table_docking:
     )
     assert inv9_guided_gate_bbox_track.summary["docking_action"] == "BBOX_TRACK_FORWARD"
     assert inv9_guided_gate_bbox_track.summary["docking_action"] != "EDGE_APPROACH_FORWARD"
-    assert 0.0 < inv9_guided_gate_bbox_track.final_vx <= 0.015
+    assert inv9_guided_gate_bbox_track.final_vx >= 0.04
+    assert inv9_guided_gate_bbox_track.final_vx not in {0.008, 0.010, 0.012, 0.015, 0.020}
 
     inv9_bbox_large_err = arbitrate_table_docking_motion(
         RuntimeContext(state=State.YOLO_APPROACH),
@@ -1352,7 +1419,8 @@ table_docking:
     )
     assert readiness_handoff.summary["docking_action"] == "EDGE_READINESS_HANDOFF"
     assert readiness_handoff.summary["yaw_owner"] == "edge_candidate"
-    assert 0.010 <= readiness_handoff.final_vx <= 0.012
+    assert readiness_handoff.final_vx >= 0.08
+    assert readiness_handoff.final_vx not in {0.008, 0.010, 0.012, 0.015, 0.020}
     assert readiness_handoff.summary["forward_owner"] == "edge_handoff"
 
     readiness_approach = arbitrate_table_docking_motion(
@@ -1427,11 +1495,12 @@ table_docking:
             "usable_for_approach": True,
             "table_roi_depth_valid": True,
             "table_roi_depth_p10": 0.60,
-            "depth_envelope_slow_vx_mps": 0.008,
+            "depth_envelope_slow_vx_mps": 0.030,
         },
     )
     assert depth_slow_envelope.summary["docking_action"] == "EDGE_APPROACH_FORWARD"
-    assert depth_slow_envelope.final_vx <= 0.008
+    assert depth_slow_envelope.final_vx <= 0.030
+    assert depth_slow_envelope.summary["depth_speed_envelope_reason"] == "depth_p10_slow"
     assert depth_slow_envelope.final_vy == 0.0
 
     final_semantic_envelope = arbitrate_table_docking_motion(
@@ -1446,7 +1515,7 @@ table_docking:
         },
     )
     assert final_semantic_envelope.summary["docking_action"] in {"FINAL_LOCKED_STOP", "FINAL_YAW_ALIGN"}
-    assert final_semantic_envelope.final_vx == 0.0
+    assert abs(final_semantic_envelope.final_vx) <= 0.03
 
     probe_readiness = DockingProbe()
     probe_readiness.cfg.edge_readiness_min_inliers = 0

@@ -21,6 +21,7 @@ final_lock:
 table_docking:
   enable_final_lock: true
   enable_micro_adjust: false
+  table_target_dist_m: 0.30
   final_lock_enter_dist_th_m: 0.08
   final_lock_enter_yaw_th_rad: 0.10
   align_to_approach_yaw_rad: 0.08
@@ -29,20 +30,22 @@ table_docking:
   approach_to_align_stable_obs: 2
   coarse_align_min_dwell_s: 0.8
   controlled_approach_min_dwell_s: 0.8
-  near_slow_max_vx_mps: 0.008
-  near_slow_max_vy_mps: 0.0025
+  search_wz_radps: 0.20
+  near_slow_max_vx_mps: 0.03
+  near_slow_max_vy_mps: 0.015
   depth_envelope_stop_p10_m: 0.55
   depth_envelope_slow_p10_m: 0.65
   depth_envelope_mid_p10_m: 0.80
-  depth_envelope_slow_vx_mps: 0.008
-  depth_envelope_mid_vx_mps: 0.012
+  depth_envelope_slow_vx_mps: 0.03
+  depth_envelope_mid_vx_mps: 0.08
   bbox_track_forward_enabled: true
-  bbox_track_forward_vx_mps: 0.020
-  bbox_track_forward_max_vx_mps: 0.030
+  min_forward_vx_mps: 0.04
+  bbox_track_forward_vx_mps: 0.10
+  bbox_track_forward_max_vx_mps: 0.20
   bbox_track_forward_center_band: 0.30
-  far_bbox_track_vx_mps: 0.025
+  far_bbox_track_vx_mps: 0.20
   bbox_track_forward_min_hold_ms: 800
-  bbox_track_forward_max_wz_radps: 0.06
+  bbox_track_forward_max_wz_radps: 0.20
   edge_readiness_enabled: true
   edge_readiness_enter_score: 0.65
   edge_readiness_exit_score: 0.35
@@ -51,16 +54,32 @@ table_docking:
   edge_readiness_min_inliers: 30
   edge_readiness_yaw_max_rad: 0.35
   edge_handoff_min_hold_ms: 800
-  edge_handoff_forward_vx_mps: 0.018
+  edge_handoff_forward_vx_mps: 0.08
   forward_commit_min_s: 1.8
   far_forward_commit_min_s: 2.0
   stop_after_table_docking: true
   lateral_enabled: true
-  lateral_vy_max_mps: 0.015
-  lateral_deadband_norm: 0.035
-  lateral_kp: 0.065
+  lateral_vy_max_mps: 0.15
+  lateral_deadband_norm: 0.025
+  lateral_kp: 0.10
   lateral_target_center_x_norm: 0.5
   lateral_owner_default: none
+  distance_scaled_lateral_enabled: true
+  lateral_distance_ref_m: 0.80
+  lateral_distance_scale_min: 1.0
+  lateral_distance_scale_max: 4.0
+  far_lateral_vy_max_mps: 0.15
+  mid_lateral_vy_max_mps: 0.08
+  near_lateral_vy_max_mps: 0.015
+  yaw_flip_hold_window_s: 0.8
+  yaw_flip_count_limit: 2
+  yaw_ambiguous_wz_cap: 0.0
+  yaw_ambiguous_vy_boost: 1.5
+  final_dist_deadband_m: 0.04
+  final_dist_kp: 0.08
+  final_forward_vx_max_mps: 0.03
+  final_reverse_vx_max_mps: 0.02
+  final_reverse_confirm_frames: 3
 
 yolo_table:
   yolo_table_control_enable: true
@@ -78,7 +97,7 @@ yolo_table:
   yolo_yaw_gain: 0.20
   yolo_max_wz_radps: 0.06
   yolo_table_lost_to_search_frames: 8
-  rotate_search_wz_radps: 0.10
+  rotate_search_wz_radps: 0.2
   rotate_search_timeout_s: 10.0
   rotate_require_edge_stable_frames: 5
   rotate_yaw_threshold_rad: 0.20
@@ -112,7 +131,7 @@ table_docking_motion:
   perception_warmup_s: 1.0
   approach_allow_wz: true
   approach_allow_vy: false
-  pose_missing_safe_vx_mps: 0.020
+  pose_missing_safe_vx_mps: 0.040
   pose_missing_max_hold_s: 3.0
   coarse_align:
     vx_max_mps: 0.000

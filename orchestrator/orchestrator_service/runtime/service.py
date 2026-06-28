@@ -965,9 +965,6 @@ class OrchestratorService(BaseModule):
             "docking_stage",
             "docking_action",
             "docking_reason",
-            "candidate_cmd",
-            "arbiter_final_cmd",
-            "service_effective_cmd",
             "uart_tx_cmd",
             "writer_accept_cmd",
             "uart_tx_ok",
@@ -1013,10 +1010,6 @@ class OrchestratorService(BaseModule):
             "lateral_err_norm",
             "lateral_err_m",
             "lateral_source",
-            "vy_enabled",
-            "vy_block_reason",
-            "vy_cmd_raw",
-            "vy_cmd_limited",
             "arbitration_reason",
             "blocked_by",
             "fov_guard_level",
@@ -2825,9 +2818,6 @@ class OrchestratorService(BaseModule):
             "docking_stage": summary.get("docking_stage") or "",
             "docking_action": summary.get("docking_action") or "",
             "docking_reason": summary.get("docking_reason") or "",
-            "candidate_cmd": summary.get("candidate_cmd"),
-            "arbiter_final_cmd": summary.get("arbiter_final_cmd"),
-            "service_effective_cmd": summary.get("service_effective_cmd"),
             "uart_tx_cmd": summary.get("uart_tx_cmd"),
             "control_source": summary.get("control_source") or "",
             "motion_intent_type": summary.get("motion_intent_type") or summary.get("control_source") or "",
@@ -2861,9 +2851,6 @@ class OrchestratorService(BaseModule):
             "vx_mps": vx,
             "vy_mps": vy,
             "wz_radps": wz,
-            "candidate_cmd": summary.get("candidate_cmd"),
-            "arbiter_final_cmd": summary.get("arbiter_final_cmd"),
-            "service_effective_cmd": summary.get("service_effective_cmd"),
             "uart_tx_cmd": summary.get("uart_tx_cmd"),
             "forward_block_reason": summary.get("forward_block_reason") or "",
             "rotate_block_reason": summary.get("rotate_block_reason") or "",
@@ -2886,19 +2873,13 @@ class OrchestratorService(BaseModule):
             "approach_commit_active": bool(summary.get("approach_commit_active", False)),
             "forward_coast_active": bool(summary.get("forward_coast_active", False)),
             "edge_conf_score": summary.get("edge_conf_score", 0.0),
-            "edge_readiness_score": summary.get("edge_readiness_score", 0.0),
-            "edge_readiness_level": summary.get("edge_readiness_level", ""),
             "edge_handoff_block_reason": summary.get("edge_handoff_block_reason", ""),
             "edge_handoff_source": summary.get("edge_handoff_source", ""),
             "bbox_track_elapsed_ms": summary.get("bbox_track_elapsed_ms", 0.0),
             "bbox_track_exit_reason": summary.get("bbox_track_exit_reason", ""),
-            "vy_enabled": bool(summary.get("vy_enabled", False)),
-            "vy_block_reason": summary.get("vy_block_reason", ""),
             "lateral_err_norm": summary.get("lateral_err_norm"),
             "lateral_err_m": summary.get("lateral_err_m"),
             "lateral_source": summary.get("lateral_source", ""),
-            "vy_cmd_raw": summary.get("vy_cmd_raw", 0.0),
-            "vy_cmd_limited": summary.get("vy_cmd_limited", 0.0),
             "last_edge_yaw_cmd": summary.get("last_edge_yaw_cmd", 0.0),
             "zero_cmd_age_ms": summary.get("zero_cmd_age_ms", 0.0),
             "zero_escape_reason": summary.get("zero_escape_reason", ""),
@@ -2940,9 +2921,6 @@ class OrchestratorService(BaseModule):
             "search_latch_reason": summary.get("search_latch_reason", ""),
             "wz_sign_final": summary.get("wz_sign_final", 0),
         }
-        if not trace.get("vy_enabled", False):
-            trace.pop("vy_cmd_raw", None)
-            trace.pop("vy_cmd_limited", None)
         self.run_logger.write_jsonl("motion_gate_trace", trace)
         is_docking = trace["state"] in {"SEARCH_TABLE", "YOLO_ACQUIRE_ALIGN", "YOLO_APPROACH", "EDGE_ADJUST", "FINAL_SLOW_STOP", "AT_TABLE_EDGE"}
         if is_docking:
@@ -3250,28 +3228,8 @@ class OrchestratorService(BaseModule):
         cmd = decision.cmd
         summary = dict(getattr(decision, "control_summary", None) or {})
         
-        # Populate candidate_cmd and arbiter_final_cmd if not set (e.g. non-docking phases)
-        if "candidate_cmd" not in summary:
-            summary["candidate_cmd"] = {
-                "vx_mps": float(getattr(cmd, "vx_mps", 0.0) or 0.0),
-                "vy_mps": float(getattr(cmd, "vy_mps", 0.0) or 0.0),
-                "wz_radps": float(getattr(cmd, "wz_radps", 0.0) or 0.0),
-            }
-        if "arbiter_final_cmd" not in summary:
-            summary["arbiter_final_cmd"] = {
-                "vx_mps": float(getattr(cmd, "vx_mps", 0.0) or 0.0),
-                "vy_mps": float(getattr(cmd, "vy_mps", 0.0) or 0.0),
-                "wz_radps": float(getattr(cmd, "wz_radps", 0.0) or 0.0),
-            }
-
         effective_cmd, uart_arbitration = self._arbitrate_uart_motion_cmd(cmd, summary)
         summary.update(uart_arbitration)
-        
-        summary["service_effective_cmd"] = {
-            "vx_mps": float(effective_cmd.vx_mps),
-            "vy_mps": float(effective_cmd.vy_mps),
-            "wz_radps": float(effective_cmd.wz_radps),
-        }
         
         allow_send = bool(summary.get("allow_uart_send", True))
         if allow_send:
@@ -3301,9 +3259,6 @@ class OrchestratorService(BaseModule):
             "docking_stage": summary.get("docking_stage") or "",
             "docking_action": summary.get("docking_action") or "",
             "docking_reason": summary.get("docking_reason") or "",
-            "candidate_cmd": summary.get("candidate_cmd"),
-            "arbiter_final_cmd": summary.get("arbiter_final_cmd"),
-            "service_effective_cmd": summary.get("service_effective_cmd"),
             "uart_tx_cmd": summary.get("uart_tx_cmd"),
             "service_override": bool(summary.get("service_override", False)),
             "writer_accept_cmd": bool(summary.get("allow_uart_send", True)),
@@ -3319,10 +3274,6 @@ class OrchestratorService(BaseModule):
             "lateral_err_norm": summary.get("lateral_err_norm"),
             "lateral_err_m": summary.get("lateral_err_m"),
             "lateral_source": summary.get("lateral_source") or "",
-            "vy_enabled": bool(summary.get("vy_enabled", False)),
-            "vy_block_reason": summary.get("vy_block_reason") or "",
-            "vy_cmd_raw": summary.get("vy_cmd_raw", 0.0),
-            "vy_cmd_limited": summary.get("vy_cmd_limited", 0.0),
             "arbitration_reason": summary.get("arbitration_reason") or "",
             "motion_class": summary.get("motion_class") or "",
             "stop_class": summary.get("stop_class") or "none",
@@ -3351,17 +3302,11 @@ class OrchestratorService(BaseModule):
             "vy_mps": float(velocity[1]),
             "wz_radps": float(velocity[2]),
         }
-        if not self._last_motion_tx_context.get("vy_enabled", False):
-            self._last_motion_tx_context.pop("vy_cmd_raw", None)
-            self._last_motion_tx_context.pop("vy_cmd_limited", None)
         self._last_motion_tx_context.update(uart_arbitration)
         tx_meta.update({
             "docking_stage": summary.get("docking_stage") or "",
             "docking_action": summary.get("docking_action") or "",
             "docking_reason": summary.get("docking_reason") or "",
-            "candidate_cmd": summary.get("candidate_cmd"),
-            "arbiter_final_cmd": summary.get("arbiter_final_cmd"),
-            "service_effective_cmd": summary.get("service_effective_cmd"),
             "uart_tx_cmd": summary.get("uart_tx_cmd"),
             "writer_accept_cmd": bool(summary.get("allow_uart_send", True)),
             "uart_tx_ok": bool(getattr(self, "_last_uart_tx_ok", True)),
