@@ -485,6 +485,8 @@ def _load_and_merge_stage_params(config: SystemGlobalConfig, file_path: Path) ->
             ctrl.bbox_track_forward_max_vx_mps = _sf(td["bbox_track_forward_max_vx_mps"])
         if "bbox_track_forward_center_band" in td:
             ctrl.bbox_track_forward_center_band = _sf(td["bbox_track_forward_center_band"])
+        if "far_bbox_track_vx_mps" in td:
+            ctrl.far_bbox_track_vx_mps = _sf(td["far_bbox_track_vx_mps"])
         if "bbox_track_forward_min_hold_ms" in td:
             ctrl.bbox_track_forward_min_hold_ms = _si(td["bbox_track_forward_min_hold_ms"])
         if "bbox_track_forward_max_wz_radps" in td:
@@ -509,6 +511,8 @@ def _load_and_merge_stage_params(config: SystemGlobalConfig, file_path: Path) ->
             ctrl.edge_handoff_forward_vx_mps = _sf(td["edge_handoff_forward_vx_mps"])
         if "forward_commit_min_s" in td:
             ctrl.forward_commit_min_s = _sf(td["forward_commit_min_s"])
+        if "far_forward_commit_min_s" in td:
+            ctrl.far_forward_commit_min_s = _sf(td["far_forward_commit_min_s"])
         if "stop_after_table_docking" in td:
             ctrl.stop_after_table_docking = _sb(td["stop_after_table_docking"])
         if "lateral_enabled" in td:

@@ -441,6 +441,14 @@ def arbitrate_table_docking_motion(
         edge_lost_age_s = max(0.0, now_mono - float(getattr(ctx, "last_good_edge_yaw_mono", 0.0) or 0.0))
     elif float(getattr(ctx, "last_edge_good_mono", 0.0) or 0.0) > 0.0:
         edge_lost_age_s = max(0.0, now_mono - float(getattr(ctx, "last_edge_good_mono", 0.0) or 0.0))
+    roi_depth_valid = bool(summary.get("table_roi_depth_valid", getattr(obs, "table_roi_depth_valid", False) if obs is not None else False))
+    roi_depth_value = summary.get("table_roi_depth_p10", getattr(obs, "table_roi_depth_p10", None) if obs is not None else None)
+    if roi_depth_value is None:
+        roi_depth_value = summary.get("table_roi_depth_median", getattr(obs, "table_roi_depth_median", None) if obs is not None else None)
+    try:
+        roi_depth_m = float(roi_depth_value) if roi_depth_value is not None else None
+    except (TypeError, ValueError):
+        roi_depth_m = None
 
     def bbox_recenter_vy(*, near: bool = False) -> tuple[float, str]:
         if not lateral_enabled:
@@ -455,12 +463,16 @@ def arbitrate_table_docking_motion(
             return 0.0, "hard_safety_or_stale"
         if bool(summary.get("final_depth_latched", False)):
             return 0.0, "final_depth_latched"
+        if roi_depth_valid and roi_depth_m is not None and roi_depth_m <= _float(summary, "depth_envelope_stop_p10_m", 0.55):
+            return 0.0, "depth_p10_stop"
         bbox_err = float(docking_obs.bbox_center_error)
-        deadband = abs(_float(summary, "lateral_deadband_norm", 0.06))
+        deadband = abs(_float(summary, "lateral_deadband_norm", 0.045))
         if abs(bbox_err) < deadband:
             return 0.0, "bbox_vy_deadband"
-        kp = abs(_float(summary, "lateral_kp", 0.025))
-        vy_max = abs(_float(summary, "near_slow_max_vy_mps", 0.003)) if near else abs(_float(summary, "lateral_vy_max_mps", 0.006))
+        kp = abs(_float(summary, "lateral_kp", 0.045))
+        near_cap = abs(_float(summary, "near_slow_max_vy_mps", 0.0025))
+        slow_depth = bool(roi_depth_valid and roi_depth_m is not None and roi_depth_m <= _float(summary, "depth_envelope_slow_p10_m", 0.65))
+        vy_max = near_cap if (near or slow_depth) else abs(_float(summary, "lateral_vy_max_mps", 0.010))
         if vy_max <= 1e-9:
             return 0.0, "bbox_vy_zero_cap"
         raw = -kp * bbox_err
@@ -969,7 +981,7 @@ def arbitrate_table_docking_motion(
     bbox_err = docking_obs.bbox_center_error
     bbox_forward_vx = raw_cmd_vx()
     bbox_track_enabled = bool(summary.get("bbox_track_forward_enabled", True))
-    bbox_track_center_band = abs(_float(summary, "bbox_track_forward_center_band", _float(summary, "yolo_forward_center_good_limit", 0.20)))
+    bbox_track_center_band = abs(_float(summary, "bbox_track_forward_center_band", _float(summary, "yolo_forward_center_good_limit", 0.30)))
     bbox_track_vx = abs(_float(summary, "bbox_track_forward_vx_mps", 0.012))
     bbox_track_max_vx = abs(_float(summary, "bbox_track_forward_max_vx_mps", 0.015))
     if bbox_track_max_vx > 0.0:
@@ -984,17 +996,13 @@ def arbitrate_table_docking_motion(
     bbox_track_hold_band = max(bbox_track_center_band, abs(_float(summary, "yolo_forward_center_hard_limit", 0.25)))
     if forward_commit_active:
         bbox_track_hold_active = True
-        bbox_track_hold_band = max(bbox_track_hold_band, 0.20)
+        bbox_track_hold_band = max(bbox_track_hold_band, 0.30)
     bbox_track_phase_allowed = bool(
         phase in {"BBOX_ACQUIRE", "EDGE_HANDOFF_CONFIRM"}
         or (phase == "EDGE_GUIDED_APPROACH" and not edge_approach_gate_ready)
     )
-    roi_depth_valid = bool(summary.get("table_roi_depth_valid", getattr(obs, "table_roi_depth_valid", False) if obs is not None else False))
-    roi_depth_value = summary.get("table_roi_depth_p10", getattr(obs, "table_roi_depth_p10", None) if obs is not None else None)
-    if roi_depth_value is None:
-        roi_depth_value = summary.get("table_roi_depth_median", getattr(obs, "table_roi_depth_median", None) if obs is not None else None)
     near_depth_floor = _float(summary, "bbox_track_forward_min_depth_m", _float(summary, "near_depth_threshold_m", 0.40))
-    roi_depth_too_near = bool(roi_depth_valid and roi_depth_value is not None and float(roi_depth_value) <= near_depth_floor)
+    roi_depth_too_near = bool(roi_depth_valid and roi_depth_m is not None and roi_depth_m <= near_depth_floor)
     if not bbox_track_enabled:
         bbox_track_block = "bbox_track_disabled"
     elif not bbox_track_phase_allowed:
@@ -1033,6 +1041,10 @@ def arbitrate_table_docking_motion(
             except Exception:
                 pass
         elapsed_ms = max(0.0, (now_track - float(getattr(ctx, "bbox_track_entered_mono", now_track) or now_track)) * 1000.0)
+        if (not roi_depth_valid or roi_depth_m is None or roi_depth_m > 1.2) and docking_obs.bbox_control_valid:
+            bbox_track_vx = min(abs(_float(summary, "far_bbox_track_vx_mps", 0.016)), bbox_track_max_vx if bbox_track_max_vx > 0.0 else 0.018)
+        elif roi_depth_m is not None and roi_depth_m > 0.8:
+            bbox_track_vx = min(max(bbox_track_vx, 0.012), min(bbox_track_max_vx if bbox_track_max_vx > 0.0 else 0.015, 0.015))
         desired_bbox_wz = desired_wz if abs(desired_wz) > 1e-9 else _float(summary, "bbox_yaw_cmd", 0.0)
         if bbox_track_max_wz > 0.0:
             desired_bbox_wz = max(-bbox_track_max_wz, min(bbox_track_max_wz, desired_bbox_wz))

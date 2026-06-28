@@ -168,7 +168,7 @@ class ControlThresholds:
     near_slow_depth_m: float = 0.40
     near_stop_depth_m: float = 0.25
     near_slow_max_vx_mps: float = 0.008
-    near_slow_max_vy_mps: float = 0.003
+    near_slow_max_vy_mps: float = 0.0025
     near_slow_max_wz_radps: float = 0.04
     depth_envelope_stop_p10_m: float = 0.55
     depth_envelope_slow_p10_m: float = 0.65
@@ -176,9 +176,10 @@ class ControlThresholds:
     depth_envelope_slow_vx_mps: float = 0.008
     depth_envelope_mid_vx_mps: float = 0.012
     bbox_track_forward_enabled: bool = True
-    bbox_track_forward_vx_mps: float = 0.012
-    bbox_track_forward_max_vx_mps: float = 0.015
-    bbox_track_forward_center_band: float = 0.20
+    bbox_track_forward_vx_mps: float = 0.014
+    bbox_track_forward_max_vx_mps: float = 0.018
+    bbox_track_forward_center_band: float = 0.30
+    far_bbox_track_vx_mps: float = 0.016
     bbox_track_forward_min_hold_ms: int = 800
     bbox_track_forward_max_wz_radps: float = 0.06
     edge_readiness_enabled: bool = True
@@ -190,12 +191,13 @@ class ControlThresholds:
     edge_readiness_yaw_max_rad: float = 0.35
     edge_handoff_min_hold_ms: int = 800
     edge_handoff_forward_vx_mps: float = 0.010
-    forward_commit_min_s: float = 1.2
+    forward_commit_min_s: float = 1.5
+    far_forward_commit_min_s: float = 1.8
     stop_after_table_docking: bool = True
     lateral_enabled: bool = True
-    lateral_vy_max_mps: float = 0.006
-    lateral_deadband_norm: float = 0.06
-    lateral_kp: float = 0.025
+    lateral_vy_max_mps: float = 0.010
+    lateral_deadband_norm: float = 0.045
+    lateral_kp: float = 0.045
     lateral_target_center_x_norm: float = 0.5
     lateral_owner_default: str = "none"
 

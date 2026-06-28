@@ -34,6 +34,66 @@ from .common import RunLogger, ensure_dir, safe_dump
 from .state_machine import OrchestratorCore
 
 
+_CONTROL_SUMMARY_KEYS = (
+    "state",
+    "docking_action",
+    "docking_reason",
+    "vx_mps",
+    "vy_mps",
+    "wz_radps",
+    "yaw_owner",
+    "forward_owner",
+    "lateral_owner",
+    "effective_block_reason",
+    "table_bbox_control_valid",
+    "bbox_center_error",
+    "fov_guard_level",
+    "table_roi_depth_valid",
+    "table_roi_depth_p10",
+    "table_roi_depth_median",
+    "edge_valid",
+    "edge_ready_for_approach",
+    "edge_ready_for_final",
+    "edge_lost_age_s",
+    "yaw_err_rad",
+    "near_table_latched",
+    "final_depth_latched",
+    "final_locked",
+    "final_lock_reason",
+    "depth_speed_envelope_reason",
+    "depth_speed_envelope_vx_cap",
+)
+
+
+def sanitize_control_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
+    src = dict(summary or {})
+    out: Dict[str, Any] = {}
+    for key in _CONTROL_SUMMARY_KEYS:
+        value = src.get(key)
+        if key == "vx_mps":
+            value = src.get("vx_mps", src.get("final_vx", 0.0))
+        elif key == "vy_mps":
+            value = src.get("vy_mps", src.get("final_vy", 0.0))
+        elif key == "wz_radps":
+            value = src.get("wz_radps", src.get("final_wz", 0.0))
+        elif key == "table_bbox_control_valid":
+            value = src.get("table_bbox_control_valid", src.get("bbox_center_valid", src.get("yolo_table_control_valid", False)))
+        elif key == "bbox_center_error":
+            value = src.get("bbox_center_error", src.get("bbox_center_error_control", src.get("center_error")))
+        elif key == "fov_guard_level":
+            value = src.get("fov_guard_level", src.get("bbox_fov_guard_level", "none"))
+        elif key == "edge_valid":
+            value = src.get("edge_valid", src.get("edge_found", False))
+        elif key == "effective_block_reason":
+            try:
+                moving = any(abs(float(src.get(name, 0.0) or 0.0)) > 1e-9 for name in ("vx_mps", "vy_mps", "wz_radps"))
+            except Exception:
+                moving = False
+            value = "" if moving else str(src.get("effective_block_reason") or src.get("blocked_by") or "")
+        out[key] = value
+    return out
+
+
 class OrchestratorService(BaseModule):
     def __init__(self, cfg: OrchestratorConfig):
         self.cfg = cfg
@@ -2712,7 +2772,7 @@ class OrchestratorService(BaseModule):
 
     def _emit_operator_control(self, decision) -> None:
         summary = self._control_summary_with_context(decision)
-        self.run_logger.write_jsonl("control_summary", summary)
+        self.run_logger.write_jsonl("control_summary", sanitize_control_summary(summary))
         self._emit_motion_gate_trace(summary)
         state = str(summary.get("state") or self.core.ctx.state.value)
         self._emit_demo_health(summary)

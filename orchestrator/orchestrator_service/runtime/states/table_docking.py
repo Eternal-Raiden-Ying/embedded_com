@@ -130,7 +130,19 @@ class TableDockingMixin:
         action = str(summary.get("docking_action") or "")
         forward_commit_actions = {"BBOX_TRACK_FORWARD", "EDGE_APPROACH_FORWARD", "NEAR_EDGE_FORWARD", "EDGE_READINESS_HANDOFF"}
         if action in forward_commit_actions and abs(float(decision.cmd.vx_mps)) > 1e-9:
-            commit_s = max(0.0, float(getattr(self.cfg, "forward_commit_min_s", 1.2) or 1.2))
+            try:
+                depth_p10 = float(summary.get("table_roi_depth_p10")) if summary.get("table_roi_depth_p10") is not None else None
+            except (TypeError, ValueError):
+                depth_p10 = None
+            far_commit = bool(
+                action == "BBOX_TRACK_FORWARD"
+                and bool(summary.get("table_bbox_control_valid", summary.get("bbox_center_valid", False)))
+                and (depth_p10 is None or depth_p10 > 1.2)
+            )
+            default_commit = 1.5 if far_commit else 1.5
+            commit_s = max(0.0, float(getattr(self.cfg, "forward_commit_min_s", default_commit) or default_commit))
+            if far_commit:
+                commit_s = max(commit_s, float(getattr(self.cfg, "far_forward_commit_min_s", 1.8) or 1.8))
             self.ctx.forward_commit_until_mono = monotonic_ts() + commit_s
             self.ctx.forward_commit_reason = action.lower()
         elif action in {"FINAL_LOCKED_STOP", "FINAL_YAW_ALIGN", "SAFETY_STOP", "EMERGENCY_STOP"} or abs(float(decision.cmd.vx_mps)) <= 1e-9:
@@ -219,6 +231,18 @@ class TableDockingMixin:
             "edge_readiness_level",
             "edge_readiness_enter_score",
             "edge_readiness_exit_score",
+            "vy_cmd_raw",
+            "vy_cmd_limited",
+            "vy_enabled",
+            "vy_block_reason",
+            "advance_condition",
+            "fallback_condition",
+            "table_bbox_touch_left",
+            "table_bbox_touch_right",
+            "table_bbox_touch_bottom",
+            "yolo_bbox_touch_left",
+            "yolo_bbox_touch_right",
+            "yolo_bbox_touch_bottom",
             "docking_observation",
             "bbox_fov_guard_level",
             "bbox_fov_guard_reason",
@@ -307,34 +331,10 @@ class TableDockingMixin:
         cx_norm = geom.get("bbox_cx_norm_control")
         center_error = geom.get("bbox_center_error_control")
         center_abs = abs(float(center_error)) if center_error is not None else 0.0
-        touch_left = bool(getattr(obs, "table_bbox_touch_left", False)) if obs is not None else False
-        touch_right = bool(getattr(obs, "table_bbox_touch_right", False)) if obs is not None else False
-        touch_bottom = bool(getattr(obs, "table_bbox_touch_bottom", False)) if obs is not None else False
-        side_touch = bool(touch_left or touch_right)
-        area_ratio = float(getattr(obs, "table_bbox_area_ratio", getattr(obs, "yolo_bbox_area_norm", 0.0)) or 0.0) if obs is not None else 0.0
-        guard_frames = max(1, int(getattr(self.car_cfg, "table_bbox_fov_guard_frames", 3) or 3))
         severe_center = bool(cx_norm is not None and (float(cx_norm) < 0.20 or float(cx_norm) > 0.80))
-        severe_side_streak = bool(
-            side_touch
-            and center_abs > 0.25
-            and int(self.ctx.bbox_fov_violation_streak) >= guard_frames
-        )
-        if bool(summary.get("bbox_fov_guard_active", False)) or severe_center or severe_side_streak:
-            if bool(summary.get("bbox_fov_guard_active", False)):
-                reason = "explicit_bbox_fov_guard"
-            elif severe_center:
-                reason = "bbox_center_extreme"
-            else:
-                reason = "side_touch_center_error_streak"
-            return {"level": "hard", "reason": reason}
-        soft_reasons = []
-        if touch_bottom:
-            soft_reasons.append("touch_bottom")
-        if area_ratio >= 0.35:
-            soft_reasons.append("bbox_area_large")
-        if side_touch and 0.08 <= center_abs <= 0.20:
-            soft_reasons.append("mild_side_touch")
-        return {"level": "soft" if soft_reasons else "none", "reason": "+".join(soft_reasons)}
+        if severe_center:
+            return {"level": "hard", "reason": "bbox_center_extreme"}
+        return {"level": "none", "reason": ""}
 
     def _bbox_yaw_hold_valid(self, obs: Optional[TableEdgeObs]) -> bool:
         """A soft-stale/held bbox center may still own rotate-only control."""
@@ -622,8 +622,7 @@ class TableDockingMixin:
         near_depth = bool(depth_valid and depth_value is not None and float(depth_value) <= self._near_depth_threshold_m(obs))
         near_dist = bool(obs is not None and getattr(obs, "dist_err_m", None) is not None and abs(float(obs.dist_err_m)) <= self._near_dist_err_threshold_m())
         bbox_area = float(getattr(obs, "table_bbox_area_ratio", getattr(obs, "yolo_bbox_area_norm", 0.0)) or 0.0) if obs is not None else 0.0
-        bbox_touch_bottom = bool(getattr(obs, "table_bbox_touch_bottom", getattr(obs, "yolo_bbox_touch_bottom", False))) if obs is not None else False
-        bbox_near_hint = bool((bbox_area >= 0.35 or bbox_touch_bottom) and depth_valid and edge_usable)
+        bbox_near_hint = bool(bbox_area >= 0.35 and depth_valid and edge_usable)
         depth_stop_ready = bool(depth_status.get("depth_roi_stop_ready", False))
         control_source = str(summary.get("control_source") or summary.get("motion_intent_type") or "").strip().lower()
         phase = str(summary.get("control_phase") or self.ctx.control_phase or "").strip().upper()
@@ -929,7 +928,6 @@ class TableDockingMixin:
         hard_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.25) or 0.25))
         geom = self._bbox_control_geometry(obs)
         center_error = geom["bbox_center_error_control"]
-        touch = bool(obs is not None and (getattr(obs, "table_bbox_touch_left", False) or getattr(obs, "table_bbox_touch_right", False)))
         edge_trusted = bool(current_bbox and self.controller._edge_trusted(obs))
         edge_usable = bool(obs is not None and (getattr(obs, "edge_found", False) or getattr(obs, "usable_for_approach", False)))
         hard_yaw = abs(float(getattr(self.car_cfg, "table_edge_hard_rotate_only_yaw_rad", 0.45) or 0.45))
@@ -959,7 +957,7 @@ class TableDockingMixin:
                 phase, reason = "SEARCH_SCAN", "no_current_fresh_bbox"
         else:
             self.ctx.bbox_valid_streak += 1
-            centered = bool(center_error is not None and abs(float(center_error)) <= hard_limit and not (touch and abs(float(center_error)) > 0.12))
+            centered = bool(center_error is not None and abs(float(center_error)) <= hard_limit)
             self.ctx.bbox_centered_streak = self.ctx.bbox_centered_streak + 1 if centered else 0
             self.ctx.bbox_fov_violation_streak = 0 if centered else self.ctx.bbox_fov_violation_streak + 1
             if not edge_trusted:
@@ -1059,8 +1057,6 @@ class TableDockingMixin:
             self.ctx.control_phase_since_mono = now
         dwell_ms = max(0.0, (now - float(self.ctx.control_phase_since_mono or now)) * 1000.0)
         return {"control_phase": phase, "phase_reason": reason, "bbox_center_error": center_error, **geom,
-                "bbox_touch_left": bool(obs is not None and getattr(obs, "table_bbox_touch_left", False)),
-                "bbox_touch_right": bool(obs is not None and getattr(obs, "table_bbox_touch_right", False)),
                 "phase_dwell_ms": dwell_ms, "edge_handoff_complete": self.ctx.edge_handoff_complete,
                 "handoff_timeout": self.ctx.edge_handoff_timeout,
                 "edge_conf_score": float(self.ctx.edge_conf_score),
@@ -1415,7 +1411,8 @@ class TableDockingMixin:
             "bbox_track_forward_enabled": bool(getattr(self.cfg, "bbox_track_forward_enabled", True)),
             "bbox_track_forward_vx_mps": float(getattr(self.cfg, "bbox_track_forward_vx_mps", 0.012) or 0.012),
             "bbox_track_forward_max_vx_mps": float(getattr(self.cfg, "bbox_track_forward_max_vx_mps", 0.015) or 0.015),
-            "bbox_track_forward_center_band": float(getattr(self.cfg, "bbox_track_forward_center_band", 0.20) or 0.20),
+            "bbox_track_forward_center_band": float(getattr(self.cfg, "bbox_track_forward_center_band", 0.30) or 0.30),
+            "far_bbox_track_vx_mps": float(getattr(self.cfg, "far_bbox_track_vx_mps", 0.016) or 0.016),
             "bbox_track_forward_min_hold_ms": int(getattr(self.cfg, "bbox_track_forward_min_hold_ms", 800) or 800),
             "bbox_track_forward_max_wz_radps": float(getattr(self.cfg, "bbox_track_forward_max_wz_radps", 0.06) or 0.06),
             "near_slow_max_vx_mps": float(getattr(self.cfg, "near_slow_max_vx_mps", 0.008) or 0.008),
@@ -1425,10 +1422,12 @@ class TableDockingMixin:
             "depth_envelope_slow_vx_mps": float(getattr(self.cfg, "depth_envelope_slow_vx_mps", 0.008) or 0.008),
             "depth_envelope_mid_vx_mps": float(getattr(self.cfg, "depth_envelope_mid_vx_mps", 0.012) or 0.012),
             "edge_handoff_forward_vx_mps": float(getattr(self.cfg, "edge_handoff_forward_vx_mps", 0.010) or 0.010),
+            "forward_commit_min_s": float(getattr(self.cfg, "forward_commit_min_s", 1.5) or 1.5),
+            "far_forward_commit_min_s": float(getattr(self.cfg, "far_forward_commit_min_s", 1.8) or 1.8),
             "lateral_enabled": bool(getattr(self.cfg, "lateral_enabled", False)),
-            "lateral_vy_max_mps": float(getattr(self.cfg, "lateral_vy_max_mps", 0.006) or 0.006),
-            "lateral_deadband_norm": float(getattr(self.cfg, "lateral_deadband_norm", 0.05) or 0.05),
-            "lateral_kp": float(getattr(self.cfg, "lateral_kp", 0.02) or 0.02),
+            "lateral_vy_max_mps": float(getattr(self.cfg, "lateral_vy_max_mps", 0.010) or 0.010),
+            "lateral_deadband_norm": float(getattr(self.cfg, "lateral_deadband_norm", 0.045) or 0.045),
+            "lateral_kp": float(getattr(self.cfg, "lateral_kp", 0.045) or 0.045),
             "lateral_target_center_x_norm": float(getattr(self.cfg, "lateral_target_center_x_norm", 0.5) or 0.5),
             "lateral_owner": "none",
             "lateral_source": "edge_lateral_err_m" if (obs is not None and getattr(obs, "lateral_err_m", None) is not None) else "",
@@ -1791,10 +1790,6 @@ class TableDockingMixin:
             abs(float(getattr(self.car_cfg, "table_approach_yaw_realign_rad", 0.16) or 0.16)),
             abs(float(getattr(self.car_cfg, "table_edge_hard_rotate_only_yaw_rad", 0.45) or 0.45)),
         )
-        touch_side = bool(
-            getattr(obs, "table_bbox_touch_left", getattr(obs, "yolo_bbox_touch_left", False))
-            or getattr(obs, "table_bbox_touch_right", getattr(obs, "yolo_bbox_touch_right", False))
-        )
         if (getattr(obs, "edge_valid", False) or getattr(obs, "edge_trusted", False)) and yaw_err <= hard_yaw:
             return self._approach_from_table_signal(obs, reason=f"YOLO_ACQUIRE_ALIGN edge forward handoff yaw={yaw_err:.3f}")
         if abs(center_error) <= hard_limit:
@@ -1841,7 +1836,7 @@ class TableDockingMixin:
             "wz_radps": float(wz),
             "allow_forward": False,
             "allow_rotate": True,
-            "forward_block_reason": "yolo_bbox_touch_side_rotate_only" if touch_side else "yolo_center_error_too_large_rotate_only",
+            "forward_block_reason": "yolo_center_error_too_large_rotate_only",
             "rotate_block_reason": "",
             "speed_profile": "search",
             "speed_limit_reason": "yolo_align",
@@ -1989,10 +1984,6 @@ class TableDockingMixin:
                 hard_yaw = max(
                     abs(float(getattr(self.car_cfg, "table_approach_yaw_realign_rad", 0.16) or 0.16)),
                     abs(float(getattr(self.car_cfg, "table_edge_hard_rotate_only_yaw_rad", 0.45) or 0.45)),
-                )
-                touch_side = bool(
-                    getattr(obs, "table_bbox_touch_left", getattr(obs, "yolo_bbox_touch_left", False))
-                    or getattr(obs, "table_bbox_touch_right", getattr(obs, "yolo_bbox_touch_right", False))
                 )
                 next_state = State.YOLO_APPROACH if abs(center_error) <= hard_limit else State.YOLO_ACQUIRE_ALIGN
                 self._transition(next_state, f"table signal found cx_norm={cx_norm:.3f} center_error={center_error:.3f}")
