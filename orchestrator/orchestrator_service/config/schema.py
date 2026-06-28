@@ -171,8 +171,13 @@ class ControlThresholds:
     near_slow_max_vy_mps: float = 0.030
     near_slow_max_wz_radps: float = 0.04
     final_servo_enter_p10_m: float = 0.45
-    roi_final_stop_p10_m: float = 0.40
-    roi_final_slow_p10_m: float = 0.50
+    edge_final_enter_margin_m: float = 0.05
+    edge_final_stop_margin_m: float = 0.02
+    close_range_enter_p10_m: float = 0.55
+    close_range_probe_vx_mps: float = 0.004
+    close_range_missing_probe_vx_mps: float = 0.002
+    roi_final_stop_p10_m: float = 0.42
+    roi_final_slow_p10_m: float = 0.52
     roi_final_probe_vx_mps: float = 0.004
     roi_final_missing_probe_vx_mps: float = 0.002
     roi_final_missing_hold_s: float = 0.8

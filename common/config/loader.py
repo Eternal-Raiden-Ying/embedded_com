@@ -474,6 +474,16 @@ def _load_and_merge_stage_params(config: SystemGlobalConfig, file_path: Path) ->
             ctrl.near_slow_max_vy_mps = _sf(td["near_slow_max_vy_mps"])
         if "final_servo_enter_p10_m" in td:
             ctrl.final_servo_enter_p10_m = _sf(td["final_servo_enter_p10_m"])
+        if "edge_final_enter_margin_m" in td:
+            ctrl.edge_final_enter_margin_m = _sf(td["edge_final_enter_margin_m"])
+        if "edge_final_stop_margin_m" in td:
+            ctrl.edge_final_stop_margin_m = _sf(td["edge_final_stop_margin_m"])
+        if "close_range_enter_p10_m" in td:
+            ctrl.close_range_enter_p10_m = _sf(td["close_range_enter_p10_m"])
+        if "close_range_probe_vx_mps" in td:
+            ctrl.close_range_probe_vx_mps = _sf(td["close_range_probe_vx_mps"])
+        if "close_range_missing_probe_vx_mps" in td:
+            ctrl.close_range_missing_probe_vx_mps = _sf(td["close_range_missing_probe_vx_mps"])
         if "roi_final_stop_p10_m" in td:
             ctrl.roi_final_stop_p10_m = _sf(td["roi_final_stop_p10_m"])
         if "roi_final_slow_p10_m" in td:

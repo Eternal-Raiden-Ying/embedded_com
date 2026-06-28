@@ -63,8 +63,13 @@ table_docking:
   bbox_track_forward_min_hold_ms: 1234
   bbox_track_forward_max_wz_radps: 0.20
   final_servo_enter_p10_m: 0.45
-  roi_final_stop_p10_m: 0.40
-  roi_final_slow_p10_m: 0.50
+  edge_final_enter_margin_m: 0.05
+  edge_final_stop_margin_m: 0.02
+  close_range_enter_p10_m: 0.55
+  close_range_probe_vx_mps: 0.004
+  close_range_missing_probe_vx_mps: 0.002
+  roi_final_stop_p10_m: 0.42
+  roi_final_slow_p10_m: 0.52
   roi_final_probe_vx_mps: 0.004
   roi_final_missing_probe_vx_mps: 0.002
   roi_final_missing_hold_s: 0.8
@@ -115,8 +120,13 @@ table_docking:
     assert abs(loaded_ctrl.bbox_track_forward_max_vx_mps - 0.20) < 1e-9
     assert abs(loaded_ctrl.bbox_track_forward_center_band - 0.45) < 1e-9
     assert abs(loaded_ctrl.final_servo_enter_p10_m - 0.45) < 1e-9
-    assert abs(loaded_ctrl.roi_final_stop_p10_m - 0.40) < 1e-9
-    assert abs(loaded_ctrl.roi_final_slow_p10_m - 0.50) < 1e-9
+    assert abs(loaded_ctrl.edge_final_enter_margin_m - 0.05) < 1e-9
+    assert abs(loaded_ctrl.edge_final_stop_margin_m - 0.02) < 1e-9
+    assert abs(loaded_ctrl.close_range_enter_p10_m - 0.55) < 1e-9
+    assert abs(loaded_ctrl.close_range_probe_vx_mps - 0.004) < 1e-9
+    assert abs(loaded_ctrl.close_range_missing_probe_vx_mps - 0.002) < 1e-9
+    assert abs(loaded_ctrl.roi_final_stop_p10_m - 0.42) < 1e-9
+    assert abs(loaded_ctrl.roi_final_slow_p10_m - 0.52) < 1e-9
     assert abs(loaded_ctrl.roi_final_probe_vx_mps - 0.004) < 1e-9
     assert abs(loaded_ctrl.roi_final_missing_probe_vx_mps - 0.002) < 1e-9
     assert abs(loaded_ctrl.roi_final_missing_hold_s - 0.8) < 1e-9
@@ -2115,7 +2125,8 @@ table_docking:
     assert res_b.final_vy == 0.0
     assert res_b.final_wz == 0.0
 
-    # Test C: dead stale with no healthy history -> choose recovery/hold (vx=0)
+    # Test C: dead stale with close-range p10 stays in final hold instead of
+    # recovery/search rotate.
     summary_c = {
         "state": "YOLO_APPROACH",
         "control_phase": "EDGE_GUIDED_APPROACH",
@@ -2125,9 +2136,11 @@ table_docking:
         "last_good_obs_age_ms": 999999.0,
     }
     res_c = arbitrate_table_docking_motion(test_ctx, obs_b, intent, summary_c)
-    assert res_c.summary["docking_action"] in {"CONTROL_RECOVERY_ROTATE", "SEARCH_ROTATE", DockingAction.CONTROL_RECOVERY_ROTATE, DockingAction.SEARCH_ROTATE}
+    assert res_c.summary["docking_action"] == "FINAL_LOCKED_STOP"
+    assert res_c.summary["close_range_latched"]
     assert res_c.final_vx == 0.0
     assert res_c.final_vy == 0.0
+    assert res_c.final_wz == 0.0
 
     probe_done = DockingProbe()
     probe_done.cfg.stop_after_table_docking = True
