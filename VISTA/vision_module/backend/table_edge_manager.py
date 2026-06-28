@@ -165,7 +165,9 @@ class TableEdgeManager:
         try:
             calib_path = Path(str(edge_cfg.detector.calib_json)).expanduser()
             calib, target_dist = load_calib(calib_path)
-            if float(edge_cfg.detector.target_dist_m_override) > 0:
+            if getattr(self.cfg.table_edge, "table_target_dist_m", 0.0) > 0.0:
+                target_dist = float(self.cfg.table_edge.table_target_dist_m)
+            elif float(edge_cfg.detector.target_dist_m_override) > 0:
                 target_dist = float(edge_cfg.detector.target_dist_m_override)
             self._detector = OnlineTableEdgeDetector(calib, edge_cfg.detector, target_dist)
             self._detector_cfg = edge_cfg.detector
@@ -1878,6 +1880,7 @@ class TableEdgeManager:
             "reason": str(reason or ""),
             "reject_reason": str(reason or ""),
             "target_dist_m": float(self._target_dist_m),
+            "obs_target_dist_m": float(self._target_dist_m),
             "plane_only_mode": self._detector_cfg.plane_only_mode if self._detector_cfg is not None else False,
             "enable_crease_line": self._detector_cfg.enable_crease_line if self._detector_cfg is not None else True,
             **self._detector_mode_payload(),
@@ -3025,6 +3028,7 @@ class TableEdgeManager:
                     "reason": "front_line_weak",
                     "reject_reason": "front_line_weak",
                     "target_dist_m": float(self._target_dist_m),
+                    "obs_target_dist_m": float(self._target_dist_m),
                     "plane_only_mode": True,
                     "enable_crease_line": False,
                     "usable_for_approach": True,
@@ -3720,6 +3724,7 @@ class TableEdgeManager:
             "reason": reject_reason,
             "reject_reason": reject_reason,
             "target_dist_m": float(self._target_dist_m),
+            "obs_target_dist_m": float(self._target_dist_m),
             "plane_only_mode": True,
             "enable_crease_line": False,
             "usable_for_approach": bool(plane_usable),
@@ -3903,6 +3908,7 @@ class TableEdgeManager:
             "source": "vision_table_edge_manager",
             "reason": "" if edge_found else "no_valid_edge",
             "target_dist_m": float(self._target_dist_m),
+            "obs_target_dist_m": float(self._target_dist_m),
             "lightweight": True,
             "sample_stride": int(stride),
             **yolo_gate,
@@ -4231,6 +4237,7 @@ class TableEdgeManager:
             "processed_frame_count": int(self._processed_frame_count),
             "processing_busy": bool(self._processing_busy),
             "target_dist_m": float(self._target_dist_m),
+            "obs_target_dist_m": float(self._target_dist_m),
             "last_valid_quadrant": self._last_valid_quadrant,
             "default_update_hz": 1.0 / max(1e-6, float(self._default_interval_s)),
             "detector_mode": self._detector_mode,

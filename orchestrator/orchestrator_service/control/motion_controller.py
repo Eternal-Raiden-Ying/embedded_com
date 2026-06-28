@@ -154,9 +154,15 @@ class MotionController:
         edge_found: Optional[bool] = None,
     ) -> Dict[str, Any]:
         measured_distance = None
-        target_distance = float(getattr(self.cfg, "table_target_dist_m", 0.30) or 0.30)
+        final_dist_err_m = None
+        table_target_dist = float(getattr(self.cfg, "table_target_dist_m", 0.30) or 0.30)
+        obs_target_dist = None
+        if obs is not None:
+            obs_target_dist = getattr(obs, "obs_target_dist_m", None) or getattr(obs, "target_dist_m", None)
+        obs_target_dist_val = float(obs_target_dist) if obs_target_dist is not None else table_target_dist
         if obs is not None and obs.dist_err_m is not None:
-            measured_distance = float(target_distance) + float(obs.dist_err_m)
+            measured_distance = obs_target_dist_val + float(obs.dist_err_m)
+            final_dist_err_m = measured_distance - table_target_dist
         timing = self._stale_guard(obs, cmd.ts)
         stale_level = str(timing.get("stale_level") or "")
         yolo_table_visible = (
@@ -209,8 +215,12 @@ class MotionController:
             "edge_conf": (float(getattr(obs, "edge_conf", obs.confidence)) if obs is not None and getattr(obs, "edge_conf", obs.confidence) is not None else None),
             "yaw_err_rad": (float(obs.yaw_err_rad) if obs is not None and obs.yaw_err_rad is not None else None),
             "dist_err_m": (float(obs.dist_err_m) if obs is not None and obs.dist_err_m is not None else None),
-            "target_dist_m": target_distance,
+            "target_dist_m": table_target_dist,
             "measured_distance_m": measured_distance,
+            "measured_dist_m": measured_distance,
+            "final_dist_err_m": final_dist_err_m,
+            "obs_target_dist_m": obs_target_dist_val,
+            "table_target_dist_m": table_target_dist,
             "control_level": self._raw_control_level(obs),
             "usable_for_approach": bool(getattr(obs, "usable_for_approach", False)) if obs is not None else False,
             "usable_for_alignment": bool(getattr(obs, "usable_for_alignment", False)) if obs is not None else False,
@@ -502,7 +512,11 @@ class MotionController:
         vx_from_dist = 0.0
         wz_from_yaw = 0.0
         if edge_obs is not None:
-            dist_err = float(edge_obs.dist_err_m or 0.0)
+            table_target_dist = float(getattr(self.cfg, "table_target_dist_m", 0.30) or 0.30)
+            obs_target = getattr(edge_obs, "obs_target_dist_m", None) or getattr(edge_obs, "target_dist_m", None)
+            obs_target_val = float(obs_target) if obs_target is not None else table_target_dist
+            measured_dist = obs_target_val + float(edge_obs.dist_err_m or 0.0)
+            dist_err = measured_dist - table_target_dist
             yaw_err = float(edge_obs.yaw_err_rad or 0.0)
             vx_from_dist = self._clamp(
                 dist_err * float(self.car_cfg.edge_slide_dist_kp_mps_per_m),
@@ -989,8 +1003,11 @@ class MotionController:
             abs(float(getattr(self.car_cfg, "table_approach_yaw_realign_rad", 0.16) or 0.16)),
             abs(float(getattr(self.car_cfg, "table_edge_hard_rotate_only_yaw_rad", 0.45) or 0.45)),
         )
-        dist_err = float(getattr(obs, "dist_err_m", 0.0) or 0.0) if obs is not None else 0.0
         target_dist = float(getattr(self.cfg, "table_target_dist_m", 0.30) or 0.30)
+        obs_target = getattr(obs, "obs_target_dist_m", None) or getattr(obs, "target_dist_m", None) if obs is not None else None
+        obs_target_val = float(obs_target) if obs_target is not None else target_dist
+        measured_dist = obs_target_val + float(getattr(obs, "dist_err_m", 0.0) or 0.0) if obs is not None else target_dist
+        dist_err = measured_dist - target_dist
         final_lock_tol = max(0.0, float(getattr(self.cfg, "final_lock_dist_tol_m", 0.02) or 0.02))
         if stale_level == "fresh" and yaw_abs <= hard_rotate_only_yaw and dist_err > final_lock_tol:
             decision = self._compose_fov_table_cmd(
@@ -1131,7 +1148,11 @@ class MotionController:
             fov_guard_reason = "view_err_hard"
         hard_guard = bool(fov_guard_reason)
 
-        dist_err = float(obs.dist_err_m) if obs is not None and obs.dist_err_m is not None else 0.0
+        table_target_dist = float(getattr(self.cfg, "table_target_dist_m", 0.30) or 0.30)
+        obs_target = getattr(obs, "obs_target_dist_m", None) or getattr(obs, "target_dist_m", None) if obs is not None else None
+        obs_target_val = float(obs_target) if obs_target is not None else table_target_dist
+        measured_dist = obs_target_val + float(obs.dist_err_m) if obs is not None and obs.dist_err_m is not None else table_target_dist
+        dist_err = measured_dist - table_target_dist
         yaw_err = float(obs.yaw_err_rad) if obs is not None and obs.yaw_err_rad is not None else 0.0
         vx_from_dist = 0.0
         min_forward_dist = max(0.0, float(getattr(self.car_cfg, "table_min_forward_dist_err_m", 0.07) or 0.07))

@@ -598,6 +598,7 @@ class TableEdgeObs:
     valid_edge_points: Optional[int] = None
     edge_inlier_count: Optional[int] = None
     target_dist_m: Optional[float] = None
+    obs_target_dist_m: Optional[float] = None
     edge_trusted: bool = False
     pose_found: bool = False
     pose_source: Optional[str] = None
@@ -805,6 +806,7 @@ class TableEdgeObs:
             valid_edge_points=_pick_optional_int(payload, "valid_edge_points", "edge_point_count"),
             edge_inlier_count=_pick_optional_int(payload, "edge_inlier_count", "inlier_count"),
             target_dist_m=_pick_optional_float(payload, "target_dist_m", "target_distance_m"),
+            obs_target_dist_m=_pick_optional_float(payload, "obs_target_dist_m", "target_dist_m", "target_distance_m"),
             edge_trusted=bool(payload.get("edge_trusted", payload.get("valid_for_control", False))),
             pose_found=bool(payload.get("pose_found", False)),
             pose_source=_pick_optional_str(payload, "pose_source"),

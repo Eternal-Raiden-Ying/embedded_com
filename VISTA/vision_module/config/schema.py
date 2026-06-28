@@ -182,6 +182,7 @@ class TableEdgeConfig:
     edge_trusted_max_background_penalty: float = 0.0  # <=0 disables background penalty gate
     yolo_table_near_dist_m: float = 0.45
     yolo_table_near_bottom_norm: float = 0.60
+    table_target_dist_m: float = 0.30
     profile_log_interval_s: float = 2.0
     save_debug_frames: bool = False
     target_hz: float = 10.0

@@ -136,6 +136,7 @@ debug:
 
 table_edge:
   target_dist_m: 0.30
+  table_target_dist_m: 0.30
   # 可选：""、center_mid、center_lower、full_width_lower。
   roi_preset: center_lower
   yolo_table_roi_enable: true
@@ -210,6 +211,7 @@ mode_profiles:
       release_cooldown_s: 2.0
       table_edge:
         target_dist_m: 0.30
+        table_target_dist_m: 0.30
         detector_mode: fast_plane_only
         update_hz: 5.0
         camera_pitch_deg: 15.0
@@ -242,6 +244,7 @@ mode_profiles:
       release_cooldown_s: 2.0
       table_edge:
         target_dist_m: 0.30
+        table_target_dist_m: 0.30
         detector_mode: fast_plane_only
         update_hz: 10.0
         camera_pitch_deg: 15.0

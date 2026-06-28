@@ -142,6 +142,7 @@ class TableDockingMixin:
         self.ctx.fov_guard_reason = str(summary.get("fov_guard_reason") or summary.get("bbox_fov_guard_reason") or "")
         self.ctx.zero_escape_reason = str(summary.get("zero_escape_reason") or "")
         self._consume_final_depth_latch_after_arbitration(decision, obs)
+        self._consume_final_lock_after_arbitration(decision, obs)
         self._slim_table_docking_control_summary(summary)
         return decision
 
@@ -316,6 +317,24 @@ class TableDockingMixin:
                 self._transition(State.AT_TABLE_EDGE, reason)
         else:
             summary["final_state_transition_block_reason"] = "final_depth_wait_settle_or_yaw"
+
+    def _consume_final_lock_after_arbitration(self, decision: MotionDecision, obs: Optional[TableEdgeObs]) -> None:
+        summary = decision.control_summary if decision.control_summary is not None else {}
+        action = str(summary.get("docking_action") or "")
+        final_locked = bool(getattr(self.ctx, "final_locked", False) or summary.get("final_locked", False))
+        if final_locked:
+            self.ctx.final_locked = True
+        stopped = bool(
+            abs(float(decision.cmd.vx_mps)) <= 1e-6
+            and abs(float(decision.cmd.vy_mps)) <= 1e-6
+            and abs(float(decision.cmd.wz_radps)) <= 1e-6
+        )
+        if (action == "FINAL_LOCKED_STOP" or final_locked) and stopped:
+            state_value = str(getattr(self.ctx.state, "value", self.ctx.state) or "")
+            if state_value != "AT_TABLE_EDGE":
+                reason = "final_locked_stop_reached"
+                self.ctx.final_locked = True
+                self._transition(State.AT_TABLE_EDGE, reason)
 
     def _bbox_control_geometry(self, obs: Optional[TableEdgeObs]) -> Dict[str, object]:
         return compute_bbox_control_geometry(obs)
@@ -933,6 +952,8 @@ class TableDockingMixin:
         self.ctx.bbox_valid_streak = 0
         self.ctx.bbox_centered_streak = 0
         self.ctx.edge_trusted_streak = 0
+        if bool(getattr(self.ctx, "final_locked", False)) or bool(getattr(self.ctx, "final_depth_latched", False)):
+            return self.controller.stop_cmd("FINAL_LOCKED_STOP", brake=True)
         self._transition(State.SEARCH_TABLE, f"{mode} bbox lost hold expired")
         return self.controller.search_table_cmd(*self._get_memory_search_params())
 

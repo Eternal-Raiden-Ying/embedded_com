@@ -105,7 +105,34 @@ def collect() -> tuple[Dict[str, Dict[str, Any]], list[str]]:
     ):
         _record(values, "yaw_anti_oscillation", key, control, key, fallback)
 
+    # Bilateral distance config check
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    vision_params_path = os.path.join(repo_root, "VISTA", "configs", "vision_params.yaml")
+    vista_dist = None
+    if os.path.exists(vision_params_path):
+        try:
+            import yaml
+            with open(vision_params_path, "r", encoding="utf-8") as f:
+                vista_data = yaml.safe_load(f) or {}
+            te = vista_data.get("table_edge", {})
+            vista_dist = te.get("table_target_dist_m") or te.get("target_dist_m")
+        except Exception:
+            pass
+
+    orch_dist = getattr(control, "table_target_dist_m", 0.30)
+    values.setdefault("bilateral_distance", {})["vista_target_dist_m"] = {
+        "value": vista_dist if vista_dist is not None else 0.30,
+        "fallback": vista_dist is None
+    }
+    values.setdefault("bilateral_distance", {})["orch_table_target_dist_m"] = {
+        "value": orch_dist,
+        "fallback": False
+    }
+
     warnings: list[str] = []
+    if vista_dist is not None and abs(float(vista_dist) - float(orch_dist)) > 1e-4:
+        warnings.append(f"bilateral target_dist mismatch: vista_target_dist_m={vista_dist} vs orch_table_target_dist_m={orch_dist}")
+
     lateral_enabled = bool(values["lateral"]["lateral_enabled"]["value"])
     near_vy = float(values["lateral"]["near_slow_max_vy_mps"]["value"] or 0.0)
     if near_vy > 0.0 and not lateral_enabled:
@@ -131,7 +158,7 @@ def main() -> None:
 
     values, warnings = collect()
     print("Docking effective config audit")
-    for group in ("speed", "final", "lateral", "yaw_anti_oscillation"):
+    for group in ("speed", "final", "lateral", "yaw_anti_oscillation", "bilateral_distance"):
         _print_group(group, values.get(group, {}))
     if warnings:
         print("\nwarnings:")
