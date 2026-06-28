@@ -130,7 +130,38 @@ class TableDockingMixin:
         self.ctx.fov_guard_reason = str(summary.get("fov_guard_reason") or summary.get("bbox_fov_guard_reason") or "")
         self.ctx.zero_escape_reason = str(summary.get("zero_escape_reason") or "")
         self._consume_final_depth_latch_after_arbitration(decision, obs)
+        self._slim_table_docking_control_summary(summary)
         return decision
+
+    def _slim_table_docking_control_summary(self, summary: Dict[str, object]) -> None:
+        if not isinstance(summary, dict):
+            return
+        for key in (
+            "camera_frame_interval_ms",
+            "camera_frame_hz",
+            "vision_process_interval_ms",
+            "vision_publish_interval_ms",
+            "obs_out_send_interval_ms",
+            "obs_out_send_hz",
+            "table_edge_obs_recv_interval_ms",
+            "orchestrator_recv_interval_ms",
+            "state_machine_tick_interval_ms",
+            "state_machine_consume_interval_ms",
+            "same_obs_reuse_count",
+            "obs_seq_gap",
+            "vision_publish_to_orch_recv_ms",
+            "orch_recv_to_state_consume_ms",
+            "table_edge_worker_interval_ms",
+            "table_edge_no_new_frame_count",
+            "scheduler_publish_ms",
+            "obs_out_drop_or_skip_count",
+            "send_hz_config",
+            "track_local_send_hz_config",
+            "dropped_frame_count",
+            "processed_frame_count",
+            "latest_frame_lag_ms",
+        ):
+            summary.pop(key, None)
 
     def _consume_final_depth_latch_after_arbitration(self, decision: MotionDecision, obs: Optional[TableEdgeObs]) -> None:
         summary = decision.control_summary if decision.control_summary is not None else {}
@@ -1322,9 +1353,16 @@ class TableDockingMixin:
             "bbox_track_forward_enabled": bool(getattr(self.cfg, "bbox_track_forward_enabled", True)),
             "bbox_track_forward_vx_mps": float(getattr(self.cfg, "bbox_track_forward_vx_mps", 0.012) or 0.012),
             "bbox_track_forward_max_vx_mps": float(getattr(self.cfg, "bbox_track_forward_max_vx_mps", 0.015) or 0.015),
-            "bbox_track_forward_center_band": float(getattr(self.cfg, "bbox_track_forward_center_band", 0.14) or 0.14),
+            "bbox_track_forward_center_band": float(getattr(self.cfg, "bbox_track_forward_center_band", 0.20) or 0.20),
             "bbox_track_forward_min_hold_ms": int(getattr(self.cfg, "bbox_track_forward_min_hold_ms", 800) or 800),
             "bbox_track_forward_max_wz_radps": float(getattr(self.cfg, "bbox_track_forward_max_wz_radps", 0.06) or 0.06),
+            "near_slow_max_vx_mps": float(getattr(self.cfg, "near_slow_max_vx_mps", 0.008) or 0.008),
+            "depth_envelope_stop_p10_m": float(getattr(self.cfg, "depth_envelope_stop_p10_m", 0.55) or 0.55),
+            "depth_envelope_slow_p10_m": float(getattr(self.cfg, "depth_envelope_slow_p10_m", 0.65) or 0.65),
+            "depth_envelope_mid_p10_m": float(getattr(self.cfg, "depth_envelope_mid_p10_m", 0.80) or 0.80),
+            "depth_envelope_slow_vx_mps": float(getattr(self.cfg, "depth_envelope_slow_vx_mps", 0.008) or 0.008),
+            "depth_envelope_mid_vx_mps": float(getattr(self.cfg, "depth_envelope_mid_vx_mps", 0.012) or 0.012),
+            "edge_handoff_forward_vx_mps": float(getattr(self.cfg, "edge_handoff_forward_vx_mps", 0.010) or 0.010),
             "lateral_enabled": bool(getattr(self.cfg, "lateral_enabled", False)),
             "lateral_vy_max_mps": float(getattr(self.cfg, "lateral_vy_max_mps", 0.006) or 0.006),
             "lateral_deadband_norm": float(getattr(self.cfg, "lateral_deadband_norm", 0.05) or 0.05),
@@ -2173,6 +2211,21 @@ class TableDockingMixin:
         return self._annotate_final_lock_decision(self.controller.stop_cmd("AT_TABLE_EDGE"), status)
 
     def _tick_at_table_edge_impl(self) -> MotionDecision:
+        if bool(getattr(self.cfg, "stop_after_table_docking", True)):
+            obs = self._fresh_table_obs()
+            if not bool(getattr(self.ctx, "docking_done_printed", False)):
+                line = (
+                    "[DOCKING_DONE] "
+                    f"reason={str(getattr(self.ctx, 'final_lock_reason', '') or getattr(self.ctx, 'final_lock_last_transition_reason', '') or 'final_locked')} "
+                    f"yaw_err_rad={getattr(obs, 'yaw_err_rad', None) if obs is not None else None} "
+                    f"table_roi_depth_p10={getattr(obs, 'table_roi_depth_p10', None) if obs is not None else None} "
+                    f"final_locked={bool(getattr(self.ctx, 'final_locked', False))} "
+                    f"state={str(getattr(self.ctx.state, 'value', self.ctx.state) or '')}"
+                )
+                print(line)
+                self._log("info", line)
+                self.ctx.docking_done_printed = True
+            return self.controller.stop_cmd("AT_TABLE_EDGE")
         if self._table_edge_only_test_enabled():
             if self._state_elapsed() < float(self.cfg.edge_settle_s):
                 return self.controller.stop_cmd("AT_TABLE_EDGE")

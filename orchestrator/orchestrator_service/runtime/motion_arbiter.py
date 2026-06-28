@@ -278,11 +278,69 @@ def _docking_result(
     safe_summary["vy_cmd_limited"] = 0.0
     safe_summary["vy_enabled"] = False
     safe_summary.setdefault("vy_block_reason", "lateral_disabled")
+    dock_obs = safe_summary.get("docking_observation")
+    dock_obs = dock_obs if isinstance(dock_obs, dict) else {}
+
+    def _field(name: str, default: Any = None) -> Any:
+        value = safe_summary.get(name)
+        if value is None:
+            value = dock_obs.get(name, default)
+        return value
+
+    def _bool_field(name: str) -> bool:
+        return bool(_field(name, False))
+
+    def _optional_field_float(name: str) -> Optional[float]:
+        value = _field(name)
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    final_depth_latched = _bool_field("final_depth_latched")
+    near_table_latched = _bool_field("near_table_latched")
+    depth_p10 = _optional_field_float("table_roi_depth_p10")
+    if depth_p10 is None:
+        depth_p10 = _optional_field_float("depth_p10")
+    vx_cap: Optional[float] = None
+    envelope_reason = ""
+    if final_depth_latched:
+        vx_cap = 0.0
+        envelope_reason = "final_depth_latched"
+    elif near_table_latched:
+        vx_cap = abs(_float(safe_summary, "near_slow_max_vx_mps", _float(safe_summary, "depth_envelope_slow_vx_mps", 0.008)))
+        envelope_reason = "near_table_latched"
+    elif depth_p10 is not None:
+        stop_p10 = _float(safe_summary, "depth_envelope_stop_p10_m", 0.55)
+        slow_p10 = _float(safe_summary, "depth_envelope_slow_p10_m", 0.65)
+        mid_p10 = _float(safe_summary, "depth_envelope_mid_p10_m", 0.80)
+        if depth_p10 <= stop_p10:
+            vx_cap = 0.0
+            envelope_reason = "depth_p10_stop"
+        elif depth_p10 <= slow_p10:
+            vx_cap = abs(_float(safe_summary, "depth_envelope_slow_vx_mps", 0.008))
+            envelope_reason = "depth_p10_slow"
+        elif depth_p10 <= mid_p10:
+            vx_cap = abs(_float(safe_summary, "depth_envelope_mid_vx_mps", 0.012))
+            envelope_reason = "depth_p10_mid"
+    final_vx = float(vx)
+    if vx_cap is not None and abs(final_vx) > vx_cap:
+        final_vx = max(-vx_cap, min(vx_cap, final_vx))
+    if near_table_latched and not final_depth_latched and action == DockingAction.EDGE_APPROACH_FORWARD:
+        action = DockingAction.NEAR_EDGE_FORWARD
+        stage = DockingStage.NEAR_EDGE_APPROACH
+        forward_owner = str(forward_owner or "near_depth")
+        safe_summary["docking_reason"] = str(safe_summary.get("docking_reason") or "near_table_latched")
+    if envelope_reason:
+        safe_summary["depth_speed_envelope_reason"] = envelope_reason
+        safe_summary["depth_speed_envelope_vx_cap"] = float(vx_cap if vx_cap is not None else 0.0)
     return _from_docking_result(
         DockingMotionResult(
             action=action,
             stage=stage,
-            vx=float(vx),
+            vx=float(final_vx),
             vy=0.0,
             wz=float(wz),
             yaw_owner=str(yaw_owner or ""),
@@ -688,6 +746,34 @@ def arbitrate_table_docking_motion(
             reason=edge_block,
         )
 
+    if bool(summary.get("near_table_latched", False)):
+        edge_wz = _float(summary, "edge_yaw_cmd", _float(summary, "wz_from_plane", 0.0))
+        if abs(edge_wz) <= 1e-9:
+            edge_wz = _float(summary, "last_good_edge_yaw_cmd", 0.0)
+        yaw_source = str(summary.get("near_stage_yaw_source") or ("last_good_edge" if abs(edge_wz) > 1e-9 else "hold"))
+        near_vx = max(0.0, min(abs(desired_vx), abs(_float(summary, "near_slow_max_vx_mps", 0.008))))
+        return _docking_result(
+            action=DockingAction.NEAR_EDGE_FORWARD,
+            stage=DockingStage.NEAR_EDGE_APPROACH,
+            summary=with_common(
+                {
+                "motion_intent_type": "near_edge_hold",
+                "yaw_owner": yaw_source,
+                "forward_owner": "near_depth" if near_vx > 1e-9 else "none",
+                "near_stage_yaw_source": yaw_source,
+                "forward_block_reason": "" if near_vx > 1e-9 else "near_table_latched",
+                "bbox_lost_ignored_due_to_near_latch": bool(intent_type in {"local_rotate_search", "search"} or phase == "SEARCH_SCAN"),
+                }
+            ),
+            vx=near_vx,
+            wz=edge_wz,
+            yaw_owner=yaw_source,
+            forward_owner="near_depth" if near_vx > 1e-9 else "none",
+            stop_class=StopClass.NONE,
+            blocked_by="near_table_latched",
+            reason="near_latch_suppressed_far_fallback",
+        )
+
     if fov_level == FovGuardLevel.HARD:
         wz = bbox_recovery_wz()
         return _docking_result(
@@ -698,30 +784,6 @@ def arbitrate_table_docking_motion(
             yaw_owner="bbox",
             blocked_by="bbox_fov_guard_hard",
             reason=fov_reason or "bbox_fov_guard_hard",
-        )
-
-    if bool(summary.get("near_table_latched", False)) and (phase in {"BBOX_ACQUIRE", "EDGE_HANDOFF_CONFIRM", "SEARCH_SCAN"} or intent_type in {"local_rotate_search", "search"}):
-        edge_wz = _float(summary, "edge_yaw_cmd", _float(summary, "wz_from_plane", 0.0))
-        if abs(edge_wz) <= 1e-9:
-            edge_wz = _float(summary, "last_good_edge_yaw_cmd", 0.0)
-        yaw_source = str(summary.get("near_stage_yaw_source") or ("last_good_edge" if abs(edge_wz) > 1e-9 else "hold"))
-        return _docking_result(
-            action=DockingAction.NEAR_EDGE_FORWARD if abs(edge_wz) > 1e-9 else DockingAction.PERCEPTION_DROPOUT_HOLD,
-            stage=DockingStage.NEAR_EDGE_APPROACH,
-            summary=with_common(
-                {
-                "motion_intent_type": "near_edge_hold",
-                "yaw_owner": yaw_source,
-                "near_stage_yaw_source": yaw_source,
-                "forward_block_reason": "near_table_latched",
-                "bbox_lost_ignored_due_to_near_latch": bool(intent_type in {"local_rotate_search", "search"} or phase == "SEARCH_SCAN"),
-                }
-            ),
-            wz=edge_wz,
-            yaw_owner=yaw_source,
-            stop_class=StopClass.NONE,
-            blocked_by="near_table_latched",
-            reason="near_latch_suppressed_far_fallback",
         )
 
     if phase == "EDGE_GUIDED_APPROACH" and intent.forward_allowed_by_behavior and edge_approach_gate_ready:
@@ -759,6 +821,20 @@ def arbitrate_table_docking_motion(
         yaw_owner = "edge_candidate" if abs(handoff_wz) > 1e-9 else "bbox_hold"
         if abs(handoff_wz) <= 1e-9:
             handoff_wz = bbox_recovery_wz()
+        handoff_vx = 0.0
+        handoff_depth_ok = bool(
+            not bool(summary.get("near_table_latched", False))
+            and not bool(summary.get("final_depth_latched", False))
+            and not bool(summary.get("depth_roi_stop_ready", False))
+        )
+        handoff_bbox_ok = bool(
+            docking_obs.bbox_control_valid
+            and docking_obs.bbox_center_error is not None
+            and abs(float(docking_obs.bbox_center_error)) <= abs(_float(summary, "bbox_track_forward_center_band", 0.20))
+            and fov_level != FovGuardLevel.HARD
+        )
+        if handoff_depth_ok and handoff_bbox_ok:
+            handoff_vx = min(abs(_float(summary, "edge_handoff_forward_vx_mps", 0.010)), abs(_float(summary, "bbox_track_forward_max_vx_mps", 0.015)))
         return _docking_result(
             action=DockingAction.EDGE_READINESS_HANDOFF,
             stage=DockingStage.EDGE_HANDOFF,
@@ -770,15 +846,16 @@ def arbitrate_table_docking_motion(
                     "fallback_condition": "edge_readiness_exit_score",
                     "edge_handoff_source": "readiness_score",
                     "edge_handoff_block_reason": "",
-                    "allow_forward": False,
+                    "allow_forward": bool(handoff_vx > 1e-9),
                     "allow_rotate": bool(abs(handoff_wz) > 1e-9),
+                    "forward_block_reason": "" if handoff_vx > 1e-9 else "edge_readiness_handoff",
                 }
             ),
-            vx=0.0,
+            vx=handoff_vx,
             vy=0.0,
             wz=handoff_wz,
             yaw_owner=yaw_owner,
-            forward_owner="none",
+            forward_owner="edge_handoff" if handoff_vx > 1e-9 else "none",
             lateral_owner="none",
             reason="edge_readiness_handoff",
         )
@@ -786,7 +863,7 @@ def arbitrate_table_docking_motion(
     bbox_err = docking_obs.bbox_center_error
     bbox_forward_vx = raw_cmd_vx()
     bbox_track_enabled = bool(summary.get("bbox_track_forward_enabled", True))
-    bbox_track_center_band = abs(_float(summary, "bbox_track_forward_center_band", _float(summary, "yolo_forward_center_good_limit", 0.14)))
+    bbox_track_center_band = abs(_float(summary, "bbox_track_forward_center_band", _float(summary, "yolo_forward_center_good_limit", 0.20)))
     bbox_track_vx = abs(_float(summary, "bbox_track_forward_vx_mps", 0.012))
     bbox_track_max_vx = abs(_float(summary, "bbox_track_forward_max_vx_mps", 0.015))
     if bbox_track_max_vx > 0.0:

@@ -467,6 +467,16 @@ def _load_and_merge_stage_params(config: SystemGlobalConfig, file_path: Path) ->
             ctrl.near_slow_max_vx_mps = _sf(td["near_slow_max_vx_mps"])
         if "near_slow_max_vy_mps" in td:
             ctrl.near_slow_max_vy_mps = _sf(td["near_slow_max_vy_mps"])
+        if "depth_envelope_stop_p10_m" in td:
+            ctrl.depth_envelope_stop_p10_m = _sf(td["depth_envelope_stop_p10_m"])
+        if "depth_envelope_slow_p10_m" in td:
+            ctrl.depth_envelope_slow_p10_m = _sf(td["depth_envelope_slow_p10_m"])
+        if "depth_envelope_mid_p10_m" in td:
+            ctrl.depth_envelope_mid_p10_m = _sf(td["depth_envelope_mid_p10_m"])
+        if "depth_envelope_slow_vx_mps" in td:
+            ctrl.depth_envelope_slow_vx_mps = _sf(td["depth_envelope_slow_vx_mps"])
+        if "depth_envelope_mid_vx_mps" in td:
+            ctrl.depth_envelope_mid_vx_mps = _sf(td["depth_envelope_mid_vx_mps"])
         if "bbox_track_forward_enabled" in td:
             ctrl.bbox_track_forward_enabled = _sb(td["bbox_track_forward_enabled"])
         if "bbox_track_forward_vx_mps" in td:
@@ -495,6 +505,12 @@ def _load_and_merge_stage_params(config: SystemGlobalConfig, file_path: Path) ->
             ctrl.edge_readiness_yaw_max_rad = _sf(td["edge_readiness_yaw_max_rad"])
         if "edge_handoff_min_hold_ms" in td:
             ctrl.edge_handoff_min_hold_ms = _si(td["edge_handoff_min_hold_ms"])
+        if "edge_handoff_forward_vx_mps" in td:
+            ctrl.edge_handoff_forward_vx_mps = _sf(td["edge_handoff_forward_vx_mps"])
+        if "forward_commit_min_s" in td:
+            ctrl.forward_commit_min_s = _sf(td["forward_commit_min_s"])
+        if "stop_after_table_docking" in td:
+            ctrl.stop_after_table_docking = _sb(td["stop_after_table_docking"])
         if "lateral_enabled" in td:
             ctrl.lateral_enabled = _sb(td["lateral_enabled"])
         if "lateral_vy_max_mps" in td:

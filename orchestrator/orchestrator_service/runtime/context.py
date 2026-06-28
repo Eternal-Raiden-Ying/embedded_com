@@ -123,6 +123,7 @@ class RuntimeContext:
     final_lock_same_obs_reuse_count: int = 0
     final_lock_consecutive_lost_count: int = 0
     final_lock_last_transition_reason: str = ""
+    docking_done_printed: bool = False
     approach_aligned_frames: int = 0
     approach_realign_frames: int = 0
     align_hysteresis_last_obs_key: str = ""
@@ -248,6 +249,7 @@ class RuntimeContext:
         self.final_lock_same_obs_reuse_count = 0
         self.final_lock_consecutive_lost_count = 0
         self.final_lock_last_transition_reason = ""
+        self.docking_done_printed = False
         self.approach_aligned_frames = 0
         self.approach_realign_frames = 0
         self.align_hysteresis_last_obs_key = ""
