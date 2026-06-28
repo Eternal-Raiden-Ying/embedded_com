@@ -229,7 +229,7 @@ mode_profiles:
         yolo_table_min_conf: 0.25
         depth_stride: 2
       rgb:
-        fps: 24
+        fps: 60
 
     FIND_EDGE:
       enabled_cameras: [rgb, depth]
@@ -260,7 +260,7 @@ mode_profiles:
         yolo_table_min_conf: 0.25
         depth_stride: 2
       rgb:
-        fps: 24
+        fps: 60
 
     FIND_TABLE:
       enabled_cameras: [rgb]
@@ -270,7 +270,7 @@ mode_profiles:
       preview_layout: rgb_yolo_overlay
       release_cooldown_s: 2.0
       rgb:
-        fps: 24
+        fps: 60
 
     MICRO_ADJUST:
       enabled_cameras: [rgb]
