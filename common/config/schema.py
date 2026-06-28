@@ -505,7 +505,7 @@ class ControlThresholds:
     near_slow_depth_m: float = 0.40
     near_stop_depth_m: float = 0.25
     near_slow_max_vx_mps: float = 0.008
-    near_slow_max_vy_mps: float = 0.0
+    near_slow_max_vy_mps: float = 0.003
     near_slow_max_wz_radps: float = 0.04
     depth_envelope_stop_p10_m: float = 0.55
     depth_envelope_slow_p10_m: float = 0.65
@@ -529,10 +529,10 @@ class ControlThresholds:
     edge_handoff_forward_vx_mps: float = 0.010
     forward_commit_min_s: float = 1.2
     stop_after_table_docking: bool = True
-    lateral_enabled: bool = False
+    lateral_enabled: bool = True
     lateral_vy_max_mps: float = 0.006
-    lateral_deadband_norm: float = 0.05
-    lateral_kp: float = 0.02
+    lateral_deadband_norm: float = 0.06
+    lateral_kp: float = 0.025
     lateral_target_center_x_norm: float = 0.5
     lateral_owner_default: str = "none"
     final_yaw_deadband_rad: float = 0.12

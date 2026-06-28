@@ -60,6 +60,7 @@ class TableDockingMixin:
         intent = MotionIntent(
             intent_type=str(summary.get("control_source") or summary.get("control_intent") or decision.cmd.mode or ""),
             desired_vx=float(getattr(decision.cmd, "vx_mps", 0.0) or 0.0),
+            desired_vy=float(getattr(decision.cmd, "vy_mps", 0.0) or 0.0),
             desired_wz=float(getattr(decision.cmd, "wz_radps", 0.0) or 0.0),
             yaw_owner=str(summary.get("yaw_source") or summary.get("yaw_owner") or ""),
             forward_owner=str(summary.get("forward_source") or summary.get("forward_owner") or "none"),
@@ -149,14 +150,27 @@ class TableDockingMixin:
             final_vx = float(summary.get("final_vx", summary.get("vx_mps", 0.0)) or 0.0)
         except Exception:
             final_vx = 0.0
+        try:
+            final_vy = float(summary.get("final_vy", summary.get("vy_mps", 0.0)) or 0.0)
+        except Exception:
+            final_vy = 0.0
+        try:
+            final_wz = float(summary.get("final_wz", summary.get("wz_radps", 0.0)) or 0.0)
+        except Exception:
+            final_wz = 0.0
         block_reason = str(
-            summary.get("effective_forward_block_reason")
+            summary.get("effective_block_reason")
+            or summary.get("effective_forward_block_reason")
             or summary.get("forward_block_reason")
             or summary.get("blocked_by")
             or ""
         )
-        summary["effective_forward_block_reason"] = "" if abs(final_vx) > 1e-9 else block_reason
+        moving = bool(abs(final_vx) > 1e-9 or abs(final_vy) > 1e-9 or abs(final_wz) > 1e-9)
+        summary["effective_block_reason"] = "" if moving else block_reason
         for key in (
+            "control_phase",
+            "docking_stage",
+            "effective_forward_block_reason",
             "camera_frame_interval_ms",
             "camera_frame_hz",
             "vision_process_interval_ms",
@@ -199,6 +213,15 @@ class TableDockingMixin:
             "edge_handoff_block_reason",
             "dropout_hold_block_reason",
             "near_latch_block_reason",
+            "edge_trusted",
+            "edge_control_allowed",
+            "edge_readiness_score",
+            "edge_readiness_level",
+            "edge_readiness_enter_score",
+            "edge_readiness_exit_score",
+            "docking_observation",
+            "bbox_fov_guard_level",
+            "bbox_fov_guard_reason",
         ):
             summary.pop(key, None)
 
@@ -2252,6 +2275,9 @@ class TableDockingMixin:
     def _tick_at_table_edge_impl(self) -> MotionDecision:
         if bool(getattr(self.cfg, "stop_after_table_docking", True)):
             obs = self._fresh_table_obs()
+            self.ctx.final_locked = True
+            self.ctx.final_yaw_align_active = False
+            self.ctx.final_lock_reason = self.ctx.final_lock_reason or self.ctx.final_lock_last_transition_reason or "at_table_edge"
             if not bool(getattr(self.ctx, "docking_done_printed", False)):
                 line = (
                     "[DOCKING_DONE] "
@@ -2264,7 +2290,21 @@ class TableDockingMixin:
                 print(line)
                 self._log("info", line)
                 self.ctx.docking_done_printed = True
-            return self.controller.stop_cmd("AT_TABLE_EDGE")
+            decision = self.controller.stop_cmd("AT_TABLE_EDGE")
+            decision.control_summary.update(
+                {
+                    "docking_action": "FINAL_LOCKED_STOP",
+                    "docking_reason": str(self.ctx.final_lock_reason or "at_table_edge"),
+                    "final_locked": True,
+                    "final_lock_reason": str(self.ctx.final_lock_reason or "at_table_edge"),
+                    "final_depth_latched": True,
+                    "final_yaw_align_active": False,
+                    "vx_mps": 0.0,
+                    "vy_mps": 0.0,
+                    "wz_radps": 0.0,
+                }
+            )
+            return decision
         if self._table_edge_only_test_enabled():
             if self._state_elapsed() < float(self.cfg.edge_settle_s):
                 return self.controller.stop_cmd("AT_TABLE_EDGE")

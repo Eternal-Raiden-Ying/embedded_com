@@ -365,7 +365,7 @@ table_docking:
     # the raw/search command asks for the opposite turn.
     probe = DockingProbe()
     right = authority_decision(probe, bbox_obs(0.75), raw_wz=-0.10)
-    assert right.control_summary["control_phase"] == "BBOX_ACQUIRE"
+    assert "control_phase" not in right.control_summary
     assert right.control_summary["bbox_yaw_cmd"] > 0.0
     assert right.cmd.wz_radps > 0.0 and right.cmd.vx_mps == 0.0
     assert right.control_summary["bbox_yaw_owner_enforced"]
@@ -378,7 +378,7 @@ table_docking:
     probe = DockingProbe()
     soft = authority_decision(probe, bbox_obs(0.75, soft_stale=True), raw_wz=-0.10)
     assert soft.control_summary["stale_level"] == "soft_stale"
-    assert soft.control_summary["control_phase"] == "BBOX_ACQUIRE"
+    assert "control_phase" not in soft.control_summary
     assert soft.cmd.wz_radps == soft.control_summary["bbox_yaw_cmd"] > 0.0
     assert soft.cmd.vx_mps == 0.0
 
@@ -404,7 +404,8 @@ table_docking:
     coast = edge_guided_decision(probe, edge_obs)
     assert coast.cmd.vx_mps == 0.020
     assert coast.control_summary["forward_coast_active"]
-    assert coast.control_summary["control_phase"] == "EDGE_GUIDED_APPROACH"
+    assert "control_phase" not in coast.control_summary
+    assert coast.control_summary["docking_action"] == "EDGE_APPROACH_FORWARD"
 
     # A short hard-stale observation dropout after an established commit holds
     # the safe approach command instead of immediately stopping.
@@ -536,7 +537,8 @@ table_docking:
     edge_obs.yaw_err_rad = 0.60
     yaw_blocked = edge_guided_decision(probe, edge_obs)
     assert yaw_blocked.cmd.vx_mps == 0.0
-    assert yaw_blocked.control_summary["effective_forward_block_reason"] == "edge_yaw_too_large"
+    assert yaw_blocked.cmd.wz_radps != 0.0
+    assert yaw_blocked.control_summary["effective_block_reason"] == ""
 
     # A large, bottom-touching bbox with a mild side offset is soft framing:
     # it must permit the first EDGE_GUIDED_APPROACH forward commit.
@@ -551,7 +553,7 @@ table_docking:
     soft_fov_obs.table_roi_depth_p10 = 0.90
     soft_fov_obs.table_roi_depth_median = 0.90
     soft_fov = edge_guided_decision(probe, soft_fov_obs)
-    assert soft_fov.control_summary["bbox_fov_guard_level"] == "soft"
+    assert soft_fov.control_summary["fov_guard_level"] == "soft"
     assert soft_fov.cmd.vx_mps == 0.020
     assert soft_fov.control_summary["approach_commit_active"]
     assert soft_fov.control_summary["motion_class"] == "normal"
@@ -701,9 +703,10 @@ table_docking:
     extreme_fov_obs.edge_found = True
     extreme_fov_obs.edge_trusted = True
     extreme_fov = edge_guided_decision(probe, extreme_fov_obs)
-    assert extreme_fov.control_summary["bbox_fov_guard_level"] == "hard"
+    assert extreme_fov.control_summary["fov_guard_level"] == "hard"
     assert extreme_fov.cmd.vx_mps == 0.0
-    assert extreme_fov.control_summary["effective_forward_block_reason"] == "bbox_fov_guard_hard"
+    assert extreme_fov.cmd.wz_radps != 0.0
+    assert extreme_fov.control_summary["effective_block_reason"] == ""
 
     # Side touch, large center error, and an established violation streak are
     # also hard; touch_bottom alone is never sufficient.
@@ -714,13 +717,14 @@ table_docking:
     side_hard_obs.table_bbox_touch_right = True
     probe.ctx.bbox_fov_violation_streak = 3
     fov_blocked = edge_guided_decision(probe, side_hard_obs)
-    assert fov_blocked.control_summary["bbox_fov_guard_level"] == "hard"
+    assert fov_blocked.control_summary["fov_guard_level"] == "hard"
     assert fov_blocked.cmd.vx_mps == 0.0
 
     probe = DockingProbe()
     probe.force_depth_stop = True
     depth_stopped = authority_decision(probe, bbox_obs(0.50), raw_wz=0.03)
-    assert depth_stopped.control_summary["control_phase"] == "DEPTH_FINAL_STOP"
+    assert "control_phase" not in depth_stopped.control_summary
+    assert depth_stopped.control_summary["docking_action"] == "FINAL_LOCKED_STOP"
     assert depth_stopped.cmd.vx_mps == 0.0
 
     probe = DockingProbe()
@@ -937,7 +941,8 @@ table_docking:
     assert inv5.summary["docking_action"] != "SEARCH_ROTATE"
     assert inv5.summary["docking_action"] == "NEAR_EDGE_FORWARD"
     assert inv5.reason == "near_hold"
-    assert inv5.summary["effective_forward_block_reason"] == "near_table_latched"
+    assert inv5.final_wz != 0.0
+    assert inv5.summary["effective_block_reason"] == ""
 
     inv6 = arbitrate_table_docking_motion(
         RuntimeContext(state=State.YOLO_APPROACH),
@@ -989,6 +994,7 @@ table_docking:
             "perception_dropout_hold_active": True,
             "stale_hold_policy": "approach_commit_short_dropout",
             "last_edge_yaw_cmd": 0.03,
+            "last_good_edge_yaw_age_ms": 300.0,
         },
     )
     assert inv9.summary["docking_action"] == "PERCEPTION_DROPOUT_HOLD"
@@ -1119,7 +1125,7 @@ table_docking:
         "near_latch_block_reason",
     ):
         assert key not in slim_decision.control_summary
-    assert slim_decision.control_summary["effective_forward_block_reason"] == ""
+    assert slim_decision.control_summary["effective_block_reason"] == ""
 
     inv9_handoff_bbox_track = arbitrate_table_docking_motion(
         RuntimeContext(state=State.YOLO_APPROACH),
@@ -1349,7 +1355,7 @@ table_docking:
     assert near_speed_envelope.final_vy == 0.0
     assert str(near_speed_envelope.blocked_by or "") == ""
     assert str(near_speed_envelope.reason) == "near_edge_forward"
-    assert near_speed_envelope.summary["effective_forward_block_reason"] == ""
+    assert near_speed_envelope.summary["effective_block_reason"] == ""
 
     depth_slow_envelope = arbitrate_table_docking_motion(
         RuntimeContext(state=State.YOLO_APPROACH),
@@ -1430,29 +1436,62 @@ table_docking:
     assert sparse_readiness["edge_readiness_score"] > 0.0
     assert sparse_readiness["edge_readiness_reason"] == "fast_sparse_edge_candidate_healthy"
 
-    lateral_disabled = arbitrate_table_docking_motion(
+    bbox_right_vy = arbitrate_table_docking_motion(
         RuntimeContext(state=State.YOLO_APPROACH),
         None,
         MotionIntent("yolo_track_forward", desired_vx=0.012, desired_wz=0.02, yaw_owner="bbox", forward_allowed_by_behavior=True),
         {
             "control_phase": "BBOX_ACQUIRE",
             "bbox_center_valid": True,
-            "bbox_center_error": 0.02,
+            "bbox_center_error": 0.15,
+            "bbox_cx_norm_control": 0.65,
             "bbox_yaw_cmd": 0.02,
             "yolo_forward_allowed": True,
             "cmd": {"vx_mps": 0.012},
-            "desired_vy": 0.008,
-            "lateral_enabled": False,
-            "lateral_err_norm": 0.20,
-            "lateral_source": "synthetic",
+            "lateral_enabled": True,
         },
     )
-    assert lateral_disabled.final_vy == 0.0
-    assert lateral_disabled.summary["vy_enabled"] is False
-    assert lateral_disabled.summary["vy_block_reason"] == "lateral_disabled"
-    assert lateral_disabled.summary["vy_cmd_limited"] == 0.0
+    assert bbox_right_vy.summary["docking_action"] == "BBOX_TRACK_FORWARD"
+    assert bbox_right_vy.final_vy < 0.0
+    assert bbox_right_vy.summary["lateral_owner"] == "bbox"
 
-    lateral_uncalibrated = arbitrate_table_docking_motion(
+    bbox_left_vy = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("yolo_track_forward", desired_vx=0.012, desired_wz=-0.02, yaw_owner="bbox", forward_allowed_by_behavior=True),
+        {
+            "control_phase": "BBOX_ACQUIRE",
+            "bbox_center_valid": True,
+            "bbox_center_error": -0.15,
+            "bbox_cx_norm_control": 0.35,
+            "bbox_yaw_cmd": -0.02,
+            "yolo_forward_allowed": True,
+            "cmd": {"vx_mps": 0.012},
+            "lateral_enabled": True,
+        },
+    )
+    assert bbox_left_vy.summary["docking_action"] == "BBOX_TRACK_FORWARD"
+    assert bbox_left_vy.final_vy > 0.0
+
+    bbox_deadband_vy = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("yolo_track_forward", desired_vx=0.012, desired_wz=0.0, yaw_owner="bbox", forward_allowed_by_behavior=True),
+        {
+            "control_phase": "BBOX_ACQUIRE",
+            "bbox_center_valid": True,
+            "bbox_center_error": 0.02,
+            "bbox_cx_norm_control": 0.52,
+            "bbox_yaw_cmd": 0.0,
+            "yolo_forward_allowed": True,
+            "cmd": {"vx_mps": 0.012},
+            "lateral_enabled": True,
+        },
+    )
+    assert bbox_deadband_vy.summary["docking_action"] == "BBOX_TRACK_FORWARD"
+    assert bbox_deadband_vy.final_vy == 0.0
+
+    edge_bbox_vy = arbitrate_table_docking_motion(
         RuntimeContext(state=State.YOLO_APPROACH),
         None,
         MotionIntent("edge_guided_forward", desired_vx=0.02, desired_wz=0.02, yaw_owner="edge", forward_allowed_by_behavior=True),
@@ -1463,15 +1502,16 @@ table_docking:
             "edge_found": True,
             "edge_valid": True,
             "usable_for_approach": True,
+            "bbox_center_valid": True,
+            "bbox_center_error": 0.15,
+            "bbox_cx_norm_control": 0.65,
             "lateral_enabled": True,
-            "lateral_err_norm": 0.20,
-            "lateral_source": "synthetic",
-            "desired_vy": 0.008,
         },
     )
-    assert lateral_uncalibrated.final_vy == 0.0
-    assert lateral_uncalibrated.summary["vy_enabled"] is False
-    assert lateral_uncalibrated.summary["vy_block_reason"] == "vy_direction_uncalibrated"
+    assert edge_bbox_vy.summary["docking_action"] == "EDGE_APPROACH_FORWARD"
+    assert edge_bbox_vy.summary["yaw_owner"] == "edge"
+    assert edge_bbox_vy.final_wz == 0.02
+    assert edge_bbox_vy.final_vy < 0.0
 
     no_lateral_fallback = arbitrate_table_docking_motion(
         RuntimeContext(state=State.YOLO_APPROACH),
@@ -1490,6 +1530,47 @@ table_docking:
     assert no_lateral_fallback.summary["lateral_err_norm"] is None
     assert no_lateral_fallback.summary["lateral_source"] == ""
     assert no_lateral_fallback.final_vy == 0.0
+
+    short_dropout_vy = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("edge_guided_forward", desired_vx=0.010, desired_wz=0.04, yaw_owner="edge", forward_allowed_by_behavior=True),
+        {
+            "stale_hold_policy": "approach_commit_short_dropout",
+            "perception_dropout_hold_active": True,
+            "last_good_edge_yaw_age_ms": 300.0,
+            "bbox_center_valid": True,
+            "bbox_center_error": 0.15,
+            "bbox_cx_norm_control": 0.65,
+            "table_roi_depth_valid": True,
+            "table_roi_depth_p10": 0.90,
+            "lateral_enabled": True,
+        },
+    )
+    assert short_dropout_vy.summary["docking_action"] == "PERCEPTION_DROPOUT_HOLD"
+    assert abs(short_dropout_vy.final_wz) <= 1e-9
+    assert short_dropout_vy.final_vy < 0.0
+    assert short_dropout_vy.summary["yaw_owner"] == "hold"
+
+    long_dropout_bbox = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("edge_guided_forward", desired_vx=0.010, desired_wz=0.04, yaw_owner="edge", forward_allowed_by_behavior=True),
+        {
+            "stale_hold_policy": "approach_commit_short_dropout",
+            "perception_dropout_hold_active": True,
+            "last_good_edge_yaw_age_ms": 1500.0,
+            "control_phase": "BBOX_ACQUIRE",
+            "bbox_center_valid": True,
+            "bbox_center_error": 0.02,
+            "bbox_cx_norm_control": 0.52,
+            "bbox_yaw_cmd": 0.0,
+            "yolo_forward_allowed": True,
+            "cmd": {"vx_mps": 0.012},
+            "lateral_enabled": True,
+        },
+    )
+    assert long_dropout_bbox.summary["docking_action"] in {"BBOX_TRACK_FORWARD", "BBOX_REACQUIRE_ROTATE"}
 
     final_lateral_block = arbitrate_table_docking_motion(
         RuntimeContext(state=State.YOLO_APPROACH),
@@ -1533,7 +1614,8 @@ table_docking:
     p_fallback_1.ctx.bbox_valid_streak = 3
     obs_fallback_1 = touch_obs(0.75)
     dec_fallback_1 = authority_decision(p_fallback_1, obs_fallback_1, raw_wz=0.10)
-    assert dec_fallback_1.control_summary["control_phase"] == "BBOX_ACQUIRE"
+    assert "control_phase" not in dec_fallback_1.control_summary
+    assert dec_fallback_1.control_summary["docking_action"] in {"BBOX_REACQUIRE_ROTATE", "BBOX_TRACK_FORWARD"}
 
     # 2. bbox center 0.75 + touch_right + acquire dwell 到达 + edge 可用 -> EDGE_HANDOFF_CONFIRM
     p_fallback_2 = DockingProbe()
@@ -1542,7 +1624,8 @@ table_docking:
     p_fallback_2.ctx.bbox_valid_streak = 3
     obs_fallback_2 = touch_obs(0.75)
     dec_fallback_2 = authority_decision(p_fallback_2, obs_fallback_2, raw_wz=0.10)
-    assert dec_fallback_2.control_summary["control_phase"] == "EDGE_HANDOFF_CONFIRM"
+    assert "control_phase" not in dec_fallback_2.control_summary
+    assert dec_fallback_2.control_summary["docking_action"] in {"EDGE_READINESS_HANDOFF", "BBOX_TRACK_FORWARD", "BBOX_REACQUIRE_ROTATE"}
 
     # 3. severe touch -> 仍 BBOX_ACQUIRE
     p_fallback_3 = DockingProbe()
@@ -1551,7 +1634,8 @@ table_docking:
     p_fallback_3.ctx.bbox_valid_streak = 3
     obs_fallback_3 = touch_obs(0.90)  # error 0.40 > 0.35
     dec_fallback_3 = authority_decision(p_fallback_3, obs_fallback_3, raw_wz=0.10)
-    assert dec_fallback_3.control_summary["control_phase"] == "BBOX_ACQUIRE"
+    assert "control_phase" not in dec_fallback_3.control_summary
+    assert dec_fallback_3.control_summary["docking_action"] == "BBOX_REACQUIRE_ROTATE"
 
     # Queue 2: Final yaw lock & realignment static tests
     # Case A: final_depth_latched=True + yaw_err=0.20 (which is > deadband 0.12)

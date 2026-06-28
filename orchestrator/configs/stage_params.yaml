@@ -30,7 +30,7 @@ table_docking:
   coarse_align_min_dwell_s: 0.8
   controlled_approach_min_dwell_s: 0.8
   near_slow_max_vx_mps: 0.008
-  near_slow_max_vy_mps: 0.0
+  near_slow_max_vy_mps: 0.003
   depth_envelope_stop_p10_m: 0.55
   depth_envelope_slow_p10_m: 0.65
   depth_envelope_mid_p10_m: 0.80
@@ -53,10 +53,10 @@ table_docking:
   edge_handoff_forward_vx_mps: 0.010
   forward_commit_min_s: 1.2
   stop_after_table_docking: true
-  lateral_enabled: false
+  lateral_enabled: true
   lateral_vy_max_mps: 0.006
-  lateral_deadband_norm: 0.05
-  lateral_kp: 0.02
+  lateral_deadband_norm: 0.06
+  lateral_kp: 0.025
   lateral_target_center_x_norm: 0.5
   lateral_owner_default: none
 
