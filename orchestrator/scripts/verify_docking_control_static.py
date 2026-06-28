@@ -63,7 +63,7 @@ table_docking:
   bbox_track_forward_min_hold_ms: 1234
   bbox_track_forward_max_wz_radps: 0.20
   final_servo_enter_p10_m: 0.45
-  edge_final_enter_margin_m: 0.05
+  edge_final_enter_margin_m: 0.06
   edge_final_stop_margin_m: 0.02
   close_range_enter_p10_m: 0.55
   close_range_probe_vx_mps: 0.004
@@ -99,7 +99,7 @@ table_docking:
   yaw_flip_count_limit: 2
   yaw_ambiguous_wz_cap: 0.0
   yaw_ambiguous_vy_boost: 1.5
-  final_dist_deadband_m: 0.04
+  final_dist_deadband_m: 0.03
   final_dist_kp: 0.08
   final_forward_vx_max_mps: 0.006
   final_reverse_vx_max_mps: 0.004
@@ -115,12 +115,14 @@ table_docking:
     loaded_ctrl = loader_cfg.orchestrator.control
     assert abs(loader_cfg.orchestrator.car.search_table_wz_radps - 0.20) < 1e-9
     assert abs(loaded_ctrl.table_target_dist_m - 0.30) < 1e-9
+    vista_cfg_text = (Path(ROOT) / "VISTA/configs/vision_params.yaml").read_text(encoding="utf-8")
+    assert vista_cfg_text.count("target_dist_m: 0.30") >= 3
     assert abs(loaded_ctrl.min_forward_vx_mps - 0.04) < 1e-9
     assert abs(loaded_ctrl.bbox_track_forward_vx_mps - 0.10) < 1e-9
     assert abs(loaded_ctrl.bbox_track_forward_max_vx_mps - 0.20) < 1e-9
     assert abs(loaded_ctrl.bbox_track_forward_center_band - 0.45) < 1e-9
     assert abs(loaded_ctrl.final_servo_enter_p10_m - 0.45) < 1e-9
-    assert abs(loaded_ctrl.edge_final_enter_margin_m - 0.05) < 1e-9
+    assert abs(loaded_ctrl.edge_final_enter_margin_m - 0.06) < 1e-9
     assert abs(loaded_ctrl.edge_final_stop_margin_m - 0.02) < 1e-9
     assert abs(loaded_ctrl.close_range_enter_p10_m - 0.55) < 1e-9
     assert abs(loaded_ctrl.close_range_probe_vx_mps - 0.004) < 1e-9
@@ -156,7 +158,7 @@ table_docking:
     assert loaded_ctrl.yaw_flip_count_limit == 2
     assert abs(loaded_ctrl.yaw_ambiguous_wz_cap - 0.0) < 1e-9
     assert abs(loaded_ctrl.yaw_ambiguous_vy_boost - 1.5) < 1e-9
-    assert abs(loaded_ctrl.final_dist_deadband_m - 0.04) < 1e-9
+    assert abs(loaded_ctrl.final_dist_deadband_m - 0.03) < 1e-9
     assert abs(loaded_ctrl.final_dist_kp - 0.08) < 1e-9
     assert abs(loaded_ctrl.final_forward_vx_max_mps - 0.006) < 1e-9
     assert abs(loaded_ctrl.final_reverse_vx_max_mps - 0.004) < 1e-9
@@ -952,6 +954,23 @@ table_docking:
     dec = edge_guided_decision(p_approach, obs_app)
     assert p_approach.ctx.state == State.NO_PROGRESS_RECOVERY
     assert dec.control_summary["progress_recovery_allowed"]
+
+    # Close/final latch blocks no-progress recovery even when forward probe is
+    # slow and distance does not decrease.
+    p_final_progress = DockingProbe()
+    p_final_progress.force_edge_guided = True
+    p_final_progress.ctx.edge_handoff_complete = True
+    p_final_progress.ctx.control_phase = "EDGE_GUIDED_APPROACH"
+    p_final_progress.ctx.dist_progress_last_refreshed_mono = monotonic_ts() - 20.0
+    obs_final_progress = bbox_obs(0.50)
+    obs_final_progress.table_roi_depth_valid = True
+    obs_final_progress.table_roi_depth_p10 = 0.54
+    obs_final_progress.table_roi_depth_median = 0.54
+    dec = edge_guided_decision(p_final_progress, obs_final_progress)
+    assert p_final_progress.ctx.state != State.NO_PROGRESS_RECOVERY
+    assert dec.control_summary["close_range_latched"]
+    assert dec.control_summary["progress_recovery_allowed"] is False
+    assert dec.control_summary["progress_recovery_block_reason"] in {"final_or_close_range_latched", "final_vx_zero_or_non_edge_phase"}
 
     class RecoveryProbe(RecoveryMixin, TableDockingMixin):
         def __init__(self, *, multi_table_enabled: bool):
@@ -2044,7 +2063,7 @@ table_docking:
     for _ in range(3):
         obs_s4 = TableEdgeObs.from_dict({
             "ts": now_ts(), "table_found": True, "edge_found": True, "edge_valid": True, "edge_trusted": True,
-            "table_bbox_control_valid": True, "yaw_err_rad": 0.15, "dist_err_m": 0.20, "table_roi_depth_valid": True, "table_roi_depth_p10": 0.20,
+            "table_bbox_control_valid": True, "yaw_err_rad": 0.15, "target_dist_m": 0.30, "dist_err_m": 0.0, "table_roi_depth_valid": True, "table_roi_depth_p10": 0.20,
         })
         dec_s4 = edge_guided_decision(probe_smoke, obs_s4)
     assert probe_smoke.ctx.final_depth_latched is True
@@ -2056,7 +2075,7 @@ table_docking:
     for _ in range(6):
         obs_s5 = TableEdgeObs.from_dict({
             "ts": now_ts(), "table_found": True, "edge_found": True, "edge_valid": True, "edge_trusted": True,
-            "table_bbox_control_valid": True, "yaw_err_rad": 0.05, "dist_err_m": 0.20, "table_roi_depth_valid": True, "table_roi_depth_p10": 0.20,
+            "table_bbox_control_valid": True, "yaw_err_rad": 0.05, "target_dist_m": 0.30, "dist_err_m": 0.0, "table_roi_depth_valid": True, "table_roi_depth_p10": 0.20,
         })
         dec_s5 = edge_guided_decision(probe_smoke, obs_s5)
     assert probe_smoke.ctx.final_locked is True

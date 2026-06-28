@@ -1432,7 +1432,7 @@ class TableDockingMixin:
             "bbox_track_forward_max_wz_radps": float(getattr(self.cfg, "bbox_track_forward_max_wz_radps", 0.200) or 0.200),
             "near_slow_max_vx_mps": float(getattr(self.cfg, "near_slow_max_vx_mps", 0.030) or 0.030),
             "final_servo_enter_p10_m": float(getattr(self.cfg, "final_servo_enter_p10_m", 0.45) or 0.45),
-            "edge_final_enter_margin_m": float(getattr(self.cfg, "edge_final_enter_margin_m", 0.05) or 0.05),
+            "edge_final_enter_margin_m": float(getattr(self.cfg, "edge_final_enter_margin_m", 0.06) or 0.06),
             "edge_final_stop_margin_m": float(getattr(self.cfg, "edge_final_stop_margin_m", 0.02) or 0.02),
             "close_range_enter_p10_m": float(getattr(self.cfg, "close_range_enter_p10_m", 0.55) or 0.55),
             "close_range_probe_vx_mps": float(getattr(self.cfg, "close_range_probe_vx_mps", 0.004) or 0.004),
@@ -1463,7 +1463,7 @@ class TableDockingMixin:
             "lateral_priority_large_error_norm": float(getattr(self.cfg, "lateral_priority_large_error_norm", 0.18) or 0.18),
             "lateral_priority_mid_vx_cap_mps": float(getattr(self.cfg, "lateral_priority_mid_vx_cap_mps", 0.080) or 0.080),
             "lateral_priority_vx_cap_mps": float(getattr(self.cfg, "lateral_priority_vx_cap_mps", 0.040) or 0.040),
-            "final_dist_deadband_m": float(getattr(self.cfg, "final_dist_deadband_m", 0.04) or 0.04),
+            "final_dist_deadband_m": float(getattr(self.cfg, "final_dist_deadband_m", 0.03) or 0.03),
             "final_dist_kp": float(getattr(self.cfg, "final_dist_kp", 0.08) or 0.08),
             "final_forward_vx_max_mps": float(getattr(self.cfg, "final_forward_vx_max_mps", 0.006) or 0.006),
             "final_reverse_vx_max_mps": float(getattr(self.cfg, "final_reverse_vx_max_mps", 0.004) or 0.004),
@@ -1553,8 +1553,29 @@ class TableDockingMixin:
         else:
             self.ctx.zero_cmd_started_mono = 0.0
 
+        final_mode_active = bool(
+            summary.get("close_range_latched")
+            or summary.get("final_edge_mode_latched")
+            or summary.get("final_roi_mode_latched")
+            or summary.get("final_distance_servo_active")
+            or summary.get("final_locked")
+            or getattr(self.ctx, "final_locked", False)
+        )
         # Check progress only after the final authority gate has retained forward motion.
-        if phase == "EDGE_GUIDED_APPROACH" and decision.cmd.vx_mps > 0.0:
+        if final_mode_active:
+            self.ctx.min_dist_seen = 999.0
+            self.ctx.dist_progress_last_refreshed_mono = 0.0
+            self.ctx.dist_missing_started_mono = 0.0
+            summary.update({
+                "progress_window_ms": float(getattr(self.cfg, "progress_window_ms", 15000.0) or 15000.0),
+                "min_progress_m": float(getattr(self.cfg, "min_progress_m", 0.010) or 0.010),
+                "no_progress_warning": False,
+                "no_progress_elapsed_ms": 0.0,
+                "no_progress_policy": "final_hold_no_recovery",
+                "progress_recovery_allowed": False,
+                "progress_recovery_block_reason": "final_or_close_range_latched",
+            })
+        elif phase == "EDGE_GUIDED_APPROACH" and decision.cmd.vx_mps > 0.0:
             progress_timeout = self._check_approach_progress(obs)
             progress_status = dict(getattr(self, "_last_approach_progress_status", {}) or {})
             summary.update(progress_status)

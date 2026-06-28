@@ -500,23 +500,12 @@ def arbitrate_table_docking_motion(
     except (TypeError, ValueError):
         roi_depth_m = None
     final_servo_enter_p10 = _float(summary, "final_servo_enter_p10_m", 0.45)
-    final_roi_enter = bool(
+    final_roi_enter_candidate = bool(
         bool(summary.get("near_table_latched", False) or getattr(ctx, "near_table_latched", False))
         and roi_depth_valid
         and roi_depth_m is not None
         and roi_depth_m <= final_servo_enter_p10
     )
-    final_roi_mode_latched = bool(summary.get("final_roi_mode_latched", False) or getattr(ctx, "final_roi_mode_latched", False) or final_roi_enter)
-    if final_roi_mode_latched:
-        try:
-            if not bool(getattr(ctx, "final_roi_mode_latched", False)):
-                ctx.final_roi_mode_since_mono = now_mono
-            ctx.final_roi_mode_latched = True
-            if roi_depth_valid and roi_depth_m is not None:
-                ctx.final_roi_last_valid_mono = now_mono
-        except Exception:
-            pass
-    summary["final_roi_mode_latched"] = bool(final_roi_mode_latched)
 
     def obs_target_dist_m() -> float:
         ctrl_target = _float(summary, "table_target_dist_m", 0.30)
@@ -552,7 +541,19 @@ def arbitrate_table_docking_motion(
         or docking_obs.edge_valid
         or docking_obs.edge_trusted
     )
-    edge_final_enter_margin = _float(summary, "edge_final_enter_margin_m", 0.05)
+    final_roi_enter = bool(final_roi_enter_candidate and not edge_ready_for_final)
+    final_roi_mode_latched = bool(summary.get("final_roi_mode_latched", False) or getattr(ctx, "final_roi_mode_latched", False) or final_roi_enter)
+    if final_roi_mode_latched:
+        try:
+            if not bool(getattr(ctx, "final_roi_mode_latched", False)):
+                ctx.final_roi_mode_since_mono = now_mono
+            ctx.final_roi_mode_latched = True
+            if roi_depth_valid and roi_depth_m is not None:
+                ctx.final_roi_last_valid_mono = now_mono
+        except Exception:
+            pass
+    summary["final_roi_mode_latched"] = bool(final_roi_mode_latched)
+    edge_final_enter_margin = _float(summary, "edge_final_enter_margin_m", 0.06)
     edge_final_stop_margin = _float(summary, "edge_final_stop_margin_m", 0.02)
     edge_final_dist_reached = bool(
         edge_ready_for_final
@@ -566,6 +567,14 @@ def arbitrate_table_docking_motion(
         and edge_final_dist_err is not None
         and float(edge_final_dist_err) <= edge_final_stop_margin
     )
+    try:
+        if edge_final_stop_reached:
+            ctx.edge_final_stop_stable_count = int(getattr(ctx, "edge_final_stop_stable_count", 0) or 0) + 1
+        else:
+            ctx.edge_final_stop_stable_count = 0
+    except Exception:
+        pass
+    edge_final_stop_stable = bool(edge_final_stop_reached and int(getattr(ctx, "edge_final_stop_stable_count", 0) or 0) >= 2)
     final_edge_mode_latched = bool(summary.get("final_edge_mode_latched", False) or getattr(ctx, "final_edge_mode_latched", False) or edge_final_dist_reached)
     close_range_enter_p10 = _float(summary, "close_range_enter_p10_m", 0.55)
     close_range_depth_reached = bool(roi_depth_valid and roi_depth_m is not None and roi_depth_m <= close_range_enter_p10)
@@ -601,6 +610,7 @@ def arbitrate_table_docking_motion(
             "final_dist_err_m": float(edge_final_dist_err) if edge_final_dist_err is not None else None,
             "table_target_dist_m": float(_float(summary, "table_target_dist_m", 0.30)),
             "obs_target_dist_m": float(obs_target_dist_m()),
+            "obs_dist_err_m": float(docking_obs.dist_err_m) if docking_obs.dist_err_m is not None else None,
         }
     )
 
@@ -803,7 +813,7 @@ def arbitrate_table_docking_motion(
                 "obs_target_dist_m": float(obs_target_dist_m()),
             }
         dist_err = float(dist_err)
-        deadband = abs(_float(summary, "final_dist_deadband_m", _float(summary, "final_lock_dist_tol_m", 0.04)))
+        deadband = abs(_float(summary, "final_dist_deadband_m", _float(summary, "final_lock_dist_tol_m", 0.03)))
         kp = max(0.0, _float(summary, "final_dist_kp", 0.08))
         fwd_cap = abs(_float(summary, "final_forward_vx_max_mps", 0.006))
         rev_cap = abs(_float(summary, "final_reverse_vx_max_mps", 0.004))
@@ -855,22 +865,43 @@ def arbitrate_table_docking_motion(
             except Exception:
                 pass
             if roi_depth_m <= stop_p10:
-                vx = 0.0
-                reason = "roi_p10_stop"
-                stage = DockingStage.FINAL_LOCKED
                 try:
-                    ctx.final_locked = True
+                    ctx.roi_final_stop_stable_count = int(getattr(ctx, "roi_final_stop_stable_count", 0) or 0) + 1
                 except Exception:
                     pass
+                if int(getattr(ctx, "roi_final_stop_stable_count", 0) or 0) >= 2:
+                    vx = 0.0
+                    reason = "roi_p10_stop"
+                    stage = DockingStage.FINAL_LOCKED
+                    try:
+                        ctx.final_locked = True
+                    except Exception:
+                        pass
+                else:
+                    vx = probe_vx
+                    reason = "roi_p10_stop_confirming"
+                    stage = DockingStage.FINAL_DISTANCE_HOLD
             elif roi_depth_m <= slow_p10:
+                try:
+                    ctx.roi_final_stop_stable_count = 0
+                except Exception:
+                    pass
                 vx = probe_vx
                 reason = "roi_p10_slow_probe"
                 stage = DockingStage.FINAL_DISTANCE_HOLD
             else:
+                try:
+                    ctx.roi_final_stop_stable_count = 0
+                except Exception:
+                    pass
                 vx = probe_vx
                 reason = "roi_p10_probe"
                 stage = DockingStage.FINAL_DISTANCE_HOLD
         else:
+            try:
+                ctx.roi_final_stop_stable_count = 0
+            except Exception:
+                pass
             roi_missing_age_s = max(0.0, now_mono - (last_valid if last_valid > 0.0 else since))
             if roi_missing_age_s <= missing_hold_s:
                 vx = missing_probe_vx
@@ -915,7 +946,7 @@ def arbitrate_table_docking_motion(
         )
 
     def final_edge_mode_result() -> ArbitrationResult:
-        if edge_final_stop_reached:
+        if edge_final_stop_stable:
             try:
                 ctx.final_locked = True
             except Exception:
@@ -948,7 +979,72 @@ def arbitrate_table_docking_motion(
                 blocked_by="edge_final_dist_stop",
                 reason="edge_final_dist_stop",
             )
+        if edge_final_stop_reached:
+            return _docking_result(
+                action=DockingAction.FINAL_LOCKED_STOP,
+                stage=DockingStage.FINAL_DISTANCE_HOLD,
+                summary=with_common(
+                    {
+                        "final_edge_mode_latched": True,
+                        "close_range_latched": True,
+                        "edge_final_dist_reached": True,
+                        "final_locked": False,
+                        "final_lock_reason": "",
+                        "measured_dist_m": float(edge_measured_dist) if edge_measured_dist is not None else None,
+                        "measured_dist_source": edge_measured_source,
+                        "final_dist_err_m": float(edge_final_dist_err) if edge_final_dist_err is not None else None,
+                        "table_target_dist_m": float(_float(summary, "table_target_dist_m", 0.30)),
+                        "obs_target_dist_m": float(obs_target_dist_m()),
+                        "yaw_owner": "none",
+                        "lateral_owner": "none",
+                        "forward_block_reason": "edge_final_dist_stop_confirming",
+                    }
+                ),
+                vx=0.0,
+                vy=0.0,
+                wz=0.0,
+                yaw_owner="none",
+                lateral_owner="none",
+                blocked_by="edge_final_dist_stop_confirming",
+                reason="edge_final_dist_stop_confirming",
+            )
         servo_vx, servo_reason, servo_summary = final_distance_servo()
+        try:
+            if servo_reason == "final_distance_servo_hold" and edge_measured_source == "edge":
+                ctx.final_servo_hold_stable_count = int(getattr(ctx, "final_servo_hold_stable_count", 0) or 0) + 1
+            else:
+                ctx.final_servo_hold_stable_count = 0
+        except Exception:
+            pass
+        if servo_reason == "final_distance_servo_hold" and int(getattr(ctx, "final_servo_hold_stable_count", 0) or 0) >= 2:
+            try:
+                ctx.final_locked = True
+            except Exception:
+                pass
+            return _docking_result(
+                action=DockingAction.FINAL_LOCKED_STOP,
+                stage=DockingStage.FINAL_LOCKED,
+                summary=with_common(
+                    {
+                        **servo_summary,
+                        "final_edge_mode_latched": True,
+                        "close_range_latched": True,
+                        "edge_final_dist_reached": bool(edge_final_dist_reached),
+                        "final_locked": True,
+                        "final_lock_reason": "final_distance_servo_hold_stable",
+                        "yaw_owner": "none",
+                        "lateral_owner": "none",
+                        "forward_block_reason": "final_distance_servo_hold_stable",
+                    }
+                ),
+                vx=0.0,
+                vy=0.0,
+                wz=0.0,
+                yaw_owner="none",
+                lateral_owner="none",
+                blocked_by="final_distance_servo_hold_stable",
+                reason="final_distance_servo_hold_stable",
+            )
         return _docking_result(
             action=DockingAction.FINAL_LOCKED_STOP,
             stage=DockingStage.FINAL_DISTANCE_HOLD,
@@ -976,24 +1072,44 @@ def arbitrate_table_docking_motion(
         )
 
     def close_range_mode_result() -> ArbitrationResult:
+        if edge_ready_for_final and edge_measured_source == "edge" and edge_final_dist_err is not None:
+            return final_edge_mode_result()
         stop_p10 = _float(summary, "roi_final_stop_p10_m", 0.42)
         probe_vx = abs(_float(summary, "close_range_probe_vx_mps", 0.004))
         missing_probe_vx = abs(_float(summary, "close_range_missing_probe_vx_mps", 0.002))
         if roi_depth_valid and roi_depth_m is not None and roi_depth_m <= stop_p10:
             try:
-                ctx.final_locked = True
+                ctx.roi_final_stop_stable_count = int(getattr(ctx, "roi_final_stop_stable_count", 0) or 0) + 1
             except Exception:
                 pass
-            vx = 0.0
-            reason = "roi_p10_stop"
-            stage = DockingStage.FINAL_LOCKED
-            final_locked_summary = True
+            if int(getattr(ctx, "roi_final_stop_stable_count", 0) or 0) >= 2:
+                try:
+                    ctx.final_locked = True
+                except Exception:
+                    pass
+                vx = 0.0
+                reason = "roi_p10_stop"
+                stage = DockingStage.FINAL_LOCKED
+                final_locked_summary = True
+            else:
+                vx = probe_vx
+                reason = "roi_p10_stop_confirming"
+                stage = DockingStage.FINAL_DISTANCE_HOLD
+                final_locked_summary = False
         elif roi_depth_valid and roi_depth_m is not None:
+            try:
+                ctx.roi_final_stop_stable_count = 0
+            except Exception:
+                pass
             vx = probe_vx
             reason = "close_range_p10_probe"
             stage = DockingStage.FINAL_DISTANCE_HOLD
             final_locked_summary = False
         else:
+            try:
+                ctx.roi_final_stop_stable_count = 0
+            except Exception:
+                pass
             vx = missing_probe_vx
             reason = "close_range_missing_probe"
             stage = DockingStage.FINAL_DISTANCE_HOLD
@@ -1082,11 +1198,14 @@ def arbitrate_table_docking_motion(
             reason="final_locked_hold",
         )
 
-    if final_roi_mode_latched:
-        return final_roi_mode_result()
-
     if final_edge_mode_latched:
         return final_edge_mode_result()
+
+    if edge_ready_for_final and edge_measured_source == "edge" and (final_roi_mode_latched or close_range_latched):
+        return final_edge_mode_result()
+
+    if final_roi_mode_latched:
+        return final_roi_mode_result()
 
     if close_range_latched:
         return close_range_mode_result()
@@ -1301,6 +1420,8 @@ def arbitrate_table_docking_motion(
         )
     if edge_block in {"bbox_fov_guard_hard", "edge_yaw_too_large"}:
         wz = bbox_recovery_wz() if edge_block == "bbox_fov_guard_hard" else _float(summary, "edge_yaw_cmd", _float(summary, "wz_from_plane", desired_wz))
+        if edge_block == "edge_yaw_too_large" and abs(wz) <= 1e-9:
+            wz = _search_wz(ctx, summary)
         action = DockingAction.SEARCH_ROTATE if state == "SEARCH_TABLE" else (
             DockingAction.BBOX_REACQUIRE_ROTATE if edge_block == "bbox_fov_guard_hard" else DockingAction.SEARCH_ROTATE
         )
@@ -1421,6 +1542,8 @@ def arbitrate_table_docking_motion(
             )
         if edge_yaw_abs > _float(summary, "edge_forward_rotate_only_yaw_rad", 0.18):
             wz = _float(summary, "edge_yaw_cmd", _float(summary, "wz_from_plane", desired_wz))
+            if abs(wz) <= 1e-9:
+                wz = _search_wz(ctx, summary)
             return _docking_result(
                 action=DockingAction.SEARCH_ROTATE,
                 stage=DockingStage.RECOVERY_ROTATE,

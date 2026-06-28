@@ -45,7 +45,7 @@ def collect() -> tuple[Dict[str, Dict[str, Any]], list[str]]:
     _record(values, "speed", "near_slow_max_vx_mps", control, "near_slow_max_vx_mps", 0.03)
     _record(values, "speed", "near_slow_max_wz_radps", control, "near_slow_max_wz_radps", 0.04)
     _record(values, "speed", "final_servo_enter_p10_m", control, "final_servo_enter_p10_m", 0.45)
-    _record(values, "speed", "edge_final_enter_margin_m", control, "edge_final_enter_margin_m", 0.05)
+    _record(values, "speed", "edge_final_enter_margin_m", control, "edge_final_enter_margin_m", 0.06)
     _record(values, "speed", "edge_final_stop_margin_m", control, "edge_final_stop_margin_m", 0.02)
     _record(values, "speed", "close_range_enter_p10_m", control, "close_range_enter_p10_m", 0.55)
     _record(values, "speed", "close_range_probe_vx_mps", control, "close_range_probe_vx_mps", 0.004)
@@ -66,7 +66,7 @@ def collect() -> tuple[Dict[str, Dict[str, Any]], list[str]]:
 
     for key, fallback in (
         ("table_target_dist_m", 0.30),
-        ("final_dist_deadband_m", 0.04),
+        ("final_dist_deadband_m", 0.03),
         ("final_dist_kp", 0.08),
         ("final_forward_vx_max_mps", 0.006),
         ("final_reverse_vx_max_mps", 0.004),

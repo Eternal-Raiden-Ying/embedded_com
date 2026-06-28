@@ -171,7 +171,7 @@ class ControlThresholds:
     near_slow_max_vy_mps: float = 0.030
     near_slow_max_wz_radps: float = 0.04
     final_servo_enter_p10_m: float = 0.45
-    edge_final_enter_margin_m: float = 0.05
+    edge_final_enter_margin_m: float = 0.06
     edge_final_stop_margin_m: float = 0.02
     close_range_enter_p10_m: float = 0.55
     close_range_probe_vx_mps: float = 0.004
@@ -227,7 +227,7 @@ class ControlThresholds:
     yaw_flip_count_limit: int = 2
     yaw_ambiguous_wz_cap: float = 0.0
     yaw_ambiguous_vy_boost: float = 1.5
-    final_dist_deadband_m: float = 0.040
+    final_dist_deadband_m: float = 0.030
     final_dist_kp: float = 0.080
     final_forward_vx_max_mps: float = 0.006
     final_reverse_vx_max_mps: float = 0.004

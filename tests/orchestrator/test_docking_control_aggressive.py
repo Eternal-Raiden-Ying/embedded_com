@@ -21,7 +21,7 @@ def _base_summary(**extra):
         "bbox_track_forward_max_wz_radps": 0.20,
         "table_target_dist_m": 0.30,
         "final_servo_enter_p10_m": 0.45,
-        "edge_final_enter_margin_m": 0.05,
+        "edge_final_enter_margin_m": 0.06,
         "edge_final_stop_margin_m": 0.02,
         "close_range_enter_p10_m": 0.55,
         "close_range_probe_vx_mps": 0.004,
@@ -119,7 +119,7 @@ def test_final_reverse_requires_confirmation_and_locked_stops():
         control_phase="DEPTH_FINAL_STOP",
         final_depth_latched=True,
         dist_err_m=-0.10,
-        final_dist_deadband_m=0.04,
+        final_dist_deadband_m=0.03,
         final_dist_kp=0.08,
         final_forward_vx_max_mps=0.006,
         final_reverse_vx_max_mps=0.004,
@@ -150,7 +150,7 @@ def test_final_distance_error_uses_observation_target_then_control_target():
             final_depth_latched=True,
             target_dist_m=0.50,
             dist_err_m=-0.10,
-            final_dist_deadband_m=0.04,
+            final_dist_deadband_m=0.03,
             final_forward_vx_max_mps=0.006,
         ),
     )
@@ -161,7 +161,7 @@ def test_final_distance_error_uses_observation_target_then_control_target():
     assert result.final_vx > 0.0
 
 
-def test_near_p10_enters_final_roi_stop_instead_of_near_forward():
+def test_near_p10_enters_close_range_but_edge_remains_priority_when_usable():
     result = arbitrate_table_docking_motion(
         RuntimeContext(state=State.YOLO_APPROACH),
         None,
@@ -178,11 +178,12 @@ def test_near_p10_enters_final_roi_stop_instead_of_near_forward():
         ),
     )
     assert result.summary["docking_action"] == "FINAL_LOCKED_STOP"
-    assert result.summary["final_roi_mode_latched"] is True
-    assert result.summary["final_roi_reason"] == "roi_p10_stop"
+    assert result.summary["close_range_latched"] is True
+    assert result.summary["final_roi_mode_latched"] is False
+    assert result.summary["measured_dist_source"] == "edge"
     assert result.final_vy == 0.0
     assert result.final_wz == 0.0
-    assert result.final_vx == 0.0
+    assert 0.0 <= result.final_vx <= 0.006
 
 
 def test_depth_envelope_and_lateral_priority_caps_forward_speed_but_keeps_vy():
@@ -278,9 +279,25 @@ def test_final_roi_latch_stops_on_p10_and_disables_yaw():
         _base_summary(
             control_phase="EDGE_GUIDED_APPROACH",
             final_roi_mode_latched=True,
-            edge_found=True,
-            edge_valid=True,
-            usable_for_approach=True,
+            edge_found=False,
+            edge_valid=False,
+            usable_for_approach=False,
+            table_roi_depth_valid=True,
+            table_roi_depth_p10=0.39,
+            yaw_err_rad=0.30,
+        ),
+    )
+    assert stopped.summary["final_roi_reason"] == "roi_p10_stop_confirming"
+    stopped = arbitrate_table_docking_motion(
+        ctx,
+        None,
+        intent,
+        _base_summary(
+            control_phase="EDGE_GUIDED_APPROACH",
+            final_roi_mode_latched=True,
+            edge_found=False,
+            edge_valid=False,
+            usable_for_approach=False,
             table_roi_depth_valid=True,
             table_roi_depth_p10=0.39,
             yaw_err_rad=0.30,
@@ -363,9 +380,10 @@ def test_final_roi_probe_and_roi_missing_hold_do_not_return_to_near_or_rotate():
 
 
 def test_edge_final_latch_and_stop_use_measured_minus_control_target():
+    ctx = RuntimeContext(state=State.YOLO_APPROACH)
     intent = MotionIntent("edge_guided_forward", desired_vx=0.20, desired_wz=0.15, yaw_owner="edge", forward_allowed_by_behavior=True)
     enter = arbitrate_table_docking_motion(
-        RuntimeContext(state=State.YOLO_APPROACH),
+        ctx,
         None,
         intent,
         _base_summary(
@@ -388,7 +406,22 @@ def test_edge_final_latch_and_stop_use_measured_minus_control_target():
     assert enter.final_wz == 0.0
 
     stop = arbitrate_table_docking_motion(
-        RuntimeContext(state=State.YOLO_APPROACH),
+        ctx,
+        None,
+        intent,
+        _base_summary(
+            control_phase="EDGE_GUIDED_APPROACH",
+            edge_found=True,
+            edge_valid=True,
+            usable_for_approach=True,
+            target_dist_m=0.50,
+            dist_err_m=-0.181,
+            yaw_err_rad=0.30,
+        ),
+    )
+    assert stop.reason == "edge_final_dist_stop_confirming"
+    stop = arbitrate_table_docking_motion(
+        ctx,
         None,
         intent,
         _base_summary(
@@ -470,3 +503,29 @@ def test_final_locked_hold_outranks_roi_missing_probe():
     assert result.final_vx == 0.0
     assert result.final_vy == 0.0
     assert result.final_wz == 0.0
+
+
+def test_non_final_edge_yaw_large_never_outputs_all_zero():
+    result = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("edge_guided_forward", desired_vx=0.0, desired_wz=0.0, yaw_owner="edge", forward_allowed_by_behavior=True),
+        _base_summary(
+            control_phase="EDGE_GUIDED_APPROACH",
+            edge_found=True,
+            edge_valid=True,
+            usable_for_approach=True,
+            edge_readiness_score=1.0,
+            edge_readiness_enter_score=0.65,
+            yaw_err_rad=0.30,
+            edge_yaw=0.30,
+            edge_forward_rotate_only_yaw_rad=0.18,
+            search_wz_radps=0.20,
+            table_roi_depth_valid=True,
+            table_roi_depth_p10=1.20,
+        ),
+    )
+    assert result.summary["docking_action"] == "SEARCH_ROTATE"
+    assert result.final_vx == 0.0
+    assert result.final_vy == 0.0
+    assert abs(result.final_wz) >= 0.20
