@@ -850,6 +850,30 @@ class TableDockingMixin:
 
     def _bbox_lost_hold_or_search(self, obs: Optional[TableEdgeObs], mode: str) -> MotionDecision:
         """Hold table docking state before clearing handoff/searching for bbox loss."""
+        is_locked = bool(getattr(self.ctx, "final_locked", False))
+        is_probe = bool(
+            getattr(self.ctx, "close_range_latched", False)
+            or getattr(self.ctx, "final_edge_mode_latched", False)
+            or getattr(self.ctx, "final_roi_mode_latched", False)
+            or getattr(self.ctx, "final_distance_servo_active", False)
+            or getattr(self.ctx, "final_depth_latched", False)
+        )
+        if is_probe or is_locked:
+            cmd = self.controller._cmd(mode, vx=0.0, wz=0.0)
+            decision = MotionDecision(
+                cmd=cmd,
+                control_summary=self.controller._summary(mode, cmd, obs, reason="final_probe_without_bbox")
+            )
+            decision.control_summary.update({
+                "close_range_latched": bool(getattr(self.ctx, "close_range_latched", False)),
+                "final_edge_mode_latched": bool(getattr(self.ctx, "final_edge_mode_latched", False)),
+                "final_roi_mode_latched": bool(getattr(self.ctx, "final_roi_mode_latched", False)),
+                "final_distance_servo_active": bool(getattr(self.ctx, "final_distance_servo_active", False)),
+                "final_depth_latched": bool(getattr(self.ctx, "final_depth_latched", False)),
+                "final_locked": is_locked,
+            })
+            return self._arbitrate_table_motion_decision(decision, obs)
+
         if bool(getattr(self.ctx, "near_table_latched", False) or getattr(self.ctx, "final_depth_latched", False)):
             wz = 0.0
             yaw_source = "hold"
@@ -952,8 +976,24 @@ class TableDockingMixin:
         self.ctx.bbox_valid_streak = 0
         self.ctx.bbox_centered_streak = 0
         self.ctx.edge_trusted_streak = 0
-        if bool(getattr(self.ctx, "final_locked", False)) or bool(getattr(self.ctx, "final_depth_latched", False)):
-            return self.controller.stop_cmd("FINAL_LOCKED_STOP", brake=True)
+        is_locked = bool(getattr(self.ctx, "final_locked", False))
+        is_probe = bool(
+            getattr(self.ctx, "close_range_latched", False)
+            or getattr(self.ctx, "final_edge_mode_latched", False)
+            or getattr(self.ctx, "final_roi_mode_latched", False)
+            or getattr(self.ctx, "final_distance_servo_active", False)
+            or getattr(self.ctx, "final_depth_latched", False)
+        )
+        if is_locked or is_probe:
+            if is_locked:
+                return self.controller.stop_cmd("FINAL_LOCKED_STOP", brake=True)
+            else:
+                cmd = self.controller._cmd(mode, vx=0.0, wz=0.0)
+                decision = MotionDecision(
+                    cmd=cmd,
+                    control_summary=self.controller._summary(mode, cmd, obs, reason="final_probe_expired_fallback")
+                )
+                return self._arbitrate_table_motion_decision(decision, obs)
         self._transition(State.SEARCH_TABLE, f"{mode} bbox lost hold expired")
         return self.controller.search_table_cmd(*self._get_memory_search_params())
 
@@ -1510,7 +1550,20 @@ class TableDockingMixin:
         })
         summary["authority_applied"] = True
         summary["mode"] = str(decision.cmd.mode)
-        if not auth.allow_forward and abs(float(decision.cmd.vx_mps)) > 1e-9:
+        is_locked = bool(summary.get("final_locked", False) or getattr(self.ctx, "final_locked", False))
+        is_close_range = bool(summary.get("close_range_latched", False) or getattr(self.ctx, "close_range_latched", False))
+        is_final_servo = bool(summary.get("final_distance_servo_active", False) or getattr(self.ctx, "final_distance_servo_active", False))
+        docking_action = str(summary.get("docking_action") or "")
+        is_probe = bool(
+            (is_close_range and not is_locked)
+            or (is_final_servo and not is_locked)
+            or (docking_action in {"CLOSE_RANGE_PROBE", "FINAL_SLOW_PROBE"})
+        )
+        if is_probe:
+            summary["allow_forward"] = True
+
+        allow_forward_val = bool(summary.get("allow_forward", auth.allow_forward))
+        if not allow_forward_val and abs(float(decision.cmd.vx_mps)) > 1e-9:
             decision.cmd.vx_mps = 0.0
         if not auth.allow_rotate and abs(float(decision.cmd.wz_radps)) > 1e-9:
             decision.cmd.wz_radps = 0.0

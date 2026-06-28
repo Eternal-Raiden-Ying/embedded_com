@@ -40,6 +40,8 @@ class DockingAction(str, Enum):
     PERCEPTION_DROPOUT_HOLD = "PERCEPTION_DROPOUT_HOLD"
     FINAL_YAW_ALIGN = "FINAL_YAW_ALIGN"
     FINAL_LOCKED_STOP = "FINAL_LOCKED_STOP"
+    CLOSE_RANGE_PROBE = "CLOSE_RANGE_PROBE"
+    FINAL_SLOW_PROBE = "FINAL_SLOW_PROBE"
     CONTROL_RECOVERY_ROTATE = "CONTROL_RECOVERY_ROTATE"
     SAFETY_STOP = "SAFETY_STOP"
     EMERGENCY_STOP = "EMERGENCY_STOP"
@@ -370,6 +372,8 @@ class DockingMotionResult:
             DockingAction.PERCEPTION_DROPOUT_HOLD: (yaw or "edge_hold", "approach_commit", "none"),
             DockingAction.FINAL_YAW_ALIGN: (yaw or "last_good_edge", "none", "none"),
             DockingAction.FINAL_LOCKED_STOP: ("none", "none", "none"),
+            DockingAction.CLOSE_RANGE_PROBE: ("none", "close_range_probe", "none"),
+            DockingAction.FINAL_SLOW_PROBE: ("none", "final_edge_servo", "none"),
             DockingAction.CONTROL_RECOVERY_ROTATE: (yaw or "bbox", "none", "none"),
             DockingAction.SAFETY_STOP: ("none", "none", "none"),
             DockingAction.EMERGENCY_STOP: ("none", "none", "none"),

@@ -177,7 +177,7 @@ def test_near_p10_enters_close_range_but_edge_remains_priority_when_usable():
             dist_err_m=0.12,
         ),
     )
-    assert result.summary["docking_action"] == "FINAL_LOCKED_STOP"
+    assert result.summary["docking_action"] == "FINAL_SLOW_PROBE"
     assert result.summary["close_range_latched"] is True
     assert result.summary["final_roi_mode_latched"] is False
     assert result.summary["measured_dist_source"] == "edge"
@@ -338,7 +338,7 @@ def test_final_roi_probe_and_roi_missing_hold_do_not_return_to_near_or_rotate():
     assert 0.0 < probe.final_vx <= 0.004
     assert probe.final_vy == 0.0
     assert probe.final_wz == 0.0
-    assert probe.summary["docking_action"] == "FINAL_LOCKED_STOP"
+    assert probe.summary["docking_action"] == "CLOSE_RANGE_PROBE"
 
     ctx.final_roi_last_valid_mono = 0.0
     ctx.final_roi_mode_since_mono = 0.0
@@ -376,7 +376,7 @@ def test_final_roi_probe_and_roi_missing_hold_do_not_return_to_near_or_rotate():
     assert missing_long.final_vx == 0.0
     assert missing_long.final_vy == 0.0
     assert missing_long.final_wz == 0.0
-    assert missing_long.summary["docking_action"] == "FINAL_LOCKED_STOP"
+    assert missing_long.summary["docking_action"] == "CLOSE_RANGE_PROBE"
 
 
 def test_edge_final_latch_and_stop_use_measured_minus_control_target():
@@ -400,7 +400,7 @@ def test_edge_final_latch_and_stop_use_measured_minus_control_target():
     assert enter.summary["close_range_latched"] is True
     assert abs(enter.summary["measured_dist_m"] - 0.35) < 1e-9
     assert abs(enter.summary["final_dist_err_m"] - 0.05) < 1e-9
-    assert enter.summary["docking_action"] == "FINAL_LOCKED_STOP"
+    assert enter.summary["docking_action"] == "FINAL_SLOW_PROBE"
     assert 0.0 <= enter.final_vx <= 0.006
     assert enter.final_vy == 0.0
     assert enter.final_wz == 0.0
@@ -458,7 +458,7 @@ def test_close_range_latch_blocks_bbox_forward_and_recovery_rotate():
         ),
     )
     assert close.summary["close_range_latched"] is True
-    assert close.summary["docking_action"] == "FINAL_LOCKED_STOP"
+    assert close.summary["docking_action"] == "CLOSE_RANGE_PROBE"
     assert close.summary["docking_action"] not in {"BBOX_TRACK_FORWARD", "BBOX_REACQUIRE_ROTATE", "SEARCH_ROTATE", "CONTROL_RECOVERY_ROTATE"}
     assert 0.0 < close.final_vx <= 0.004
     assert close.final_vy == 0.0
@@ -478,7 +478,7 @@ def test_close_range_latch_blocks_bbox_forward_and_recovery_rotate():
         ),
     )
     assert latched.summary["close_range_latched"] is True
-    assert latched.summary["docking_action"] == "FINAL_LOCKED_STOP"
+    assert latched.summary["docking_action"] == "CLOSE_RANGE_PROBE"
     assert latched.summary["docking_action"] not in {"BBOX_REACQUIRE_ROTATE", "SEARCH_ROTATE", "CONTROL_RECOVERY_ROTATE"}
     assert 0.0 < latched.final_vx <= 0.002
     assert latched.final_vy == 0.0

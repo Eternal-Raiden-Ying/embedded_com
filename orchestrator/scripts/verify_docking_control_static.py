@@ -447,7 +447,7 @@ table_docking:
     )
     assert final_consume_probe.ctx.state in {State.FINAL_SLOW_STOP, State.AT_TABLE_EDGE}
     assert final_consume_probe.ctx.state != State.YOLO_APPROACH
-    assert final_decision.control_summary["docking_action"] == "FINAL_LOCKED_STOP"
+    assert final_decision.control_summary["docking_action"] == "FINAL_SLOW_PROBE"
     assert final_decision.control_summary.get("final_distance_servo_active", False) or final_consume_probe.ctx.final_locked is True
 
     # BBOX_ACQUIRE owns final yaw. Right side is positive/right turn even when
@@ -820,7 +820,7 @@ table_docking:
     probe.force_depth_stop = True
     depth_stopped = authority_decision(probe, bbox_obs(0.50), raw_wz=0.03)
     assert "control_phase" not in depth_stopped.control_summary
-    assert depth_stopped.control_summary["docking_action"] == "FINAL_LOCKED_STOP"
+    assert depth_stopped.control_summary["docking_action"] == "FINAL_SLOW_PROBE"
     assert abs(depth_stopped.cmd.vx_mps) <= max(probe.cfg.final_forward_vx_max_mps, probe.cfg.roi_final_probe_vx_mps)
     assert depth_stopped.cmd.vy_mps == 0.0
     assert depth_stopped.cmd.wz_radps == 0.0
@@ -1043,7 +1043,7 @@ table_docking:
         },
     )
 
-    assert inv3.summary["docking_action"] == "FINAL_LOCKED_STOP"
+    assert inv3.summary["docking_action"] == "FINAL_SLOW_PROBE"
     assert inv3.final_vx == 0.0 and inv3.final_vy == 0.0 and inv3.final_wz == 0.0
     assert inv3.summary["yaw_owner"] == "none"
 
@@ -1571,7 +1571,7 @@ table_docking:
             "edge_readiness_enter_score": 0.65,
         },
     )
-    assert final_semantic_envelope.summary["docking_action"] in {"FINAL_LOCKED_STOP", "FINAL_YAW_ALIGN"}
+    assert final_semantic_envelope.summary["docking_action"] in {"FINAL_LOCKED_STOP", "FINAL_YAW_ALIGN", "FINAL_SLOW_PROBE"}
     assert abs(final_semantic_envelope.final_vx) <= 0.03
 
     probe_readiness = DockingProbe()
@@ -1945,7 +1945,7 @@ table_docking:
         },
     )
 
-    assert inv_q2_a.summary["docking_action"] == "FINAL_LOCKED_STOP"
+    assert inv_q2_a.summary["docking_action"] == "FINAL_SLOW_PROBE"
     assert inv_q2_a.summary["docking_stage"] == "FINAL_DISTANCE_HOLD"
     assert inv_q2_a.final_vx == 0.0 and inv_q2_a.final_vy == 0.0 and inv_q2_a.final_wz == 0.0
     assert inv_q2_a.summary["yaw_owner"] == "none"
@@ -2023,7 +2023,7 @@ table_docking:
             "last_good_edge_yaw_age_ms": 5000.0, # stale!
         },
     )
-    assert inv_q2_d.summary["docking_action"] == "FINAL_LOCKED_STOP"
+    assert inv_q2_d.summary["docking_action"] == "FINAL_SLOW_PROBE"
     assert inv_q2_d.summary["docking_stage"] == "FINAL_DISTANCE_HOLD"
     assert inv_q2_d.final_vx == 0.0 and inv_q2_d.final_wz == 0.0
     assert inv_q2_d.summary["yaw_owner"] == "none"
@@ -2139,7 +2139,7 @@ table_docking:
     test_ctx.cfg = probe_smoke.cfg
 
     res_b = arbitrate_table_docking_motion(test_ctx, obs_b, intent, summary_b)
-    assert res_b.summary["docking_action"] == "FINAL_LOCKED_STOP" or res_b.summary["docking_action"] == DockingAction.FINAL_LOCKED_STOP
+    assert res_b.summary["docking_action"] == "FINAL_SLOW_PROBE" or res_b.summary["docking_action"] == DockingAction.FINAL_SLOW_PROBE
     assert res_b.summary["docking_stage"] in {"FINAL_LOCKED", "FINAL_DISTANCE_HOLD", DockingStage.FINAL_LOCKED, DockingStage.FINAL_DISTANCE_HOLD}
     assert res_b.final_vy == 0.0
     assert res_b.final_wz == 0.0
@@ -2155,7 +2155,7 @@ table_docking:
         "last_good_obs_age_ms": 999999.0,
     }
     res_c = arbitrate_table_docking_motion(test_ctx, obs_b, intent, summary_c)
-    assert res_c.summary["docking_action"] == "FINAL_LOCKED_STOP"
+    assert res_c.summary["docking_action"] == "FINAL_SLOW_PROBE"
     assert res_c.summary["close_range_latched"]
     assert res_c.final_vx == 0.0
     assert res_c.final_vy == 0.0

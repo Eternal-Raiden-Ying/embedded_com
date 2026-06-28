@@ -391,6 +391,33 @@ def _docking_result(
         "yolo_bbox_touch_bottom",
     ):
         safe_summary.pop(key, None)
+
+    is_locked = bool(safe_summary.get("final_locked", False) or final_locked)
+    is_final_servo = bool(safe_summary.get("final_distance_servo_active", False) or final_distance_servo_active or final_depth_latched)
+    is_close_range = bool(safe_summary.get("close_range_latched", False) or _bool_field("close_range_latched"))
+
+    if action in {DockingAction.FINAL_LOCKED_STOP, DockingAction.CLOSE_RANGE_PROBE, DockingAction.FINAL_SLOW_PROBE}:
+        if is_locked:
+            action = DockingAction.FINAL_LOCKED_STOP
+            final_vx = 0.0
+            final_vy = 0.0
+            final_wz = 0.0
+            stage = DockingStage.FINAL_LOCKED
+        else:
+            final_vy = 0.0
+            final_wz = 0.0
+            if is_final_servo:
+                action = DockingAction.FINAL_SLOW_PROBE
+                stage = DockingStage.FINAL_DISTANCE_HOLD
+            else:
+                action = DockingAction.CLOSE_RANGE_PROBE
+                stage = DockingStage.FINAL_DISTANCE_HOLD
+
+    safe_summary["final_locked"] = is_locked
+    safe_summary["close_range_latched"] = is_close_range
+    safe_summary["final_distance_servo_active"] = is_final_servo
+    safe_summary["docking_action"] = action.value
+
     return _from_docking_result(
         DockingMotionResult(
             action=action,
