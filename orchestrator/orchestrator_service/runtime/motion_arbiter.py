@@ -333,9 +333,22 @@ def _docking_result(
         stage = DockingStage.NEAR_EDGE_APPROACH
         forward_owner = str(forward_owner or "near_depth")
         safe_summary["docking_reason"] = str(safe_summary.get("docking_reason") or "near_table_latched")
+    if final_depth_latched and action not in {DockingAction.FINAL_LOCKED_STOP, DockingAction.FINAL_YAW_ALIGN}:
+        action = DockingAction.FINAL_LOCKED_STOP
+        stage = DockingStage.FINAL_DISTANCE_HOLD
+        forward_owner = "none"
+        if str(safe_summary.get("docking_reason") or "") in {"", "near_table_latched", "near_edge_forward", "near_hold"}:
+            safe_summary["docking_reason"] = "final_depth_latched"
     if envelope_reason:
         safe_summary["depth_speed_envelope_reason"] = envelope_reason
         safe_summary["depth_speed_envelope_vx_cap"] = float(vx_cap if vx_cap is not None else 0.0)
+    edge_score = _float(safe_summary, "edge_readiness_score", 0.0)
+    edge_enter = _float(safe_summary, "edge_readiness_enter_score", 0.65)
+    edge_ready_for_approach = bool(_bool_field("edge_trusted") or bool(safe_summary.get("edge_handoff_complete", False)) or edge_score >= edge_enter)
+    safe_summary.setdefault("edge_ready_for_approach", edge_ready_for_approach)
+    safe_summary.setdefault("edge_ready_for_final", bool(_bool_field("edge_valid") or _bool_field("edge_trusted")))
+    actual_block = str(blocked_by or safe_summary.get("forward_block_reason") or safe_summary.get("effective_forward_block_reason") or "")
+    safe_summary["effective_forward_block_reason"] = "" if abs(float(final_vx)) > 1e-9 else actual_block
     return _from_docking_result(
         DockingMotionResult(
             action=action,
@@ -406,6 +419,16 @@ def arbitrate_table_docking_motion(
         or edge_handoff_complete
         or edge_readiness_ready
         or edge_readiness_level in {"ready", "trusted", "handoff_ready", "approach_ready"}
+    )
+    now_mono = time.monotonic()
+    forward_commit_active = bool(
+        float(getattr(ctx, "forward_commit_until_mono", 0.0) or 0.0) > now_mono
+        and not bool(summary.get("near_table_latched", False))
+        and not bool(summary.get("final_depth_latched", False))
+        and not emergency_active
+        and not explicit_stop
+        and not hard_safety
+        and fov_level != FovGuardLevel.HARD
     )
 
     def with_common(extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -770,8 +793,8 @@ def arbitrate_table_docking_motion(
             yaw_owner=yaw_source,
             forward_owner="near_depth" if near_vx > 1e-9 else "none",
             stop_class=StopClass.NONE,
-            blocked_by="near_table_latched",
-            reason="near_latch_suppressed_far_fallback",
+            blocked_by="" if near_vx > 1e-9 else "near_table_latched",
+            reason="near_edge_forward" if near_vx > 1e-9 else "near_hold",
         )
 
     if fov_level == FovGuardLevel.HARD:
@@ -787,6 +810,18 @@ def arbitrate_table_docking_motion(
         )
 
     if phase == "EDGE_GUIDED_APPROACH" and intent.forward_allowed_by_behavior and edge_approach_gate_ready:
+        edge_yaw_abs = abs(_float(summary, "edge_yaw", _float(summary, "yaw_err_rad", 0.0)))
+        if edge_yaw_abs > _float(summary, "edge_forward_rotate_only_yaw_rad", 0.18):
+            wz = _float(summary, "edge_yaw_cmd", _float(summary, "wz_from_plane", desired_wz))
+            return _docking_result(
+                action=DockingAction.CONTROL_RECOVERY_ROTATE,
+                stage=DockingStage.RECOVERY_ROTATE,
+                summary=with_common({"effective_forward_block_reason": "edge_yaw_large", "forward_block_reason": "edge_yaw_large", "rotate_block_reason": ""}),
+                wz=wz,
+                yaw_owner="edge",
+                blocked_by="edge_yaw_large",
+                reason="edge_yaw_large",
+            )
         vx = desired_vx
         if bool(summary.get("approach_commit_active", False)) or _edge_usable(obs, summary):
             vx = max(abs(vx), _float(summary, "forward_commit_vx", 0.020))
@@ -876,6 +911,9 @@ def arbitrate_table_docking_motion(
     bbox_track_elapsed_if_active_ms = max(0.0, (now_track - bbox_track_active_since) * 1000.0) if bbox_track_active_since > 0.0 else 0.0
     bbox_track_hold_active = bool(bbox_track_active_since > 0.0 and bbox_track_elapsed_if_active_ms < bbox_track_min_hold_ms)
     bbox_track_hold_band = max(bbox_track_center_band, abs(_float(summary, "yolo_forward_center_hard_limit", 0.25)))
+    if forward_commit_active:
+        bbox_track_hold_active = True
+        bbox_track_hold_band = max(bbox_track_hold_band, 0.20)
     bbox_track_phase_allowed = bool(
         phase in {"BBOX_ACQUIRE", "EDGE_HANDOFF_CONFIRM"}
         or (phase == "EDGE_GUIDED_APPROACH" and not edge_approach_gate_ready)

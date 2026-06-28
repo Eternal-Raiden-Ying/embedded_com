@@ -8,6 +8,7 @@ import io
 import os
 import sys
 import time
+from pathlib import Path
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, ROOT)
@@ -32,6 +33,8 @@ from orchestrator.orchestrator_service.bridge.uart_bridge import UartBridge
 from vision_module.backend.table_roi_depth import table_roi_depth_statistics
 from vision_module.app.stages.search.table_edge_obs_builder import annotate_table_edge_obs, merge_table_bbox_from_local_perception
 from orchestrator.orchestrator_service.runtime.docking_model import DockingAction, DockingStage
+from common.config.loader import _load_and_merge_stage_params
+from common.config.schema import SystemGlobalConfig
 
 
 def auth(state: str, *, bbox: bool, edge: bool = False, error: float = 0.0, depth_stop: bool = False, phase: str = ""):
@@ -46,6 +49,50 @@ def auth(state: str, *, bbox: bool, edge: bool = False, error: float = 0.0, dept
 
 
 def main() -> None:
+    cfg_tmp = Path("/tmp/docking_loader_static_test.yaml")
+    cfg_tmp.write_text(
+        """
+table_docking:
+  bbox_track_forward_vx_mps: 0.013
+  bbox_track_forward_max_vx_mps: 0.014
+  bbox_track_forward_center_band: 0.20
+  bbox_track_forward_min_hold_ms: 1234
+  bbox_track_forward_max_wz_radps: 0.055
+  depth_envelope_stop_p10_m: 0.55
+  depth_envelope_slow_p10_m: 0.65
+  depth_envelope_mid_p10_m: 0.80
+  depth_envelope_slow_vx_mps: 0.008
+  depth_envelope_mid_vx_mps: 0.012
+  edge_readiness_yaw_max_rad: 0.31
+  edge_handoff_forward_vx_mps: 0.011
+  forward_commit_min_s: 1.3
+  stop_after_table_docking: true
+""",
+        encoding="utf-8",
+    )
+    loader_cfg = SystemGlobalConfig()
+    _load_and_merge_stage_params(loader_cfg, cfg_tmp)
+    loaded_ctrl = loader_cfg.orchestrator.control
+    assert abs(loaded_ctrl.bbox_track_forward_vx_mps - 0.013) < 1e-9
+    assert abs(loaded_ctrl.bbox_track_forward_max_vx_mps - 0.014) < 1e-9
+    assert abs(loaded_ctrl.bbox_track_forward_center_band - 0.20) < 1e-9
+    assert loaded_ctrl.bbox_track_forward_min_hold_ms == 1234
+    assert abs(loaded_ctrl.bbox_track_forward_max_wz_radps - 0.055) < 1e-9
+    assert abs(loaded_ctrl.edge_readiness_yaw_max_rad - 0.31) < 1e-9
+    assert abs(loaded_ctrl.edge_handoff_forward_vx_mps - 0.011) < 1e-9
+    assert abs(loaded_ctrl.forward_commit_min_s - 1.3) < 1e-9
+    assert loaded_ctrl.stop_after_table_docking is True
+    assert abs(ControlThresholds().near_slow_max_vx_mps - 0.008) < 1e-9
+    assert abs(ControlThresholds().bbox_track_forward_center_band - 0.20) < 1e-9
+    for path in (
+        Path(ROOT) / "orchestrator/orchestrator_service/config/schema.py",
+        Path(ROOT) / "common/config/schema.py",
+        Path(ROOT) / "orchestrator/configs/stage_params.yaml",
+    ):
+        text = path.read_text(encoding="utf-8")
+        assert text.count("near_slow_max_vx_mps") == 1
+        assert text.count("bbox_track_forward_center_band") == 1
+
     vista_obs = TableEdgeObs.from_dict({
         "ts": 1.0, "table_found": True, "edge_found": False,
         "yolo_table_visible": True, "yolo_table_fresh": True, "yolo_table_control_valid": True,
@@ -489,7 +536,7 @@ def main() -> None:
     edge_obs.yaw_err_rad = 0.60
     yaw_blocked = edge_guided_decision(probe, edge_obs)
     assert yaw_blocked.cmd.vx_mps == 0.0
-    assert yaw_blocked.control_summary["forward_block_reason"] == "edge_yaw_too_large"
+    assert yaw_blocked.control_summary["effective_forward_block_reason"] == "edge_yaw_too_large"
 
     # A large, bottom-touching bbox with a mild side offset is soft framing:
     # it must permit the first EDGE_GUIDED_APPROACH forward commit.
@@ -564,7 +611,7 @@ def main() -> None:
     assert abs(final_align_applied.cmd.wz_radps + 0.15) < 1e-6
     assert final_align_applied.control_summary["final_cmd_source"] == "arbiter_final_yaw_align"
     assert final_align_applied.control_summary["rotate_allowed"]
-    assert final_align_applied.control_summary["rotate_block_reason"] != "allow_rotate_false_intercept"
+    assert "rotate_block_reason" not in final_align_applied.control_summary
 
     # Final depth latch + stable small yaw: become locked instead of returning
     # to SEARCH_TABLE.
@@ -656,7 +703,7 @@ def main() -> None:
     extreme_fov = edge_guided_decision(probe, extreme_fov_obs)
     assert extreme_fov.control_summary["bbox_fov_guard_level"] == "hard"
     assert extreme_fov.cmd.vx_mps == 0.0
-    assert extreme_fov.control_summary["forward_block_reason"] == "bbox_fov_guard_hard"
+    assert extreme_fov.control_summary["effective_forward_block_reason"] == "bbox_fov_guard_hard"
 
     # Side touch, large center error, and an established violation streak are
     # also hard; touch_bottom alone is never sufficient.
@@ -888,7 +935,9 @@ def main() -> None:
     )
     assert inv5.summary["docking_stage"] != "SEARCH"
     assert inv5.summary["docking_action"] != "SEARCH_ROTATE"
-    assert inv5.reason == "near_latch_suppressed_far_fallback"
+    assert inv5.summary["docking_action"] == "NEAR_EDGE_FORWARD"
+    assert inv5.reason == "near_hold"
+    assert inv5.summary["effective_forward_block_reason"] == "near_table_latched"
 
     inv6 = arbitrate_table_docking_motion(
         RuntimeContext(state=State.YOLO_APPROACH),
@@ -973,6 +1022,105 @@ def main() -> None:
     assert abs(inv9_bbox_track.final_vx - 0.012) < 1e-9
     assert abs(inv9_bbox_track.final_wz) <= 0.06
 
+    slim_probe = DockingProbe()
+    slim_obs = bbox_obs(0.50)
+    slim_obs.table_roi_depth_p10 = 0.90
+    slim_obs.table_roi_depth_median = 0.90
+    slim_cmd = slim_probe.controller._cmd("YOLO_APPROACH", vx=0.012, wz=0.01)
+    slim_summary = slim_probe.controller._summary("YOLO_APPROACH", slim_cmd, slim_obs)
+    for key in (
+        "camera_frame_interval_ms",
+        "camera_frame_hz",
+        "vision_process_interval_ms",
+        "vision_publish_interval_ms",
+        "obs_out_send_interval_ms",
+        "obs_out_send_hz",
+        "table_edge_obs_recv_interval_ms",
+        "orchestrator_recv_interval_ms",
+        "state_machine_tick_interval_ms",
+        "state_machine_consume_interval_ms",
+        "same_obs_reuse_count",
+        "obs_seq_gap",
+        "vision_publish_to_orch_recv_ms",
+        "orch_recv_to_state_consume_ms",
+        "table_edge_worker_interval_ms",
+        "table_edge_no_new_frame_count",
+        "scheduler_publish_ms",
+        "obs_out_drop_or_skip_count",
+        "obs_out_skip_reason",
+        "send_hz_config",
+        "track_local_send_hz_config",
+        "dropped_frame_count",
+        "processed_frame_count",
+        "latest_frame_lag_ms",
+        "control_loop_age_ms",
+        "edge_update_interval_ms",
+        "camera_frame_seq",
+        "camera_frame_ts_ms",
+        "vision_process_start_ts_ms",
+        "vision_process_end_ts_ms",
+        "vision_publish_ts_ms",
+        "obs_out_send_ts_ms",
+        "orchestrator_recv_ts_ms",
+        "state_machine_consume_ts_ms",
+        "cmd_publish_ts_ms",
+        "forward_block_reason",
+        "rotate_block_reason",
+        "lateral_block_reason",
+        "bbox_track_exit_reason",
+        "edge_handoff_block_reason",
+        "dropout_hold_block_reason",
+        "near_latch_block_reason",
+    ):
+        slim_summary[key] = "debug"
+    slim_decision = slim_probe._apply_control_authority(MotionDecision(cmd=slim_cmd, control_summary=slim_summary), slim_obs)
+    for key in (
+        "camera_frame_interval_ms",
+        "camera_frame_hz",
+        "vision_process_interval_ms",
+        "vision_publish_interval_ms",
+        "obs_out_send_interval_ms",
+        "obs_out_send_hz",
+        "table_edge_obs_recv_interval_ms",
+        "orchestrator_recv_interval_ms",
+        "state_machine_tick_interval_ms",
+        "state_machine_consume_interval_ms",
+        "same_obs_reuse_count",
+        "obs_seq_gap",
+        "vision_publish_to_orch_recv_ms",
+        "orch_recv_to_state_consume_ms",
+        "table_edge_worker_interval_ms",
+        "table_edge_no_new_frame_count",
+        "scheduler_publish_ms",
+        "obs_out_drop_or_skip_count",
+        "obs_out_skip_reason",
+        "send_hz_config",
+        "track_local_send_hz_config",
+        "dropped_frame_count",
+        "processed_frame_count",
+        "latest_frame_lag_ms",
+        "control_loop_age_ms",
+        "edge_update_interval_ms",
+        "camera_frame_seq",
+        "camera_frame_ts_ms",
+        "vision_process_start_ts_ms",
+        "vision_process_end_ts_ms",
+        "vision_publish_ts_ms",
+        "obs_out_send_ts_ms",
+        "orchestrator_recv_ts_ms",
+        "state_machine_consume_ts_ms",
+        "cmd_publish_ts_ms",
+        "forward_block_reason",
+        "rotate_block_reason",
+        "lateral_block_reason",
+        "bbox_track_exit_reason",
+        "edge_handoff_block_reason",
+        "dropout_hold_block_reason",
+        "near_latch_block_reason",
+    ):
+        assert key not in slim_decision.control_summary
+    assert slim_decision.control_summary["effective_forward_block_reason"] == ""
+
     inv9_handoff_bbox_track = arbitrate_table_docking_motion(
         RuntimeContext(state=State.YOLO_APPROACH),
         None,
@@ -994,6 +1142,31 @@ def main() -> None:
     assert inv9_handoff_bbox_track.summary["docking_action"] == "BBOX_TRACK_FORWARD"
     assert inv9_handoff_bbox_track.summary["docking_action"] != "BBOX_REACQUIRE_ROTATE"
     assert 0.0 < inv9_handoff_bbox_track.final_vx <= 0.015
+
+    commit_ctx = RuntimeContext(state=State.YOLO_APPROACH)
+    commit_ctx.forward_commit_until_mono = time.monotonic() + 1.0
+    commit_ctx.forward_commit_reason = "bbox_track_forward"
+    inv9_commit_bbox_track = arbitrate_table_docking_motion(
+        commit_ctx,
+        None,
+        MotionIntent("yolo_track_forward", desired_vx=0.012, desired_wz=0.02, yaw_owner="bbox", forward_allowed_by_behavior=True),
+        {
+            "control_phase": "EDGE_HANDOFF_CONFIRM",
+            "edge_readiness_score": 0.0,
+            "edge_readiness_enter_score": 0.65,
+            "bbox_center_valid": True,
+            "bbox_center_error": 0.18,
+            "bbox_yaw_cmd": 0.02,
+            "bbox_track_forward_center_band": 0.12,
+            "yolo_forward_allowed": True,
+            "bbox_fov_guard_level": "none",
+            "table_roi_depth_valid": True,
+            "table_roi_depth_p10": 0.90,
+            "cmd": {"vx_mps": 0.012},
+        },
+    )
+    assert inv9_commit_bbox_track.summary["docking_action"] == "BBOX_TRACK_FORWARD"
+    assert inv9_commit_bbox_track.final_vx > 0.0
 
     inv9_guided_gate_bbox_track = arbitrate_table_docking_motion(
         RuntimeContext(state=State.YOLO_APPROACH),
@@ -1174,6 +1347,9 @@ def main() -> None:
     assert near_speed_envelope.summary["docking_action"] == "NEAR_EDGE_FORWARD"
     assert near_speed_envelope.final_vx <= 0.008
     assert near_speed_envelope.final_vy == 0.0
+    assert str(near_speed_envelope.blocked_by or "") == ""
+    assert str(near_speed_envelope.reason) == "near_edge_forward"
+    assert near_speed_envelope.summary["effective_forward_block_reason"] == ""
 
     depth_slow_envelope = arbitrate_table_docking_motion(
         RuntimeContext(state=State.YOLO_APPROACH),
@@ -1194,6 +1370,20 @@ def main() -> None:
     assert depth_slow_envelope.summary["docking_action"] == "EDGE_APPROACH_FORWARD"
     assert depth_slow_envelope.final_vx <= 0.008
     assert depth_slow_envelope.final_vy == 0.0
+
+    final_semantic_envelope = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("edge_guided_forward", desired_vx=0.020, desired_wz=0.0, yaw_owner="edge", forward_allowed_by_behavior=True),
+        {
+            "control_phase": "EDGE_GUIDED_APPROACH",
+            "final_depth_latched": True,
+            "edge_readiness_score": 1.0,
+            "edge_readiness_enter_score": 0.65,
+        },
+    )
+    assert final_semantic_envelope.summary["docking_action"] in {"FINAL_LOCKED_STOP", "FINAL_YAW_ALIGN"}
+    assert final_semantic_envelope.final_vx == 0.0
 
     probe_readiness = DockingProbe()
     probe_readiness.cfg.edge_readiness_min_inliers = 0

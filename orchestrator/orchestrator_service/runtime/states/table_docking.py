@@ -126,6 +126,15 @@ class TableDockingMixin:
         self.ctx.motion_class = str(result.motion_class or "")
         self.ctx.stop_class = str(result.stop_class or "none")
         self.ctx.blocked_by = str(result.blocked_by or "")
+        action = str(summary.get("docking_action") or "")
+        forward_commit_actions = {"BBOX_TRACK_FORWARD", "EDGE_APPROACH_FORWARD", "NEAR_EDGE_FORWARD", "EDGE_READINESS_HANDOFF"}
+        if action in forward_commit_actions and abs(float(decision.cmd.vx_mps)) > 1e-9:
+            commit_s = max(0.0, float(getattr(self.cfg, "forward_commit_min_s", 1.2) or 1.2))
+            self.ctx.forward_commit_until_mono = monotonic_ts() + commit_s
+            self.ctx.forward_commit_reason = action.lower()
+        elif action in {"FINAL_LOCKED_STOP", "FINAL_YAW_ALIGN", "SAFETY_STOP", "EMERGENCY_STOP"} or abs(float(decision.cmd.vx_mps)) <= 1e-9:
+            self.ctx.forward_commit_until_mono = 0.0
+            self.ctx.forward_commit_reason = ""
         self.ctx.fov_guard_level = str(summary.get("fov_guard_level") or summary.get("bbox_fov_guard_level") or "none")
         self.ctx.fov_guard_reason = str(summary.get("fov_guard_reason") or summary.get("bbox_fov_guard_reason") or "")
         self.ctx.zero_escape_reason = str(summary.get("zero_escape_reason") or "")
@@ -136,6 +145,17 @@ class TableDockingMixin:
     def _slim_table_docking_control_summary(self, summary: Dict[str, object]) -> None:
         if not isinstance(summary, dict):
             return
+        try:
+            final_vx = float(summary.get("final_vx", summary.get("vx_mps", 0.0)) or 0.0)
+        except Exception:
+            final_vx = 0.0
+        block_reason = str(
+            summary.get("effective_forward_block_reason")
+            or summary.get("forward_block_reason")
+            or summary.get("blocked_by")
+            or ""
+        )
+        summary["effective_forward_block_reason"] = "" if abs(final_vx) > 1e-9 else block_reason
         for key in (
             "camera_frame_interval_ms",
             "camera_frame_hz",
@@ -155,11 +175,30 @@ class TableDockingMixin:
             "table_edge_no_new_frame_count",
             "scheduler_publish_ms",
             "obs_out_drop_or_skip_count",
+            "obs_out_skip_reason",
             "send_hz_config",
             "track_local_send_hz_config",
             "dropped_frame_count",
             "processed_frame_count",
             "latest_frame_lag_ms",
+            "control_loop_age_ms",
+            "edge_update_interval_ms",
+            "camera_frame_seq",
+            "camera_frame_ts_ms",
+            "vision_process_start_ts_ms",
+            "vision_process_end_ts_ms",
+            "vision_publish_ts_ms",
+            "obs_out_send_ts_ms",
+            "orchestrator_recv_ts_ms",
+            "state_machine_consume_ts_ms",
+            "cmd_publish_ts_ms",
+            "forward_block_reason",
+            "rotate_block_reason",
+            "lateral_block_reason",
+            "bbox_track_exit_reason",
+            "edge_handoff_block_reason",
+            "dropout_hold_block_reason",
+            "near_latch_block_reason",
         ):
             summary.pop(key, None)
 
