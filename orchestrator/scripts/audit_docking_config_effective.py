@@ -44,6 +44,17 @@ def collect() -> tuple[Dict[str, Dict[str, Any]], list[str]]:
     _record(values, "speed", "edge_handoff_forward_vx_mps", control, "edge_handoff_forward_vx_mps", 0.08)
     _record(values, "speed", "near_slow_max_vx_mps", control, "near_slow_max_vx_mps", 0.03)
     _record(values, "speed", "near_slow_max_wz_radps", control, "near_slow_max_wz_radps", 0.04)
+    _record(values, "speed", "final_servo_enter_p10_m", control, "final_servo_enter_p10_m", 0.45)
+    _record(values, "speed", "roi_final_stop_p10_m", control, "roi_final_stop_p10_m", 0.40)
+    _record(values, "speed", "roi_final_slow_p10_m", control, "roi_final_slow_p10_m", 0.50)
+    _record(values, "speed", "roi_final_probe_vx_mps", control, "roi_final_probe_vx_mps", 0.004)
+    _record(values, "speed", "roi_final_missing_probe_vx_mps", control, "roi_final_missing_probe_vx_mps", 0.002)
+    _record(values, "speed", "roi_final_missing_hold_s", control, "roi_final_missing_hold_s", 0.8)
+    _record(values, "speed", "depth_envelope_stop_p10_m", control, "depth_envelope_stop_p10_m", 0.35)
+    _record(values, "speed", "depth_envelope_slow_p10_m", control, "depth_envelope_slow_p10_m", 0.50)
+    _record(values, "speed", "depth_envelope_mid_p10_m", control, "depth_envelope_mid_p10_m", 0.70)
+    _record(values, "speed", "depth_envelope_slow_vx_mps", control, "depth_envelope_slow_vx_mps", 0.006)
+    _record(values, "speed", "depth_envelope_mid_vx_mps", control, "depth_envelope_mid_vx_mps", 0.015)
     _record(values, "speed", "global_max_vx_mps", car, "max_vx_mps", 1.0)
     _record(values, "speed", "global_max_vy_mps", car, "max_vy_mps", 1.0)
     _record(values, "speed", "global_max_wz_radps", car, "max_wz_radps", 1.0)
@@ -52,8 +63,8 @@ def collect() -> tuple[Dict[str, Dict[str, Any]], list[str]]:
         ("table_target_dist_m", 0.30),
         ("final_dist_deadband_m", 0.04),
         ("final_dist_kp", 0.08),
-        ("final_forward_vx_max_mps", 0.03),
-        ("final_reverse_vx_max_mps", 0.02),
+        ("final_forward_vx_max_mps", 0.006),
+        ("final_reverse_vx_max_mps", 0.004),
         ("final_reverse_confirm_frames", 3),
         ("final_yaw_deadband_rad", 0.12),
         ("final_lock_yaw_rad", 0.12),
@@ -65,7 +76,7 @@ def collect() -> tuple[Dict[str, Dict[str, Any]], list[str]]:
         _record(values, "final", key, control, key, fallback)
 
     _record(values, "lateral", "distance_scaled_lateral_enabled", control, "distance_scaled_lateral_enabled", True)
-    _record(values, "lateral", "near_slow_max_vy_mps", control, "near_slow_max_vy_mps", 0.0)
+    _record(values, "lateral", "near_slow_max_vy_mps", control, "near_slow_max_vy_mps", 0.030)
     _record(values, "lateral", "lateral_enabled", control, "lateral_enabled", False)
     _record(values, "lateral", "lateral_vy_max_mps", control, "lateral_vy_max_mps", 0.15)
     _record(values, "lateral", "lateral_kp", control, "lateral_kp", 0.10)
@@ -75,7 +86,11 @@ def collect() -> tuple[Dict[str, Dict[str, Any]], list[str]]:
     _record(values, "lateral", "lateral_distance_scale_max", control, "lateral_distance_scale_max", 4.0)
     _record(values, "lateral", "far_lateral_vy_max_mps", control, "far_lateral_vy_max_mps", 0.15)
     _record(values, "lateral", "mid_lateral_vy_max_mps", control, "mid_lateral_vy_max_mps", 0.08)
-    _record(values, "lateral", "near_lateral_vy_max_mps", control, "near_lateral_vy_max_mps", 0.015)
+    _record(values, "lateral", "near_lateral_vy_max_mps", control, "near_lateral_vy_max_mps", 0.030)
+    _record(values, "lateral", "lateral_priority_mid_error_norm", control, "lateral_priority_mid_error_norm", 0.10)
+    _record(values, "lateral", "lateral_priority_large_error_norm", control, "lateral_priority_large_error_norm", 0.18)
+    _record(values, "lateral", "lateral_priority_mid_vx_cap_mps", control, "lateral_priority_mid_vx_cap_mps", 0.080)
+    _record(values, "lateral", "lateral_priority_vx_cap_mps", control, "lateral_priority_vx_cap_mps", 0.040)
 
     for key, fallback in (
         ("yaw_flip_hold_window_s", 0.8),

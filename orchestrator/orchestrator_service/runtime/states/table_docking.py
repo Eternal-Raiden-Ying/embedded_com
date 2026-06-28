@@ -614,7 +614,8 @@ class TableDockingMixin:
         depth_median = getattr(obs, "table_roi_depth_median", None) if obs is not None else None
         depth_value = depth_p10 if depth_p10 is not None else depth_median
         near_depth = bool(depth_valid and depth_value is not None and float(depth_value) <= self._near_depth_threshold_m(obs))
-        near_dist = bool(obs is not None and getattr(obs, "dist_err_m", None) is not None and abs(float(obs.dist_err_m)) <= self._near_dist_err_threshold_m())
+        final_dist_err = self._table_final_dist_err_m(obs)
+        near_dist = bool(final_dist_err is not None and abs(float(final_dist_err)) <= self._near_dist_err_threshold_m())
         bbox_area = float(getattr(obs, "table_bbox_area_ratio", getattr(obs, "yolo_bbox_area_norm", 0.0)) or 0.0) if obs is not None else 0.0
         bbox_near_hint = bool(bbox_area >= 0.35 and depth_valid and edge_usable)
         depth_stop_ready = bool(depth_status.get("depth_roi_stop_ready", False))
@@ -1430,11 +1431,17 @@ class TableDockingMixin:
             "bbox_track_forward_min_hold_ms": int(getattr(self.cfg, "bbox_track_forward_min_hold_ms", 800) or 800),
             "bbox_track_forward_max_wz_radps": float(getattr(self.cfg, "bbox_track_forward_max_wz_radps", 0.200) or 0.200),
             "near_slow_max_vx_mps": float(getattr(self.cfg, "near_slow_max_vx_mps", 0.030) or 0.030),
-            "depth_envelope_stop_p10_m": float(getattr(self.cfg, "depth_envelope_stop_p10_m", 0.55) or 0.55),
-            "depth_envelope_slow_p10_m": float(getattr(self.cfg, "depth_envelope_slow_p10_m", 0.65) or 0.65),
-            "depth_envelope_mid_p10_m": float(getattr(self.cfg, "depth_envelope_mid_p10_m", 0.80) or 0.80),
-            "depth_envelope_slow_vx_mps": float(getattr(self.cfg, "depth_envelope_slow_vx_mps", 0.030) or 0.030),
-            "depth_envelope_mid_vx_mps": float(getattr(self.cfg, "depth_envelope_mid_vx_mps", 0.080) or 0.080),
+            "final_servo_enter_p10_m": float(getattr(self.cfg, "final_servo_enter_p10_m", 0.45) or 0.45),
+            "roi_final_stop_p10_m": float(getattr(self.cfg, "roi_final_stop_p10_m", 0.40) or 0.40),
+            "roi_final_slow_p10_m": float(getattr(self.cfg, "roi_final_slow_p10_m", 0.50) or 0.50),
+            "roi_final_probe_vx_mps": float(getattr(self.cfg, "roi_final_probe_vx_mps", 0.004) or 0.004),
+            "roi_final_missing_probe_vx_mps": float(getattr(self.cfg, "roi_final_missing_probe_vx_mps", 0.002) or 0.002),
+            "roi_final_missing_hold_s": float(getattr(self.cfg, "roi_final_missing_hold_s", 0.8) or 0.8),
+            "depth_envelope_stop_p10_m": float(getattr(self.cfg, "depth_envelope_stop_p10_m", 0.35) or 0.35),
+            "depth_envelope_slow_p10_m": float(getattr(self.cfg, "depth_envelope_slow_p10_m", 0.50) or 0.50),
+            "depth_envelope_mid_p10_m": float(getattr(self.cfg, "depth_envelope_mid_p10_m", 0.70) or 0.70),
+            "depth_envelope_slow_vx_mps": float(getattr(self.cfg, "depth_envelope_slow_vx_mps", 0.006) or 0.006),
+            "depth_envelope_mid_vx_mps": float(getattr(self.cfg, "depth_envelope_mid_vx_mps", 0.015) or 0.015),
             "edge_handoff_forward_vx_mps": float(getattr(self.cfg, "edge_handoff_forward_vx_mps", 0.080) or 0.080),
             "forward_commit_min_s": float(getattr(self.cfg, "forward_commit_min_s", 1.5) or 1.5),
             "far_forward_commit_min_s": float(getattr(self.cfg, "far_forward_commit_min_s", 1.8) or 1.8),
@@ -1447,6 +1454,15 @@ class TableDockingMixin:
             "lateral_source": "edge_lateral_err_m" if (obs is not None and getattr(obs, "lateral_err_m", None) is not None) else "",
             "lateral_err_m": float(getattr(obs, "lateral_err_m")) if (obs is not None and getattr(obs, "lateral_err_m", None) is not None) else None,
             "lateral_err_norm": None,
+            "lateral_priority_mid_error_norm": float(getattr(self.cfg, "lateral_priority_mid_error_norm", 0.10) or 0.10),
+            "lateral_priority_large_error_norm": float(getattr(self.cfg, "lateral_priority_large_error_norm", 0.18) or 0.18),
+            "lateral_priority_mid_vx_cap_mps": float(getattr(self.cfg, "lateral_priority_mid_vx_cap_mps", 0.080) or 0.080),
+            "lateral_priority_vx_cap_mps": float(getattr(self.cfg, "lateral_priority_vx_cap_mps", 0.040) or 0.040),
+            "final_dist_deadband_m": float(getattr(self.cfg, "final_dist_deadband_m", 0.04) or 0.04),
+            "final_dist_kp": float(getattr(self.cfg, "final_dist_kp", 0.08) or 0.08),
+            "final_forward_vx_max_mps": float(getattr(self.cfg, "final_forward_vx_max_mps", 0.006) or 0.006),
+            "final_reverse_vx_max_mps": float(getattr(self.cfg, "final_reverse_vx_max_mps", 0.004) or 0.004),
+            "final_reverse_confirm_frames": int(getattr(self.cfg, "final_reverse_confirm_frames", 3) or 3),
             "perception_dropout_hold_active": bool(self.ctx.perception_dropout_hold_active),
             "perception_dropout_hold_age_ms": 0.0,
             "last_good_table_obs_age_ms": max(0.0, (monotonic_ts() - float(self.ctx.last_good_table_obs_mono or monotonic_ts())) * 1000.0),
@@ -1678,7 +1694,7 @@ class TableDockingMixin:
         curr_dist = None
         if obs is not None:
             if obs.dist_err_m is not None:
-                curr_dist = float(self.cfg.table_target_dist_m) + float(obs.dist_err_m)
+                curr_dist = self._table_measured_dist_m(obs)
             elif bool(getattr(obs, "table_roi_depth_valid", False)) and getattr(obs, "table_roi_depth_median", None) is not None:
                 curr_dist = float(obs.table_roi_depth_median)
 
@@ -2736,8 +2752,9 @@ class TableDockingMixin:
             return True
         if obs.edge_ready is not None:
             return bool(obs.edge_ready)
-        if obs.dist_err_m is not None:
-            return abs(float(obs.dist_err_m)) <= float(self.cfg.final_lock_dist_tol_m) * 2.0
+        final_dist_err = self._table_final_dist_err_m(obs)
+        if final_dist_err is not None:
+            return abs(float(final_dist_err)) <= float(self.cfg.final_lock_dist_tol_m) * 2.0
         return bool(obs.edge_found)
 
     def _depth_roi_stop_status(self, obs: Optional[TableEdgeObs]) -> Dict[str, object]:
@@ -2867,11 +2884,13 @@ class TableDockingMixin:
         if abs(float(obs.yaw_err_rad)) > yaw_th:
             status["final_lock_enter_block_reason"] = "yaw_out_of_range"
             return status
-        if obs.dist_err_m is None:
+        final_dist_err = self._table_final_dist_err_m(obs)
+        if final_dist_err is None:
             status["final_lock_enter_block_reason"] = "dist_missing"
             return status
-        if abs(float(obs.dist_err_m)) > dist_th:
-            status["final_lock_enter_block_reason"] = "distance_too_far" if float(obs.dist_err_m) > 0.0 else "distance_too_close"
+        status["dist_err_m"] = float(final_dist_err)
+        if abs(float(final_dist_err)) > dist_th:
+            status["final_lock_enter_block_reason"] = "distance_too_far" if float(final_dist_err) > 0.0 else "distance_too_close"
             return status
         status["final_lock_enter_allowed"] = True
         status["final_lock_enter_block_reason"] = "allowed"
@@ -2885,10 +2904,26 @@ class TableDockingMixin:
         except Exception:
             return 0.30
 
+    def _obs_target_dist_m(self, obs: Optional[TableEdgeObs]) -> float:
+        ctrl_target = self._table_target_dist_m(obs)
+        if obs is None:
+            return ctrl_target
+        target = getattr(obs, "target_dist_m", None)
+        try:
+            return max(0.0, float(target)) if target is not None else ctrl_target
+        except Exception:
+            return ctrl_target
+
     def _table_measured_dist_m(self, obs: Optional[TableEdgeObs]) -> Optional[float]:
         if obs is None or obs.dist_err_m is None:
             return None
-        return self._table_target_dist_m(obs) + float(obs.dist_err_m)
+        return self._obs_target_dist_m(obs) + float(obs.dist_err_m)
+
+    def _table_final_dist_err_m(self, obs: Optional[TableEdgeObs]) -> Optional[float]:
+        measured = self._table_measured_dist_m(obs)
+        if measured is None:
+            return None
+        return float(measured) - self._table_target_dist_m(obs)
 
     def _table_dock_should_stop(self, obs: Optional[TableEdgeObs]) -> bool:
         if obs is None or self._edge_obs_is_stale(obs):
@@ -3350,8 +3385,7 @@ class TableDockingMixin:
         target_distance = None
         if obs is not None:
             target_distance = self._table_target_dist_m(obs)
-            if obs.dist_err_m is not None:
-                measured_distance = float(target_distance) + float(obs.dist_err_m)
+            measured_distance = self._table_measured_dist_m(obs)
         reset_reason = str(status.get("lock_count_reset_reason") or status.get("lock_reset_reason") or "")
         stale_reason = str(status.get("vision_stale_reason") or "")
         reason_text = str(reason or status.get("reason") or "")

@@ -32,17 +32,23 @@ table_docking:
   controlled_approach_min_dwell_s: 0.8
   search_wz_radps: 0.20
   near_slow_max_vx_mps: 0.03
-  near_slow_max_vy_mps: 0.015
-  depth_envelope_stop_p10_m: 0.55
-  depth_envelope_slow_p10_m: 0.65
-  depth_envelope_mid_p10_m: 0.80
-  depth_envelope_slow_vx_mps: 0.03
-  depth_envelope_mid_vx_mps: 0.08
+  near_slow_max_vy_mps: 0.030
+  final_servo_enter_p10_m: 0.45
+  roi_final_stop_p10_m: 0.40
+  roi_final_slow_p10_m: 0.50
+  roi_final_probe_vx_mps: 0.004
+  roi_final_missing_probe_vx_mps: 0.002
+  roi_final_missing_hold_s: 0.8
+  depth_envelope_stop_p10_m: 0.35
+  depth_envelope_slow_p10_m: 0.50
+  depth_envelope_mid_p10_m: 0.70
+  depth_envelope_slow_vx_mps: 0.006
+  depth_envelope_mid_vx_mps: 0.015
   bbox_track_forward_enabled: true
   min_forward_vx_mps: 0.04
   bbox_track_forward_vx_mps: 0.10
   bbox_track_forward_max_vx_mps: 0.20
-  bbox_track_forward_center_band: 0.30
+  bbox_track_forward_center_band: 0.45
   far_bbox_track_vx_mps: 0.20
   bbox_track_forward_min_hold_ms: 800
   bbox_track_forward_max_wz_radps: 0.20
@@ -70,15 +76,19 @@ table_docking:
   lateral_distance_scale_max: 4.0
   far_lateral_vy_max_mps: 0.15
   mid_lateral_vy_max_mps: 0.08
-  near_lateral_vy_max_mps: 0.015
+  near_lateral_vy_max_mps: 0.030
+  lateral_priority_mid_error_norm: 0.10
+  lateral_priority_large_error_norm: 0.18
+  lateral_priority_mid_vx_cap_mps: 0.08
+  lateral_priority_vx_cap_mps: 0.04
   yaw_flip_hold_window_s: 0.8
   yaw_flip_count_limit: 2
   yaw_ambiguous_wz_cap: 0.0
   yaw_ambiguous_vy_boost: 1.5
   final_dist_deadband_m: 0.04
   final_dist_kp: 0.08
-  final_forward_vx_max_mps: 0.03
-  final_reverse_vx_max_mps: 0.02
+  final_forward_vx_max_mps: 0.006
+  final_reverse_vx_max_mps: 0.004
   final_reverse_confirm_frames: 3
 
 yolo_table:

@@ -58,15 +58,21 @@ table_docking:
   min_forward_vx_mps: 0.04
   bbox_track_forward_vx_mps: 0.10
   bbox_track_forward_max_vx_mps: 0.20
-  bbox_track_forward_center_band: 0.30
+  bbox_track_forward_center_band: 0.45
   far_bbox_track_vx_mps: 0.20
   bbox_track_forward_min_hold_ms: 1234
   bbox_track_forward_max_wz_radps: 0.20
-  depth_envelope_stop_p10_m: 0.55
-  depth_envelope_slow_p10_m: 0.65
-  depth_envelope_mid_p10_m: 0.80
-  depth_envelope_slow_vx_mps: 0.03
-  depth_envelope_mid_vx_mps: 0.08
+  final_servo_enter_p10_m: 0.45
+  roi_final_stop_p10_m: 0.40
+  roi_final_slow_p10_m: 0.50
+  roi_final_probe_vx_mps: 0.004
+  roi_final_missing_probe_vx_mps: 0.002
+  roi_final_missing_hold_s: 0.8
+  depth_envelope_stop_p10_m: 0.35
+  depth_envelope_slow_p10_m: 0.50
+  depth_envelope_mid_p10_m: 0.70
+  depth_envelope_slow_vx_mps: 0.006
+  depth_envelope_mid_vx_mps: 0.015
   edge_readiness_yaw_max_rad: 0.31
   edge_handoff_forward_vx_mps: 0.08
   lateral_enabled: true
@@ -79,15 +85,19 @@ table_docking:
   lateral_distance_scale_max: 4.0
   far_lateral_vy_max_mps: 0.15
   mid_lateral_vy_max_mps: 0.08
-  near_lateral_vy_max_mps: 0.015
+  near_lateral_vy_max_mps: 0.030
+  lateral_priority_mid_error_norm: 0.10
+  lateral_priority_large_error_norm: 0.18
+  lateral_priority_mid_vx_cap_mps: 0.08
+  lateral_priority_vx_cap_mps: 0.04
   yaw_flip_hold_window_s: 0.8
   yaw_flip_count_limit: 2
   yaw_ambiguous_wz_cap: 0.0
   yaw_ambiguous_vy_boost: 1.5
   final_dist_deadband_m: 0.04
   final_dist_kp: 0.08
-  final_forward_vx_max_mps: 0.03
-  final_reverse_vx_max_mps: 0.02
+  final_forward_vx_max_mps: 0.006
+  final_reverse_vx_max_mps: 0.004
   final_reverse_confirm_frames: 3
   forward_commit_min_s: 1.3
   far_forward_commit_min_s: 1.8
@@ -103,7 +113,18 @@ table_docking:
     assert abs(loaded_ctrl.min_forward_vx_mps - 0.04) < 1e-9
     assert abs(loaded_ctrl.bbox_track_forward_vx_mps - 0.10) < 1e-9
     assert abs(loaded_ctrl.bbox_track_forward_max_vx_mps - 0.20) < 1e-9
-    assert abs(loaded_ctrl.bbox_track_forward_center_band - 0.30) < 1e-9
+    assert abs(loaded_ctrl.bbox_track_forward_center_band - 0.45) < 1e-9
+    assert abs(loaded_ctrl.final_servo_enter_p10_m - 0.45) < 1e-9
+    assert abs(loaded_ctrl.roi_final_stop_p10_m - 0.40) < 1e-9
+    assert abs(loaded_ctrl.roi_final_slow_p10_m - 0.50) < 1e-9
+    assert abs(loaded_ctrl.roi_final_probe_vx_mps - 0.004) < 1e-9
+    assert abs(loaded_ctrl.roi_final_missing_probe_vx_mps - 0.002) < 1e-9
+    assert abs(loaded_ctrl.roi_final_missing_hold_s - 0.8) < 1e-9
+    assert abs(loaded_ctrl.depth_envelope_stop_p10_m - 0.35) < 1e-9
+    assert abs(loaded_ctrl.depth_envelope_slow_p10_m - 0.50) < 1e-9
+    assert abs(loaded_ctrl.depth_envelope_mid_p10_m - 0.70) < 1e-9
+    assert abs(loaded_ctrl.depth_envelope_slow_vx_mps - 0.006) < 1e-9
+    assert abs(loaded_ctrl.depth_envelope_mid_vx_mps - 0.015) < 1e-9
     assert abs(loaded_ctrl.far_bbox_track_vx_mps - 0.20) < 1e-9
     assert loaded_ctrl.bbox_track_forward_min_hold_ms == 1234
     assert abs(loaded_ctrl.bbox_track_forward_max_wz_radps - 0.20) < 1e-9
@@ -116,15 +137,19 @@ table_docking:
     assert abs(loaded_ctrl.lateral_distance_ref_m - 0.80) < 1e-9
     assert abs(loaded_ctrl.far_lateral_vy_max_mps - 0.15) < 1e-9
     assert abs(loaded_ctrl.mid_lateral_vy_max_mps - 0.08) < 1e-9
-    assert abs(loaded_ctrl.near_lateral_vy_max_mps - 0.015) < 1e-9
+    assert abs(loaded_ctrl.near_lateral_vy_max_mps - 0.030) < 1e-9
+    assert abs(loaded_ctrl.lateral_priority_mid_error_norm - 0.10) < 1e-9
+    assert abs(loaded_ctrl.lateral_priority_large_error_norm - 0.18) < 1e-9
+    assert abs(loaded_ctrl.lateral_priority_mid_vx_cap_mps - 0.08) < 1e-9
+    assert abs(loaded_ctrl.lateral_priority_vx_cap_mps - 0.04) < 1e-9
     assert abs(loaded_ctrl.yaw_flip_hold_window_s - 0.8) < 1e-9
     assert loaded_ctrl.yaw_flip_count_limit == 2
     assert abs(loaded_ctrl.yaw_ambiguous_wz_cap - 0.0) < 1e-9
     assert abs(loaded_ctrl.yaw_ambiguous_vy_boost - 1.5) < 1e-9
     assert abs(loaded_ctrl.final_dist_deadband_m - 0.04) < 1e-9
     assert abs(loaded_ctrl.final_dist_kp - 0.08) < 1e-9
-    assert abs(loaded_ctrl.final_forward_vx_max_mps - 0.03) < 1e-9
-    assert abs(loaded_ctrl.final_reverse_vx_max_mps - 0.02) < 1e-9
+    assert abs(loaded_ctrl.final_forward_vx_max_mps - 0.006) < 1e-9
+    assert abs(loaded_ctrl.final_reverse_vx_max_mps - 0.004) < 1e-9
     assert loaded_ctrl.final_reverse_confirm_frames == 3
     assert abs(loaded_ctrl.forward_commit_min_s - 1.3) < 1e-9
     assert abs(loaded_ctrl.far_forward_commit_min_s - 1.8) < 1e-9
@@ -132,7 +157,10 @@ table_docking:
     assert abs(ControlThresholds().near_slow_max_vx_mps - 0.030) < 1e-9
     assert abs(ControlThresholds().bbox_track_forward_vx_mps - 0.100) < 1e-9
     assert abs(ControlThresholds().bbox_track_forward_max_vx_mps - 0.200) < 1e-9
-    assert abs(ControlThresholds().bbox_track_forward_center_band - 0.30) < 1e-9
+    assert abs(ControlThresholds().bbox_track_forward_center_band - 0.45) < 1e-9
+    assert abs(ControlThresholds().final_servo_enter_p10_m - 0.45) < 1e-9
+    assert abs(ControlThresholds().roi_final_probe_vx_mps - 0.004) < 1e-9
+    assert abs(ControlThresholds().depth_envelope_slow_vx_mps - 0.006) < 1e-9
     for path in (
         Path(ROOT) / "orchestrator/orchestrator_service/config/schema.py",
         Path(ROOT) / "common/config/schema.py",
@@ -392,7 +420,6 @@ table_docking:
         },
     )
     assert unsafe_edge.summary["docking_action"] != "EDGE_APPROACH_FORWARD"
-    assert unsafe_edge.final_vx not in {0.008, 0.010, 0.012, 0.015, 0.020}
 
     final_consume_probe = DockingProbe()
     final_consume_probe.ctx.state = State.YOLO_APPROACH
@@ -518,7 +545,6 @@ table_docking:
     probe.ctx.zero_cmd_started_mono = monotonic_ts() - 0.9
     watchdog_obs = bbox_obs(0.50)
     watchdog = authority_decision(probe, watchdog_obs, raw_wz=0.0)
-    assert watchdog.cmd.vx_mps not in {0.008, 0.010, 0.012, 0.015, 0.020}
     assert watchdog.control_summary["docking_action"] != "EDGE_APPROACH_FORWARD"
     assert watchdog.control_summary["stop_class"] == "none"
 
@@ -624,8 +650,8 @@ table_docking:
     assert near_latched.control_summary["near_stage_yaw_source"] in {"edge", "last_good_edge"}
     assert near_latched.control_summary["yaw_owner"] not in {"bbox", "yolo"}
 
-    # Final depth latch + large yaw: forward is permanently blocked but yaw
-    # alignment may continue in place.
+    # Final depth latch + large yaw: final mode disables omega and only allows
+    # the very small final distance/ROI motion.
     probe = DockingProbe()
     probe.ctx.near_table_latched = True
     probe.ctx.final_depth_latched = True
@@ -634,13 +660,13 @@ table_docking:
     large_yaw = max(final_yaw_deadband + 0.05, 0.30)
     final_yaw_obs = near_depth_obs(0.50, 0.50, yaw=large_yaw)
     final_yaw = edge_guided_decision(probe, final_yaw_obs)
-    assert final_yaw.cmd.vx_mps == 0.0
-    assert abs(final_yaw.cmd.wz_radps) > 0.0
+    assert abs(final_yaw.cmd.vx_mps) <= probe.cfg.final_forward_vx_max_mps
+    assert final_yaw.cmd.vy_mps == 0.0
+    assert final_yaw.cmd.wz_radps == 0.0
     assert final_yaw.control_summary["final_depth_latched"]
-    assert final_yaw.control_summary["final_yaw_align_active"]
+    assert not final_yaw.control_summary["final_yaw_align_active"]
     assert not final_yaw.control_summary["final_locked"]
-    assert final_yaw.control_summary["arbitration_reason"] == "final_yaw_align"
-    assert abs(final_yaw.control_summary["final_yaw_align_yaw_cmd"]) > 0.0
+    assert final_yaw.control_summary["yaw_owner"] == "none"
 
     # Final yaw align must be applied to the actual CmdVel, not only summary.
     probe = DockingProbe()
@@ -662,12 +688,10 @@ table_docking:
         },
     )
     final_align_applied = probe._arbitrate_table_motion_decision(final_align_decision, final_yaw_obs)
-    assert final_align_applied.cmd.vx_mps == 0.0
+    assert abs(final_align_applied.cmd.vx_mps) <= probe.cfg.final_forward_vx_max_mps
     assert final_align_applied.cmd.vy_mps == 0.0
-    assert abs(final_align_applied.cmd.wz_radps + 0.15) < 1e-6
-    assert final_align_applied.control_summary["final_cmd_source"] == "arbiter_final_yaw_align"
-    assert final_align_applied.control_summary["rotate_allowed"]
-    assert "rotate_block_reason" not in final_align_applied.control_summary
+    assert final_align_applied.cmd.wz_radps == 0.0
+    assert final_align_applied.control_summary["yaw_owner"] == "none"
 
     # Final depth latch + stable small yaw: become locked instead of returning
     # to SEARCH_TABLE.
@@ -704,9 +728,10 @@ table_docking:
     probe.ctx.approach_commit_active = True
     probe.ctx.last_edge_yaw_cmd = 0.04
     coast_blocked = authority_decision(probe, final_yaw_obs, raw_wz=0.04)
-    assert coast_blocked.cmd.vx_mps == 0.0
+    assert abs(coast_blocked.cmd.vx_mps) <= probe.cfg.final_forward_vx_max_mps
     assert coast_blocked.control_summary["final_depth_latched"]
     assert coast_blocked.cmd.vy_mps == 0.0
+    assert coast_blocked.cmd.wz_radps == 0.0
 
     # Emergency/explicit hard safety clears near/final latches.
     probe = DockingProbe()
@@ -784,7 +809,9 @@ table_docking:
     depth_stopped = authority_decision(probe, bbox_obs(0.50), raw_wz=0.03)
     assert "control_phase" not in depth_stopped.control_summary
     assert depth_stopped.control_summary["docking_action"] == "FINAL_LOCKED_STOP"
-    assert abs(depth_stopped.cmd.vx_mps) <= probe.cfg.final_forward_vx_max_mps
+    assert abs(depth_stopped.cmd.vx_mps) <= max(probe.cfg.final_forward_vx_max_mps, probe.cfg.roi_final_probe_vx_mps)
+    assert depth_stopped.cmd.vy_mps == 0.0
+    assert depth_stopped.cmd.wz_radps == 0.0
 
     probe = DockingProbe()
     probe.ctx.bbox_valid_streak = 3
@@ -862,7 +889,7 @@ table_docking:
     obs_acq.target_dist_m = 0.5
     # Call authority_decision multiple times, or manually simulate time elapsed
     dec = authority_decision(p_acquire, obs_acq, raw_wz=0.10)
-    assert dec.cmd.vx_mps not in {0.008, 0.010, 0.012, 0.015, 0.020}
+    assert dec.control_summary["docking_action"] in {"BBOX_TRACK_FORWARD", "BBOX_REACQUIRE_ROTATE", "EDGE_APPROACH_FORWARD"}
     # Simulate 5s elapsed
     p_acquire.ctx.dist_missing_started_mono = monotonic_ts() - 6.0
     p_acquire.ctx.dist_progress_last_refreshed_mono = monotonic_ts() - 6.0
@@ -988,7 +1015,8 @@ table_docking:
     )
 
     assert inv3.summary["docking_action"] == "FINAL_LOCKED_STOP"
-    assert inv3.final_vx == 0.0 and inv3.final_vy == 0.0 and abs(inv3.final_wz) > 0.0
+    assert inv3.final_vx == 0.0 and inv3.final_vy == 0.0 and inv3.final_wz == 0.0
+    assert inv3.summary["yaw_owner"] == "none"
 
     inv4 = arbitrate_table_docking_motion(
         RuntimeContext(state=State.YOLO_APPROACH),
@@ -1495,12 +1523,12 @@ table_docking:
             "usable_for_approach": True,
             "table_roi_depth_valid": True,
             "table_roi_depth_p10": 0.60,
-            "depth_envelope_slow_vx_mps": 0.030,
+            "depth_envelope_mid_vx_mps": 0.015,
         },
     )
     assert depth_slow_envelope.summary["docking_action"] == "EDGE_APPROACH_FORWARD"
-    assert depth_slow_envelope.final_vx <= 0.030
-    assert depth_slow_envelope.summary["depth_speed_envelope_reason"] == "depth_p10_slow"
+    assert depth_slow_envelope.final_vx <= 0.015
+    assert depth_slow_envelope.summary["depth_speed_envelope_reason"] == "depth_p10_mid"
     assert depth_slow_envelope.final_vy == 0.0
 
     final_semantic_envelope = arbitrate_table_docking_motion(
@@ -1864,9 +1892,9 @@ table_docking:
     assert "control_phase" not in dec_fallback_3.control_summary
     assert dec_fallback_3.control_summary["docking_action"] == "BBOX_REACQUIRE_ROTATE"
 
-    # Queue 2: Final yaw lock & realignment static tests
+    # Queue 2: Final stop static tests with omega disabled
     # Case A: final_depth_latched=True + yaw_err=0.20 (which is > deadband 0.12)
-    # Action must be FINAL_YAW_ALIGN, wz != 0, final_locked=False
+    # Action must stay in final hold with wz=0; final no longer chases edge yaw.
     ctx_q2_a = RuntimeContext(state=State.FINAL_SLOW_STOP)
     ctx_q2_a.final_depth_latched = True
     ctx_q2_a.final_yaw_align_start_mono = 1.0
@@ -1889,8 +1917,9 @@ table_docking:
     )
 
     assert inv_q2_a.summary["docking_action"] == "FINAL_LOCKED_STOP"
-    assert inv_q2_a.summary["docking_stage"] == "FINAL_YAW_ALIGN"
-    assert inv_q2_a.final_vx == 0.0 and inv_q2_a.final_vy == 0.0 and abs(inv_q2_a.final_wz) > 0.0
+    assert inv_q2_a.summary["docking_stage"] == "FINAL_DISTANCE_HOLD"
+    assert inv_q2_a.final_vx == 0.0 and inv_q2_a.final_vy == 0.0 and inv_q2_a.final_wz == 0.0
+    assert inv_q2_a.summary["yaw_owner"] == "none"
     assert inv_q2_a.summary["final_locked"] is False
 
     # Case B: final_depth_latched=True + yaw_err=0.05 consecutively stable for 6 frames (final_yaw_stable_frames=6)
@@ -1949,7 +1978,8 @@ table_docking:
     assert probe_q2_b.ctx.final_locked is False
     assert probe_q2_b.ctx.final_yaw_align_active is True
 
-    # Case D: final depth + edge yaw stale (age > hold_timeout) -> action=FINAL_LOCKED_STOP, wz=0, vx=0, reason=edge_yaw_stale
+    # Case D: final depth + edge yaw stale (age > hold_timeout) still holds
+    # final mode with omega disabled.
     ctx_q2_d = RuntimeContext(state=State.FINAL_SLOW_STOP)
     ctx_q2_d.final_depth_latched = True
     inv_q2_d = arbitrate_table_docking_motion(
@@ -1967,9 +1997,9 @@ table_docking:
     assert inv_q2_d.summary["docking_action"] == "FINAL_LOCKED_STOP"
     assert inv_q2_d.summary["docking_stage"] == "FINAL_DISTANCE_HOLD"
     assert inv_q2_d.final_vx == 0.0 and inv_q2_d.final_wz == 0.0
-    assert inv_q2_d.reason == "edge_yaw_stale"
+    assert inv_q2_d.summary["yaw_owner"] == "none"
 
-    # Queue 3: Full workflow smoke test (SEARCH -> BBOX -> EDGE -> FINAL_YAW -> FINAL_LOCKED)
+    # Queue 3: Full workflow smoke test (SEARCH -> BBOX -> EDGE -> ROI_STOP -> FINAL_LOCKED)
     probe_smoke = DockingProbe()
     probe_smoke.ctx.state = State.SEARCH_TABLE
     probe_smoke.ctx.table_lost_frames = 0
@@ -1999,7 +2029,7 @@ table_docking:
     dec_s3 = edge_guided_decision(probe_smoke, obs_s3)
     assert probe_smoke.ctx.near_table_latched is True
 
-    # Step 4: Final depth latched at < 0.25m -> final_depth_latched becomes True, final_locked is False
+    # Step 4: Final ROI stop at close p10 -> final_locked becomes True with no omega.
     probe_smoke.ctx.state = State.FINAL_SLOW_STOP
     for _ in range(3):
         obs_s4 = TableEdgeObs.from_dict({
@@ -2008,9 +2038,10 @@ table_docking:
         })
         dec_s4 = edge_guided_decision(probe_smoke, obs_s4)
     assert probe_smoke.ctx.final_depth_latched is True
-    assert probe_smoke.ctx.final_locked is False
+    assert probe_smoke.ctx.final_locked is True
+    assert dec_s4.cmd.vx_mps == 0.0 and dec_s4.cmd.vy_mps == 0.0 and dec_s4.cmd.wz_radps == 0.0
 
-    # Step 5: Stable small yaw for 6 frames -> final_locked becomes True
+    # Step 5: Stable small yaw remains locked; final does not chase yaw.
     probe_smoke.ctx.final_yaw_align_start_mono = monotonic_ts() - 2.0
     for _ in range(6):
         obs_s5 = TableEdgeObs.from_dict({
@@ -2057,7 +2088,7 @@ table_docking:
         rotate_allowed_by_behavior=True,
     )
 
-    # Test B: final yaw align cmd -> docking_action=FINAL_YAW_ALIGN, wz!=0
+    # Test B: final yaw request is ignored in final mode; omega remains zero.
     obs_b = TableEdgeObs.from_dict({
         "ts": now_ts(), "table_found": True, "edge_found": True, "edge_valid": True, "edge_trusted": True,
         "yaw_err_rad": 0.15, "dist_err_m": 0.20, "table_roi_depth_valid": True, "table_roi_depth_p10": 0.20,
@@ -2080,8 +2111,9 @@ table_docking:
 
     res_b = arbitrate_table_docking_motion(test_ctx, obs_b, intent, summary_b)
     assert res_b.summary["docking_action"] == "FINAL_LOCKED_STOP" or res_b.summary["docking_action"] == DockingAction.FINAL_LOCKED_STOP
-    assert res_b.summary["docking_stage"] == "FINAL_YAW_ALIGN" or res_b.summary["docking_stage"] == DockingStage.FINAL_YAW_ALIGN
-    assert abs(res_b.final_wz) > 1e-9
+    assert res_b.summary["docking_stage"] in {"FINAL_LOCKED", "FINAL_DISTANCE_HOLD", DockingStage.FINAL_LOCKED, DockingStage.FINAL_DISTANCE_HOLD}
+    assert res_b.final_vy == 0.0
+    assert res_b.final_wz == 0.0
 
     # Test C: dead stale with no healthy history -> choose recovery/hold (vx=0)
     summary_c = {

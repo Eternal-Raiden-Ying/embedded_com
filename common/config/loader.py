@@ -472,6 +472,18 @@ def _load_and_merge_stage_params(config: SystemGlobalConfig, file_path: Path) ->
             ctrl.near_slow_max_vx_mps = _sf(td["near_slow_max_vx_mps"])
         if "near_slow_max_vy_mps" in td:
             ctrl.near_slow_max_vy_mps = _sf(td["near_slow_max_vy_mps"])
+        if "final_servo_enter_p10_m" in td:
+            ctrl.final_servo_enter_p10_m = _sf(td["final_servo_enter_p10_m"])
+        if "roi_final_stop_p10_m" in td:
+            ctrl.roi_final_stop_p10_m = _sf(td["roi_final_stop_p10_m"])
+        if "roi_final_slow_p10_m" in td:
+            ctrl.roi_final_slow_p10_m = _sf(td["roi_final_slow_p10_m"])
+        if "roi_final_probe_vx_mps" in td:
+            ctrl.roi_final_probe_vx_mps = _sf(td["roi_final_probe_vx_mps"])
+        if "roi_final_missing_probe_vx_mps" in td:
+            ctrl.roi_final_missing_probe_vx_mps = _sf(td["roi_final_missing_probe_vx_mps"])
+        if "roi_final_missing_hold_s" in td:
+            ctrl.roi_final_missing_hold_s = _sf(td["roi_final_missing_hold_s"])
         if "depth_envelope_stop_p10_m" in td:
             ctrl.depth_envelope_stop_p10_m = _sf(td["depth_envelope_stop_p10_m"])
         if "depth_envelope_slow_p10_m" in td:
@@ -548,6 +560,14 @@ def _load_and_merge_stage_params(config: SystemGlobalConfig, file_path: Path) ->
             ctrl.mid_lateral_vy_max_mps = _sf(td["mid_lateral_vy_max_mps"])
         if "near_lateral_vy_max_mps" in td:
             ctrl.near_lateral_vy_max_mps = _sf(td["near_lateral_vy_max_mps"])
+        if "lateral_priority_mid_error_norm" in td:
+            ctrl.lateral_priority_mid_error_norm = _sf(td["lateral_priority_mid_error_norm"])
+        if "lateral_priority_large_error_norm" in td:
+            ctrl.lateral_priority_large_error_norm = _sf(td["lateral_priority_large_error_norm"])
+        if "lateral_priority_mid_vx_cap_mps" in td:
+            ctrl.lateral_priority_mid_vx_cap_mps = _sf(td["lateral_priority_mid_vx_cap_mps"])
+        if "lateral_priority_vx_cap_mps" in td:
+            ctrl.lateral_priority_vx_cap_mps = _sf(td["lateral_priority_vx_cap_mps"])
         if "yaw_flip_hold_window_s" in td:
             ctrl.yaw_flip_hold_window_s = _sf(td["yaw_flip_hold_window_s"])
         if "yaw_flip_count_limit" in td:
