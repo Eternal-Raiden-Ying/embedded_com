@@ -8,7 +8,7 @@ final_lock:
   edge_conf_th: 0.55
   stable_ms: 500
   timeout_ms: 14000
-  target_dist_m: 0.50
+  target_dist_m: 0.30
   stop_margin_m: 0.05
   settle_ms: 500
   stable_frames: 5
@@ -37,10 +37,10 @@ table_docking:
   depth_envelope_slow_vx_mps: 0.008
   depth_envelope_mid_vx_mps: 0.012
   bbox_track_forward_enabled: true
-  bbox_track_forward_vx_mps: 0.014
-  bbox_track_forward_max_vx_mps: 0.018
+  bbox_track_forward_vx_mps: 0.020
+  bbox_track_forward_max_vx_mps: 0.030
   bbox_track_forward_center_band: 0.30
-  far_bbox_track_vx_mps: 0.016
+  far_bbox_track_vx_mps: 0.025
   bbox_track_forward_min_hold_ms: 800
   bbox_track_forward_max_wz_radps: 0.06
   edge_readiness_enabled: true
@@ -51,14 +51,14 @@ table_docking:
   edge_readiness_min_inliers: 30
   edge_readiness_yaw_max_rad: 0.35
   edge_handoff_min_hold_ms: 800
-  edge_handoff_forward_vx_mps: 0.010
-  forward_commit_min_s: 1.5
-  far_forward_commit_min_s: 1.8
+  edge_handoff_forward_vx_mps: 0.018
+  forward_commit_min_s: 1.8
+  far_forward_commit_min_s: 2.0
   stop_after_table_docking: true
   lateral_enabled: true
-  lateral_vy_max_mps: 0.010
-  lateral_deadband_norm: 0.045
-  lateral_kp: 0.045
+  lateral_vy_max_mps: 0.015
+  lateral_deadband_norm: 0.035
+  lateral_kp: 0.065
   lateral_target_center_x_norm: 0.5
   lateral_owner_default: none
 

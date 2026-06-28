@@ -466,8 +466,7 @@ def arbitrate_table_docking_motion(
         if roi_depth_valid and roi_depth_m is not None and roi_depth_m <= _float(summary, "depth_envelope_stop_p10_m", 0.55):
             return 0.0, "depth_p10_stop"
         bbox_err = float(docking_obs.bbox_center_error)
-        deadband = abs(_float(summary, "lateral_deadband_norm", 0.045))
-        if abs(bbox_err) < deadband:
+        if abs(bbox_err) <= 0.06:
             return 0.0, "bbox_vy_deadband"
         kp = abs(_float(summary, "lateral_kp", 0.045))
         near_cap = abs(_float(summary, "near_slow_max_vy_mps", 0.0025))
@@ -608,7 +607,7 @@ def arbitrate_table_docking_motion(
             )
         if yaw_large and abs(edge_wz) > 1e-9:
             return _docking_result(
-                action=DockingAction.FINAL_YAW_ALIGN,
+                action=DockingAction.FINAL_LOCKED_STOP,
                 stage=DockingStage.FINAL_YAW_ALIGN,
                 summary=with_common(
                     {
@@ -673,7 +672,7 @@ def arbitrate_table_docking_motion(
         edge_wz, yaw_source = edge_final_wz()
         if abs(edge_wz) > 1e-9:
             return _docking_result(
-                action=DockingAction.FINAL_YAW_ALIGN,
+                action=DockingAction.FINAL_LOCKED_STOP,
                 stage=DockingStage.FINAL_YAW_ALIGN,
                 summary=with_common(
                     {
@@ -725,8 +724,9 @@ def arbitrate_table_docking_motion(
             )
         else:
             wz = bbox_recovery_wz()
+            action = DockingAction.SEARCH_ROTATE if state == "SEARCH_TABLE" else (DockingAction.CONTROL_RECOVERY_ROTATE if abs(wz) > 1e-9 else DockingAction.SEARCH_ROTATE)
             return _docking_result(
-                action=DockingAction.CONTROL_RECOVERY_ROTATE if abs(wz) > 1e-9 else DockingAction.SEARCH_ROTATE,
+                action=action,
                 stage=DockingStage.RECOVERY_ROTATE,
                 summary=with_common({
                     "forward_block_reason": "stale_dead_no_last_good",
@@ -802,7 +802,7 @@ def arbitrate_table_docking_motion(
         if abs(wz) <= 1e-9:
             wz = bbox_recovery_wz()
         return _docking_result(
-            action=DockingAction.CONTROL_RECOVERY_ROTATE,
+            action=DockingAction.SEARCH_ROTATE if state == "SEARCH_TABLE" else DockingAction.CONTROL_RECOVERY_ROTATE,
             stage=DockingStage.RECOVERY_ROTATE,
             summary=with_common({"forward_block_reason": edge_block}),
             wz=wz,
@@ -821,8 +821,11 @@ def arbitrate_table_docking_motion(
         )
     if edge_block in {"bbox_fov_guard_hard", "edge_yaw_too_large"}:
         wz = bbox_recovery_wz() if edge_block == "bbox_fov_guard_hard" else _float(summary, "edge_yaw_cmd", _float(summary, "wz_from_plane", desired_wz))
+        action = DockingAction.SEARCH_ROTATE if state == "SEARCH_TABLE" else (
+            DockingAction.BBOX_REACQUIRE_ROTATE if edge_block == "bbox_fov_guard_hard" else DockingAction.SEARCH_ROTATE
+        )
         return _docking_result(
-            action=DockingAction.CONTROL_RECOVERY_ROTATE,
+            action=action,
             stage=DockingStage.RECOVERY_ROTATE,
             summary=with_common({"forward_block_reason": edge_block, "rotate_block_reason": ""}),
             wz=wz,
@@ -884,7 +887,7 @@ def arbitrate_table_docking_motion(
         if edge_yaw_abs > _float(summary, "edge_forward_rotate_only_yaw_rad", 0.18):
             wz = _float(summary, "edge_yaw_cmd", _float(summary, "wz_from_plane", desired_wz))
             return _docking_result(
-                action=DockingAction.CONTROL_RECOVERY_ROTATE,
+                action=DockingAction.SEARCH_ROTATE,
                 stage=DockingStage.RECOVERY_ROTATE,
                 summary=with_common({"effective_forward_block_reason": "edge_yaw_large", "forward_block_reason": "edge_yaw_large", "rotate_block_reason": ""}),
                 wz=wz,

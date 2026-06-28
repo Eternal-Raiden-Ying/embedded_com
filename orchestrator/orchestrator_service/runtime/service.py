@@ -2807,7 +2807,7 @@ class OrchestratorService(BaseModule):
             center_error = self._motion_num(cx_norm) - 0.5
         yaw_err = self._motion_num(summary.get("yaw_err_rad", summary.get("yaw_err", 0.0)))
         dist_err = self._motion_num(summary.get("dist_err_m", 0.0))
-        target_dist = self._motion_num(summary.get("target_dist_m", getattr(self.cfg.control, "table_target_dist_m", 0.5)), 0.5)
+        target_dist = self._motion_num(summary.get("target_dist_m", getattr(self.cfg.control, "table_target_dist_m", 0.3)), 0.3)
         hard_yaw = abs(self._motion_num(summary.get("hard_rotate_only_yaw_rad", getattr(self.cfg.car, "table_edge_hard_rotate_only_yaw_rad", 0.45)), 0.45))
         tolerance = max(0.0, self._motion_num(getattr(self.cfg.control, "final_lock_dist_tol_m", 0.02), 0.02))
         yolo_visible = bool(summary.get("yolo_table_visible") or summary.get("table_bbox_found"))
@@ -2940,6 +2940,9 @@ class OrchestratorService(BaseModule):
             "search_latch_reason": summary.get("search_latch_reason", ""),
             "wz_sign_final": summary.get("wz_sign_final", 0),
         }
+        if not trace.get("vy_enabled", False):
+            trace.pop("vy_cmd_raw", None)
+            trace.pop("vy_cmd_limited", None)
         self.run_logger.write_jsonl("motion_gate_trace", trace)
         is_docking = trace["state"] in {"SEARCH_TABLE", "YOLO_ACQUIRE_ALIGN", "YOLO_APPROACH", "EDGE_ADJUST", "FINAL_SLOW_STOP", "AT_TABLE_EDGE"}
         if is_docking:
@@ -3348,6 +3351,9 @@ class OrchestratorService(BaseModule):
             "vy_mps": float(velocity[1]),
             "wz_radps": float(velocity[2]),
         }
+        if not self._last_motion_tx_context.get("vy_enabled", False):
+            self._last_motion_tx_context.pop("vy_cmd_raw", None)
+            self._last_motion_tx_context.pop("vy_cmd_limited", None)
         self._last_motion_tx_context.update(uart_arbitration)
         tx_meta.update({
             "docking_stage": summary.get("docking_stage") or "",
@@ -3396,15 +3402,54 @@ class OrchestratorService(BaseModule):
         if self._should_log_motion(motion_signature, now=log_now):
             cmd_record = effective_cmd.to_dict()
             cmd_record.update(self._last_motion_tx_context)
-            self.run_logger.write_jsonl("cmd_vel", cmd_record)
+            slim_cmd_record = {
+                "ts": float(cmd_record.get("ts", time.time())),
+                "mode": str(cmd_record.get("mode", "")),
+                "vx": float(cmd_record.get("vx", cmd_record.get("vx_mps", 0.0))),
+                "vy": float(cmd_record.get("vy", cmd_record.get("vy_mps", 0.0))),
+                "wz": float(cmd_record.get("wz", cmd_record.get("wz_radps", 0.0))),
+                "vx_mps": float(cmd_record.get("vx_mps", 0.0)),
+                "vy_mps": float(cmd_record.get("vy_mps", 0.0)),
+                "wz_radps": float(cmd_record.get("wz_radps", 0.0)),
+                "brake": bool(cmd_record.get("brake", False)),
+                "docking_action": str(cmd_record.get("docking_action") or ""),
+                "docking_reason": str(cmd_record.get("docking_reason") or cmd_record.get("reason") or ""),
+                "yaw_owner": str(cmd_record.get("yaw_owner") or ""),
+                "forward_owner": str(cmd_record.get("forward_owner") or "none"),
+                "lateral_owner": str(cmd_record.get("lateral_owner") or "none"),
+                "effective_block_reason": str(cmd_record.get("effective_block_reason") or cmd_record.get("forward_block_reason") or ""),
+                "uart_tx_ok": bool(cmd_record.get("uart_tx_ok", True)),
+                "service_override_reason": str(cmd_record.get("service_override_reason") or ""),
+            }
+            self.run_logger.write_jsonl("cmd_vel", slim_cmd_record)
             self.run_logger.write_jsonl("car_cmd", car_record)
         self._emit_edge_slide_trace(decision)
 
     def _emit_jog_motion(self, decision, jog_action: str) -> None:
         cmd = decision.cmd
-        self.run_logger.write_jsonl("cmd_vel", cmd.to_dict())
         summary = dict(getattr(decision, "control_summary", None) or {})
-        self.run_logger.write_jsonl("control_summary", summary)
+        cmd_dict = cmd.to_dict()
+        slim_cmd_record = {
+            "ts": float(cmd_dict.get("ts", time.time())),
+            "mode": str(cmd_dict.get("mode", "")),
+            "vx": float(cmd_dict.get("vx", 0.0)),
+            "vy": float(cmd_dict.get("vy", 0.0)),
+            "wz": float(cmd_dict.get("wz", 0.0)),
+            "vx_mps": float(cmd_dict.get("vx_mps", 0.0)),
+            "vy_mps": float(cmd_dict.get("vy_mps", 0.0)),
+            "wz_radps": float(cmd_dict.get("wz_radps", 0.0)),
+            "brake": bool(cmd_dict.get("brake", False)),
+            "docking_action": str(summary.get("docking_action") or ""),
+            "docking_reason": str(summary.get("docking_reason") or summary.get("reason") or ""),
+            "yaw_owner": str(summary.get("yaw_owner") or ""),
+            "forward_owner": str(summary.get("forward_owner") or "none"),
+            "lateral_owner": str(summary.get("lateral_owner") or "none"),
+            "effective_block_reason": str(summary.get("effective_block_reason") or summary.get("forward_block_reason") or ""),
+            "uart_tx_ok": bool(getattr(self, "_last_uart_tx_ok", True)),
+            "service_override_reason": str(summary.get("service_override_reason") or ""),
+        }
+        self.run_logger.write_jsonl("cmd_vel", slim_cmd_record)
+        self.run_logger.write_jsonl("control_summary", sanitize_control_summary(summary))
         reason = str(getattr(decision, "jog_reason", "") or summary.get("reason") or jog_action)
         if jog_action == "forward":
             seq = self.motion_adapter.jog_forward_small(reason=reason)

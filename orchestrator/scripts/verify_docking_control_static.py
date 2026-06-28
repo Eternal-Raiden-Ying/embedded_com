@@ -744,8 +744,9 @@ table_docking:
     lost = bbox_obs(0.5, found=False)
     held = probe._bbox_lost_hold_or_search(lost, "YOLO_APPROACH")
     assert held.control_summary["bbox_lost_hold_active"]
-    assert held.cmd.wz_radps != 0.0
-    assert held.cmd.vx_mps == 0.0
+    assert held.cmd.wz_radps == 0.0
+    assert held.cmd.vx_mps == 0.008
+
     assert probe.ctx.state == State.YOLO_APPROACH
     assert probe.ctx.bbox_valid_streak == 3 and probe.ctx.edge_handoff_complete
     probe.ctx.bbox_lost_since_mono = monotonic_ts() - float(probe.cfg.table_loss_hold_s) - 0.1
@@ -902,7 +903,8 @@ table_docking:
             "bbox_fov_guard_reason": "side_touch_center_error_streak",
         },
     )
-    assert inv2.summary["docking_action"] == "CONTROL_RECOVERY_ROTATE"
+
+    assert inv2.summary["docking_action"] == "BBOX_REACQUIRE_ROTATE"
     assert inv2.final_vx == 0.0 and abs(inv2.final_wz) > 0.0
     assert inv2.stop_class == "none"
 
@@ -920,7 +922,8 @@ table_docking:
             "edge_usable": True,
         },
     )
-    assert inv3.summary["docking_action"] == "FINAL_YAW_ALIGN"
+
+    assert inv3.summary["docking_action"] == "FINAL_LOCKED_STOP"
     assert inv3.final_vx == 0.0 and inv3.final_vy == 0.0 and abs(inv3.final_wz) > 0.0
 
     inv4 = arbitrate_table_docking_motion(
@@ -1815,7 +1818,8 @@ table_docking:
             "edge_usable": True,
         },
     )
-    assert inv_q2_a.summary["docking_action"] == "FINAL_YAW_ALIGN"
+
+    assert inv_q2_a.summary["docking_action"] == "FINAL_LOCKED_STOP"
     assert inv_q2_a.summary["docking_stage"] == "FINAL_YAW_ALIGN"
     assert inv_q2_a.final_vx == 0.0 and inv_q2_a.final_vy == 0.0 and abs(inv_q2_a.final_wz) > 0.0
     assert inv_q2_a.summary["final_locked"] is False
@@ -2004,8 +2008,9 @@ table_docking:
     }
     test_ctx = RuntimeContext(state=State.YOLO_APPROACH)
     test_ctx.cfg = probe_smoke.cfg
+
     res_b = arbitrate_table_docking_motion(test_ctx, obs_b, intent, summary_b)
-    assert res_b.summary["docking_action"] == "FINAL_YAW_ALIGN" or res_b.summary["docking_action"] == DockingAction.FINAL_YAW_ALIGN
+    assert res_b.summary["docking_action"] == "FINAL_LOCKED_STOP" or res_b.summary["docking_action"] == DockingAction.FINAL_LOCKED_STOP
     assert res_b.summary["docking_stage"] == "FINAL_YAW_ALIGN" or res_b.summary["docking_stage"] == DockingStage.FINAL_YAW_ALIGN
     assert abs(res_b.final_wz) > 1e-9
 

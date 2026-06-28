@@ -135,9 +135,10 @@ def test_yolo_acquire_align_outputs_rotate_command_not_stop_summary():
             "table_bbox_found": True,
             "table_bbox_xyxy": [0.05, 0.35, 0.45, 0.90],
             "table_cx_norm": -0.6,
-            "yolo_bbox_center_x_norm": 0.20,
+            "yolo_bbox_center_x_norm": 0.05,
             "yolo_table_control_valid": True,
             "depth_valid": True,
+
         }
     )
 

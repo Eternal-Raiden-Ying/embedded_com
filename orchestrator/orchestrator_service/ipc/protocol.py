@@ -1032,8 +1032,6 @@ class CarState:
 
     def to_dict(self) -> Dict[str, Any]:
         return {k: v for k, v in asdict(self).items() if v is not None}
-
-
 @dataclass
 class CmdVel:
     ts: float
@@ -1043,6 +1041,7 @@ class CmdVel:
     wz_radps: float = 0.0
     hold_ms: int = 150
     brake: bool = False
+    base_freeze: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -1056,8 +1055,8 @@ class CmdVel:
             "wz": float(self.wz_radps),
             "hold_ms": int(self.hold_ms),
             "brake": bool(self.brake),
+            "base_freeze": bool(getattr(self, "base_freeze", False)),
         }
-
 
 @dataclass
 class ArmCommand:

@@ -466,9 +466,8 @@ class TableDockingMixin:
 
     def _final_depth_latch_frames(self) -> int:
         return max(1, int(getattr(self.cfg, "final_depth_latch_frames", self._final_lock_required_ready_obs()) or self._final_lock_required_ready_obs()))
-
     def _near_depth_threshold_m(self, obs: Optional[TableEdgeObs]) -> float:
-        target = self._table_target_dist_m(obs) if hasattr(self, "_table_target_dist_m") else float(getattr(self.cfg, "table_target_dist_m", 0.50) or 0.50)
+        target = self._table_target_dist_m(obs) if hasattr(self, "_table_target_dist_m") else float(getattr(self.cfg, "table_target_dist_m", 0.30) or 0.30)
         margin = max(
             float(getattr(self.cfg, "near_table_depth_margin_m", 0.12) or 0.12),
             float(getattr(self.cfg, "table_stop_margin_m", 0.05) or 0.05),
@@ -878,12 +877,9 @@ class TableDockingMixin:
         hard_lost = stale_level in {"hard_stale", "dead"}
         if not hard_lost and hold_age_s < hold_limit_s:
             last_yaw = getattr(self.ctx, "last_bbox_yaw_cmd", 0.0)
-            if abs(last_yaw) > 1e-6:
-                wz = last_yaw
-            else:
-                search_sign = int(self.ctx.search_wz_sign_latched or self.ctx.relocate_turn_sign or 1)
-                wz = abs(float(self.car_cfg.search_table_wz_radps)) * search_sign
-            cmd = self.controller._cmd(mode, vx=0.0, wz=wz)
+            wz = last_yaw if abs(last_yaw) > 1e-6 else 0.0
+            vx = 0.008 if abs(wz) <= 1e-6 else 0.0
+            cmd = self.controller._cmd(mode, vx=vx, wz=wz)
             decision = MotionDecision(
                 cmd=cmd,
                 control_summary=self.controller._summary(mode, cmd, obs, reason="bbox_lost_hold_rotate")
@@ -901,9 +897,9 @@ class TableDockingMixin:
                     "bbox_centered_streak": int(self.ctx.bbox_centered_streak),
                     "control_source": "bbox_lost_hold",
                     "yaw_source": "last_bbox_yaw" if abs(last_yaw) > 1e-6 else "search",
-                    "allow_forward": False,
-                    "allow_rotate": True,
-                    "vx_mps": 0.0,
+                    "allow_forward": bool(vx > 0.0),
+                    "allow_rotate": bool(abs(wz) > 1e-9),
+                    "vx_mps": float(vx),
                     "vy_mps": 0.0,
                     "wz_radps": float(wz),
                 }
