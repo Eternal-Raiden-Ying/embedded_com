@@ -107,6 +107,10 @@ class DockingObservation:
     table_roi_depth_p10: Optional[float] = None
     table_roi_depth_median: Optional[float] = None
     table_roi_depth_mean: Optional[float] = None
+    table_roi_source: str = ""
+    table_roi_latched: bool = False
+    table_roi_latch_age_s: Optional[float] = None
+    table_roi_xyxy: Optional[list] = None
     dist_err_m: Optional[float] = None
     lateral_err_norm: Optional[float] = None
     lateral_err_m: Optional[float] = None
@@ -239,6 +243,10 @@ def build_docking_observation(ctx: Any, obs: Any, summary: Optional[Dict[str, An
         table_roi_depth_p10=_optional_float(summary.get("table_roi_depth_p10", _obs_value(obs, "table_roi_depth_p10"))),
         table_roi_depth_median=_optional_float(summary.get("table_roi_depth_median", _obs_value(obs, "table_roi_depth_median"))),
         table_roi_depth_mean=_optional_float(summary.get("table_roi_depth_mean", _obs_value(obs, "table_roi_depth_mean"))),
+        table_roi_source=str(summary.get("table_roi_source", _obs_value(obs, "table_roi_source")) or ""),
+        table_roi_latched=bool(summary.get("table_roi_latched") or _obs_bool(obs, "table_roi_latched")),
+        table_roi_latch_age_s=_optional_float(summary.get("table_roi_latch_age_s", _obs_value(obs, "table_roi_latch_age_s"))),
+        table_roi_xyxy=summary.get("table_roi_xyxy", _obs_value(obs, "table_roi_xyxy")),
         dist_err_m=_optional_float(summary.get("dist_err_m", _obs_value(obs, "dist_err_m"))),
         lateral_err_norm=_optional_float(summary.get("lateral_err_norm")),
         lateral_err_m=_optional_float(summary.get("lateral_err_m", _obs_value(obs, "lateral_err_m"))),

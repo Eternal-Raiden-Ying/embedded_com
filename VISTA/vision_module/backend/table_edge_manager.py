@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, Optional
 import numpy as np
 
 from .depth_calibration import DepthIntrinsics, depth_intrinsics_from_dict
-from .table_edge_roi import choose_depth_roi
+from .table_edge_roi import choose_depth_roi, normalize_table_bbox
 from .table_roi_depth import table_roi_depth_statistics
 from .vision_semantics import standardize_table_edge_payload, TableEdgeObservation
 from .math_utils import finite_percentiles, camera_points_to_robot, weighted_line_fit, ransac_line_fit
@@ -118,6 +118,7 @@ class TableEdgeManager:
         self._last_valid_table_bbox = None
         self._last_valid_table_center_norm = None
         self._last_valid_depth_roi = None
+        self._last_valid_depth_roi_ts = 0.0
         self._last_valid_table_bbox_hold_frames = 0
         self._force_depth_roi_once: Optional[list[int]] = None
         self._force_depth_roi_reason_once = ""
@@ -2156,12 +2157,48 @@ class TableEdgeManager:
         current_table_bbox_found = bool(roi_meta.get("table_bbox_current_found", False))
         if not current_table_bbox_found and table_bbox is not None and roi_source_text != "yolo_table_bbox_hold":
             current_table_bbox_found = roi_source_text in {"local_perception_table_bbox", "yolo_table_bbox", "yolo_table_mapped_center", "yolo_table_bbox_mapped", "yolo_table_bbox_boundary_extend"}
+        now_s = time.time()
+        latch_age_s = None
+        if self._last_valid_depth_roi_ts:
+            latch_age_s = max(0.0, now_s - float(self._last_valid_depth_roi_ts or 0.0))
+        latch_max_age_s = max(0.0, float(getattr(table_edge_cfg, "final_roi_latch_max_age_s", 2.0) or 2.0))
+        latched_roi = normalize_table_bbox(self._last_valid_depth_roi, depth_shape)
+        runtime_state = str((runtime_status or {}).get("orchestrator_state") or "").strip().upper()
+        close_or_final_latched = any(
+            bool((runtime_status or {}).get(key))
+            for key in (
+                "close_range_latched",
+                "final_roi_mode_latched",
+                "final_edge_mode_latched",
+                "final_distance_servo_active",
+            )
+        )
+        latch_allowed = bool(
+            getattr(table_edge_cfg, "final_roi_latch_enable", True)
+            and not current_table_bbox_found
+            and latched_roi is not None
+            and latch_age_s is not None
+            and latch_age_s <= latch_max_age_s
+            and (
+                close_or_final_latched
+                or runtime_state in {"FINAL_SLOW_STOP", "AT_TABLE_EDGE"}
+            )
+        )
+        if latch_allowed:
+            roi_meta["depth_edge_roi"] = list(latched_roi)
+            roi_meta["table_edge_roi"] = list(latched_roi)
+            roi_meta["edge_roi"] = list(latched_roi)
+            roi_meta["dynamic_roi"] = list(latched_roi)
+            roi_meta["roi_source"] = "latched_table_roi"
+            roi_meta["roi_reason"] = "table_bbox_lost_close_final_latched_roi"
+            roi_source_text = "latched_table_roi"
         if current_table_bbox_found and roi_source_text in {"local_perception_table_bbox", "yolo_table_bbox", "yolo_table_mapped_center", "yolo_table_bbox_mapped", "yolo_table_bbox_boundary_extend"}:
             self._last_valid_quadrant = str(quadrant).strip().upper() if quadrant else self._last_valid_quadrant
-            self._last_valid_quadrant_ts = time.time()
+            self._last_valid_quadrant_ts = now_s
             self._last_valid_table_bbox = table_bbox
             self._last_valid_table_center_norm = roi_meta.get("table_center_norm")
             self._last_valid_depth_roi = roi_meta.get("table_edge_roi") or roi_meta.get("depth_edge_roi")
+            self._last_valid_depth_roi_ts = now_s
             self._last_valid_table_bbox_hold_frames = 0
         elif roi_source_text == "yolo_table_bbox_hold":
             self._last_valid_table_bbox_hold_frames = int(self._last_valid_table_bbox_hold_frames or 0) + 1
@@ -2174,6 +2211,11 @@ class TableEdgeManager:
         roi_meta["roi_hold_active"] = bool(roi_source_text == "yolo_table_bbox_hold")
         roi_meta["roi_hold_age_frames"] = int(self._last_valid_table_bbox_hold_frames if roi_source_text == "yolo_table_bbox_hold" else 0)
         roi_meta["last_valid_table_edge_roi"] = self._last_valid_depth_roi
+        roi_meta["table_roi_latched"] = bool(roi_source_text == "latched_table_roi")
+        roi_meta["table_roi_latch_age_s"] = latch_age_s
+        roi_meta["table_roi_latch_max_age_s"] = float(latch_max_age_s)
+        roi_meta["table_roi_source"] = str(roi_meta.get("roi_source") or "")
+        roi_meta["table_roi_xyxy"] = roi_meta.get("table_edge_roi") or roi_meta.get("depth_edge_roi")
         roi_meta["yolo_table_roi_enable"] = bool(dynamic_enable)
         roi_meta["yolo_table_roi_use_rgb_depth_mapping"] = bool(table_edge_cfg.yolo_table_roi_use_rgb_depth_mapping)
         roi_meta["yolo_table_roi_mode"] = str(table_edge_cfg.yolo_table_roi_mode)
@@ -2259,6 +2301,11 @@ class TableEdgeManager:
             "roi_hold_active",
             "roi_hold_age_frames",
             "last_valid_table_edge_roi",
+            "table_roi_source",
+            "table_roi_latched",
+            "table_roi_latch_age_s",
+            "table_roi_latch_max_age_s",
+            "table_roi_xyxy",
             "yolo_table_edge_stable_count",
             "yolo_table_edge_stable_required",
             "yolo_table_near_distance",
@@ -3704,9 +3751,16 @@ class TableEdgeManager:
             mapped_roi = payload.get("table_edge_roi") or payload.get("depth_edge_roi") or payload.get("dynamic_roi")
             roi_stats = table_roi_depth_statistics(
                 depth, depth_scale, mapped_roi,
-                current_table_bbox_found=bool(payload.get("table_bbox_current_found", False)),
+                current_table_bbox_found=bool(
+                    payload.get("table_bbox_current_found", False)
+                    or payload.get("table_roi_latched", False)
+                ),
             )
             roi_stats["table_roi_depth_mapping_source"] = str(payload.get("roi_source") or "")
+            roi_stats["table_roi_source"] = str(payload.get("table_roi_source") or payload.get("roi_source") or "")
+            roi_stats["table_roi_latched"] = bool(payload.get("table_roi_latched", False))
+            roi_stats["table_roi_latch_age_s"] = payload.get("table_roi_latch_age_s")
+            roi_stats["table_roi_xyxy"] = mapped_roi
             payload.update(roi_stats)
 
         self._processed_frame_count += 1

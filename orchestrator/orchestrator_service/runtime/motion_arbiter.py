@@ -441,6 +441,10 @@ def arbitrate_table_docking_motion(
         {
             "docking_stage": docking_stage.value,
             "docking_observation": docking_obs.to_dict(),
+            "table_roi_source": docking_obs.table_roi_source,
+            "table_roi_latched": bool(docking_obs.table_roi_latched),
+            "table_roi_latch_age_s": docking_obs.table_roi_latch_age_s,
+            "table_roi_xyxy": docking_obs.table_roi_xyxy,
         }
     )
     state = _state_value(ctx)

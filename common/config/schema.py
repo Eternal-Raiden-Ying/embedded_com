@@ -318,6 +318,8 @@ class TableEdgeConfig:
     yolo_table_bbox_hold_enable: bool = True
     yolo_table_bbox_hold_frames: int = 8
     yolo_table_roi_hold_enable: bool = True
+    final_roi_latch_enable: bool = True
+    final_roi_latch_max_age_s: float = 2.0
     yolo_table_roi_boundary_extend_enable: bool = True
     yolo_table_roi_boundary_margin_norm: float = 0.03
     yolo_table_edge_stable_frames: int = 5

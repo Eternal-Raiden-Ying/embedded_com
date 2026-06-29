@@ -533,6 +533,10 @@ class TableEdgeObs:
     table_roi_depth_bbox_norm: Optional[list] = None
     table_roi_depth_coord_space: Optional[str] = None
     table_roi_depth_mapping_source: Optional[str] = None
+    table_roi_source: Optional[str] = None
+    table_roi_latched: bool = False
+    table_roi_latch_age_s: Optional[float] = None
+    table_roi_xyxy: Optional[list] = None
     edge_angle_rad: Optional[float] = None
     edge_k: Optional[float] = None
     edge_b: Optional[float] = None
@@ -741,6 +745,10 @@ class TableEdgeObs:
             table_roi_depth_bbox_norm=_pick_optional_bbox(payload, "table_roi_depth_bbox_norm"),
             table_roi_depth_coord_space=_pick_optional_str(payload, "table_roi_depth_coord_space"),
             table_roi_depth_mapping_source=_pick_optional_str(payload, "table_roi_depth_mapping_source"),
+            table_roi_source=_pick_optional_str(payload, "table_roi_source", "roi_source"),
+            table_roi_latched=_pick_optional_bool(payload, "table_roi_latched") is True,
+            table_roi_latch_age_s=_pick_optional_float(payload, "table_roi_latch_age_s"),
+            table_roi_xyxy=_pick_optional_bbox(payload, "table_roi_xyxy", "table_edge_roi", "depth_edge_roi"),
             edge_angle_rad=_pick_optional_float(payload, "edge_angle_rad"),
             edge_k=_pick_optional_float(payload, "edge_k"),
             edge_b=_pick_optional_float(payload, "edge_b"),

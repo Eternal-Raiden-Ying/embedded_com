@@ -128,6 +128,10 @@ class TableEdgeObservation:
     table_roi_depth_bbox_norm: Optional[list[float]] = None
     table_roi_depth_coord_space: Optional[str] = None
     table_roi_depth_mapping_source: Optional[str] = None
+    table_roi_source: Optional[str] = None
+    table_roi_latched: bool = False
+    table_roi_latch_age_s: Optional[float] = None
+    table_roi_xyxy: Optional[list[float]] = None
 
     # Depth safety stop metrics
     depth_p10: Optional[float] = None

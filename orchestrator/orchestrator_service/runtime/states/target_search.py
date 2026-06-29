@@ -1005,8 +1005,8 @@ class TargetSearchMixin:
             return False
         
         active_target = str(self.ctx.active_target or "").strip()
-        matched_cls = str(obs.matched_cls or "").strip()
-        if not active_target or matched_cls != active_target:
+        matched_cls = str(obs.matched_cls or obs.target or "").strip()
+        if active_target and matched_cls and matched_cls != active_target:
             return False
             
         conf = obs.matched_conf if obs.matched_conf is not None else 0.0
@@ -1016,21 +1016,8 @@ class TargetSearchMixin:
         mb = obs.matched_bbox
         if not mb or not isinstance(mb, list) or len(mb) < 4:
             return False
-            
-        table_obs = self._fresh_table_obs()
-        if table_obs is not None and getattr(table_obs, "table_bbox_xyxy", None):
-            tb = table_obs.table_bbox_xyxy
-            if len(tb) >= 4:
-                mcx = (float(mb[0]) + float(mb[2])) / 2.0
-                mcy = (float(mb[1]) + float(mb[3])) / 2.0
-                tx1, ty1, tx2, ty2 = float(tb[0]), float(tb[1]), float(tb[2]), float(tb[3])
-                if not (tx1 - 10 <= mcx <= tx2 + 10 and ty1 - 10 <= mcy <= ty2 + 10):
-                    return False
                     
         if int(getattr(self.ctx, "target_found_frames", 0) or 0) < 5:
-            return False
-            
-        if obs.depth_m is None or obs.depth_m <= 0.0:
             return False
             
         return True

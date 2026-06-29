@@ -223,6 +223,10 @@ class VisionSyncMixin:
                     "need_depth": True,
                     "current_edge_id": self.ctx.current_edge_id,
                     "orchestrator_state": state.value,
+                    "close_range_latched": bool(getattr(self.ctx, "close_range_latched", False)),
+                    "final_roi_mode_latched": bool(getattr(self.ctx, "final_roi_mode_latched", False)),
+                    "final_edge_mode_latched": bool(getattr(self.ctx, "final_edge_mode_latched", False)),
+                    "final_distance_servo_active": bool(getattr(self.ctx, "final_distance_servo_active", False)),
                     "table_cycle_count": int(self.ctx.table_cycle_count),
                     "edge_visit_index": int(self.ctx.edge_visit_index),
                 },
@@ -273,4 +277,3 @@ class VisionSyncMixin:
                 },
             )
         return None
-

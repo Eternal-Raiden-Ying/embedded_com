@@ -118,6 +118,8 @@ vision:
     yolo_table_bbox_hold_enable: true # Hold previous bbox upon detection loss
     yolo_table_bbox_hold_frames: 8 # Number of frames to hold bbox history
     yolo_table_roi_hold_enable: true # Persist ROI to avoid frame gaps
+    final_roi_latch_enable: true # Reuse last valid table ROI during close/final bbox gaps
+    final_roi_latch_max_age_s: 2.0 # Maximum age for close/final ROI latch
     yolo_table_roi_boundary_extend_enable: true # Extend ROI to edge if boundary is reached
     yolo_table_roi_boundary_margin_norm: 0.03 # Margin to trigger extension
     yolo_table_edge_stable_frames: 5 # Frames to confirm stable edge detection

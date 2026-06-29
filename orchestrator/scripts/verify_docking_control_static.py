@@ -1246,9 +1246,10 @@ def main() -> None:
         "yaw_owner", "forward_owner", "lateral_owner", "effective_block_reason",
         "table_bbox_control_valid", "bbox_center_error", "fov_guard_level",
         "table_roi_depth_valid", "table_roi_depth_p10", "table_roi_depth_median",
+        "table_roi_source", "table_roi_latched", "table_roi_latch_age_s", "table_roi_xyxy",
         "edge_valid", "edge_ready_for_approach", "edge_ready_for_final",
         "edge_lost_age_s", "yaw_err_rad", "near_table_latched",
-        "final_depth_latched", "final_locked", "final_lock_reason",
+        "final_depth_latched", "final_distance_servo_reason", "final_locked", "final_lock_reason",
         "depth_speed_envelope_reason", "depth_speed_envelope_vx_cap",
     }
 
