@@ -196,6 +196,27 @@ class TransitionsMixin:
             "next_state": new_state.value,
             "reason": str(reason or ""),
             "transition_reason": str(reason or ""),
+            "target_found": bool(getattr(self.ctx.last_target_obs, "found", False)),
+            "target_cls": str(getattr(self.ctx.last_target_obs, "matched_cls", None) or getattr(self.ctx.last_target_obs, "target", "") or "") if self.ctx.last_target_obs is not None else "",
+            "target_conf": self._target_conf_value(self.ctx.last_target_obs) if self.ctx.last_target_obs is not None else None,
+            "target_center_x_norm": self._target_lateral_center_x(self.ctx.last_target_obs) if hasattr(self, "_target_lateral_center_x") else None,
+            "target_err_x": self._target_lateral_error_x(self.ctx.last_target_obs) if hasattr(self, "_target_lateral_error_x") else None,
+            "target_lateral_align_active": False,
+            "target_lateral_align_reason": str(getattr(self.ctx, "target_lateral_align_reason", "") or ""),
+            "target_lateral_vy_cmd": float(getattr(self.ctx, "target_lateral_vy_cmd", 0.0) or 0.0),
+            "target_lateral_stable_count": int(getattr(self.ctx, "target_lateral_stable_count", 0) or 0),
+            "target_locked": bool(getattr(self.ctx, "target_locked", False)),
+            "grasp_request_sent": bool(new_state == State.GRASP),
+            "grasp_dry_run": bool(new_state == State.DONE and str(reason or "").strip() == "grasp_request_dry_run"),
+            "hard_stop_barrier_active": bool(
+                new_state == State.AT_TABLE_EDGE
+                and float(getattr(self.ctx, "hard_stop_barrier_until_mono", 0.0) or 0.0) > monotonic_ts()
+            ),
+            "hard_stop_barrier_reason": str(getattr(self.ctx, "hard_stop_barrier_reason", "") or ""),
+            "hard_stop_barrier_left_ms": max(
+                0,
+                int(round((float(getattr(self.ctx, "hard_stop_barrier_until_mono", 0.0) or 0.0) - monotonic_ts()) * 1000.0)),
+            ),
         }
 
     def _on_enter_state(self, state: State):
@@ -207,6 +228,10 @@ class TransitionsMixin:
             self.ctx.confirmed_vision_mode = ""
             self.ctx.resume_state = None
             return
+        if state == State.AT_TABLE_EDGE:
+            duration_s = min(1.0, max(0.5, float(getattr(self.cfg, "edge_settle_s", 0.8) or 0.8)))
+            self.ctx.hard_stop_barrier_until_mono = monotonic_ts() + duration_s
+            self.ctx.hard_stop_barrier_reason = "at_table_edge_entry_sstop_barrier"
         if state == State.SEARCH_TARGET_INIT:
             self._reset_slide_ref_handoff()
         if state == State.SEARCH_TABLE:

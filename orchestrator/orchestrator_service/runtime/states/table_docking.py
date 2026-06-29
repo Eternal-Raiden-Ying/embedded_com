@@ -2312,7 +2312,7 @@ class TableDockingMixin:
                         return self._annotate_final_lock_decision(self.controller.stop_cmd("DONE"), lock_status)
                     self._transition(State.AT_TABLE_EDGE, "lock_ready")
                     self._queue_tts("已完成桌边停靠")
-                    return self._annotate_final_lock_decision(self.controller.stop_cmd("AT_TABLE_EDGE"), lock_status)
+                    return self._annotate_final_lock_decision(self._at_table_edge_hard_stop_barrier_cmd("lock_ready"), lock_status)
                 return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_SLOW_STOP"), lock_status)
 
             hold_reason = str(lock_status.get("lock_count_hold_reason") or "")
@@ -2370,9 +2370,12 @@ class TableDockingMixin:
             return self._annotate_final_lock_decision(self.controller.stop_cmd("DONE"), status)
         self._transition(State.AT_TABLE_EDGE, "final_lock_window_ready")
         self._queue_tts("已完成桌边停靠")
-        return self._annotate_final_lock_decision(self.controller.stop_cmd("AT_TABLE_EDGE"), status)
+        return self._annotate_final_lock_decision(self._at_table_edge_hard_stop_barrier_cmd("final_lock_window_ready"), status)
 
     def _tick_at_table_edge_impl(self) -> MotionDecision:
+        barrier = self._at_table_edge_hard_stop_barrier_status()
+        if bool(barrier["hard_stop_barrier_active"]):
+            return self._at_table_edge_hard_stop_barrier_cmd(str(barrier["hard_stop_barrier_reason"]))
         if bool(getattr(self.cfg, "stop_after_table_docking", True)):
             obs = self._fresh_table_obs()
             self.ctx.final_locked = True
@@ -2407,15 +2410,50 @@ class TableDockingMixin:
             return decision
         if self._table_edge_only_test_enabled():
             if self._state_elapsed() < float(self.cfg.edge_settle_s):
-                return self.controller.stop_cmd("AT_TABLE_EDGE")
+                return self._at_table_edge_hard_stop_barrier_cmd("table_edge_only_settle")
             self._log("info", "[TABLE_EDGE_ONLY][DONE] table edge reached; stopping before target search")
             self._transition(State.DONE, "table_edge_only_done")
             self._queue_tts("桌边停靠测试完成")
             return self.controller.stop_cmd("DONE")
         if self._state_elapsed() < float(self.cfg.edge_settle_s):
-            return self.controller.stop_cmd("AT_TABLE_EDGE")
-        self._transition(State.SEARCH_TARGET_INIT, "桌边姿态稳定，初始化沿边搜索")
+            return self._at_table_edge_hard_stop_barrier_cmd("at_table_edge_settle")
+        self._transition(State.SEARCH_TARGET_INIT, "table_edge_settled_start_target_search")
         return self.controller.stop_cmd("AT_TABLE_EDGE")
+
+    def _at_table_edge_hard_stop_barrier_status(self) -> Dict[str, object]:
+        now = monotonic_ts()
+        until = float(getattr(self.ctx, "hard_stop_barrier_until_mono", 0.0) or 0.0)
+        left_ms = max(0, int(round((until - now) * 1000.0)))
+        return {
+            "hard_stop_barrier_active": bool(left_ms > 0),
+            "hard_stop_barrier_reason": str(getattr(self.ctx, "hard_stop_barrier_reason", "") or "at_table_edge_entry_sstop_barrier"),
+            "hard_stop_barrier_left_ms": int(left_ms),
+        }
+
+    def _at_table_edge_hard_stop_barrier_cmd(self, reason: str = "") -> MotionDecision:
+        barrier = self._at_table_edge_hard_stop_barrier_status()
+        decision = self.controller.stop_cmd("AT_TABLE_EDGE", brake=True)
+        if decision.control_summary is not None:
+            decision.control_summary.update(
+                {
+                    **barrier,
+                    "hard_stop_barrier_reason": str(reason or barrier["hard_stop_barrier_reason"]),
+                    "docking_action": "FINAL_LOCKED_STOP",
+                    "docking_reason": str(self.ctx.final_lock_reason or self.ctx.final_lock_last_transition_reason or "at_table_edge"),
+                    "final_locked": True,
+                    "final_lock_reason": str(self.ctx.final_lock_reason or "at_table_edge"),
+                    "allow_forward": False,
+                    "allow_rotate": False,
+                    "allow_lateral": False,
+                    "vx_mps": 0.0,
+                    "vy_mps": 0.0,
+                    "wz_radps": 0.0,
+                    "final_vx": 0.0,
+                    "final_vy": 0.0,
+                    "final_wz": 0.0,
+                }
+            )
+        return decision
 
     def _table_edge_only_test_enabled(self) -> bool:
         return bool(getattr(self.cfg, "table_edge_only_test", False))

@@ -231,6 +231,7 @@ orchestrator:
     target_search_timeout_s: 10.0 # Timeout for target search phase
     return_search_timeout_s: 15.0 # Timeout for return trip tag search phase
     req_resend_period_s: 1.0 # Re-trigger command send rate
+    stop_after_table_docking: false # Continue into target search after table docking
     table_found_frames_to_approach: 2 # Bbox frames to confirm and approach
     table_lost_frames_to_reacquire: 4 # Frames to transition from track to search
     table_loss_hold_s: 1.20 # Timeout to preserve last direction on table loss
@@ -332,6 +333,16 @@ orchestrator:
     target_confirm_min_bbox_area: 0.0 # Minimum target box area ratio
     target_confirm_window_s: 1.50 # Sliding window size for target detection
     target_confirm_found_ratio_th: 0.50 # Ratio of successful detections in window
+    target_lateral_align_enable: true # Center target bbox by lateral base motion
+    target_lateral_align_center_x_target: 0.50 # Desired target bbox center x
+    target_lateral_align_center_x_tol: 0.06 # Center tolerance for lock
+    target_lateral_align_center_x_deadband: 0.03 # No-motion deadband
+    target_lateral_align_kp_vy: 0.05 # Lateral proportional gain
+    target_lateral_align_vy_min_mps: 0.008 # Minimum lateral command
+    target_lateral_align_vy_max_mps: 0.025 # Maximum lateral command
+    target_lateral_align_stable_frames: 3 # Consecutive centered frames
+    target_lateral_align_lost_hold_s: 0.80 # Hold duration after target loss
+    target_lateral_align_timeout_s: 12.0 # Target lateral align timeout
     target_lock_conf_th: 0.40 # Trust limit for locking target tag
     target_lock_found_ratio_th: 0.60 # Detections ratio required to lock tag
     target_lock_settle_s: 0.50 # Delay after locking target tag

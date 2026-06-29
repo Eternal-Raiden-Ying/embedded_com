@@ -176,6 +176,8 @@ class RuntimeContext:
     final_depth_latched_mono: float = 0.0
     final_yaw_align_active: bool = False
     final_locked: bool = False
+    hard_stop_barrier_until_mono: float = 0.0
+    hard_stop_barrier_reason: str = ""
     last_valid_depth_p10_m: Optional[float] = None
     last_valid_depth_p10_source: str = ""
     last_valid_depth_p10_mono: float = 0.0
@@ -227,6 +229,10 @@ class RuntimeContext:
     target_last_center_jitter: float = 0.0
     target_last_lost_reason: str = ""
     target_last_transition_reason: str = ""
+    target_lateral_stable_count: int = 0
+    target_lateral_align_reason: str = ""
+    target_lateral_vy_cmd: float = 0.0
+    target_locked: bool = False
     task_slide_entries_count: int = 0
     task_target_confirm_count: int = 0
     task_target_locked_count: int = 0
@@ -314,6 +320,8 @@ class RuntimeContext:
         self.final_depth_latched_mono = 0.0
         self.final_yaw_align_active = False
         self.final_locked = False
+        self.hard_stop_barrier_until_mono = 0.0
+        self.hard_stop_barrier_reason = ""
         self.last_valid_depth_p10_m = None
         self.last_valid_depth_p10_source = ""
         self.last_valid_depth_p10_mono = 0.0
@@ -361,6 +369,10 @@ class RuntimeContext:
         self.target_last_center_jitter = 0.0
         self.target_last_lost_reason = ""
         self.target_last_transition_reason = ""
+        self.target_lateral_stable_count = 0
+        self.target_lateral_align_reason = ""
+        self.target_lateral_vy_cmd = 0.0
+        self.target_locked = False
         self.grasp_retry_count = 0
         self.grasp_substate = ""
         self.grasp_verify_reported = False

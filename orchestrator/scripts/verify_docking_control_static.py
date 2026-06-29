@@ -109,7 +109,7 @@ def main() -> None:
     assert loaded_ctrl.final_reverse_confirm_frames == 3
     assert abs(loaded_ctrl.forward_commit_min_s - 1.8) < 1e-9
     assert abs(loaded_ctrl.far_forward_commit_min_s - 2.0) < 1e-9
-    assert loaded_ctrl.stop_after_table_docking is True
+    assert loaded_ctrl.stop_after_table_docking is False
     assert abs(ControlThresholds().near_slow_max_vx_mps - 0.030) < 1e-9
     assert abs(ControlThresholds().bbox_track_forward_vx_mps - 0.100) < 1e-9
     assert abs(ControlThresholds().bbox_track_forward_max_vx_mps - 0.200) < 1e-9

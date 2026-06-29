@@ -1090,6 +1090,45 @@ class OrchestratorService(BaseModule):
         now = time.time()
         state = str(getattr(self.core.ctx.state, "value", self.core.ctx.state) or "").strip().upper()
         mode = str(getattr(cmd, "mode", "") or "").strip().upper()
+        target_flow_states = {
+            "AT_TABLE_EDGE",
+            "SEARCH_TARGET_INIT",
+            "EDGE_SLIDE_SEARCH",
+            "TARGET_CONFIRM",
+            "TARGET_LOCKED",
+            "FREEZE_BASE",
+            "GRASP",
+        }
+        target_flow_state = bool(state in target_flow_states or mode in target_flow_states)
+        edge_slide_state = bool(state == "EDGE_SLIDE_SEARCH" or mode == "EDGE_SLIDE_SEARCH")
+        if state == "EDGE_SLIDE_SEARCH" or mode == "EDGE_SLIDE_SEARCH":
+            vy_max = abs(float(getattr(self.cfg.control, "target_lateral_align_vy_max_mps", 0.025) or 0.025))
+            vy = max(-vy_max, min(vy_max, float(getattr(cmd, "vy_mps", 0.0) or 0.0)))
+            cmd = CmdVel(
+                ts=float(getattr(cmd, "ts", now) or now),
+                mode=str(getattr(cmd, "mode", "") or "EDGE_SLIDE_SEARCH"),
+                vx_mps=0.0,
+                vy_mps=vy,
+                wz_radps=0.0,
+                hold_ms=int(getattr(cmd, "hold_ms", self.cfg.car.cmd_hold_ms) or self.cfg.car.cmd_hold_ms),
+                brake=bool(getattr(cmd, "brake", False)),
+            )
+            summary.update(
+                {
+                    "allow_lateral": True,
+                    "allow_forward": False,
+                    "allow_rotate": False,
+                    "forward_block_reason": "edge_slide_target_lateral_only",
+                    "rotate_block_reason": "edge_slide_target_lateral_only",
+                    "target_lateral_vy_cmd": float(vy),
+                    "vx_mps": 0.0,
+                    "vy_mps": float(vy),
+                    "wz_radps": 0.0,
+                    "final_vx": 0.0,
+                    "final_vy": float(vy),
+                    "final_wz": 0.0,
+                }
+            )
         arbiter_applied = bool(summary.get("arbiter_applied", False))
         arbiter_stop_class = str(summary.get("stop_class") or "none").strip().lower()
         arbiter_motion_class = str(summary.get("motion_class") or "").strip().lower()
@@ -1107,14 +1146,17 @@ class OrchestratorService(BaseModule):
             effective = cmd
             emit_reason = "arbiter_direct"
             stop_class = "none" if arbiter_stop_class in {"", "none"} else arbiter_stop_class
-            if emergency_or_safety or explicit_idle_shutdown:
+            target_flow_motion_blocked = bool(target_flow_state and not edge_slide_state and self._cmd_has_motion(cmd))
+            if emergency_or_safety or explicit_idle_shutdown or target_flow_motion_blocked:
                 emit_reason = "arbiter_hard_stop" if emergency_or_safety else "explicit_idle_shutdown"
+                if target_flow_motion_blocked:
+                    emit_reason = "target_flow_recovery_motion_blocked"
                 effective = self._make_stop_cmd(now, hold_ms=int(getattr(cmd, "hold_ms", self.cfg.car.cmd_hold_ms) or self.cfg.car.cmd_hold_ms))
                 self._last_valid_motion_cmd = None
                 self._last_valid_motion_ts = 0.0
                 last_age_ms = None
                 if not stop_class:
-                    stop_class = "emergency" if arbiter_motion_class == "emergency_stop" else "safety"
+                    stop_class = "control_recovery" if target_flow_motion_blocked else ("emergency" if arbiter_motion_class == "emergency_stop" else "safety")
             elif self._cmd_has_motion(cmd):
                 self._last_valid_motion_cmd = self._cmd_dict(cmd)
                 self._last_valid_motion_ts = now
@@ -1176,6 +1218,15 @@ class OrchestratorService(BaseModule):
             or "vision_dead" in stale_reason
             or "system_perception_dead" in stale_reason
         )
+        target_lateral_vy_allowed = bool(
+            edge_slide_state
+            and not perception_dead
+            and bool(summary.get("target_lateral_align_active", False))
+            and bool(summary.get("target_found", False))
+            and abs(float(getattr(cmd, "vy_mps", 0.0) or 0.0)) > 1e-9
+            and abs(float(getattr(cmd, "vx_mps", 0.0) or 0.0)) <= 1e-9
+            and abs(float(getattr(cmd, "wz_radps", 0.0) or 0.0)) <= 1e-9
+        )
         yolo_allows_edge_stale = bool(
             control_source in {"yolo_forward", "yolo_track_forward", "edge_guided_forward"}
             and bool(summary.get("yolo_table_control_valid", False))
@@ -1194,7 +1245,13 @@ class OrchestratorService(BaseModule):
             or soft_stale_timed_out
         )
         bbox_lost_hold_active = bool(summary.get("bbox_lost_hold_active", False))
-        hard_stale = bool(hard_stale_raw and not search_allows_edge_stale and not yolo_allows_edge_stale and not bbox_lost_hold_active)
+        hard_stale = bool(
+            hard_stale_raw
+            and not search_allows_edge_stale
+            and not yolo_allows_edge_stale
+            and not bbox_lost_hold_active
+            and not target_lateral_vy_allowed
+        )
         dropout_hold_active = bool(summary.get("perception_dropout_hold_active", False))
         if dropout_hold_active:
             hard_stale = False
@@ -1205,6 +1262,7 @@ class OrchestratorService(BaseModule):
         else:
             stale_source = ""
         has_new_valid_motion = bool(self._cmd_has_motion(cmd) and not explicit_stop and not hard_stale)
+        target_flow_stop_only = bool(target_flow_state and not target_lateral_vy_allowed and not explicit_stop)
         last_within_hold = bool(last_age_ms is not None and last_age_ms <= float(hold_ms))
         soft_stale_within_hard_timeout = bool(
             stale_level == "soft_stale"
@@ -1228,6 +1286,14 @@ class OrchestratorService(BaseModule):
             emit_reason = "explicit_stop"
             zero_cmd_reason = "explicit_stop"
             stop_class = "emergency" if any(bool(summary.get(key, False)) for key in ("emergency_stop_active", "car_estop", "estop_active")) else "safety"
+            effective = self._make_stop_cmd(now, hold_ms=int(getattr(cmd, "hold_ms", self.cfg.car.cmd_hold_ms) or self.cfg.car.cmd_hold_ms))
+            self._last_valid_motion_cmd = None
+            self._last_valid_motion_ts = 0.0
+            last_age_ms = None
+        elif target_flow_stop_only:
+            emit_reason = "target_flow_stale_stop" if hard_stale_raw else "target_flow_no_recovery_stop"
+            zero_cmd_reason = stale_level or stale_reason or "target_flow_recovery_motion_blocked"
+            stop_class = "stale_recovery" if hard_stale_raw else "control_recovery"
             effective = self._make_stop_cmd(now, hold_ms=int(getattr(cmd, "hold_ms", self.cfg.car.cmd_hold_ms) or self.cfg.car.cmd_hold_ms))
             self._last_valid_motion_cmd = None
             self._last_valid_motion_ts = 0.0
@@ -1282,6 +1348,8 @@ class OrchestratorService(BaseModule):
             "stale_source": stale_source,
             "yolo_allows_edge_stale": bool(yolo_allows_edge_stale),
             "search_allows_edge_stale": bool(search_allows_edge_stale),
+            "target_lateral_vy_allowed": bool(target_lateral_vy_allowed),
+            "target_flow_stop_only": bool(target_flow_stop_only),
             "search_table_stale_gate_bypass": bool(search_allows_edge_stale and hard_stale_raw),
             "stale_gate_stop_source_state": state if hard_stale else "",
             "stop_class": stop_class,
@@ -2840,6 +2908,7 @@ class OrchestratorService(BaseModule):
             "stale_level": summary.get("stale_level") or "",
             "allow_forward": bool(summary.get("allow_forward", summary.get("forward_allowed", False))),
             "allow_rotate": bool(summary.get("allow_rotate", abs(wz) > 1e-9)),
+            "allow_lateral": bool(summary.get("allow_lateral", abs(vy) > 1e-9)),
             "vx_mps": vx,
             "vy_mps": vy,
             "wz_radps": wz,
@@ -3511,6 +3580,10 @@ class OrchestratorService(BaseModule):
             "fallback_decision": decision_summary.get("fallback_decision", (self.core.ctx.last_edge_quality or {}).get("fallback_decision")),
             "fallback_suppressed_reason": (self.core.ctx.last_edge_quality or {}).get("fallback_suppressed_reason"),
             "target_found": bool(getattr(target_obs, "found", False)) if target_obs is not None else False,
+            "target_center_x_norm": decision_summary.get("target_center_x_norm"),
+            "target_err_x": decision_summary.get("target_err_x"),
+            "target_lateral_align_active": bool(decision_summary.get("target_lateral_align_active", False)),
+            "target_lateral_vy_cmd": decision_summary.get("target_lateral_vy_cmd", float(cmd.vy_mps)),
             "target_conf": (
                 getattr(target_obs, "matched_conf", None)
                 if target_obs is not None and getattr(target_obs, "matched_conf", None) is not None

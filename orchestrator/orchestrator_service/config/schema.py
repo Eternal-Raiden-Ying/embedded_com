@@ -96,6 +96,7 @@ class ControlThresholds:
     target_search_timeout_s: float = 10.0
     return_search_timeout_s: float = 15.0
     req_resend_period_s: float = 1.0
+    stop_after_table_docking: bool = False
 
     table_found_frames_to_approach: int = 2
     table_lost_frames_to_reacquire: int = 4
@@ -205,7 +206,6 @@ class ControlThresholds:
     edge_handoff_forward_vx_mps: float = 0.080
     forward_commit_min_s: float = 1.8
     far_forward_commit_min_s: float = 2.0
-    stop_after_table_docking: bool = True
     lateral_enabled: bool = True
     lateral_vy_max_mps: float = 0.180
     lateral_deadband_norm: float = 0.020
@@ -259,6 +259,16 @@ class ControlThresholds:
     target_confirm_min_bbox_area: float = 0.0
     target_confirm_window_s: float = 1.50
     target_confirm_found_ratio_th: float = 0.50
+    target_lateral_align_enable: bool = True
+    target_lateral_align_center_x_target: float = 0.50
+    target_lateral_align_center_x_tol: float = 0.06
+    target_lateral_align_center_x_deadband: float = 0.03
+    target_lateral_align_kp_vy: float = 0.05
+    target_lateral_align_vy_min_mps: float = 0.008
+    target_lateral_align_vy_max_mps: float = 0.025
+    target_lateral_align_stable_frames: int = 3
+    target_lateral_align_lost_hold_s: float = 0.80
+    target_lateral_align_timeout_s: float = 12.0
     target_lock_conf_th: float = 0.40
     target_lock_found_ratio_th: float = 0.60
     target_lock_settle_s: float = 0.50
