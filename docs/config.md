@@ -13,35 +13,31 @@
     *   定义了配置的数据结构与安全底线值。这部分默认值非常保守，不应直接作为实际运行参数。
 2.  **项目主配置 (Project Config)**
     *   主配置文件：[configs/system_config.yaml](file:///d:/55495/workspace/embedded_com/configs/system_config.yaml)。
-    *   指定了当前激活的运行 Profile，以及各底层运行参数文件的路径。
+    *   指定当前激活的运行 Profile，并承载 Orchestrator/VISTA 的 canonical 运行参数。
 3.  **运行 Profile (Profiles)**
     *   相关文件：
         *   `configs/profiles/windows_dev.yaml`：用于 Windows 主机仿真调试。
         *   `configs/profiles/sc171_board.yaml`：用于 SC171 真实板端运行。
         *   `configs/profiles/dry_run.yaml`：用于串口 Dry-run 机制的本地测试。
     *   用于对 Windows 开发机、真实板端及模拟运行进行环境变量与网络端点的分流。
-4.  **可调运行时参数文件 (Tunable Runtime Files)**
-    *   相关文件：
-        *   `orchestrator/configs/stage_params.yaml`：状态机运行参数。
-        *   `orchestrator/configs/car_cmd_params.yaml`：底盘运动参数。
-    *   **开发原则**：所有需要现场调试的参数（如阈值、速度上限、控制频率等）必须放在这些 YAML 文件中，禁止在 Python 代码里硬编码。
-5.  **运行时最后一步覆盖 (Runtime Overrides)**
-    *   支持通过系统环境变量进行最高优先级覆盖，在程序启动打印中会体现最终的有效生效值。
+4.  **运行时最后一步覆盖 (Runtime Overrides)**
+    *   `runtime_overrides` 用于在主配置内固定当前 baseline 的最终值。
+    *   `stage_params.yaml` 与 `car_cmd_params.yaml` 已删除，不再参与默认加载链。
 
 ---
 
 ## 2. 核心配置文件与参数修改位置 (Key Files & Configuration Tuning)
 
-### 2.1 状态机运行时参数 (`orchestrator/configs/stage_params.yaml`)
-修改以下内容时请调整此文件：
+### 2.1 状态机与停靠控制参数 (`configs/system_config.yaml`)
+修改以下内容时请调整 `orchestrator.control.*`：
 *   桌边停靠的距离、yaw 偏角以及横向偏差的阈值和稳定判定时间。
 *   沿桌边滑动寻找目标的超时限制、确认目标稳定的帧数。
 *   抓取流程中的微调超时与动作执行参数。
 *   丢帧保护时间（stale observation guards）及异常恢复重试次数。
 
-### 2.2 底盘命令参数 (`orchestrator/configs/car_cmd_params.yaml`)
-修改以下内容时请调整此文件：
-*   串口发送周期（默认 `ORCH_CAR_SEND_PERIOD_MS = 50`）。
+### 2.2 底盘命令参数 (`configs/system_config.yaml`)
+修改以下内容时请调整 `orchestrator.car.*`：
+*   串口发送周期。
 *   速度命令的保持时间（keepalive duration）。
 *   小车前进/后退/横移/旋转的绝对速度限幅。
 *   在进入新状态时的强制停车/刹车控制策略。
@@ -50,7 +46,7 @@
 修改以下内容时请调整此文件：
 *   切换当前激活的 profile（如 `windows_dev` / `sc171_board`）。
 *   修改 Windows 和板端的 IPC 通信端点默认配置（如 UDS 或 TCP 接口路径）。
-*   重定向运行时参数文件的实际存放位置。
+*   修改 Orchestrator、VISTA 与 Gateway 的运行路径和通信端点。
 
 ---
 
@@ -70,8 +66,7 @@
 
 **标准的启动日志格式示例：**
 ```text
-loaded stage_params  : orchestrator/configs/stage_params.yaml
-loaded car_cmd_params: orchestrator/configs/car_cmd_params.yaml
+loaded config files  : configs/system_config.yaml, configs/profiles/<profile>.yaml
 edge_slide_vy_mps    : 0.010
 ```
 

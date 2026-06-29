@@ -52,8 +52,7 @@ READY_TIMEOUT_S="${READY_TIMEOUT_S:-35}"
 # STOP 后按 Ctrl+C 只退出当前日志显示，不停止服务
 FOLLOW_STACK_LOGS_AFTER_START="${FOLLOW_STACK_LOGS_AFTER_START:-1}"
 ROBOT_CONSOLE_LEVEL="${ROBOT_CONSOLE_LEVEL:-normal}"
-ENABLE_GATEWAY_LOGS="${ENABLE_GATEWAY_LOGS:-true}"
-COLLECT_GATEWAY_LOGS="${COLLECT_GATEWAY_LOGS:-true}"
+ENABLE_GATEWAY_LOGS="${ENABLE_GATEWAY_LOGS:-false}"
 
 # 当前终端显示的状态摘要和手机链路关键字
 ORCH_SUMMARY_PATTERN='状态切换|MODE |DRY_RUN|UART|stop_class=|搜索超时|已发现目标|目标丢失|开始寻找|AUTOEXPLORE|AUTOSEARCH|SEARCH|RETURN|收到 STOP 命令|热待机|重新发现目标|自动搜索超时|TASK_CMD|task_cmd|vision_req|TASK_DONE|DEMO|IDLE_HOT|preview kept alive|waiting for next command|target        :|session_id    :|result        :|final_state   :|reason        :|total_time_s  :|next_state    :|preview       :|waiting       :|━━━━━━━━'
@@ -77,9 +76,6 @@ STOP_GRACE_S="${STOP_GRACE_S:-3}"
 # =========================
 # 以下一般不用改
 # =========================
-VISION_LOG_DIR="$VISION_ROOT/logs"
-ORCH_LOG_DIR="$ORCH_ROOT/logs"
-GATEWAY_LOG_DIR="$STACK_ROOT/logs"
 STACK_RUNS_ROOT="$STACK_ROOT/logs/runs"
 LATEST_RUN_ID_FILE="$STACK_RUNS_ROOT/latest_run_id"
 VISION_PID_DIR="$VISION_ROOT/pids"
@@ -90,18 +86,21 @@ VISION_PID_FILE="$VISION_PID_DIR/vision.pid"
 ORCH_PID_FILE="$ORCH_PID_DIR/orchestrator.pid"
 GATEWAY_PID_FILE="$GATEWAY_PID_DIR/mobile_gateway.pid"
 
-VISION_LOG_FILE="$VISION_LOG_DIR/vision.out"
-ORCH_LOG_FILE="$ORCH_LOG_DIR/orchestrator.out"
-GATEWAY_LOG_FILE="$GATEWAY_LOG_DIR/mobile_gateway.out"
+VISION_LOG_DIR=""
+ORCH_LOG_DIR=""
+GATEWAY_LOG_DIR=""
+VISION_LOG_FILE=""
+ORCH_LOG_FILE=""
+GATEWAY_LOG_FILE=""
 
 gateway_logs_enabled() {
-  case "${ENABLE_GATEWAY_LOGS:-false}:${COLLECT_GATEWAY_LOGS:-false}" in
+  case "${ENABLE_GATEWAY_LOGS:-false}" in
     *1*|*true*|*yes*|*on*) return 0 ;;
     *) return 1 ;;
   esac
 }
 
-mkdir -p "$VISION_LOG_DIR" "$ORCH_LOG_DIR" "$STACK_RUNS_ROOT" "$VISION_PID_DIR" "$ORCH_PID_DIR" "$GATEWAY_PID_DIR" "$STACK_SOCK_DIR"
+mkdir -p "$STACK_RUNS_ROOT" "$VISION_PID_DIR" "$ORCH_PID_DIR" "$GATEWAY_PID_DIR" "$STACK_SOCK_DIR"
 if gateway_logs_enabled; then
   mkdir -p "$GATEWAY_LOG_DIR"
 fi
@@ -308,7 +307,7 @@ show_banner() {
   printf '%bsudo%b           : requested=%s effective=%s\n' "$C_BOLD" "$C_RESET" "$ORCH_USE_SUDO" "$([[ $(orch_use_sudo_effective; echo $?) -eq 0 ]] && echo 1 || echo 0)"
   printf '%bdry-run%b        : ORCH_SERIAL_DRY_RUN=%s  ORCH_DRY_RUN_ECHO_STDOUT=%s\n' "$C_BOLD" "$C_RESET" "$ORCH_SERIAL_DRY_RUN" "$ORCH_DRY_RUN_ECHO_STDOUT"
   printf '%bconsole%b        : ROBOT_CONSOLE_LEVEL=%s  ROBOT_CONSOLE_COLOR=%s\n' "$C_BOLD" "$C_RESET" "$ROBOT_CONSOLE_LEVEL" "${ROBOT_CONSOLE_COLOR:-auto}"
-  printf '%bgateway logs%b   : enabled=%s  collect=%s\n' "$C_BOLD" "$C_RESET" "$ENABLE_GATEWAY_LOGS" "$COLLECT_GATEWAY_LOGS"
+  printf '%bgateway logs%b   : enabled=%s\n' "$C_BOLD" "$C_RESET" "$ENABLE_GATEWAY_LOGS"
   printf '%bports%b          : %s\n' "$C_BOLD" "$C_RESET" "$STACK_PORTS"
 }
 
@@ -755,184 +754,6 @@ wait_for_endpoint_group() {
   local endpoint
   for endpoint in "$@"; do
     wait_for_endpoint "$service" "$endpoint" "$timeout_s" "$extra_s" || return 1
-  done
-}
-
-wait_for_sockets() {
-  local name="$1" sockets_str="$2" timeout_s="$3" extra_s="$4"
-  local start_ts now_ts all_ok s pid_file use_sudo log_file ready_pattern
-  start_ts=$(date +%s)
-  local last_err=""
-  
-  pid_file=""
-  use_sudo=0
-  log_file=""
-  ready_pattern=""
-  case "$name" in
-    vision)
-      pid_file="$VISION_PID_FILE"
-      log_file="$VISION_LOG_FILE"
-      ready_pattern="\[VISTA\] READY|SERVICE_READY"
-      ;;
-    orchestrator)
-      pid_file="$ORCH_PID_FILE"
-      log_file="$ORCH_LOG_FILE"
-      ready_pattern="\[ORCH\] READY"
-      if orch_use_sudo_effective; then
-        use_sudo=1
-      fi
-      ;;
-    mobile_gateway)
-      pid_file="$GATEWAY_PID_FILE"
-      log_file="$GATEWAY_LOG_FILE"
-      ready_pattern="gateway online|SERVICE_READY"
-      ;;
-  esac
-
-  while true; do
-    if [[ -n "$pid_file" ]] && ! pid_alive "$pid_file" "$use_sudo"; then
-      mark err "$name ready-check 失败：进程已退出"
-      if [[ -n "$log_file" ]]; then
-        tail_last_logs_on_failure "$name" "$log_file"
-      fi
-      return 1
-    fi
-
-    all_ok=1
-    for s in $sockets_str; do
-      if [[ ! -S "$s" ]]; then
-        all_ok=0
-        last_err="FileNotFoundError: [Errno 2] No such file or directory: '$s' (or not a UDS socket)"
-        break
-      fi
-      
-      err_msg=$(/usr/bin/python3 -c "
-import socket, sys
-try:
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(1.0)
-    s.connect('$s')
-    s.close()
-except Exception as e:
-    print(f'{type(e).__name__}: {e}', end='')
-    sys.exit(1)
-" 2>&1 || true)
-      
-      if [[ -n "$err_msg" ]]; then
-        all_ok=0
-        last_err="$err_msg"
-        break
-      fi
-    done
-
-    if [[ "$all_ok" == "1" ]]; then
-      [[ "$extra_s" -gt 0 ]] && sleep "$extra_s"
-      if [[ -n "$pid_file" ]] && ! pid_alive "$pid_file" "$use_sudo"; then
-        mark err "$name ready-check 失败：进程已退出"
-        if [[ -n "$log_file" ]]; then
-          tail_last_logs_on_failure "$name" "$log_file"
-        fi
-        return 1
-      fi
-      mark ok "$name ready  sockets=[$sockets_str]"
-      return 0
-    fi
-
-    now_ts=$(date +%s)
-    if (( now_ts - start_ts >= timeout_s )); then
-      mark err "$name ready-check 超时  sockets=[$sockets_str]"
-      mark err "---------------- ready-check Timeout Details ----------------"
-      mark err "  Endpoint Name: $name"
-      mark err "  Mode: uds"
-      mark err "  Path: $sockets_str"
-      mark err "  ls -l /tmp/robot_stack:"
-      ls -l /tmp/robot_stack 2>&1 | while read -r line; do mark err "    $line"; done || true
-      for s in $sockets_str; do
-        mark err "  stat $s:"
-        stat "$s" 2>&1 | while read -r line; do mark err "    $line"; done || true
-      done
-      mark err "  Last Connect Exception: $last_err"
-      
-      local log_has_ready="no"
-      if [[ -n "$log_file" && -f "$log_file" ]]; then
-        if grep -qE "$ready_pattern" "$log_file" 2>/dev/null; then
-          log_has_ready="yes"
-        fi
-      fi
-      mark err "  Service Log Reports READY: $log_has_ready"
-      
-      if [[ "$name" == "orchestrator" && "$log_has_ready" == "yes" ]]; then
-        mark err "process reports READY but UDS socket is not connectable; likely permission or stale socket issue"
-      fi
-      mark err "-------------------------------------------------------------"
-      return 1
-    fi
-    sleep 0.5
-  done
-}
-
-wait_for_ports() {
-  local name="$1" ports_str="$2" timeout_s="$3" extra_s="$4"
-  local start_ts now_ts all_ok p pid_file use_sudo
-  start_ts=$(date +%s)
-  while true; do
-    all_ok=1
-    for p in $ports_str; do
-      if ! is_port_listening "$p"; then
-        all_ok=0
-        break
-      fi
-    done
-    if [[ "$all_ok" == "1" ]]; then
-      [[ "$extra_s" -gt 0 ]] && sleep "$extra_s"
-      pid_file=""
-      use_sudo=0
-      case "$name" in
-        vision)
-          pid_file="$VISION_PID_FILE"
-          ;;
-        orchestrator)
-          pid_file="$ORCH_PID_FILE"
-          if orch_use_sudo_effective; then
-            use_sudo=1
-          fi
-          ;;
-        mobile_gateway)
-          pid_file="$GATEWAY_PID_FILE"
-          ;;
-      esac
-      if [[ -n "$pid_file" ]] && ! pid_alive "$pid_file" "$use_sudo"; then
-        mark err "$name ready-check 失败：端口曾经可用，但进程已退出"
-        return 1
-      fi
-      mark ok "$name ready  ports=[$ports_str]"
-      return 0
-    fi
-    now_ts=$(date +%s)
-    if (( now_ts - start_ts >= timeout_s )); then
-      mark err "$name ready-check 超时  ports=[$ports_str]"
-      return 1
-    fi
-    sleep 0.5
-  done
-}
-
-wait_for_log_pattern() {
-  local name="$1" file="$2" pattern="$3" timeout_s="$4" extra_s="$5"
-  local start_ts now_ts
-  start_ts=$(date +%s)
-  while true; do
-    if [[ -f "$file" ]] && grep -qE "$pattern" "$file" 2>/dev/null; then
-      [[ "$extra_s" -gt 0 ]] && sleep "$extra_s"
-      mark ok "$name ready  pattern=/$pattern/"
-      return 0
-    fi
-    now_ts=$(date +%s)
-    if (( now_ts - start_ts >= timeout_s )); then
-      mark err "$name ready-check 超时  pattern=/$pattern/"
-      return 1
-    fi
-    sleep 0.5
   done
 }
 

@@ -750,11 +750,7 @@ class OrchestratorService(BaseModule):
             "runs_dir": self.cfg.runtime.runs_dir,
             "pid_dir": self.cfg.runtime.pid_dir,
             "pid_file": self.cfg.runtime.pid_file,
-            "config_files": {
-                "stage_params": self.cfg.runtime.stage_params_file,
-                "car_cmd_params": self.cfg.runtime.car_cmd_params_file,
-                "loaded": list(self.cfg.runtime.loaded_config_files),
-            },
+            "config_files": list(self.cfg.runtime.loaded_config_files),
             "serial": {
                 "port": self.cfg.serial.port,
                 "baudrate": self.cfg.serial.baudrate,
@@ -1661,11 +1657,7 @@ class OrchestratorService(BaseModule):
         self.run_logger.write_jsonl("config", cfg_dump)
         self.run_logger.write_timeline("BOOT", run_dir=str(self.run_logger.run_dir), config=cfg_dump)
         loaded_files = ",".join(self.cfg.runtime.loaded_config_files) or "<defaults>"
-        self._operator_emit(
-            "[ORCH] CONFIG "
-            f"stage={self.cfg.runtime.stage_params_file} car_cmd={self.cfg.runtime.car_cmd_params_file} "
-            f"loaded={loaded_files}"
-        )
+        self._operator_emit(f"[ORCH] CONFIG loaded={loaded_files}")
         self._operator_emit(
             "[ORCH] PARAMS "
             f"tick_hz={float(self.cfg.runtime.tick_hz):.2f} send_period_ms={int(self.cfg.car.send_period_ms)} "

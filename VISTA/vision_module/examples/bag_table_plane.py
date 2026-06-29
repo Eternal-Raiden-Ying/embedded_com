@@ -68,7 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
     advanced = parser.add_argument_group("advanced")
     advanced.add_argument("--config", type=Path, default=VISTA_ROOT / "configs" / "vision_params.yaml", help="Advanced: vision params YAML.")
     advanced.add_argument("--roi-preset", default="", help="Advanced: optional table plane ROI preset override.")
-    advanced.add_argument("--detector-mode", choices=("full", "fast_plane_only"), default="", help="Advanced: override table plane detector mode.")
+    advanced.add_argument("--detector-mode", choices=("fast_plane_only",), default="", help="Advanced: override table plane detector mode.")
     advanced.add_argument("--no-system-monitor", action="store_true", help="Advanced: disable eval system_monitor.csv.")
     return parser
 
@@ -990,7 +990,7 @@ def main() -> None:
     print(
         "[BAG_TABLE_PLANE] "
         f"mode={preset.mode} strategy={preset.selection_strategy} "
-        f"detector_mode={getattr(CONFIG.table_edge, 'detector_mode', 'full')} "
+        f"detector_mode={getattr(CONFIG.table_edge, 'detector_mode', 'fast_plane_only')} "
         f"frame_stride={preset.frame_stride} target_hz={preset.target_hz} "
         f"preview_every={preset.preview_every} preview_max={preset.preview_max}"
     )

@@ -164,7 +164,6 @@ class ModeController:
                     "enabled": bool(profile.table_edge.enabled),
                     "detector_mode": str(profile.table_edge.detector_mode),
                     "update_hz": float(profile.table_edge.update_hz),
-                    "light_stride": int(profile.table_edge.light_stride),
                     "fast_plane_stride": int(profile.table_edge.fast_plane_stride),
                     "depth_stride": int(profile.table_edge.depth_stride),
                     "require_yolo_confirm": bool(profile.table_edge.require_yolo_confirm),

@@ -369,7 +369,8 @@ def test_final_roi_probe_and_roi_missing_hold_do_not_return_to_near_or_rotate():
     assert 0.0 < probe.final_vx <= 0.008
     assert probe.final_vy == 0.0
     assert probe.final_wz == 0.0
-    assert probe.summary["docking_action"] == "CLOSE_RANGE_PROBE"
+    assert probe.summary["docking_action"] == "FINAL_SLOW_PROBE"
+    assert probe.summary["docking_action"] != "FINAL_LOCKED_STOP"
 
     ctx.final_roi_last_valid_mono = 0.0
     ctx.final_roi_mode_since_mono = 0.0

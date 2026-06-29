@@ -158,17 +158,6 @@ class VistaApp(BaseModule):
         self._rate_diag_send_ts = deque(maxlen=256)
         self.obs_metrics = ObservationMetrics()
         self.obs_router = ObservationRouter(metrics=self.obs_metrics, control_send_interval_s=self._control_send_interval_s())
-        self._warn_deprecated_env()
-
-    def _warn_deprecated_env(self):
-        deprecated = {
-            "VISTA_TRACK_LOCAL_LIGHT_EDGE": "TableEdgeProfile.detector_mode",
-            "VISTA_TRACK_LOCAL_EDGE_STRIDE": "TableEdgeProfile.light_stride / fast_plane_stride",
-            "VISTA_TRACK_LOCAL_EDGE_UPDATE_HZ": "TableEdgeProfile.update_hz",
-        }
-        for var, replacement in deprecated.items():
-            if os.environ.get(var):
-                self.log_warn("deprecation", f"env {var} is deprecated, use {replacement} in ModeProfile instead")
 
     def _ctx(self):
         return self.stage_controller.context()

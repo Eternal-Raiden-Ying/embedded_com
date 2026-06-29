@@ -26,23 +26,23 @@ class ConfigLoaderLayeringTest(unittest.TestCase):
         with patch.dict(os.environ, {"SYSTEM_CONFIG_PROFILE": "windows_dev"}, clear=False):
             return load_global_config(str(ROOT / "configs" / "system_config.yaml"))
 
-    def test_default_load_uses_windows_profile_and_runtime_param_files(self):
+    def test_default_load_uses_windows_profile_without_legacy_param_files(self):
         cfg = self._load_default()
 
         self.assertEqual(cfg.profile, "windows_dev")
         self.assertEqual(cfg.orchestrator.runtime.config_profile, "windows_dev")
         self.assertTrue(cfg.orchestrator.serial.dry_run)
         self.assertEqual(cfg.orchestrator.serial.port, "COM_DRY_RUN")
-        self.assertEqual(cfg.orchestrator.runtime.stage_params_file, "orchestrator/configs/stage_params.yaml")
-        self.assertEqual(cfg.orchestrator.runtime.car_cmd_params_file, "orchestrator/configs/car_cmd_params.yaml")
+        self.assertFalse(hasattr(cfg.orchestrator.runtime, "stage_params_file"))
+        self.assertFalse(hasattr(cfg.orchestrator.runtime, "car_cmd_params_file"))
         self.assertAlmostEqual(cfg.orchestrator.car.edge_slide_vy_mps, 0.010)
         self.assertAlmostEqual(cfg.orchestrator.car.edge_slide_max_vx_mps, 0.008)
 
         loaded = "\n".join(cfg.orchestrator.runtime.loaded_config_files)
         self.assertIn("system_config.yaml", loaded)
         self.assertIn("windows_dev.yaml", loaded)
-        self.assertIn("stage_params.yaml", loaded)
-        self.assertIn("car_cmd_params.yaml", loaded)
+        self.assertNotIn("stage_params.yaml", loaded)
+        self.assertNotIn("car_cmd_params.yaml", loaded)
 
     def test_effective_dump_contains_required_runtime_fields(self):
         cfg = self._load_default()
@@ -51,8 +51,6 @@ class ConfigLoaderLayeringTest(unittest.TestCase):
         for expected in (
             "config profile",
             "loaded config files",
-            "loaded stage_params",
-            "loaded car_cmd_params",
             "UART port / dry_run",
             "tick_hz",
             "near_stop_depth_m",

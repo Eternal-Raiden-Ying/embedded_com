@@ -81,8 +81,6 @@ class RuntimeConfig:
     debug: bool = False
     state_block_period_s: float = 1.0
     heartbeat_period_s: float = 1.0
-    stage_params_file: str = ""
-    car_cmd_params_file: str = ""
     loaded_config_files: List[str] = field(default_factory=list)
 
 

@@ -40,9 +40,8 @@ class TableEdgeProfile:
     """Capability requirements for table-edge depth perception."""
 
     enabled: bool = False
-    detector_mode: str = "lightweight"  # "lightweight" | "full" | "fast_plane_only"
+    detector_mode: str = "fast_plane_only"
     update_hz: float = 5.0
-    light_stride: int = 4
     fast_plane_stride: int = 4
     depth_stride: int = 2
     require_yolo_confirm: bool = True

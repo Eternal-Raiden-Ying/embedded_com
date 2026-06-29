@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Any, Dict, Tuple
 
 
@@ -13,6 +14,8 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, ROOT)
 
 from common.config import load_global_config  # noqa: E402
+from common.config.loader import load_yaml_file  # noqa: E402
+from common.config.schema import SystemGlobalConfig  # noqa: E402
 
 
 def _get(obj: Any, name: str, fallback: Any) -> Tuple[Any, bool]:
@@ -23,9 +26,68 @@ def _get(obj: Any, name: str, fallback: Any) -> Tuple[Any, bool]:
     return fallback, True
 
 
-def _record(out: Dict[str, Dict[str, Any]], group: str, key: str, obj: Any, attr: str, fallback: Any) -> None:
+def _dict_has_path(data: Dict[str, Any], path: tuple[str, ...]) -> bool:
+    cur: Any = data
+    for item in path:
+        if not isinstance(cur, dict) or item not in cur:
+            return False
+        cur = cur[item]
+    return True
+
+
+def _schema_default(path: tuple[str, ...], fallback: Any) -> Any:
+    cur: Any = SystemGlobalConfig()
+    for item in path:
+        if not hasattr(cur, item):
+            return fallback
+        cur = getattr(cur, item)
+    return cur
+
+
+def _source_for(system_yaml: Dict[str, Any], path: tuple[str, ...], fallback: Any) -> str:
+    if _dict_has_path(system_yaml, path):
+        return "configs/system_config.yaml"
+    _schema_default(path, fallback)
+    return "common/config/schema.py"
+
+
+def _record(
+    out: Dict[str, Dict[str, Any]],
+    group: str,
+    key: str,
+    obj: Any,
+    attr: str,
+    fallback: Any,
+    *,
+    source: str = "",
+) -> None:
     value, used_fallback = _get(obj, attr, fallback)
-    out.setdefault(group, {})[key] = {"value": value, "fallback": used_fallback}
+    out.setdefault(group, {})[key] = {"value": value, "fallback": used_fallback, "source": source or "unknown"}
+
+
+def _record_control(
+    out: Dict[str, Dict[str, Any]],
+    system_yaml: Dict[str, Any],
+    group: str,
+    key: str,
+    control: Any,
+    fallback: Any,
+) -> None:
+    path = ("orchestrator", "control", key)
+    _record(out, group, key, control, key, fallback, source=_source_for(system_yaml, path, fallback))
+
+
+def _record_car(
+    out: Dict[str, Dict[str, Any]],
+    system_yaml: Dict[str, Any],
+    group: str,
+    key: str,
+    car: Any,
+    attr: str,
+    fallback: Any,
+) -> None:
+    path = ("orchestrator", "car", attr)
+    _record(out, group, key, car, attr, fallback, source=_source_for(system_yaml, path, fallback))
 
 
 def collect() -> tuple[Dict[str, Dict[str, Any]], list[str]]:
@@ -33,38 +95,48 @@ def collect() -> tuple[Dict[str, Dict[str, Any]], list[str]]:
     orch = cfg.orchestrator
     control = orch.control
     car = orch.car
+    system_path = Path(os.getenv("SYSTEM_CONFIG_FILE") or os.path.join(ROOT, "configs", "system_config.yaml"))
+    system_yaml = load_yaml_file(system_path)
     values: Dict[str, Dict[str, Any]] = {}
+    values["config_chain"] = {
+        "system_config_file": {"value": str(system_path), "fallback": False, "source": "SYSTEM_CONFIG_FILE" if os.getenv("SYSTEM_CONFIG_FILE") else "default"},
+        "vision_params_file": {"value": getattr(cfg.vision.runtime, "vision_params_file", ""), "fallback": False, "source": "vision.runtime.vision_params_file"},
+        "loaded_config_files": {"value": list(getattr(orch.runtime, "loaded_config_files", [])), "fallback": False, "source": "loader"},
+    }
 
-    _record(values, "speed", "search_wz_radps", car, "search_table_wz_radps", 0.20)
-    _record(values, "speed", "min_forward_vx_mps", control, "min_forward_vx_mps", 0.04)
-    _record(values, "speed", "bbox_track_forward_vx_mps", control, "bbox_track_forward_vx_mps", 0.10)
-    _record(values, "speed", "bbox_track_forward_max_vx_mps", control, "bbox_track_forward_max_vx_mps", 0.20)
-    _record(values, "speed", "far_bbox_track_vx_mps", control, "far_bbox_track_vx_mps", 0.20)
-    _record(values, "speed", "bbox_track_forward_max_wz_radps", control, "bbox_track_forward_max_wz_radps", 0.20)
-    _record(values, "speed", "edge_handoff_forward_vx_mps", control, "edge_handoff_forward_vx_mps", 0.08)
-    _record(values, "speed", "near_slow_max_vx_mps", control, "near_slow_max_vx_mps", 0.03)
-    _record(values, "speed", "near_slow_max_wz_radps", control, "near_slow_max_wz_radps", 0.04)
-    _record(values, "speed", "final_servo_enter_p10_m", control, "final_servo_enter_p10_m", 0.45)
-    _record(values, "speed", "edge_final_enter_margin_m", control, "edge_final_enter_margin_m", 0.06)
-    _record(values, "speed", "edge_final_stop_margin_m", control, "edge_final_stop_margin_m", 0.02)
-    _record(values, "speed", "close_range_enter_p10_m", control, "close_range_enter_p10_m", 0.55)
-    _record(values, "speed", "final_probe_vx_mps", control, "final_probe_vx_mps", 0.008)
-    _record(values, "speed", "final_missing_probe_vx_mps", control, "final_missing_probe_vx_mps", 0.004)
-    _record(values, "speed", "close_range_probe_vx_mps", control, "close_range_probe_vx_mps", 0.008)
-    _record(values, "speed", "close_range_missing_probe_vx_mps", control, "close_range_missing_probe_vx_mps", 0.004)
-    _record(values, "speed", "roi_final_stop_p10_m", control, "roi_final_stop_p10_m", 0.42)
-    _record(values, "speed", "roi_final_slow_p10_m", control, "roi_final_slow_p10_m", 0.52)
-    _record(values, "speed", "roi_final_probe_vx_mps", control, "roi_final_probe_vx_mps", 0.008)
-    _record(values, "speed", "roi_final_missing_probe_vx_mps", control, "roi_final_missing_probe_vx_mps", 0.004)
-    _record(values, "speed", "roi_final_missing_hold_s", control, "roi_final_missing_hold_s", 0.8)
-    _record(values, "speed", "depth_envelope_stop_p10_m", control, "depth_envelope_stop_p10_m", 0.35)
-    _record(values, "speed", "depth_envelope_slow_p10_m", control, "depth_envelope_slow_p10_m", 0.50)
-    _record(values, "speed", "depth_envelope_mid_p10_m", control, "depth_envelope_mid_p10_m", 0.70)
-    _record(values, "speed", "depth_envelope_slow_vx_mps", control, "depth_envelope_slow_vx_mps", 0.006)
-    _record(values, "speed", "depth_envelope_mid_vx_mps", control, "depth_envelope_mid_vx_mps", 0.015)
-    _record(values, "speed", "global_max_vx_mps", car, "max_vx_mps", 1.0)
-    _record(values, "speed", "global_max_vy_mps", car, "max_vy_mps", 1.0)
-    _record(values, "speed", "global_max_wz_radps", car, "max_wz_radps", 1.0)
+    _record_car(values, system_yaml, "speed", "search_wz_radps", car, "search_table_wz_radps", 0.20)
+    for key, fallback in (
+        ("min_forward_vx_mps", 0.04),
+        ("bbox_track_forward_vx_mps", 0.10),
+        ("bbox_track_forward_max_vx_mps", 0.20),
+        ("far_bbox_track_vx_mps", 0.20),
+        ("bbox_track_forward_max_wz_radps", 0.20),
+        ("edge_handoff_forward_vx_mps", 0.08),
+        ("near_slow_max_vx_mps", 0.03),
+        ("near_slow_max_wz_radps", 0.04),
+        ("final_servo_enter_p10_m", 0.45),
+        ("edge_final_enter_margin_m", 0.06),
+        ("edge_final_stop_margin_m", 0.02),
+        ("close_range_enter_p10_m", 0.55),
+        ("final_probe_vx_mps", 0.008),
+        ("final_missing_probe_vx_mps", 0.004),
+        ("close_range_probe_vx_mps", 0.008),
+        ("close_range_missing_probe_vx_mps", 0.004),
+        ("roi_final_stop_p10_m", 0.42),
+        ("roi_final_slow_p10_m", 0.52),
+        ("roi_final_probe_vx_mps", 0.008),
+        ("roi_final_missing_probe_vx_mps", 0.004),
+        ("roi_final_missing_hold_s", 0.8),
+        ("depth_envelope_stop_p10_m", 0.35),
+        ("depth_envelope_slow_p10_m", 0.50),
+        ("depth_envelope_mid_p10_m", 0.70),
+        ("depth_envelope_slow_vx_mps", 0.006),
+        ("depth_envelope_mid_vx_mps", 0.015),
+    ):
+        _record_control(values, system_yaml, "speed", key, control, fallback)
+    _record_car(values, system_yaml, "speed", "global_max_vx_mps", car, "max_vx_mps", 1.0)
+    _record_car(values, system_yaml, "speed", "global_max_vy_mps", car, "max_vy_mps", 1.0)
+    _record_car(values, system_yaml, "speed", "global_max_wz_radps", car, "max_wz_radps", 1.0)
 
     for key, fallback in (
         ("table_target_dist_m", 0.30),
@@ -80,26 +152,29 @@ def collect() -> tuple[Dict[str, Dict[str, Any]], list[str]]:
         ("final_yaw_align_min_duration_ms", 1000),
         ("final_yaw_last_good_hold_s", 1.2),
     ):
-        _record(values, "final", key, control, key, fallback)
+        _record_control(values, system_yaml, "final", key, control, fallback)
 
-    _record(values, "lateral", "distance_scaled_lateral_enabled", control, "distance_scaled_lateral_enabled", True)
-    _record(values, "lateral", "near_slow_max_vy_mps", control, "near_slow_max_vy_mps", 0.040)
-    _record(values, "lateral", "lateral_enabled", control, "lateral_enabled", False)
-    _record(values, "lateral", "lateral_vy_max_mps", control, "lateral_vy_max_mps", 0.18)
-    _record(values, "lateral", "lateral_kp", control, "lateral_kp", 0.30)
-    _record(values, "lateral", "lateral_deadband_norm", control, "lateral_deadband_norm", 0.020)
-    _record(values, "lateral", "lateral_distance_ref_m", control, "lateral_distance_ref_m", 0.50)
-    _record(values, "lateral", "lateral_distance_scale_min", control, "lateral_distance_scale_min", 0.80)
-    _record(values, "lateral", "lateral_distance_scale_max", control, "lateral_distance_scale_max", 2.0)
-    _record(values, "lateral", "far_lateral_vy_max_mps", control, "far_lateral_vy_max_mps", 0.18)
-    _record(values, "lateral", "mid_lateral_vy_max_mps", control, "mid_lateral_vy_max_mps", 0.14)
-    _record(values, "lateral", "near_lateral_vy_max_mps", control, "near_lateral_vy_max_mps", 0.060)
-    _record(values, "lateral", "lateral_priority_mid_error_norm", control, "lateral_priority_mid_error_norm", 0.99)
-    _record(values, "lateral", "lateral_priority_large_error_norm", control, "lateral_priority_large_error_norm", 0.99)
-    _record(values, "lateral", "lateral_priority_mid_vx_cap_mps", control, "lateral_priority_mid_vx_cap_mps", 0.080)
-    _record(values, "lateral", "lateral_priority_vx_cap_mps", control, "lateral_priority_vx_cap_mps", 0.040)
-    _record(values, "lateral", "edge_yaw_align_allow_lateral", control, "edge_yaw_align_allow_lateral", True)
-    _record(values, "lateral", "edge_yaw_align_lateral_vy_max_mps", control, "edge_yaw_align_lateral_vy_max_mps", 0.080)
+    for key, fallback in (
+        ("distance_scaled_lateral_enabled", True),
+        ("near_slow_max_vy_mps", 0.040),
+        ("lateral_enabled", True),
+        ("lateral_vy_max_mps", 0.18),
+        ("lateral_kp", 0.30),
+        ("lateral_deadband_norm", 0.020),
+        ("lateral_distance_ref_m", 0.50),
+        ("lateral_distance_scale_min", 0.80),
+        ("lateral_distance_scale_max", 2.0),
+        ("far_lateral_vy_max_mps", 0.18),
+        ("mid_lateral_vy_max_mps", 0.14),
+        ("near_lateral_vy_max_mps", 0.060),
+        ("lateral_priority_mid_error_norm", 0.99),
+        ("lateral_priority_large_error_norm", 0.99),
+        ("lateral_priority_mid_vx_cap_mps", 0.080),
+        ("lateral_priority_vx_cap_mps", 0.040),
+        ("edge_yaw_align_allow_lateral", True),
+        ("edge_yaw_align_lateral_vy_max_mps", 0.080),
+    ):
+        _record_control(values, system_yaml, "lateral", key, control, fallback)
 
     for key, fallback in (
         ("yaw_flip_hold_window_s", 0.8),
@@ -107,7 +182,7 @@ def collect() -> tuple[Dict[str, Dict[str, Any]], list[str]]:
         ("yaw_ambiguous_wz_cap", 0.0),
         ("yaw_ambiguous_vy_boost", 1.5),
     ):
-        _record(values, "yaw_anti_oscillation", key, control, key, fallback)
+        _record_control(values, system_yaml, "yaw_anti_oscillation", key, control, fallback)
 
     for key, fallback in (
         ("edge_yaw_control_enter_rad", 0.30),
@@ -117,8 +192,8 @@ def collect() -> tuple[Dict[str, Dict[str, Any]], list[str]]:
         ("edge_yaw_min_wz_radps", 0.08),
         ("edge_yaw_max_wz_radps", 0.18),
     ):
-        _record(values, "edge_yaw_control", key, control, key, fallback)
-    _record(values, "edge_yaw_control", "edge_hard_rotate_only_yaw_rad", car, "table_edge_hard_rotate_only_yaw_rad", 1.40)
+        _record_control(values, system_yaml, "edge_yaw_control", key, control, fallback)
+    _record_car(values, system_yaml, "edge_yaw_control", "edge_hard_rotate_only_yaw_rad", car, "table_edge_hard_rotate_only_yaw_rad", 1.40)
 
     # Bilateral distance config check
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -137,11 +212,19 @@ def collect() -> tuple[Dict[str, Dict[str, Any]], list[str]]:
     orch_dist = getattr(control, "table_target_dist_m", 0.30)
     values.setdefault("bilateral_distance", {})["vista_target_dist_m"] = {
         "value": vista_dist if vista_dist is not None else 0.30,
-        "fallback": vista_dist is None
+        "fallback": vista_dist is None,
+        "source": "VISTA/configs/vision_params.yaml" if vista_dist is not None else "common/config/schema.py",
     }
     values.setdefault("bilateral_distance", {})["orch_table_target_dist_m"] = {
         "value": orch_dist,
-        "fallback": False
+        "fallback": False,
+        "source": values.get("final", {}).get("table_target_dist_m", {}).get("source", "unknown"),
+    }
+    edge_override = getattr(getattr(cfg.online_edge, "detector", None), "target_dist_m_override", None)
+    values.setdefault("bilateral_distance", {})["online_edge_target_dist_m_override"] = {
+        "value": edge_override,
+        "fallback": False,
+        "source": "configs/system_config.yaml" if _dict_has_path(system_yaml, ("online_edge", "detector", "target_dist_m_override")) else "common/config/schema.py",
     }
 
     warnings: list[str] = []
@@ -163,7 +246,8 @@ def _print_group(name: str, rows: Dict[str, Any]) -> None:
     print(f"\n{name}:")
     for key, item in rows.items():
         suffix = " [fallback]" if item["fallback"] else ""
-        print(f"  {key}: {item['value']}{suffix}")
+        source = item.get("source", "unknown")
+        print(f"  {key}: {item['value']}{suffix}  source={source}")
 
 
 def main() -> None:
@@ -173,7 +257,7 @@ def main() -> None:
 
     values, warnings = collect()
     print("Docking effective config audit")
-    for group in ("speed", "final", "lateral", "yaw_anti_oscillation", "edge_yaw_control", "bilateral_distance"):
+    for group in ("config_chain", "speed", "final", "lateral", "yaw_anti_oscillation", "edge_yaw_control", "bilateral_distance"):
         _print_group(group, values.get(group, {}))
     if warnings:
         print("\nwarnings:")

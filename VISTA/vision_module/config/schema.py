@@ -195,9 +195,8 @@ class TableEdgeConfig:
     fast_front_edge_col_step: int = 2
     fast_front_edge_row_step: int = 2
     depth_stride: int = 2
-    detector_mode: str = "lightweight"
+    detector_mode: str = "fast_plane_only"
     update_hz: float = 10.0
-    light_stride: int = 4
     fast_plane_stride: int = 4
     require_yolo_confirm: bool = True
     static_roi_enabled: bool = False

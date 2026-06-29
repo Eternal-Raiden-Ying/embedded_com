@@ -344,9 +344,8 @@ class TableEdgeConfig:
     depth_stride: int = 2
 
     # Previously hardcoded configurations inside table_edge_manager.py business layer
-    detector_mode: str = "lightweight"
+    detector_mode: str = "fast_plane_only"
     update_hz: float = 5.0
-    light_stride: int = 4
     fast_plane_stride: int = 4
     require_yolo_confirm: bool = True
     static_roi_enabled: bool = False
@@ -429,8 +428,6 @@ class OrchestratorRuntimeConfig:
     debug: bool = False
     state_block_period_s: float = 1.0
     heartbeat_period_s: float = 1.0
-    stage_params_file: str = ""
-    car_cmd_params_file: str = ""
     config_profile: str = ""
     loaded_config_files: List[str] = field(default_factory=list)
 
@@ -843,7 +840,7 @@ class DockingControlConfig:
     spin_only_yaw_rad: float = 0.18
 
     precise_yaw_tol_rad: float = 0.025
-    precise_dist_tol_m: float = 0.015  # Distance error stopping tolerance/threshold for precise approach (mapped from controlled_approach.target_dist_m in stage_params.yaml)
+    precise_dist_tol_m: float = 0.015  # Distance error stopping tolerance/threshold for precise approach
     precise_lateral_tol_m: float = 0.015
     precise_stable_s: float = 0.50
 

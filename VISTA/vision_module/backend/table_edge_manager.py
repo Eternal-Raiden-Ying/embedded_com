@@ -48,11 +48,10 @@ class TableEdgeManager:
 
         # Initialize configurations directly from type-safe config
         table_edge_cfg = self.cfg.table_edge
-        self._detector_mode = table_edge_cfg.detector_mode
+        self._detector_mode = self._normalize_detector_mode(table_edge_cfg.detector_mode)
         self._edge_update_hz = table_edge_cfg.update_hz
         self._worker_interval_s = 1.0 / max(1.0, self._edge_update_hz)
         self._default_interval_s = self._worker_interval_s
-        self._light_stride = table_edge_cfg.light_stride
         self._fast_plane_stride = table_edge_cfg.fast_plane_stride
         self._depth_stride = table_edge_cfg.depth_stride
         self._require_yolo_confirm = table_edge_cfg.require_yolo_confirm
@@ -135,8 +134,10 @@ class TableEdgeManager:
 
     @staticmethod
     def _normalize_detector_mode(value: Any) -> str:
-        mode = str(value or "full").strip().lower().replace("-", "_")
-        return mode if mode in {"full", "fast_plane_only"} else "full"
+        mode = str(value or "fast_plane_only").strip().lower().replace("-", "_")
+        if mode != "fast_plane_only":
+            raise ValueError(f"unsupported table edge detector_mode={value!r}; expected fast_plane_only")
+        return mode
 
     def _emit(self, action: str, **fields: Any) -> None:
         if self._capability_sink is None:
@@ -334,13 +335,10 @@ class TableEdgeManager:
             pass
 
     def configure(self, payload: Dict[str, Any]) -> None:
-        mode = str(payload.get("detector_mode") or "full")
-        self._detector_mode = mode if mode in {"lightweight", "full", "fast_plane_only"} else "full"
+        self._detector_mode = self._normalize_detector_mode(payload.get("detector_mode") or self._detector_mode)
         self._edge_update_hz = float(payload.get("update_hz", self._edge_update_hz) or self._edge_update_hz)
         if self._edge_update_hz > 0:
             self._worker_interval_s = 1.0 / max(1.0, self._edge_update_hz)
-        if "light_stride" in payload:
-            self._light_stride = max(1, int(payload.get("light_stride")))
         if "fast_plane_stride" in payload:
             self._fast_plane_stride = max(1, int(payload.get("fast_plane_stride")))
         if "depth_stride" in payload:
@@ -2320,201 +2318,7 @@ class TableEdgeManager:
         return payload
 
     def _process_depth(self, depth_frame: np.ndarray, frame_seq: int) -> Dict[str, Any]:
-        if self._detector_mode == "fast_plane_only":
-            return self._process_depth_fast_plane_only(depth_frame, frame_seq)
-        if self._detector_mode == "lightweight":
-            return self._process_depth_lightweight(depth_frame, frame_seq)
-        total_start = time.perf_counter()
-        profile = self._profile_template()
-        profile["depth_frame_fetch_ms"] = float(self._last_depth_frame_fetch_ms)
-        frame_prepare_start = time.perf_counter()
-        roi_meta = self._select_roi(depth_frame)
-        yolo_gate = self._yolo_table_confirmation()
-        profile["frame_prepare_ms"] = self._ms_since(frame_prepare_start)
-        if not bool(yolo_gate.get("yolo_gate_open", yolo_gate.get("table_confirmed_by_yolo", False))):
-            payload = self._default_result(
-                depth_valid=True,
-                reason="waiting_yolo_table_confirm",
-                frame_seq=frame_seq,
-                roi_meta=roi_meta,
-            )
-            payload.update(yolo_gate)
-            profile["total_edge_process_ms"] = self._ms_since(total_start)
-            return self._attach_profile(payload, profile, path="yolo_gate_wait")
-        roi_override = roi_meta.get("depth_edge_roi") if roi_meta.get("roi_source") != "static_fallback" else None
-        if self._detector is None:
-            payload = self._default_result(
-                depth_valid=True,
-                reason=self._detector_error or "detector_unavailable",
-                frame_seq=frame_seq,
-                roi_meta=roi_meta,
-            )
-            profile["total_edge_process_ms"] = self._ms_since(total_start)
-            return self._attach_profile(payload, profile, path="full_unavailable")
-        try:
-            detect_start = time.perf_counter()
-            result, _debug = self._detector.process_depth(depth_frame, roi_override=roi_override)
-            profile["plane_or_edge_fit_ms"] = self._ms_since(detect_start)
-            if isinstance(_debug, dict) and isinstance(_debug.get("timing"), dict):
-                for key, value in _debug.get("timing", {}).items():
-                    if key in profile and isinstance(value, (int, float)):
-                        profile[key] = float(value)
-                profile["roi_crop_ms"] = float(profile.get("roi_extract_ms", 0.0) or 0.0)
-                profile["depth_preprocess_ms"] = float(profile.get("roi_extract_ms", 0.0) or 0.0)
-        except Exception as exc:
-            self.log.debug("table edge detect failed | error=%s", exc)
-            payload = self._default_result(depth_valid=True, reason=f"detect_failed:{exc}", frame_seq=frame_seq, roi_meta=roi_meta)
-            profile["total_edge_process_ms"] = self._ms_since(total_start)
-            return self._attach_profile(payload, profile, path="full_detect_failed")
-        obs_build_start = time.perf_counter()
-        roi_box = None
-        front_plane = None
-        if isinstance(_debug, dict):
-            roi_box = _debug.get("roi_box")
-            front_plane = _debug.get("front_plane") if isinstance(_debug.get("front_plane"), dict) else None
-        roi_payload = self._roi_payload(roi_box, roi_meta)
-        plane_bbox = None
-        if isinstance(front_plane, dict) and bool(front_plane.get("found", False)):
-            try:
-                ix0 = front_plane.get("image_x_min")
-                ix1 = front_plane.get("image_x_max")
-                iy0 = front_plane.get("image_y_min")
-                iy1 = front_plane.get("image_y_max")
-                if ix0 is not None and ix1 is not None and iy0 is not None and iy1 is not None:
-                    plane_bbox = [int(ix0), int(iy0), int(ix1) + 1, int(iy1) + 1]
-            except Exception:
-                plane_bbox = None
-        plane_view = self._plane_view_from_bbox(
-            plane_bbox,
-            getattr(depth_frame, "shape", None),
-            area_ratio=front_plane.get("area_ratio") if isinstance(front_plane, dict) else None,
-        )
-        table_points = int(getattr(result, "table_point_count", 0) or 0)
-        all_points = int(getattr(result, "point_count", 0) or 0)
-        edge_found = bool(getattr(result, "edge_found", False))
-        reason = ""
-        if not edge_found:
-            reason = "roi_empty" if all_points <= 0 and table_points <= 0 else "no_valid_edge"
-        valid_for_control = bool(getattr(result, "valid_for_control", edge_found))
-        reject_reason = getattr(result, "reject_reason", "") or reason
-        yaw_err = float(getattr(result, "yaw_err_rad", 0.0)) if edge_found else None
-        dist_err = float(getattr(result, "dist_err_m", 0.0)) if edge_found else None
-        edge_conf = float(getattr(result, "edge_confidence", 0.0) or 0.0)
-        payload = {
-            "table_found": bool(table_points > 0),
-            "edge_found": edge_found,
-            "edge_detected": bool(edge_found),
-            "edge_geometry_valid": bool(edge_found),
-            "edge_valid": bool(edge_found),
-            "valid_for_control": valid_for_control,
-            "confidence": edge_conf,
-            "edge_conf": edge_conf,
-            "yaw_err_rad": yaw_err,
-            "yaw_err": yaw_err,
-            "dist_err_m": dist_err,
-            "dist_err": dist_err,
-            "edge_k": getattr(result, "line_k", None),
-            "edge_b": getattr(result, "line_b", None),
-            "image_line_k": getattr(result, "image_line_k", None),
-            "image_line_b": getattr(result, "image_line_b", None),
-            "depth_valid": True,
-            "edge_obs_unavailable": False,
-            "point_count": all_points,
-            "valid_edge_points": all_points,
-            "table_point_count": table_points,
-            "edge_inlier_count": int(getattr(result, "inlier_count", 0) or 0),
-            "selected_edge": edge_found,
-            "near_edge": valid_for_control,
-            **plane_view,
-            "view_err_norm": plane_view.get("plane_cx_norm") if edge_found else yolo_gate.get("table_cx_norm"),
-            "view_source": "plane" if edge_found else ("yolo" if yolo_gate.get("yolo_reliable") else "none"),
-            "view_reliable": bool(
-                (edge_found and plane_view.get("plane_cx_norm") is not None)
-                or yolo_gate.get("yolo_reliable", False)
-            ),
-            "fov_guard_active": False,
-            "frame_id": int(self._frame_id),
-            "frame_seq": int(frame_seq),
-            "source": "vision_table_edge_manager",
-            "reason": reject_reason,
-            "reject_reason": reject_reason,
-            "target_dist_m": float(self._target_dist_m),
-            "plane_only_mode": bool(getattr(self._detector_cfg, "plane_only_mode", False)),
-            "enable_crease_line": bool(getattr(self._detector_cfg, "enable_crease_line", True)),
-            **self._detector_mode_payload(),
-            **yolo_gate,
-            **roi_payload,
-            **self._plane_debug_payload(_debug, roi_payload.get("edge_roi") or roi_box),
-            "type": "table_edge_obs",
-        }
-        for key in (
-            "raw_found",
-            "pose_found",
-            "pose_source",
-            "plane_found",
-            "line_found",
-            "plane_confidence",
-            "line_confidence",
-            "plane_residual_mean",
-            "line_residual_mean",
-            "plane_x_span_m",
-            "line_x_span_m",
-            "candidate_count",
-            "inlier_count",
-            "stable_count",
-            "front_face_area_ratio",
-            "plane_yaw_err_rad",
-            "plane_dist_err_m",
-            "line_yaw_err_rad",
-            "line_dist_err_m",
-            "plane_k",
-            "plane_b",
-            "upper_line_found",
-            "upper_line_confidence",
-            "upper_line_candidate_count",
-            "upper_line_inlier_count",
-            "upper_line_residual_mean",
-            "upper_line_x_span_m",
-            "upper_line_y_norm_mean",
-            "upper_line_k",
-            "upper_line_b",
-            "upper_line_yaw_err_rad",
-            "upper_line_dist_err_m",
-            "lower_line_found",
-            "lower_line_confidence",
-            "lower_line_candidate_count",
-            "lower_line_inlier_count",
-            "lower_line_residual_mean",
-            "lower_line_x_span_m",
-            "lower_line_y_norm_mean",
-            "lower_line_k",
-            "lower_line_b",
-            "lower_line_yaw_err_rad",
-            "lower_line_dist_err_m",
-            "selected_line_type",
-            "table_geometry_score",
-            "front_plane_score",
-            "line_score",
-            "plane_line_consistency_score",
-            "roi_boundary_score",
-            "temporal_score",
-            "geometry_reject_reason",
-            "usable_for_approach",
-            "usable_for_alignment",
-            "usable_for_stop",
-            "control_level",
-            "control_reject_reason",
-            "selected_line_plane_boundary_dist",
-            "selected_line_plane_consistency",
-            "line_reject_reason",
-            "line_drift_rejected",
-            "object_like_line_score",
-            "final_pose_source",
-        ):
-            payload[key] = getattr(result, key, None)
-        profile["obs_build_ms"] = float(profile.get("obs_build_ms", 0.0) or 0.0) + self._ms_since(obs_build_start)
-        profile["total_edge_process_ms"] = self._ms_since(total_start)
-        return self._attach_profile(payload, profile, path="full")
+        return self._process_depth_fast_plane_only(depth_frame, frame_seq)
 
     def _process_depth_fast_plane_only(self, depth_frame: np.ndarray, frame_seq: int) -> Dict[str, Any]:
         """Run fast-plane detector, then retry once with boundary-extended ROI if needed.
@@ -3758,165 +3562,6 @@ class TableEdgeManager:
         profile["obs_build_ms"] = self._ms_since(obs_start)
         profile["total_edge_process_ms"] = self._ms_since(total_start)
         return self._attach_profile(payload, profile, path="fast_plane_only")
-
-    def _process_depth_lightweight(self, depth_frame: np.ndarray, frame_seq: int) -> Dict[str, Any]:
-        total_start = time.perf_counter()
-        profile = self._profile_template()
-        profile["depth_frame_fetch_ms"] = float(self._last_depth_frame_fetch_ms)
-        roi_select_start = time.perf_counter()
-        roi_meta = self._select_roi(depth_frame)
-        yolo_gate = self._yolo_table_confirmation()
-        roi_box = roi_meta.get("depth_edge_roi") if roi_meta.get("roi_source") != "static_fallback" else self._static_roi()
-        if roi_box is None:
-            roi_box = self._static_roi()
-        try:
-            roi_box = self._detector._resolve_roi(depth_frame, roi_override=roi_box) if self._detector is not None else tuple(int(v) for v in roi_box)
-        except Exception:
-            roi_box = tuple(int(v) for v in self._static_roi() or (0, 0, depth_frame.shape[1], depth_frame.shape[0]))
-        x0, y0, x1, y1 = [int(v) for v in roi_box]
-        stride = max(1, int(self._light_stride))
-        depth_roi = depth_frame[y0:y1:stride, x0:x1:stride]
-        profile["roi_crop_ms"] = self._ms_since(roi_select_start)
-
-        prep_start = time.perf_counter()
-        if depth_roi.size <= 0:
-            payload = self._default_result(depth_valid=False, reason="roi_empty", frame_seq=frame_seq, roi_meta=roi_meta)
-            profile["depth_preprocess_ms"] = self._ms_since(prep_start)
-            profile["total_edge_process_ms"] = self._ms_since(total_start)
-            return self._attach_profile(payload, profile, path="light_roi_empty")
-        if depth_roi.dtype != np.float32:
-            depth_m = depth_roi.astype(np.float32) * float(self._target_dist_m * 0.0 + (self._detector.calib.depth_scale if self._detector is not None else 0.001))
-        else:
-            depth_m = depth_roi
-        cfg = self._detector_cfg
-        z_min = float(cfg.z_min if cfg is not None else 0.2)
-        z_max = float(cfg.z_max if cfg is not None else 2.0)
-        valid_mask = (depth_m > z_min) & (depth_m < z_max)
-        valid_count = int(valid_mask.sum())
-        profile["depth_preprocess_ms"] = self._ms_since(prep_start)
-
-        fit_start = time.perf_counter()
-        min_all = max(40, int(cfg.min_all_points if cfg is not None else 1000) // max(1, stride * stride))
-        min_table = max(25, int(cfg.min_table_points if cfg is not None else 500) // max(1, stride * stride))
-        roi_payload = self._roi_payload(roi_box, roi_meta)
-        if self._detector is None or valid_count < min_all:
-            payload = self._default_result(
-                depth_valid=True,
-                reason=self._detector_error or "not_enough_points",
-                frame_seq=frame_seq,
-                roi_meta=roi_meta,
-            )
-            payload.update(roi_payload)
-            payload["point_count"] = int(valid_count)
-            profile["plane_or_edge_fit_ms"] = self._ms_since(fit_start)
-            profile["total_edge_process_ms"] = self._ms_since(total_start)
-            return self._attach_profile(payload, profile, path="light_not_enough_points")
-
-        calib = self._detector.calib
-        yy, xx = np.nonzero(valid_mask)
-        z = depth_m[valid_mask]
-        u = (x0 + xx.astype(np.float32) * float(stride))
-        v = (y0 + yy.astype(np.float32) * float(stride))
-        x_c = (u - float(calib.cx)) * z / float(calib.fx)
-        y_c = (v - float(calib.cy)) * z / float(calib.fy)
-        table_mask = (y_c > float(cfg.table_y_min if cfg is not None else -0.2)) & (y_c < float(cfg.table_y_max if cfg is not None else 0.2))
-        table_count = int(table_mask.sum())
-        if table_count < min_table:
-            payload = self._default_result(depth_valid=True, reason="no_valid_edge", frame_seq=frame_seq, roi_meta=roi_meta)
-            payload.update(roi_payload)
-            payload["point_count"] = int(valid_count)
-            payload["table_point_count"] = int(table_count)
-            profile["plane_or_edge_fit_ms"] = self._ms_since(fit_start)
-            profile["total_edge_process_ms"] = self._ms_since(total_start)
-            return self._attach_profile(payload, profile, path="light_no_table_points")
-
-        x_t = x_c[table_mask]
-        z_t = z[table_mask]
-        try:
-            k, b = np.polyfit(x_t, z_t, 1)
-            residual = np.abs(z_t - (float(k) * x_t + float(b)))
-            threshold = float(cfg.residual_threshold_m if cfg is not None else 0.05)
-            inlier = residual <= threshold
-            inlier_count = int(inlier.sum())
-            if inlier_count >= min_table:
-                k, b = np.polyfit(x_t[inlier], z_t[inlier], 1)
-            else:
-                inlier_count = table_count
-            yaw_err = math.atan(float(k))
-            dist_err = float(b) - float(self._target_dist_m)
-            edge_conf = float(inlier_count) / float(max(1, table_count))
-            edge_found = bool(inlier_count >= min_table)
-            if edge_found and inlier_count >= min_table:
-                yy_plane = yy[table_mask][inlier]
-                xx_plane = xx[table_mask][inlier]
-            else:
-                yy_plane = yy[table_mask]
-                xx_plane = xx[table_mask]
-        except Exception as exc:
-            payload = self._default_result(depth_valid=True, reason=f"light_fit_failed:{exc}", frame_seq=frame_seq, roi_meta=roi_meta)
-            payload.update(roi_payload)
-            payload["point_count"] = int(valid_count)
-            payload["table_point_count"] = int(table_count)
-            profile["plane_or_edge_fit_ms"] = self._ms_since(fit_start)
-            profile["total_edge_process_ms"] = self._ms_since(total_start)
-            return self._attach_profile(payload, profile, path="light_fit_failed")
-        profile["plane_or_edge_fit_ms"] = self._ms_since(fit_start)
-        plane_bbox = None
-        if edge_found and len(xx_plane) > 0 and len(yy_plane) > 0:
-            px0 = x0 + int(np.min(xx_plane)) * stride
-            px1 = x0 + int(np.max(xx_plane)) * stride
-            py0 = y0 + int(np.min(yy_plane)) * stride
-            py1 = y0 + int(np.max(yy_plane)) * stride
-            plane_bbox = [px0, py0, px1 + stride, py1 + stride]
-        roi_area = max(1.0, float(max(1, x1 - x0) * max(1, y1 - y0)) / float(max(1, stride * stride)))
-        plane_view = self._plane_view_from_bbox(
-            plane_bbox or roi_box,
-            getattr(depth_frame, "shape", None),
-            area_ratio=float(inlier_count) / roi_area if edge_found else None,
-        )
-
-        payload = {
-            "table_found": bool(table_count > 0),
-            "edge_found": edge_found,
-            "edge_detected": bool(edge_found),
-            "edge_geometry_valid": bool(edge_found),
-            "edge_valid": bool(edge_found),
-            "valid_for_control": bool(edge_found),
-            "confidence": float(edge_conf),
-            "edge_conf": float(edge_conf),
-            "yaw_err_rad": float(yaw_err) if edge_found else None,
-            "yaw_err": float(yaw_err) if edge_found else None,
-            "dist_err_m": float(dist_err) if edge_found else None,
-            "dist_err": float(dist_err) if edge_found else None,
-            "edge_k": float(k) if edge_found else None,
-            "edge_b": float(b) if edge_found else None,
-            "depth_valid": True,
-            "edge_obs_unavailable": False,
-            "point_count": int(valid_count),
-            "valid_edge_points": int(valid_count),
-            "table_point_count": int(table_count),
-            "edge_inlier_count": int(inlier_count),
-            "selected_edge": edge_found,
-            "near_edge": edge_found,
-            **plane_view,
-            "view_err_norm": plane_view.get("plane_cx_norm") if edge_found else None,
-            "view_source": "plane" if edge_found else "none",
-            "view_reliable": bool(edge_found),
-            "fov_guard_active": False,
-            "frame_id": int(self._frame_id),
-            "frame_seq": int(frame_seq),
-            "source": "vision_table_edge_manager",
-            "reason": "" if edge_found else "no_valid_edge",
-            "target_dist_m": float(self._target_dist_m),
-            "obs_target_dist_m": float(self._target_dist_m),
-            "lightweight": True,
-            "sample_stride": int(stride),
-            **yolo_gate,
-            **roi_payload,
-            "type": "table_edge_obs",
-        }
-        profile["total_edge_process_ms"] = self._ms_since(total_start)
-        return self._attach_profile(payload, profile, path="light")
 
     def process_camera_frame(
         self,

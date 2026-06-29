@@ -9,16 +9,8 @@
 profile: "windows_dev"
 defaults:
   orchestrator:
-    runtime:
-      stage_params_file: "orchestrator/configs/stage_params.yaml"
-      car_cmd_params_file: "orchestrator/configs/car_cmd_params.yaml"
     serial:
       dry_run: true
-runtime_overrides:
-  orchestrator:
-    runtime:
-      stage_params_file: "orchestrator/configs/stage_params.yaml"
-      car_cmd_params_file: "orchestrator/configs/car_cmd_params.yaml"
 
 ### === Vision Module Configuration === ###
 vision:
@@ -149,9 +141,8 @@ vision:
     fast_front_edge_col_step: 2 # Column stride for edge search
     fast_front_edge_row_step: 2 # Row stride for edge search
     depth_stride: 2 # Column and row downsample stride for fast plane depth map
-    detector_mode: "lightweight" # Perception process mode: lightweight, full, fast_plane_only
+    detector_mode: "fast_plane_only" # Online table-edge detector mode
     update_hz: 5.0 # Perception thread loop frequency
-    light_stride: 4 # Processing step for lightweight mode
     fast_plane_stride: 4 # Processing step for fast plane mode
     require_yolo_confirm: true # Block edge perception if YOLO has no table bbox
     static_roi_enabled: false # Use static fallback ROI instead of dynamic YOLO ROI
@@ -216,8 +207,6 @@ orchestrator:
     debug: false # Debug level traces enabled
     state_block_period_s: 1.0 # State report publish period
     heartbeat_period_s: 1.0 # State machine heartbeat period
-    stage_params_file: "orchestrator/configs/stage_params.yaml" # Dynamic state configuration override yaml
-    car_cmd_params_file: "orchestrator/configs/car_cmd_params.yaml" # Velocity limits override yaml
     loaded_config_files: [] # List of config files loaded during boot
   serial:
     port: "/dev/ttyHS1" # Serial port device descriptor
@@ -258,10 +247,10 @@ orchestrator:
     controlled_approach_min_dwell_s: 0.80 # Minimum controlled approach duration
     final_lock_frames_to_arrive: 3 # Frames of stable target to complete task
     final_lock_yaw_tol_rad: 0.25 # Heading error threshold for final stop
-    final_lock_dist_tol_m: 0.03 # Forward distance error threshold for final stop
+    final_lock_dist_tol_m: 0.05 # Forward distance error threshold for final stop
     final_lock_lateral_tol_m: 0.03 # Lateral alignment error threshold for final stop
     table_edge_only_test: false # Perceive table edge without active motion
-    table_target_dist_m: 0.50 # Desired docking offset distance from table
+    table_target_dist_m: 0.30 # Desired docking offset distance from table
     table_dist_tol_m: 0.05 # Distance tolerance for stopping
     table_yaw_tol_rad: 0.25 # Heading alignment tolerance for stopping
     table_stop_margin_m: 0.05 # Stop margin offset safety factor
@@ -278,6 +267,27 @@ orchestrator:
     edge_trusted_min_x_span_m: 0.0 # Minimum horizontal size of fit edge
     edge_trusted_max_background_penalty: 0.0 # Max background noise allowed
     yolo_table_near_dist_m: 0.45 # Lateral distance threshold for near stage
+    near_slow_max_vx_mps: 0.030 # Near-table forward speed cap
+    near_slow_max_vy_mps: 0.040 # Near-table lateral speed cap
+    near_slow_max_wz_radps: 0.04 # Near-table yaw speed cap
+    final_servo_enter_p10_m: 0.45 # ROI depth threshold to enter final servo
+    edge_final_enter_margin_m: 0.06 # Edge distance margin to enter final servo
+    edge_final_stop_margin_m: 0.02 # Edge distance margin for final stop confirmation
+    close_range_enter_p10_m: 0.55 # ROI depth threshold to latch close range
+    final_probe_vx_mps: 0.008 # Final probe forward speed
+    final_missing_probe_vx_mps: 0.004 # Final probe speed when final signal is missing
+    close_range_probe_vx_mps: 0.008 # Close-range probe forward speed
+    close_range_missing_probe_vx_mps: 0.004 # Close-range probe speed when depth is missing
+    roi_final_stop_p10_m: 0.42 # ROI P10 threshold for final lock stop
+    roi_final_slow_p10_m: 0.52 # ROI P10 threshold for slow final probe
+    roi_final_probe_vx_mps: 0.008 # ROI final probe forward speed
+    roi_final_missing_probe_vx_mps: 0.004 # ROI final probe speed when depth is missing
+    roi_final_missing_hold_s: 0.8 # ROI missing hold before zero forward
+    depth_envelope_stop_p10_m: 0.35 # Depth envelope hard stop threshold
+    depth_envelope_slow_p10_m: 0.50 # Depth envelope slow threshold
+    depth_envelope_mid_p10_m: 0.70 # Depth envelope mid threshold
+    depth_envelope_slow_vx_mps: 0.006 # Depth envelope slow forward cap
+    depth_envelope_mid_vx_mps: 0.015 # Depth envelope mid forward cap
     yolo_table_lost_to_search_frames: 8 # Frame drop threshold to trigger search
     no_table_bbox_timeout_s: 10.0 # Timeout only when YOLO table bbox is also absent
     edge_geometry_timeout_s: 10.0 # Time to degrade edge geometry before YOLO assist fallback
@@ -291,11 +301,23 @@ orchestrator:
     final_lock_window_ms: 1000 # Time window for target updates
     final_lock_max_consecutive_lost: 2 # Allowed consecutive lost target frames
     final_lock_soft_stale_hold: true # Keep command active on brief loss
+    final_lock_min_hold_ms: 500 # Minimum hold time before final lock
     table_max_micro_adjust: 3 # Limit search iterations near table
     enable_final_lock: true # Enable final adjustment phase
     enable_micro_adjust: false # Enable micro adjust search loop
     final_lock_enter_dist_th_m: 0.08 # Distance threshold to enter final lock
     final_lock_enter_yaw_th_rad: 0.10 # Heading threshold to enter final lock
+    final_dist_deadband_m: 0.030 # Final distance deadband
+    final_dist_kp: 0.080 # Final distance proportional gain
+    final_forward_vx_max_mps: 0.006 # Final forward speed cap
+    final_reverse_vx_max_mps: 0.004 # Final reverse speed cap
+    final_reverse_confirm_frames: 3 # Reverse confirmation frames
+    final_yaw_deadband_rad: 0.12 # Final yaw deadband
+    final_lock_yaw_rad: 0.12 # Final lock yaw tolerance
+    final_yaw_realign_rad: 0.18 # Final yaw realign threshold
+    final_yaw_stable_frames: 6 # Final yaw stable frames
+    final_yaw_align_min_duration_ms: 1000 # Minimum final yaw alignment duration
+    final_yaw_last_good_hold_s: 1.2 # Last good yaw hold time
     edge_settle_s: 0.80 # Settle time for edge confirmation
     dock_retry_limit: 2 # Retries limit upon docking failure
     dock_retry_backoff_s: 0.60 # Wait time before backing up
@@ -379,7 +401,7 @@ orchestrator:
     enable_pick_pipeline: false # Enable picker robot subsystem integration
     assume_grasp_success_for_test: false # Bypass hardware checks during test
   car:
-    search_table_wz_radps: 0.5 # Rotational velocity to search for table
+    search_table_wz_radps: 0.20 # Rotational velocity to search for table
     fallback_align_turn_wz_min_radps: 0.10 # Minimum rotation velocity in fallback
     fallback_align_turn_wz_max_radps: 0.45 # Maximum rotation velocity in fallback
     fallback_forward_vx_mps_min: 0.06 # Minimum forward velocity in fallback
@@ -395,19 +417,19 @@ orchestrator:
     table_coarse_align_vy_max_mps: 0.000 # Maximum lateral velocity in coarse align
     table_coarse_align_wz_min_radps: 0.080 # Minimum rotation velocity in coarse align
     table_coarse_align_wz_max_radps: 0.150 # Maximum rotation velocity in coarse align
-    table_controlled_vx_min_mps: 0.1 # Minimum forward velocity in controlled approach0.04
-    table_controlled_vx_max_mps: 0.12 # Maximum forward velocity in controlled approach0.12
+    table_controlled_vx_min_mps: 0.020 # Minimum forward velocity in controlled approach
+    table_controlled_vx_max_mps: 0.035 # Maximum forward velocity in controlled approach
     table_controlled_vy_min_mps: 0.000 # Minimum lateral velocity in controlled approach
     table_controlled_vy_max_mps: 0.000 # Maximum lateral velocity in controlled approach
     table_controlled_wz_min_radps: 0.000 # Minimum rotation velocity in controlled approach
-    table_controlled_wz_max_radps: 0.150 # Maximum rotation velocity in controlled approach
-    table_approach_safe_vx_mps: 0.1 # Safe forward velocity limit in approach
-    table_approach_max_vx_mps: 0.12 # Maximum forward velocity limit in approach
+    table_controlled_wz_max_radps: 0.120 # Maximum rotation velocity in controlled approach
+    table_approach_safe_vx_mps: 0.020 # Safe forward velocity limit in approach
+    table_approach_max_vx_mps: 0.035 # Maximum forward velocity limit in approach
     table_approach_yaw_deadband_rad: 0.08 # Deadband for heading corrections
     table_approach_yaw_realign_rad: 0.16 # Heading error forcing stop and align
-    table_approach_allow_wz: false # Enable heading correction during approach
+    table_approach_allow_wz: true # Enable heading correction during approach
     table_approach_allow_vy: false # Enable lateral correction during approach
-    table_pose_missing_safe_vx_mps: 0.020 # Safe speed on brief perception loss
+    table_pose_missing_safe_vx_mps: 0.040 # Safe speed on brief perception loss
     table_pose_missing_max_hold_s: 3.0 # Duration to keep moving on loss
     table_final_lock_vx_min_mps: 0.000 # Minimum forward speed in final lock
     table_final_lock_vx_max_mps: 0.008 # Maximum forward speed in final lock
@@ -418,20 +440,20 @@ orchestrator:
     table_vx_deadband_mps: 0.004 # Forward speed deadband
     table_vy_deadband_mps: 0.001 # Lateral speed deadband
     table_wz_deadband_radps: 0.006 # Rotation speed deadband
-    table_stage_a_wz_radps: 0.04 # Alignment phase angular velocity
-    table_stage_b_vx_max_mps: 0.03 # Approach phase forward velocity limit
-    table_stage_c_vx_max_mps: 0.03 # Docking phase forward velocity limit
+    table_stage_a_wz_radps: 0.080 # Alignment phase angular velocity
+    table_stage_b_vx_max_mps: 0.020 # Approach phase forward velocity limit
+    table_stage_c_vx_max_mps: 0.035 # Docking phase forward velocity limit
     table_stage_c_vx_min_mps: 0.0 # Docking phase minimum forward velocity
     table_min_forward_dist_err_m: 0.07 # Minimum distance to target
-    table_vx_mps_min: 0.10 # Base forward speed
-    table_vx_mps_max: 0.200 # Peak forward speed
+    table_vx_mps_min: 0.020 # Base forward speed
+    table_vx_mps_max: 0.035 # Peak forward speed
     table_vx_kp_mps_per_m: 0.30 # Forward speed gain factor
     table_yaw_slow_th_rad: 0.12 # Heading error requiring deceleration
     table_yaw_stop_th_rad: 0.45 # Heading error forcing stop
     table_near_dist_err_th_m: 0.10 # Near table distance threshold
-    table_vy_max_mps: 0.067 # Maximum lateral velocity
+    table_vy_max_mps: 0.000 # Maximum lateral velocity
     table_wz_view_max_radps: 0.05 # Maximum rotation velocity during tag search
-    table_wz_plane_max_radps: 0.06 # Maximum rotation velocity during edge search
+    table_wz_plane_max_radps: 0.150 # Maximum rotation velocity during edge search
     table_dist_kp_mps_per_m: 0.12 # Distance error gain factor
     yolo_table_yaw_gain: 0.20 # Tag heading error gain factor
     yolo_table_max_wz_radps: 0.06 # Maximum rotation speed for tag tracking
@@ -451,12 +473,12 @@ orchestrator:
     return_turn_wz_max_radps: 0.75 # Return trip maximum rotation speed
     return_vx_mps_min: 0.10 # Return trip minimum forward speed
     return_vx_mps_max: 0.45 # Return trip maximum forward speed
-    edge_slide_vy_mps: 0.14 # Lateral slide speed
-    edge_slide_dist_kp_mps_per_m: 1.20 # Distance error gain during slide
-    edge_slide_yaw_kp_radps_per_rad: 1.20 # Heading error gain during slide
-    edge_slide_max_vx_mps: 0.10 # Forward velocity limit during slide
-    edge_slide_max_wz_radps: 0.12 # Rotation velocity limit during slide
-    edge_slide_weak_vy_mps: 0.05 # Slide speed on weak detection
+    edge_slide_vy_mps: 0.010 # Lateral slide speed
+    edge_slide_dist_kp_mps_per_m: 1.00 # Distance error gain during slide
+    edge_slide_yaw_kp_radps_per_rad: 1.00 # Heading error gain during slide
+    edge_slide_max_vx_mps: 0.008 # Forward velocity limit during slide
+    edge_slide_max_wz_radps: 0.080 # Rotation velocity limit during slide
+    edge_slide_weak_vy_mps: 0.006 # Slide speed on weak detection
     leave_edge_vx_mps: -0.12 # Reverse backing up speed when leaving table
     relocate_turn_wz_radps: 0.28 # Rotation speed for relocating table
     avoid_turn_wz_radps: 0.38 # Rotation speed for obstacle avoidance

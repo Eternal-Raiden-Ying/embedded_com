@@ -255,7 +255,6 @@ class TableDockingMixin:
 
     def _consume_final_depth_latch_after_arbitration(self, decision: MotionDecision, obs: Optional[TableEdgeObs]) -> None:
         summary = decision.control_summary if decision.control_summary is not None else {}
-        action = str(summary.get("docking_action") or "")
         final_latched = bool(getattr(self.ctx, "final_depth_latched", False) or summary.get("final_depth_latched", False))
         if not final_latched:
             return
@@ -279,52 +278,6 @@ class TableDockingMixin:
             self.ctx.final_lock_last_transition_reason = "final_depth_latched"
             summary["final_state_transition_reason"] = "final_depth_latched"
             self._transition(State.FINAL_SLOW_STOP, "final_depth_latched")
-            state_value = "FINAL_SLOW_STOP"
-
-        stopped = bool(
-            action == "FINAL_LOCKED_STOP"
-            and abs(float(decision.cmd.vx_mps)) <= 1e-6
-            and abs(float(decision.cmd.vy_mps)) <= 1e-6
-            and abs(float(decision.cmd.wz_radps)) <= 1e-6
-        )
-        if state_value not in {"FINAL_SLOW_STOP", "AT_TABLE_EDGE"} or not stopped:
-            return
-
-        now = monotonic_ts()
-        latched_mono = float(getattr(self.ctx, "final_depth_latched_mono", 0.0) or 0.0)
-        latched_age_s = max(0.0, now - latched_mono) if latched_mono > 0.0 else 0.0
-        settle_s = max(0.0, float(getattr(self.cfg, "table_settle_s", 0.30) or 0.30))
-        final_yaw_wait_s = max(
-            settle_s,
-            float(getattr(self.cfg, "final_yaw_wait_s", getattr(self.cfg, "final_yaw_last_good_hold_s", 1.2)) or 1.2),
-        )
-        yaw_err = getattr(obs, "yaw_err_rad", None) if obs is not None else None
-        last_yaw_age_s = max(0.0, now - float(getattr(self.ctx, "last_good_edge_yaw_mono", 0.0) or 0.0)) if getattr(self.ctx, "last_good_edge_yaw_mono", 0.0) else 999.0
-        last_yaw_fresh = bool(last_yaw_age_s <= float(getattr(self.cfg, "final_yaw_last_good_hold_s", 1.2) or 1.2))
-        yaw_available = bool(yaw_err is not None or last_yaw_fresh)
-        stable_enough = bool(
-            int(getattr(self.ctx, "final_depth_stable_frames", 0) or 0) >= self._final_depth_latch_frames()
-            or latched_age_s >= settle_s
-        )
-        waited_for_yaw = bool(latched_age_s >= final_yaw_wait_s)
-        if stable_enough and (not yaw_available or waited_for_yaw):
-            reason = "final_depth_latched_edge_yaw_unavailable" if not yaw_available else "final_depth_only_lock"
-            self.ctx.final_locked = True
-            self.ctx.final_yaw_align_active = False
-            self.ctx.final_lock_reason = reason
-            self.ctx.final_lock_last_transition_reason = reason
-            summary.update(
-                {
-                    "final_locked": True,
-                    "final_lock_reason": reason,
-                    "final_state_transition_reason": reason,
-                    "docking_reason": reason,
-                }
-            )
-            if str(getattr(self.ctx.state, "value", self.ctx.state) or "") != "AT_TABLE_EDGE":
-                self._transition(State.AT_TABLE_EDGE, reason)
-        else:
-            summary["final_state_transition_block_reason"] = "final_depth_wait_settle_or_yaw"
 
     def _consume_final_lock_after_arbitration(self, decision: MotionDecision, obs: Optional[TableEdgeObs]) -> None:
         summary = decision.control_summary if decision.control_summary is not None else {}
@@ -337,7 +290,7 @@ class TableDockingMixin:
             and abs(float(decision.cmd.vy_mps)) <= 1e-6
             and abs(float(decision.cmd.wz_radps)) <= 1e-6
         )
-        if (action == "FINAL_LOCKED_STOP" or final_locked) and stopped:
+        if final_locked and action == "FINAL_LOCKED_STOP" and stopped:
             state_value = str(getattr(self.ctx.state, "value", self.ctx.state) or "")
             if state_value != "AT_TABLE_EDGE":
                 reason = "final_locked_stop_reached"

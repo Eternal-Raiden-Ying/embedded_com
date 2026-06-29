@@ -33,8 +33,7 @@ from orchestrator.orchestrator_service.bridge.uart_bridge import UartBridge
 from vision_module.backend.table_roi_depth import table_roi_depth_statistics
 from vision_module.app.stages.search.table_edge_obs_builder import annotate_table_edge_obs, merge_table_bbox_from_local_perception
 from orchestrator.orchestrator_service.runtime.docking_model import DockingAction, DockingStage
-from common.config.loader import _load_and_merge_stage_params
-from common.config.schema import SystemGlobalConfig
+from common.config.loader import load_global_config
 
 
 def auth(state: str, *, bbox: bool, edge: bool = False, error: float = 0.0, depth_stop: bool = False, phase: str = ""):
@@ -49,75 +48,12 @@ def auth(state: str, *, bbox: bool, edge: bool = False, error: float = 0.0, dept
 
 
 def main() -> None:
-    cfg_tmp = Path("/tmp/docking_loader_static_test.yaml")
-    cfg_tmp.write_text(
-        """
-table_docking:
-  table_target_dist_m: 0.30
-  search_wz_radps: 0.20
-  min_forward_vx_mps: 0.04
-  bbox_track_forward_vx_mps: 0.10
-  bbox_track_forward_max_vx_mps: 0.20
-  bbox_track_forward_center_band: 0.45
-  far_bbox_track_vx_mps: 0.20
-  bbox_track_forward_min_hold_ms: 1234
-  bbox_track_forward_max_wz_radps: 0.20
-  final_servo_enter_p10_m: 0.45
-  edge_final_enter_margin_m: 0.06
-  edge_final_stop_margin_m: 0.02
-  close_range_enter_p10_m: 0.55
-  final_probe_vx_mps: 0.008
-  final_missing_probe_vx_mps: 0.004
-  close_range_probe_vx_mps: 0.008
-  close_range_missing_probe_vx_mps: 0.004
-  roi_final_stop_p10_m: 0.42
-  roi_final_slow_p10_m: 0.52
-  roi_final_probe_vx_mps: 0.008
-  roi_final_missing_probe_vx_mps: 0.004
-  roi_final_missing_hold_s: 0.8
-  depth_envelope_stop_p10_m: 0.35
-  depth_envelope_slow_p10_m: 0.50
-  depth_envelope_mid_p10_m: 0.70
-  depth_envelope_slow_vx_mps: 0.006
-  depth_envelope_mid_vx_mps: 0.015
-  edge_readiness_yaw_max_rad: 0.31
-  edge_handoff_forward_vx_mps: 0.08
-  lateral_enabled: true
-  lateral_vy_max_mps: 0.18
-  lateral_kp: 0.30
-  lateral_deadband_norm: 0.020
-  distance_scaled_lateral_enabled: true
-  lateral_distance_ref_m: 0.50
-  lateral_distance_scale_min: 0.80
-  lateral_distance_scale_max: 2.00
-  far_lateral_vy_max_mps: 0.18
-  mid_lateral_vy_max_mps: 0.14
-  near_lateral_vy_max_mps: 0.060
-  lateral_priority_mid_error_norm: 0.99
-  lateral_priority_large_error_norm: 0.99
-  lateral_priority_mid_vx_cap_mps: 0.08
-  lateral_priority_vx_cap_mps: 0.04
-  edge_yaw_align_allow_lateral: true
-  edge_yaw_align_lateral_vy_max_mps: 0.08
-  yaw_flip_hold_window_s: 0.8
-  yaw_flip_count_limit: 2
-  yaw_ambiguous_wz_cap: 0.0
-  yaw_ambiguous_vy_boost: 1.5
-  final_dist_deadband_m: 0.03
-  final_dist_kp: 0.08
-  final_forward_vx_max_mps: 0.006
-  final_reverse_vx_max_mps: 0.004
-  final_reverse_confirm_frames: 3
-  forward_commit_min_s: 1.3
-  far_forward_commit_min_s: 1.8
-  stop_after_table_docking: true
-""",
-        encoding="utf-8",
-    )
-    loader_cfg = SystemGlobalConfig()
-    _load_and_merge_stage_params(loader_cfg, cfg_tmp)
-    loaded_ctrl = loader_cfg.orchestrator.control
-    assert abs(loader_cfg.orchestrator.car.search_table_wz_radps - 0.20) < 1e-9
+    effective_cfg = load_global_config(str(Path(ROOT) / "configs/system_config.yaml"))
+    loaded_ctrl = effective_cfg.orchestrator.control
+    loaded_car = effective_cfg.orchestrator.car
+    assert not hasattr(effective_cfg.orchestrator.runtime, "stage_params_file")
+    assert not hasattr(effective_cfg.orchestrator.runtime, "car_cmd_params_file")
+    assert abs(loaded_car.search_table_wz_radps - 0.20) < 1e-9
     assert abs(loaded_ctrl.table_target_dist_m - 0.30) < 1e-9
     vista_cfg_text = (Path(ROOT) / "VISTA/configs/vision_params.yaml").read_text(encoding="utf-8")
     assert vista_cfg_text.count("target_dist_m: 0.30") >= 3
@@ -144,9 +80,9 @@ table_docking:
     assert abs(loaded_ctrl.depth_envelope_slow_vx_mps - 0.006) < 1e-9
     assert abs(loaded_ctrl.depth_envelope_mid_vx_mps - 0.015) < 1e-9
     assert abs(loaded_ctrl.far_bbox_track_vx_mps - 0.20) < 1e-9
-    assert loaded_ctrl.bbox_track_forward_min_hold_ms == 1234
+    assert loaded_ctrl.bbox_track_forward_min_hold_ms == 800
     assert abs(loaded_ctrl.bbox_track_forward_max_wz_radps - 0.20) < 1e-9
-    assert abs(loaded_ctrl.edge_readiness_yaw_max_rad - 0.31) < 1e-9
+    assert abs(loaded_ctrl.edge_readiness_yaw_max_rad - 0.35) < 1e-9
     assert abs(loaded_ctrl.edge_handoff_forward_vx_mps - 0.08) < 1e-9
     assert abs(loaded_ctrl.lateral_vy_max_mps - 0.18) < 1e-9
     assert abs(loaded_ctrl.lateral_kp - 0.30) < 1e-9
@@ -171,8 +107,8 @@ table_docking:
     assert abs(loaded_ctrl.final_forward_vx_max_mps - 0.006) < 1e-9
     assert abs(loaded_ctrl.final_reverse_vx_max_mps - 0.004) < 1e-9
     assert loaded_ctrl.final_reverse_confirm_frames == 3
-    assert abs(loaded_ctrl.forward_commit_min_s - 1.3) < 1e-9
-    assert abs(loaded_ctrl.far_forward_commit_min_s - 1.8) < 1e-9
+    assert abs(loaded_ctrl.forward_commit_min_s - 1.8) < 1e-9
+    assert abs(loaded_ctrl.far_forward_commit_min_s - 2.0) < 1e-9
     assert loaded_ctrl.stop_after_table_docking is True
     assert abs(ControlThresholds().near_slow_max_vx_mps - 0.030) < 1e-9
     assert abs(ControlThresholds().bbox_track_forward_vx_mps - 0.100) < 1e-9
@@ -186,7 +122,6 @@ table_docking:
     for path in (
         Path(ROOT) / "orchestrator/orchestrator_service/config/schema.py",
         Path(ROOT) / "common/config/schema.py",
-        Path(ROOT) / "orchestrator/configs/stage_params.yaml",
     ):
         text = path.read_text(encoding="utf-8")
         assert text.count("near_slow_max_vx_mps") == 1
@@ -1053,7 +988,8 @@ table_docking:
         },
     )
 
-    assert inv3.summary["docking_action"] == "FINAL_SLOW_PROBE"
+    assert inv3.summary["docking_action"] == "CLOSE_RANGE_PROBE"
+    assert inv3.summary["docking_action"] != "FINAL_LOCKED_STOP"
     assert inv3.final_vx == 0.0 and inv3.final_vy == 0.0 and inv3.final_wz == 0.0
     assert inv3.summary["yaw_owner"] == "none"
 
@@ -1581,7 +1517,9 @@ table_docking:
             "edge_readiness_enter_score": 0.65,
         },
     )
-    assert final_semantic_envelope.summary["docking_action"] in {"FINAL_LOCKED_STOP", "FINAL_YAW_ALIGN", "FINAL_SLOW_PROBE"}
+    assert final_semantic_envelope.summary["docking_action"] == "CLOSE_RANGE_PROBE"
+    assert final_semantic_envelope.summary["docking_action"] != "FINAL_LOCKED_STOP"
+    assert final_semantic_envelope.summary.get("final_locked") is False
     assert abs(final_semantic_envelope.final_vx) <= 0.03
 
     probe_readiness = DockingProbe()
@@ -1955,7 +1893,8 @@ table_docking:
         },
     )
 
-    assert inv_q2_a.summary["docking_action"] == "FINAL_SLOW_PROBE"
+    assert inv_q2_a.summary["docking_action"] == "CLOSE_RANGE_PROBE"
+    assert inv_q2_a.summary["docking_action"] != "FINAL_LOCKED_STOP"
     assert inv_q2_a.summary["docking_stage"] == "FINAL_DISTANCE_HOLD"
     assert inv_q2_a.final_vx == 0.0 and inv_q2_a.final_vy == 0.0 and inv_q2_a.final_wz == 0.0
     assert inv_q2_a.summary["yaw_owner"] == "none"
@@ -2033,7 +1972,8 @@ table_docking:
             "last_good_edge_yaw_age_ms": 5000.0, # stale!
         },
     )
-    assert inv_q2_d.summary["docking_action"] == "FINAL_SLOW_PROBE"
+    assert inv_q2_d.summary["docking_action"] == "CLOSE_RANGE_PROBE"
+    assert inv_q2_d.summary["docking_action"] != "FINAL_LOCKED_STOP"
     assert inv_q2_d.summary["docking_stage"] == "FINAL_DISTANCE_HOLD"
     assert inv_q2_d.final_vx == 0.0 and inv_q2_d.final_wz == 0.0
     assert inv_q2_d.summary["yaw_owner"] == "none"

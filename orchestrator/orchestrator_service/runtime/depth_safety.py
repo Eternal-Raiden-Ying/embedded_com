@@ -200,6 +200,8 @@ def apply_close_range_depth_safety_gate(ctx: Any, obs: Any, result: ArbitrationR
     state = "pass_or_probe_cap"
     reason = "depth_probe_cap"
     action = str(summary.get("docking_action") or "")
+    if action == DockingAction.FINAL_LOCKED_STOP.value and not already_locked:
+        action = DockingAction.FINAL_SLOW_PROBE.value if bool(summary.get("final_distance_servo_active", False)) else DockingAction.CLOSE_RANGE_PROBE.value
     blocked_by = ""
     final_locked = False
     allow_forward = bool(vx > 1e-9)
@@ -258,6 +260,7 @@ def apply_close_range_depth_safety_gate(ctx: Any, obs: Any, result: ArbitrationR
             vx = _positive_cap(vx_raw, final_probe_vx_mps)
             state = "slow_cap"
             reason = "depth_slow_cap"
+            action = DockingAction.FINAL_SLOW_PROBE.value
             allow_forward = bool(vx > 1e-9)
         elif final_probe_elapsed_s > final_probe_timeout_s:
             vx = 0.0

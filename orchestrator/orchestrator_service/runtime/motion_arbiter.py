@@ -356,10 +356,10 @@ def _docking_result(
         stage = DockingStage.NEAR_EDGE_APPROACH
         forward_owner = str(forward_owner or "near_depth")
         safe_summary["docking_reason"] = str(safe_summary.get("docking_reason") or "near_table_latched")
-    if final_depth_latched and not final_distance_servo_active and action not in {DockingAction.FINAL_LOCKED_STOP, DockingAction.FINAL_YAW_ALIGN}:
-        action = DockingAction.FINAL_LOCKED_STOP
+    if final_depth_latched and not final_locked and not final_distance_servo_active and action not in {DockingAction.FINAL_YAW_ALIGN}:
+        action = DockingAction.FINAL_SLOW_PROBE
         stage = DockingStage.FINAL_DISTANCE_HOLD
-        forward_owner = "none"
+        forward_owner = str(forward_owner or "final_depth_hold")
         if str(safe_summary.get("docking_reason") or "") in {"", "near_table_latched", "near_edge_forward", "near_hold"}:
             safe_summary["docking_reason"] = "final_depth_latched"
     if envelope_reason:
@@ -395,23 +395,6 @@ def _docking_result(
     is_locked = bool(safe_summary.get("final_locked", False) or final_locked)
     is_final_servo = bool(safe_summary.get("final_distance_servo_active", False) or final_distance_servo_active or final_depth_latched)
     is_close_range = bool(safe_summary.get("close_range_latched", False) or _bool_field("close_range_latched"))
-
-    if action in {DockingAction.FINAL_LOCKED_STOP, DockingAction.CLOSE_RANGE_PROBE, DockingAction.FINAL_SLOW_PROBE}:
-        if is_locked:
-            action = DockingAction.FINAL_LOCKED_STOP
-            final_vx = 0.0
-            final_vy = 0.0
-            final_wz = 0.0
-            stage = DockingStage.FINAL_LOCKED
-        else:
-            final_vy = 0.0
-            final_wz = 0.0
-            if is_final_servo:
-                action = DockingAction.FINAL_SLOW_PROBE
-                stage = DockingStage.FINAL_DISTANCE_HOLD
-            else:
-                action = DockingAction.CLOSE_RANGE_PROBE
-                stage = DockingStage.FINAL_DISTANCE_HOLD
 
     safe_summary["final_locked"] = is_locked
     safe_summary["close_range_latched"] = is_close_range
@@ -1016,8 +999,14 @@ def arbitrate_table_docking_motion(
                 reason = "roi_missing_hold"
             stage = DockingStage.FINAL_DISTANCE_HOLD
         final_locked_summary = bool(reason == "roi_p10_stop" or summary.get("final_locked", False) or getattr(ctx, "final_locked", False))
+        if final_locked_summary:
+            roi_action = DockingAction.FINAL_LOCKED_STOP
+        elif abs(vx) > 1e-9:
+            roi_action = DockingAction.FINAL_SLOW_PROBE
+        else:
+            roi_action = DockingAction.CLOSE_RANGE_PROBE
         return _docking_result(
-            action=DockingAction.FINAL_LOCKED_STOP,
+            action=roi_action,
             stage=stage,
             summary=with_common(
                 {
@@ -1086,7 +1075,7 @@ def arbitrate_table_docking_motion(
             )
         if edge_final_stop_reached:
             return _docking_result(
-                action=DockingAction.FINAL_LOCKED_STOP,
+                action=DockingAction.DEPTH_SAFETY_HOLD,
                 stage=DockingStage.FINAL_DISTANCE_HOLD,
                 summary=with_common(
                     {
@@ -1151,7 +1140,7 @@ def arbitrate_table_docking_motion(
                 reason="final_distance_servo_hold_stable",
             )
         return _docking_result(
-            action=DockingAction.FINAL_LOCKED_STOP,
+            action=DockingAction.FINAL_SLOW_PROBE if abs(servo_vx) > 1e-9 else DockingAction.CLOSE_RANGE_PROBE,
             stage=DockingStage.FINAL_DISTANCE_HOLD,
             summary=with_common(
                 {
@@ -1219,8 +1208,14 @@ def arbitrate_table_docking_motion(
             reason = "close_range_missing_probe"
             stage = DockingStage.FINAL_DISTANCE_HOLD
             final_locked_summary = False
+        if final_locked_summary:
+            close_range_action = DockingAction.FINAL_LOCKED_STOP
+        elif abs(vx) > 1e-9:
+            close_range_action = DockingAction.CLOSE_RANGE_PROBE
+        else:
+            close_range_action = DockingAction.DEPTH_SAFETY_HOLD
         return _docking_result(
-            action=DockingAction.FINAL_LOCKED_STOP,
+            action=close_range_action,
             stage=stage,
             summary=with_common(
                 {
@@ -1340,7 +1335,7 @@ def arbitrate_table_docking_motion(
             )
         servo_vx, servo_reason, servo_summary = final_distance_servo()
         return _docking_result(
-            action=DockingAction.FINAL_LOCKED_STOP,
+            action=DockingAction.FINAL_SLOW_PROBE if abs(servo_vx) > 1e-9 else DockingAction.CLOSE_RANGE_PROBE,
             stage=DockingStage.FINAL_DISTANCE_HOLD,
             summary=with_common(
                 {
@@ -1386,7 +1381,7 @@ def arbitrate_table_docking_motion(
             )
         servo_vx, servo_reason, servo_summary = final_distance_servo()
         return _docking_result(
-            action=DockingAction.FINAL_LOCKED_STOP,
+            action=DockingAction.FINAL_SLOW_PROBE if abs(servo_vx) > 1e-9 else DockingAction.CLOSE_RANGE_PROBE,
             stage=DockingStage.FINAL_DISTANCE_HOLD,
             summary=with_common(
                 {
@@ -1474,7 +1469,7 @@ def arbitrate_table_docking_motion(
         if bool(summary.get("final_depth_latched", False)):
             edge_wz, yaw_source = edge_final_wz()
             return _docking_result(
-                action=DockingAction.FINAL_LOCKED_STOP,
+                action=DockingAction.DEPTH_SAFETY_HOLD,
                 stage=DockingStage.FINAL_DISTANCE_HOLD,
                 summary=with_common({
                     "forward_block_reason": "stale_dead_no_last_good",
@@ -1575,7 +1570,7 @@ def arbitrate_table_docking_motion(
         )
     if edge_block == "depth_final_stop":
         return _docking_result(
-            action=DockingAction.FINAL_LOCKED_STOP,
+            action=DockingAction.DEPTH_SAFETY_HOLD,
             stage=DockingStage.FINAL_DISTANCE_HOLD,
             summary=with_common({"forward_block_reason": "final_depth_latched"}),
             blocked_by=edge_block,
@@ -1608,7 +1603,7 @@ def arbitrate_table_docking_motion(
     if near_final_servo_ready:
         servo_vx, servo_reason, servo_summary = final_distance_servo()
         return _docking_result(
-            action=DockingAction.FINAL_LOCKED_STOP,
+            action=DockingAction.FINAL_SLOW_PROBE if abs(servo_vx) > 1e-9 else DockingAction.CLOSE_RANGE_PROBE,
             stage=DockingStage.FINAL_DISTANCE_HOLD,
             summary=with_common(
                 {
