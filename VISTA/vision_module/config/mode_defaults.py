@@ -92,6 +92,30 @@ def _default_remote_profile(*, enabled: bool, require_depth: bool = False,
     )
 
 
+def _apply_remote_overrides(profile: RemoteProfile, section: Dict[str, Any]) -> None:
+    remote = section.get("remote")
+    if not isinstance(remote, dict):
+        return
+    if "enabled" in remote:
+        profile.enabled = bool(remote.get("enabled"))
+    for key in ("base_url", "kind", "action", "command", "rgb_encoding", "depth_encoding"):
+        if key in remote and remote.get(key) is not None:
+            setattr(profile, key, str(remote.get(key)).strip())
+    for key in ("require_depth",):
+        if key in remote:
+            setattr(profile, key, bool(remote.get(key)))
+    for key in ("timeout_s",):
+        if key in remote and remote.get(key) is not None:
+            setattr(profile, key, float(remote.get(key)))
+    for key in ("max_retries", "rgb_quality", "depth_compression"):
+        if key in remote and remote.get(key) is not None:
+            setattr(profile, key, int(remote.get(key)))
+    if isinstance(remote.get("metadata"), dict):
+        merged = dict(profile.metadata or {})
+        merged.update(dict(remote.get("metadata") or {}))
+        profile.metadata = merged
+
+
 def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) -> Dict[str, ModeProfile]:
     """Build the initial mode profile set for VISTA."""
     mode_cfg = dict(getattr(cfg, "mode_profiles", {}) or {})
@@ -398,6 +422,8 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             profile.preview.enabled = bool(section.get("preview_enabled"))
         if "preview_layout" in section and section.get("preview_layout"):
             profile.preview.metadata["layout"] = str(section.get("preview_layout")).strip()
+
+        _apply_remote_overrides(profile.remote, section)
 
         table_edge_section = section.get("table_edge")
         if isinstance(table_edge_section, dict):

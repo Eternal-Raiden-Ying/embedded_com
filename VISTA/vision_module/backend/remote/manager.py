@@ -251,6 +251,7 @@ class RemoteManager:
             return None
 
     def _build_predict_request(self, cmd: Dict[str, Any], frames: Dict[str, Any] = None) -> Optional[RemotePredictRequest]:
+        frame_slot: Dict[str, Any] = {}
         if frames is None:
             scheduler = self._scheduler
             if scheduler is None:
@@ -471,8 +472,25 @@ class RemoteManager:
             return
 
         # ── loop worker: no longer used (effects channel removed) ──
+        if self._service_init_pending:
+            timeout_s = float(self._runtime_profile.get("timeout_s", 10.0) or 10.0)
+            self._run_service_init(timeout_s=timeout_s, source="loop_init_compat")
+            self._publish_result("remote_result", dict(self._last_result))
         self.logger.warning("remote loop worker started but no effects producer exists; idling")
         self._worker_stop.wait(timeout=1.0)
+
+    def _runtime_status_payload(self) -> Dict[str, Any]:
+        scheduler = self._scheduler
+        if scheduler is None:
+            return {}
+        try:
+            slot = scheduler.read_slot("runtime_status")
+        except Exception:
+            return {}
+        if not isinstance(slot, dict):
+            return {}
+        payload = slot.get("payload")
+        return dict(payload) if isinstance(payload, dict) else {}
 
     def _run_task(self, *, action: str, max_retries: int) -> None:
         """Execute a finite task action (init / predict / release).
@@ -505,10 +523,23 @@ class RemoteManager:
                 self._update_result(action="predict", state="predict_failed", ok=False, error="init_not_confirmed")
                 return
             require_depth = bool(self._runtime_profile.get("require_depth", False))
+            runtime_status = self._runtime_status_payload()
+            profile_metadata = dict(self._runtime_profile.get("metadata") or {})
+            runtime_metadata = dict(runtime_status.get("remote_metadata") or {}) if isinstance(runtime_status.get("remote_metadata"), dict) else {}
+            runtime_metadata.setdefault("target", runtime_status.get("target"))
+            runtime_metadata.setdefault("request_id", runtime_status.get("request_id") or runtime_status.get("req_id"))
+            runtime_class_id = runtime_status.get("remote_class_id")
+            if runtime_class_id is None:
+                runtime_class_id = profile_metadata.get("class_id")
             cmd = {
+                **profile_metadata,
                 "need_depth": require_depth,
-                "class_id": None,
-                **dict(self._runtime_profile.get("metadata") or {}),
+                "class_id": runtime_class_id,
+                "robot_id": runtime_status.get("remote_robot_id"),
+                "timeout_s": runtime_status.get("remote_timeout_s"),
+                "target": runtime_status.get("target"),
+                "request_id": runtime_status.get("request_id") or runtime_status.get("req_id"),
+                "metadata": runtime_metadata,
             }
             # Wait for a fresh camera frame matching current generation.
             # Mode switch clears scheduler slots, so the first frame after

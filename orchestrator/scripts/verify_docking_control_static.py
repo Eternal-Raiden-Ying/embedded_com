@@ -523,7 +523,7 @@ def main() -> None:
     uart_probe = UartBridge(port="COM_DRY_RUN", baudrate=115200, timeout_s=0.1, dry_run=True)
     assert uart_probe._writer_discard_reason({"line": "V 0.020 0.000 0.010", "tx_meta": {}}) == ""
     assert uart_probe._writer_discard_reason({"line": "V 0.000 0.000 0.100", "tx_meta": {}}) == ""
-    assert uart_probe._writer_discard_reason({"line": "MODE SEARCH", "tx_meta": {}}) == "non_velocity_line"
+    assert uart_probe._writer_discard_reason({"line": "MODE SEARCH 0", "tx_meta": {}}) == ""
     assert uart_probe._writer_discard_reason({"line": "V 0.000 0.000 0.100", "tx_meta": {}, "publish_mono": time.monotonic()}) == ""
     uart_probe._last_estop_mono = time.monotonic()
     assert uart_probe._writer_discard_reason({"line": "V 0.000 0.000 0.100", "tx_meta": {}, "publish_mono": time.monotonic()}) == "estop_cooldown"

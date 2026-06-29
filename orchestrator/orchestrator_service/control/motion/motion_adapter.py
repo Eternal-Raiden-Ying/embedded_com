@@ -143,11 +143,7 @@ class Stm32MotionAdapter:
 
     def send_cmd_vel(self, cmd: Any, reason: str = "") -> int:
         if self._cmd_is_stop(cmd):
-            mode = str(getattr(cmd, "mode", "") or "").strip().upper()
-            is_soft = mode in {"IDLE", "DONE", "AT_TABLE_EDGE"} or str(reason or "").lower() in {"control_recovery", "stale_recovery"}
-            if "error" in reason.lower() or "estop" in reason.lower() or "fatal" in reason.lower() or "failsafe" in reason.lower():
-                is_soft = False
-            return self.stop(reason=reason, soft=is_soft)
+            return self.stop(reason=reason, soft=False)
         vx, vy, wz = self.cmd_vel_to_velocity(cmd)
         return self.set_velocity(vx, vy, wz, mode=str(getattr(cmd, "mode", "SEARCH") or "SEARCH"), reason=reason)
 

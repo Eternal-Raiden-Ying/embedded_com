@@ -183,7 +183,21 @@ vision:
     show_depth: true # Render depth overlay
     show_edge: true # Render edge line fit overlays
     destroy_all_on_close: true # Close all OpenCV windows on exit
-  mode_profiles: {} # Parameter adjustments per execution mode
+  mode_profiles: # Parameter adjustments per execution mode
+    modes:
+      GRASP_REMOTE_INIT:
+        remote:
+          enabled: true
+          kind: task
+          action: init
+          base_url: "http://10.11.40.164:6006"
+      GRASP_REMOTE:
+        remote:
+          enabled: true
+          kind: task
+          action: predict
+          require_depth: true
+          base_url: "http://10.11.40.164:6006"
   req_in:
     transport: "uds" # Incoming IPC channel mode
     ipc_socket_path: "" # Socket file path

@@ -199,8 +199,6 @@ class UartBridge:
     def _writer_discard_reason(self, item: Dict[str, Any]) -> str:
         line = item.get("line", "")
         tx_meta = item.get("tx_meta")
-        if str(line or "").strip().upper() == "MODE SEARCH":
-            return "non_velocity_line"
         if not self.is_velocity_command(line, tx_meta):
             return ""
         now_mono = time.monotonic()

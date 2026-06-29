@@ -121,6 +121,7 @@ class StageController:
             "mode": self._ctx.current_mode,
             "session_id": self._ctx.session_id,
             "req_id": self._ctx.req_id,
+            "request_id": self._ctx.req_id,
             "epoch": int(self._ctx.epoch),
             "interaction_id": self._ctx.interaction_id,
             "target": self._ctx.target_name,
@@ -292,6 +293,10 @@ class StageController:
             "locked_edge_conf",
             "locked_obs_seq",
             "current_edge_id",
+            "remote_class_id",
+            "remote_robot_id",
+            "remote_timeout_s",
+            "remote_metadata",
         ):
             if key in self._ctx.stage_state:
                 payload[key] = self._ctx.stage_state.get(key)
