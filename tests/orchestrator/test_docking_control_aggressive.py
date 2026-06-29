@@ -24,12 +24,14 @@ def _base_summary(**extra):
         "edge_final_enter_margin_m": 0.06,
         "edge_final_stop_margin_m": 0.02,
         "close_range_enter_p10_m": 0.55,
-        "close_range_probe_vx_mps": 0.004,
-        "close_range_missing_probe_vx_mps": 0.002,
+        "final_probe_vx_mps": 0.008,
+        "final_missing_probe_vx_mps": 0.004,
+        "close_range_probe_vx_mps": 0.008,
+        "close_range_missing_probe_vx_mps": 0.004,
         "roi_final_stop_p10_m": 0.42,
         "roi_final_slow_p10_m": 0.52,
-        "roi_final_probe_vx_mps": 0.004,
-        "roi_final_missing_probe_vx_mps": 0.002,
+        "roi_final_probe_vx_mps": 0.008,
+        "roi_final_missing_probe_vx_mps": 0.004,
         "roi_final_missing_hold_s": 0.8,
         "depth_envelope_stop_p10_m": 0.35,
         "depth_envelope_slow_p10_m": 0.50,
@@ -297,7 +299,7 @@ def test_final_roi_latch_stops_on_p10_and_disables_yaw():
         ),
     )
     assert enter.summary["final_roi_mode_latched"] is True
-    assert enter.final_vx <= 0.004
+    assert enter.final_vx <= 0.008
     assert enter.final_vy == 0.0
     assert enter.final_wz == 0.0
 
@@ -364,7 +366,7 @@ def test_final_roi_probe_and_roi_missing_hold_do_not_return_to_near_or_rotate():
         ),
     )
     assert probe.summary["final_roi_reason"] == "roi_p10_slow_probe"
-    assert 0.0 < probe.final_vx <= 0.004
+    assert 0.0 < probe.final_vx <= 0.008
     assert probe.final_vy == 0.0
     assert probe.final_wz == 0.0
     assert probe.summary["docking_action"] == "CLOSE_RANGE_PROBE"
@@ -383,7 +385,7 @@ def test_final_roi_probe_and_roi_missing_hold_do_not_return_to_near_or_rotate():
         ),
     )
     assert missing_short.summary["final_roi_reason"] == "roi_missing_slow_probe"
-    assert 0.0 < missing_short.final_vx <= 0.002
+    assert 0.0 < missing_short.final_vx <= 0.004
     assert missing_short.final_vy == 0.0
     assert missing_short.final_wz == 0.0
     assert missing_short.summary["docking_action"] not in {"NEAR_EDGE_FORWARD", "SEARCH_ROTATE", "CONTROL_RECOVERY_ROTATE"}
@@ -489,7 +491,7 @@ def test_close_range_latch_blocks_bbox_forward_and_recovery_rotate():
     assert close.summary["close_range_latched"] is True
     assert close.summary["docking_action"] == "CLOSE_RANGE_PROBE"
     assert close.summary["docking_action"] not in {"BBOX_TRACK_FORWARD", "BBOX_REACQUIRE_ROTATE", "SEARCH_ROTATE", "CONTROL_RECOVERY_ROTATE"}
-    assert 0.0 < close.final_vx <= 0.004
+    assert 0.0 < close.final_vx <= 0.008
     assert close.final_vy == 0.0
     assert close.final_wz == 0.0
 
@@ -509,7 +511,7 @@ def test_close_range_latch_blocks_bbox_forward_and_recovery_rotate():
     assert latched.summary["close_range_latched"] is True
     assert latched.summary["docking_action"] == "CLOSE_RANGE_PROBE"
     assert latched.summary["docking_action"] not in {"BBOX_REACQUIRE_ROTATE", "SEARCH_ROTATE", "CONTROL_RECOVERY_ROTATE"}
-    assert 0.0 < latched.final_vx <= 0.002
+    assert 0.0 < latched.final_vx <= 0.004
     assert latched.final_vy == 0.0
     assert latched.final_wz == 0.0
 

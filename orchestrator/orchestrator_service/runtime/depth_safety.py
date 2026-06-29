@@ -158,8 +158,8 @@ def apply_close_range_depth_safety_gate(ctx: Any, obs: Any, result: ArbitrationR
     depth_stop_p10_m = _cfg_float(cfg, "roi_final_stop_p10_m", "depth_envelope_stop_p10_m", default=0.42)
     depth_slow_p10_m = _cfg_float(cfg, "roi_final_slow_p10_m", "depth_envelope_slow_p10_m", default=0.52)
     depth_missing_hold_s = max(0.0, _cfg_float(cfg, "roi_final_missing_hold_s", default=0.8))
-    final_probe_vx_mps = abs(_cfg_float(cfg, "close_range_probe_vx_mps", "roi_final_probe_vx_mps", default=0.004))
-    final_missing_probe_vx_mps = abs(_cfg_float(cfg, "close_range_missing_probe_vx_mps", "roi_final_missing_probe_vx_mps", default=0.002))
+    final_probe_vx_mps = abs(_cfg_float(cfg, "final_probe_vx_mps", "close_range_probe_vx_mps", "roi_final_probe_vx_mps", default=0.008))
+    final_missing_probe_vx_mps = abs(_cfg_float(cfg, "final_missing_probe_vx_mps", "close_range_missing_probe_vx_mps", "roi_final_missing_probe_vx_mps", default=0.004))
     final_probe_timeout_s = max(0.0, _cfg_float(cfg, "final_probe_timeout_s", default=8.0))
     final_probe_distance_budget_m = max(0.0, _cfg_float(cfg, "final_probe_distance_budget_m", default=0.15))
 

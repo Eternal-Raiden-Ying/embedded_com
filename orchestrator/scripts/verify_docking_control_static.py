@@ -66,12 +66,14 @@ table_docking:
   edge_final_enter_margin_m: 0.06
   edge_final_stop_margin_m: 0.02
   close_range_enter_p10_m: 0.55
-  close_range_probe_vx_mps: 0.004
-  close_range_missing_probe_vx_mps: 0.002
+  final_probe_vx_mps: 0.008
+  final_missing_probe_vx_mps: 0.004
+  close_range_probe_vx_mps: 0.008
+  close_range_missing_probe_vx_mps: 0.004
   roi_final_stop_p10_m: 0.42
   roi_final_slow_p10_m: 0.52
-  roi_final_probe_vx_mps: 0.004
-  roi_final_missing_probe_vx_mps: 0.002
+  roi_final_probe_vx_mps: 0.008
+  roi_final_missing_probe_vx_mps: 0.004
   roi_final_missing_hold_s: 0.8
   depth_envelope_stop_p10_m: 0.35
   depth_envelope_slow_p10_m: 0.50
@@ -127,12 +129,14 @@ table_docking:
     assert abs(loaded_ctrl.edge_final_enter_margin_m - 0.06) < 1e-9
     assert abs(loaded_ctrl.edge_final_stop_margin_m - 0.02) < 1e-9
     assert abs(loaded_ctrl.close_range_enter_p10_m - 0.55) < 1e-9
-    assert abs(loaded_ctrl.close_range_probe_vx_mps - 0.004) < 1e-9
-    assert abs(loaded_ctrl.close_range_missing_probe_vx_mps - 0.002) < 1e-9
+    assert abs(loaded_ctrl.final_probe_vx_mps - 0.008) < 1e-9
+    assert abs(loaded_ctrl.final_missing_probe_vx_mps - 0.004) < 1e-9
+    assert abs(loaded_ctrl.close_range_probe_vx_mps - 0.008) < 1e-9
+    assert abs(loaded_ctrl.close_range_missing_probe_vx_mps - 0.004) < 1e-9
     assert abs(loaded_ctrl.roi_final_stop_p10_m - 0.42) < 1e-9
     assert abs(loaded_ctrl.roi_final_slow_p10_m - 0.52) < 1e-9
-    assert abs(loaded_ctrl.roi_final_probe_vx_mps - 0.004) < 1e-9
-    assert abs(loaded_ctrl.roi_final_missing_probe_vx_mps - 0.002) < 1e-9
+    assert abs(loaded_ctrl.roi_final_probe_vx_mps - 0.008) < 1e-9
+    assert abs(loaded_ctrl.roi_final_missing_probe_vx_mps - 0.004) < 1e-9
     assert abs(loaded_ctrl.roi_final_missing_hold_s - 0.8) < 1e-9
     assert abs(loaded_ctrl.depth_envelope_stop_p10_m - 0.35) < 1e-9
     assert abs(loaded_ctrl.depth_envelope_slow_p10_m - 0.50) < 1e-9
@@ -175,7 +179,9 @@ table_docking:
     assert abs(ControlThresholds().bbox_track_forward_max_vx_mps - 0.200) < 1e-9
     assert abs(ControlThresholds().bbox_track_forward_center_band - 0.45) < 1e-9
     assert abs(ControlThresholds().final_servo_enter_p10_m - 0.45) < 1e-9
-    assert abs(ControlThresholds().roi_final_probe_vx_mps - 0.004) < 1e-9
+    assert abs(ControlThresholds().final_probe_vx_mps - 0.008) < 1e-9
+    assert abs(ControlThresholds().final_missing_probe_vx_mps - 0.004) < 1e-9
+    assert abs(ControlThresholds().roi_final_probe_vx_mps - 0.008) < 1e-9
     assert abs(ControlThresholds().depth_envelope_slow_vx_mps - 0.006) < 1e-9
     for path in (
         Path(ROOT) / "orchestrator/orchestrator_service/config/schema.py",

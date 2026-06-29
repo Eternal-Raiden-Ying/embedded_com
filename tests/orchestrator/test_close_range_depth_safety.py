@@ -10,8 +10,10 @@ def _cfg():
         roi_final_stop_p10_m=0.42,
         roi_final_slow_p10_m=0.52,
         roi_final_missing_hold_s=0.8,
-        close_range_probe_vx_mps=0.004,
-        close_range_missing_probe_vx_mps=0.002,
+        final_probe_vx_mps=0.008,
+        final_missing_probe_vx_mps=0.004,
+        close_range_probe_vx_mps=0.008,
+        close_range_missing_probe_vx_mps=0.004,
         final_probe_timeout_s=8.0,
         final_probe_distance_budget_m=0.15,
     )
@@ -67,7 +69,7 @@ def test_close_range_slow_depth_caps_probe_speed_and_disables_yaw_lateral():
     ctx = RuntimeContext(state=State.FINAL_SLOW_STOP)
     out = apply_close_range_depth_safety_gate(ctx, _obs(valid=True, p10=0.50), _result(vx=0.02), _cfg(), now_mono=10.0)
 
-    assert 0.0 < out.final_vx <= 0.004
+    assert 0.0 < out.final_vx <= 0.008
     assert out.final_vy == 0.0
     assert out.final_wz == 0.0
     assert out.summary["depth_safety_state"] == "slow_cap"
@@ -82,7 +84,7 @@ def test_close_range_recent_missing_depth_caps_to_missing_probe_speed():
 
     out = apply_close_range_depth_safety_gate(ctx, _obs(valid=False, p10=None), _result(vx=0.02), _cfg(), now_mono=10.0)
 
-    assert 0.0 < out.final_vx <= 0.002
+    assert 0.0 < out.final_vx <= 0.004
     assert out.final_vy == 0.0
     assert out.final_wz == 0.0
     assert out.summary["depth_safety_state"] == "missing_short_probe"

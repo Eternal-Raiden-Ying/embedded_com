@@ -958,8 +958,8 @@ def arbitrate_table_docking_motion(
     def final_roi_mode_result() -> ArbitrationResult:
         stop_p10 = _float(summary, "roi_final_stop_p10_m", 0.42)
         slow_p10 = _float(summary, "roi_final_slow_p10_m", 0.52)
-        probe_vx = abs(_float(summary, "roi_final_probe_vx_mps", 0.004))
-        missing_probe_vx = abs(_float(summary, "roi_final_missing_probe_vx_mps", 0.002))
+        probe_vx = abs(_float(summary, "roi_final_probe_vx_mps", 0.008))
+        missing_probe_vx = abs(_float(summary, "roi_final_missing_probe_vx_mps", 0.004))
         missing_hold_s = max(0.0, _float(summary, "roi_final_missing_hold_s", 0.8))
         last_valid = float(getattr(ctx, "final_roi_last_valid_mono", 0.0) or 0.0)
         since = float(getattr(ctx, "final_roi_mode_since_mono", now_mono) or now_mono)
@@ -1180,8 +1180,8 @@ def arbitrate_table_docking_motion(
         if edge_ready_for_final and edge_measured_source == "edge" and edge_final_dist_err is not None:
             return final_edge_mode_result()
         stop_p10 = _float(summary, "roi_final_stop_p10_m", 0.42)
-        probe_vx = abs(_float(summary, "close_range_probe_vx_mps", 0.004))
-        missing_probe_vx = abs(_float(summary, "close_range_missing_probe_vx_mps", 0.002))
+        probe_vx = abs(_float(summary, "close_range_probe_vx_mps", 0.008))
+        missing_probe_vx = abs(_float(summary, "close_range_missing_probe_vx_mps", 0.004))
         if roi_depth_valid and roi_depth_m is not None and roi_depth_m <= stop_p10:
             try:
                 ctx.roi_final_stop_stable_count = int(getattr(ctx, "roi_final_stop_stable_count", 0) or 0) + 1

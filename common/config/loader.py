@@ -480,6 +480,10 @@ def _load_and_merge_stage_params(config: SystemGlobalConfig, file_path: Path) ->
             ctrl.edge_final_stop_margin_m = _sf(td["edge_final_stop_margin_m"])
         if "close_range_enter_p10_m" in td:
             ctrl.close_range_enter_p10_m = _sf(td["close_range_enter_p10_m"])
+        if "final_probe_vx_mps" in td:
+            ctrl.final_probe_vx_mps = _sf(td["final_probe_vx_mps"])
+        if "final_missing_probe_vx_mps" in td:
+            ctrl.final_missing_probe_vx_mps = _sf(td["final_missing_probe_vx_mps"])
         if "close_range_probe_vx_mps" in td:
             ctrl.close_range_probe_vx_mps = _sf(td["close_range_probe_vx_mps"])
         if "close_range_missing_probe_vx_mps" in td:
