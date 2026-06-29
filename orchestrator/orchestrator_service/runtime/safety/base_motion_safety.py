@@ -113,9 +113,22 @@ def apply_base_motion_safety(decision: Any, *, ctx: Any, cfg: Any, log_fn: Optio
     )
 
     allow_forward = summary.get("allow_forward", True)
-    if is_probe:
+    depth_safety_state = str(summary.get("depth_safety_state") or "")
+    depth_safety_hold_states = {
+        "hard_stop_confirming",
+        "hard_stop_locked",
+        "missing_hold",
+        "timeout_hold",
+        "distance_budget_hold",
+    }
+    if is_probe and depth_safety_state not in depth_safety_hold_states:
         allow_forward = True
         summary["allow_forward"] = True
+    elif depth_safety_state in depth_safety_hold_states:
+        allow_forward = False
+        summary["allow_forward"] = False
+        if not summary.get("forward_block_reason"):
+            summary["forward_block_reason"] = str(summary.get("depth_safety_reason") or depth_safety_state)
 
     allow_rotate = summary.get("allow_rotate", True)
     allow_lateral = summary.get("allow_lateral", True)
@@ -242,4 +255,3 @@ class BaseMotionSafetyMixin:
             self._log(level, msg, *args)
 
         return apply_base_motion_safety(decision, ctx=self.ctx, cfg=self.cfg, log_fn=log_fn)
-

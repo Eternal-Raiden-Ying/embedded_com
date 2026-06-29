@@ -565,6 +565,12 @@ class ControlThresholds:
     yaw_flip_count_limit: int = 2
     yaw_ambiguous_wz_cap: float = 0.0
     yaw_ambiguous_vy_boost: float = 1.5
+    edge_yaw_control_enter_rad: float = 0.30
+    edge_yaw_control_exit_rad: float = 0.12
+    edge_yaw_reject_rad: float = 1.40
+    edge_yaw_kp: float = 0.22
+    edge_yaw_min_wz_radps: float = 0.08
+    edge_yaw_max_wz_radps: float = 0.18
     final_dist_deadband_m: float = 0.030
     final_dist_kp: float = 0.080
     final_forward_vx_max_mps: float = 0.006
@@ -719,7 +725,7 @@ class CarMotionConfig:
     table_approach_max_vx_mps: float = 0.035
     table_approach_yaw_deadband_rad: float = 0.08
     table_approach_yaw_realign_rad: float = 0.16
-    table_edge_hard_rotate_only_yaw_rad: float = 0.45
+    table_edge_hard_rotate_only_yaw_rad: float = 1.40
     table_edge_hard_yaw_rotate_only_frames: int = 3
     table_edge_hard_yaw_rotate_only_ms: int = 350
     table_perception_warmup_s: float = 1.0

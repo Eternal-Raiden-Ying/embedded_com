@@ -640,6 +640,56 @@ def arbitrate_table_docking_motion(
             "obs_dist_err_m": float(docking_obs.dist_err_m) if docking_obs.dist_err_m is not None else None,
         }
     )
+    edge_yaw_err = docking_obs.yaw_err_rad
+    edge_yaw_abs = abs(float(edge_yaw_err)) if edge_yaw_err is not None else None
+    edge_yaw_control_enter = abs(_float(summary, "edge_yaw_control_enter_rad", 0.30))
+    edge_yaw_control_exit = abs(_float(summary, "edge_yaw_control_exit_rad", 0.12))
+    edge_yaw_reject = max(edge_yaw_control_enter + 1e-6, abs(_float(summary, "edge_yaw_reject_rad", 1.40)))
+    edge_yaw_min_wz = abs(_float(summary, "edge_yaw_min_wz_radps", 0.08))
+    edge_yaw_max_wz = max(edge_yaw_min_wz, abs(_float(summary, "edge_yaw_max_wz_radps", 0.18)))
+    edge_yaw_kp = max(0.0, _float(summary, "edge_yaw_kp", 0.22))
+    edge_stale = bool(stale_policy == StalePolicy.HARD_STOP or str(summary.get("stale_level") or "").lower() in {"hard_stale", "dead"})
+    edge_yaw_available = bool(
+        edge_yaw_err is not None
+        and (docking_obs.edge_valid or docking_obs.edge_trusted or docking_obs.edge_usable)
+        and not edge_stale
+        and edge_yaw_abs is not None
+        and edge_yaw_abs < edge_yaw_reject
+    )
+    edge_yaw_rejected = bool(
+        edge_yaw_err is not None
+        and (docking_obs.edge_found or docking_obs.edge_valid)
+        and edge_yaw_abs is not None
+        and edge_yaw_abs >= edge_yaw_reject
+    )
+
+    def edge_yaw_correction_wz() -> float:
+        existing = _float(summary, "edge_yaw_cmd", _float(summary, "wz_from_plane", 0.0))
+        if abs(existing) >= edge_yaw_min_wz:
+            return _clamp(existing, -edge_yaw_max_wz, edge_yaw_max_wz)
+        if edge_yaw_err is None:
+            return 0.0
+        sign = 1.0 if float(edge_yaw_err) >= 0.0 else -1.0
+        mag = _clamp(edge_yaw_kp * abs(float(edge_yaw_err)), edge_yaw_min_wz, edge_yaw_max_wz)
+        return sign * mag
+
+    summary.update(
+        {
+            "edge_valid": bool(docking_obs.edge_valid),
+            "edge_stale": bool(edge_stale),
+            "edge_yaw_err_rad": float(edge_yaw_err) if edge_yaw_err is not None else None,
+            "edge_yaw_abs_rad": float(edge_yaw_abs) if edge_yaw_abs is not None else None,
+            "edge_yaw_reject_rad": float(edge_yaw_reject),
+            "edge_yaw_control_enter_rad": float(edge_yaw_control_enter),
+            "edge_yaw_control_exit_rad": float(edge_yaw_control_exit),
+            "edge_yaw_min_wz_radps": float(edge_yaw_min_wz),
+            "edge_yaw_max_wz_radps": float(edge_yaw_max_wz),
+            "edge_yaw_control_active": False,
+            "edge_yaw_rejected_near_vertical": bool(edge_yaw_rejected),
+            "usable_for_alignment": bool(summary.get("usable_for_alignment", getattr(obs, "usable_for_alignment", False) if obs is not None else False)),
+            "usable_for_approach": bool(summary.get("usable_for_approach", getattr(obs, "usable_for_approach", False) if obs is not None else False)),
+        }
+    )
 
     def estimated_table_distance_m() -> tuple[float, str]:
         ref = abs(_float(summary, "lateral_distance_ref_m", 0.80)) or 0.80
@@ -905,7 +955,7 @@ def arbitrate_table_docking_motion(
                     except Exception:
                         pass
                 else:
-                    vx = probe_vx
+                    vx = 0.0
                     reason = "roi_p10_stop_confirming"
                     stage = DockingStage.FINAL_DISTANCE_HOLD
             elif roi_depth_m <= slow_p10:
@@ -1119,7 +1169,7 @@ def arbitrate_table_docking_motion(
                 stage = DockingStage.FINAL_LOCKED
                 final_locked_summary = True
             else:
-                vx = probe_vx
+                vx = 0.0
                 reason = "roi_p10_stop_confirming"
                 stage = DockingStage.FINAL_DISTANCE_HOLD
                 final_locked_summary = False
@@ -1326,6 +1376,55 @@ def arbitrate_table_docking_motion(
             forward_owner="final_distance_servo" if abs(servo_vx) > 1e-9 else "none",
             blocked_by="" if abs(servo_vx) > 1e-9 else "final_distance_servo",
             reason=servo_reason,
+        )
+
+    if edge_yaw_rejected:
+        summary["edge_yaw_reject_reason"] = "edge_yaw_rejected_near_vertical"
+
+    edge_yaw_should_control = bool(
+        edge_yaw_available
+        and edge_yaw_abs is not None
+        and edge_yaw_abs > edge_yaw_control_enter
+        and not bool(summary.get("close_range_latched", False))
+        and not bool(summary.get("final_edge_mode_latched", False))
+        and not bool(summary.get("final_roi_mode_latched", False))
+        and not bool(summary.get("final_distance_servo_active", False))
+        and not bool(summary.get("final_locked", False))
+        and state != "AT_TABLE_EDGE"
+    )
+    if edge_yaw_should_control:
+        edge_wz = edge_yaw_correction_wz()
+        vx = 0.0
+        vy = 0.0
+        return _docking_result(
+            action=DockingAction.EDGE_APPROACH_FORWARD,
+            stage=DockingStage.EDGE_APPROACH,
+            summary=with_common(
+                {
+                    "edge_yaw_control_active": True,
+                    "edge_yaw_control_reason": "edge_yaw_large_correction",
+                    "docking_reason": "edge_yaw_large_correction",
+                    "yaw_owner": "edge",
+                    "yaw_source": "edge",
+                    "lateral_owner": "none",
+                    "forward_block_reason": "edge_yaw_large_correction",
+                    "rotate_block_reason": "",
+                    "yaw_conflict": bool(summary.get("yaw_conflict", False)),
+                    "wz_before_gate": float(desired_wz),
+                    "wz_after_gate": float(edge_wz),
+                    "allow_forward": False,
+                    "allow_rotate": bool(abs(edge_wz) > 1e-9),
+                    "allow_lateral": False,
+                }
+            ),
+            vx=vx,
+            vy=vy,
+            wz=edge_wz,
+            yaw_owner="edge",
+            forward_owner="none",
+            lateral_owner="none",
+            blocked_by="edge_yaw_large_correction",
+            reason="edge_yaw_large_correction",
         )
 
     last_good_obs_healthy = bool(summary.get("last_good_obs_healthy", False))

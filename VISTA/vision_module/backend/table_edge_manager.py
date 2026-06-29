@@ -2737,7 +2737,7 @@ class TableEdgeManager:
         y_cluster_bin_m = float(self._y_cluster_bin_m)
         min_front_face_columns = max(2, int(self._min_front_face_columns))
         min_front_face_x_span = float(self._min_front_face_x_span_m)
-        max_yaw_cfg = float(self._max_yaw_abs_rad)
+        max_yaw_cfg = max(float(self._max_yaw_abs_rad), 1.40)
 
         ray_x_roi = self._ray_x[y0:y1:stride, x0:x1:stride]
         ray_y_roi = self._ray_y[y0:y1:stride, x0:x1:stride]
@@ -3523,7 +3523,7 @@ class TableEdgeManager:
             and not bool(background_blocked)
         )
         plane_usable = bool(edge_geometry_valid)
-        valid_for_control = control_level in {"align", "alignment", "stop_ready", "stop"}
+        valid_for_control = control_level in {"align", "alignment", "rotate_only", "stop_ready", "stop"}
 
         if not reject_reason:
             if representative_inlier_count <= 3 or x_span < 0.15:
@@ -3728,7 +3728,7 @@ class TableEdgeManager:
             "plane_only_mode": True,
             "enable_crease_line": False,
             "usable_for_approach": bool(plane_usable),
-            "usable_for_alignment": bool(control_level in {"align", "stop_ready"}),
+            "usable_for_alignment": bool(control_level in {"align", "alignment", "rotate_only", "stop_ready"}),
             "usable_for_stop": bool(control_level == "stop_ready"),
             "control_level": control_level,
             "control_reject_reason": "" if plane_usable else reject_reason,

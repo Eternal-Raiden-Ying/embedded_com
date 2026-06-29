@@ -40,6 +40,12 @@ def _base_summary(**extra):
         "lateral_priority_large_error_norm": 0.18,
         "lateral_priority_mid_vx_cap_mps": 0.08,
         "lateral_priority_vx_cap_mps": 0.04,
+        "edge_yaw_control_enter_rad": 0.30,
+        "edge_yaw_control_exit_rad": 0.12,
+        "edge_yaw_reject_rad": 1.40,
+        "edge_yaw_kp": 0.22,
+        "edge_yaw_min_wz_radps": 0.08,
+        "edge_yaw_max_wz_radps": 0.18,
     }
     summary.update(extra)
     return summary
@@ -517,15 +523,140 @@ def test_non_final_edge_yaw_large_never_outputs_all_zero():
             usable_for_approach=True,
             edge_readiness_score=1.0,
             edge_readiness_enter_score=0.65,
-            yaw_err_rad=0.30,
-            edge_yaw=0.30,
+            yaw_err_rad=0.31,
+            edge_yaw=0.31,
             edge_forward_rotate_only_yaw_rad=0.18,
             search_wz_radps=0.20,
             table_roi_depth_valid=True,
             table_roi_depth_p10=1.20,
         ),
     )
-    assert result.summary["docking_action"] == "SEARCH_ROTATE"
+    assert result.summary["docking_action"] == "EDGE_APPROACH_FORWARD"
+    assert result.summary["edge_yaw_control_active"] is True
+    assert result.summary["yaw_owner"] == "edge"
     assert result.final_vx == 0.0
     assert result.final_vy == 0.0
-    assert abs(result.final_wz) >= 0.20
+    assert abs(result.final_wz) >= result.summary["edge_yaw_min_wz_radps"]
+
+
+def test_large_edge_yaw_takes_yaw_owner_before_close_range():
+    result = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("yolo_track_forward", desired_vx=0.20, desired_wz=0.01, yaw_owner="bbox", forward_allowed_by_behavior=True),
+        _base_summary(
+            control_phase="BBOX_ACQUIRE",
+            edge_found=True,
+            edge_valid=True,
+            usable_for_approach=True,
+            usable_for_alignment=True,
+            bbox_center_valid=True,
+            bbox_center_error=0.08,
+            yolo_forward_allowed=True,
+            yaw_err_rad=0.60,
+            edge_yaw=0.60,
+            yaw_conflict=True,
+            table_roi_depth_valid=True,
+            table_roi_depth_p10=1.20,
+        ),
+    )
+
+    assert result.summary["edge_yaw_control_active"] is True
+    assert result.summary["yaw_owner"] == "edge"
+    assert result.summary["yaw_source"] == "edge"
+    assert abs(result.final_wz) >= result.summary["edge_yaw_min_wz_radps"]
+    assert result.final_vx == 0.0
+    assert result.final_vy == 0.0
+
+
+def test_one_rad_edge_yaw_is_still_correction_not_reject():
+    result = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("edge_guided_forward", desired_vx=0.08, desired_wz=0.0, yaw_owner="bbox", forward_allowed_by_behavior=True),
+        _base_summary(
+            control_phase="EDGE_GUIDED_APPROACH",
+            edge_found=True,
+            edge_valid=True,
+            usable_for_approach=True,
+            yaw_err_rad=1.00,
+            edge_yaw=1.00,
+            table_roi_depth_valid=True,
+            table_roi_depth_p10=1.20,
+        ),
+    )
+
+    assert result.summary["edge_yaw_control_active"] is True
+    assert result.summary["edge_yaw_rejected_near_vertical"] is False
+    assert result.summary["yaw_owner"] == "edge"
+    assert abs(result.final_wz) >= result.summary["edge_yaw_min_wz_radps"]
+
+
+def test_near_vertical_edge_yaw_is_marked_rejected_for_fallback():
+    result = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("yolo_track_forward", desired_vx=0.10, desired_wz=0.02, yaw_owner="bbox", forward_allowed_by_behavior=True),
+        _base_summary(
+            control_phase="BBOX_ACQUIRE",
+            edge_found=True,
+            edge_valid=True,
+            usable_for_approach=True,
+            bbox_center_valid=True,
+            bbox_center_error=0.02,
+            yolo_forward_allowed=True,
+            yaw_err_rad=1.45,
+            edge_yaw=1.45,
+            table_roi_depth_valid=True,
+            table_roi_depth_p10=1.20,
+        ),
+    )
+
+    assert result.summary["edge_yaw_rejected_near_vertical"] is True
+    assert result.summary["edge_yaw_reject_reason"] == "edge_yaw_rejected_near_vertical"
+    assert result.summary["edge_yaw_control_active"] is False
+
+
+def test_close_range_still_disables_edge_yaw_correction():
+    result = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("edge_guided_forward", desired_vx=0.08, desired_wz=0.15, yaw_owner="edge", forward_allowed_by_behavior=True),
+        _base_summary(
+            control_phase="EDGE_GUIDED_APPROACH",
+            close_range_latched=True,
+            edge_found=True,
+            edge_valid=True,
+            usable_for_approach=True,
+            yaw_err_rad=0.60,
+            edge_yaw=0.60,
+            table_roi_depth_valid=False,
+        ),
+    )
+
+    assert result.summary["close_range_latched"] is True
+    assert result.summary["edge_yaw_control_active"] is False
+    assert result.final_wz == 0.0
+    assert result.summary["yaw_owner"] == "none"
+
+
+def test_edge_missing_allows_bbox_yaw_fallback():
+    result = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("yolo_track_forward", desired_vx=0.10, desired_wz=0.04, yaw_owner="bbox", forward_allowed_by_behavior=True),
+        _base_summary(
+            control_phase="BBOX_ACQUIRE",
+            edge_found=False,
+            edge_valid=False,
+            bbox_center_valid=True,
+            bbox_center_error=0.04,
+            yolo_forward_allowed=True,
+            table_roi_depth_valid=True,
+            table_roi_depth_p10=1.20,
+        ),
+    )
+
+    assert result.summary["edge_yaw_control_active"] is False
+    assert result.summary["yaw_owner"] == "bbox"
+    assert abs(result.final_wz) > 0.0

@@ -29,6 +29,7 @@ from ..common import monotonic_ts
 from ..context import RuntimeContext, State
 from ..controller import MotionController, MotionDecision
 from ..control_authority import decide_table_control_authority, ControlAuthority
+from ..depth_safety import apply_close_range_depth_safety_gate
 from ..motion_arbiter import MotionIntent, arbitrate_table_docking_motion
 from ..perception_semantics import build_table_perception_semantics
 from ..core_types import (
@@ -71,6 +72,13 @@ class TableDockingMixin:
             reason=str(summary.get("phase_reason") or summary.get("reason") or summary.get("forward_block_reason") or ""),
         )
         result = arbitrate_table_docking_motion(self.ctx, obs, intent, summary)
+        result = apply_close_range_depth_safety_gate(
+            ctx=self.ctx,
+            obs=obs,
+            result=result,
+            cfg=self.cfg,
+            now_mono=monotonic_ts(),
+        )
         decision.cmd.vx_mps = float(result.final_vx)
         decision.cmd.vy_mps = float(result.final_vy)
         decision.cmd.wz_radps = float(result.final_wz)
@@ -1524,6 +1532,12 @@ class TableDockingMixin:
             "lateral_priority_large_error_norm": float(getattr(self.cfg, "lateral_priority_large_error_norm", 0.18) or 0.18),
             "lateral_priority_mid_vx_cap_mps": float(getattr(self.cfg, "lateral_priority_mid_vx_cap_mps", 0.080) or 0.080),
             "lateral_priority_vx_cap_mps": float(getattr(self.cfg, "lateral_priority_vx_cap_mps", 0.040) or 0.040),
+            "edge_yaw_control_enter_rad": float(getattr(self.cfg, "edge_yaw_control_enter_rad", 0.30) or 0.30),
+            "edge_yaw_control_exit_rad": float(getattr(self.cfg, "edge_yaw_control_exit_rad", 0.12) or 0.12),
+            "edge_yaw_reject_rad": float(getattr(self.cfg, "edge_yaw_reject_rad", 1.40) or 1.40),
+            "edge_yaw_kp": float(getattr(self.cfg, "edge_yaw_kp", 0.22) or 0.22),
+            "edge_yaw_min_wz_radps": float(getattr(self.cfg, "edge_yaw_min_wz_radps", 0.08) or 0.08),
+            "edge_yaw_max_wz_radps": float(getattr(self.cfg, "edge_yaw_max_wz_radps", 0.18) or 0.18),
             "final_dist_deadband_m": float(getattr(self.cfg, "final_dist_deadband_m", 0.03) or 0.03),
             "final_dist_kp": float(getattr(self.cfg, "final_dist_kp", 0.08) or 0.08),
             "final_forward_vx_max_mps": float(getattr(self.cfg, "final_forward_vx_max_mps", 0.006) or 0.006),
@@ -1559,8 +1573,20 @@ class TableDockingMixin:
             or (is_final_servo and not is_locked)
             or (docking_action in {"CLOSE_RANGE_PROBE", "FINAL_SLOW_PROBE"})
         )
-        if is_probe:
+        depth_safety_state = str(summary.get("depth_safety_state") or "")
+        depth_safety_hold_states = {
+            "hard_stop_confirming",
+            "hard_stop_locked",
+            "missing_hold",
+            "timeout_hold",
+            "distance_budget_hold",
+        }
+        if is_probe and depth_safety_state not in depth_safety_hold_states:
             summary["allow_forward"] = True
+        elif depth_safety_state in depth_safety_hold_states:
+            summary["allow_forward"] = False
+            if not summary.get("forward_block_reason"):
+                summary["forward_block_reason"] = str(summary.get("depth_safety_reason") or depth_safety_state)
 
         allow_forward_val = bool(summary.get("allow_forward", auth.allow_forward))
         if not allow_forward_val and abs(float(decision.cmd.vx_mps)) > 1e-9:

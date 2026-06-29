@@ -586,6 +586,18 @@ def _load_and_merge_stage_params(config: SystemGlobalConfig, file_path: Path) ->
             ctrl.yaw_ambiguous_wz_cap = _sf(td["yaw_ambiguous_wz_cap"])
         if "yaw_ambiguous_vy_boost" in td:
             ctrl.yaw_ambiguous_vy_boost = _sf(td["yaw_ambiguous_vy_boost"])
+        if "edge_yaw_control_enter_rad" in td:
+            ctrl.edge_yaw_control_enter_rad = _sf(td["edge_yaw_control_enter_rad"])
+        if "edge_yaw_control_exit_rad" in td:
+            ctrl.edge_yaw_control_exit_rad = _sf(td["edge_yaw_control_exit_rad"])
+        if "edge_yaw_reject_rad" in td:
+            ctrl.edge_yaw_reject_rad = _sf(td["edge_yaw_reject_rad"])
+        if "edge_yaw_kp" in td:
+            ctrl.edge_yaw_kp = _sf(td["edge_yaw_kp"])
+        if "edge_yaw_min_wz_radps" in td:
+            ctrl.edge_yaw_min_wz_radps = _sf(td["edge_yaw_min_wz_radps"])
+        if "edge_yaw_max_wz_radps" in td:
+            ctrl.edge_yaw_max_wz_radps = _sf(td["edge_yaw_max_wz_radps"])
         if "final_dist_deadband_m" in td:
             ctrl.final_dist_deadband_m = _sf(td["final_dist_deadband_m"])
         if "final_dist_kp" in td:

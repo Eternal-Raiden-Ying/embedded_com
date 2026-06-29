@@ -105,6 +105,17 @@ def collect() -> tuple[Dict[str, Dict[str, Any]], list[str]]:
     ):
         _record(values, "yaw_anti_oscillation", key, control, key, fallback)
 
+    for key, fallback in (
+        ("edge_yaw_control_enter_rad", 0.30),
+        ("edge_yaw_control_exit_rad", 0.12),
+        ("edge_yaw_reject_rad", 1.40),
+        ("edge_yaw_kp", 0.22),
+        ("edge_yaw_min_wz_radps", 0.08),
+        ("edge_yaw_max_wz_radps", 0.18),
+    ):
+        _record(values, "edge_yaw_control", key, control, key, fallback)
+    _record(values, "edge_yaw_control", "edge_hard_rotate_only_yaw_rad", car, "table_edge_hard_rotate_only_yaw_rad", 1.40)
+
     # Bilateral distance config check
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     vision_params_path = os.path.join(repo_root, "VISTA", "configs", "vision_params.yaml")
@@ -158,7 +169,7 @@ def main() -> None:
 
     values, warnings = collect()
     print("Docking effective config audit")
-    for group in ("speed", "final", "lateral", "yaw_anti_oscillation", "bilateral_distance"):
+    for group in ("speed", "final", "lateral", "yaw_anti_oscillation", "edge_yaw_control", "bilateral_distance"):
         _print_group(group, values.get(group, {}))
     if warnings:
         print("\nwarnings:")
