@@ -119,6 +119,9 @@ class TableEdgeManager:
         self._last_valid_table_center_norm = None
         self._last_valid_depth_roi = None
         self._last_valid_depth_roi_ts = 0.0
+        self._last_valid_table_roi_xyxy = None
+        self._last_valid_table_roi_ts = 0.0
+        self._last_valid_table_roi_source = ""
         self._last_valid_table_bbox_hold_frames = 0
         self._force_depth_roi_once: Optional[list[int]] = None
         self._force_depth_roi_reason_once = ""
@@ -2159,30 +2162,16 @@ class TableEdgeManager:
             current_table_bbox_found = roi_source_text in {"local_perception_table_bbox", "yolo_table_bbox", "yolo_table_mapped_center", "yolo_table_bbox_mapped", "yolo_table_bbox_boundary_extend"}
         now_s = time.time()
         latch_age_s = None
-        if self._last_valid_depth_roi_ts:
-            latch_age_s = max(0.0, now_s - float(self._last_valid_depth_roi_ts or 0.0))
+        if self._last_valid_table_roi_ts:
+            latch_age_s = max(0.0, now_s - float(self._last_valid_table_roi_ts or 0.0))
         latch_max_age_s = max(0.0, float(getattr(table_edge_cfg, "final_roi_latch_max_age_s", 2.0) or 2.0))
-        latched_roi = normalize_table_bbox(self._last_valid_depth_roi, depth_shape)
-        runtime_state = str((runtime_status or {}).get("orchestrator_state") or "").strip().upper()
-        close_or_final_latched = any(
-            bool((runtime_status or {}).get(key))
-            for key in (
-                "close_range_latched",
-                "final_roi_mode_latched",
-                "final_edge_mode_latched",
-                "final_distance_servo_active",
-            )
-        )
+        latched_roi = normalize_table_bbox(self._last_valid_table_roi_xyxy or self._last_valid_depth_roi, depth_shape)
         latch_allowed = bool(
             getattr(table_edge_cfg, "final_roi_latch_enable", True)
             and not current_table_bbox_found
             and latched_roi is not None
             and latch_age_s is not None
             and latch_age_s <= latch_max_age_s
-            and (
-                close_or_final_latched
-                or runtime_state in {"FINAL_SLOW_STOP", "AT_TABLE_EDGE"}
-            )
         )
         if latch_allowed:
             roi_meta["depth_edge_roi"] = list(latched_roi)
@@ -2199,6 +2188,9 @@ class TableEdgeManager:
             self._last_valid_table_center_norm = roi_meta.get("table_center_norm")
             self._last_valid_depth_roi = roi_meta.get("table_edge_roi") or roi_meta.get("depth_edge_roi")
             self._last_valid_depth_roi_ts = now_s
+            self._last_valid_table_roi_xyxy = self._last_valid_depth_roi
+            self._last_valid_table_roi_ts = now_s
+            self._last_valid_table_roi_source = "current_yolo_table_roi"
             self._last_valid_table_bbox_hold_frames = 0
         elif roi_source_text == "yolo_table_bbox_hold":
             self._last_valid_table_bbox_hold_frames = int(self._last_valid_table_bbox_hold_frames or 0) + 1
@@ -2214,7 +2206,15 @@ class TableEdgeManager:
         roi_meta["table_roi_latched"] = bool(roi_source_text == "latched_table_roi")
         roi_meta["table_roi_latch_age_s"] = latch_age_s
         roi_meta["table_roi_latch_max_age_s"] = float(latch_max_age_s)
-        roi_meta["table_roi_source"] = str(roi_meta.get("roi_source") or "")
+        roi_meta["last_valid_table_roi_xyxy"] = self._last_valid_table_roi_xyxy
+        roi_meta["last_valid_table_roi_source"] = self._last_valid_table_roi_source
+        if roi_source_text == "latched_table_roi":
+            table_roi_source = "latched_table_roi"
+        elif current_table_bbox_found:
+            table_roi_source = "current_yolo_table_roi"
+        else:
+            table_roi_source = str(roi_meta.get("roi_source") or "")
+        roi_meta["table_roi_source"] = table_roi_source
         roi_meta["table_roi_xyxy"] = roi_meta.get("table_edge_roi") or roi_meta.get("depth_edge_roi")
         roi_meta["yolo_table_roi_enable"] = bool(dynamic_enable)
         roi_meta["yolo_table_roi_use_rgb_depth_mapping"] = bool(table_edge_cfg.yolo_table_roi_use_rgb_depth_mapping)
@@ -2306,6 +2306,8 @@ class TableEdgeManager:
             "table_roi_latch_age_s",
             "table_roi_latch_max_age_s",
             "table_roi_xyxy",
+            "last_valid_table_roi_xyxy",
+            "last_valid_table_roi_source",
             "yolo_table_edge_stable_count",
             "yolo_table_edge_stable_required",
             "yolo_table_near_distance",
@@ -3755,6 +3757,7 @@ class TableEdgeManager:
                     payload.get("table_bbox_current_found", False)
                     or payload.get("table_roi_latched", False)
                 ),
+                allow_without_table_bbox=bool(payload.get("table_roi_latched", False)),
             )
             roi_stats["table_roi_depth_mapping_source"] = str(payload.get("roi_source") or "")
             roi_stats["table_roi_source"] = str(payload.get("table_roi_source") or payload.get("roi_source") or "")

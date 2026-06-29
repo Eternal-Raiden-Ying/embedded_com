@@ -535,26 +535,49 @@ class TargetSearchMixin:
             self._start_loss_timer("target_loss_since_mono")
             lost_s = self._loss_elapsed(self.ctx.target_loss_since_mono)
             self.ctx.target_last_lost_reason = f"{lock_reason} lost_hold_ms={int(round(lost_s * 1000.0))}"
+            freeze_fields = {
+                "target_locked_freeze_elapsed_s": float(self._state_elapsed()),
+                "target_locked_freeze_after_s": float(self.cfg.target_locked_freeze_after_s),
+                "target_lock_ok": bool(lock_ok),
+                "target_lock_reason": str(lock_reason or "target_obs_missing"),
+                "target_centered_ok": False,
+                "target_lateral_stable_ok": False,
+                "target_lateral_stable_count": int(self.ctx.target_lateral_stable_count),
+                "target_lateral_stable_frames": int(self._target_lateral_stable_frames()),
+                "target_ready_for_grasp": False,
+                "target_ready_for_grasp_reason": "target_lock_not_ok",
+                "target_lock_stable_ok": False,
+                "target_lock_jitter_ok": False,
+                "target_lock_conf_stable": False,
+                "target_lock_ratio_ok": False,
+                "target_lock_freeze_blockers": ["target_lock_not_ok"],
+            }
             if lost_s >= float(self.cfg.target_lock_lost_hold_s):
                 self._reset_target_stability(lock_reason)
                 self._transition(
                     State.EDGE_SLIDE_SEARCH,
                     self._format_target_transition_reason("locked_lost_hold_exceeded", obs),
                 )
-                return self._annotate_target_lateral_decision(
+                decision = self._annotate_target_lateral_decision(
                     self.controller.stop_cmd("EDGE_SLIDE_SEARCH"),
                     obs,
                     active=False,
                     reason="target_locked_lost_return_search",
                     vy_cmd=0.0,
                 )
-            return self._annotate_target_lateral_decision(
+                if decision.control_summary is not None:
+                    decision.control_summary.update(freeze_fields)
+                return decision
+            decision = self._annotate_target_lateral_decision(
                 self.controller.stop_cmd("TARGET_LOCKED"),
                 obs,
                 active=False,
                 reason="target_locked_lost_hold",
                 vy_cmd=0.0,
             )
+            if decision.control_summary is not None:
+                decision.control_summary.update(freeze_fields)
+            return decision
         self.ctx.target_lost_frames = 0
         self.ctx.target_lock_frames += 1
         self.ctx.target_locked = True
@@ -571,19 +594,53 @@ class TargetSearchMixin:
         conf_stable = conf_median is not None and conf_median >= float(self.cfg.target_lock_conf_th or 0.0)
         ratio_ok = found_ratio >= float(getattr(self.cfg, "target_lock_found_ratio_th", 0.6) or 0.6)
         centered_ok = self._target_lateral_centered(obs)
+        if centered_ok:
+            self.ctx.target_lateral_stable_count += 1
+        else:
+            self.ctx.target_lateral_stable_count = 0
         lateral_stable_ok = int(self.ctx.target_lateral_stable_count) >= self._target_lateral_stable_frames()
-        ready_for_grasp = self._check_target_ready_for_grasp(obs)
-        if (
-            self._state_elapsed() >= float(self.cfg.target_locked_freeze_after_s)
-            and stable_ok
-            and jitter_ok
-            and conf_stable
-            and ratio_ok
-            and centered_ok
-            and lateral_stable_ok
-            and self.ctx.target_loss_since_mono <= 0.0
-            and ready_for_grasp
-        ):
+        ready_for_grasp, ready_reason = self._target_ready_for_grasp_status(obs)
+        bbox_valid = self._target_bbox_valid(obs)
+        cls_ok = self._target_cls_matches_active(obs)
+        found_ok = bool(getattr(obs, "found", False))
+        elapsed_s = self._state_elapsed()
+        freeze_after_s = float(self.cfg.target_locked_freeze_after_s)
+        freeze_blockers = []
+        if elapsed_s < freeze_after_s:
+            freeze_blockers.append("freeze_settle_not_elapsed")
+        if not lock_ok:
+            freeze_blockers.append("target_lock_not_ok")
+        if not centered_ok:
+            freeze_blockers.append("target_not_centered")
+        if not bbox_valid:
+            freeze_blockers.append("target_bbox_invalid")
+        if not found_ok:
+            freeze_blockers.append("target_not_found")
+        if not cls_ok:
+            freeze_blockers.append("target_cls_mismatch")
+        if not lateral_stable_ok:
+            freeze_blockers.append("target_lateral_stable_not_enough")
+        if not ready_for_grasp:
+            freeze_blockers.append(f"ready_for_grasp:{ready_reason}")
+
+        freeze_fields = {
+            "target_locked_freeze_elapsed_s": float(elapsed_s),
+            "target_locked_freeze_after_s": float(freeze_after_s),
+            "target_lock_ok": bool(lock_ok),
+            "target_lock_reason": str(lock_reason or ""),
+            "target_centered_ok": bool(centered_ok),
+            "target_lateral_stable_ok": bool(lateral_stable_ok),
+            "target_lateral_stable_count": int(self.ctx.target_lateral_stable_count),
+            "target_lateral_stable_frames": int(self._target_lateral_stable_frames()),
+            "target_ready_for_grasp": bool(ready_for_grasp),
+            "target_ready_for_grasp_reason": str(ready_reason or ""),
+            "target_lock_stable_ok": bool(stable_ok),
+            "target_lock_jitter_ok": bool(jitter_ok),
+            "target_lock_conf_stable": bool(conf_stable),
+            "target_lock_ratio_ok": bool(ratio_ok),
+            "target_lock_freeze_blockers": list(freeze_blockers),
+        }
+        if not freeze_blockers:
             self.ctx.target_last_transition_reason = (
                 f"freeze_ok found_ratio={found_ratio:.2f} conf_median={float(conf_median):.3f} "
                 f"center_jitter={float(center_jitter):.3f} stable_ms={self._target_stable_ms()} "
@@ -593,25 +650,31 @@ class TargetSearchMixin:
                 State.FREEZE_BASE,
                 self._format_target_transition_reason("locked_stable_freeze", obs),
             )
-            return self._annotate_target_lateral_decision(
+            decision = self._annotate_target_lateral_decision(
                 self.controller.stop_cmd("FREEZE_BASE"),
                 obs,
                 active=False,
                 reason="target_locked_freeze_base",
                 vy_cmd=0.0,
             )
-        return self._annotate_target_lateral_decision(
+            if decision.control_summary is not None:
+                decision.control_summary.update(freeze_fields)
+            return decision
+        decision = self._annotate_target_lateral_decision(
             self.controller.stop_cmd("TARGET_LOCKED"),
             obs,
             active=False,
             reason="target_locked_hold",
             vy_cmd=0.0,
         )
+        if decision.control_summary is not None:
+            decision.control_summary.update(freeze_fields)
+        return decision
 
     def _tick_freeze_base(self) -> MotionDecision:
         if self._state_elapsed() < float(self.cfg.freeze_settle_s):
             return self.controller.stop_cmd("FREEZE_BASE")
-        if self.ctx.task_intent == "FIND" and self.ctx.active_target:
+        if self.ctx.active_target:
             self._transition(State.GRASP, f"已锁定 {self.ctx.active_target}，开始抓取")
             self._queue_tts(f"已锁定 {self.ctx.active_target}，开始抓取")
             return self.controller.stop_cmd("GRASP")
@@ -998,26 +1061,30 @@ class TargetSearchMixin:
             return False
         return self.ctx.edge_visit_index + 1 < len(self.ctx.edge_visit_order)
 
-    def _check_target_ready_for_grasp(self, obs: Optional[TargetObs]) -> bool:
+    def _target_ready_for_grasp_status(self, obs: Optional[TargetObs]) -> Tuple[bool, str]:
         if obs is None:
-            return False
+            return False, "obs_missing"
         if not getattr(obs, "found", False):
-            return False
+            return False, "target_not_found"
         
         active_target = str(self.ctx.active_target or "").strip()
         matched_cls = str(obs.matched_cls or obs.target or "").strip()
         if active_target and matched_cls and matched_cls != active_target:
-            return False
+            return False, "target_cls_mismatch"
             
         conf = obs.matched_conf if obs.matched_conf is not None else 0.0
         if conf < 0.45:
-            return False
+            return False, "target_conf_low"
             
         mb = obs.matched_bbox
         if not mb or not isinstance(mb, list) or len(mb) < 4:
-            return False
+            return False, "target_bbox_invalid"
                     
         if int(getattr(self.ctx, "target_found_frames", 0) or 0) < 5:
-            return False
+            return False, "target_found_frames_low"
             
-        return True
+        return True, "ready"
+
+    def _check_target_ready_for_grasp(self, obs: Optional[TargetObs]) -> bool:
+        ready, _ = self._target_ready_for_grasp_status(obs)
+        return bool(ready)

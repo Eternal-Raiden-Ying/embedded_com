@@ -179,6 +179,9 @@ class TaskRuntimeMixin:
             "target_last_center_jitter": float(self.ctx.target_last_center_jitter),
             "target_last_lost_reason": str(self.ctx.target_last_lost_reason or ""),
             "target_last_transition_reason": str(self.ctx.target_last_transition_reason or ""),
+            "target_lateral_stable_count": int(getattr(self.ctx, "target_lateral_stable_count", 0) or 0),
+            "target_lateral_align_reason": str(getattr(self.ctx, "target_lateral_align_reason", "") or ""),
+            "target_lateral_vy_cmd": float(getattr(self.ctx, "target_lateral_vy_cmd", 0.0) or 0.0),
         }
 
     def _restore_target_debounce_snapshot(self, snapshot: Dict[str, Any]) -> None:
@@ -194,6 +197,9 @@ class TaskRuntimeMixin:
         self.ctx.target_obs_window = [dict(item) for item in snapshot.get("target_obs_window", [])]
         self.ctx.target_last_lost_reason = str(snapshot.get("target_last_lost_reason", "") or "")
         self.ctx.target_last_transition_reason = str(snapshot.get("target_last_transition_reason", "") or "")
+        self.ctx.target_lateral_stable_count = int(snapshot.get("target_lateral_stable_count", 0) or 0)
+        self.ctx.target_lateral_align_reason = str(snapshot.get("target_lateral_align_reason", "") or "")
+        self.ctx.target_lateral_vy_cmd = float(snapshot.get("target_lateral_vy_cmd", 0.0) or 0.0)
 
     def _emit_reset_trace(self, reset_state: str, reason: str, cleared_fields: List[str]) -> None:
         self._pending_reset_traces.append(

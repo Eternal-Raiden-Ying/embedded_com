@@ -48,7 +48,7 @@ class Stm32MotionAdapter:
         self.jog_turn_speed = coerce_micro_speed(jog_turn_speed, 0.05)
         self.jog_duration_ms = clamp_int(jog_duration_ms, 60, 500)
         self._seq = 0
-        self._last_wire_mode = ""
+        self._last_wire_mode: Optional[str] = None
         self._jog_cancel_events = []
         self._jog_lock = threading.Lock()
 
@@ -111,15 +111,6 @@ class Stm32MotionAdapter:
         wz = clamp_float(wz_radps, -self.max_wz_radps, self.max_wz_radps)
         return vx, vy, wz
 
-    def _mode_prefix(self, wire_mode: str) -> str:
-        wire_mode = self.wire_mode_for_mode(wire_mode)
-        if wire_mode == "STOP":
-            return ""
-        if wire_mode == self._last_wire_mode:
-            return ""
-        self._last_wire_mode = wire_mode
-        return encode_mode(wire_mode) + "\r\n"
-
     def set_velocity(self, vx_mps: Any, vy_mps: Any, wz_radps: Any, mode: str = "SEARCH", reason: str = "") -> int:
         seq = self._next_seq()
         wire_mode = self.wire_mode_for_mode(mode)
@@ -134,11 +125,46 @@ class Stm32MotionAdapter:
             f"[MOTION][V] seq={seq} mode={wire_mode} "
             f"vx_mps={vx:.3f} vy_mps={vy:.3f} wz_radps={wz:.3f} reason={reason}"
         )
-        line = self._mode_prefix(wire_mode) + encode_vel(vx, vy, wz) + "\r\n"
-        self.uart.send_motion_line(
+        target_lateral = str(mode or "").strip().upper() == "EDGE_SLIDE_SEARCH" and abs(vy) > 1e-9 and abs(vx) < 1e-9 and abs(wz) < 1e-9
+        mode_required = wire_mode != self._last_wire_mode
+        if mode_required and target_lateral:
+            sent = bool(
+                self.uart.send_motion_line(
+                    encode_mode(wire_mode) + "\r\n",
+                    tx_meta=self._meta(
+                        "mode",
+                        seq,
+                        reason,
+                        wire_mode=wire_mode,
+                        last_wire_mode=self._last_wire_mode,
+                        target_lateral_uart_mode_required=bool(target_lateral),
+                        target_lateral_uart_mode_sent=True,
+                        target_lateral_uart_mode_rearm=True,
+                    ),
+                )
+            )
+            if sent:
+                self._last_wire_mode = wire_mode
+            return seq
+        line = (encode_mode(wire_mode) + "\r\n" if mode_required else "") + encode_vel(vx, vy, wz) + "\r\n"
+        sent = bool(self.uart.send_motion_line(
             line,
-            tx_meta=self._meta("vel", seq, reason, wire_mode=wire_mode, vx_mps=vx, vy_mps=vy, wz_radps=wz),
-        )
+            tx_meta=self._meta(
+                "vel",
+                seq,
+                reason,
+                wire_mode=wire_mode,
+                last_wire_mode=self._last_wire_mode,
+                vx_mps=vx,
+                vy_mps=vy,
+                wz_radps=wz,
+                target_lateral_uart_mode_required=bool(target_lateral),
+                target_lateral_uart_mode_sent=False,
+                target_lateral_uart_mode_rearm=False,
+            ),
+        ))
+        if sent and mode_required:
+            self._last_wire_mode = wire_mode
         return seq
 
     def send_cmd_vel(self, cmd: Any, reason: str = "") -> int:
@@ -150,7 +176,7 @@ class Stm32MotionAdapter:
     def stop(self, reason: str = "", soft: bool = False) -> int:
         self.cancel_active_jogs()
         seq = self._next_seq()
-        self._last_wire_mode = "STOP"
+        self._last_wire_mode = None
         self._log(f"[MOTION][STOP] seq={seq} reason={reason} soft={soft}")
         if soft:
             stop_policy.soft_stop(self.uart, tx_meta=self._meta("stop", seq, reason, wire_mode="SSTOP"))
@@ -168,7 +194,7 @@ class Stm32MotionAdapter:
         self.cancel_active_jogs()
         seq = self._next_seq()
         duration = self.jog_duration_ms
-        self._last_wire_mode = "SEARCH"
+        self._last_wire_mode = None
         self._log(
             f"[MOTION][PULSE] seq={seq} mode=SEARCH vx_mps={vx_mps:.3f} "
             f"vy_mps={vy_mps:.3f} wz_radps={wz_radps:.3f} duration_ms={duration} reason={reason}"

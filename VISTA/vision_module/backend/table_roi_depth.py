@@ -16,6 +16,7 @@ def table_roi_depth_statistics(
     table_roi_xyxy: Optional[Sequence[float]],
     *,
     current_table_bbox_found: bool = True,
+    allow_without_table_bbox: bool = False,
     min_valid_ratio: float = 0.20,
     min_sample_count: int = 64,
     min_depth_m: float = 0.05,
@@ -33,7 +34,7 @@ def table_roi_depth_statistics(
         "table_roi_depth_bbox_norm": None,
         "table_roi_depth_coord_space": "depth_frame_xyxy",
     }
-    if not current_table_bbox_found or not isinstance(depth_frame, np.ndarray) or depth_frame.ndim != 2 or depth_frame.size == 0 or not table_roi_xyxy or len(table_roi_xyxy) < 4:
+    if (not current_table_bbox_found and not allow_without_table_bbox) or not isinstance(depth_frame, np.ndarray) or depth_frame.ndim != 2 or depth_frame.size == 0 or not table_roi_xyxy or len(table_roi_xyxy) < 4:
         return out
     h, w = depth_frame.shape
     try:

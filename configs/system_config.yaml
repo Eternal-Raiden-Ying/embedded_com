@@ -291,19 +291,19 @@ orchestrator:
     edge_final_enter_margin_m: 0.06 # Edge distance margin to enter final servo
     edge_final_stop_margin_m: 0.02 # Edge distance margin for final stop confirmation
     close_range_enter_p10_m: 0.55 # ROI depth threshold to latch close range
-    final_probe_vx_mps: 0.008 # Final probe forward speed
-    final_missing_probe_vx_mps: 0.004 # Final probe speed when final signal is missing
-    close_range_probe_vx_mps: 0.008 # Close-range probe forward speed
-    close_range_missing_probe_vx_mps: 0.004 # Close-range probe speed when depth is missing
+    final_probe_vx_mps: 0.015 # Final probe forward speed
+    final_missing_probe_vx_mps: 0.008 # Final probe speed when final signal is missing
+    close_range_probe_vx_mps: 0.015 # Close-range probe forward speed
+    close_range_missing_probe_vx_mps: 0.008 # Close-range probe speed when depth is missing
     roi_final_stop_p10_m: 0.42 # ROI P10 threshold for final lock stop
     roi_final_slow_p10_m: 0.52 # ROI P10 threshold for slow final probe
-    roi_final_probe_vx_mps: 0.008 # ROI final probe forward speed
-    roi_final_missing_probe_vx_mps: 0.004 # ROI final probe speed when depth is missing
+    roi_final_probe_vx_mps: 0.015 # ROI final probe forward speed
+    roi_final_missing_probe_vx_mps: 0.008 # ROI final probe speed when depth is missing
     roi_final_missing_hold_s: 0.8 # ROI missing hold before zero forward
     depth_envelope_stop_p10_m: 0.35 # Depth envelope hard stop threshold
     depth_envelope_slow_p10_m: 0.50 # Depth envelope slow threshold
     depth_envelope_mid_p10_m: 0.70 # Depth envelope mid threshold
-    depth_envelope_slow_vx_mps: 0.006 # Depth envelope slow forward cap
+    depth_envelope_slow_vx_mps: 0.012 # Depth envelope slow forward cap
     depth_envelope_mid_vx_mps: 0.015 # Depth envelope mid forward cap
     yolo_table_lost_to_search_frames: 8 # Frame drop threshold to trigger search
     no_table_bbox_timeout_s: 10.0 # Timeout only when YOLO table bbox is also absent
@@ -326,7 +326,7 @@ orchestrator:
     final_lock_enter_yaw_th_rad: 0.10 # Heading threshold to enter final lock
     final_dist_deadband_m: 0.030 # Final distance deadband
     final_dist_kp: 0.080 # Final distance proportional gain
-    final_forward_vx_max_mps: 0.006 # Final forward speed cap
+    final_forward_vx_max_mps: 0.015 # Final forward speed cap
     final_reverse_vx_max_mps: 0.004 # Final reverse speed cap
     final_reverse_confirm_frames: 3 # Reverse confirmation frames
     final_yaw_deadband_rad: 0.12 # Final yaw deadband
@@ -353,9 +353,9 @@ orchestrator:
     target_lateral_align_center_x_target: 0.50 # Desired target bbox center x
     target_lateral_align_center_x_tol: 0.06 # Center tolerance for lock
     target_lateral_align_center_x_deadband: 0.03 # No-motion deadband
-    target_lateral_align_kp_vy: 0.05 # Lateral proportional gain
-    target_lateral_align_vy_min_mps: 0.008 # Minimum lateral command
-    target_lateral_align_vy_max_mps: 0.025 # Maximum lateral command
+    target_lateral_align_kp_vy: 0.10 # Lateral proportional gain
+    target_lateral_align_vy_min_mps: 0.016 # Minimum lateral command
+    target_lateral_align_vy_max_mps: 0.050 # Maximum lateral command
     target_lateral_align_stable_frames: 3 # Consecutive centered frames
     target_lateral_align_lost_hold_s: 0.80 # Hold duration after target loss
     target_lateral_align_timeout_s: 12.0 # Target lateral align timeout
@@ -459,7 +459,7 @@ orchestrator:
     table_pose_missing_safe_vx_mps: 0.040 # Safe speed on brief perception loss
     table_pose_missing_max_hold_s: 3.0 # Duration to keep moving on loss
     table_final_lock_vx_min_mps: 0.000 # Minimum forward speed in final lock
-    table_final_lock_vx_max_mps: 0.008 # Maximum forward speed in final lock
+    table_final_lock_vx_max_mps: 0.015 # Maximum forward speed in final lock
     table_final_lock_vy_min_mps: 0.006 # Minimum lateral speed in final lock
     table_final_lock_vy_max_mps: 0.012 # Maximum lateral speed in final lock
     table_final_lock_wz_min_radps: 0.010 # Minimum rotation speed in final lock
