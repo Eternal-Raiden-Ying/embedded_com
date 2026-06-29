@@ -578,6 +578,10 @@ def _load_and_merge_stage_params(config: SystemGlobalConfig, file_path: Path) ->
             ctrl.lateral_priority_mid_vx_cap_mps = _sf(td["lateral_priority_mid_vx_cap_mps"])
         if "lateral_priority_vx_cap_mps" in td:
             ctrl.lateral_priority_vx_cap_mps = _sf(td["lateral_priority_vx_cap_mps"])
+        if "edge_yaw_align_allow_lateral" in td:
+            ctrl.edge_yaw_align_allow_lateral = _sb(td["edge_yaw_align_allow_lateral"])
+        if "edge_yaw_align_lateral_vy_max_mps" in td:
+            ctrl.edge_yaw_align_lateral_vy_max_mps = _sf(td["edge_yaw_align_lateral_vy_max_mps"])
         if "yaw_flip_hold_window_s" in td:
             ctrl.yaw_flip_hold_window_s = _sf(td["yaw_flip_hold_window_s"])
         if "yaw_flip_count_limit" in td:

@@ -6,14 +6,14 @@ def _base_summary(**extra):
     summary = {
         "lateral_enabled": True,
         "distance_scaled_lateral_enabled": True,
-        "lateral_kp": 0.10,
-        "lateral_deadband_norm": 0.025,
-        "lateral_distance_ref_m": 0.80,
-        "lateral_distance_scale_min": 1.0,
-        "lateral_distance_scale_max": 4.0,
-        "far_lateral_vy_max_mps": 0.15,
-        "mid_lateral_vy_max_mps": 0.08,
-        "near_lateral_vy_max_mps": 0.030,
+        "lateral_kp": 0.30,
+        "lateral_deadband_norm": 0.020,
+        "lateral_distance_ref_m": 0.50,
+        "lateral_distance_scale_min": 0.80,
+        "lateral_distance_scale_max": 2.0,
+        "far_lateral_vy_max_mps": 0.18,
+        "mid_lateral_vy_max_mps": 0.14,
+        "near_lateral_vy_max_mps": 0.060,
         "min_forward_vx_mps": 0.04,
         "bbox_track_forward_vx_mps": 0.10,
         "bbox_track_forward_max_vx_mps": 0.20,
@@ -36,16 +36,19 @@ def _base_summary(**extra):
         "depth_envelope_mid_p10_m": 0.70,
         "depth_envelope_slow_vx_mps": 0.006,
         "depth_envelope_mid_vx_mps": 0.015,
-        "lateral_priority_mid_error_norm": 0.10,
-        "lateral_priority_large_error_norm": 0.18,
+        "lateral_priority_mid_error_norm": 0.99,
+        "lateral_priority_large_error_norm": 0.99,
         "lateral_priority_mid_vx_cap_mps": 0.08,
         "lateral_priority_vx_cap_mps": 0.04,
+        "edge_yaw_align_allow_lateral": True,
+        "edge_yaw_align_lateral_vy_max_mps": 0.08,
         "edge_yaw_control_enter_rad": 0.30,
         "edge_yaw_control_exit_rad": 0.12,
         "edge_yaw_reject_rad": 1.40,
         "edge_yaw_kp": 0.22,
         "edge_yaw_min_wz_radps": 0.08,
         "edge_yaw_max_wz_radps": 0.18,
+        "table_plane_yaw_sign": -1.0,
     }
     summary.update(extra)
     return summary
@@ -75,11 +78,31 @@ def test_distance_scaled_lateral_direction_and_distance_gain():
     assert mid.final_vy < 0.0
     assert abs(far.final_vy) > abs(mid.final_vy)
 
+    strong_mid = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        intent,
+        _base_summary(**{**common, "bbox_center_error": 0.20}, table_roi_depth_p10=0.75),
+    )
+    assert strong_mid.final_vy < 0.0
+    assert abs(strong_mid.final_vy) >= 0.06
+    assert abs(strong_mid.summary["lateral_distance_scale"] - 1.5) < 1e-9
+
+    stronger_mid = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        intent,
+        _base_summary(**{**common, "bbox_center_error": 0.30}, table_roi_depth_p10=0.75),
+    )
+    assert stronger_mid.final_vy < 0.0
+    assert abs(stronger_mid.final_vy) >= 0.10
+    assert abs(stronger_mid.final_vy) <= stronger_mid.summary["far_lateral_vy_max_mps"]
+
     left = arbitrate_table_docking_motion(
         RuntimeContext(state=State.YOLO_APPROACH),
         None,
         intent,
-        _base_summary(**{**common, "bbox_center_error": -0.10}, table_roi_depth_p10=1.60),
+        _base_summary(**{**common, "bbox_center_error": -0.25}, table_roi_depth_p10=1.60),
     )
     assert left.final_vy > 0.0
 
@@ -192,7 +215,7 @@ def test_near_p10_enters_close_range_but_edge_remains_priority_when_usable():
     assert 0.0 <= result.final_vx <= 0.006
 
 
-def test_depth_envelope_and_lateral_priority_caps_forward_speed_but_keeps_vy():
+def test_depth_envelope_caps_near_speed_but_lateral_priority_keeps_far_vx_fast():
     intent = MotionIntent("yolo_track_forward", desired_vx=0.20, desired_wz=0.0, yaw_owner="bbox", forward_allowed_by_behavior=True)
     mid_depth = arbitrate_table_docking_motion(
         RuntimeContext(state=State.YOLO_APPROACH),
@@ -237,7 +260,7 @@ def test_depth_envelope_and_lateral_priority_caps_forward_speed_but_keeps_vy():
             table_roi_depth_p10=1.30,
         ),
     )
-    assert 0.0 < mid_error.final_vx <= 0.08
+    assert mid_error.final_vx >= 0.19
     assert mid_error.final_vy != 0.0
 
     large_error = arbitrate_table_docking_motion(
@@ -254,8 +277,8 @@ def test_depth_envelope_and_lateral_priority_caps_forward_speed_but_keeps_vy():
             bbox_track_forward_center_band=0.45,
         ),
     )
-    assert 0.0 < large_error.final_vx <= 0.04
-    assert large_error.final_vy != 0.0
+    assert large_error.final_vx >= 0.19
+    assert abs(large_error.final_vy) >= 0.10
 
 
 def test_final_roi_latch_stops_on_p10_and_disables_yaw():
@@ -537,6 +560,7 @@ def test_non_final_edge_yaw_large_never_outputs_all_zero():
     assert result.final_vx == 0.0
     assert result.final_vy == 0.0
     assert abs(result.final_wz) >= result.summary["edge_yaw_min_wz_radps"]
+    assert result.final_wz < 0.0
 
 
 def test_large_edge_yaw_takes_yaw_owner_before_close_range():
@@ -565,8 +589,39 @@ def test_large_edge_yaw_takes_yaw_owner_before_close_range():
     assert result.summary["yaw_owner"] == "edge"
     assert result.summary["yaw_source"] == "edge"
     assert abs(result.final_wz) >= result.summary["edge_yaw_min_wz_radps"]
+    assert result.final_wz < 0.0
     assert result.final_vx == 0.0
-    assert result.final_vy == 0.0
+    assert result.summary["lateral_owner"] == "bbox"
+    assert result.final_vy < 0.0
+    assert abs(result.final_vy) <= result.summary["edge_yaw_align_lateral_vy_max_mps"]
+
+
+def test_edge_yaw_control_keeps_bbox_lateral_capped():
+    result = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("edge_guided_forward", desired_vx=0.08, desired_wz=0.0, yaw_owner="bbox", forward_allowed_by_behavior=True),
+        _base_summary(
+            control_phase="EDGE_GUIDED_APPROACH",
+            edge_found=True,
+            edge_valid=True,
+            usable_for_approach=True,
+            bbox_center_valid=True,
+            bbox_center_error=0.30,
+            yolo_forward_allowed=True,
+            yaw_err_rad=0.60,
+            edge_yaw=0.60,
+            table_roi_depth_valid=True,
+            table_roi_depth_p10=1.60,
+        ),
+    )
+
+    assert result.summary["edge_yaw_control_active"] is True
+    assert result.summary["yaw_owner"] == "edge"
+    assert result.summary["lateral_owner"] == "bbox"
+    assert result.final_wz < 0.0
+    assert result.final_vy < 0.0
+    assert abs(result.final_vy) == result.summary["edge_yaw_align_lateral_vy_max_mps"]
 
 
 def test_one_rad_edge_yaw_is_still_correction_not_reject():
@@ -590,6 +645,29 @@ def test_one_rad_edge_yaw_is_still_correction_not_reject():
     assert result.summary["edge_yaw_rejected_near_vertical"] is False
     assert result.summary["yaw_owner"] == "edge"
     assert abs(result.final_wz) >= result.summary["edge_yaw_min_wz_radps"]
+    assert result.final_wz < 0.0
+
+
+def test_large_negative_edge_yaw_uses_positive_wz_with_configured_sign():
+    result = arbitrate_table_docking_motion(
+        RuntimeContext(state=State.YOLO_APPROACH),
+        None,
+        MotionIntent("edge_guided_forward", desired_vx=0.08, desired_wz=0.0, yaw_owner="bbox", forward_allowed_by_behavior=True),
+        _base_summary(
+            control_phase="EDGE_GUIDED_APPROACH",
+            edge_found=True,
+            edge_valid=True,
+            usable_for_approach=True,
+            yaw_err_rad=-0.60,
+            edge_yaw=-0.60,
+            table_roi_depth_valid=True,
+            table_roi_depth_p10=1.20,
+        ),
+    )
+
+    assert result.summary["edge_yaw_control_active"] is True
+    assert result.summary["edge_yaw_sign"] == -1.0
+    assert result.final_wz > 0.0
 
 
 def test_near_vertical_edge_yaw_is_marked_rejected_for_fallback():

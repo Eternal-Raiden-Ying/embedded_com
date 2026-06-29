@@ -81,20 +81,22 @@ table_docking:
   edge_readiness_yaw_max_rad: 0.31
   edge_handoff_forward_vx_mps: 0.08
   lateral_enabled: true
-  lateral_vy_max_mps: 0.15
-  lateral_kp: 0.10
-  lateral_deadband_norm: 0.025
+  lateral_vy_max_mps: 0.18
+  lateral_kp: 0.30
+  lateral_deadband_norm: 0.020
   distance_scaled_lateral_enabled: true
-  lateral_distance_ref_m: 0.80
-  lateral_distance_scale_min: 1.0
-  lateral_distance_scale_max: 4.0
-  far_lateral_vy_max_mps: 0.15
-  mid_lateral_vy_max_mps: 0.08
-  near_lateral_vy_max_mps: 0.030
-  lateral_priority_mid_error_norm: 0.10
-  lateral_priority_large_error_norm: 0.18
+  lateral_distance_ref_m: 0.50
+  lateral_distance_scale_min: 0.80
+  lateral_distance_scale_max: 2.00
+  far_lateral_vy_max_mps: 0.18
+  mid_lateral_vy_max_mps: 0.14
+  near_lateral_vy_max_mps: 0.060
+  lateral_priority_mid_error_norm: 0.99
+  lateral_priority_large_error_norm: 0.99
   lateral_priority_mid_vx_cap_mps: 0.08
   lateral_priority_vx_cap_mps: 0.04
+  edge_yaw_align_allow_lateral: true
+  edge_yaw_align_lateral_vy_max_mps: 0.08
   yaw_flip_hold_window_s: 0.8
   yaw_flip_count_limit: 2
   yaw_ambiguous_wz_cap: 0.0
@@ -142,18 +144,20 @@ table_docking:
     assert abs(loaded_ctrl.bbox_track_forward_max_wz_radps - 0.20) < 1e-9
     assert abs(loaded_ctrl.edge_readiness_yaw_max_rad - 0.31) < 1e-9
     assert abs(loaded_ctrl.edge_handoff_forward_vx_mps - 0.08) < 1e-9
-    assert abs(loaded_ctrl.lateral_vy_max_mps - 0.15) < 1e-9
-    assert abs(loaded_ctrl.lateral_kp - 0.10) < 1e-9
-    assert abs(loaded_ctrl.lateral_deadband_norm - 0.025) < 1e-9
+    assert abs(loaded_ctrl.lateral_vy_max_mps - 0.18) < 1e-9
+    assert abs(loaded_ctrl.lateral_kp - 0.30) < 1e-9
+    assert abs(loaded_ctrl.lateral_deadband_norm - 0.020) < 1e-9
     assert loaded_ctrl.distance_scaled_lateral_enabled is True
-    assert abs(loaded_ctrl.lateral_distance_ref_m - 0.80) < 1e-9
-    assert abs(loaded_ctrl.far_lateral_vy_max_mps - 0.15) < 1e-9
-    assert abs(loaded_ctrl.mid_lateral_vy_max_mps - 0.08) < 1e-9
-    assert abs(loaded_ctrl.near_lateral_vy_max_mps - 0.030) < 1e-9
-    assert abs(loaded_ctrl.lateral_priority_mid_error_norm - 0.10) < 1e-9
-    assert abs(loaded_ctrl.lateral_priority_large_error_norm - 0.18) < 1e-9
+    assert abs(loaded_ctrl.lateral_distance_ref_m - 0.50) < 1e-9
+    assert abs(loaded_ctrl.far_lateral_vy_max_mps - 0.18) < 1e-9
+    assert abs(loaded_ctrl.mid_lateral_vy_max_mps - 0.14) < 1e-9
+    assert abs(loaded_ctrl.near_lateral_vy_max_mps - 0.060) < 1e-9
+    assert abs(loaded_ctrl.lateral_priority_mid_error_norm - 0.99) < 1e-9
+    assert abs(loaded_ctrl.lateral_priority_large_error_norm - 0.99) < 1e-9
     assert abs(loaded_ctrl.lateral_priority_mid_vx_cap_mps - 0.08) < 1e-9
     assert abs(loaded_ctrl.lateral_priority_vx_cap_mps - 0.04) < 1e-9
+    assert loaded_ctrl.edge_yaw_align_allow_lateral is True
+    assert abs(loaded_ctrl.edge_yaw_align_lateral_vy_max_mps - 0.08) < 1e-9
     assert abs(loaded_ctrl.yaw_flip_hold_window_s - 0.8) < 1e-9
     assert loaded_ctrl.yaw_flip_count_limit == 2
     assert abs(loaded_ctrl.yaw_ambiguous_wz_cap - 0.0) < 1e-9

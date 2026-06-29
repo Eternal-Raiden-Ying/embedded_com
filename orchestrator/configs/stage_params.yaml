@@ -32,7 +32,7 @@ table_docking:
   controlled_approach_min_dwell_s: 0.8
   search_wz_radps: 0.20
   near_slow_max_vx_mps: 0.03
-  near_slow_max_vy_mps: 0.030
+  near_slow_max_vy_mps: 0.040
   final_servo_enter_p10_m: 0.45
   edge_final_enter_margin_m: 0.06
   edge_final_stop_margin_m: 0.02
@@ -70,22 +70,24 @@ table_docking:
   far_forward_commit_min_s: 2.0
   stop_after_table_docking: true
   lateral_enabled: true
-  lateral_vy_max_mps: 0.15
-  lateral_deadband_norm: 0.025
-  lateral_kp: 0.10
+  lateral_vy_max_mps: 0.18
+  lateral_deadband_norm: 0.020
+  lateral_kp: 0.30
   lateral_target_center_x_norm: 0.5
   lateral_owner_default: none
   distance_scaled_lateral_enabled: true
-  lateral_distance_ref_m: 0.80
-  lateral_distance_scale_min: 1.0
-  lateral_distance_scale_max: 4.0
-  far_lateral_vy_max_mps: 0.15
-  mid_lateral_vy_max_mps: 0.08
-  near_lateral_vy_max_mps: 0.030
-  lateral_priority_mid_error_norm: 0.10
-  lateral_priority_large_error_norm: 0.18
+  lateral_distance_ref_m: 0.50
+  lateral_distance_scale_min: 0.80
+  lateral_distance_scale_max: 2.00
+  far_lateral_vy_max_mps: 0.18
+  mid_lateral_vy_max_mps: 0.14
+  near_lateral_vy_max_mps: 0.060
+  lateral_priority_mid_error_norm: 0.99
+  lateral_priority_large_error_norm: 0.99
   lateral_priority_mid_vx_cap_mps: 0.08
   lateral_priority_vx_cap_mps: 0.04
+  edge_yaw_align_allow_lateral: true
+  edge_yaw_align_lateral_vy_max_mps: 0.08
   yaw_flip_hold_window_s: 0.8
   yaw_flip_count_limit: 2
   yaw_ambiguous_wz_cap: 0.0
