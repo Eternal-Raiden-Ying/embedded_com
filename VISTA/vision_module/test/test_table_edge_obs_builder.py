@@ -17,6 +17,29 @@ from vision_module.app.stages.search.table_edge_obs_builder import (
 )
 
 class TestTableEdgeObsBuilder(unittest.TestCase):
+    def test_confidence_backfills_zero_edge_conf(self):
+        obs = {
+            "edge_found": True,
+            "edge_valid": True,
+            "confidence": 0.82,
+            "edge_conf": 0.0,
+            "edge_confidence": 0.0,
+        }
+        annotated = annotate_table_edge_obs(obs, tick_ts=100.0, source="results", source_mode="FIND_EDGE")
+        self.assertAlmostEqual(annotated["edge_conf"], 0.82)
+        self.assertAlmostEqual(annotated["edge_confidence"], 0.82)
+
+    def test_lateral_missing_does_not_fallback_to_dist(self):
+        obs = {
+            "edge_found": True,
+            "edge_valid": True,
+            "confidence": 0.82,
+            "dist_err_m": 1.2,
+        }
+        annotated = annotate_table_edge_obs(obs, tick_ts=100.0, source="results", source_mode="FIND_EDGE")
+        self.assertIsNone(annotated["lateral"])
+        self.assertIsNone(annotated["lateral_err_m"])
+        self.assertEqual(annotated["lateral_source"], "missing")
 
     def test_annotate_priority_trusted(self):
         # Case 1: edge_trusted is True
@@ -109,7 +132,8 @@ class TestTableEdgeObsBuilder(unittest.TestCase):
         self.assertEqual(annotated["yaw"], 0.1)
         self.assertEqual(annotated["dist_err"], 0.2)
         self.assertEqual(annotated["dist"], 0.2)
-        self.assertEqual(annotated["lateral"], 0.2)
+        self.assertIsNone(annotated["lateral"])
+        self.assertIsNone(annotated["lateral_err_m"])
         self.assertEqual(annotated["support_count"], 15)
         self.assertEqual(annotated["fast_support_point_count"], 15)
         self.assertEqual(annotated["inlier_count"], 8)

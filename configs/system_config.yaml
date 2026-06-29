@@ -59,14 +59,14 @@ vision:
         source: "6" # Camera identifier for rgb stream
         in_w: 1280 # Input frame width
         in_h: 720 # Input frame height
-        out_w: 640 # Output processed width
-        out_h: 640 # Output processed height
+        out_w: 1280 # Output processed width
+        out_h: 720 # Output processed height
         in_format: "YUY2" # Video format from camera
         format: "BGR" # Color space target
         fps: 30 # Frame rate
-        crop_x: 280 # Horizontal crop start pixel
+        crop_x: 0 # Horizontal crop start pixel
         crop_y: 0 # Vertical crop start pixel
-        crop_w: 720 # Crop width
+        crop_w: 1280 # Crop width
         crop_h: 720 # Crop height
         enable: true # Stream enabled status
         auto_exposure: true # Enable auto exposure
@@ -379,7 +379,7 @@ orchestrator:
     enable_pick_pipeline: false # Enable picker robot subsystem integration
     assume_grasp_success_for_test: false # Bypass hardware checks during test
   car:
-    search_table_wz_radps: 0.10 # Rotational velocity to search for table
+    search_table_wz_radps: 0.5 # Rotational velocity to search for table
     fallback_align_turn_wz_min_radps: 0.10 # Minimum rotation velocity in fallback
     fallback_align_turn_wz_max_radps: 0.45 # Maximum rotation velocity in fallback
     fallback_forward_vx_mps_min: 0.06 # Minimum forward velocity in fallback
@@ -395,14 +395,14 @@ orchestrator:
     table_coarse_align_vy_max_mps: 0.000 # Maximum lateral velocity in coarse align
     table_coarse_align_wz_min_radps: 0.080 # Minimum rotation velocity in coarse align
     table_coarse_align_wz_max_radps: 0.150 # Maximum rotation velocity in coarse align
-    table_controlled_vx_min_mps: 0.020 # Minimum forward velocity in controlled approach
-    table_controlled_vx_max_mps: 0.035 # Maximum forward velocity in controlled approach
+    table_controlled_vx_min_mps: 0.1 # Minimum forward velocity in controlled approach0.04
+    table_controlled_vx_max_mps: 0.12 # Maximum forward velocity in controlled approach0.12
     table_controlled_vy_min_mps: 0.000 # Minimum lateral velocity in controlled approach
     table_controlled_vy_max_mps: 0.000 # Maximum lateral velocity in controlled approach
     table_controlled_wz_min_radps: 0.000 # Minimum rotation velocity in controlled approach
     table_controlled_wz_max_radps: 0.150 # Maximum rotation velocity in controlled approach
-    table_approach_safe_vx_mps: 0.020 # Safe forward velocity limit in approach
-    table_approach_max_vx_mps: 0.035 # Maximum forward velocity limit in approach
+    table_approach_safe_vx_mps: 0.1 # Safe forward velocity limit in approach
+    table_approach_max_vx_mps: 0.12 # Maximum forward velocity limit in approach
     table_approach_yaw_deadband_rad: 0.08 # Deadband for heading corrections
     table_approach_yaw_realign_rad: 0.16 # Heading error forcing stop and align
     table_approach_allow_wz: false # Enable heading correction during approach
@@ -423,8 +423,8 @@ orchestrator:
     table_stage_c_vx_max_mps: 0.03 # Docking phase forward velocity limit
     table_stage_c_vx_min_mps: 0.0 # Docking phase minimum forward velocity
     table_min_forward_dist_err_m: 0.07 # Minimum distance to target
-    table_vx_mps_min: 0.040 # Base forward speed
-    table_vx_mps_max: 0.100 # Peak forward speed
+    table_vx_mps_min: 0.10 # Base forward speed
+    table_vx_mps_max: 0.200 # Peak forward speed
     table_vx_kp_mps_per_m: 0.30 # Forward speed gain factor
     table_yaw_slow_th_rad: 0.12 # Heading error requiring deceleration
     table_yaw_stop_th_rad: 0.45 # Heading error forcing stop

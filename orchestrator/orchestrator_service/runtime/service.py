@@ -34,6 +34,66 @@ from .common import RunLogger, ensure_dir, safe_dump
 from .state_machine import OrchestratorCore
 
 
+_CONTROL_SUMMARY_KEYS = (
+    "state",
+    "docking_action",
+    "docking_reason",
+    "vx_mps",
+    "vy_mps",
+    "wz_radps",
+    "yaw_owner",
+    "forward_owner",
+    "lateral_owner",
+    "effective_block_reason",
+    "table_bbox_control_valid",
+    "bbox_center_error",
+    "fov_guard_level",
+    "table_roi_depth_valid",
+    "table_roi_depth_p10",
+    "table_roi_depth_median",
+    "edge_valid",
+    "edge_ready_for_approach",
+    "edge_ready_for_final",
+    "edge_lost_age_s",
+    "yaw_err_rad",
+    "near_table_latched",
+    "final_depth_latched",
+    "final_locked",
+    "final_lock_reason",
+    "depth_speed_envelope_reason",
+    "depth_speed_envelope_vx_cap",
+)
+
+
+def sanitize_control_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
+    src = dict(summary or {})
+    out: Dict[str, Any] = {}
+    for key in _CONTROL_SUMMARY_KEYS:
+        value = src.get(key)
+        if key == "vx_mps":
+            value = src.get("vx_mps", src.get("final_vx", 0.0))
+        elif key == "vy_mps":
+            value = src.get("vy_mps", src.get("final_vy", 0.0))
+        elif key == "wz_radps":
+            value = src.get("wz_radps", src.get("final_wz", 0.0))
+        elif key == "table_bbox_control_valid":
+            value = src.get("table_bbox_control_valid", src.get("bbox_center_valid", src.get("yolo_table_control_valid", False)))
+        elif key == "bbox_center_error":
+            value = src.get("bbox_center_error", src.get("bbox_center_error_control", src.get("center_error")))
+        elif key == "fov_guard_level":
+            value = src.get("fov_guard_level", src.get("bbox_fov_guard_level", "none"))
+        elif key == "edge_valid":
+            value = src.get("edge_valid", src.get("edge_found", False))
+        elif key == "effective_block_reason":
+            try:
+                moving = any(abs(float(src.get(name, 0.0) or 0.0)) > 1e-9 for name in ("vx_mps", "vy_mps", "wz_radps"))
+            except Exception:
+                moving = False
+            value = "" if moving else str(src.get("effective_block_reason") or src.get("blocked_by") or "")
+        out[key] = value
+    return out
+
+
 class OrchestratorService(BaseModule):
     def __init__(self, cfg: OrchestratorConfig):
         self.cfg = cfg
@@ -905,9 +965,6 @@ class OrchestratorService(BaseModule):
             "docking_stage",
             "docking_action",
             "docking_reason",
-            "candidate_cmd",
-            "arbiter_final_cmd",
-            "service_effective_cmd",
             "uart_tx_cmd",
             "writer_accept_cmd",
             "uart_tx_ok",
@@ -948,6 +1005,11 @@ class OrchestratorService(BaseModule):
             "motion_class",
             "motion_intent_type",
             "yaw_owner",
+            "forward_owner",
+            "lateral_owner",
+            "lateral_err_norm",
+            "lateral_err_m",
+            "lateral_source",
             "arbitration_reason",
             "blocked_by",
             "fov_guard_level",
@@ -2703,7 +2765,7 @@ class OrchestratorService(BaseModule):
 
     def _emit_operator_control(self, decision) -> None:
         summary = self._control_summary_with_context(decision)
-        self.run_logger.write_jsonl("control_summary", summary)
+        self.run_logger.write_jsonl("control_summary", sanitize_control_summary(summary))
         self._emit_motion_gate_trace(summary)
         state = str(summary.get("state") or self.core.ctx.state.value)
         self._emit_demo_health(summary)
@@ -2738,7 +2800,7 @@ class OrchestratorService(BaseModule):
             center_error = self._motion_num(cx_norm) - 0.5
         yaw_err = self._motion_num(summary.get("yaw_err_rad", summary.get("yaw_err", 0.0)))
         dist_err = self._motion_num(summary.get("dist_err_m", 0.0))
-        target_dist = self._motion_num(summary.get("target_dist_m", getattr(self.cfg.control, "table_target_dist_m", 0.5)), 0.5)
+        target_dist = self._motion_num(summary.get("target_dist_m", getattr(self.cfg.control, "table_target_dist_m", 0.3)), 0.3)
         hard_yaw = abs(self._motion_num(summary.get("hard_rotate_only_yaw_rad", getattr(self.cfg.car, "table_edge_hard_rotate_only_yaw_rad", 0.45)), 0.45))
         tolerance = max(0.0, self._motion_num(getattr(self.cfg.control, "final_lock_dist_tol_m", 0.02), 0.02))
         yolo_visible = bool(summary.get("yolo_table_visible") or summary.get("table_bbox_found"))
@@ -2756,9 +2818,6 @@ class OrchestratorService(BaseModule):
             "docking_stage": summary.get("docking_stage") or "",
             "docking_action": summary.get("docking_action") or "",
             "docking_reason": summary.get("docking_reason") or "",
-            "candidate_cmd": summary.get("candidate_cmd"),
-            "arbiter_final_cmd": summary.get("arbiter_final_cmd"),
-            "service_effective_cmd": summary.get("service_effective_cmd"),
             "uart_tx_cmd": summary.get("uart_tx_cmd"),
             "control_source": summary.get("control_source") or "",
             "motion_intent_type": summary.get("motion_intent_type") or summary.get("control_source") or "",
@@ -2769,6 +2828,8 @@ class OrchestratorService(BaseModule):
             "stop_class": summary.get("stop_class") or "none",
             "blocked_by": summary.get("blocked_by") or "",
             "yaw_owner": summary.get("yaw_owner") or yaw_source,
+            "forward_owner": summary.get("forward_owner") or forward_source or "none",
+            "lateral_owner": summary.get("lateral_owner") or "none",
             "yaw_source": yaw_source,
             "forward_source": forward_source,
             "stop_source": stop_source,
@@ -2790,9 +2851,6 @@ class OrchestratorService(BaseModule):
             "vx_mps": vx,
             "vy_mps": vy,
             "wz_radps": wz,
-            "candidate_cmd": summary.get("candidate_cmd"),
-            "arbiter_final_cmd": summary.get("arbiter_final_cmd"),
-            "service_effective_cmd": summary.get("service_effective_cmd"),
             "uart_tx_cmd": summary.get("uart_tx_cmd"),
             "forward_block_reason": summary.get("forward_block_reason") or "",
             "rotate_block_reason": summary.get("rotate_block_reason") or "",
@@ -2815,6 +2873,13 @@ class OrchestratorService(BaseModule):
             "approach_commit_active": bool(summary.get("approach_commit_active", False)),
             "forward_coast_active": bool(summary.get("forward_coast_active", False)),
             "edge_conf_score": summary.get("edge_conf_score", 0.0),
+            "edge_handoff_block_reason": summary.get("edge_handoff_block_reason", ""),
+            "edge_handoff_source": summary.get("edge_handoff_source", ""),
+            "bbox_track_elapsed_ms": summary.get("bbox_track_elapsed_ms", 0.0),
+            "bbox_track_exit_reason": summary.get("bbox_track_exit_reason", ""),
+            "lateral_err_norm": summary.get("lateral_err_norm"),
+            "lateral_err_m": summary.get("lateral_err_m"),
+            "lateral_source": summary.get("lateral_source", ""),
             "last_edge_yaw_cmd": summary.get("last_edge_yaw_cmd", 0.0),
             "zero_cmd_age_ms": summary.get("zero_cmd_age_ms", 0.0),
             "zero_escape_reason": summary.get("zero_escape_reason", ""),
@@ -3163,28 +3228,8 @@ class OrchestratorService(BaseModule):
         cmd = decision.cmd
         summary = dict(getattr(decision, "control_summary", None) or {})
         
-        # Populate candidate_cmd and arbiter_final_cmd if not set (e.g. non-docking phases)
-        if "candidate_cmd" not in summary:
-            summary["candidate_cmd"] = {
-                "vx_mps": float(getattr(cmd, "vx_mps", 0.0) or 0.0),
-                "vy_mps": float(getattr(cmd, "vy_mps", 0.0) or 0.0),
-                "wz_radps": float(getattr(cmd, "wz_radps", 0.0) or 0.0),
-            }
-        if "arbiter_final_cmd" not in summary:
-            summary["arbiter_final_cmd"] = {
-                "vx_mps": float(getattr(cmd, "vx_mps", 0.0) or 0.0),
-                "vy_mps": float(getattr(cmd, "vy_mps", 0.0) or 0.0),
-                "wz_radps": float(getattr(cmd, "wz_radps", 0.0) or 0.0),
-            }
-
         effective_cmd, uart_arbitration = self._arbitrate_uart_motion_cmd(cmd, summary)
         summary.update(uart_arbitration)
-        
-        summary["service_effective_cmd"] = {
-            "vx_mps": float(effective_cmd.vx_mps),
-            "vy_mps": float(effective_cmd.vy_mps),
-            "wz_radps": float(effective_cmd.wz_radps),
-        }
         
         allow_send = bool(summary.get("allow_uart_send", True))
         if allow_send:
@@ -3214,9 +3259,6 @@ class OrchestratorService(BaseModule):
             "docking_stage": summary.get("docking_stage") or "",
             "docking_action": summary.get("docking_action") or "",
             "docking_reason": summary.get("docking_reason") or "",
-            "candidate_cmd": summary.get("candidate_cmd"),
-            "arbiter_final_cmd": summary.get("arbiter_final_cmd"),
-            "service_effective_cmd": summary.get("service_effective_cmd"),
             "uart_tx_cmd": summary.get("uart_tx_cmd"),
             "service_override": bool(summary.get("service_override", False)),
             "writer_accept_cmd": bool(summary.get("allow_uart_send", True)),
@@ -3227,6 +3269,11 @@ class OrchestratorService(BaseModule):
             "table_approach_phase": summary.get("table_approach_phase") or "",
             "motion_intent_type": summary.get("motion_intent_type") or "",
             "yaw_owner": summary.get("yaw_owner") or summary.get("yaw_source") or "",
+            "forward_owner": summary.get("forward_owner") or summary.get("forward_source") or "none",
+            "lateral_owner": summary.get("lateral_owner") or "none",
+            "lateral_err_norm": summary.get("lateral_err_norm"),
+            "lateral_err_m": summary.get("lateral_err_m"),
+            "lateral_source": summary.get("lateral_source") or "",
             "arbitration_reason": summary.get("arbitration_reason") or "",
             "motion_class": summary.get("motion_class") or "",
             "stop_class": summary.get("stop_class") or "none",
@@ -3260,9 +3307,6 @@ class OrchestratorService(BaseModule):
             "docking_stage": summary.get("docking_stage") or "",
             "docking_action": summary.get("docking_action") or "",
             "docking_reason": summary.get("docking_reason") or "",
-            "candidate_cmd": summary.get("candidate_cmd"),
-            "arbiter_final_cmd": summary.get("arbiter_final_cmd"),
-            "service_effective_cmd": summary.get("service_effective_cmd"),
             "uart_tx_cmd": summary.get("uart_tx_cmd"),
             "writer_accept_cmd": bool(summary.get("allow_uart_send", True)),
             "uart_tx_ok": bool(getattr(self, "_last_uart_tx_ok", True)),
@@ -3303,15 +3347,54 @@ class OrchestratorService(BaseModule):
         if self._should_log_motion(motion_signature, now=log_now):
             cmd_record = effective_cmd.to_dict()
             cmd_record.update(self._last_motion_tx_context)
-            self.run_logger.write_jsonl("cmd_vel", cmd_record)
+            slim_cmd_record = {
+                "ts": float(cmd_record.get("ts", time.time())),
+                "mode": str(cmd_record.get("mode", "")),
+                "vx": float(cmd_record.get("vx", cmd_record.get("vx_mps", 0.0))),
+                "vy": float(cmd_record.get("vy", cmd_record.get("vy_mps", 0.0))),
+                "wz": float(cmd_record.get("wz", cmd_record.get("wz_radps", 0.0))),
+                "vx_mps": float(cmd_record.get("vx_mps", 0.0)),
+                "vy_mps": float(cmd_record.get("vy_mps", 0.0)),
+                "wz_radps": float(cmd_record.get("wz_radps", 0.0)),
+                "brake": bool(cmd_record.get("brake", False)),
+                "docking_action": str(cmd_record.get("docking_action") or ""),
+                "docking_reason": str(cmd_record.get("docking_reason") or cmd_record.get("reason") or ""),
+                "yaw_owner": str(cmd_record.get("yaw_owner") or ""),
+                "forward_owner": str(cmd_record.get("forward_owner") or "none"),
+                "lateral_owner": str(cmd_record.get("lateral_owner") or "none"),
+                "effective_block_reason": str(cmd_record.get("effective_block_reason") or cmd_record.get("forward_block_reason") or ""),
+                "uart_tx_ok": bool(cmd_record.get("uart_tx_ok", True)),
+                "service_override_reason": str(cmd_record.get("service_override_reason") or ""),
+            }
+            self.run_logger.write_jsonl("cmd_vel", slim_cmd_record)
             self.run_logger.write_jsonl("car_cmd", car_record)
         self._emit_edge_slide_trace(decision)
 
     def _emit_jog_motion(self, decision, jog_action: str) -> None:
         cmd = decision.cmd
-        self.run_logger.write_jsonl("cmd_vel", cmd.to_dict())
         summary = dict(getattr(decision, "control_summary", None) or {})
-        self.run_logger.write_jsonl("control_summary", summary)
+        cmd_dict = cmd.to_dict()
+        slim_cmd_record = {
+            "ts": float(cmd_dict.get("ts", time.time())),
+            "mode": str(cmd_dict.get("mode", "")),
+            "vx": float(cmd_dict.get("vx", 0.0)),
+            "vy": float(cmd_dict.get("vy", 0.0)),
+            "wz": float(cmd_dict.get("wz", 0.0)),
+            "vx_mps": float(cmd_dict.get("vx_mps", 0.0)),
+            "vy_mps": float(cmd_dict.get("vy_mps", 0.0)),
+            "wz_radps": float(cmd_dict.get("wz_radps", 0.0)),
+            "brake": bool(cmd_dict.get("brake", False)),
+            "docking_action": str(summary.get("docking_action") or ""),
+            "docking_reason": str(summary.get("docking_reason") or summary.get("reason") or ""),
+            "yaw_owner": str(summary.get("yaw_owner") or ""),
+            "forward_owner": str(summary.get("forward_owner") or "none"),
+            "lateral_owner": str(summary.get("lateral_owner") or "none"),
+            "effective_block_reason": str(summary.get("effective_block_reason") or summary.get("forward_block_reason") or ""),
+            "uart_tx_ok": bool(getattr(self, "_last_uart_tx_ok", True)),
+            "service_override_reason": str(summary.get("service_override_reason") or ""),
+        }
+        self.run_logger.write_jsonl("cmd_vel", slim_cmd_record)
+        self.run_logger.write_jsonl("control_summary", sanitize_control_summary(summary))
         reason = str(getattr(decision, "jog_reason", "") or summary.get("reason") or jog_action)
         if jog_action == "forward":
             seq = self.motion_adapter.jog_forward_small(reason=reason)

@@ -8,7 +8,7 @@ final_lock:
   edge_conf_th: 0.55
   stable_ms: 500
   timeout_ms: 14000
-  target_dist_m: 0.50
+  target_dist_m: 0.30
   stop_margin_m: 0.05
   settle_ms: 500
   stable_frames: 5
@@ -21,6 +21,7 @@ final_lock:
 table_docking:
   enable_final_lock: true
   enable_micro_adjust: false
+  table_target_dist_m: 0.30
   final_lock_enter_dist_th_m: 0.08
   final_lock_enter_yaw_th_rad: 0.10
   align_to_approach_yaw_rad: 0.08
@@ -29,8 +30,81 @@ table_docking:
   approach_to_align_stable_obs: 2
   coarse_align_min_dwell_s: 0.8
   controlled_approach_min_dwell_s: 0.8
-  near_slow_max_vx_mps: 0.020
-  near_slow_max_vy_mps: 0.0
+  search_wz_radps: 0.20
+  near_slow_max_vx_mps: 0.03
+  near_slow_max_vy_mps: 0.040
+  final_servo_enter_p10_m: 0.45
+  edge_final_enter_margin_m: 0.06
+  edge_final_stop_margin_m: 0.02
+  close_range_enter_p10_m: 0.55
+  final_probe_vx_mps: 0.008
+  final_missing_probe_vx_mps: 0.004
+  close_range_probe_vx_mps: 0.008
+  close_range_missing_probe_vx_mps: 0.004
+  roi_final_stop_p10_m: 0.42
+  roi_final_slow_p10_m: 0.52
+  roi_final_probe_vx_mps: 0.008
+  roi_final_missing_probe_vx_mps: 0.004
+  roi_final_missing_hold_s: 0.8
+  depth_envelope_stop_p10_m: 0.35
+  depth_envelope_slow_p10_m: 0.50
+  depth_envelope_mid_p10_m: 0.70
+  depth_envelope_slow_vx_mps: 0.006
+  depth_envelope_mid_vx_mps: 0.015
+  bbox_track_forward_enabled: true
+  min_forward_vx_mps: 0.04
+  bbox_track_forward_vx_mps: 0.10
+  bbox_track_forward_max_vx_mps: 0.20
+  bbox_track_forward_center_band: 0.45
+  far_bbox_track_vx_mps: 0.20
+  bbox_track_forward_min_hold_ms: 800
+  bbox_track_forward_max_wz_radps: 0.20
+  edge_readiness_enabled: true
+  edge_readiness_enter_score: 0.65
+  edge_readiness_exit_score: 0.35
+  edge_readiness_rise: 0.15
+  edge_readiness_decay: 0.10
+  edge_readiness_min_inliers: 30
+  edge_readiness_yaw_max_rad: 0.35
+  edge_handoff_min_hold_ms: 800
+  edge_handoff_forward_vx_mps: 0.08
+  forward_commit_min_s: 1.8
+  far_forward_commit_min_s: 2.0
+  stop_after_table_docking: true
+  lateral_enabled: true
+  lateral_vy_max_mps: 0.18
+  lateral_deadband_norm: 0.020
+  lateral_kp: 0.30
+  lateral_target_center_x_norm: 0.5
+  lateral_owner_default: none
+  distance_scaled_lateral_enabled: true
+  lateral_distance_ref_m: 0.50
+  lateral_distance_scale_min: 0.80
+  lateral_distance_scale_max: 2.00
+  far_lateral_vy_max_mps: 0.18
+  mid_lateral_vy_max_mps: 0.14
+  near_lateral_vy_max_mps: 0.060
+  lateral_priority_mid_error_norm: 0.99
+  lateral_priority_large_error_norm: 0.99
+  lateral_priority_mid_vx_cap_mps: 0.08
+  lateral_priority_vx_cap_mps: 0.04
+  edge_yaw_align_allow_lateral: true
+  edge_yaw_align_lateral_vy_max_mps: 0.08
+  yaw_flip_hold_window_s: 0.8
+  yaw_flip_count_limit: 2
+  yaw_ambiguous_wz_cap: 0.0
+  yaw_ambiguous_vy_boost: 1.5
+  edge_yaw_control_enter_rad: 0.30
+  edge_yaw_control_exit_rad: 0.12
+  edge_yaw_reject_rad: 1.40
+  edge_yaw_kp: 0.22
+  edge_yaw_min_wz_radps: 0.08
+  edge_yaw_max_wz_radps: 0.18
+  final_dist_deadband_m: 0.03
+  final_dist_kp: 0.08
+  final_forward_vx_max_mps: 0.006
+  final_reverse_vx_max_mps: 0.004
+  final_reverse_confirm_frames: 3
 
 yolo_table:
   yolo_table_control_enable: true
@@ -48,7 +122,7 @@ yolo_table:
   yolo_yaw_gain: 0.20
   yolo_max_wz_radps: 0.06
   yolo_table_lost_to_search_frames: 8
-  rotate_search_wz_radps: 0.10
+  rotate_search_wz_radps: 0.2
   rotate_search_timeout_s: 10.0
   rotate_require_edge_stable_frames: 5
   rotate_yaw_threshold_rad: 0.20
@@ -76,13 +150,13 @@ table_docking_motion:
   approach_max_vx_mps: 0.035
   approach_yaw_deadband_rad: 0.08
   approach_yaw_realign_rad: 0.16
-  edge_hard_rotate_only_yaw_rad: 0.45
+  edge_hard_rotate_only_yaw_rad: 1.40
   edge_hard_yaw_rotate_only_frames: 3
   edge_hard_yaw_rotate_only_ms: 350
   perception_warmup_s: 1.0
   approach_allow_wz: true
   approach_allow_vy: false
-  pose_missing_safe_vx_mps: 0.020
+  pose_missing_safe_vx_mps: 0.040
   pose_missing_max_hold_s: 3.0
   coarse_align:
     vx_max_mps: 0.000

@@ -300,7 +300,6 @@ class VisionReqMsg:
 
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
-        data["obs_class"] = canonical_vision_obs_class(data.get("obs_class"))
         return _compact(data)
 
 
@@ -599,6 +598,7 @@ class TableEdgeObs:
     valid_edge_points: Optional[int] = None
     edge_inlier_count: Optional[int] = None
     target_dist_m: Optional[float] = None
+    obs_target_dist_m: Optional[float] = None
     edge_trusted: bool = False
     pose_found: bool = False
     pose_source: Optional[str] = None
@@ -638,7 +638,16 @@ class TableEdgeObs:
         table_found = bool(payload.get("table_found", payload.get("found", False)))
         edge_valid = _pick_optional_bool(payload, "edge_valid")
         edge_found = bool(payload.get("edge_found", payload.get("table_edge_found", edge_valid if edge_valid is not None else table_found)))
-        confidence = _pick_optional_float(payload, "confidence", "edge_conf", "score", "edge_confidence", "table_confidence") or 0.0
+        confidence = _pick_optional_float(payload, "confidence", "score", "table_confidence")
+        edge_conf = _pick_optional_float(payload, "edge_conf")
+        edge_confidence = _pick_optional_float(payload, "edge_confidence")
+        if confidence is None:
+            confidence = edge_conf if edge_conf is not None else edge_confidence
+        if (edge_conf is None or edge_conf <= 0.0) and confidence is not None and confidence > 0.0:
+            edge_conf = confidence
+        if (edge_confidence is None or edge_confidence <= 0.0) and edge_conf is not None and edge_conf > 0.0:
+            edge_confidence = edge_conf
+        confidence = confidence or 0.0
         obs_ts = _pick_optional_float(payload, "obs_ts", "observation_ts", "frame_ts", "ts")
         table_bbox_value = _pick_optional_bbox(payload, "table_bbox_xyxy", "yolo_table_bbox", "table_bbox", "detected_table_bbox")
         table_bbox_present = bool(
@@ -660,8 +669,8 @@ class TableEdgeObs:
             edge_found=edge_found,
             edge_valid=edge_valid if edge_valid is not None else edge_found,
             confidence=float(confidence),
-            edge_conf=_pick_optional_float(payload, "edge_conf", "confidence", "edge_confidence"),
-            edge_confidence=_pick_optional_float(payload, "edge_confidence", "edge_conf", "confidence"),
+            edge_conf=edge_conf,
+            edge_confidence=edge_confidence,
             obs_ts=obs_ts,
             age_ms=_pick_optional_float(payload, "age_ms", "edge_obs_age_ms"),
             frame_id=_pick_optional_int(payload, "frame_id"),
@@ -797,6 +806,7 @@ class TableEdgeObs:
             valid_edge_points=_pick_optional_int(payload, "valid_edge_points", "edge_point_count"),
             edge_inlier_count=_pick_optional_int(payload, "edge_inlier_count", "inlier_count"),
             target_dist_m=_pick_optional_float(payload, "target_dist_m", "target_distance_m"),
+            obs_target_dist_m=_pick_optional_float(payload, "obs_target_dist_m", "target_dist_m", "target_distance_m"),
             edge_trusted=bool(payload.get("edge_trusted", payload.get("valid_for_control", False))),
             pose_found=bool(payload.get("pose_found", False)),
             pose_source=_pick_optional_str(payload, "pose_source"),
@@ -1024,8 +1034,6 @@ class CarState:
 
     def to_dict(self) -> Dict[str, Any]:
         return {k: v for k, v in asdict(self).items() if v is not None}
-
-
 @dataclass
 class CmdVel:
     ts: float
@@ -1035,6 +1043,7 @@ class CmdVel:
     wz_radps: float = 0.0
     hold_ms: int = 150
     brake: bool = False
+    base_freeze: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -1048,8 +1057,8 @@ class CmdVel:
             "wz": float(self.wz_radps),
             "hold_ms": int(self.hold_ms),
             "brake": bool(self.brake),
+            "base_freeze": bool(getattr(self, "base_freeze", False)),
         }
-
 
 @dataclass
 class ArmCommand:

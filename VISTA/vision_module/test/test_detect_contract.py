@@ -24,6 +24,7 @@ from vision_module.backend.predictor_manager import (
 )
 from vision_module.backend.predictor.detect_utils import preprocess_img
 from vision_module.app.stages.search import _target_obs_from_results as search_target_obs_from_results
+from vision_module.app.stages.search.target_obs_builder import target_obs_from_results
 from vision_module.backend.scheduler import Scheduler
 from vision_module.utils.detect import compute_target_obs
 
@@ -76,6 +77,29 @@ class DetectClassVocabularyTest(unittest.TestCase):
             "yolo26s-cutoff-bgr_qcs6490_w8a8.qnn236.ctx.bin"
         ))
         self.assertTrue(Path(profile.target_model).is_file())
+
+    def test_yolo26_target_class_map_keeps_apple_at_finetune_index(self):
+        from vision_module.config.board_config import CONFIG
+
+        profile = CONFIG.model.profiles["yolo26s_detect"]
+        class_names = tuple(profile.classes)
+        self.assertEqual(profile.class_num, len(class_names))
+        self.assertIn("apple", class_names)
+        self.assertEqual(class_names.index("apple"), 1)
+        self.assertNotIn("tag_home", class_names)
+        self.assertNotIn("tag_station", class_names)
+
+        local = {
+            "has_infer": True,
+            "rgb_shape": [640, 640, 3],
+            "infer_boxes": [[20.0, 30.0, 180.0, 260.0, 0.92, 1.0]],
+            "class_names": list(class_names),
+        }
+        obs = target_obs_from_results({"local_perception": local}, "apple")
+        self.assertIsNotNone(obs)
+        self.assertTrue(obs["target_found"])
+        self.assertEqual(obs["matched_cls"], "apple")
+        self.assertEqual(local["class_names"], list(class_names))
 
     def test_detect_preprocess_preserves_bgr_channel_order(self):
         bgr = np.array([[[11, 22, 33]]], dtype=np.uint8)

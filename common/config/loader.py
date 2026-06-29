@@ -443,10 +443,15 @@ def _load_and_merge_stage_params(config: SystemGlobalConfig, file_path: Path) ->
     td = yaml_data.get("table_docking", {})
     if td:
         ctrl = config.orchestrator.control
+        car = config.orchestrator.car
         if "enable_final_lock" in td:
             ctrl.enable_final_lock = _sb(td["enable_final_lock"])
         if "enable_micro_adjust" in td:
             ctrl.enable_micro_adjust = _sb(td["enable_micro_adjust"])
+        if "table_target_dist_m" in td:
+            ctrl.table_target_dist_m = _sf(td["table_target_dist_m"])
+        if "search_wz_radps" in td:
+            car.search_table_wz_radps = _sf(td["search_wz_radps"])
         if "final_lock_enter_dist_th_m" in td:
             ctrl.final_lock_enter_dist_th_m = _sf(td["final_lock_enter_dist_th_m"])
         if "final_lock_enter_yaw_th_rad" in td:
@@ -467,6 +472,150 @@ def _load_and_merge_stage_params(config: SystemGlobalConfig, file_path: Path) ->
             ctrl.near_slow_max_vx_mps = _sf(td["near_slow_max_vx_mps"])
         if "near_slow_max_vy_mps" in td:
             ctrl.near_slow_max_vy_mps = _sf(td["near_slow_max_vy_mps"])
+        if "final_servo_enter_p10_m" in td:
+            ctrl.final_servo_enter_p10_m = _sf(td["final_servo_enter_p10_m"])
+        if "edge_final_enter_margin_m" in td:
+            ctrl.edge_final_enter_margin_m = _sf(td["edge_final_enter_margin_m"])
+        if "edge_final_stop_margin_m" in td:
+            ctrl.edge_final_stop_margin_m = _sf(td["edge_final_stop_margin_m"])
+        if "close_range_enter_p10_m" in td:
+            ctrl.close_range_enter_p10_m = _sf(td["close_range_enter_p10_m"])
+        if "final_probe_vx_mps" in td:
+            ctrl.final_probe_vx_mps = _sf(td["final_probe_vx_mps"])
+        if "final_missing_probe_vx_mps" in td:
+            ctrl.final_missing_probe_vx_mps = _sf(td["final_missing_probe_vx_mps"])
+        if "close_range_probe_vx_mps" in td:
+            ctrl.close_range_probe_vx_mps = _sf(td["close_range_probe_vx_mps"])
+        if "close_range_missing_probe_vx_mps" in td:
+            ctrl.close_range_missing_probe_vx_mps = _sf(td["close_range_missing_probe_vx_mps"])
+        if "roi_final_stop_p10_m" in td:
+            ctrl.roi_final_stop_p10_m = _sf(td["roi_final_stop_p10_m"])
+        if "roi_final_slow_p10_m" in td:
+            ctrl.roi_final_slow_p10_m = _sf(td["roi_final_slow_p10_m"])
+        if "roi_final_probe_vx_mps" in td:
+            ctrl.roi_final_probe_vx_mps = _sf(td["roi_final_probe_vx_mps"])
+        if "roi_final_missing_probe_vx_mps" in td:
+            ctrl.roi_final_missing_probe_vx_mps = _sf(td["roi_final_missing_probe_vx_mps"])
+        if "roi_final_missing_hold_s" in td:
+            ctrl.roi_final_missing_hold_s = _sf(td["roi_final_missing_hold_s"])
+        if "depth_envelope_stop_p10_m" in td:
+            ctrl.depth_envelope_stop_p10_m = _sf(td["depth_envelope_stop_p10_m"])
+        if "depth_envelope_slow_p10_m" in td:
+            ctrl.depth_envelope_slow_p10_m = _sf(td["depth_envelope_slow_p10_m"])
+        if "depth_envelope_mid_p10_m" in td:
+            ctrl.depth_envelope_mid_p10_m = _sf(td["depth_envelope_mid_p10_m"])
+        if "depth_envelope_slow_vx_mps" in td:
+            ctrl.depth_envelope_slow_vx_mps = _sf(td["depth_envelope_slow_vx_mps"])
+        if "depth_envelope_mid_vx_mps" in td:
+            ctrl.depth_envelope_mid_vx_mps = _sf(td["depth_envelope_mid_vx_mps"])
+        if "bbox_track_forward_enabled" in td:
+            ctrl.bbox_track_forward_enabled = _sb(td["bbox_track_forward_enabled"])
+        if "min_forward_vx_mps" in td:
+            ctrl.min_forward_vx_mps = _sf(td["min_forward_vx_mps"])
+        if "bbox_track_forward_vx_mps" in td:
+            ctrl.bbox_track_forward_vx_mps = _sf(td["bbox_track_forward_vx_mps"])
+        if "bbox_track_forward_max_vx_mps" in td:
+            ctrl.bbox_track_forward_max_vx_mps = _sf(td["bbox_track_forward_max_vx_mps"])
+        if "bbox_track_forward_center_band" in td:
+            ctrl.bbox_track_forward_center_band = _sf(td["bbox_track_forward_center_band"])
+        if "far_bbox_track_vx_mps" in td:
+            ctrl.far_bbox_track_vx_mps = _sf(td["far_bbox_track_vx_mps"])
+        if "bbox_track_forward_min_hold_ms" in td:
+            ctrl.bbox_track_forward_min_hold_ms = _si(td["bbox_track_forward_min_hold_ms"])
+        if "bbox_track_forward_max_wz_radps" in td:
+            ctrl.bbox_track_forward_max_wz_radps = _sf(td["bbox_track_forward_max_wz_radps"])
+        if "edge_readiness_enabled" in td:
+            ctrl.edge_readiness_enabled = _sb(td["edge_readiness_enabled"])
+        if "edge_readiness_enter_score" in td:
+            ctrl.edge_readiness_enter_score = _sf(td["edge_readiness_enter_score"])
+        if "edge_readiness_exit_score" in td:
+            ctrl.edge_readiness_exit_score = _sf(td["edge_readiness_exit_score"])
+        if "edge_readiness_rise" in td:
+            ctrl.edge_readiness_rise = _sf(td["edge_readiness_rise"])
+        if "edge_readiness_decay" in td:
+            ctrl.edge_readiness_decay = _sf(td["edge_readiness_decay"])
+        if "edge_readiness_min_inliers" in td:
+            ctrl.edge_readiness_min_inliers = _si(td["edge_readiness_min_inliers"])
+        if "edge_readiness_yaw_max_rad" in td:
+            ctrl.edge_readiness_yaw_max_rad = _sf(td["edge_readiness_yaw_max_rad"])
+        if "edge_handoff_min_hold_ms" in td:
+            ctrl.edge_handoff_min_hold_ms = _si(td["edge_handoff_min_hold_ms"])
+        if "edge_handoff_forward_vx_mps" in td:
+            ctrl.edge_handoff_forward_vx_mps = _sf(td["edge_handoff_forward_vx_mps"])
+        if "forward_commit_min_s" in td:
+            ctrl.forward_commit_min_s = _sf(td["forward_commit_min_s"])
+        if "far_forward_commit_min_s" in td:
+            ctrl.far_forward_commit_min_s = _sf(td["far_forward_commit_min_s"])
+        if "stop_after_table_docking" in td:
+            ctrl.stop_after_table_docking = _sb(td["stop_after_table_docking"])
+        if "lateral_enabled" in td:
+            ctrl.lateral_enabled = _sb(td["lateral_enabled"])
+        if "lateral_vy_max_mps" in td:
+            ctrl.lateral_vy_max_mps = _sf(td["lateral_vy_max_mps"])
+        if "lateral_deadband_norm" in td:
+            ctrl.lateral_deadband_norm = _sf(td["lateral_deadband_norm"])
+        if "lateral_kp" in td:
+            ctrl.lateral_kp = _sf(td["lateral_kp"])
+        if "lateral_target_center_x_norm" in td:
+            ctrl.lateral_target_center_x_norm = _sf(td["lateral_target_center_x_norm"])
+        if "lateral_owner_default" in td:
+            ctrl.lateral_owner_default = str(td["lateral_owner_default"])
+        if "distance_scaled_lateral_enabled" in td:
+            ctrl.distance_scaled_lateral_enabled = _sb(td["distance_scaled_lateral_enabled"])
+        if "lateral_distance_ref_m" in td:
+            ctrl.lateral_distance_ref_m = _sf(td["lateral_distance_ref_m"])
+        if "lateral_distance_scale_min" in td:
+            ctrl.lateral_distance_scale_min = _sf(td["lateral_distance_scale_min"])
+        if "lateral_distance_scale_max" in td:
+            ctrl.lateral_distance_scale_max = _sf(td["lateral_distance_scale_max"])
+        if "far_lateral_vy_max_mps" in td:
+            ctrl.far_lateral_vy_max_mps = _sf(td["far_lateral_vy_max_mps"])
+        if "mid_lateral_vy_max_mps" in td:
+            ctrl.mid_lateral_vy_max_mps = _sf(td["mid_lateral_vy_max_mps"])
+        if "near_lateral_vy_max_mps" in td:
+            ctrl.near_lateral_vy_max_mps = _sf(td["near_lateral_vy_max_mps"])
+        if "lateral_priority_mid_error_norm" in td:
+            ctrl.lateral_priority_mid_error_norm = _sf(td["lateral_priority_mid_error_norm"])
+        if "lateral_priority_large_error_norm" in td:
+            ctrl.lateral_priority_large_error_norm = _sf(td["lateral_priority_large_error_norm"])
+        if "lateral_priority_mid_vx_cap_mps" in td:
+            ctrl.lateral_priority_mid_vx_cap_mps = _sf(td["lateral_priority_mid_vx_cap_mps"])
+        if "lateral_priority_vx_cap_mps" in td:
+            ctrl.lateral_priority_vx_cap_mps = _sf(td["lateral_priority_vx_cap_mps"])
+        if "edge_yaw_align_allow_lateral" in td:
+            ctrl.edge_yaw_align_allow_lateral = _sb(td["edge_yaw_align_allow_lateral"])
+        if "edge_yaw_align_lateral_vy_max_mps" in td:
+            ctrl.edge_yaw_align_lateral_vy_max_mps = _sf(td["edge_yaw_align_lateral_vy_max_mps"])
+        if "yaw_flip_hold_window_s" in td:
+            ctrl.yaw_flip_hold_window_s = _sf(td["yaw_flip_hold_window_s"])
+        if "yaw_flip_count_limit" in td:
+            ctrl.yaw_flip_count_limit = _si(td["yaw_flip_count_limit"])
+        if "yaw_ambiguous_wz_cap" in td:
+            ctrl.yaw_ambiguous_wz_cap = _sf(td["yaw_ambiguous_wz_cap"])
+        if "yaw_ambiguous_vy_boost" in td:
+            ctrl.yaw_ambiguous_vy_boost = _sf(td["yaw_ambiguous_vy_boost"])
+        if "edge_yaw_control_enter_rad" in td:
+            ctrl.edge_yaw_control_enter_rad = _sf(td["edge_yaw_control_enter_rad"])
+        if "edge_yaw_control_exit_rad" in td:
+            ctrl.edge_yaw_control_exit_rad = _sf(td["edge_yaw_control_exit_rad"])
+        if "edge_yaw_reject_rad" in td:
+            ctrl.edge_yaw_reject_rad = _sf(td["edge_yaw_reject_rad"])
+        if "edge_yaw_kp" in td:
+            ctrl.edge_yaw_kp = _sf(td["edge_yaw_kp"])
+        if "edge_yaw_min_wz_radps" in td:
+            ctrl.edge_yaw_min_wz_radps = _sf(td["edge_yaw_min_wz_radps"])
+        if "edge_yaw_max_wz_radps" in td:
+            ctrl.edge_yaw_max_wz_radps = _sf(td["edge_yaw_max_wz_radps"])
+        if "final_dist_deadband_m" in td:
+            ctrl.final_dist_deadband_m = _sf(td["final_dist_deadband_m"])
+        if "final_dist_kp" in td:
+            ctrl.final_dist_kp = _sf(td["final_dist_kp"])
+        if "final_forward_vx_max_mps" in td:
+            ctrl.final_forward_vx_max_mps = _sf(td["final_forward_vx_max_mps"])
+        if "final_reverse_vx_max_mps" in td:
+            ctrl.final_reverse_vx_max_mps = _sf(td["final_reverse_vx_max_mps"])
+        if "final_reverse_confirm_frames" in td:
+            ctrl.final_reverse_confirm_frames = _si(td["final_reverse_confirm_frames"])
         if "final_yaw_deadband_rad" in td:
             ctrl.final_yaw_deadband_rad = _sf(td["final_yaw_deadband_rad"])
         if "final_lock_yaw_rad" in td:

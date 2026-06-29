@@ -155,6 +155,8 @@ def target_obs_from_results(results: Dict[str, object], target: Optional[str]) -
         weak_payload["contract_warnings"] = contract_warnings
     if not isinstance(boxes, list) or not rgb_shape:
         return weak_payload
+    # TODO: prefer target candidates inside table ROI/table bbox when the
+    # search pipeline publishes a stable ROI gate for FIND_OBJECT.
     try:
         obs = compute_target_obs(tuple(rgb_shape), target, boxes, class_names=class_names)
     except Exception as exc:

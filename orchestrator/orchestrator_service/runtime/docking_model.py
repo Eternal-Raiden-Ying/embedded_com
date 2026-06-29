@@ -20,6 +20,7 @@ class DockingStage(str, Enum):
     EDGE_HANDOFF = "EDGE_HANDOFF"
     EDGE_APPROACH = "EDGE_APPROACH"
     NEAR_EDGE_APPROACH = "NEAR_EDGE_APPROACH"
+    PERCEPTION_DROPOUT_HOLD = "PERCEPTION_DROPOUT_HOLD"
     FINAL_DISTANCE_HOLD = "FINAL_DISTANCE_HOLD"
     FINAL_YAW_ALIGN = "FINAL_YAW_ALIGN"
     FINAL_LOCKED = "FINAL_LOCKED"
@@ -31,11 +32,17 @@ class DockingStage(str, Enum):
 class DockingAction(str, Enum):
     SEARCH_ROTATE = "SEARCH_ROTATE"
     BBOX_REACQUIRE_ROTATE = "BBOX_REACQUIRE_ROTATE"
+    BBOX_TRACK_FORWARD = "BBOX_TRACK_FORWARD"
+    EDGE_READINESS_HANDOFF = "EDGE_READINESS_HANDOFF"
     EDGE_APPROACH_FORWARD = "EDGE_APPROACH_FORWARD"
     NEAR_EDGE_FORWARD = "NEAR_EDGE_FORWARD"
+    NEAR_EDGE_LATERAL_ALIGN = "NEAR_EDGE_LATERAL_ALIGN"
     PERCEPTION_DROPOUT_HOLD = "PERCEPTION_DROPOUT_HOLD"
     FINAL_YAW_ALIGN = "FINAL_YAW_ALIGN"
     FINAL_LOCKED_STOP = "FINAL_LOCKED_STOP"
+    CLOSE_RANGE_PROBE = "CLOSE_RANGE_PROBE"
+    FINAL_SLOW_PROBE = "FINAL_SLOW_PROBE"
+    DEPTH_SAFETY_HOLD = "DEPTH_SAFETY_HOLD"
     CONTROL_RECOVERY_ROTATE = "CONTROL_RECOVERY_ROTATE"
     SAFETY_STOP = "SAFETY_STOP"
     EMERGENCY_STOP = "EMERGENCY_STOP"
@@ -101,6 +108,9 @@ class DockingObservation:
     table_roi_depth_median: Optional[float] = None
     table_roi_depth_mean: Optional[float] = None
     dist_err_m: Optional[float] = None
+    lateral_err_norm: Optional[float] = None
+    lateral_err_m: Optional[float] = None
+    lateral_source: str = ""
     final_depth_latched: bool = False
     near_table_latched: bool = False
     final_yaw_align_active: bool = False
@@ -230,6 +240,9 @@ def build_docking_observation(ctx: Any, obs: Any, summary: Optional[Dict[str, An
         table_roi_depth_median=_optional_float(summary.get("table_roi_depth_median", _obs_value(obs, "table_roi_depth_median"))),
         table_roi_depth_mean=_optional_float(summary.get("table_roi_depth_mean", _obs_value(obs, "table_roi_depth_mean"))),
         dist_err_m=_optional_float(summary.get("dist_err_m", _obs_value(obs, "dist_err_m"))),
+        lateral_err_norm=_optional_float(summary.get("lateral_err_norm")),
+        lateral_err_m=_optional_float(summary.get("lateral_err_m", _obs_value(obs, "lateral_err_m"))),
+        lateral_source=str(summary.get("lateral_source") or ("edge_lateral_err_m" if _obs_value(obs, "lateral_err_m") is not None else "")),
         final_depth_latched=bool(summary.get("final_depth_latched") or getattr(ctx, "final_depth_latched", False)),
         near_table_latched=bool(summary.get("near_table_latched") or getattr(ctx, "near_table_latched", False)),
         final_yaw_align_active=bool(summary.get("final_yaw_align_active") or getattr(ctx, "final_yaw_align_active", False)),
@@ -314,6 +327,10 @@ class DockingMotionResult:
     blocked_by: str
     reason: str
     summary: Dict[str, Any] = field(default_factory=dict)
+    forward_owner: str = ""
+    lateral_owner: str = ""
+    advance_condition: str = ""
+    fallback_condition: str = ""
     allow_uart_send: bool = True
     service_may_override: bool = False
     overridden_by: List[DockingAction] = field(default_factory=list)
@@ -343,15 +360,51 @@ class DockingMotionResult:
             return "normal"
         return "control_stop"
 
+    def _owner_defaults(self) -> tuple[str, str, str]:
+        yaw = str(self.yaw_owner or "")
+        mapping = {
+            DockingAction.SEARCH_ROTATE: ("search", "none", "none"),
+            DockingAction.BBOX_REACQUIRE_ROTATE: ("bbox", "none", "none"),
+            DockingAction.BBOX_TRACK_FORWARD: ("bbox", "bbox_track", "none"),
+            DockingAction.EDGE_READINESS_HANDOFF: ("edge_candidate", "none", "none"),
+            DockingAction.EDGE_APPROACH_FORWARD: ("edge", "edge_approach", "none"),
+            DockingAction.NEAR_EDGE_FORWARD: (yaw or "last_good_edge", "near_edge", "none"),
+            DockingAction.NEAR_EDGE_LATERAL_ALIGN: (yaw or "edge", "none", "none"),
+            DockingAction.PERCEPTION_DROPOUT_HOLD: (yaw or "edge_hold", "approach_commit", "none"),
+            DockingAction.FINAL_YAW_ALIGN: (yaw or "last_good_edge", "none", "none"),
+            DockingAction.FINAL_LOCKED_STOP: ("none", "none", "none"),
+            DockingAction.CLOSE_RANGE_PROBE: ("none", "close_range_probe", "none"),
+            DockingAction.FINAL_SLOW_PROBE: ("none", "final_edge_servo", "none"),
+            DockingAction.CONTROL_RECOVERY_ROTATE: (yaw or "bbox", "none", "none"),
+            DockingAction.SAFETY_STOP: ("none", "none", "none"),
+            DockingAction.EMERGENCY_STOP: ("none", "none", "none"),
+        }
+        return mapping.get(self.action, (yaw, "none", "none"))
+
     def legacy_summary(self) -> Dict[str, Any]:
         out = dict(self.summary or {})
+        default_yaw, default_forward, default_lateral = self._owner_defaults()
+        yaw_owner = "none" if self.action == DockingAction.FINAL_LOCKED_STOP else str(self.yaw_owner or default_yaw or "none")
+        forward_owner = str(self.forward_owner or out.get("forward_owner") or default_forward or "none")
+        lateral_owner = str(self.lateral_owner or out.get("lateral_owner") or default_lateral or "none")
         out.update(
             {
                 "docking_action": self.action.value,
                 "docking_stage": self.stage.value,
                 "docking_reason": str(self.reason or ""),
                 "motion_intent_type": self.action.value.lower(),
-                "yaw_owner": str(self.yaw_owner or ""),
+                "yaw_owner": yaw_owner,
+                "forward_owner": forward_owner,
+                "lateral_owner": lateral_owner,
+                "lateral_err_norm": out.get("lateral_err_norm"),
+                "lateral_err_m": out.get("lateral_err_m"),
+                "lateral_source": str(out.get("lateral_source") or ""),
+                "vy_enabled": bool(out.get("vy_enabled", False)),
+                "vy_block_reason": str(out.get("vy_block_reason") or "lateral_disabled"),
+                "vy_cmd_raw": float(out.get("vy_cmd_raw", self.vy) or 0.0),
+                "vy_cmd_limited": 0.0,
+                "advance_condition": str(self.advance_condition or out.get("advance_condition") or ""),
+                "fallback_condition": str(self.fallback_condition or out.get("fallback_condition") or ""),
                 "arbitration_reason": str(self.reason or ""),
                 "motion_class": self.motion_class,
                 "stop_class": self.stop_class.value,

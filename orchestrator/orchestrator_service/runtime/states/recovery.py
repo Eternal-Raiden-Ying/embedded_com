@@ -170,7 +170,11 @@ class RecoveryMixin:
         lost_hold_ok = self._loss_elapsed(self.ctx.table_loss_since_mono) >= float(self.cfg.table_loss_hold_s)
         min_dwell_ok = self._state_elapsed() >= float(self.cfg.approach_min_dwell_s)
         if lost_frames_ok and lost_hold_ok and min_dwell_ok:
-            if fallback_state == State.SEARCH_TABLE and (bool(getattr(self.ctx, "near_table_latched", False)) or bool(getattr(self.ctx, "final_depth_latched", False))):
+            if fallback_state == State.SEARCH_TABLE and (
+                bool(getattr(self.ctx, "near_table_latched", False))
+                or bool(getattr(self.ctx, "final_depth_latched", False))
+                or bool(getattr(self.ctx, "final_locked", False))
+            ):
                 # Keep holding final slow stop or near edge approach, do not fall back to search.
                 # compatibility only; table docking semantic state is DockingStage
                 return self.controller.stop_cmd(hold_mode)
@@ -196,6 +200,25 @@ class RecoveryMixin:
         return decision
 
     def _enter_no_progress_recovery_or_next(self, reason: str) -> MotionDecision:
+        is_locked = bool(getattr(self.ctx, "final_locked", False))
+        is_probe = bool(
+            getattr(self.ctx, "close_range_latched", False)
+            or getattr(self.ctx, "final_edge_mode_latched", False)
+            or getattr(self.ctx, "final_roi_mode_latched", False)
+            or getattr(self.ctx, "final_distance_servo_active", False)
+            or getattr(self.ctx, "final_depth_latched", False)
+        )
+        if is_locked or is_probe:
+            if is_locked:
+                return self.controller.stop_cmd("FINAL_LOCKED_STOP", brake=True)
+            else:
+                obs = getattr(self.ctx, "last_table_obs", None)
+                cmd = self.controller._cmd("FINAL_SLOW_STOP", vx=0.0, wz=0.0)
+                decision = MotionDecision(
+                    cmd=cmd,
+                    control_summary=self.controller._summary("FINAL_SLOW_STOP", cmd, obs, reason="final_probe_no_progress_fallback")
+                )
+                return self._arbitrate_table_motion_decision(decision, obs)
         self.ctx.last_fail_reason = reason
         if self.ctx.no_progress_recovery_count < int(self.cfg.dock_retry_limit):
             self.ctx.no_progress_recovery_count += 1

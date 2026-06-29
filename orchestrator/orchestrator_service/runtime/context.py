@@ -123,6 +123,7 @@ class RuntimeContext:
     final_lock_same_obs_reuse_count: int = 0
     final_lock_consecutive_lost_count: int = 0
     final_lock_last_transition_reason: str = ""
+    docking_done_printed: bool = False
     approach_aligned_frames: int = 0
     approach_realign_frames: int = 0
     align_hysteresis_last_obs_key: str = ""
@@ -141,10 +142,18 @@ class RuntimeContext:
     edge_handoff_timeout: bool = False
     approach_commit_active: bool = False
     last_forward_cmd_mono: float = 0.0
+    forward_commit_until_mono: float = 0.0
+    forward_commit_reason: str = ""
     last_edge_yaw_cmd: float = 0.0
     last_edge_good_mono: float = 0.0
     zero_cmd_started_mono: float = 0.0
+    bbox_track_entered_mono: float = 0.0
+    bbox_track_last_exit_reason: str = ""
     edge_conf_score: float = 0.0
+    edge_readiness_score: float = 0.0
+    edge_readiness_last_update_mono: float = 0.0
+    edge_readiness_level: str = ""
+    edge_handoff_entered_mono: float = 0.0
     last_good_table_obs_mono: float = 0.0
     last_good_table_obs_summary: Dict[str, object] = field(default_factory=dict)
     perception_dropout_hold_active: bool = False
@@ -152,6 +161,8 @@ class RuntimeContext:
     perception_dropout_hold_reason: str = ""
     motion_intent_type: str = ""
     yaw_owner: str = ""
+    forward_owner: str = ""
+    lateral_owner: str = ""
     arbitration_reason: str = ""
     motion_class: str = ""
     stop_class: str = "none"
@@ -165,6 +176,16 @@ class RuntimeContext:
     final_depth_latched_mono: float = 0.0
     final_yaw_align_active: bool = False
     final_locked: bool = False
+    last_valid_depth_p10_m: Optional[float] = None
+    last_valid_depth_p10_source: str = ""
+    last_valid_depth_p10_mono: float = 0.0
+    close_range_probe_start_mono: float = 0.0
+    close_range_probe_last_mono: float = 0.0
+    close_range_probe_distance_used_m: float = 0.0
+    depth_stop_stable_count: int = 0
+    depth_missing_started_mono: float = 0.0
+    depth_safety_state: str = ""
+    depth_safety_reason: str = ""
     last_good_edge_yaw_cmd: float = 0.0
     last_good_edge_yaw_mono: float = 0.0
     last_good_near_depth_mono: float = 0.0
@@ -240,6 +261,7 @@ class RuntimeContext:
         self.final_lock_same_obs_reuse_count = 0
         self.final_lock_consecutive_lost_count = 0
         self.final_lock_last_transition_reason = ""
+        self.docking_done_printed = False
         self.approach_aligned_frames = 0
         self.approach_realign_frames = 0
         self.align_hysteresis_last_obs_key = ""
@@ -258,10 +280,18 @@ class RuntimeContext:
         self.edge_handoff_timeout = False
         self.approach_commit_active = False
         self.last_forward_cmd_mono = 0.0
+        self.forward_commit_until_mono = 0.0
+        self.forward_commit_reason = ""
         self.last_edge_yaw_cmd = 0.0
         self.last_edge_good_mono = 0.0
         self.zero_cmd_started_mono = 0.0
+        self.bbox_track_entered_mono = 0.0
+        self.bbox_track_last_exit_reason = ""
         self.edge_conf_score = 0.0
+        self.edge_readiness_score = 0.0
+        self.edge_readiness_last_update_mono = 0.0
+        self.edge_readiness_level = ""
+        self.edge_handoff_entered_mono = 0.0
         self.last_good_table_obs_mono = 0.0
         self.last_good_table_obs_summary.clear()
         self.perception_dropout_hold_active = False
@@ -269,6 +299,8 @@ class RuntimeContext:
         self.perception_dropout_hold_reason = ""
         self.motion_intent_type = ""
         self.yaw_owner = ""
+        self.forward_owner = ""
+        self.lateral_owner = ""
         self.arbitration_reason = ""
         self.motion_class = ""
         self.stop_class = "none"
@@ -282,6 +314,16 @@ class RuntimeContext:
         self.final_depth_latched_mono = 0.0
         self.final_yaw_align_active = False
         self.final_locked = False
+        self.last_valid_depth_p10_m = None
+        self.last_valid_depth_p10_source = ""
+        self.last_valid_depth_p10_mono = 0.0
+        self.close_range_probe_start_mono = 0.0
+        self.close_range_probe_last_mono = 0.0
+        self.close_range_probe_distance_used_m = 0.0
+        self.depth_stop_stable_count = 0
+        self.depth_missing_started_mono = 0.0
+        self.depth_safety_state = ""
+        self.depth_safety_reason = ""
         self.last_good_edge_yaw_cmd = 0.0
         self.last_good_edge_yaw_mono = 0.0
         self.last_good_near_depth_mono = 0.0

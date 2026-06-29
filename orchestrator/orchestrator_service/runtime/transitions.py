@@ -48,6 +48,10 @@ from .core_types import (
 class TransitionsMixin:
     def _transition(self, new_state: State, reason: str):
         old_state = self.ctx.state
+        if old_state == State.AT_TABLE_EDGE and getattr(self.ctx, "final_locked", False):
+            if new_state in {State.SEARCH_TABLE, State.REACQUIRE_TABLE, State.NO_PROGRESS_RECOVERY, State.LEAVE_EDGE, State.ERROR_RECOVERY}:
+                self._log("warn", f"Bypassing transition from AT_TABLE_EDGE to {new_state.value} due to final_locked=True")
+                return
         if old_state == new_state:
             self.ctx.last_enter_reason = reason
             return

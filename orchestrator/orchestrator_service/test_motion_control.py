@@ -220,3 +220,23 @@ def test_no_same_tick_yolo_approach_to_edge_adjust_blocks_forward():
     assert decision.cmd.vx_mps > 0.0
     assert decision.control_summary["forward_block_reason"] == ""
     assert decision.control_summary["control_source"] in {"yolo_track_forward", "edge_guided_forward"}
+
+
+def test_target_distance_compatibility():
+    ctrl = _controller()
+    ctrl.cfg.table_target_dist_m = 0.30
+    obs = _obs(
+        obs_target_dist_m=0.50,
+        dist_err_m=-0.15,
+        target_dist_m=0.50,
+        edge_found=True,
+        edge_valid=True,
+        edge_trusted=True,
+        usable_for_approach=True,
+        usable_for_alignment=True,
+    )
+    cmd = ctrl._cmd("EDGE_ADJUST")
+    summary = ctrl._summary("EDGE_ADJUST", cmd, obs)
+    assert abs(summary["measured_dist_m"] - 0.35) < 1e-4
+    assert abs(summary["final_dist_err_m"] - 0.05) < 1e-4
+

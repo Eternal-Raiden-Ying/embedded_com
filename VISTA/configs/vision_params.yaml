@@ -135,6 +135,8 @@ debug:
   table_det_center_tol: 0.12
 
 table_edge:
+  target_dist_m: 0.30
+  table_target_dist_m: 0.30
   # 可选：""、center_mid、center_lower、full_width_lower。
   roi_preset: center_lower
   yolo_table_roi_enable: true
@@ -208,6 +210,8 @@ mode_profiles:
       preview_layout: rgb_yolo_edge_overlay
       release_cooldown_s: 2.0
       table_edge:
+        target_dist_m: 0.30
+        table_target_dist_m: 0.30
         detector_mode: fast_plane_only
         update_hz: 5.0
         camera_pitch_deg: 15.0
@@ -229,7 +233,7 @@ mode_profiles:
         yolo_table_min_conf: 0.25
         depth_stride: 2
       rgb:
-        fps: 24
+        fps: 60
 
     FIND_EDGE:
       enabled_cameras: [rgb, depth]
@@ -239,6 +243,8 @@ mode_profiles:
       preview_layout: rgb_depth_edge
       release_cooldown_s: 2.0
       table_edge:
+        target_dist_m: 0.30
+        table_target_dist_m: 0.30
         detector_mode: fast_plane_only
         update_hz: 10.0
         camera_pitch_deg: 15.0
@@ -260,7 +266,7 @@ mode_profiles:
         yolo_table_min_conf: 0.25
         depth_stride: 2
       rgb:
-        fps: 24
+        fps: 60
 
     FIND_TABLE:
       enabled_cameras: [rgb]
@@ -270,7 +276,7 @@ mode_profiles:
       preview_layout: rgb_yolo_overlay
       release_cooldown_s: 2.0
       rgb:
-        fps: 24
+        fps: 60
 
     MICRO_ADJUST:
       enabled_cameras: [rgb]

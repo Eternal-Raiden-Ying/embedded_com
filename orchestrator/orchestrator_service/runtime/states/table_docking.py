@@ -29,6 +29,7 @@ from ..common import monotonic_ts
 from ..context import RuntimeContext, State
 from ..controller import MotionController, MotionDecision
 from ..control_authority import decide_table_control_authority, ControlAuthority
+from ..depth_safety import apply_close_range_depth_safety_gate
 from ..motion_arbiter import MotionIntent, arbitrate_table_docking_motion
 from ..perception_semantics import build_table_perception_semantics
 from ..core_types import (
@@ -52,16 +53,14 @@ class TableDockingMixin:
     def _arbitrate_table_motion_decision(self, decision: MotionDecision, obs: Optional[TableEdgeObs]) -> MotionDecision:
         summary = decision.control_summary if decision.control_summary is not None else {}
         decision.control_summary = summary
-        summary["candidate_cmd"] = {
-            "vx_mps": float(getattr(decision.cmd, "vx_mps", 0.0) or 0.0),
-            "vy_mps": float(getattr(decision.cmd, "vy_mps", 0.0) or 0.0),
-            "wz_radps": float(getattr(decision.cmd, "wz_radps", 0.0) or 0.0),
-        }
         intent = MotionIntent(
             intent_type=str(summary.get("control_source") or summary.get("control_intent") or decision.cmd.mode or ""),
             desired_vx=float(getattr(decision.cmd, "vx_mps", 0.0) or 0.0),
+            desired_vy=float(getattr(decision.cmd, "vy_mps", 0.0) or 0.0),
             desired_wz=float(getattr(decision.cmd, "wz_radps", 0.0) or 0.0),
             yaw_owner=str(summary.get("yaw_source") or summary.get("yaw_owner") or ""),
+            forward_owner=str(summary.get("forward_source") or summary.get("forward_owner") or "none"),
+            lateral_owner=str(summary.get("lateral_owner") or "none"),
             forward_allowed_by_behavior=bool(
                 summary.get("allow_forward", summary.get("forward_allowed", False))
                 or abs(float(getattr(decision.cmd, "vx_mps", 0.0) or 0.0)) > 1e-9
@@ -73,6 +72,13 @@ class TableDockingMixin:
             reason=str(summary.get("phase_reason") or summary.get("reason") or summary.get("forward_block_reason") or ""),
         )
         result = arbitrate_table_docking_motion(self.ctx, obs, intent, summary)
+        result = apply_close_range_depth_safety_gate(
+            ctx=self.ctx,
+            obs=obs,
+            result=result,
+            cfg=self.cfg,
+            now_mono=monotonic_ts(),
+        )
         decision.cmd.vx_mps = float(result.final_vx)
         decision.cmd.vy_mps = float(result.final_vy)
         decision.cmd.wz_radps = float(result.final_wz)
@@ -90,16 +96,13 @@ class TableDockingMixin:
                     "rotate_block_reason": "",
                 }
             )
-        summary["arbiter_final_cmd"] = {
-            "vx_mps": float(decision.cmd.vx_mps),
-            "vy_mps": float(decision.cmd.vy_mps),
-            "wz_radps": float(decision.cmd.wz_radps),
-        }
         summary.update(
             {
                 "arbiter_applied": True,
                 "motion_intent_type": summary.get("motion_intent_type", intent.intent_type),
                 "yaw_owner": summary.get("yaw_owner", intent.yaw_owner),
+                "forward_owner": summary.get("forward_owner", intent.forward_owner or "none"),
+                "lateral_owner": summary.get("lateral_owner", intent.lateral_owner or "none"),
                 "arbitration_reason": result.reason,
                 "motion_class": result.motion_class,
                 "stop_class": result.stop_class,
@@ -116,14 +119,230 @@ class TableDockingMixin:
         )
         self.ctx.motion_intent_type = str(summary.get("motion_intent_type") or intent.intent_type or "")
         self.ctx.yaw_owner = str(summary.get("yaw_owner") or intent.yaw_owner or "")
+        self.ctx.forward_owner = str(summary.get("forward_owner") or intent.forward_owner or "none")
+        self.ctx.lateral_owner = str(summary.get("lateral_owner") or intent.lateral_owner or "none")
         self.ctx.arbitration_reason = str(result.reason or "")
         self.ctx.motion_class = str(result.motion_class or "")
         self.ctx.stop_class = str(result.stop_class or "none")
         self.ctx.blocked_by = str(result.blocked_by or "")
+        action = str(summary.get("docking_action") or "")
+        forward_commit_actions = {"BBOX_TRACK_FORWARD", "EDGE_APPROACH_FORWARD", "NEAR_EDGE_FORWARD", "EDGE_READINESS_HANDOFF"}
+        if action in forward_commit_actions and abs(float(decision.cmd.vx_mps)) > 1e-9:
+            try:
+                depth_p10 = float(summary.get("table_roi_depth_p10")) if summary.get("table_roi_depth_p10") is not None else None
+            except (TypeError, ValueError):
+                depth_p10 = None
+            far_commit = bool(
+                action == "BBOX_TRACK_FORWARD"
+                and bool(summary.get("table_bbox_control_valid", summary.get("bbox_center_valid", False)))
+                and (depth_p10 is None or depth_p10 > 1.2)
+            )
+            default_commit = 1.5 if far_commit else 1.5
+            commit_s = max(0.0, float(getattr(self.cfg, "forward_commit_min_s", default_commit) or default_commit))
+            if far_commit:
+                commit_s = max(commit_s, float(getattr(self.cfg, "far_forward_commit_min_s", 1.8) or 1.8))
+            self.ctx.forward_commit_until_mono = monotonic_ts() + commit_s
+            self.ctx.forward_commit_reason = action.lower()
+        elif action in {"FINAL_LOCKED_STOP", "FINAL_YAW_ALIGN", "SAFETY_STOP", "EMERGENCY_STOP"} or abs(float(decision.cmd.vx_mps)) <= 1e-9:
+            self.ctx.forward_commit_until_mono = 0.0
+            self.ctx.forward_commit_reason = ""
         self.ctx.fov_guard_level = str(summary.get("fov_guard_level") or summary.get("bbox_fov_guard_level") or "none")
         self.ctx.fov_guard_reason = str(summary.get("fov_guard_reason") or summary.get("bbox_fov_guard_reason") or "")
         self.ctx.zero_escape_reason = str(summary.get("zero_escape_reason") or "")
+        self._consume_final_depth_latch_after_arbitration(decision, obs)
+        self._consume_final_lock_after_arbitration(decision, obs)
+        self._slim_table_docking_control_summary(summary)
         return decision
+
+    def _slim_table_docking_control_summary(self, summary: Dict[str, object]) -> None:
+        if not isinstance(summary, dict):
+            return
+        try:
+            final_vx = float(summary.get("final_vx", summary.get("vx_mps", 0.0)) or 0.0)
+        except Exception:
+            final_vx = 0.0
+        try:
+            final_vy = float(summary.get("final_vy", summary.get("vy_mps", 0.0)) or 0.0)
+        except Exception:
+            final_vy = 0.0
+        try:
+            final_wz = float(summary.get("final_wz", summary.get("wz_radps", 0.0)) or 0.0)
+        except Exception:
+            final_wz = 0.0
+        block_reason = str(
+            summary.get("effective_block_reason")
+            or summary.get("effective_forward_block_reason")
+            or summary.get("forward_block_reason")
+            or summary.get("blocked_by")
+            or ""
+        )
+        moving = bool(abs(final_vx) > 1e-9 or abs(final_vy) > 1e-9 or abs(final_wz) > 1e-9)
+        summary["effective_block_reason"] = "" if moving else block_reason
+        for key in (
+            "control_phase",
+            "docking_stage",
+            "effective_forward_block_reason",
+            "camera_frame_interval_ms",
+            "camera_frame_hz",
+            "vision_process_interval_ms",
+            "vision_publish_interval_ms",
+            "obs_out_send_interval_ms",
+            "obs_out_send_hz",
+            "table_edge_obs_recv_interval_ms",
+            "orchestrator_recv_interval_ms",
+            "state_machine_tick_interval_ms",
+            "state_machine_consume_interval_ms",
+            "same_obs_reuse_count",
+            "obs_seq_gap",
+            "vision_publish_to_orch_recv_ms",
+            "orch_recv_to_state_consume_ms",
+            "table_edge_worker_interval_ms",
+            "table_edge_no_new_frame_count",
+            "scheduler_publish_ms",
+            "obs_out_drop_or_skip_count",
+            "obs_out_skip_reason",
+            "send_hz_config",
+            "track_local_send_hz_config",
+            "dropped_frame_count",
+            "processed_frame_count",
+            "latest_frame_lag_ms",
+            "control_loop_age_ms",
+            "edge_update_interval_ms",
+            "camera_frame_seq",
+            "camera_frame_ts_ms",
+            "vision_process_start_ts_ms",
+            "vision_process_end_ts_ms",
+            "vision_publish_ts_ms",
+            "obs_out_send_ts_ms",
+            "orchestrator_recv_ts_ms",
+            "state_machine_consume_ts_ms",
+            "cmd_publish_ts_ms",
+            "candidate_cmd",
+            "arbiter_final_cmd",
+            "service_effective_cmd",
+            "forward_block_reason",
+            "rotate_block_reason",
+            "lateral_block_reason",
+            "bbox_track_exit_reason",
+            "edge_handoff_block_reason",
+            "dropout_hold_block_reason",
+            "near_latch_block_reason",
+            "edge_trusted",
+            "edge_control_allowed",
+            "edge_readiness_score",
+            "edge_readiness_level",
+            "edge_readiness_enter_score",
+            "edge_readiness_exit_score",
+            "vy_cmd_raw",
+            "vy_cmd_limited",
+            "vy_enabled",
+            "vy_block_reason",
+            "advance_condition",
+            "fallback_condition",
+            "table_bbox_touch_left",
+            "table_bbox_touch_right",
+            "table_bbox_touch_bottom",
+            "yolo_bbox_touch_left",
+            "yolo_bbox_touch_right",
+            "yolo_bbox_touch_bottom",
+            "plane_touch_left",
+            "plane_touch_right",
+            "docking_observation",
+            "bbox_fov_guard_level",
+            "bbox_fov_guard_reason",
+        ):
+            summary.pop(key, None)
+
+    def _consume_final_depth_latch_after_arbitration(self, decision: MotionDecision, obs: Optional[TableEdgeObs]) -> None:
+        summary = decision.control_summary if decision.control_summary is not None else {}
+        action = str(summary.get("docking_action") or "")
+        final_latched = bool(getattr(self.ctx, "final_depth_latched", False) or summary.get("final_depth_latched", False))
+        if not final_latched:
+            return
+        hard_safety = bool(
+            decision.cmd.brake
+            or any(bool(summary.get(key, False)) for key in (
+                "emergency_stop_active", "car_estop", "estop_active", "obstacle_active", "obstacle_stop_active",
+                "base_depth_hard_safety", "base_depth_stop_active", "base_depth_emergency_active",
+                "depth_hard_stop_active", "safety_stop_active", "explicit_stop_active",
+            ))
+            or str(summary.get("stale_level") or "").lower() in {"hard_stale", "dead"}
+        )
+        if hard_safety:
+            summary["final_state_transition_block_reason"] = "hard_safety_or_stale"
+            return
+
+        state_value = str(getattr(self.ctx.state, "value", self.ctx.state) or "")
+        if state_value in {"YOLO_APPROACH", "EDGE_ADJUST"}:
+            self.ctx.table_dock_phase = self.ctx.table_dock_phase or "STOP_AND_SETTLE"
+            self.ctx.table_dock_phase_since_mono = self.ctx.table_dock_phase_since_mono or monotonic_ts()
+            self.ctx.final_lock_last_transition_reason = "final_depth_latched"
+            summary["final_state_transition_reason"] = "final_depth_latched"
+            self._transition(State.FINAL_SLOW_STOP, "final_depth_latched")
+            state_value = "FINAL_SLOW_STOP"
+
+        stopped = bool(
+            action == "FINAL_LOCKED_STOP"
+            and abs(float(decision.cmd.vx_mps)) <= 1e-6
+            and abs(float(decision.cmd.vy_mps)) <= 1e-6
+            and abs(float(decision.cmd.wz_radps)) <= 1e-6
+        )
+        if state_value not in {"FINAL_SLOW_STOP", "AT_TABLE_EDGE"} or not stopped:
+            return
+
+        now = monotonic_ts()
+        latched_mono = float(getattr(self.ctx, "final_depth_latched_mono", 0.0) or 0.0)
+        latched_age_s = max(0.0, now - latched_mono) if latched_mono > 0.0 else 0.0
+        settle_s = max(0.0, float(getattr(self.cfg, "table_settle_s", 0.30) or 0.30))
+        final_yaw_wait_s = max(
+            settle_s,
+            float(getattr(self.cfg, "final_yaw_wait_s", getattr(self.cfg, "final_yaw_last_good_hold_s", 1.2)) or 1.2),
+        )
+        yaw_err = getattr(obs, "yaw_err_rad", None) if obs is not None else None
+        last_yaw_age_s = max(0.0, now - float(getattr(self.ctx, "last_good_edge_yaw_mono", 0.0) or 0.0)) if getattr(self.ctx, "last_good_edge_yaw_mono", 0.0) else 999.0
+        last_yaw_fresh = bool(last_yaw_age_s <= float(getattr(self.cfg, "final_yaw_last_good_hold_s", 1.2) or 1.2))
+        yaw_available = bool(yaw_err is not None or last_yaw_fresh)
+        stable_enough = bool(
+            int(getattr(self.ctx, "final_depth_stable_frames", 0) or 0) >= self._final_depth_latch_frames()
+            or latched_age_s >= settle_s
+        )
+        waited_for_yaw = bool(latched_age_s >= final_yaw_wait_s)
+        if stable_enough and (not yaw_available or waited_for_yaw):
+            reason = "final_depth_latched_edge_yaw_unavailable" if not yaw_available else "final_depth_only_lock"
+            self.ctx.final_locked = True
+            self.ctx.final_yaw_align_active = False
+            self.ctx.final_lock_reason = reason
+            self.ctx.final_lock_last_transition_reason = reason
+            summary.update(
+                {
+                    "final_locked": True,
+                    "final_lock_reason": reason,
+                    "final_state_transition_reason": reason,
+                    "docking_reason": reason,
+                }
+            )
+            if str(getattr(self.ctx.state, "value", self.ctx.state) or "") != "AT_TABLE_EDGE":
+                self._transition(State.AT_TABLE_EDGE, reason)
+        else:
+            summary["final_state_transition_block_reason"] = "final_depth_wait_settle_or_yaw"
+
+    def _consume_final_lock_after_arbitration(self, decision: MotionDecision, obs: Optional[TableEdgeObs]) -> None:
+        summary = decision.control_summary if decision.control_summary is not None else {}
+        action = str(summary.get("docking_action") or "")
+        final_locked = bool(getattr(self.ctx, "final_locked", False) or summary.get("final_locked", False))
+        if final_locked:
+            self.ctx.final_locked = True
+        stopped = bool(
+            abs(float(decision.cmd.vx_mps)) <= 1e-6
+            and abs(float(decision.cmd.vy_mps)) <= 1e-6
+            and abs(float(decision.cmd.wz_radps)) <= 1e-6
+        )
+        if (action == "FINAL_LOCKED_STOP" or final_locked) and stopped:
+            state_value = str(getattr(self.ctx.state, "value", self.ctx.state) or "")
+            if state_value != "AT_TABLE_EDGE":
+                reason = "final_locked_stop_reached"
+                self.ctx.final_locked = True
+                self._transition(State.AT_TABLE_EDGE, reason)
 
     def _bbox_control_geometry(self, obs: Optional[TableEdgeObs]) -> Dict[str, object]:
         return compute_bbox_control_geometry(obs)
@@ -134,34 +353,10 @@ class TableDockingMixin:
         cx_norm = geom.get("bbox_cx_norm_control")
         center_error = geom.get("bbox_center_error_control")
         center_abs = abs(float(center_error)) if center_error is not None else 0.0
-        touch_left = bool(getattr(obs, "table_bbox_touch_left", False)) if obs is not None else False
-        touch_right = bool(getattr(obs, "table_bbox_touch_right", False)) if obs is not None else False
-        touch_bottom = bool(getattr(obs, "table_bbox_touch_bottom", False)) if obs is not None else False
-        side_touch = bool(touch_left or touch_right)
-        area_ratio = float(getattr(obs, "table_bbox_area_ratio", getattr(obs, "yolo_bbox_area_norm", 0.0)) or 0.0) if obs is not None else 0.0
-        guard_frames = max(1, int(getattr(self.car_cfg, "table_bbox_fov_guard_frames", 3) or 3))
         severe_center = bool(cx_norm is not None and (float(cx_norm) < 0.20 or float(cx_norm) > 0.80))
-        severe_side_streak = bool(
-            side_touch
-            and center_abs > 0.25
-            and int(self.ctx.bbox_fov_violation_streak) >= guard_frames
-        )
-        if bool(summary.get("bbox_fov_guard_active", False)) or severe_center or severe_side_streak:
-            if bool(summary.get("bbox_fov_guard_active", False)):
-                reason = "explicit_bbox_fov_guard"
-            elif severe_center:
-                reason = "bbox_center_extreme"
-            else:
-                reason = "side_touch_center_error_streak"
-            return {"level": "hard", "reason": reason}
-        soft_reasons = []
-        if touch_bottom:
-            soft_reasons.append("touch_bottom")
-        if area_ratio >= 0.35:
-            soft_reasons.append("bbox_area_large")
-        if side_touch and 0.08 <= center_abs <= 0.20:
-            soft_reasons.append("mild_side_touch")
-        return {"level": "soft" if soft_reasons else "none", "reason": "+".join(soft_reasons)}
+        if severe_center:
+            return {"level": "hard", "reason": "bbox_center_extreme"}
+        return {"level": "none", "reason": ""}
 
     def _bbox_yaw_hold_valid(self, obs: Optional[TableEdgeObs]) -> bool:
         """A soft-stale/held bbox center may still own rotate-only control."""
@@ -171,14 +366,130 @@ class TableDockingMixin:
         stale_level = str(self.controller._stale_guard(obs).get("stale_level") or "fresh")
         return stale_level not in {"hard_stale", "dead"}
 
+    def _refresh_edge_readiness(self, obs: Optional[TableEdgeObs], summary: Dict[str, object], *, current_bbox: bool, stable_bbox: bool, depth_stop_ready: bool) -> Dict[str, object]:
+        now = monotonic_ts()
+        enabled = bool(getattr(self.cfg, "edge_readiness_enabled", True))
+        enter_score = float(getattr(self.cfg, "edge_readiness_enter_score", 0.65) or 0.65)
+        exit_score = float(getattr(self.cfg, "edge_readiness_exit_score", 0.35) or 0.35)
+        rise = abs(float(getattr(self.cfg, "edge_readiness_rise", 0.15) or 0.15))
+        decay = abs(float(getattr(self.cfg, "edge_readiness_decay", 0.10) or 0.10))
+        raw_min_inliers = getattr(self.cfg, "edge_readiness_min_inliers", 30)
+        min_inliers = max(0, int(30 if raw_min_inliers is None else raw_min_inliers))
+        yaw_max = abs(float(getattr(self.cfg, "edge_readiness_yaw_max_rad", 0.35) or 0.35))
+
+        state_name = str(getattr(self.ctx.state, "value", self.ctx.state) or "").upper()
+        explicit_or_hard = bool(
+            summary.get("explicit_stop_active")
+            or summary.get("emergency_stop_active")
+            or summary.get("car_estop")
+            or summary.get("estop_active")
+            or summary.get("obstacle_active")
+            or summary.get("obstacle_stop_active")
+            or summary.get("base_depth_hard_safety")
+            or summary.get("base_depth_stop_active")
+            or summary.get("base_depth_emergency_active")
+            or summary.get("depth_hard_stop_active")
+            or summary.get("safety_stop_active")
+        )
+        if state_name == "IDLE" or explicit_or_hard:
+            self.ctx.edge_readiness_score = 0.0
+            self.ctx.edge_readiness_level = "reset"
+            self.ctx.edge_readiness_last_update_mono = now
+            self.ctx.edge_handoff_entered_mono = 0.0
+            return {
+                "edge_readiness_score": 0.0,
+                "edge_readiness_level": "reset",
+                "edge_readiness_reason": "idle_or_stop_reset",
+                "edge_handoff_block_reason": "idle_or_stop_reset",
+                "edge_handoff_source": "reset",
+                "edge_readiness_enter_score": enter_score,
+                "edge_readiness_exit_score": exit_score,
+            }
+
+        edge_found = bool(obs is not None and getattr(obs, "edge_found", False))
+        edge_valid = bool(edge_found or (obs is not None and getattr(obs, "edge_valid", False)))
+        edge_trusted = bool(obs is not None and getattr(obs, "edge_trusted", False))
+        edge_usable = bool(obs is not None and getattr(obs, "usable_for_approach", False))
+        confidence = max(
+            float(getattr(obs, "edge_confidence", 0.0) or 0.0),
+            float(getattr(obs, "edge_conf", 0.0) or 0.0),
+            float(getattr(obs, "confidence", 0.0) or 0.0),
+        ) if obs is not None else 0.0
+        inliers = max(
+            int(getattr(obs, "edge_inlier_count", 0) or 0),
+            int(getattr(obs, "inlier_count", 0) or 0),
+            int(getattr(obs, "valid_edge_points", 0) or 0),
+            int(getattr(obs, "support_count", 0) or 0),
+            int(getattr(obs, "edge_support_count", 0) or 0),
+        ) if obs is not None else 0
+        yaw = getattr(obs, "yaw_err_rad", None) if obs is not None else None
+        yaw_ok = bool(yaw is not None and abs(float(yaw)) <= yaw_max)
+        depth_valid = bool(obs is not None and (getattr(obs, "table_roi_depth_valid", False) or getattr(obs, "depth_valid", False)))
+        stale_level = str(summary.get("stale_level") or self.controller._stale_guard(obs).get("stale_level") or "fresh").lower()
+        last_good_ok = bool(summary.get("last_good_obs_healthy", False) and float(summary.get("last_good_obs_age_ms", 999999.0) or 999999.0) <= 2500.0)
+
+        score = float(getattr(self.ctx, "edge_readiness_score", 0.0) or 0.0)
+        reason = "disabled"
+        if not enabled or depth_stop_ready or bool(getattr(self.ctx, "near_table_latched", False) or getattr(self.ctx, "final_depth_latched", False)):
+            reason = "disabled_or_not_prefinal"
+        elif stale_level in {"hard_stale", "dead"} and not last_good_ok:
+            score -= decay
+            reason = "stale_dead_no_last_good"
+        else:
+            sparse_edge_ready = bool(
+                edge_valid
+                and confidence >= float(getattr(self.cfg, "edge_trusted_min_conf", 0.60) or 0.60)
+                and yaw_ok
+                and depth_valid
+                and inliers >= 3
+            )
+            positive = bool(
+                current_bbox
+                and stable_bbox
+                and edge_valid
+                and (edge_trusted or edge_usable or confidence >= float(getattr(self.cfg, "edge_trusted_min_conf", 0.60) or 0.60))
+                and yaw_ok
+                and depth_valid
+                and (min_inliers <= 0 or inliers >= min_inliers or edge_trusted or sparse_edge_ready)
+            )
+            if positive:
+                bonus = rise + (0.05 if edge_trusted else 0.0)
+                score += bonus
+                reason = "fast_sparse_edge_candidate_healthy" if sparse_edge_ready and inliers < min_inliers and not edge_trusted else "edge_candidate_healthy"
+            else:
+                score -= decay
+                reason = "edge_candidate_incomplete"
+
+        score = max(0.0, min(1.0, score))
+        if score >= enter_score:
+            level = "ready"
+            block = ""
+        elif score <= exit_score:
+            level = "low"
+            block = reason
+        else:
+            level = "hold"
+            block = "hysteresis_hold"
+        self.ctx.edge_readiness_score = score
+        self.ctx.edge_readiness_level = level
+        self.ctx.edge_readiness_last_update_mono = now
+        return {
+            "edge_readiness_score": float(score),
+            "edge_readiness_level": level,
+            "edge_readiness_reason": reason,
+            "edge_handoff_block_reason": block,
+            "edge_handoff_source": "readiness_score",
+            "edge_readiness_enter_score": float(enter_score),
+            "edge_readiness_exit_score": float(exit_score),
+        }
+
     def _near_table_latch_frames(self) -> int:
         return max(1, int(getattr(self.cfg, "near_table_latch_frames", 2) or 2))
 
     def _final_depth_latch_frames(self) -> int:
         return max(1, int(getattr(self.cfg, "final_depth_latch_frames", self._final_lock_required_ready_obs()) or self._final_lock_required_ready_obs()))
-
     def _near_depth_threshold_m(self, obs: Optional[TableEdgeObs]) -> float:
-        target = self._table_target_dist_m(obs) if hasattr(self, "_table_target_dist_m") else float(getattr(self.cfg, "table_target_dist_m", 0.50) or 0.50)
+        target = self._table_target_dist_m(obs) if hasattr(self, "_table_target_dist_m") else float(getattr(self.cfg, "table_target_dist_m", 0.30) or 0.30)
         margin = max(
             float(getattr(self.cfg, "near_table_depth_margin_m", 0.12) or 0.12),
             float(getattr(self.cfg, "table_stop_margin_m", 0.05) or 0.05),
@@ -330,10 +641,10 @@ class TableDockingMixin:
         depth_median = getattr(obs, "table_roi_depth_median", None) if obs is not None else None
         depth_value = depth_p10 if depth_p10 is not None else depth_median
         near_depth = bool(depth_valid and depth_value is not None and float(depth_value) <= self._near_depth_threshold_m(obs))
-        near_dist = bool(obs is not None and getattr(obs, "dist_err_m", None) is not None and abs(float(obs.dist_err_m)) <= self._near_dist_err_threshold_m())
+        final_dist_err = self._table_final_dist_err_m(obs)
+        near_dist = bool(final_dist_err is not None and abs(float(final_dist_err)) <= self._near_dist_err_threshold_m())
         bbox_area = float(getattr(obs, "table_bbox_area_ratio", getattr(obs, "yolo_bbox_area_norm", 0.0)) or 0.0) if obs is not None else 0.0
-        bbox_touch_bottom = bool(getattr(obs, "table_bbox_touch_bottom", getattr(obs, "yolo_bbox_touch_bottom", False))) if obs is not None else False
-        near_bbox_depth = bool((bbox_area >= 0.35 or bbox_touch_bottom) and depth_valid and edge_usable)
+        bbox_near_hint = bool(bbox_area >= 0.35 and depth_valid and edge_usable)
         depth_stop_ready = bool(depth_status.get("depth_roi_stop_ready", False))
         control_source = str(summary.get("control_source") or summary.get("motion_intent_type") or "").strip().lower()
         phase = str(summary.get("control_phase") or self.ctx.control_phase or "").strip().upper()
@@ -364,10 +675,6 @@ class TableDockingMixin:
             near_reason = "near_depth_stable"
         elif self.ctx.near_dist_stable_frames >= self._near_table_latch_frames():
             near_reason = "near_dist_stable"
-        elif near_bbox_depth:
-            near_reason = "bbox_large_touch_depth_edge"
-        elif approach_depth_near:
-            near_reason = "edge_guided_forward_depth_seen"
 
         # Separate near latch gating
         final_ok = bool(self.ctx.final_depth_latched or depth_stop_ready or phase == "DEPTH_FINAL_STOP" or str(depth_status.get("reason") or "") == "stable_dynamic_roi_depth")
@@ -415,6 +722,8 @@ class TableDockingMixin:
         summary["last_good_obs_age_ms"] = float(last_good_obs_age_ms)
         summary["near_latch_block_reason"] = near_latch_block_reason
         summary["near_latch_source"] = near_latch_source
+        summary["near_bbox_touch_hint"] = bool(bbox_near_hint)
+        summary["near_bbox_touch_hint_depth_m"] = float(depth_value) if depth_value is not None else None
         summary["dropout_hold_allowed"] = dropout_allowed
         summary["dropout_hold_block_reason"] = dropout_block_reason
 
@@ -543,9 +852,36 @@ class TableDockingMixin:
         self.ctx.final_yaw_align_start_mono = 0.0
         self.ctx.final_yaw_initially_small = False
         self.ctx.final_yaw_realign_count = 0
+        self.ctx.final_reverse_too_close_count = 0
+        self.ctx.edge_yaw_flip_history = []
+        self.ctx.edge_yaw_flip_state = ""
 
     def _bbox_lost_hold_or_search(self, obs: Optional[TableEdgeObs], mode: str) -> MotionDecision:
         """Hold table docking state before clearing handoff/searching for bbox loss."""
+        is_locked = bool(getattr(self.ctx, "final_locked", False))
+        is_probe = bool(
+            getattr(self.ctx, "close_range_latched", False)
+            or getattr(self.ctx, "final_edge_mode_latched", False)
+            or getattr(self.ctx, "final_roi_mode_latched", False)
+            or getattr(self.ctx, "final_distance_servo_active", False)
+            or getattr(self.ctx, "final_depth_latched", False)
+        )
+        if is_probe or is_locked:
+            cmd = self.controller._cmd(mode, vx=0.0, wz=0.0)
+            decision = MotionDecision(
+                cmd=cmd,
+                control_summary=self.controller._summary(mode, cmd, obs, reason="final_probe_without_bbox")
+            )
+            decision.control_summary.update({
+                "close_range_latched": bool(getattr(self.ctx, "close_range_latched", False)),
+                "final_edge_mode_latched": bool(getattr(self.ctx, "final_edge_mode_latched", False)),
+                "final_roi_mode_latched": bool(getattr(self.ctx, "final_roi_mode_latched", False)),
+                "final_distance_servo_active": bool(getattr(self.ctx, "final_distance_servo_active", False)),
+                "final_depth_latched": bool(getattr(self.ctx, "final_depth_latched", False)),
+                "final_locked": is_locked,
+            })
+            return self._arbitrate_table_motion_decision(decision, obs)
+
         if bool(getattr(self.ctx, "near_table_latched", False) or getattr(self.ctx, "final_depth_latched", False)):
             wz = 0.0
             yaw_source = "hold"
@@ -590,16 +926,33 @@ class TableDockingMixin:
         stale_level = str(self.controller._stale_guard(obs).get("stale_level") or "fresh")
         hard_lost = stale_level in {"hard_stale", "dead"}
         if not hard_lost and hold_age_s < hold_limit_s:
-            last_yaw = getattr(self.ctx, "last_bbox_yaw_cmd", 0.0)
-            if abs(last_yaw) > 1e-6:
-                wz = last_yaw
+            edge_safe = bool(obs is not None and (getattr(obs, "edge_found", False) or getattr(obs, "edge_valid", False) or getattr(obs, "usable_for_approach", False) or getattr(obs, "edge_trusted", False)))
+            depth_value = getattr(obs, "table_roi_depth_p10", None) if obs is not None else None
+            if depth_value is None and obs is not None:
+                depth_value = getattr(obs, "table_roi_depth_median", None)
+            depth_safe = bool(
+                obs is not None
+                and getattr(obs, "table_roi_depth_valid", False)
+                and depth_value is not None
+                and float(depth_value) > float(getattr(self.cfg, "depth_envelope_stop_p10_m", 0.55) or 0.55)
+            )
+            min_forward = abs(float(getattr(self.cfg, "min_forward_vx_mps", 0.04) or 0.04))
+            if edge_safe and depth_safe:
+                last_edge = float(getattr(self.ctx, "last_good_edge_yaw_cmd", 0.0) or 0.0)
+                wz_cap = abs(float(getattr(self.car_cfg, "table_wz_plane_max_radps", 0.06) or 0.06))
+                wz = max(-wz_cap, min(wz_cap, last_edge))
+                vx = min_forward
+                hold_reason = "bbox_lost_edge_depth_safe_forward_hold"
+                yaw_source = "last_good_edge" if abs(wz) > 1e-9 else "hold"
             else:
-                search_sign = int(self.ctx.search_wz_sign_latched or self.ctx.relocate_turn_sign or 1)
-                wz = abs(float(self.car_cfg.search_table_wz_radps)) * search_sign
-            cmd = self.controller._cmd(mode, vx=0.0, wz=wz)
+                wz = 0.0
+                vx = 0.0
+                hold_reason = "bbox_lost_hold"
+                yaw_source = "hold"
+            cmd = self.controller._cmd(mode, vx=vx, wz=wz)
             decision = MotionDecision(
                 cmd=cmd,
-                control_summary=self.controller._summary(mode, cmd, obs, reason="bbox_lost_hold_rotate")
+                control_summary=self.controller._summary(mode, cmd, obs, reason=hold_reason)
             )
             summary = decision.control_summary
             summary.update(
@@ -607,16 +960,16 @@ class TableDockingMixin:
                     "bbox_lost_hold_active": True,
                     "bbox_lost_hold_age_ms": hold_age_s * 1000.0,
                     "bbox_lost_hold_limit_ms": hold_limit_s * 1000.0,
-                    "bbox_lost_hold_reason": "bbox_lost_or_soft_stale",
+                    "bbox_lost_hold_reason": hold_reason,
                     "control_phase": self.ctx.control_phase,
                     "edge_handoff_complete": bool(self.ctx.edge_handoff_complete),
                     "bbox_valid_streak": int(self.ctx.bbox_valid_streak),
                     "bbox_centered_streak": int(self.ctx.bbox_centered_streak),
                     "control_source": "bbox_lost_hold",
-                    "yaw_source": "last_bbox_yaw" if abs(last_yaw) > 1e-6 else "search",
-                    "allow_forward": False,
-                    "allow_rotate": True,
-                    "vx_mps": 0.0,
+                    "yaw_source": yaw_source,
+                    "allow_forward": bool(vx > 0.0),
+                    "allow_rotate": bool(abs(wz) > 1e-9),
+                    "vx_mps": float(vx),
                     "vy_mps": 0.0,
                     "wz_radps": float(wz),
                 }
@@ -631,6 +984,24 @@ class TableDockingMixin:
         self.ctx.bbox_valid_streak = 0
         self.ctx.bbox_centered_streak = 0
         self.ctx.edge_trusted_streak = 0
+        is_locked = bool(getattr(self.ctx, "final_locked", False))
+        is_probe = bool(
+            getattr(self.ctx, "close_range_latched", False)
+            or getattr(self.ctx, "final_edge_mode_latched", False)
+            or getattr(self.ctx, "final_roi_mode_latched", False)
+            or getattr(self.ctx, "final_distance_servo_active", False)
+            or getattr(self.ctx, "final_depth_latched", False)
+        )
+        if is_locked or is_probe:
+            if is_locked:
+                return self.controller.stop_cmd("FINAL_LOCKED_STOP", brake=True)
+            else:
+                cmd = self.controller._cmd(mode, vx=0.0, wz=0.0)
+                decision = MotionDecision(
+                    cmd=cmd,
+                    control_summary=self.controller._summary(mode, cmd, obs, reason="final_probe_expired_fallback")
+                )
+                return self._arbitrate_table_motion_decision(decision, obs)
         self._transition(State.SEARCH_TABLE, f"{mode} bbox lost hold expired")
         return self.controller.search_table_cmd(*self._get_memory_search_params())
 
@@ -641,7 +1012,6 @@ class TableDockingMixin:
         hard_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.25) or 0.25))
         geom = self._bbox_control_geometry(obs)
         center_error = geom["bbox_center_error_control"]
-        touch = bool(obs is not None and (getattr(obs, "table_bbox_touch_left", False) or getattr(obs, "table_bbox_touch_right", False)))
         edge_trusted = bool(current_bbox and self.controller._edge_trusted(obs))
         edge_usable = bool(obs is not None and (getattr(obs, "edge_found", False) or getattr(obs, "usable_for_approach", False)))
         hard_yaw = abs(float(getattr(self.car_cfg, "table_edge_hard_rotate_only_yaw_rad", 0.45) or 0.45))
@@ -671,7 +1041,7 @@ class TableDockingMixin:
                 phase, reason = "SEARCH_SCAN", "no_current_fresh_bbox"
         else:
             self.ctx.bbox_valid_streak += 1
-            centered = bool(center_error is not None and abs(float(center_error)) <= hard_limit and not (touch and abs(float(center_error)) > 0.12))
+            centered = bool(center_error is not None and abs(float(center_error)) <= hard_limit)
             self.ctx.bbox_centered_streak = self.ctx.bbox_centered_streak + 1 if centered else 0
             self.ctx.bbox_fov_violation_streak = 0 if centered else self.ctx.bbox_fov_violation_streak + 1
             if not edge_trusted:
@@ -684,6 +1054,12 @@ class TableDockingMixin:
                 self.ctx.edge_yaw_ema = yaw if self.ctx.edge_yaw_ema is None else (0.7 * self.ctx.edge_yaw_ema + 0.3 * yaw)
             stable_bbox = self.ctx.bbox_centered_streak >= 2
             fov_guard = self._bbox_fov_guard_status(obs, geom)
+            readiness = self._refresh_edge_readiness(obs, {}, current_bbox=current_bbox, stable_bbox=stable_bbox, depth_stop_ready=depth_stop_ready)
+            edge_readiness_score = float(readiness["edge_readiness_score"])
+            edge_readiness_enter = float(readiness["edge_readiness_enter_score"])
+            edge_readiness_exit = float(readiness["edge_readiness_exit_score"])
+            edge_readiness_ready = bool(edge_readiness_score >= edge_readiness_enter)
+            edge_readiness_hold = bool(edge_readiness_exit < edge_readiness_score < edge_readiness_enter)
             commit_bbox_safe = bool(
                 center_error is not None
                 and abs(float(center_error)) <= 0.35
@@ -724,9 +1100,22 @@ class TableDockingMixin:
             elif not stable_bbox and not dwell_fallback:
                 self.ctx.edge_handoff_complete = False
                 self.ctx.edge_handoff_started_mono = 0.0
+                self.ctx.edge_handoff_entered_mono = 0.0
                 phase, reason = "BBOX_ACQUIRE", "bbox_not_centered_or_not_stable"
-            elif self.ctx.edge_handoff_complete and edge_trusted:
+            elif self.ctx.edge_handoff_complete and (edge_trusted or edge_readiness_score > edge_readiness_exit):
                 phase, reason = "EDGE_GUIDED_APPROACH", "bbox_safe_edge_handoff_complete"
+            elif edge_readiness_ready:
+                if self.ctx.edge_handoff_entered_mono <= 0.0:
+                    self.ctx.edge_handoff_entered_mono = now
+                hold_ms = max(0.0, float(getattr(self.cfg, "edge_handoff_min_hold_ms", 800) or 800))
+                handoff_elapsed_ms = max(0.0, (now - float(self.ctx.edge_handoff_entered_mono or now)) * 1000.0)
+                if handoff_elapsed_ms < hold_ms:
+                    phase, reason = "EDGE_HANDOFF_CONFIRM", "edge_readiness_handoff_hold"
+                else:
+                    self.ctx.edge_handoff_complete = True
+                    phase, reason = "EDGE_GUIDED_APPROACH", "edge_readiness_confirmed"
+            elif edge_readiness_hold and self.ctx.control_phase in {"EDGE_HANDOFF_CONFIRM", "EDGE_GUIDED_APPROACH"}:
+                phase, reason = self.ctx.control_phase, "edge_readiness_hysteresis_hold"
             else:
                 if self.ctx.edge_handoff_started_mono <= 0.0:
                     self.ctx.edge_handoff_started_mono = now
@@ -752,11 +1141,15 @@ class TableDockingMixin:
             self.ctx.control_phase_since_mono = now
         dwell_ms = max(0.0, (now - float(self.ctx.control_phase_since_mono or now)) * 1000.0)
         return {"control_phase": phase, "phase_reason": reason, "bbox_center_error": center_error, **geom,
-                "bbox_touch_left": bool(obs is not None and getattr(obs, "table_bbox_touch_left", False)),
-                "bbox_touch_right": bool(obs is not None and getattr(obs, "table_bbox_touch_right", False)),
                 "phase_dwell_ms": dwell_ms, "edge_handoff_complete": self.ctx.edge_handoff_complete,
                 "handoff_timeout": self.ctx.edge_handoff_timeout,
                 "edge_conf_score": float(self.ctx.edge_conf_score),
+                "edge_readiness_score": float(getattr(self.ctx, "edge_readiness_score", 0.0) or 0.0),
+                "edge_readiness_level": str(getattr(self.ctx, "edge_readiness_level", "") or ""),
+                "edge_readiness_enter_score": float(getattr(self.cfg, "edge_readiness_enter_score", 0.65) or 0.65),
+                "edge_readiness_exit_score": float(getattr(self.cfg, "edge_readiness_exit_score", 0.35) or 0.35),
+                "edge_handoff_block_reason": "" if float(getattr(self.ctx, "edge_readiness_score", 0.0) or 0.0) >= float(getattr(self.cfg, "edge_readiness_enter_score", 0.65) or 0.65) else str(getattr(self.ctx, "edge_readiness_level", "") or ""),
+                "edge_handoff_source": "readiness_score",
                 "approach_commit_active": bool(self.ctx.approach_commit_active)}
 
     def _get_control_authority(self, obs: Optional[TableEdgeObs], depth_roi_stop_active: bool = False, explicit_stop_active: bool = False) -> ControlAuthority:
@@ -820,6 +1213,10 @@ class TableDockingMixin:
             ))
         ):
             self._clear_near_final_latches("explicit_or_emergency_stop")
+            self.ctx.edge_readiness_score = 0.0
+            self.ctx.edge_readiness_level = "reset"
+            self.ctx.edge_readiness_last_update_mono = monotonic_ts()
+            self.ctx.edge_handoff_entered_mono = 0.0
         depth_status = self._depth_roi_stop_status(obs)
         self._refresh_near_final_latches(obs, depth_status, summary)
         if bool(self.ctx.final_depth_latched):
@@ -871,7 +1268,7 @@ class TableDockingMixin:
                 self.ctx.perception_dropout_hold_started_mono = now_mono
             self.ctx.perception_dropout_hold_active = True
             self.ctx.perception_dropout_hold_reason = "approach_commit_short_dropout"
-            decision.cmd.vx_mps = 0.020
+            decision.cmd.vx_mps = abs(float(getattr(self.cfg, "min_forward_vx_mps", 0.04) or 0.04))
             decision.cmd.vy_mps = 0.0
             decision.cmd.wz_radps = float(self.ctx.last_edge_yaw_cmd or self.ctx.last_good_table_obs_summary.get("edge_yaw_cmd", 0.0) or 0.0)
             summary.update({
@@ -917,6 +1314,19 @@ class TableDockingMixin:
             explicit_stop_active=explicit_stop_active,
         )
         summary.update(auth.to_dict())
+        edge_readiness_score = float(getattr(self.ctx, "edge_readiness_score", 0.0) or 0.0)
+        edge_readiness_enter_score = float(getattr(self.cfg, "edge_readiness_enter_score", 0.65) or 0.65)
+        edge_readiness_exit_score = float(getattr(self.cfg, "edge_readiness_exit_score", 0.35) or 0.35)
+        summary.update(
+            {
+                "edge_readiness_score": edge_readiness_score,
+                "edge_readiness_level": str(getattr(self.ctx, "edge_readiness_level", "") or ""),
+                "edge_readiness_enter_score": edge_readiness_enter_score,
+                "edge_readiness_exit_score": edge_readiness_exit_score,
+                "edge_handoff_block_reason": "" if edge_readiness_score >= edge_readiness_enter_score else ("below_exit_score" if edge_readiness_score <= edge_readiness_exit_score else "hysteresis_hold"),
+                "edge_handoff_source": "readiness_score",
+            }
+        )
         summary.update(depth_status)
         self._refresh_near_final_latches(obs, depth_status, summary)
         if bool(self.ctx.final_depth_latched):
@@ -979,12 +1389,16 @@ class TableDockingMixin:
             elif phase == "EDGE_GUIDED_APPROACH":
                 decision.cmd.wz_radps = edge_wz
 
-        forward_commit_vx = 0.020
+        forward_commit_vx = abs(float(getattr(self.cfg, "min_forward_vx_mps", 0.04) or 0.04))
+        edge_readiness_ready = bool(
+            float(summary.get("edge_readiness_score", 0.0) or 0.0)
+            >= float(summary.get("edge_readiness_enter_score", getattr(self.cfg, "edge_readiness_enter_score", 0.65)) or 0.65)
+        )
         edge_guided_candidate = bool(
             phase == "EDGE_GUIDED_APPROACH"
             and bool(self.ctx.edge_handoff_complete)
             and bool(auth.allow_forward)
-            and bool(getattr(obs, "edge_trusted", False))
+            and bool(getattr(obs, "edge_trusted", False) or edge_readiness_ready)
         )
         forward_coast_candidate = bool(
             phase == "EDGE_GUIDED_APPROACH"
@@ -1078,6 +1492,61 @@ class TableDockingMixin:
             "bbox_fov_guard_reason": bbox_fov_guard_reason,
             "bbox_fov_soft_allowed_forward": bool(bbox_fov_guard_level == "soft" and not edge_commit_block_reason),
             "bbox_fov_hard_block": bool(bbox_fov_guard_level == "hard"),
+            "bbox_track_forward_enabled": bool(getattr(self.cfg, "bbox_track_forward_enabled", True)),
+            "bbox_track_forward_vx_mps": float(getattr(self.cfg, "bbox_track_forward_vx_mps", 0.100) or 0.100),
+            "bbox_track_forward_max_vx_mps": float(getattr(self.cfg, "bbox_track_forward_max_vx_mps", 0.200) or 0.200),
+            "bbox_track_forward_center_band": float(getattr(self.cfg, "bbox_track_forward_center_band", 0.30) or 0.30),
+            "far_bbox_track_vx_mps": float(getattr(self.cfg, "far_bbox_track_vx_mps", 0.200) or 0.200),
+            "bbox_track_forward_min_hold_ms": int(getattr(self.cfg, "bbox_track_forward_min_hold_ms", 800) or 800),
+            "bbox_track_forward_max_wz_radps": float(getattr(self.cfg, "bbox_track_forward_max_wz_radps", 0.200) or 0.200),
+            "near_slow_max_vx_mps": float(getattr(self.cfg, "near_slow_max_vx_mps", 0.030) or 0.030),
+            "final_servo_enter_p10_m": float(getattr(self.cfg, "final_servo_enter_p10_m", 0.45) or 0.45),
+            "edge_final_enter_margin_m": float(getattr(self.cfg, "edge_final_enter_margin_m", 0.06) or 0.06),
+            "edge_final_stop_margin_m": float(getattr(self.cfg, "edge_final_stop_margin_m", 0.02) or 0.02),
+            "close_range_enter_p10_m": float(getattr(self.cfg, "close_range_enter_p10_m", 0.55) or 0.55),
+            "final_probe_vx_mps": float(getattr(self.cfg, "final_probe_vx_mps", 0.008) or 0.008),
+            "final_missing_probe_vx_mps": float(getattr(self.cfg, "final_missing_probe_vx_mps", 0.004) or 0.004),
+            "close_range_probe_vx_mps": float(getattr(self.cfg, "close_range_probe_vx_mps", 0.008) or 0.008),
+            "close_range_missing_probe_vx_mps": float(getattr(self.cfg, "close_range_missing_probe_vx_mps", 0.004) or 0.004),
+            "roi_final_stop_p10_m": float(getattr(self.cfg, "roi_final_stop_p10_m", 0.42) or 0.42),
+            "roi_final_slow_p10_m": float(getattr(self.cfg, "roi_final_slow_p10_m", 0.52) or 0.52),
+            "roi_final_probe_vx_mps": float(getattr(self.cfg, "roi_final_probe_vx_mps", 0.008) or 0.008),
+            "roi_final_missing_probe_vx_mps": float(getattr(self.cfg, "roi_final_missing_probe_vx_mps", 0.004) or 0.004),
+            "roi_final_missing_hold_s": float(getattr(self.cfg, "roi_final_missing_hold_s", 0.8) or 0.8),
+            "depth_envelope_stop_p10_m": float(getattr(self.cfg, "depth_envelope_stop_p10_m", 0.35) or 0.35),
+            "depth_envelope_slow_p10_m": float(getattr(self.cfg, "depth_envelope_slow_p10_m", 0.50) or 0.50),
+            "depth_envelope_mid_p10_m": float(getattr(self.cfg, "depth_envelope_mid_p10_m", 0.70) or 0.70),
+            "depth_envelope_slow_vx_mps": float(getattr(self.cfg, "depth_envelope_slow_vx_mps", 0.006) or 0.006),
+            "depth_envelope_mid_vx_mps": float(getattr(self.cfg, "depth_envelope_mid_vx_mps", 0.015) or 0.015),
+            "edge_handoff_forward_vx_mps": float(getattr(self.cfg, "edge_handoff_forward_vx_mps", 0.080) or 0.080),
+            "forward_commit_min_s": float(getattr(self.cfg, "forward_commit_min_s", 1.5) or 1.5),
+            "far_forward_commit_min_s": float(getattr(self.cfg, "far_forward_commit_min_s", 1.8) or 1.8),
+            "lateral_enabled": bool(getattr(self.cfg, "lateral_enabled", False)),
+            "lateral_vy_max_mps": float(getattr(self.cfg, "lateral_vy_max_mps", 0.180) or 0.180),
+            "lateral_deadband_norm": float(getattr(self.cfg, "lateral_deadband_norm", 0.020) or 0.020),
+            "lateral_kp": float(getattr(self.cfg, "lateral_kp", 0.300) or 0.300),
+            "lateral_target_center_x_norm": float(getattr(self.cfg, "lateral_target_center_x_norm", 0.5) or 0.5),
+            "lateral_owner": "none",
+            "lateral_source": "edge_lateral_err_m" if (obs is not None and getattr(obs, "lateral_err_m", None) is not None) else "",
+            "lateral_err_m": float(getattr(obs, "lateral_err_m")) if (obs is not None and getattr(obs, "lateral_err_m", None) is not None) else None,
+            "lateral_err_norm": None,
+            "lateral_priority_mid_error_norm": float(getattr(self.cfg, "lateral_priority_mid_error_norm", 0.99) or 0.99),
+            "lateral_priority_large_error_norm": float(getattr(self.cfg, "lateral_priority_large_error_norm", 0.99) or 0.99),
+            "lateral_priority_mid_vx_cap_mps": float(getattr(self.cfg, "lateral_priority_mid_vx_cap_mps", 0.080) or 0.080),
+            "lateral_priority_vx_cap_mps": float(getattr(self.cfg, "lateral_priority_vx_cap_mps", 0.040) or 0.040),
+            "edge_yaw_align_allow_lateral": bool(getattr(self.cfg, "edge_yaw_align_allow_lateral", True)),
+            "edge_yaw_align_lateral_vy_max_mps": float(getattr(self.cfg, "edge_yaw_align_lateral_vy_max_mps", 0.080) or 0.080),
+            "edge_yaw_control_enter_rad": float(getattr(self.cfg, "edge_yaw_control_enter_rad", 0.30) or 0.30),
+            "edge_yaw_control_exit_rad": float(getattr(self.cfg, "edge_yaw_control_exit_rad", 0.12) or 0.12),
+            "edge_yaw_reject_rad": float(getattr(self.cfg, "edge_yaw_reject_rad", 1.40) or 1.40),
+            "edge_yaw_kp": float(getattr(self.cfg, "edge_yaw_kp", 0.22) or 0.22),
+            "edge_yaw_min_wz_radps": float(getattr(self.cfg, "edge_yaw_min_wz_radps", 0.08) or 0.08),
+            "edge_yaw_max_wz_radps": float(getattr(self.cfg, "edge_yaw_max_wz_radps", 0.18) or 0.18),
+            "final_dist_deadband_m": float(getattr(self.cfg, "final_dist_deadband_m", 0.03) or 0.03),
+            "final_dist_kp": float(getattr(self.cfg, "final_dist_kp", 0.08) or 0.08),
+            "final_forward_vx_max_mps": float(getattr(self.cfg, "final_forward_vx_max_mps", 0.006) or 0.006),
+            "final_reverse_vx_max_mps": float(getattr(self.cfg, "final_reverse_vx_max_mps", 0.004) or 0.004),
+            "final_reverse_confirm_frames": int(getattr(self.cfg, "final_reverse_confirm_frames", 3) or 3),
             "perception_dropout_hold_active": bool(self.ctx.perception_dropout_hold_active),
             "perception_dropout_hold_age_ms": 0.0,
             "last_good_table_obs_age_ms": max(0.0, (monotonic_ts() - float(self.ctx.last_good_table_obs_mono or monotonic_ts())) * 1000.0),
@@ -1099,7 +1568,32 @@ class TableDockingMixin:
         })
         summary["authority_applied"] = True
         summary["mode"] = str(decision.cmd.mode)
-        if not auth.allow_forward and abs(float(decision.cmd.vx_mps)) > 1e-9:
+        is_locked = bool(summary.get("final_locked", False) or getattr(self.ctx, "final_locked", False))
+        is_close_range = bool(summary.get("close_range_latched", False) or getattr(self.ctx, "close_range_latched", False))
+        is_final_servo = bool(summary.get("final_distance_servo_active", False) or getattr(self.ctx, "final_distance_servo_active", False))
+        docking_action = str(summary.get("docking_action") or "")
+        is_probe = bool(
+            (is_close_range and not is_locked)
+            or (is_final_servo and not is_locked)
+            or (docking_action in {"CLOSE_RANGE_PROBE", "FINAL_SLOW_PROBE"})
+        )
+        depth_safety_state = str(summary.get("depth_safety_state") or "")
+        depth_safety_hold_states = {
+            "hard_stop_confirming",
+            "hard_stop_locked",
+            "missing_hold",
+            "timeout_hold",
+            "distance_budget_hold",
+        }
+        if is_probe and depth_safety_state not in depth_safety_hold_states:
+            summary["allow_forward"] = True
+        elif depth_safety_state in depth_safety_hold_states:
+            summary["allow_forward"] = False
+            if not summary.get("forward_block_reason"):
+                summary["forward_block_reason"] = str(summary.get("depth_safety_reason") or depth_safety_state)
+
+        allow_forward_val = bool(summary.get("allow_forward", auth.allow_forward))
+        if not allow_forward_val and abs(float(decision.cmd.vx_mps)) > 1e-9:
             decision.cmd.vx_mps = 0.0
         if not auth.allow_rotate and abs(float(decision.cmd.wz_radps)) > 1e-9:
             decision.cmd.wz_radps = 0.0
@@ -1163,8 +1657,29 @@ class TableDockingMixin:
         else:
             self.ctx.zero_cmd_started_mono = 0.0
 
+        final_mode_active = bool(
+            summary.get("close_range_latched")
+            or summary.get("final_edge_mode_latched")
+            or summary.get("final_roi_mode_latched")
+            or summary.get("final_distance_servo_active")
+            or summary.get("final_locked")
+            or getattr(self.ctx, "final_locked", False)
+        )
         # Check progress only after the final authority gate has retained forward motion.
-        if phase == "EDGE_GUIDED_APPROACH" and decision.cmd.vx_mps > 0.0:
+        if final_mode_active:
+            self.ctx.min_dist_seen = 999.0
+            self.ctx.dist_progress_last_refreshed_mono = 0.0
+            self.ctx.dist_missing_started_mono = 0.0
+            summary.update({
+                "progress_window_ms": float(getattr(self.cfg, "progress_window_ms", 15000.0) or 15000.0),
+                "min_progress_m": float(getattr(self.cfg, "min_progress_m", 0.010) or 0.010),
+                "no_progress_warning": False,
+                "no_progress_elapsed_ms": 0.0,
+                "no_progress_policy": "final_hold_no_recovery",
+                "progress_recovery_allowed": False,
+                "progress_recovery_block_reason": "final_or_close_range_latched",
+            })
+        elif phase == "EDGE_GUIDED_APPROACH" and decision.cmd.vx_mps > 0.0:
             progress_timeout = self._check_approach_progress(obs)
             progress_status = dict(getattr(self, "_last_approach_progress_status", {}) or {})
             summary.update(progress_status)
@@ -1309,7 +1824,7 @@ class TableDockingMixin:
         curr_dist = None
         if obs is not None:
             if obs.dist_err_m is not None:
-                curr_dist = float(obs.target_dist_m or self.cfg.table_target_dist_m) + float(obs.dist_err_m)
+                curr_dist = self._table_measured_dist_m(obs)
             elif bool(getattr(obs, "table_roi_depth_valid", False)) and getattr(obs, "table_roi_depth_median", None) is not None:
                 curr_dist = float(obs.table_roi_depth_median)
 
@@ -1431,10 +1946,6 @@ class TableDockingMixin:
             abs(float(getattr(self.car_cfg, "table_approach_yaw_realign_rad", 0.16) or 0.16)),
             abs(float(getattr(self.car_cfg, "table_edge_hard_rotate_only_yaw_rad", 0.45) or 0.45)),
         )
-        touch_side = bool(
-            getattr(obs, "table_bbox_touch_left", getattr(obs, "yolo_bbox_touch_left", False))
-            or getattr(obs, "table_bbox_touch_right", getattr(obs, "yolo_bbox_touch_right", False))
-        )
         if (getattr(obs, "edge_valid", False) or getattr(obs, "edge_trusted", False)) and yaw_err <= hard_yaw:
             return self._approach_from_table_signal(obs, reason=f"YOLO_ACQUIRE_ALIGN edge forward handoff yaw={yaw_err:.3f}")
         if abs(center_error) <= hard_limit:
@@ -1481,7 +1992,7 @@ class TableDockingMixin:
             "wz_radps": float(wz),
             "allow_forward": False,
             "allow_rotate": True,
-            "forward_block_reason": "yolo_bbox_touch_side_rotate_only" if touch_side else "yolo_center_error_too_large_rotate_only",
+            "forward_block_reason": "yolo_center_error_too_large_rotate_only",
             "rotate_block_reason": "",
             "speed_profile": "search",
             "speed_limit_reason": "yolo_align",
@@ -1629,10 +2140,6 @@ class TableDockingMixin:
                 hard_yaw = max(
                     abs(float(getattr(self.car_cfg, "table_approach_yaw_realign_rad", 0.16) or 0.16)),
                     abs(float(getattr(self.car_cfg, "table_edge_hard_rotate_only_yaw_rad", 0.45) or 0.45)),
-                )
-                touch_side = bool(
-                    getattr(obs, "table_bbox_touch_left", getattr(obs, "yolo_bbox_touch_left", False))
-                    or getattr(obs, "table_bbox_touch_right", getattr(obs, "yolo_bbox_touch_right", False))
                 )
                 next_state = State.YOLO_APPROACH if abs(center_error) <= hard_limit else State.YOLO_ACQUIRE_ALIGN
                 self._transition(next_state, f"table signal found cx_norm={cx_norm:.3f} center_error={center_error:.3f}")
@@ -1913,6 +2420,38 @@ class TableDockingMixin:
         return self._annotate_final_lock_decision(self.controller.stop_cmd("AT_TABLE_EDGE"), status)
 
     def _tick_at_table_edge_impl(self) -> MotionDecision:
+        if bool(getattr(self.cfg, "stop_after_table_docking", True)):
+            obs = self._fresh_table_obs()
+            self.ctx.final_locked = True
+            self.ctx.final_yaw_align_active = False
+            self.ctx.final_lock_reason = self.ctx.final_lock_reason or self.ctx.final_lock_last_transition_reason or "at_table_edge"
+            if not bool(getattr(self.ctx, "docking_done_printed", False)):
+                line = (
+                    "[DOCKING_DONE] "
+                    f"reason={str(getattr(self.ctx, 'final_lock_reason', '') or getattr(self.ctx, 'final_lock_last_transition_reason', '') or 'final_locked')} "
+                    f"yaw_err_rad={getattr(obs, 'yaw_err_rad', None) if obs is not None else None} "
+                    f"table_roi_depth_p10={getattr(obs, 'table_roi_depth_p10', None) if obs is not None else None} "
+                    f"final_locked={bool(getattr(self.ctx, 'final_locked', False))} "
+                    f"state={str(getattr(self.ctx.state, 'value', self.ctx.state) or '')}"
+                )
+                print(line)
+                self._log("info", line)
+                self.ctx.docking_done_printed = True
+            decision = self.controller.stop_cmd("AT_TABLE_EDGE")
+            decision.control_summary.update(
+                {
+                    "docking_action": "FINAL_LOCKED_STOP",
+                    "docking_reason": str(self.ctx.final_lock_reason or "at_table_edge"),
+                    "final_locked": True,
+                    "final_lock_reason": str(self.ctx.final_lock_reason or "at_table_edge"),
+                    "final_depth_latched": True,
+                    "final_yaw_align_active": False,
+                    "vx_mps": 0.0,
+                    "vy_mps": 0.0,
+                    "wz_radps": 0.0,
+                }
+            )
+            return decision
         if self._table_edge_only_test_enabled():
             if self._state_elapsed() < float(self.cfg.edge_settle_s):
                 return self.controller.stop_cmd("AT_TABLE_EDGE")
@@ -2343,8 +2882,9 @@ class TableDockingMixin:
             return True
         if obs.edge_ready is not None:
             return bool(obs.edge_ready)
-        if obs.dist_err_m is not None:
-            return abs(float(obs.dist_err_m)) <= float(self.cfg.final_lock_dist_tol_m) * 2.0
+        final_dist_err = self._table_final_dist_err_m(obs)
+        if final_dist_err is not None:
+            return abs(float(final_dist_err)) <= float(self.cfg.final_lock_dist_tol_m) * 2.0
         return bool(obs.edge_found)
 
     def _depth_roi_stop_status(self, obs: Optional[TableEdgeObs]) -> Dict[str, object]:
@@ -2474,29 +3014,46 @@ class TableDockingMixin:
         if abs(float(obs.yaw_err_rad)) > yaw_th:
             status["final_lock_enter_block_reason"] = "yaw_out_of_range"
             return status
-        if obs.dist_err_m is None:
+        final_dist_err = self._table_final_dist_err_m(obs)
+        if final_dist_err is None:
             status["final_lock_enter_block_reason"] = "dist_missing"
             return status
-        if abs(float(obs.dist_err_m)) > dist_th:
-            status["final_lock_enter_block_reason"] = "distance_too_far" if float(obs.dist_err_m) > 0.0 else "distance_too_close"
+        status["dist_err_m"] = float(final_dist_err)
+        if abs(float(final_dist_err)) > dist_th:
+            status["final_lock_enter_block_reason"] = "distance_too_far" if float(final_dist_err) > 0.0 else "distance_too_close"
             return status
         status["final_lock_enter_allowed"] = True
         status["final_lock_enter_block_reason"] = "allowed"
         return status
 
     def _table_target_dist_m(self, obs: Optional[TableEdgeObs] = None) -> float:
-        target = getattr(self.cfg, "table_target_dist_m", 0.015)
-        if obs is not None and obs.target_dist_m is not None:
-            target = obs.target_dist_m
+        del obs
+        target = getattr(self.cfg, "table_target_dist_m", 0.30)
         try:
             return max(0.0, float(target))
         except Exception:
-            return 0.015
+            return 0.30
+
+    def _obs_target_dist_m(self, obs: Optional[TableEdgeObs]) -> float:
+        ctrl_target = self._table_target_dist_m(obs)
+        if obs is None:
+            return ctrl_target
+        target = getattr(obs, "target_dist_m", None)
+        try:
+            return max(0.0, float(target)) if target is not None else ctrl_target
+        except Exception:
+            return ctrl_target
 
     def _table_measured_dist_m(self, obs: Optional[TableEdgeObs]) -> Optional[float]:
         if obs is None or obs.dist_err_m is None:
             return None
-        return self._table_target_dist_m(obs) + float(obs.dist_err_m)
+        return self._obs_target_dist_m(obs) + float(obs.dist_err_m)
+
+    def _table_final_dist_err_m(self, obs: Optional[TableEdgeObs]) -> Optional[float]:
+        measured = self._table_measured_dist_m(obs)
+        if measured is None:
+            return None
+        return float(measured) - self._table_target_dist_m(obs)
 
     def _table_dock_should_stop(self, obs: Optional[TableEdgeObs]) -> bool:
         if obs is None or self._edge_obs_is_stale(obs):
@@ -2957,9 +3514,8 @@ class TableDockingMixin:
         measured_distance = None
         target_distance = None
         if obs is not None:
-            target_distance = obs.target_dist_m
-            if obs.dist_err_m is not None and target_distance is not None:
-                measured_distance = float(target_distance) + float(obs.dist_err_m)
+            target_distance = self._table_target_dist_m(obs)
+            measured_distance = self._table_measured_dist_m(obs)
         reset_reason = str(status.get("lock_count_reset_reason") or status.get("lock_reset_reason") or "")
         stale_reason = str(status.get("vision_stale_reason") or "")
         reason_text = str(reason or status.get("reason") or "")

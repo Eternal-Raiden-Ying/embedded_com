@@ -117,6 +117,7 @@ class TableEdgeObservation:
     upper_line_dist_err_m: Optional[float] = None
     lower_line_dist_err_m: Optional[float] = None
     target_dist_m: Optional[float] = None
+    obs_target_dist_m: Optional[float] = None
     dist_err: Optional[float] = None
     table_roi_depth_valid: bool = False
     table_roi_depth_p10: Optional[float] = None

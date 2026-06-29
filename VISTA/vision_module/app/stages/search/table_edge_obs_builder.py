@@ -19,8 +19,8 @@ def default_table_edge_obs() -> Dict[str, object]:
         "edge_found": False,
         "edge_valid": False,
         "confidence": 0.0,
-        "edge_conf": 0.0,
-        "edge_confidence": 0.0,
+        "edge_conf": None,
+        "edge_confidence": None,
         "yaw_err_rad": None,
         "yaw_err": None,
         "dist_err_m": None,
@@ -802,12 +802,29 @@ def annotate_table_edge_obs(
     out["dist_err"] = dist
     out["dist"] = dist
 
-    lateral = out.get("lateral", out.get("lateral_err_m", dist))
+    lateral = out.get("lateral")
+    if lateral is None:
+        lateral = out.get("lateral_err_m")
     out["lateral"] = lateral
     out["lateral_err_m"] = lateral
+    out["lateral_source"] = str(out.get("lateral_source") or ("geometry" if lateral is not None else "missing"))
 
-    out["edge_conf"] = float(out.get("edge_conf", out.get("confidence", 0.0)) or 0.0)
-    out["edge_confidence"] = float(out.get("edge_confidence", out.get("edge_conf", 0.0)) or 0.0)
+    def _positive_float(value: object) -> Optional[float]:
+        try:
+            f = float(value)
+        except Exception:
+            return None
+        return f if f > 0.0 else None
+
+    confidence = _positive_float(out.get("confidence"))
+    edge_conf = _positive_float(out.get("edge_conf"))
+    edge_confidence = _positive_float(out.get("edge_confidence"))
+    if edge_conf is None and confidence is not None:
+        edge_conf = confidence
+    if edge_confidence is None:
+        edge_confidence = edge_conf if edge_conf is not None else confidence
+    out["edge_conf"] = float(edge_conf or 0.0)
+    out["edge_confidence"] = float(edge_confidence or 0.0)
 
     obs_ts = out.get("obs_ts", out.get("ts"))
     age_ms = None

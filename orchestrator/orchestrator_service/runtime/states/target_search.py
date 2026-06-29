@@ -456,6 +456,7 @@ class TargetSearchMixin:
         jitter_ok = center_jitter <= float(self.cfg.target_lock_center_jitter_th)
         conf_stable = conf_median is not None and conf_median >= float(self.cfg.target_lock_conf_th or 0.0)
         ratio_ok = found_ratio >= float(getattr(self.cfg, "target_lock_found_ratio_th", 0.6) or 0.6)
+        ready_for_grasp = self._check_target_ready_for_grasp(obs)
         if (
             self._state_elapsed() >= float(self.cfg.target_locked_freeze_after_s)
             and stable_ok
@@ -463,6 +464,7 @@ class TargetSearchMixin:
             and conf_stable
             and ratio_ok
             and self.ctx.target_loss_since_mono <= 0.0
+            and ready_for_grasp
         ):
             self.ctx.target_last_transition_reason = (
                 f"freeze_ok found_ratio={found_ratio:.2f} conf_median={float(conf_median):.3f} "
@@ -746,7 +748,6 @@ class TargetSearchMixin:
         segment_s = max(0.2, float(self.cfg.edge_slide_segment_s))
         segment_index = int(self._state_elapsed() / segment_s)
         return self.ctx.slide_direction_sign if segment_index % 2 == 0 else -self.ctx.slide_direction_sign
-
     def _segment_elapsed(self, segment_s: float) -> float:
         segment_s = max(0.1, float(segment_s))
         return self._state_elapsed() % segment_s
@@ -758,3 +759,39 @@ class TargetSearchMixin:
             return False
         return self.ctx.edge_visit_index + 1 < len(self.ctx.edge_visit_order)
 
+    def _check_target_ready_for_grasp(self, obs: Optional[TargetObs]) -> bool:
+        if obs is None:
+            return False
+        if not getattr(obs, "found", False):
+            return False
+        
+        active_target = str(self.ctx.active_target or "").strip()
+        matched_cls = str(obs.matched_cls or "").strip()
+        if not active_target or matched_cls != active_target:
+            return False
+            
+        conf = obs.matched_conf if obs.matched_conf is not None else 0.0
+        if conf < 0.45:
+            return False
+            
+        mb = obs.matched_bbox
+        if not mb or not isinstance(mb, list) or len(mb) < 4:
+            return False
+            
+        table_obs = self._fresh_table_obs()
+        if table_obs is not None and getattr(table_obs, "table_bbox_xyxy", None):
+            tb = table_obs.table_bbox_xyxy
+            if len(tb) >= 4:
+                mcx = (float(mb[0]) + float(mb[2])) / 2.0
+                mcy = (float(mb[1]) + float(mb[3])) / 2.0
+                tx1, ty1, tx2, ty2 = float(tb[0]), float(tb[1]), float(tb[2]), float(tb[3])
+                if not (tx1 - 10 <= mcx <= tx2 + 10 and ty1 - 10 <= mcy <= ty2 + 10):
+                    return False
+                    
+        if int(getattr(self.ctx, "target_found_frames", 0) or 0) < 5:
+            return False
+            
+        if obs.depth_m is None or obs.depth_m <= 0.0:
+            return False
+            
+        return True
