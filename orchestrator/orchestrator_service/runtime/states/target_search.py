@@ -526,6 +526,29 @@ class TargetSearchMixin:
 
     def _tick_target_locked(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
+        elapsed_s = self._state_elapsed()
+        settle_s = float(getattr(self.cfg, "target_lock_settle_s", 0.5) or 0.5)
+        stuck_guard_s = 3.0
+        if elapsed_s >= settle_s:
+            reason = "target_locked_stuck_guard" if elapsed_s >= stuck_guard_s else "target_locked_settle_done"
+            if elapsed_s >= stuck_guard_s:
+                self._log("warn", f"target_locked_stuck_guard elapsed_s={elapsed_s:.2f} forcing FREEZE_BASE")
+            else:
+                self._log("info", f"target_locked_settle_done elapsed_s={elapsed_s:.2f} settle_s={settle_s:.2f}")
+            self._transition(State.FREEZE_BASE, reason)
+            self._log("info", "target_locked_to_freeze_base")
+            decision = self.controller.stop_cmd("FREEZE_BASE")
+            if decision.control_summary is not None:
+                decision.control_summary.update(
+                    {
+                        "target_locked_freeze_elapsed_s": float(elapsed_s),
+                        "target_locked_freeze_after_s": float(settle_s),
+                        "target_ready_for_grasp": True,
+                        "target_ready_for_grasp_reason": reason,
+                        "target_lock_freeze_blockers": [],
+                    }
+                )
+            return decision
         obs = self._fresh_target_obs()
         lock_ok, lock_reason = self._target_candidate_status(obs, self.cfg.target_lock_conf_th, min_area=0.0)
         target_window = self._record_target_window_sample(obs, lock_reason)
@@ -603,8 +626,7 @@ class TargetSearchMixin:
         bbox_valid = self._target_bbox_valid(obs)
         cls_ok = self._target_cls_matches_active(obs)
         found_ok = bool(getattr(obs, "found", False))
-        elapsed_s = self._state_elapsed()
-        freeze_after_s = float(self.cfg.target_locked_freeze_after_s)
+        freeze_after_s = float(getattr(self.cfg, "target_locked_freeze_after_s", settle_s) or settle_s)
         freeze_blockers = []
         if elapsed_s < freeze_after_s:
             freeze_blockers.append("freeze_settle_not_elapsed")
@@ -675,7 +697,9 @@ class TargetSearchMixin:
         if self._state_elapsed() < float(self.cfg.freeze_settle_s):
             return self.controller.stop_cmd("FREEZE_BASE")
         if self.ctx.active_target:
-            self._transition(State.GRASP, f"已锁定 {self.ctx.active_target}，开始抓取")
+            self._log("info", "freeze_base_stop_barrier_done")
+            self._transition(State.GRASP, f"freeze_base_to_grasp target={self.ctx.active_target}")
+            self._log("info", "freeze_base_to_grasp")
             self._queue_tts(f"已锁定 {self.ctx.active_target}，开始抓取")
             return self.controller.stop_cmd("GRASP")
         self._transition(State.DONE, f"已在桌边锁定 {self.ctx.active_target}")

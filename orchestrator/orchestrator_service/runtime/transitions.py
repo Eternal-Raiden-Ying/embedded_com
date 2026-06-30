@@ -75,6 +75,7 @@ class TransitionsMixin:
             self.ctx.task_target_confirm_count += 1
         elif new_state == State.TARGET_LOCKED:
             self.ctx.task_target_locked_count += 1
+            self._log("info", "target_locked_enter")
         if new_state == State.DONE and self.ctx.last_fail_reason:
             warning = str(self.ctx.last_fail_reason).strip()
             if warning and warning not in self.ctx.task_warning_history:
@@ -237,12 +238,15 @@ class TransitionsMixin:
         if state == State.SEARCH_TABLE:
             self.reset_edge_tracking("enter_search_table")
             self.reset_target_tracking("enter_search_table")
+        elif state == State.FREEZE_BASE:
+            self._log("info", "freeze_base_enter")
         elif state in {State.NO_PROGRESS_RECOVERY, State.LEAVE_EDGE, State.NEXT_TABLE}:
             reason = f"enter_{state.value.lower()}"
             self.reset_edge_tracking(reason)
             self.reset_target_tracking(reason)
             self.reset_slide_reference(reason)
         elif state == State.GRASP:
+            self._log("info", "grasp_enter")
             self.ctx.grasp_substate = "AWAITING_RESPOND"
             self.ctx.grasp_result = None
             self.ctx.grasp_status = ""
@@ -253,6 +257,7 @@ class TransitionsMixin:
             self.ctx.arm_response = None
             self.ctx.grasp_timeout_mono = monotonic_ts() + _GRASP_RESPOND_TIMEOUT_S
             self.ctx.grasp_verify_reported = False
+            self._log("info", "grasp_remote_request_sent")
         elif state == State.DONE:
             if self.ctx.last_fail_reason:
                 warning = str(self.ctx.last_fail_reason).strip()

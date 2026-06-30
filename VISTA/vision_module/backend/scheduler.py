@@ -30,6 +30,7 @@ class Scheduler:
         self._last_publish_trace_ts: Dict[str, float] = {}
         self._last_collect_trace_ts: float = 0.0
         self._logger = logging.getLogger("vision.scheduler")
+        self._debug_trace_enable = False
 
     def _route_cfg(self, route_name: str) -> Dict[str, Any]:
         raw = (self.routes or {}).get(route_name)
@@ -71,6 +72,7 @@ class Scheduler:
         with self._lock:
             self.active_plan = dict(plan or {})
             self.active_generation = int(generation)
+            self._debug_trace_enable = bool((self.active_plan or {}).get("vision_debug_trace_enable", False))
             self.routes = dict((self.active_plan or {}).get("routes") or {})
             self.result_slots.clear()
             self.event_latches.clear()
@@ -188,6 +190,8 @@ class Scheduler:
         result_slots_keys_after,
     ) -> None:
         now = time.time()
+        if not bool(getattr(self, "_debug_trace_enable", False)):
+            return
         count = int(self._publish_trace_count.get(route_name, 0) or 0)
         last_ts = float(self._last_publish_trace_ts.get(route_name, 0.0) or 0.0)
         should_log = route_name == "table_edge_obs" and (count < 5 or not accepted or (now - last_ts) >= 0.5)
@@ -195,7 +199,7 @@ class Scheduler:
             return
         self._publish_trace_count[route_name] = count + 1
         self._last_publish_trace_ts[route_name] = now
-        self._logger.info(
+        self._logger.debug(
             "[PUBLISH_RESULT_TRACE] route=%s accepted=%s reason=%s publish_generation=%s scheduler_active_generation=%s routes_keys=%s route_cfg=%s result_slots_keys_before=%s result_slots_keys_after=%s",
             route_name,
             str(bool(accepted)).lower(),
@@ -306,18 +310,18 @@ class Scheduler:
 
     def collect_tick_input(self, ts: float, route_filter: set = None) -> StageTickInput:
         with self._lock:
-            # DIAGNOSTIC LOG FOR ROUTING INVESTIGATION
-            if "table_edge_obs" in self.result_slots:
-                slot = self.result_slots["table_edge_obs"]
-                self._logger.info(
-                    "[DIAG_SCHEDULER] table_edge_obs slot exists: generation=%s active_gen=%s visible=%s payload_frame=%s",
-                    slot.get("generation"),
-                    self.active_generation,
-                    self._slot_visible(slot),
-                    (slot.get("payload") or {}).get("frame_id") if isinstance(slot.get("payload"), dict) else None
-                )
-            else:
-                self._logger.info("[DIAG_SCHEDULER] table_edge_obs slot DOES NOT exist in result_slots")
+            if bool(getattr(self, "_debug_trace_enable", False)):
+                if "table_edge_obs" in self.result_slots:
+                    slot = self.result_slots["table_edge_obs"]
+                    self._logger.debug(
+                        "[DIAG_SCHEDULER] table_edge_obs slot exists: generation=%s active_gen=%s visible=%s payload_frame=%s",
+                        slot.get("generation"),
+                        self.active_generation,
+                        self._slot_visible(slot),
+                        (slot.get("payload") or {}).get("frame_id") if isinstance(slot.get("payload"), dict) else None,
+                    )
+                else:
+                    self._logger.debug("[DIAG_SCHEDULER] table_edge_obs slot DOES NOT exist in result_slots")
 
             signals = dict(self.pending_signals or {})
             self.pending_signals.clear()
@@ -349,15 +353,16 @@ class Scheduler:
                     skipped_routes.append((route_name, "payload_none"))
             visible_routes = sorted(stage_results.keys())
             now = time.time()
-            if now - float(self._last_collect_trace_ts or 0.0) >= 0.5 or "table_edge_obs" in self.result_slots:
+            if bool(getattr(self, "_debug_trace_enable", False)) and now - float(self._last_collect_trace_ts or 0.0) >= 2.0:
                 self._last_collect_trace_ts = now
                 for skipped_route, skip_reason in skipped_routes:
                     self.last_snapshot["collect_skipped_route"] = skipped_route
                     self.last_snapshot["collect_skip_reason"] = skip_reason
                     if skipped_route == "table_edge_obs":
                         break
-                self._logger.info(
-                    "[SCHEDULER_COLLECT_TRACE] stage=SEARCH mode=%s subscribed_routes=%s result_slots_keys=%s visible_routes=%s skipped_routes=%s",
+                self._logger.debug(
+                    "[SCHEDULER_COLLECT_TRACE] stage=%s mode=%s subscribed_routes=%s result_slots_keys=%s visible_routes=%s skipped_routes=%s",
+                    (self.active_plan or {}).get("stage"),
                     (self.active_plan or {}).get("mode"),
                     sorted(route_filter) if route_filter is not None else None,
                     sorted((self.result_slots or {}).keys()),

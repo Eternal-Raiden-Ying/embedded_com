@@ -537,6 +537,12 @@ class TableEdgeObs:
     table_roi_latched: bool = False
     table_roi_latch_age_s: Optional[float] = None
     table_roi_xyxy: Optional[list] = None
+    final_fixed_roi_active: bool = False
+    final_fixed_roi_xyxy: Optional[list] = None
+    final_fixed_roi_depth_valid: bool = False
+    final_fixed_roi_depth_p10: Optional[float] = None
+    final_fixed_roi_depth_sample_count: Optional[int] = None
+    final_fixed_roi_depth_invalid_reason: Optional[str] = None
     edge_angle_rad: Optional[float] = None
     edge_k: Optional[float] = None
     edge_b: Optional[float] = None
@@ -749,6 +755,12 @@ class TableEdgeObs:
             table_roi_latched=_pick_optional_bool(payload, "table_roi_latched") is True,
             table_roi_latch_age_s=_pick_optional_float(payload, "table_roi_latch_age_s"),
             table_roi_xyxy=_pick_optional_bbox(payload, "table_roi_xyxy", "table_edge_roi", "depth_edge_roi"),
+            final_fixed_roi_active=bool(payload.get("final_fixed_roi_active", False)),
+            final_fixed_roi_xyxy=_pick_optional_bbox(payload, "final_fixed_roi_xyxy"),
+            final_fixed_roi_depth_valid=bool(payload.get("final_fixed_roi_depth_valid", False)),
+            final_fixed_roi_depth_p10=_pick_optional_float(payload, "final_fixed_roi_depth_p10"),
+            final_fixed_roi_depth_sample_count=_pick_optional_int(payload, "final_fixed_roi_depth_sample_count"),
+            final_fixed_roi_depth_invalid_reason=_pick_optional_str(payload, "final_fixed_roi_depth_invalid_reason"),
             edge_angle_rad=_pick_optional_float(payload, "edge_angle_rad"),
             edge_k=_pick_optional_float(payload, "edge_k"),
             edge_b=_pick_optional_float(payload, "edge_b"),
