@@ -319,6 +319,12 @@ class GraspStagePlan(BaseStagePlan):
                 remote_error_norm = remote_error or "predict_failed"
                 if remote_error_norm == "timeout":
                     remote_error_norm = "predict_timeout"
+                try:
+                    status_code = int(remote.get("status_code")) if remote.get("status_code") is not None else None
+                except (TypeError, ValueError):
+                    status_code = None
+                if status_code is not None and status_code >= 400:
+                    remote_error_norm = f"predict_http_{status_code}"
                 return StageOutput(
                     vision_obs=self.build_obs(
                         ctx, status="FAILED",
@@ -326,7 +332,7 @@ class GraspStagePlan(BaseStagePlan):
                         result={"reason": "remote_predict_failed", "request_id": request_id,
                                 "remote_error": remote_error_norm,
                                 "error": remote_error_norm,
-                                "status_code": remote.get("status_code")},
+                                "status_code": status_code if status_code is not None else remote.get("status_code")},
                     ),
                     snapshot=snapshot,
                 )

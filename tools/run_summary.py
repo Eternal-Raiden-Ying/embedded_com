@@ -109,9 +109,10 @@ def _short_text(value: Any, limit: int = 80) -> str:
 
 
 def _parse_log_payload(line: str) -> Dict[str, Any]:
-    if " | " not in line:
+    brace_idx = line.find("{")
+    if brace_idx < 0:
         return {}
-    raw = line.split(" | ", 1)[1].strip()
+    raw = line[brace_idx:].strip()
     try:
         obj = ast.literal_eval(raw)
     except Exception:
@@ -560,6 +561,45 @@ def final_close_summary(control: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         and not bool(r.get("final_edge_mode_latched"))
         and not bool(r.get("final_depth_latched"))
     ]
+    lock_rows = [
+        r for r in rows
+        if str(r.get("docking_action") or "") == "FINAL_LOCKED_STOP"
+        or bool(r.get("final_locked"))
+        or bool(str(r.get("final_lock_reason") or "").strip())
+    ]
+    lock_row = lock_rows[-1] if lock_rows else {}
+    final_lock_reason = str(lock_row.get("final_lock_reason") or lock_row.get("docking_reason") or "")
+    final_depth_at_lock = _safe_float(lock_row.get("final_depth_m"))
+    final_stop_threshold = _safe_float(lock_row.get("final_stop_threshold_m"))
+    if final_stop_threshold is None:
+        final_stop_threshold = _safe_float(lock_row.get("depth_envelope_stop_p10_m"))
+    legacy_p10_at_lock = _safe_float(lock_row.get("legacy_table_roi_depth_p10"))
+    if legacy_p10_at_lock is None:
+        legacy_p10_at_lock = _safe_float(lock_row.get("legacy_table_roi_p10_m"))
+    if legacy_p10_at_lock is None:
+        legacy_p10_at_lock = _safe_float(lock_row.get("table_roi_depth_p10"))
+    legacy_reason_tokens = ("roi_p10", "table_roi", "depth_hard_stop")
+    early_stop_by_legacy_roi = bool(
+        lock_row
+        and any(token in final_lock_reason for token in legacy_reason_tokens)
+        and final_depth_at_lock is not None
+        and final_stop_threshold is not None
+        and final_depth_at_lock > final_stop_threshold
+    )
+    if early_stop_by_legacy_roi:
+        final_stop_verdict = "WARN_LEGACY_ROI_EARLY_STOP"
+    elif lock_row:
+        final_stop_verdict = "OK"
+    else:
+        final_stop_verdict = "NO_FINAL_LOCK"
+    final_stop_source = ""
+    if lock_row:
+        if any(token in final_lock_reason for token in legacy_reason_tokens):
+            final_stop_source = "legacy_table_roi"
+        elif final_lock_reason == "final_depth_stop" or str(lock_row.get("final_depth_source") or "") == "fixed_center_low_roi":
+            final_stop_source = "fixed_center_low_roi"
+        else:
+            final_stop_source = str(lock_row.get("final_depth_source") or lock_row.get("measured_dist_source") or "unknown")
     return {
         "count": len(rows),
         "has_final_depth_field": bool(has_final_depth_field),
@@ -573,6 +613,13 @@ def final_close_summary(control: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         "warning": "" if has_final_depth_field else "WARN: final_depth_m missing; control still uses old ROI debug fields",
         "fixed_roi_too_early_count": len(fixed_roi_too_early_rows),
         "fixed_roi_too_early": bool(fixed_roi_too_early_rows),
+        "final_stop_verdict": final_stop_verdict,
+        "final_stop_source": final_stop_source,
+        "final_lock_reason": final_lock_reason,
+        "final_depth_at_lock": final_depth_at_lock,
+        "legacy_table_roi_p10_at_lock": legacy_p10_at_lock,
+        "final_stop_threshold_m": final_stop_threshold,
+        "early_stop_by_legacy_roi": early_stop_by_legacy_roi,
         "rows": rows,
     }
 
@@ -709,6 +756,12 @@ def remote_flow_summary(remote_events: Sequence[Dict[str, Any]], grasp_window: D
             state = ready_state
         elif ok:
             state = "SENT_OK" if name == "release" else ("OK" if name != "predict" else "SUCCESS")
+        elif name == "predict" and status_code is not None:
+            try:
+                code_int = int(status_code)
+            except (TypeError, ValueError):
+                code_int = 0
+            state = f"SENT_HTTP_{code_int}" if code_int >= 400 else "FAILED"
         else:
             state = "FAILED"
         out[name] = {
@@ -771,6 +824,8 @@ def conclusion_summary(summary: Dict[str, Any]) -> Dict[str, str]:
     else:
         final_depth = "BAD"
     final_safety = "PASS" if final_depth == "GOOD" else ("WARN" if final_depth in {"WEAK", "MISSING_FIELD"} else "FAIL")
+    if final_close.get("early_stop_by_legacy_roi"):
+        final_safety = "WARN"
     target_slide_info = summary.get("target_slide") or {}
     target_slide = "PASS" if target_slide_info.get("pass") else "FAIL"
     grasp = summary.get("grasp") or {}
@@ -781,7 +836,7 @@ def conclusion_summary(summary: Dict[str, Any]) -> Dict[str, str]:
         last_reason = str(grasp.get("last_grasp_reason") or "").lower()
         if predict_state == "SUCCESS":
             grasp_state = "SUCCESS"
-        elif predict_state == "FAILED":
+        elif predict_state == "FAILED" or predict_state.startswith("SENT_HTTP_"):
             grasp_state = "FAILED"
         elif predict_state in {"NOT_SENT_OR_NOT_LOGGED", "NOT_SENT"} and "timeout" in last_reason:
             grasp_state = "TIMEOUT"
@@ -1035,6 +1090,11 @@ def render_markdown(run_dir: Path, summary: Dict[str, Any], plots: Dict[str, str
     lines.append(f"- entries={fc.get('count', 0)} valid={fc.get('final_depth_valid_count', 0)} ratio={fmt((fc.get('final_depth_valid_ratio') or 0) * 100, 1, '%')}")
     lines.append(f"- final_depth_m min/mean/max={fmt(ds.get('min'))}/{fmt(ds.get('mean'))}/{fmt(ds.get('max'))}")
     lines.append(f"- sources={fc.get('final_depth_source_distribution', {})}")
+    lines.append(
+        f"- final_stop={fc.get('final_stop_verdict')} source={fc.get('final_stop_source')} "
+        f"reason={_short_text(fc.get('final_lock_reason'), 80)} final_depth_at_lock={fmt(fc.get('final_depth_at_lock'))} "
+        f"legacy_roi_p10_at_lock={fmt(fc.get('legacy_table_roi_p10_at_lock'))}"
+    )
     lines.append(f"- servo_reasons={fc.get('final_distance_servo_reason_distribution', {})}")
     lines.append("")
 
@@ -1218,6 +1278,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "servo_reason_distribution": summary["final_close"].get("final_distance_servo_reason_distribution"),
             "fixed_roi_too_early": summary["final_close"].get("fixed_roi_too_early"),
             "fixed_roi_too_early_count": summary["final_close"].get("fixed_roi_too_early_count"),
+            "final_stop_verdict": summary["final_close"].get("final_stop_verdict"),
+            "final_stop_source": summary["final_close"].get("final_stop_source"),
+            "final_lock_reason": summary["final_close"].get("final_lock_reason"),
+            "final_depth_at_lock": summary["final_close"].get("final_depth_at_lock"),
+            "legacy_table_roi_p10_at_lock": summary["final_close"].get("legacy_table_roi_p10_at_lock"),
+            "early_stop_by_legacy_roi": summary["final_close"].get("early_stop_by_legacy_roi"),
         },
         "target_summary": {
             "count": summary["target"].get("count"),

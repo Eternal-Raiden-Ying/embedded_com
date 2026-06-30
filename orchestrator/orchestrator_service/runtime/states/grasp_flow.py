@@ -68,7 +68,7 @@ class GraspFlowMixin:
         if self._state_elapsed() < 0.3:
             return self.controller.stop_cmd("GRASP")
         if str(self.ctx.grasp_status or "").upper() == "FAILED":
-            reason = str(self.ctx.grasp_reason or "")
+            reason = self._normalize_grasp_failed_reason(str(self.ctx.grasp_reason or ""))
             self._enter_error_recovery(reason or "grasp failed")
             return self.controller.stop_cmd("GRASP")
         if now_m > self.ctx.grasp_timeout_mono:
@@ -115,7 +115,7 @@ class GraspFlowMixin:
             return self.controller.stop_cmd("GRASP")
 
         if status == "FAILED":
-            reason = str(self.ctx.grasp_reason or "")
+            reason = self._normalize_grasp_failed_reason(str(self.ctx.grasp_reason or ""))
             if reason == "no_detection":
                 self._transition(State.SEARCH_TARGET_INIT, "grasp failed: target not detected")
                 return self.controller.stop_cmd("SEARCH_TARGET_INIT")
@@ -123,6 +123,14 @@ class GraspFlowMixin:
             return self.controller.stop_cmd("GRASP")
 
         return self.controller.stop_cmd("GRASP")
+
+    @staticmethod
+    def _normalize_grasp_failed_reason(reason: str) -> str:
+        text = str(reason or "").strip()
+        prefix = "remote_predict_failed:predict_http_"
+        if text.startswith(prefix):
+            return "remote_predict_failed:http_" + text[len(prefix):]
+        return text
 
     def _tick_grasp_pre_arm_stop_settle(self, now_m: float) -> MotionDecision:
         settle_ms = getattr(self.car_cfg, "pre_arm_stop_settle_ms", 150)
