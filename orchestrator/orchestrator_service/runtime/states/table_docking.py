@@ -292,6 +292,10 @@ class TableDockingMixin:
         )
         if final_locked and action == "FINAL_LOCKED_STOP" and stopped:
             state_value = str(getattr(self.ctx.state, "value", self.ctx.state) or "")
+            docking_transition_states = {"SEARCH_TABLE", "YOLO_ACQUIRE_ALIGN", "YOLO_APPROACH", "EDGE_ADJUST", "FINAL_SLOW_STOP"}
+            if state_value not in docking_transition_states and state_value != "AT_TABLE_EDGE":
+                summary["final_state_transition_block_reason"] = "docking_final_latch_frozen_for_target_search"
+                return
             if state_value != "AT_TABLE_EDGE":
                 reason = "final_locked_stop_reached"
                 self.ctx.final_locked = True

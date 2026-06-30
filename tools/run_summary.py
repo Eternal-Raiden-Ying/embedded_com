@@ -346,6 +346,46 @@ def active_window(
     return {"start_ts": start_ts, "end_ts": end_ts, "end_reason": end_reason}
 
 
+def task_windows(
+    state_trace: Sequence[Dict[str, Any]],
+    control: Sequence[Dict[str, Any]],
+    velocity_rows: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    trans = [r for r in state_trace if r.get("event") == "state_transition"]
+    trans.sort(key=lambda r: _safe_float(r.get("ts")) or 0.0)
+    starts = [
+        _safe_float(r.get("ts"))
+        for r in trans
+        if r.get("previous_state") == "IDLE" and r.get("next_state") == "SEARCH_TABLE" and _safe_float(r.get("ts")) is not None
+    ]
+    if not starts:
+        return [active_window(state_trace, control, velocity_rows)]
+    windows: List[Dict[str, Any]] = []
+    all_ts = [_safe_float(r.get("ts")) for r in list(control) + list(velocity_rows) + list(trans)]
+    max_ts = max([x for x in all_ts if x is not None], default=None)
+    for idx, start_ts in enumerate(starts):
+        next_start = starts[idx + 1] if idx + 1 < len(starts) else None
+        end_ts = None
+        end_reason = ""
+        for r in trans:
+            ts = _safe_float(r.get("ts"))
+            if ts is None or ts < start_ts or (next_start is not None and ts >= next_start):
+                continue
+            if r.get("previous_state") == "GRASP" and r.get("next_state") in {"ERROR_RECOVERY", "IDLE"}:
+                end_ts = ts
+                end_reason = f"GRASP->{r.get('next_state')}"
+                break
+            if r.get("next_state") in {"IDLE", "ERROR_RECOVERY", "DONE"}:
+                end_ts = ts
+                end_reason = f"{r.get('previous_state')}->{r.get('next_state')}"
+                break
+        if end_ts is None:
+            end_ts = next_start if next_start is not None else max_ts
+            end_reason = "next_task_start" if next_start is not None else "last_record"
+        windows.append({"task_index": idx + 1, "start_ts": start_ts, "end_ts": end_ts, "end_reason": end_reason})
+    return windows
+
+
 def in_window(row: Dict[str, Any], window: Dict[str, Any]) -> bool:
     ts = _safe_float(row.get("ts"))
     if ts is None:
@@ -506,6 +546,17 @@ def final_close_summary(control: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     depth_values = [_safe_float(r.get("final_depth_m")) for r in rows]
     source_counts = Counter(str(r.get("final_depth_source") or "missing") for r in rows)
     final_vx = [_safe_float(r.get("vx_mps")) for r in rows]
+    fixed_roi_too_early_rows = [
+        r for r in rows
+        if str(r.get("docking_action") or "") == "FINAL_SLOW_PROBE"
+        and str(r.get("final_depth_source") or "") == "fixed_center_low_roi"
+        and (_safe_float(r.get("final_depth_m")) is not None and 0.80 <= float(_safe_float(r.get("final_depth_m")) or 0.0) <= 0.90)
+        and not bool(r.get("close_range_latched"))
+        and not bool(r.get("near_table_latched"))
+        and not bool(r.get("final_roi_mode_latched"))
+        and not bool(r.get("final_edge_mode_latched"))
+        and not bool(r.get("final_depth_latched"))
+    ]
     return {
         "count": len(rows),
         "has_final_depth_field": bool(has_final_depth_field),
@@ -517,6 +568,8 @@ def final_close_summary(control: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         "final_vx_stats": num_stats(final_vx),
         "reason_counts": dict(reasons.most_common(12)),
         "warning": "" if has_final_depth_field else "WARN: final_depth_m missing; control still uses old ROI debug fields",
+        "fixed_roi_too_early_count": len(fixed_roi_too_early_rows),
+        "fixed_roi_too_early": bool(fixed_roi_too_early_rows),
         "rows": rows,
     }
 
@@ -545,6 +598,28 @@ def target_summary(target_obs: Sequence[Dict[str, Any]], control: Sequence[Dict[
         "conf_stats": num_stats(confs),
         "centers": centers,
         "rows": rows,
+    }
+
+
+def target_slide_summary(chain: Sequence[str], velocity_rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    entered_slide = "EDGE_SLIDE_SEARCH" in chain
+    nonzero_vy = any(
+        str(r.get("state") or "") == "EDGE_SLIDE_SEARCH"
+        and abs(float(r.get("vy_mps", 0.0) or 0.0)) > 1e-4
+        for r in velocity_rows
+    )
+    reached_confirm = False
+    if entered_slide:
+        try:
+            idx = list(chain).index("EDGE_SLIDE_SEARCH")
+            reached_confirm = any(s in {"TARGET_CONFIRM", "TARGET_LOCKED"} for s in list(chain)[idx + 1:])
+        except ValueError:
+            reached_confirm = False
+    return {
+        "entered_edge_slide_search": bool(entered_slide),
+        "sent_nonzero_vy": bool(nonzero_vy),
+        "reached_target_confirm_or_locked": bool(reached_confirm),
+        "pass": bool(entered_slide and nonzero_vy and reached_confirm),
     }
 
 
@@ -672,7 +747,9 @@ def conclusion_summary(summary: Dict[str, Any]) -> Dict[str, str]:
     chain_ok = bool(summary.get("chain_complete"))
     final_close = summary.get("final_close") or {}
     final_ratio = final_close.get("final_depth_valid_ratio")
-    if not final_close.get("has_final_depth_field"):
+    if final_close.get("fixed_roi_too_early"):
+        final_depth = "REGRESSION_TOO_EARLY"
+    elif not final_close.get("has_final_depth_field"):
         final_depth = "MISSING_FIELD"
     elif final_ratio is None:
         final_depth = "BAD"
@@ -683,8 +760,8 @@ def conclusion_summary(summary: Dict[str, Any]) -> Dict[str, str]:
     else:
         final_depth = "BAD"
     final_safety = "PASS" if final_depth == "GOOD" else ("WARN" if final_depth in {"WEAK", "MISSING_FIELD"} else "FAIL")
-    target = summary.get("target") or {}
-    target_slide = "PASS" if target.get("count", 0) > 0 else "FAIL"
+    target_slide_info = summary.get("target_slide") or {}
+    target_slide = "PASS" if target_slide_info.get("pass") else "FAIL"
     grasp = summary.get("grasp") or {}
     if not grasp.get("grasp_remote_requested"):
         grasp_state = "NOT_TRIGGERED"
@@ -1012,7 +1089,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     t0, t1 = normalize_ts(all_records)
 
     vrows = extract_velocity_rows(uart)
-    window = active_window(state_trace, control, vrows)
+    windows = task_windows(state_trace, control, vrows)
+    window = windows[-1] if windows else active_window(state_trace, control, vrows)
     active_control = [r for r in control if in_window(r, window)]
     active_vrows = [r for r in vrows if in_window(r, window)]
     active_target_obs = [r for r in target_obs if in_window(r, window)]
@@ -1035,6 +1113,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     final_info = final_close_summary(active_control)
     target_info = target_summary(active_target_obs, active_control)
+    target_slide_info = target_slide_summary(chain, active_vrows)
     remote_events = read_remote_dump_events(vision)
     grasp_window = grasp_remote_window(state_trace, vision_req)
     remote_flow = remote_flow_summary(remote_events, grasp_window)
@@ -1056,6 +1135,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "t1": active_t1,
         "duration_s": (active_t1 - active_t0) if active_t0 is not None and active_t1 is not None else None,
         "active_window": window,
+        "task_windows": windows,
         "state_chain": chain,
         "critical_issues": critical_issues,
         "transitions": [
@@ -1082,6 +1162,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "target_obs_hz": intervals_hz(active_target_obs),
         "final_close": {k: v for k, v in final_info.items() if k != "rows"},
         "target": {k: v for k, v in target_info.items() if k not in {"rows", "centers"}},
+        "target_slide": target_slide_info,
         "grasp": grasp_info,
         "files": {
             "markdown": str(out_dir / "run_summary_auto.md"),
@@ -1100,6 +1181,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     compact = {
         "run_id": summary["run_id"],
         "active_window": summary["active_window"],
+        "task_windows": summary["task_windows"],
         "verdicts": summary["conclusions"],
         "critical_issues": summary["critical_issues"],
         "state_chain": summary["state_chain"],
@@ -1120,6 +1202,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "depth_m_mean": _get(summary, "final_close", "final_depth_m_stats", "mean"),
             "depth_m_max": _get(summary, "final_close", "final_depth_m_stats", "max"),
             "servo_reason_distribution": summary["final_close"].get("final_distance_servo_reason_distribution"),
+            "fixed_roi_too_early": summary["final_close"].get("fixed_roi_too_early"),
+            "fixed_roi_too_early_count": summary["final_close"].get("fixed_roi_too_early_count"),
         },
         "target_summary": {
             "count": summary["target"].get("count"),
@@ -1131,6 +1215,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "conf_mean": _get(summary, "target", "conf_stats", "mean"),
             "conf_max": _get(summary, "target", "conf_stats", "max"),
         },
+        "target_slide_summary": summary["target_slide"],
         "remote_flow_summary": compact_remote_flow(remote_flow),
         "artifact_files": summary["files"],
     }

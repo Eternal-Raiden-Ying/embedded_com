@@ -525,6 +525,12 @@ def arbitrate_table_docking_motion(
         edge_lost_age_s = max(0.0, now_mono - float(getattr(ctx, "last_good_edge_yaw_mono", 0.0) or 0.0))
     elif float(getattr(ctx, "last_edge_good_mono", 0.0) or 0.0) > 0.0:
         edge_lost_age_s = max(0.0, now_mono - float(getattr(ctx, "last_edge_good_mono", 0.0) or 0.0))
+    edge_ready_for_final = bool(
+        summary.get("edge_ready_for_final", False)
+        or docking_obs.edge_valid
+        or docking_obs.edge_trusted
+    )
+    close_range_enter_p10 = _float(summary, "close_range_enter_p10_m", 0.55)
     roi_depth_valid = bool(summary.get("table_roi_depth_valid", getattr(obs, "table_roi_depth_valid", False) if obs is not None else False))
     roi_depth_value = summary.get("table_roi_depth_p10", getattr(obs, "table_roi_depth_p10", None) if obs is not None else None)
     if roi_depth_value is None:
@@ -551,15 +557,17 @@ def arbitrate_table_docking_motion(
         or getattr(ctx, "final_edge_mode_latched", False)
         or getattr(ctx, "final_depth_latched", False)
     )
+    fixed_roi_depth_close_enough = bool(
+        fixed_roi_valid
+        and fixed_roi_depth_m is not None
+        and fixed_roi_depth_m <= close_range_enter_p10
+    )
     fixed_roi_close_context = bool(
         fixed_roi_context_active
-        or state == "YOLO_APPROACH"
         or bool(summary.get("near_table_latched", False))
         or bool(getattr(ctx, "near_table_latched", False))
-        or docking_obs.edge_found
-        or docking_obs.edge_valid
-        or docking_obs.edge_trusted
-        or edge_handoff_complete
+        or edge_ready_for_final
+        or fixed_roi_depth_close_enough
     )
     fixed_roi_selected = bool(fixed_roi_close_context and fixed_roi_valid and fixed_roi_depth_m is not None)
     final_depth_valid = bool(roi_depth_valid and roi_depth_m is not None)
@@ -596,6 +604,10 @@ def arbitrate_table_docking_motion(
                 "final_fixed_roi_depth_invalid_reason",
                 getattr(obs, "final_fixed_roi_depth_invalid_reason", "") if obs is not None else "",
             ),
+            "final_depth_candidate_source": "fixed_center_low_roi" if fixed_roi_valid and fixed_roi_depth_m is not None else "",
+            "final_depth_candidate_m": float(fixed_roi_depth_m) if fixed_roi_valid and fixed_roi_depth_m is not None else None,
+            "final_depth_usable_for_control": bool(fixed_roi_selected),
+            "final_depth_gate_reason": "gate_open" if fixed_roi_selected else ("not_close_enough" if fixed_roi_valid and fixed_roi_depth_m is not None else "missing_fixed_roi"),
             "final_depth_valid": bool(final_depth_valid),
             "final_depth_m": float(final_depth_m) if final_depth_m is not None else None,
             "final_depth_source": final_depth_source,
@@ -636,11 +648,6 @@ def arbitrate_table_docking_motion(
         return float(measured) - float(target), float(measured), source
 
     edge_final_dist_err, edge_measured_dist, edge_measured_source = table_final_dist_err_m()
-    edge_ready_for_final = bool(
-        summary.get("edge_ready_for_final", False)
-        or docking_obs.edge_valid
-        or docking_obs.edge_trusted
-    )
     final_roi_enter = bool(final_roi_enter_candidate and not edge_ready_for_final)
     final_roi_mode_latched = bool(summary.get("final_roi_mode_latched", False) or getattr(ctx, "final_roi_mode_latched", False) or final_roi_enter)
     if final_roi_mode_latched:
@@ -676,13 +683,9 @@ def arbitrate_table_docking_motion(
         pass
     edge_final_stop_stable = bool(edge_final_stop_reached and int(getattr(ctx, "edge_final_stop_stable_count", 0) or 0) >= 2)
     final_edge_mode_latched = bool(summary.get("final_edge_mode_latched", False) or getattr(ctx, "final_edge_mode_latched", False) or edge_final_dist_reached)
-    close_range_enter_p10 = _float(summary, "close_range_enter_p10_m", 0.55)
     close_range_depth_reached = bool(roi_depth_valid and roi_depth_m is not None and roi_depth_m <= close_range_enter_p10)
     fixed_close_range_depth_reached = bool(
-        fixed_roi_close_context
-        and fixed_roi_valid
-        and fixed_roi_depth_m is not None
-        and fixed_roi_depth_m <= close_range_enter_p10
+        fixed_roi_depth_close_enough
     )
     close_range_latched = bool(
         summary.get("close_range_latched", False)

@@ -234,6 +234,16 @@ class TransitionsMixin:
             self.ctx.hard_stop_barrier_until_mono = monotonic_ts() + duration_s
             self.ctx.hard_stop_barrier_reason = "at_table_edge_entry_sstop_barrier"
         if state == State.SEARCH_TARGET_INIT:
+            self._log("info", "target_search_enter")
+            self._log("info", "docking_final_latch_frozen_for_target_search")
+            self.ctx.final_locked = False
+            self.ctx.final_depth_latched = False
+            self.ctx.final_roi_mode_latched = False
+            self.ctx.final_edge_mode_latched = False
+            self.ctx.close_range_latched = False
+            self.ctx.final_yaw_align_active = False
+            self.ctx.final_lock_reason = ""
+            self.ctx.final_lock_last_transition_reason = ""
             self._reset_slide_ref_handoff()
         if state == State.SEARCH_TABLE:
             self.reset_edge_tracking("enter_search_table")

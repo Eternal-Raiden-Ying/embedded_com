@@ -55,6 +55,7 @@ class TargetSearchMixin:
             min_area=self.cfg.target_confirm_min_bbox_area,
         )
         if candidate_ok and target_obs is not None:
+            self._log("info", "target_search_start_slide")
             self._transition(State.EDGE_SLIDE_SEARCH, self._format_target_transition_reason("target_found_start_lateral_align", target_obs))
             return self._annotate_target_lateral_decision(
                 self.controller.stop_cmd("EDGE_SLIDE_SEARCH"),
@@ -78,6 +79,7 @@ class TargetSearchMixin:
                     }
                 )
             return decision
+        self._log("info", "target_search_start_slide")
         self._transition(State.EDGE_SLIDE_SEARCH, f"target_search_init_hold_done reason={candidate_reason}")
         return self.controller.stop_cmd("EDGE_SLIDE_SEARCH")
 
