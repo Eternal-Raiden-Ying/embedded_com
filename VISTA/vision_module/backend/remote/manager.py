@@ -14,7 +14,14 @@ except ImportError:
         cv2 = None  # type: ignore
 
 from .client import RemoteGraspClient
-from .protocol import RemoteMetadata, RemotePredictRequest, RemotePredictResponse, image_encoding_info, normalize_image_encoding
+from .protocol import (
+    DEFAULT_REMOTE_ROBOT_ID,
+    RemoteMetadata,
+    RemotePredictRequest,
+    RemotePredictResponse,
+    image_encoding_info,
+    normalize_image_encoding,
+)
 
 
 class RemoteManager:
@@ -45,6 +52,7 @@ class RemoteManager:
             "command": "predict",
             "require_depth": False,
             "timeout_s": 10.0,
+            "robot_id": DEFAULT_REMOTE_ROBOT_ID,
             "metadata": {},
             "rgb_encoding": "jpeg",
             "depth_encoding": "png",
@@ -163,6 +171,7 @@ class RemoteManager:
                 "command": str(profile.get("command") or "predict").strip() or "predict",
                 "require_depth": bool(profile.get("require_depth", False)),
                 "timeout_s": float(profile.get("timeout_s", 10.0) or 10.0),
+                "robot_id": str(profile.get("robot_id") or "").strip() or DEFAULT_REMOTE_ROBOT_ID,
                 "metadata": dict(profile.get("metadata") or {}) if isinstance(profile.get("metadata"), dict) else {},
                 "rgb_encoding": normalize_image_encoding(profile.get("rgb_encoding"), default="jpeg"),
                 "depth_encoding": normalize_image_encoding(profile.get("depth_encoding"), default="png"),
@@ -250,16 +259,63 @@ class RemoteManager:
         except Exception:
             return None
 
-    def _build_predict_request(self, cmd: Dict[str, Any], frames: Dict[str, Any] = None) -> Optional[RemotePredictRequest]:
-        frame_slot: Dict[str, Any] = {}
+    def _frame_seq_from_slot(self, frame_slot: Dict[str, Any], frames: Dict[str, Any]) -> tuple:
+        candidates = []
+        if isinstance(frame_slot, dict):
+            candidates.extend(
+                [
+                    ("slot.seq", frame_slot.get("seq")),
+                    ("slot.frame_seq", frame_slot.get("frame_seq")),
+                    ("slot.camera_frame_seq", frame_slot.get("camera_frame_seq")),
+                ]
+            )
+            payload = frame_slot.get("payload")
+            if isinstance(payload, dict):
+                candidates.extend(
+                    [
+                        ("slot.payload.seq", payload.get("seq")),
+                        ("slot.payload.frame_seq", payload.get("frame_seq")),
+                        ("slot.payload.camera_frame_seq", payload.get("camera_frame_seq")),
+                    ]
+                )
+        if isinstance(frames, dict):
+            candidates.extend(
+                [
+                    ("frames.seq", frames.get("seq")),
+                    ("frames.frame_seq", frames.get("frame_seq")),
+                    ("frames.camera_frame_seq", frames.get("camera_frame_seq")),
+                ]
+            )
+        for source, value in candidates:
+            if value is None:
+                continue
+            try:
+                return int(value), source
+            except Exception:
+                continue
+        return 0, "fallback_0"
+
+    def _build_predict_request(
+        self,
+        cmd: Dict[str, Any],
+        frames: Dict[str, Any] = None,
+        frame_slot: Dict[str, Any] = None,
+    ) -> Optional[RemotePredictRequest]:
+        frame_slot = dict(frame_slot or {})
         if frames is None:
             scheduler = self._scheduler
             if scheduler is None:
                 return None
             frame_slot = scheduler.read_slot("camera_frames")
             frames = frame_slot.get("payload") if isinstance(frame_slot, dict) else None
-        request_id = cmd.get("request_id")
+        request_id = str(cmd.get("request_id") or "").strip()
+        request_id_source = "runtime_status"
+        if not request_id:
+            request_id = f"rr_{int(time.time() * 1000)}"
+            request_id_source = "generated"
+        session_id = str(cmd.get("session_id") or "")
         if not isinstance(frames, dict):
+            self._log("error", "remote_predict_precheck_failed", reason="missing_camera_frames", request_id=request_id)
             self._update_result(
                 action="predict",
                 state="predict_failed",
@@ -273,6 +329,7 @@ class RemoteManager:
         depth = frames.get("depth")
         require_depth = bool(cmd.get("need_depth", self._runtime_profile.get("require_depth", False)))
         if rgb is None:
+            self._log("error", "remote_predict_precheck_failed", reason="missing_rgb_frame", request_id=request_id)
             self._update_result(
                 action="predict",
                 state="predict_failed",
@@ -282,6 +339,7 @@ class RemoteManager:
             )
             return None
         if require_depth and depth is None:
+            self._log("error", "remote_predict_precheck_failed", reason="missing_depth_frame", request_id=request_id)
             self._update_result(
                 action="predict",
                 state="predict_failed",
@@ -293,6 +351,7 @@ class RemoteManager:
 
         class_id = self._resolve_class_id(cmd.get("class_id"))
         if class_id is None:
+            self._log("error", "remote_predict_precheck_failed", reason="missing_class_id", request_id=request_id)
             self._update_result(
                 action="predict",
                 state="predict_failed",
@@ -302,6 +361,7 @@ class RemoteManager:
             )
             return None
         if cv2 is None:
+            self._log("error", "remote_predict_precheck_failed", reason="opencv_unavailable", request_id=request_id)
             self._update_result(
                 action="predict",
                 state="predict_failed",
@@ -326,6 +386,7 @@ class RemoteManager:
                 compression=int(self._runtime_profile.get("depth_compression", 3) or 3),
             )
         if rgb_bytes is None:
+            self._log("error", "remote_predict_precheck_failed", reason="rgb_encode_failed", request_id=request_id)
             self._update_result(
                 action="predict",
                 state="predict_failed",
@@ -335,6 +396,7 @@ class RemoteManager:
             )
             return None
         if require_depth and depth_bytes is None:
+            self._log("error", "remote_predict_precheck_failed", reason="depth_encode_failed", request_id=request_id)
             self._update_result(
                 action="predict",
                 state="predict_failed",
@@ -348,14 +410,32 @@ class RemoteManager:
         request_metadata = dict(cmd.get("metadata") or {}) if isinstance(cmd.get("metadata"), dict) else {}
         extras = dict(profile_metadata)
         extras.update(request_metadata)
-        extras.setdefault("target", cmd.get("target"))
-        extras.setdefault("request_id", request_id)
-        extras.setdefault("frame_seq", int(frame_slot.get("seq", 0) or 0))
-        extras.setdefault("camera_names", sorted(frames.keys()))
+        target = str(cmd.get("target") or extras.get("target") or "")
+        cmd_robot_id = str(cmd.get("robot_id") or "").strip()
+        if cmd_robot_id == "arm_001":
+            cmd_robot_id = ""
+        robot_id = str(
+            cmd_robot_id
+            or self._runtime_profile.get("robot_id")
+            or profile_metadata.get("robot_id")
+            or DEFAULT_REMOTE_ROBOT_ID
+        ).strip() or DEFAULT_REMOTE_ROBOT_ID
+        command = "predict"
+        frame_seq, frame_seq_source = self._frame_seq_from_slot(frame_slot, frames)
+        camera_names = sorted(str(name) for name in frames.keys() if str(name) in {"rgb", "depth"})
+        extras["request_id_source"] = request_id_source
+        extras["session_id_source"] = "runtime_status" if session_id else "empty"
         metadata = RemoteMetadata(
-            robot_id=str(cmd.get("robot_id") or "arm_001"),
-            command=str(self._effective_runtime_field(cmd, "command", self._runtime_profile.get("command", "predict")) or "predict"),
+            robot_id=robot_id,
+            cmd="predict",
+            command=command,
+            request_id=request_id,
+            session_id=session_id,
+            target=target,
             class_id=class_id,
+            frame_seq=frame_seq,
+            frame_seq_source=frame_seq_source,
+            camera_names=camera_names,
             extras=extras,
         )
         return RemotePredictRequest(
@@ -450,6 +530,39 @@ class RemoteManager:
             "source": str(source or "service"),
         }
 
+    def _ensure_service_ready_for_predict(self, *, timeout_s: float) -> bool:
+        if self._service_init_confirmed or str(self._service_init_state or "").strip().lower() == "ready":
+            self._service_init_confirmed = True
+            return True
+        self._log(
+            "warn",
+            "remote_predict_init_not_confirmed",
+            service_init_state=self._service_init_state,
+            service_init_confirmed=self._service_init_confirmed,
+            service_init_last_error=self._service_init_last_error,
+        )
+        result = self._run_service_init(timeout_s=timeout_s, source="predict_preflight")
+        if bool(result.get("ok")) or self._service_init_confirmed:
+            return True
+        self._update_result(
+            action="predict",
+            state="predict_failed",
+            ok=False,
+            error="init_not_confirmed",
+            status_code=result.get("status_code"),
+        )
+        return False
+
+    def _release_service_quiet(self, *, timeout_s: float, source: str = "predict_finally") -> None:
+        if not self.enabled or self.client is None:
+            return
+        try:
+            self.client.release_server(timeout_s=max(0.1, float(timeout_s)))
+        except Exception as exc:
+            self._log("warn", "remote_release_failed", source=source, error=str(exc))
+        finally:
+            self._reset_service_init_state()
+
     def _release_service_if_ready(self, timeout_s: float = 5.0) -> None:
         if not self.enabled or self.client is None or not self._service_init_confirmed:
             return
@@ -519,8 +632,7 @@ class RemoteManager:
             return
 
         if action == "predict":
-            if not self._service_init_confirmed:
-                self._update_result(action="predict", state="predict_failed", ok=False, error="init_not_confirmed")
+            if not self._ensure_service_ready_for_predict(timeout_s=min(timeout_s, 5.0)):
                 return
             require_depth = bool(self._runtime_profile.get("require_depth", False))
             runtime_status = self._runtime_status_payload()
@@ -528,47 +640,109 @@ class RemoteManager:
             runtime_metadata = dict(runtime_status.get("remote_metadata") or {}) if isinstance(runtime_status.get("remote_metadata"), dict) else {}
             runtime_metadata.setdefault("target", runtime_status.get("target"))
             runtime_metadata.setdefault("request_id", runtime_status.get("request_id") or runtime_status.get("req_id"))
+            runtime_metadata.setdefault("session_id", runtime_status.get("session_id"))
             runtime_class_id = runtime_status.get("remote_class_id")
             if runtime_class_id is None:
                 runtime_class_id = profile_metadata.get("class_id")
+            if runtime_class_id is None:
+                self._log(
+                    "error",
+                    "remote_predict_precheck_failed",
+                    reason="missing_class_id",
+                    runtime_status=runtime_status,
+                )
+                self._update_result(
+                    action="predict",
+                    state="predict_failed",
+                    ok=False,
+                    error="missing_class_id",
+                    request_id=runtime_status.get("request_id") or runtime_status.get("req_id"),
+                )
+                self._release_service_quiet(timeout_s=min(2.0, timeout_s), source="predict_precheck_failed")
+                return
             cmd = {
                 **profile_metadata,
                 "need_depth": require_depth,
                 "class_id": runtime_class_id,
-                "robot_id": runtime_status.get("remote_robot_id"),
+                "robot_id": runtime_status.get("remote_robot_id") or self._runtime_profile.get("robot_id") or profile_metadata.get("robot_id"),
                 "timeout_s": runtime_status.get("remote_timeout_s"),
                 "target": runtime_status.get("target"),
                 "request_id": runtime_status.get("request_id") or runtime_status.get("req_id"),
+                "session_id": runtime_status.get("session_id"),
                 "metadata": runtime_metadata,
             }
             # Wait for a fresh camera frame matching current generation.
             # Mode switch clears scheduler slots, so the first frame after
             # camera threads restart may not be published yet.
             if self._scheduler is None:
+                self._log("error", "remote_predict_precheck_failed", reason="scheduler_unavailable", runtime_status=runtime_status)
                 self._update_result(action="predict", state="predict_failed", ok=False, error="scheduler_unavailable")
+                self._release_service_quiet(timeout_s=min(2.0, timeout_s), source="scheduler_unavailable")
                 return
             deadline = time.time() + min(5.0, float(self._runtime_profile.get("timeout_s", 10.0) or 10.0) * 0.5)
             frames = None
+            selected_frame_slot = None
+            expected_gen = int(self._generation_getter())
+            wait_start = time.time()
+            self._log(
+                "info",
+                "remote_predict_wait_camera_start",
+                expected_generation=expected_gen,
+                require_depth=require_depth,
+            )
             while time.time() < deadline:
                 if self._worker_stop.is_set():
                     return
                 frame_slot = self._scheduler.read_slot("camera_frames") if self._scheduler else None
                 if isinstance(frame_slot, dict):
                     slot_gen = int(frame_slot.get("generation", 0) or 0)
-                    expected_gen = int(self._generation_getter())
                     if slot_gen == expected_gen:
                         payload = frame_slot.get("payload")
                         if isinstance(payload, dict) and payload:
                             frames = payload
+                            selected_frame_slot = frame_slot
+                            self._log(
+                                "info",
+                                "remote_predict_wait_camera_ready",
+                                expected_generation=expected_gen,
+                                slot_generation=slot_gen,
+                                wait_ms=int(round((time.time() - wait_start) * 1000.0)),
+                                has_rgb=payload.get("rgb") is not None,
+                                has_depth=payload.get("depth") is not None,
+                                require_depth=require_depth,
+                            )
                             break
                 self._worker_stop.wait(timeout=0.05)
             if frames is None:
+                slot_gen = None
+                has_rgb = False
+                has_depth = False
+                if isinstance(frame_slot, dict):
+                    slot_gen = frame_slot.get("generation")
+                    payload = frame_slot.get("payload")
+                    if isinstance(payload, dict):
+                        has_rgb = payload.get("rgb") is not None
+                        has_depth = payload.get("depth") is not None
+                self._log(
+                    "error",
+                    "remote_predict_wait_camera_timeout",
+                    expected_generation=expected_gen,
+                    slot_generation=slot_gen,
+                    wait_ms=int(round((time.time() - wait_start) * 1000.0)),
+                    has_rgb=has_rgb,
+                    has_depth=has_depth,
+                    require_depth=require_depth,
+                )
                 self._update_result(action="predict", state="predict_failed", ok=False, error="missing_camera_frames")
+                self._release_service_quiet(timeout_s=min(2.0, timeout_s), source="missing_camera_frames")
                 return
-            request = self._build_predict_request(cmd, frames=frames)
+            request = self._build_predict_request(cmd, frames=frames, frame_slot=selected_frame_slot)
             if request is not None:
                 resp = self.predict(request)
                 self._record_response("predict", resp)
+                self._release_service_quiet(timeout_s=min(2.0, timeout_s), source="predict_done")
+            else:
+                self._release_service_quiet(timeout_s=min(2.0, timeout_s), source="predict_request_not_built")
             return
 
         if action == "release":

@@ -2,8 +2,12 @@
 # -*- coding: utf-8 -*-
 
 import json
+import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
+
+DEFAULT_REMOTE_ROBOT_ID = "sc171_car_01"
 
 
 _IMAGE_ENCODING_MAP = {
@@ -31,16 +35,43 @@ def image_encoding_info(value: Any, default: str = "png") -> Tuple[str, str]:
 class RemoteMetadata:
     """Metadata shared with the remote grasp server."""
 
-    robot_id: str = "arm_001"
+    robot_id: str = DEFAULT_REMOTE_ROBOT_ID
+    cmd: str = "predict"
     command: str = "predict"
+    request_id: str = ""
+    session_id: str = ""
+    target: str = ""
     class_id: Optional[int] = None
+    frame_seq: int = 0
+    frame_seq_source: str = "fallback"
+    timestamp_ms: Optional[int] = None
+    camera_names: List[str] = field(default_factory=list)
     extras: Dict[str, Any] = field(default_factory=dict)
 
-    def to_form_fields(self) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {"robot_id": self.robot_id, "cmd": self.command}
-        if self.class_id is not None:
-            payload["class_id"] = self.class_id
-        payload.update(self.extras)
+    def to_metadata_payload(self) -> Dict[str, Any]:
+        if self.class_id is None:
+            raise ValueError("remote predict class_id is required")
+        command = str(self.command or "predict").strip() or "predict"
+        cmd = str(self.cmd or command).strip() or command
+        timestamp_ms = self.timestamp_ms
+        if timestamp_ms is None:
+            timestamp_ms = int(round(time.time() * 1000.0))
+        payload: Dict[str, Any] = {
+            "robot_id": str(self.robot_id or DEFAULT_REMOTE_ROBOT_ID).strip() or DEFAULT_REMOTE_ROBOT_ID,
+            "cmd": cmd,
+            "command": command,
+            "request_id": str(self.request_id or ""),
+            "session_id": str(self.session_id or ""),
+            "target": str(self.target or ""),
+            "class_id": int(self.class_id),
+            "frame_seq": int(self.frame_seq or 0),
+            "frame_seq_source": str(self.frame_seq_source or "fallback"),
+            "timestamp_ms": int(timestamp_ms),
+            "camera_names": list(self.camera_names or []),
+        }
+        for key, value in dict(self.extras or {}).items():
+            if key not in payload:
+                payload[key] = value
         return payload
 
 
@@ -69,9 +100,24 @@ class RemotePredictResponse:
 
 def build_predict_multipart(request: RemotePredictRequest) -> Tuple[Dict[str, Any], Dict[str, Tuple[str, bytes, str]]]:
     """Build multipart form fields following the current remote grasp protocol."""
-    data: Dict[str, Any] = {"metadata": json.dumps(request.metadata.to_form_fields(), ensure_ascii=False)}
-    if request.class_id is not None:
-        data["class_id"] = str(request.class_id)
+    class_id = request.class_id if request.class_id is not None else request.metadata.class_id
+    if class_id is None:
+        raise ValueError("remote predict class_id is required")
+    request.metadata.class_id = int(class_id)
+    metadata_payload = request.metadata.to_metadata_payload()
+    data: Dict[str, Any] = {
+        "robot_id": str(metadata_payload["robot_id"]),
+        "cmd": str(metadata_payload["cmd"]),
+        "command": str(metadata_payload["command"]),
+        "request_id": str(metadata_payload["request_id"]),
+        "session_id": str(metadata_payload["session_id"]),
+        "target": str(metadata_payload["target"]),
+        "class_id": str(metadata_payload["class_id"]),
+        "frame_seq": str(metadata_payload["frame_seq"]),
+        "frame_seq_source": str(metadata_payload["frame_seq_source"]),
+        "timestamp_ms": str(metadata_payload["timestamp_ms"]),
+        "metadata": json.dumps(metadata_payload, ensure_ascii=False),
+    }
 
     files: Dict[str, Tuple[str, bytes, str]] = {}
     if request.rgb_bytes is not None:

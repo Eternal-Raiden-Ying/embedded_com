@@ -16,6 +16,7 @@ Outputs into <run_dir>/summary/:
 from __future__ import annotations
 
 import argparse
+import ast
 import csv
 import json
 import math
@@ -28,6 +29,16 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 EPS = 1e-9
+
+
+REMOTE_EVENTS = (
+    "remote_init_request_dump",
+    "remote_init_response_dump",
+    "remote_predict_request_dump",
+    "remote_predict_response_dump",
+    "remote_release_request_dump",
+    "remote_release_response_dump",
+)
 
 
 def _safe_float(v: Any) -> Optional[float]:
@@ -87,6 +98,42 @@ def read_jsonl(path: Path) -> List[Dict[str, Any]]:
                 # Keep script robust; old logs may contain damaged partial lines.
                 continue
     return out
+
+
+def _short_text(value: Any, limit: int = 80) -> str:
+    text = str(value or "").replace("\n", " ").strip()
+    return text if len(text) <= limit else text[: max(0, limit - 3)] + "..."
+
+
+def _parse_log_payload(line: str) -> Dict[str, Any]:
+    if " | " not in line:
+        return {}
+    raw = line.split(" | ", 1)[1].strip()
+    try:
+        obj = ast.literal_eval(raw)
+    except Exception:
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
+def read_remote_dump_events(vision_dir: Path) -> List[Dict[str, Any]]:
+    events: List[Dict[str, Any]] = []
+    for fname in ("vision.out", "vision.log"):
+        path = vision_dir / fname
+        if not path.exists():
+            continue
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    event_name = next((name for name in REMOTE_EVENTS if name in line), "")
+                    if not event_name:
+                        continue
+                    payload = _parse_log_payload(line)
+                    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+                    events.append({"event": event_name, "file": fname, "data": data})
+        except Exception:
+            continue
+    return events
 
 
 def find_run_dir(path: Path) -> Path:
@@ -393,7 +440,46 @@ def target_summary(target_obs: Sequence[Dict[str, Any]], control: Sequence[Dict[
     }
 
 
-def grasp_summary(state_trace: Sequence[Dict[str, Any]], vision_req: Sequence[Dict[str, Any]], vision_dir: Path) -> Dict[str, Any]:
+def remote_flow_summary(remote_events: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for name in ("init", "predict", "release"):
+        req_event = f"remote_{name}_request_dump"
+        resp_event = f"remote_{name}_response_dump"
+        reqs = [e for e in remote_events if e.get("event") == req_event]
+        resps = [e for e in remote_events if e.get("event") == resp_event]
+        last_req = reqs[-1].get("data", {}) if reqs else {}
+        last_resp = resps[-1].get("data", {}) if resps else {}
+        status_code = last_resp.get("status_code")
+        error = str(last_resp.get("error_message") or "")
+        ok = bool(status_code is not None and 200 <= int(status_code) < 300) if isinstance(status_code, int) else False
+        if not reqs:
+            state = "NOT_SENT_OR_NOT_LOGGED" if name == "predict" else "NOT_SENT"
+        elif not resps:
+            state = "SENT"
+        elif ok:
+            state = "OK" if name != "predict" else "SUCCESS"
+        else:
+            state = "FAILED"
+        out[name] = {
+            "requested": bool(reqs),
+            "request_count": len(reqs),
+            "response_count": len(resps),
+            "state": state,
+            "ok": ok,
+            "status_code": status_code,
+            "elapsed_ms": last_resp.get("elapsed_ms"),
+            "error": error,
+            "url": last_req.get("url"),
+        }
+        if name == "predict" and isinstance(last_req, dict):
+            form = last_req.get("form") if isinstance(last_req.get("form"), dict) else {}
+            files = last_req.get("files") if isinstance(last_req.get("files"), dict) else {}
+            out[name]["form"] = {k: form.get(k) for k in ("robot_id", "cmd", "command", "request_id", "session_id", "target", "class_id", "frame_seq")}
+            out[name]["files"] = sorted(files.keys())
+    return out
+
+
+def grasp_summary(state_trace: Sequence[Dict[str, Any]], vision_req: Sequence[Dict[str, Any]], remote_flow: Dict[str, Any]) -> Dict[str, Any]:
     reqs = []
     for r in vision_req:
         if r.get("mode_hint") == "GRASP_REMOTE" or r.get("stage") == "GRASP":
@@ -404,24 +490,13 @@ def grasp_summary(state_trace: Sequence[Dict[str, Any]], vision_req: Sequence[Di
         if r.get("previous_state") == "GRASP" or r.get("state") == "GRASP":
             last_reason = r.get("reason") or r.get("transition_reason")
             break
-    remote_lines: List[str] = []
-    for fname in ["vision.out", "vision.log"]:
-        p = vision_dir / fname
-        if p.exists():
-            try:
-                with p.open("r", encoding="utf-8", errors="replace") as f:
-                    for line in f:
-                        if "GRASP" in line or "remote" in line.lower() or "grasp" in line.lower():
-                            remote_lines.append(line.strip())
-            except Exception:
-                pass
     return {
         "grasp_remote_requested": bool(reqs),
         "request_count": len(reqs),
         "last_request": reqs[-1] if reqs else None,
         "grasp_transition_count": len(grasp_trans),
         "last_grasp_reason": last_reason,
-        "remote_log_tail": remote_lines[-20:],
+        "remote_flow": remote_flow,
     }
 
 
@@ -446,8 +521,15 @@ def conclusion_summary(summary: Dict[str, Any]) -> Dict[str, str]:
     if not grasp.get("grasp_remote_requested"):
         grasp_state = "NOT_TRIGGERED"
     else:
+        predict_state = str(((grasp.get("remote_flow") or {}).get("predict") or {}).get("state") or "")
         last_reason = str(grasp.get("last_grasp_reason") or "").lower()
-        if "success" in last_reason or "done" in last_reason:
+        if predict_state == "SUCCESS":
+            grasp_state = "SUCCESS"
+        elif predict_state == "FAILED":
+            grasp_state = "FAILED"
+        elif predict_state in {"NOT_SENT_OR_NOT_LOGGED", "NOT_SENT"} and "timeout" in last_reason:
+            grasp_state = "TIMEOUT"
+        elif "success" in last_reason or "done" in last_reason:
             grasp_state = "SUCCESS"
         elif "timeout" in last_reason:
             grasp_state = "TIMEOUT"
@@ -625,44 +707,47 @@ def render_markdown(run_dir: Path, summary: Dict[str, Any], plots: Dict[str, str
     lines: List[str] = []
     lines.append(f"# Robot Run Summary: `{run_dir.name}`")
     lines.append("")
-    lines.append("## 1. 一句话结论")
+    lines.append("## Verdicts")
     conclusions = summary.get("conclusions") or {}
     for name in ("Main chain", "Final safety", "Target slide", "Grasp remote", "Final depth"):
         if name in conclusions:
             lines.append(f"- {name}: {conclusions[name]}")
-    complete = summary["chain_complete"]
-    grasp_req = summary["grasp"].get("grasp_remote_requested")
     final_ratio = summary["final_close"].get("final_depth_valid_ratio")
-    target = summary["target"]
-    lines.append(f"- 状态链完整性：{'✅ 完整到 GRASP' if complete else '⚠️ 未完整到 GRASP'}")
-    lines.append(f"- GRASP_REMOTE 触发：{'✅ 已触发' if grasp_req else '⚠️ 未触发'}")
     if final_ratio is not None:
-        lines.append(f"- final_depth 有效率：{fmt(final_ratio * 100, 1, '%')} ({summary['final_close'].get('final_depth_valid_count')}/{summary['final_close'].get('count')})")
+        lines.append(f"- final_depth valid ratio: {fmt(final_ratio * 100, 1, '%')} ({summary['final_close'].get('final_depth_valid_count')}/{summary['final_close'].get('count')})")
     if summary["final_close"].get("warning"):
-        lines.append(f"- {summary['final_close'].get('warning')}")
-    if target.get("center_start") is not None:
-        lines.append(f"- target center：{fmt(target.get('center_start'))} → {fmt(target.get('center_end'))}")
+        lines.append(f"- Final depth abstraction missing")
     lines.append("")
 
-    lines.append("## 2. 状态切换总览")
+    lines.append("## Remote Flow")
+    flow = ((summary.get("grasp") or {}).get("remote_flow") or {})
+    for name in ("init", "predict", "release"):
+        item = flow.get(name) or {}
+        lines.append(
+            f"- {name}: {item.get('state', 'NOT_SENT')} requested={item.get('requested', False)} "
+            f"status_code={item.get('status_code')} ok={item.get('ok', False)} error={_short_text(item.get('error'), 80)}"
+        )
+    lines.append("")
+
+    lines.append("## State Chain")
     chain = summary.get("state_chain") or []
     lines.append("```text")
     lines.append(" -> ".join(chain) if chain else "<no state_transition found>")
     lines.append("```")
-    trans_rows = [["time_s", "from", "to", "reason"]]
+    trans_rows = [["time_s", "from", "to", "short_reason"]]
     t0 = summary.get("t0")
-    for tr in summary.get("transitions", []):
+    for tr in (summary.get("transitions", []) or [])[:30]:
         ts = tr.get("ts")
         trans_rows.append([
             fmt((ts - t0) if ts is not None and t0 is not None else None, 2),
             tr.get("previous_state"),
             tr.get("next_state"),
-            tr.get("reason") or tr.get("transition_reason") or "",
+            _short_text(tr.get("reason") or tr.get("transition_reason") or "", 80),
         ])
     lines.append(md_table(trans_rows))
     lines.append("")
 
-    lines.append("## 3. 速度统计（UART 实际发送）")
+    lines.append("## Velocity")
     vstats = summary["velocity_stats_moving_only"]
     rows = [["axis", "mean", "mean_abs", "min", "max", "p95_abs", "std"]]
     for axis in ["vx_mps", "vy_mps", "wz_radps"]:
@@ -670,56 +755,44 @@ def render_markdown(run_dir: Path, summary: Dict[str, Any], plots: Dict[str, str
         rows.append([axis, fmt(st.get("mean")), fmt(st.get("mean_abs")), fmt(st.get("min")), fmt(st.get("max")), fmt(st.get("p95_abs")), fmt(st.get("std"))])
     lines.append(md_table(rows))
     hz = summary.get("uart_hz", {})
-    lines.append(f"- active moving_only count={vstats.get('count', 0)}")
-    lines.append(f"- UART 频率：mean={fmt(hz.get('hz_mean'), 2, 'Hz')}, p50={fmt(hz.get('hz_p50'), 2, 'Hz')}, count={hz.get('count', 0)}")
+    lines.append(f"- moving_only count={vstats.get('count', 0)}, uart_hz_mean={fmt(hz.get('hz_mean'), 2, 'Hz')}")
     lines.append("")
 
-    lines.append("## 4. Final / Close 阶段")
+    lines.append("## Final Depth")
     fc = summary["final_close"]
-    lines.append(f"- final/close entries: {fc.get('count', 0)}")
-    lines.append(f"- final_depth valid: {fc.get('final_depth_valid_count', 0)}/{fc.get('count', 0)} = {fmt((fc.get('final_depth_valid_ratio') or 0) * 100, 1, '%')}")
     ds = fc.get("final_depth_m_stats", {})
-    lines.append(f"- final_depth_m: mean={fmt(ds.get('mean'))}, min={fmt(ds.get('min'))}, max={fmt(ds.get('max'))}")
-    if fc.get("final_depth_source_distribution"):
-        lines.append("- final_depth source counts:")
-        for name, count in fc.get("final_depth_source_distribution", {}).items():
-            lines.append(f"  - `{name or '<empty>'}`: {count}")
-    lines.append("- reason counts:")
-    for reason, count in fc.get("final_distance_servo_reason_distribution", {}).items():
-        lines.append(f"  - `{reason or '<empty>'}`: {count}")
+    lines.append(f"- entries={fc.get('count', 0)} valid={fc.get('final_depth_valid_count', 0)} ratio={fmt((fc.get('final_depth_valid_ratio') or 0) * 100, 1, '%')}")
+    lines.append(f"- final_depth_m min/mean/max={fmt(ds.get('min'))}/{fmt(ds.get('mean'))}/{fmt(ds.get('max'))}")
+    lines.append(f"- sources={fc.get('final_depth_source_distribution', {})}")
+    lines.append(f"- servo_reasons={fc.get('final_distance_servo_reason_distribution', {})}")
     lines.append("")
 
-    lines.append("## 5. Target / Slide / Lock")
+    lines.append("## Target")
     tsu = summary["target"]
-    lines.append(f"- target obs count: {tsu.get('count', 0)}")
-    lines.append(f"- center start/end: {fmt(tsu.get('center_start'))} -> {fmt(tsu.get('center_end'))}")
-    lines.append(f"- center min/max: {fmt(tsu.get('center_min'))} / {fmt(tsu.get('center_max'))}")
+    lines.append(f"- count={tsu.get('count', 0)} center_start/end={fmt(tsu.get('center_start'))}->{fmt(tsu.get('center_end'))} min/max={fmt(tsu.get('center_min'))}/{fmt(tsu.get('center_max'))}")
     cf = tsu.get("conf_stats", {})
-    lines.append(f"- confidence mean/max: {fmt(cf.get('mean'))} / {fmt(cf.get('max'))}")
+    lines.append(f"- confidence mean/max={fmt(cf.get('mean'))}/{fmt(cf.get('max'))}")
     lines.append("")
 
-    lines.append("## 6. Grasp / Remote")
+    lines.append("## Grasp")
     gs = summary["grasp"]
-    lines.append(f"- GRASP_REMOTE requested: {gs.get('grasp_remote_requested')}")
-    lines.append(f"- request count: {gs.get('request_count')}")
+    lines.append(f"- GRASP_REMOTE requested={gs.get('grasp_remote_requested')} request_count={gs.get('request_count')} last_reason={_short_text(gs.get('last_grasp_reason'), 80)}")
     if gs.get("last_request"):
         req = gs["last_request"]
         lines.append(f"- last request: stage={req.get('stage')} mode_hint={req.get('mode_hint')} class_id={_get(req, 'payload', 'class_id', default=req.get('class_id'))}")
-    lines.append(f"- last grasp reason: {gs.get('last_grasp_reason')}")
-    if gs.get("remote_log_tail"):
-        lines.append("- remote/grasp log tail:")
-        for l in gs["remote_log_tail"][-8:]:
-            lines.append(f"  - `{l[:220]}`")
     lines.append("")
 
-    lines.append("## 7. 状态耗时")
+    lines.append("## State Durations")
     dur_rows = [["state", "duration_s"]]
     for s, d in sorted(summary.get("state_durations", {}).items(), key=lambda kv: kv[1], reverse=True):
         dur_rows.append([s, fmt(d, 2)])
     lines.append(md_table(dur_rows))
     lines.append("")
 
-    lines.append("## 8. 图表")
+    lines.append("## Artifacts")
+    files = summary.get("files") or {}
+    if files.get("debug_json"):
+        lines.append(f"- debug_json: `{os.path.relpath(files['debug_json'], start=run_dir)}`")
     if plots:
         for name, p in plots.items():
             if name == "plot_error":
@@ -782,7 +855,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     final_info = final_close_summary(active_control)
     target_info = target_summary(active_target_obs, active_control)
-    grasp_info = grasp_summary(state_trace, vision_req, vision)
+    remote_events = read_remote_dump_events(vision)
+    remote_flow = remote_flow_summary(remote_events)
+    grasp_info = grasp_summary(state_trace, vision_req, remote_flow)
 
     summary: Dict[str, Any] = {
         "run_id": run_dir.name,
@@ -820,6 +895,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "files": {
             "markdown": str(out_dir / "run_summary_auto.md"),
             "json": str(out_dir / "run_summary_auto.json"),
+            "debug_json": str(out_dir / "run_summary_debug.json"),
             "speed_csv": str(out_dir / "speed_timeseries.csv"),
         },
     }
@@ -830,16 +906,49 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         plots = make_plots(out_dir, summary, active_vrows, active_control, target_info, final_info)
     summary["plots"] = plots
 
+    compact = {
+        "run_id": summary["run_id"],
+        "active_window": summary["active_window"],
+        "verdicts": summary["conclusions"],
+        "state_chain": summary["state_chain"],
+        "state_durations": summary["state_durations"],
+        "velocity_moving_only": summary["velocity_stats_moving_only"],
+        "velocity_by_phase": {
+            "yolo_approach": summary["velocity_stats_yolo_approach"],
+            "final_only": summary["velocity_stats_final_only"],
+            "target_slide_only": summary["velocity_stats_target_slide_only"],
+        },
+        "final_depth_summary": {
+            "count": summary["final_close"].get("count"),
+            "has_final_depth_field": summary["final_close"].get("has_final_depth_field"),
+            "valid_count": summary["final_close"].get("final_depth_valid_count"),
+            "valid_ratio": summary["final_close"].get("final_depth_valid_ratio"),
+            "source_distribution": summary["final_close"].get("final_depth_source_distribution"),
+            "depth_m": summary["final_close"].get("final_depth_m_stats"),
+            "servo_reason_distribution": summary["final_close"].get("final_distance_servo_reason_distribution"),
+            "warning": summary["final_close"].get("warning"),
+        },
+        "target_summary": summary["target"],
+        "remote_flow_summary": remote_flow,
+        "artifact_files": summary["files"],
+    }
+    debug_summary = dict(summary)
+    debug_summary["remote_dump_events"] = remote_events
+
     md = render_markdown(run_dir, summary, plots)
     (out_dir / "run_summary_auto.md").write_text(md, encoding="utf-8")
     with (out_dir / "run_summary_auto.json").open("w", encoding="utf-8") as f:
-        json.dump(summary, f, ensure_ascii=False, indent=2)
+        json.dump(compact, f, ensure_ascii=False, separators=(",", ":"))
+        f.write("\n")
+    with (out_dir / "run_summary_debug.json").open("w", encoding="utf-8") as f:
+        json.dump(debug_summary, f, ensure_ascii=False, indent=2)
 
     if not args.quiet:
         print(md)
         print("\n[OK] summary written to:")
         print(f"  {out_dir / 'run_summary_auto.md'}")
         print(f"  {out_dir / 'run_summary_auto.json'}")
+        print(f"  {out_dir / 'run_summary_debug.json'}")
         print(f"  {out_dir / 'speed_timeseries.csv'}")
     return 0
 

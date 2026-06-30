@@ -110,6 +110,10 @@ def _apply_remote_overrides(profile: RemoteProfile, section: Dict[str, Any]) -> 
     for key in ("max_retries", "rgb_quality", "depth_compression"):
         if key in remote and remote.get(key) is not None:
             setattr(profile, key, int(remote.get(key)))
+    if "robot_id" in remote and remote.get("robot_id") is not None:
+        merged = dict(profile.metadata or {})
+        merged["robot_id"] = str(remote.get("robot_id")).strip()
+        profile.metadata = merged
     if isinstance(remote.get("metadata"), dict):
         merged = dict(profile.metadata or {})
         merged.update(dict(remote.get("metadata") or {}))

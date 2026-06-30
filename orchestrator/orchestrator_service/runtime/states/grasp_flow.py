@@ -67,6 +67,10 @@ class GraspFlowMixin:
     def _tick_grasp_awaiting_respond(self, now_m: float) -> MotionDecision:
         if self._state_elapsed() < 0.3:
             return self.controller.stop_cmd("GRASP")
+        if str(self.ctx.grasp_status or "").upper() == "FAILED":
+            reason = str(self.ctx.grasp_reason or "")
+            self._enter_error_recovery(reason or "grasp failed")
+            return self.controller.stop_cmd("GRASP")
         if now_m > self.ctx.grasp_timeout_mono:
             self._enter_error_recovery("grasp respond timeout")
             return self.controller.stop_cmd("GRASP")
@@ -258,4 +262,3 @@ class GraspFlowMixin:
         self.ctx.arm_response = None
         self.ctx.grasp_verify_reported = False
         return self.controller.stop_cmd("GRASP")
-

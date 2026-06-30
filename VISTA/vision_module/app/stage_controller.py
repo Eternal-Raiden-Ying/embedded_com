@@ -280,6 +280,7 @@ class StageController:
             "mode": normalize_upper(self._ctx.current_mode, "IDLE"),
             "session_id": self._ctx.session_id,
             "req_id": self._ctx.req_id,
+            "request_id": self._ctx.req_id,
             "epoch": int(self._ctx.epoch),
             "interaction_id": self._ctx.interaction_id,
             "target": self._ctx.target_name,
@@ -297,9 +298,12 @@ class StageController:
             "remote_robot_id",
             "remote_timeout_s",
             "remote_metadata",
+            "remote_request_id",
         ):
             if key in self._ctx.stage_state:
                 payload[key] = self._ctx.stage_state.get(key)
+        if payload.get("remote_request_id"):
+            payload["request_id"] = payload.get("remote_request_id")
         return payload
 
     def _publish_runtime_status(self) -> None:

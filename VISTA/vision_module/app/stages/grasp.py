@@ -58,6 +58,12 @@ def _required_remote_cameras(need_depth: bool) -> list:
 def _grasp_state_from_req(req: VisionReq, target: Optional[str]) -> Dict[str, object]:
     payload = req.payload if isinstance(req.payload, dict) else {}
     need_depth = bool(payload.get("need_depth", True))
+    remote_request_id = str(payload.get("request_id") or payload.get("req_id") or "").strip() or _next_remote_request_id()
+    session_id = str(req.session_id or payload.get("session_id") or "")
+    remote_metadata = dict(payload.get("remote_metadata") or {}) if isinstance(payload.get("remote_metadata"), dict) else {}
+    remote_metadata.setdefault("target", target)
+    remote_metadata.setdefault("request_id", remote_request_id)
+    remote_metadata.setdefault("session_id", session_id)
     return {
         "target_obs": dict(payload.get("target_obs") or payload.get("mock_target_obs") or _default_target_obs(target)),
         "result": dict(payload.get("result") or _default_result(target)),
@@ -66,7 +72,7 @@ def _grasp_state_from_req(req: VisionReq, target: Optional[str]) -> Dict[str, ob
         "adjust_round": 0,
         "last_response": None,
         "last_feedback": None,
-        "remote_request_id": None,
+        "remote_request_id": remote_request_id,
         "remote_predict_sent": False,
         "remote_result_sent": False,
         "remote_ready_frame_seq": 0,
@@ -74,10 +80,10 @@ def _grasp_state_from_req(req: VisionReq, target: Optional[str]) -> Dict[str, ob
         "remote_init_retry_limit": 3,
         "remote_init_retry_inflight": False,
         "remote_init_retry_target_attempt": 0,
-        "remote_robot_id": str(payload.get("robot_id") or "arm_001"),
+        "remote_robot_id": str(payload.get("robot_id") or "sc171_car_01"),
         "remote_timeout_s": float(payload.get("remote_timeout_s", 10.0) or 10.0),
         "remote_class_id": _coerce_optional_int(payload.get("class_id")),
-        "remote_metadata": dict(payload.get("remote_metadata") or {}) if isinstance(payload.get("remote_metadata"), dict) else {},
+        "remote_metadata": remote_metadata,
         "remote_required_cameras": _required_remote_cameras(need_depth),
     }
 
@@ -316,6 +322,7 @@ class GraspStagePlan(BaseStagePlan):
                         perception={"target_obs": target_obs},
                         result={"reason": "remote_predict_failed", "request_id": request_id,
                                 "remote_error": remote_error or "predict_failed",
+                                "error": remote_error or "predict_failed",
                                 "status_code": remote.get("status_code")},
                     ),
                     snapshot=snapshot,
