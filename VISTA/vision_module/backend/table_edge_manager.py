@@ -3731,13 +3731,13 @@ class TableEdgeManager:
         # Compute pure depth safety metrics
         depth_p10 = None
         close_depth_ratio = None
+        depth_scale = float(getattr(frame_calib, "depth_scale", 0.001) or 0.001)
         if isinstance(depth, np.ndarray) and depth.ndim == 2 and depth.size > 0:
             H, W = depth.shape
             y_start = int(H * 0.6)
             x_start = int(W * 0.1)
             x_end = int(W * 0.9)
             safety_roi = depth[y_start:, x_start:x_end]
-            depth_scale = float(getattr(frame_calib, "depth_scale", 0.001) or 0.001)
             safety_roi_m = safety_roi.astype(np.float32) * depth_scale
             valid_mask = safety_roi_m > 0.01
             valid_depths = safety_roi_m[valid_mask]
@@ -3750,7 +3750,46 @@ class TableEdgeManager:
             payload["camera_frame_seq"] = int(seq)
             payload["depth_p10"] = depth_p10
             payload["close_depth_ratio"] = close_depth_ratio
+            fixed_roi_enabled = bool(getattr(self.cfg.table_edge, "final_fixed_roi_enable", True))
+            fixed_roi_xyxy = None
+            if fixed_roi_enabled and isinstance(depth, np.ndarray) and depth.ndim == 2 and depth.size > 0:
+                h_depth, w_depth = depth.shape[:2]
+                x0_norm = float(getattr(self.cfg.table_edge, "final_fixed_roi_x0_norm", 0.22))
+                x1_norm = float(getattr(self.cfg.table_edge, "final_fixed_roi_x1_norm", 0.78))
+                y0_norm = float(getattr(self.cfg.table_edge, "final_fixed_roi_y0_norm", 0.60))
+                y1_norm = float(getattr(self.cfg.table_edge, "final_fixed_roi_y1_norm", 0.96))
+                x0 = max(0, min(w_depth, int(round(w_depth * x0_norm))))
+                x1 = max(0, min(w_depth, int(round(w_depth * x1_norm))))
+                y0 = max(0, min(h_depth, int(round(h_depth * y0_norm))))
+                y1 = max(0, min(h_depth, int(round(h_depth * y1_norm))))
+                x0, x1 = sorted((x0, x1))
+                y0, y1 = sorted((y0, y1))
+                if x1 > x0 and y1 > y0:
+                    fixed_roi_xyxy = [int(x0), int(y0), int(x1), int(y1)]
+            payload["final_fixed_roi_active"] = bool(fixed_roi_xyxy is not None)
+            payload["final_fixed_roi_xyxy"] = fixed_roi_xyxy
+            payload["final_fixed_roi_source"] = "fixed_center_low_roi" if fixed_roi_xyxy is not None else ""
+            fixed_stats = table_roi_depth_statistics(
+                depth,
+                depth_scale,
+                fixed_roi_xyxy,
+                current_table_bbox_found=True,
+                allow_without_table_bbox=True,
+                roi_is_latched=True,
+                min_valid_ratio=float(getattr(self.cfg.table_edge, "final_fixed_roi_min_valid_ratio", 0.03)),
+                min_sample_count=int(getattr(self.cfg.table_edge, "final_fixed_roi_min_sample_count", 32)),
+            )
+            payload["final_fixed_roi_depth_valid"] = bool(fixed_stats.get("table_roi_depth_valid", False))
+            payload["final_fixed_roi_depth_p10"] = fixed_stats.get("table_roi_depth_p10")
+            payload["final_fixed_roi_depth_sample_count"] = int(fixed_stats.get("table_roi_depth_sample_count", 0) or 0)
+            payload["final_fixed_roi_depth_invalid_reason"] = str(fixed_stats.get("table_roi_depth_invalid_reason") or "")
+            final_depth_debug = bool(getattr(self.cfg.table_edge, "final_depth_debug_enable", False))
+            if final_depth_debug:
+                for key, value in fixed_stats.items():
+                    if key.startswith("table_roi_depth_"):
+                        payload["final_fixed_roi_depth_debug_" + key[len("table_roi_depth_"):]] = value
             mapped_roi = payload.get("table_edge_roi") or payload.get("depth_edge_roi") or payload.get("dynamic_roi")
+            roi_latched = bool(payload.get("table_roi_latched", False))
             roi_stats = table_roi_depth_statistics(
                 depth, depth_scale, mapped_roi,
                 current_table_bbox_found=bool(
@@ -3758,13 +3797,41 @@ class TableEdgeManager:
                     or payload.get("table_roi_latched", False)
                 ),
                 allow_without_table_bbox=bool(payload.get("table_roi_latched", False)),
+                roi_is_latched=roi_latched,
+                min_valid_ratio=float(
+                    getattr(
+                        self.cfg.table_edge,
+                        "table_roi_depth_latched_min_valid_ratio" if roi_latched else "table_roi_depth_current_min_valid_ratio",
+                        0.03 if roi_latched else 0.08,
+                    )
+                ),
+                min_sample_count=int(
+                    getattr(
+                        self.cfg.table_edge,
+                        "table_roi_depth_latched_min_sample_count" if roi_latched else "table_roi_depth_current_min_sample_count",
+                        32 if roi_latched else 64,
+                    )
+                ),
             )
             roi_stats["table_roi_depth_mapping_source"] = str(payload.get("roi_source") or "")
             roi_stats["table_roi_source"] = str(payload.get("table_roi_source") or payload.get("roi_source") or "")
             roi_stats["table_roi_latched"] = bool(payload.get("table_roi_latched", False))
             roi_stats["table_roi_latch_age_s"] = payload.get("table_roi_latch_age_s")
             roi_stats["table_roi_xyxy"] = mapped_roi
-            payload.update(roi_stats)
+            payload.update(
+                {
+                    "table_roi_depth_valid": bool(roi_stats.get("table_roi_depth_valid", False)),
+                    "table_roi_depth_p10": roi_stats.get("table_roi_depth_p10"),
+                    "table_roi_depth_sample_count": int(roi_stats.get("table_roi_depth_sample_count", 0) or 0),
+                    "table_roi_depth_mapping_source": roi_stats.get("table_roi_depth_mapping_source", ""),
+                    "table_roi_source": roi_stats.get("table_roi_source", ""),
+                    "table_roi_latched": bool(roi_stats.get("table_roi_latched", False)),
+                    "table_roi_latch_age_s": roi_stats.get("table_roi_latch_age_s"),
+                    "table_roi_xyxy": roi_stats.get("table_roi_xyxy"),
+                }
+            )
+            if final_depth_debug:
+                payload.update(roi_stats)
 
         self._processed_frame_count += 1
         self._last_process_ms = max(0.0, (vision_done_ts - vision_start_ts) * 1000.0)

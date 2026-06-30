@@ -120,6 +120,18 @@ vision:
     yolo_table_roi_hold_enable: true # Persist ROI to avoid frame gaps
     final_roi_latch_enable: true # Reuse last valid table ROI during close/final bbox gaps
     final_roi_latch_max_age_s: 2.0 # Maximum age for close/final ROI latch
+    table_roi_depth_latched_min_valid_ratio: 0.03 # Valid depth ratio for latched ROI sampler
+    table_roi_depth_latched_min_sample_count: 32 # Valid depth sample count for latched ROI sampler
+    table_roi_depth_current_min_valid_ratio: 0.08 # Valid depth ratio for current ROI sampler
+    table_roi_depth_current_min_sample_count: 64 # Valid depth sample count for current ROI sampler
+    final_fixed_roi_enable: true # Use fixed center-low ROI during close/final depth control
+    final_fixed_roi_x0_norm: 0.22 # Fixed final ROI left edge in depth-frame normalized coords
+    final_fixed_roi_x1_norm: 0.78 # Fixed final ROI right edge in depth-frame normalized coords
+    final_fixed_roi_y0_norm: 0.60 # Fixed final ROI top edge in depth-frame normalized coords
+    final_fixed_roi_y1_norm: 0.96 # Fixed final ROI bottom edge in depth-frame normalized coords
+    final_fixed_roi_min_valid_ratio: 0.03 # Valid depth ratio for fixed final ROI sampler
+    final_fixed_roi_min_sample_count: 32 # Valid depth sample count for fixed final ROI sampler
+    final_depth_debug_enable: false # Keep low-level ROI sampler diagnostics out of main payload/logs
     yolo_table_roi_boundary_extend_enable: true # Extend ROI to edge if boundary is reached
     yolo_table_roi_boundary_margin_norm: 0.03 # Margin to trigger extension
     yolo_table_edge_stable_frames: 5 # Frames to confirm stable edge detection
