@@ -39,6 +39,8 @@ REMOTE_EVENTS = (
     "remote_predict_response_dump",
     "remote_release_request_dump",
     "remote_release_response_dump",
+    "remote_predict_precheck_failed",
+    "remote_predict_wait_camera_timeout",
 )
 
 
@@ -498,6 +500,7 @@ def compact_remote_flow(flow: Dict[str, Any]) -> Dict[str, Any]:
         out[f"{name}_state"] = item.get("state")
         out[f"{name}_status_code"] = item.get("status_code")
         out[f"{name}_ok"] = item.get("ok")
+    out["predict_error"] = _get(flow, "predict", "error")
     return out
 
 
@@ -685,19 +688,27 @@ def remote_flow_summary(remote_events: Sequence[Dict[str, Any]], grasp_window: D
         resp_event = f"remote_{name}_response_dump"
         reqs = [e for e in window_events if e.get("event") == req_event]
         resps = [e for e in window_events if e.get("event") == resp_event]
+        precheck_failures = [
+            e for e in window_events
+            if e.get("event") in {"remote_predict_precheck_failed", "remote_predict_wait_camera_timeout"}
+        ] if name == "predict" else []
         last_req = reqs[-1].get("data", {}) if reqs else {}
         last_resp = resps[-1].get("data", {}) if resps else {}
+        last_precheck = precheck_failures[-1].get("data", {}) if precheck_failures else {}
         status_code = last_resp.get("status_code")
-        error = str(last_resp.get("error_message") or "")
+        error = str(last_resp.get("error_message") or last_precheck.get("reason") or "")
         ok, ready_state = _remote_status_from_resp(last_resp) if resps else (False, "")
         if not reqs:
-            state = "NOT_SENT_OR_NOT_LOGGED" if name == "predict" else "NOT_SENT"
+            state = "NOT_SENT" if precheck_failures else ("NOT_SENT_OR_NOT_LOGGED" if name == "predict" else "NOT_SENT")
         elif not resps:
             state = "SENT"
+        elif str(last_resp.get("result") or "").lower() == "timeout":
+            state = "SENT_NO_ACK" if name == "release" else "TIMEOUT"
+            error = error or ("release_timeout" if name == "release" else "predict_timeout")
         elif ready_state == "READY_ALREADY_LOADED":
             state = ready_state
         elif ok:
-            state = "OK" if name != "predict" else "SUCCESS"
+            state = "SENT_OK" if name == "release" else ("OK" if name != "predict" else "SUCCESS")
         else:
             state = "FAILED"
         out[name] = {
@@ -984,6 +995,9 @@ def render_markdown(run_dir: Path, summary: Dict[str, Any], plots: Dict[str, str
                 f"- {name}: {item.get('state', 'NOT_SENT')} requested={item.get('requested', False)} "
                 f"status_code={item.get('status_code')} ok={item.get('ok', False)} error={_short_text(item.get('error'), 80)}"
             )
+        predict_error = _get(flow, "predict", "error")
+        if predict_error:
+            lines.append(f"- predict_error: {_short_text(predict_error, 80)}")
         lines.append("")
 
     lines.append("## State Chain")

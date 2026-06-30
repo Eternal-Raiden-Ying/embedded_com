@@ -132,9 +132,14 @@ class TaskRuntimeMixin:
         if status and status not in KNOWN_VISION_STATUS:
             self._enter_error_recovery(f"unknown vision status: {status}")
             return
+        result = obs.get("result") if isinstance(obs.get("result"), dict) else {}
         self.ctx.grasp_status = status
         self.ctx.grasp_result = obs.get("grasp") if isinstance(obs.get("grasp"), dict) else None
-        self.ctx.grasp_reason = str(obs.get("reason") or "")
+        reason = str(obs.get("reason") or result.get("reason") or "")
+        remote_error = str(result.get("remote_error") or result.get("error") or "")
+        if status == "FAILED" and reason == "remote_predict_failed" and remote_error:
+            reason = f"remote_predict_failed:{remote_error}"
+        self.ctx.grasp_reason = reason
         proposal = obs.get("reposition_proposal")
         self.ctx.grasp_reposition_proposal = proposal if isinstance(proposal, dict) else None
 

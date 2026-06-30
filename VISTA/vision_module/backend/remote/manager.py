@@ -87,6 +87,7 @@ class RemoteManager:
             "service_init_last_ok": False,
             "service_init_last_ts": None,
         }
+        self._latest_grasp_remote_context: Dict[str, Any] = {}
 
     def _emit(self, action: str, **fields: Any) -> None:
         if self._capability_sink is None:
@@ -154,6 +155,71 @@ class RemoteManager:
         if key in self._runtime_profile:
             return self._runtime_profile.get(key, default)
         return default
+
+    def _context_from_runtime_status(self, status: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(status, dict):
+            return {}
+        metadata = dict(status.get("remote_metadata") or {}) if isinstance(status.get("remote_metadata"), dict) else {}
+        class_id = status.get("class_id", status.get("remote_class_id", metadata.get("class_id")))
+        context = {
+            "class_id": class_id,
+            "target": status.get("target", metadata.get("target")),
+            "request_id": status.get("request_id") or status.get("req_id") or status.get("remote_request_id") or metadata.get("request_id"),
+            "session_id": status.get("session_id", metadata.get("session_id")),
+            "robot_id": status.get("robot_id") or status.get("remote_robot_id") or metadata.get("robot_id"),
+            "need_depth": status.get("need_depth", metadata.get("need_depth")),
+            "timeout_s": status.get("timeout_s") or status.get("remote_timeout_s"),
+            "metadata": metadata,
+        }
+        return {key: value for key, value in context.items() if value is not None}
+
+    def _update_latest_grasp_remote_context(self, context: Dict[str, Any], *, source: str) -> Dict[str, Any]:
+        clean = {key: value for key, value in dict(context or {}).items() if value is not None}
+        if clean:
+            clean["context_source"] = str(source or "unknown")
+            merged = dict(self._latest_grasp_remote_context or {})
+            merged.update(clean)
+            self._latest_grasp_remote_context = merged
+        return dict(self._latest_grasp_remote_context or {})
+
+    def _wait_runtime_status_context(self, timeout_s: float) -> Dict[str, Any]:
+        deadline = time.time() + max(0.0, float(timeout_s))
+        last_status: Dict[str, Any] = {}
+        while time.time() <= deadline:
+            status = self._runtime_status_payload()
+            if status:
+                last_status = status
+                context = self._context_from_runtime_status(status)
+                self._update_latest_grasp_remote_context(context, source="runtime_status")
+                if self._resolve_class_id(context.get("class_id")) is not None:
+                    return status
+            if timeout_s <= 0.0:
+                break
+            self._worker_stop.wait(timeout=0.05)
+        return last_status
+
+    def _predict_context(self, runtime_status: Dict[str, Any]) -> Dict[str, Any]:
+        profile_metadata = dict(self._runtime_profile.get("metadata") or {})
+        context: Dict[str, Any] = {}
+        context.update(profile_metadata)
+        context.update(dict(self._latest_grasp_remote_context or {}))
+        runtime_context = self._context_from_runtime_status(runtime_status)
+        context.update(runtime_context)
+        self._update_latest_grasp_remote_context(runtime_context, source="runtime_status")
+        metadata = {}
+        if isinstance(profile_metadata, dict):
+            metadata.update(profile_metadata)
+        latest_metadata = self._latest_grasp_remote_context.get("metadata")
+        if isinstance(latest_metadata, dict):
+            metadata.update(latest_metadata)
+        runtime_metadata = runtime_context.get("metadata")
+        if isinstance(runtime_metadata, dict):
+            metadata.update(runtime_metadata)
+        metadata.setdefault("target", context.get("target"))
+        metadata.setdefault("request_id", context.get("request_id"))
+        metadata.setdefault("session_id", context.get("session_id"))
+        context["metadata"] = metadata
+        return context
 
     def set_client(self, client: RemoteGraspClient) -> None:
         self.client = client
@@ -633,22 +699,24 @@ class RemoteManager:
 
         if action == "predict":
             if not self._ensure_service_ready_for_predict(timeout_s=min(timeout_s, 5.0)):
+                self._release_service_quiet(timeout_s=min(2.0, timeout_s), source="init_not_confirmed")
                 return
             require_depth = bool(self._runtime_profile.get("require_depth", False))
-            runtime_status = self._runtime_status_payload()
-            profile_metadata = dict(self._runtime_profile.get("metadata") or {})
-            runtime_metadata = dict(runtime_status.get("remote_metadata") or {}) if isinstance(runtime_status.get("remote_metadata"), dict) else {}
-            runtime_metadata.setdefault("target", runtime_status.get("target"))
-            runtime_metadata.setdefault("request_id", runtime_status.get("request_id") or runtime_status.get("req_id"))
-            runtime_metadata.setdefault("session_id", runtime_status.get("session_id"))
-            runtime_class_id = runtime_status.get("remote_class_id")
-            if runtime_class_id is None:
-                runtime_class_id = profile_metadata.get("class_id")
+            frame_wait_timeout_s = float(
+                self._runtime_profile.get("remote_predict_frame_wait_timeout_s")
+                or (self._runtime_profile.get("metadata") or {}).get("remote_predict_frame_wait_timeout_s")
+                or 2.0
+            )
+            runtime_status = self._wait_runtime_status_context(timeout_s=min(frame_wait_timeout_s, 2.0))
+            predict_context = self._predict_context(runtime_status)
+            runtime_class_id = predict_context.get("class_id")
             if runtime_class_id is None:
                 self._log(
                     "error",
                     "remote_predict_precheck_failed",
                     reason="missing_class_id",
+                    sources_checked=["command_payload", "latest_context", "runtime_status", "mode_profile"],
+                    latest_context=dict(self._latest_grasp_remote_context or {}),
                     runtime_status=runtime_status,
                 )
                 self._update_result(
@@ -656,20 +724,39 @@ class RemoteManager:
                     state="predict_failed",
                     ok=False,
                     error="missing_class_id",
-                    request_id=runtime_status.get("request_id") or runtime_status.get("req_id"),
+                    request_id=predict_context.get("request_id"),
+                )
+                self._release_service_quiet(timeout_s=min(2.0, timeout_s), source="predict_precheck_failed")
+                return
+            runtime_class_id = self._resolve_class_id(runtime_class_id)
+            if runtime_class_id is None:
+                self._log(
+                    "error",
+                    "remote_predict_precheck_failed",
+                    reason="invalid_class_id",
+                    sources_checked=["command_payload", "latest_context", "runtime_status", "mode_profile"],
+                    latest_context=dict(self._latest_grasp_remote_context or {}),
+                    runtime_status=runtime_status,
+                )
+                self._update_result(
+                    action="predict",
+                    state="predict_failed",
+                    ok=False,
+                    error="invalid_class_id",
+                    request_id=predict_context.get("request_id"),
                 )
                 self._release_service_quiet(timeout_s=min(2.0, timeout_s), source="predict_precheck_failed")
                 return
             cmd = {
-                **profile_metadata,
+                **dict(self._runtime_profile.get("metadata") or {}),
                 "need_depth": require_depth,
                 "class_id": runtime_class_id,
-                "robot_id": runtime_status.get("remote_robot_id") or self._runtime_profile.get("robot_id") or profile_metadata.get("robot_id"),
-                "timeout_s": runtime_status.get("remote_timeout_s"),
-                "target": runtime_status.get("target"),
-                "request_id": runtime_status.get("request_id") or runtime_status.get("req_id"),
-                "session_id": runtime_status.get("session_id"),
-                "metadata": runtime_metadata,
+                "robot_id": predict_context.get("robot_id") or self._runtime_profile.get("robot_id"),
+                "timeout_s": predict_context.get("timeout_s") or timeout_s,
+                "target": predict_context.get("target"),
+                "request_id": predict_context.get("request_id"),
+                "session_id": predict_context.get("session_id"),
+                "metadata": predict_context.get("metadata"),
             }
             # Wait for a fresh camera frame matching current generation.
             # Mode switch clears scheduler slots, so the first frame after
@@ -679,7 +766,7 @@ class RemoteManager:
                 self._update_result(action="predict", state="predict_failed", ok=False, error="scheduler_unavailable")
                 self._release_service_quiet(timeout_s=min(2.0, timeout_s), source="scheduler_unavailable")
                 return
-            deadline = time.time() + min(5.0, float(self._runtime_profile.get("timeout_s", 10.0) or 10.0) * 0.5)
+            deadline = time.time() + max(0.1, float(frame_wait_timeout_s))
             frames = None
             selected_frame_slot = None
             expected_gen = int(self._generation_getter())
@@ -698,18 +785,23 @@ class RemoteManager:
                     slot_gen = int(frame_slot.get("generation", 0) or 0)
                     if slot_gen == expected_gen:
                         payload = frame_slot.get("payload")
-                        if isinstance(payload, dict) and payload:
+                        has_rgb = isinstance(payload, dict) and payload.get("rgb") is not None
+                        has_depth = isinstance(payload, dict) and payload.get("depth") is not None
+                        if isinstance(payload, dict) and has_rgb and (has_depth or not require_depth):
                             frames = payload
                             selected_frame_slot = frame_slot
+                            frame_seq, frame_seq_source = self._frame_seq_from_slot(frame_slot, payload)
                             self._log(
                                 "info",
                                 "remote_predict_wait_camera_ready",
                                 expected_generation=expected_gen,
                                 slot_generation=slot_gen,
                                 wait_ms=int(round((time.time() - wait_start) * 1000.0)),
-                                has_rgb=payload.get("rgb") is not None,
-                                has_depth=payload.get("depth") is not None,
+                                has_rgb=has_rgb,
+                                has_depth=has_depth,
                                 require_depth=require_depth,
+                                frame_seq=frame_seq,
+                                frame_seq_source=frame_seq_source,
                             )
                             break
                 self._worker_stop.wait(timeout=0.05)
@@ -723,6 +815,14 @@ class RemoteManager:
                     if isinstance(payload, dict):
                         has_rgb = payload.get("rgb") is not None
                         has_depth = payload.get("depth") is not None
+                    frame_seq, frame_seq_source = self._frame_seq_from_slot(frame_slot, payload if isinstance(payload, dict) else {})
+                else:
+                    frame_seq, frame_seq_source = 0, "fallback_0"
+                reason = "missing_camera_frames"
+                if not has_rgb:
+                    reason = "missing_rgb_frame"
+                elif require_depth and not has_depth:
+                    reason = "missing_depth_frame"
                 self._log(
                     "error",
                     "remote_predict_wait_camera_timeout",
@@ -732,14 +832,16 @@ class RemoteManager:
                     has_rgb=has_rgb,
                     has_depth=has_depth,
                     require_depth=require_depth,
+                    frame_seq=frame_seq,
+                    frame_seq_source=frame_seq_source,
+                    reason=reason,
                 )
-                self._update_result(action="predict", state="predict_failed", ok=False, error="missing_camera_frames")
+                self._update_result(action="predict", state="predict_failed", ok=False, error=reason, request_id=cmd.get("request_id"))
                 self._release_service_quiet(timeout_s=min(2.0, timeout_s), source="missing_camera_frames")
                 return
             request = self._build_predict_request(cmd, frames=frames, frame_slot=selected_frame_slot)
             if request is not None:
-                resp = self.predict(request)
-                self._record_response("predict", resp)
+                self.predict(request, request_id=request.metadata.request_id)
                 self._release_service_quiet(timeout_s=min(2.0, timeout_s), source="predict_done")
             else:
                 self._release_service_quiet(timeout_s=min(2.0, timeout_s), source="predict_request_not_built")

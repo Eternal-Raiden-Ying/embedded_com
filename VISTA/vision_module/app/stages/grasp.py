@@ -316,13 +316,16 @@ class GraspStagePlan(BaseStagePlan):
             stage_state["remote_result_sent"] = True
 
             if not bool(remote.get("last_ok", False)):
+                remote_error_norm = remote_error or "predict_failed"
+                if remote_error_norm == "timeout":
+                    remote_error_norm = "predict_timeout"
                 return StageOutput(
                     vision_obs=self.build_obs(
                         ctx, status="FAILED",
                         perception={"target_obs": target_obs},
                         result={"reason": "remote_predict_failed", "request_id": request_id,
-                                "remote_error": remote_error or "predict_failed",
-                                "error": remote_error or "predict_failed",
+                                "remote_error": remote_error_norm,
+                                "error": remote_error_norm,
                                 "status_code": remote.get("status_code")},
                     ),
                     snapshot=snapshot,

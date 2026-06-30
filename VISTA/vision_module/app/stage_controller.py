@@ -304,6 +304,12 @@ class StageController:
                 payload[key] = self._ctx.stage_state.get(key)
         if payload.get("remote_request_id"):
             payload["request_id"] = payload.get("remote_request_id")
+        if payload.get("remote_class_id") is not None:
+            payload["class_id"] = payload.get("remote_class_id")
+        if payload.get("remote_robot_id"):
+            payload["robot_id"] = payload.get("remote_robot_id")
+        if payload.get("remote_timeout_s") is not None:
+            payload["timeout_s"] = payload.get("remote_timeout_s")
         return payload
 
     def _publish_runtime_status(self) -> None:

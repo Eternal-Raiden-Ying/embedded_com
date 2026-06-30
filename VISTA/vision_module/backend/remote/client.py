@@ -65,9 +65,9 @@ class RemoteGraspClient:
             "json_status": json_payload.get("status"),
             "json_keys": sorted(str(key) for key in json_payload.keys()),
             "error_message": str(error or json_payload.get("error") or json_payload.get("message") or ""),
+            "result": "timeout" if "timeout" in str(error or "").lower() or "timed out" in str(error or "").lower() else ("ok" if not error and status_code is not None and 200 <= int(status_code) < 300 else "error"),
+            "body_snippet_1000": str(raw_text or "")[:1000],
         }
-        if raw_text:
-            dump["raw_text_prefix"] = str(raw_text)[:1000]
         self._log("info", event, data=dump)
 
     def _post_json(self, path: str, timeout_s: float, response_dump_event: str = "", **kwargs: Any) -> RemotePredictResponse:
@@ -86,13 +86,17 @@ class RemoteGraspClient:
         try:
             resp = self._session.post(url, timeout=max(0.1, float(timeout_s)), **kwargs)
         except Exception as exc:
+            err = str(exc)
             self._response_dump(
                 response_dump_event,
                 status_code=None,
                 elapsed_ms=int(round((time.time() - start) * 1000.0)),
-                error=str(exc),
+                error=err,
+                raw_text="",
             )
-            return self._failure(str(exc))
+            if "timeout" in err.lower() or "timed out" in err.lower():
+                return self._failure("timeout")
+            return self._failure(err)
         elapsed_ms = int(round((time.time() - start) * 1000.0))
         status_code = int(resp.status_code)
         raw_text = ""
