@@ -628,6 +628,8 @@ class MobileGatewayService(BaseModule):
         self._paused_template: Optional[TaskTemplate] = None
         self._last_fetch_template: Optional[TaskTemplate] = None
         self._last_stop_session_id = ""
+        self._pending_after_stop_command: Optional[MobileCommand] = None
+        self._pending_after_stop_deadline_mono = 0.0
         self._recent_cmd_ids: Deque[str] = deque(maxlen=max(1, int(cfg.runtime.cmd_dedup_cache_size or 64)))
         self._recent_cmd_id_set: Set[str] = set()
         self._snapshot: Dict[str, Any] = MobileStatus(
@@ -881,6 +883,7 @@ class MobileGatewayService(BaseModule):
             while self._running:
                 loop_start = time.time()
                 self._drain_inbound_commands()
+                self._drain_pending_after_stop()
                 self._drain_ack_messages()
                 self._drain_orchestrator_observer()
                 self._emit_heartbeat_if_needed()
@@ -987,7 +990,6 @@ class MobileGatewayService(BaseModule):
                     "session_id": command.session_id,
                 })
             return
-        self._remember_cmd_id(command.cmd_id)
         self.log_info("protocol", "received mobile command", {
             "cmd_id": command.cmd_id,
             "cmd": command.cmd,
@@ -995,20 +997,25 @@ class MobileGatewayService(BaseModule):
             "target": command.target,
             "source": command.source,
         })
+        self.run_logger.write_jsonl("gateway_command_received", {
+            "cmd_id": command.cmd_id,
+            "cmd": command.cmd,
+            "session_id": command.session_id,
+            "target": command.target,
+            "stop_cooldown_active": bool(self._in_stop_cooldown()),
+        })
+        if command.cmd != "stop" and self._in_stop_cooldown():
+            self._queue_after_stop(command)
+            ack_payload = dict(command.to_dict())
+            ack_payload["queued_after_stop"] = True
+            ack_payload["reason"] = "stop_cooldown_queue"
+            self._publish_gateway_ack(ack_payload, accepted=True, message="gateway command queued after stop cooldown")
+            self.run_logger.write_jsonl("gateway_ack_queued_after_stop", ack_payload)
+            return
+        self._remember_cmd_id(command.cmd_id)
         if command.cmd not in {"query_status", "stop"}:
             self.demo_console.phone_command(command.target or "n/a")
         self._publish_gateway_ack(command.to_dict(), accepted=True, message="gateway command accepted")
-        if command.cmd != "stop" and self._in_stop_cooldown():
-            self._publish_status(make_error_status(
-                ROBOT_ID,
-                command.session_id,
-                "stop cooldown active; retry after a short delay",
-                ERROR_CODES["busy"],
-                target=command.target,
-                command=command.cmd,
-                epoch=command.epoch,
-            ))
-            return
         if command.cmd == "query_status":
             snapshot = dict(self._snapshot)
             snapshot["robot_id"] = ROBOT_ID
@@ -1092,6 +1099,8 @@ class MobileGatewayService(BaseModule):
         session_id = self._active_template.session_id if self._active_template is not None else command.session_id
         if self._active_template is not None and self._active_template.command in {"fetch_object", "go_home"}:
             self._paused_template = self._active_template
+        self._pending_after_stop_command = None
+        self._pending_after_stop_deadline_mono = 0.0
         self._last_stop_session_id = session_id
         self._last_stop_ts = now_ts()
         self._submit_orchestrator_task(command, intent="STOP", session_id=session_id, high_level_command="stop", force=True)
@@ -1122,6 +1131,14 @@ class MobileGatewayService(BaseModule):
         ok, reason = self.backend.submit(task_cmd)
         self.run_logger.write_jsonl("mobile_command", command.to_dict())
         self.run_logger.write_jsonl("task_cmd_forward", task_cmd)
+        self.run_logger.write_jsonl("gateway_task_cmd_forwarded", {
+            "cmd_id": command.cmd_id,
+            "intent": intent,
+            "session_id": session_id,
+            "epoch": epoch,
+            "ok": bool(ok),
+            "reason": reason,
+        })
         self.run_logger.write_ipc_record(
             "TX",
             "orchestrator_task_cmd_out",
@@ -1508,6 +1525,8 @@ class MobileGatewayService(BaseModule):
             "message": message,
             "accepted": bool(accepted),
             "error_code": error_code,
+            "queued_after_stop": bool(payload.get("queued_after_stop", False)),
+            "reason": payload.get("reason"),
             "source": "mobile_gateway",
             "ts": now_ts(),
         }
@@ -1560,6 +1579,41 @@ class MobileGatewayService(BaseModule):
         if self._last_stop_ts <= 0:
             return False
         return (now_ts() - self._last_stop_ts) < float(self.cfg.backend.stop_cooldown_s)
+
+    def _queue_after_stop(self, command: MobileCommand) -> None:
+        replaced = self._pending_after_stop_command is not None
+        self._pending_after_stop_command = command
+        self._pending_after_stop_deadline_mono = time.monotonic() + max(1.0, float(self.cfg.backend.stop_cooldown_s) + 5.0)
+        payload = {
+            "cmd_id": command.cmd_id,
+            "cmd": command.cmd,
+            "session_id": command.session_id,
+            "target": command.target,
+            "gateway_stop_cooldown_active": True,
+            "gateway_pending_after_stop_set": True,
+            "gateway_pending_after_stop_replaced": bool(replaced),
+        }
+        self.run_logger.write_jsonl("gateway_pending_after_stop_set", payload)
+        self.log_info("protocol", "queued mobile command after stop cooldown", payload)
+
+    def _drain_pending_after_stop(self) -> None:
+        command = self._pending_after_stop_command
+        if command is None:
+            return
+        if self._in_stop_cooldown():
+            return
+        self._pending_after_stop_command = None
+        self._pending_after_stop_deadline_mono = 0.0
+        payload = {
+            "cmd_id": command.cmd_id,
+            "cmd": command.cmd,
+            "session_id": command.session_id,
+            "target": command.target,
+            "gateway_pending_after_stop_submitted": True,
+        }
+        self.run_logger.write_jsonl("gateway_pending_after_stop_submitted", payload)
+        self.log_info("protocol", "submitting queued mobile command after stop cooldown", payload)
+        self.handle_mobile_command_payload(command.to_dict())
 
     def _is_duplicate_cmd(self, cmd_id: str) -> bool:
         cmd_id = str(cmd_id or "").strip()

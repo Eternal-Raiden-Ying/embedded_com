@@ -1032,9 +1032,53 @@ def arbitrate_table_docking_motion(
                 ctx.final_reverse_too_close_count = 0
             except Exception:
                 pass
-            return 0.0, "final_distance_servo_hold_no_distance", {
+            missing_since = float(getattr(ctx, "final_servo_missing_since_mono", 0.0) or 0.0)
+            if missing_since <= 0.0:
+                missing_since = now_mono
+                try:
+                    ctx.final_servo_missing_since_mono = missing_since
+                except Exception:
+                    pass
+            missing_age_s = max(0.0, now_mono - missing_since)
+            last_valid_dist = getattr(ctx, "final_servo_last_valid_dist_m", None)
+            last_valid_mono = float(getattr(ctx, "final_servo_last_valid_mono", 0.0) or 0.0)
+            last_valid_age_s = max(0.0, now_mono - last_valid_mono) if last_valid_mono > 0.0 else None
+            try:
+                last_valid_dist_m = float(last_valid_dist) if last_valid_dist is not None else None
+            except (TypeError, ValueError):
+                last_valid_dist_m = None
+            global_depth_p10 = summary.get("depth_p10", getattr(obs, "depth_p10", None) if obs is not None else None)
+            try:
+                global_depth_p10_m = float(global_depth_p10) if global_depth_p10 is not None else None
+            except (TypeError, ValueError):
+                global_depth_p10_m = None
+            stop_p10 = _float(summary, "depth_envelope_stop_p10_m", 0.35)
+            missing_probe_cap = abs(_float(summary, "final_missing_probe_vx_mps", 0.010))
+            missing_probe_vx = min(missing_probe_cap, abs(_float(summary, "final_forward_vx_max_mps", 0.015)))
+            reuse_s = max(0.0, _float(summary, "final_missing_reuse_s", 0.50))
+            grace_s = max(0.0, _float(summary, "final_missing_probe_grace_s", 0.80))
+            margin_m = max(0.0, _float(summary, "final_missing_probe_margin_m", 0.04))
+            reason = "final_distance_servo_hold_no_distance"
+            vx = 0.0
+            probe_active = False
+            if global_depth_p10_m is not None and global_depth_p10_m <= stop_p10:
+                reason = "final_distance_servo_global_depth_stop_no_roi"
+            elif (
+                last_valid_dist_m is not None
+                and last_valid_age_s is not None
+                and last_valid_age_s <= reuse_s
+                and last_valid_dist_m > target + margin_m
+            ):
+                vx = missing_probe_vx
+                probe_active = bool(vx > 1e-9)
+                reason = "final_distance_servo_missing_probe_last_valid"
+            elif missing_age_s <= grace_s:
+                vx = missing_probe_vx
+                probe_active = bool(vx > 1e-9)
+                reason = "final_distance_servo_missing_probe_grace"
+            return vx, reason, {
                 "final_distance_servo_active": True,
-                "final_distance_servo_reason": "final_distance_servo_hold_no_distance",
+                "final_distance_servo_reason": reason,
                 "final_dist_err_m": None,
                 "final_reverse_confirm_count": 0,
                 "final_reverse_confirm_frames": int(max(1, _float(summary, "final_reverse_confirm_frames", 3))),
@@ -1042,8 +1086,23 @@ def arbitrate_table_docking_motion(
                 "measured_dist_source": measured_source,
                 "table_target_dist_m": float(target),
                 "obs_target_dist_m": float(obs_target_dist_m()),
+                "final_missing_probe_active": bool(probe_active),
+                "final_missing_probe_vx_mps": float(missing_probe_vx),
+                "final_missing_probe_age_s": float(missing_age_s),
+                "final_missing_probe_grace_s": float(grace_s),
+                "final_missing_reuse_s": float(reuse_s),
+                "final_missing_probe_margin_m": float(margin_m),
+                "final_servo_last_valid_dist_m": last_valid_dist_m,
+                "final_servo_last_valid_age_s": last_valid_age_s,
+                "global_depth_p10_m": global_depth_p10_m,
             }
         dist_err = float(dist_err)
+        try:
+            ctx.final_servo_last_valid_dist_m = float(measured_dist) if measured_dist is not None else None
+            ctx.final_servo_last_valid_mono = now_mono
+            ctx.final_servo_missing_since_mono = 0.0
+        except Exception:
+            pass
         deadband = abs(_float(summary, "final_dist_deadband_m", _float(summary, "final_lock_dist_tol_m", 0.03)))
         kp = max(0.0, _float(summary, "final_dist_kp", 0.08))
         fwd_cap = abs(_float(summary, "final_forward_vx_max_mps", 0.006))
@@ -1079,6 +1138,11 @@ def arbitrate_table_docking_motion(
             "measured_dist_source": measured_source,
             "table_target_dist_m": float(target),
             "obs_target_dist_m": float(obs_target_dist_m()),
+            "final_missing_probe_active": False,
+            "final_missing_probe_vx_mps": abs(_float(summary, "final_missing_probe_vx_mps", 0.010)),
+            "final_missing_probe_age_s": 0.0,
+            "final_servo_last_valid_dist_m": float(measured_dist) if measured_dist is not None else None,
+            "final_servo_last_valid_age_s": 0.0,
         }
 
     def final_roi_mode_result() -> ArbitrationResult:

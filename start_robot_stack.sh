@@ -73,6 +73,12 @@ ORCH_READY_EXTRA_S="${ORCH_READY_EXTRA_S:-1}"
 GATEWAY_READY_EXTRA_S="${GATEWAY_READY_EXTRA_S:-1}"
 STOP_GRACE_S="${STOP_GRACE_S:-3}"
 
+# Stop 后自动生成本次 run summary。
+# 关闭：RUN_SUMMARY_ENABLE=0 ./start_robot_stack.sh stop
+RUN_SUMMARY_ENABLE="${RUN_SUMMARY_ENABLE:-1}"
+RUN_SUMMARY_SCRIPT="${RUN_SUMMARY_SCRIPT:-$STACK_ROOT/tools/run_summary.py}"
+RUN_SUMMARY_NO_PLOTS="${RUN_SUMMARY_NO_PLOTS:-0}"
+
 # =========================
 # 以下一般不用改
 # =========================
@@ -952,6 +958,21 @@ stop_all() {
   cleanup_sockets
 }
 
+run_latest_summary() {
+  [[ "${RUN_SUMMARY_ENABLE:-1}" == "1" ]] || return 0
+  [[ -n "${STACK_RUN_DIR:-}" && -d "$STACK_RUN_DIR" ]] || { mark warn "run summary skipped: STACK_RUN_DIR not found"; return 0; }
+  [[ -f "$RUN_SUMMARY_SCRIPT" ]] || { mark warn "run summary skipped: script not found: $RUN_SUMMARY_SCRIPT"; return 0; }
+
+  headline "生成 run summary"
+  local plot_flag=""
+  [[ "${RUN_SUMMARY_NO_PLOTS:-0}" == "1" ]] && plot_flag="--no-plots"
+  if /usr/bin/python3 "$RUN_SUMMARY_SCRIPT" "$STACK_RUN_DIR" $plot_flag; then
+    mark ok "run summary 已生成: $STACK_RUN_DIR/summary/run_summary_auto.md"
+  else
+    mark warn "run summary 生成失败，但 stop 流程继续"
+  fi
+}
+
 status_one() {
   local name="$1" pid_file="$2" use_sudo="$3" log_file="$4"
   if pid_alive "$pid_file" "$use_sudo"; then
@@ -1127,6 +1148,7 @@ stop_stack() {
   show_banner
   stop_all
   status_all
+  run_latest_summary
 }
 
 main() {

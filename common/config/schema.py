@@ -525,7 +525,10 @@ class ControlThresholds:
     edge_final_stop_margin_m: float = 0.02
     close_range_enter_p10_m: float = 0.55
     final_probe_vx_mps: float = 0.015
-    final_missing_probe_vx_mps: float = 0.008
+    final_missing_probe_vx_mps: float = 0.010
+    final_missing_probe_grace_s: float = 0.80
+    final_missing_reuse_s: float = 0.50
+    final_missing_probe_margin_m: float = 0.04
     close_range_probe_vx_mps: float = 0.015
     close_range_missing_probe_vx_mps: float = 0.008
     roi_final_stop_p10_m: float = 0.42

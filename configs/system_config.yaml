@@ -205,6 +205,9 @@ vision:
           kind: task
           action: init
           base_url: "http://10.11.40.164:6006"
+          robot_id: "sc171_car_01"
+          metadata:
+            robot_id: "sc171_car_01"
       GRASP_REMOTE:
         remote:
           enabled: true
@@ -212,6 +215,9 @@ vision:
           action: predict
           require_depth: true
           base_url: "http://10.11.40.164:6006"
+          robot_id: "sc171_car_01"
+          metadata:
+            robot_id: "sc171_car_01"
   req_in:
     transport: "uds" # Incoming IPC channel mode
     ipc_socket_path: "" # Socket file path
@@ -304,7 +310,10 @@ orchestrator:
     edge_final_stop_margin_m: 0.02 # Edge distance margin for final stop confirmation
     close_range_enter_p10_m: 0.55 # ROI depth threshold to latch close range
     final_probe_vx_mps: 0.015 # Final probe forward speed
-    final_missing_probe_vx_mps: 0.008 # Final probe speed when final signal is missing
+    final_missing_probe_vx_mps: 0.010 # Final probe speed when final signal is missing
+    final_missing_probe_grace_s: 0.80 # Short missing-distance grace probe window
+    final_missing_reuse_s: 0.50 # Reuse window for last valid final distance
+    final_missing_probe_margin_m: 0.04 # Last valid distance margin before missing probe
     close_range_probe_vx_mps: 0.015 # Close-range probe forward speed
     close_range_missing_probe_vx_mps: 0.008 # Close-range probe speed when depth is missing
     roi_final_stop_p10_m: 0.42 # ROI P10 threshold for final lock stop
