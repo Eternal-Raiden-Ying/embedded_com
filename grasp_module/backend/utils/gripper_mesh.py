@@ -107,11 +107,11 @@ def build_gripper_mesh(
         offset_z=-height / 2.0,
     )
 
-    # ── bottom (connects the two fingers) ──────────────────────
+    # ── bottom (full-span base plate, Y matches collision) ────────
     bottom = create_mesh_box(
-        finger_width, width, height,
+        finger_width, width + 2.0 * finger_width, height,
         offset_x=depth - finger_length - finger_width,
-        offset_y=-width / 2.0,
+        offset_y=-(width / 2.0 + finger_width),
         offset_z=-height / 2.0,
     )
 
