@@ -176,6 +176,7 @@ class RealSenseGraspPredictor:
             conf=getattr(self.cfgs, 'yolo_conf', 0.25),
             iou=getattr(self.cfgs, 'yolo_iou', 0.7),
             bbox_scale=getattr(self.cfgs, 'bbox_expand_scale', 2.0),
+            seg_scale=getattr(self.cfgs, 'forward_bbox_scale', 1.0),
         )
         return seg_mask, bbox_mask, overlay_img, yolo_info
 
@@ -369,8 +370,8 @@ class RealSenseGraspPredictor:
             return None
 
         # 限定 robot 坐标系下 approach X 分量为正（从 +X 方向接近）
-        if float(raw_approach[0]) <= 0:
-            return None
+        # if float(raw_approach[0]) <= 0:
+        #     return None
 
         # grasp center in robot frame (cm)
         grasp_robot_cm = self.frames.camera_point_to_robot_cm(grasp.translation)

@@ -45,7 +45,7 @@ def mask_to_bbox_mask(mask, scale=2.0):
     return bbox_mask, (x1, y1, x2, y2)
 
 
-def predict_target_masks(model, bgr_image, class_id, conf=0.25, iou=0.7, bbox_scale=2.0):
+def predict_target_masks(model, bgr_image, class_id, conf=0.25, iou=0.7, bbox_scale=2.0, seg_scale=1.0):
     results = model.predict(
         source=bgr_image,
         classes=[class_id],
@@ -74,22 +74,28 @@ def predict_target_masks(model, bgr_image, class_id, conf=0.25, iou=0.7, bbox_sc
     confs = result.boxes.conf.detach().cpu().numpy()
     best_idx = int(np.argmax(confs))
     xyxy = result.boxes.xyxy[best_idx].detach().cpu().numpy()
-    x1, y1, x2, y2 = np.round(xyxy).astype(int)
-    x1 = int(np.clip(x1, 0, w))
-    x2 = int(np.clip(x2, 0, w))
-    y1 = int(np.clip(y1, 0, h))
-    y2 = int(np.clip(y2, 0, h))
-    x1, y1, x2, y2 = expand_bbox_xyxy(x1, y1, x2, y2, w, h, scale=bbox_scale)
+    ox1, oy1, ox2, oy2 = np.round(xyxy).astype(int)
+    ox1 = int(np.clip(ox1, 0, w))
+    ox2 = int(np.clip(ox2, 0, w))
+    oy1 = int(np.clip(oy1, 0, h))
+    oy2 = int(np.clip(oy2, 0, h))
+
+    # bbox_mask: 碰撞检测场景云用，保持大扩张
+    x1, y1, x2, y2 = expand_bbox_xyxy(ox1, oy1, ox2, oy2, w, h, scale=bbox_scale)
     if x2 > x1 and y2 > y1:
         bbox_mask[y1:y2, x1:x2] = 1
 
+    # seg_mask: segmentation 模型的 polygon，或 detection 模型的小扩张框
     if result.masks is not None and best_idx < len(result.masks.xy):
         pts = np.array(result.masks.xy[best_idx], dtype=np.int32)
         if pts.size > 0:
             cv2.fillPoly(seg_mask, [pts], 1)
 
     if seg_mask.sum() == 0:
-        seg_mask = bbox_mask.copy()
+        # detection 模型回退：用较小的 seg_scale 框定 forward 推理区域
+        sx1, sy1, sx2, sy2 = expand_bbox_xyxy(ox1, oy1, ox2, oy2, w, h, scale=seg_scale)
+        if sx2 > sx1 and sy2 > sy1:
+            seg_mask[sy1:sy2, sx1:sx2] = 1
 
     info.update({
         'found': True,

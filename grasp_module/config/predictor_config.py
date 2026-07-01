@@ -15,7 +15,7 @@ class PredictorConfig:
     seed_feat_dim: int = 512
     num_point: int = 15000
     voxel_size: float = 0.005
-    collision_thresh: float = -1.0
+    collision_thresh: float = 0.01
     voxel_size_cd: float = 0.01
     random_seed: int = 0
     scene_max_depth: float = 3.0
@@ -32,29 +32,30 @@ class PredictorConfig:
     # ---- Collision detection occupancy parameters ----
     # Used by ModelFreeCollisionDetector. Independent of the debug mesh above.
     collision_finger_width_m: float = 0.02
-    collision_finger_length_m: float = 0.07
+    collision_finger_length_m: float = 0.05
     collision_height_override_m: float = -1.0
 
     rgb_path: str = os.path.join(MODULE_DIR, 'test', 'data', 'color', 'color_00000.png')
     depth_path: str = os.path.join(MODULE_DIR, 'test', 'data', 'depth', 'depth_raw_00000.png')
     camera_metadata: str = os.path.join(CONFIG_DIR, 'realsense_metadata.json')
 
-    yolo_model: str = 'yolo26m-seg.pt'
+    yolo_model: str = 'yolo26l-finetune.pt'
     yolo_weights_dir: str = os.path.join(MODULE_DIR, 'weights')
-    yolo_class_id: int = 47
+    yolo_class_id: int = 1
     yolo_conf: float = 0.25
     yolo_iou: float = 0.7
     bbox_expand_scale: float = 2.0
+    forward_bbox_scale: float = 1.0
     collision_depth_margin: float = 0.15
     protocol_depth_base: float = -0.03  # 0.02
-    protocol_feasible_distance_cm: float = 2.0
-    protocol_min_score: float = 0.3
+    protocol_feasible_distance_cm: float = 3.0
+    protocol_min_score: float = 0.0
     response_max_targets: int = 5
-    reference_line_x_cm: float = 0.0
+    reference_line_x_cm: float = 1.5
     reference_line_y_cm: float = 0.0
     reposition_max_distance_cm: float = 20.0
-    robot_cam_rotation_csv: str = '0.00428801,-0.63729195,0.77061053,-0.99996824,0.00244406,0.00758549,-0.00671759,-0.77061858,-0.63726123'
-    robot_cam_translation_cm_csv: str = '-10.30593831,0.93004589,35.4166982'
+    robot_cam_rotation_csv: str = '0.06860923,-0.33156783,0.94093334,-0.99678667,0.01630074,0.07842593,-0.04134143,-0.94329055,-0.32938401'
+    robot_cam_translation_cm_csv: str = '-13.7205499,-6.83104687,35.19270402'
     robot_calibration_translation_cm_csv: str = ''
 
     debug: bool = False
