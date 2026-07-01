@@ -268,3 +268,142 @@ def get_workspace_mask(cloud, seg, trans=None, organized=True, outlier=0):
         workspace_mask = workspace_mask.reshape([h, w])
 
     return workspace_mask
+
+
+# ============================================================
+# 方案 B: 深度→颜色 3D 投影对齐
+# ============================================================
+
+def load_color_camera_info_from_metadata(metadata_path, default_camera=None):
+    """从 metadata JSON 的 ``color`` 段加载彩色相机内参。
+
+    Args:
+        metadata_path: metadata JSON 文件路径。
+        default_camera: 如果 metadata 中没有 color 段，回退到此值。
+
+    Returns:
+        CameraInfo for the color sensor, or default_camera if unavailable.
+    """
+    if not metadata_path or not os.path.exists(metadata_path):
+        return default_camera
+
+    with open(metadata_path, 'r', encoding='utf-8') as f:
+        metadata = json.load(f)
+
+    color_info = metadata.get('color')
+    if not color_info:
+        return default_camera
+
+    fallback = default_camera
+    camera_info = CameraInfo(
+        width=float(color_info.get('width', fallback.width if fallback else 1280)),
+        height=float(color_info.get('height', fallback.height if fallback else 720)),
+        fx=float(color_info.get('fx', fallback.fx if fallback else 906.98)),
+        fy=float(color_info.get('fy', fallback.fy if fallback else 905.03)),
+        cx=float(color_info.get('cx', fallback.cx if fallback else 646.37)),
+        cy=float(color_info.get('cy', fallback.cy if fallback else 369.08)),
+        scale=1000.0,
+    )
+
+    logger.info("Loaded color camera metadata from %s", metadata_path)
+    logger.info(
+        "Color intrinsics wxh=%sx%s fx=%.4f fy=%.4f cx=%.4f cy=%.4f",
+        int(camera_info.width), int(camera_info.height),
+        camera_info.fx, camera_info.fy,
+        camera_info.cx, camera_info.cy,
+    )
+    return camera_info
+
+
+def load_depth_to_color_extrinsic(metadata_path):
+    """从 metadata JSON 的 ``extrinsics_depth_to_color`` 段加载 4x4 外参矩阵。
+
+    Args:
+        metadata_path: metadata JSON 文件路径。
+
+    Returns:
+        4x4 numpy float64 齐次变换矩阵 [R|t; 0 0 0 1]，无此字段返回 None。
+    """
+    if not metadata_path or not os.path.exists(metadata_path):
+        return None
+
+    with open(metadata_path, 'r', encoding='utf-8') as f:
+        metadata = json.load(f)
+
+    extrin = metadata.get('extrinsics_depth_to_color')
+    if not extrin:
+        return None
+
+    rotation = np.array(extrin['rotation'], dtype=np.float64).reshape(3, 3)
+    translation = np.array(extrin['translation'], dtype=np.float64)
+
+    extrinsic_4x4 = np.eye(4, dtype=np.float64)
+    extrinsic_4x4[:3, :3] = rotation
+    extrinsic_4x4[:3, 3] = translation
+
+    logger.info("Loaded depth-to-color extrinsics (4x4) from %s", metadata_path)
+    return extrinsic_4x4
+
+
+def map_depth_cloud_to_color_image(depth, color, depth_cam, color_cam, depth_to_color_extrinsic=None):
+    """将完整 depth 点云投影到 color 2D 像素系 — 方案 B 的核心。
+
+    1. 用 depth 内参生成完整 3D 点云。
+    2. 用 depth→color 外参变换到 color 坐标系。
+    3. 用 color 内参投影到 2D 像素坐标。
+    4. 返回 UV + in_view 掩码，由调用方按 YOLO mask 划分点云。
+
+    Args:
+        depth: (H, W) uint16 深度图。
+        color: (H, W, 3) uint8 RGB 图像。
+        depth_cam: CameraInfo — 深度传感器内参。
+        color_cam: CameraInfo — 彩色传感器内参。
+        depth_to_color_extrinsic: (4, 4) np.float64 外参矩阵，None 时假设共轴。
+
+    Returns:
+        points: (N, 3) float32 — depth 坐标系下的 3D 点。
+        colors: (N, 3) float32 — RGB 颜色 [0,1]，超出 color FOV 的点为黑色。
+        u: (N,) int32 — color 图像上的列坐标，无效时为负值。
+        v: (N,) int32 — color 图像上的行坐标，无效时为负值。
+        in_view: (N,) bool — 该 3D 点投影后是否落在 color 图像范围内。
+    """
+    # 1. 生成完整 depth 点云 (depth 坐标系)
+    all_points = create_point_cloud_from_depth_image(depth, depth_cam, organized=False)
+    valid_z = depth.reshape(-1) > 0
+    points = all_points[valid_z]
+    n = len(points)
+
+    # 默认：黑色，UV 无效
+    colors = np.zeros((n, 3), dtype=np.float32)
+    u = np.full(n, -1, dtype=np.int32)
+    v = np.full(n, -1, dtype=np.int32)
+
+    # 2. 变换到 color 坐标系
+    if depth_to_color_extrinsic is not None:
+        pts_c = transform_point_cloud(points, depth_to_color_extrinsic, format='4x4')
+    else:
+        pts_c = points
+
+    # 3. 针孔投影到 color 2D 平面
+    front_mask = pts_c[:, 2] > 0
+    z_front = pts_c[front_mask, 2]
+    u[front_mask] = np.round(
+        (pts_c[front_mask, 0] * color_cam.fx / z_front) + color_cam.cx
+    ).astype(np.int32)
+    v[front_mask] = np.round(
+        (pts_c[front_mask, 1] * color_cam.fy / z_front) + color_cam.cy
+    ).astype(np.int32)
+
+    # 4. 检查投影点是否在 color 图像范围内
+    h, w = color.shape[:2]
+    in_view = front_mask & (u >= 0) & (u < w) & (v >= 0) & (v < h)
+
+    # 5. 对视野内的点提取 RGB 颜色
+    colors[in_view] = color[v[in_view], u[in_view]].astype(np.float32) / 255.0
+
+    logger.debug(
+        "map_depth_cloud: %d valid depth points, %d in color FOV, "
+        "%d outside color FOV (preserved for collision)",
+        n, int(in_view.sum()), int((~in_view & front_mask).sum()),
+    )
+    return points, colors, u, v, in_view

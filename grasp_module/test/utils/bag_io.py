@@ -159,15 +159,28 @@ def convert_color_frame_to_rgb(rs_module, color_frame):
     return cv2.cvtColor(color_data, cv2.COLOR_BGR2RGB)
 
 
-def export_depth_metadata(profile, raw_depth_frame, raw_color_frame, output_path, description):
+def export_depth_metadata(profile, raw_depth_frame, raw_color_frame, output_path, description, depth_to_color_extrin=None):
     depth_intrinsics = raw_depth_frame.get_profile().as_video_stream_profile().get_intrinsics()
-    color_intrinsics = raw_color_frame.get_profile().as_video_stream_profile().get_intrinsics()
     depth_scale = profile.get_device().first_depth_sensor().get_depth_scale()
     factor_depth = 1.0 / depth_scale if depth_scale > 0 else 1000.0
 
+    color_meta = None
+    if raw_color_frame is not None:
+        color_intrinsics = raw_color_frame.get_profile().as_video_stream_profile().get_intrinsics()
+        color_meta = {
+            "width": color_intrinsics.width,
+            "height": color_intrinsics.height,
+            "fx": color_intrinsics.fx,
+            "fy": color_intrinsics.fy,
+            "cx": color_intrinsics.ppx,
+            "cy": color_intrinsics.ppy,
+            "model": str(color_intrinsics.model),
+            "coeffs": list(color_intrinsics.coeffs),
+        }
+
     metadata = {
         "camera_type": "realsense_bag",
-        "align_mode": "depth",
+        "align_mode": "depth_only" if raw_color_frame is None else "depth",
         "depth": {
             "width": depth_intrinsics.width,
             "height": depth_intrinsics.height,
@@ -178,20 +191,17 @@ def export_depth_metadata(profile, raw_depth_frame, raw_color_frame, output_path
             "model": str(depth_intrinsics.model),
             "coeffs": list(depth_intrinsics.coeffs),
         },
-        "color": {
-            "width": color_intrinsics.width,
-            "height": color_intrinsics.height,
-            "fx": color_intrinsics.fx,
-            "fy": color_intrinsics.fy,
-            "cx": color_intrinsics.ppx,
-            "cy": color_intrinsics.ppy,
-            "model": str(color_intrinsics.model),
-            "coeffs": list(color_intrinsics.coeffs),
-        },
         "depth_scale": depth_scale,
         "factor_depth": factor_depth,
         "description": description,
     }
+    if color_meta is not None:
+        metadata["color"] = color_meta
+    if depth_to_color_extrin is not None:
+        metadata["extrinsics_depth_to_color"] = {
+            "rotation": list(depth_to_color_extrin.rotation),
+            "translation": list(depth_to_color_extrin.translation),
+        }
     save_json(output_path, metadata)
     return output_path, metadata
 
@@ -267,6 +277,8 @@ def _collect_aligned_bag_frames(
     metadata_description,
     include_sdk_cloud=False,
     include_official_variants=False,
+    skip_align=True,
+    depth_only=False,
 ):
     try:
         import pyrealsense2 as rs
@@ -282,7 +294,20 @@ def _collect_aligned_bag_frames(
     profile = pipeline.start(config)
     playback = profile.get_device().as_playback()
     playback.set_real_time(False)
-    align = rs.align(rs.stream.depth)
+
+    # 从 profile stream 提取 depth→color 外参 (方案 B 对齐)
+    depth_to_color_extrin = None
+    if not depth_only:
+        try:
+            depth_stream = profile.get_stream(rs.stream.depth)
+            color_stream = profile.get_stream(rs.stream.color)
+            depth_to_color_extrin = depth_stream.as_video_stream_profile().get_extrinsics_to(
+                color_stream.as_video_stream_profile()
+            )
+        except Exception:
+            pass
+
+    align = None if skip_align else rs.align(rs.stream.depth)
 
     metadata_path = None
     metadata = None
@@ -302,12 +327,19 @@ def _collect_aligned_bag_frames(
                 continue
 
             raw_depth_frame = frames.get_depth_frame()
-            raw_color_frame = frames.get_color_frame()
-            aligned_frames = align.process(frames)
-            aligned_depth_frame = aligned_frames.get_depth_frame()
-            aligned_color_frame = aligned_frames.get_color_frame()
+            raw_color_frame = None if depth_only else frames.get_color_frame()
 
-            if not raw_depth_frame or not raw_color_frame or not aligned_depth_frame or not aligned_color_frame:
+            if skip_align:
+                depth_frame = raw_depth_frame
+                color_frame = raw_color_frame
+            else:
+                aligned_frames = align.process(frames)
+                depth_frame = aligned_frames.get_depth_frame()
+                color_frame = None if depth_only else aligned_frames.get_color_frame()
+
+            if not raw_depth_frame or not depth_frame:
+                continue
+            if not depth_only and (not raw_color_frame or not color_frame):
                 continue
 
             if metadata_path is None:
@@ -317,10 +349,11 @@ def _collect_aligned_bag_frames(
                     raw_color_frame,
                     str(output_dir / "camera_metadata.json"),
                     metadata_description,
+                    depth_to_color_extrin=depth_to_color_extrin,
                 )
 
-            color_img = convert_color_frame_to_rgb(rs, aligned_color_frame)
-            raw_depth_img = normalize_depth_shape(np.asanyarray(aligned_depth_frame.get_data()))
+            color_img = None if depth_only else convert_color_frame_to_rgb(rs, color_frame)
+            raw_depth_img = normalize_depth_shape(np.asanyarray(depth_frame.get_data()))
             if raw_depth_img is None or raw_depth_img.ndim != 2:
                 continue
 
@@ -334,7 +367,7 @@ def _collect_aligned_bag_frames(
             official_depth_img = None
             official_depth_frame = None
             if include_official_variants:
-                official_depth_frame = apply_rs_official_filters(rs, aligned_depth_frame, cfgs)
+                official_depth_frame = apply_rs_official_filters(rs, depth_frame, cfgs)
                 official_depth_img = normalize_depth_shape(np.asanyarray(official_depth_frame.get_data()))
                 official_depth_img = sanitize_depth_image(
                     official_depth_img,
@@ -352,7 +385,7 @@ def _collect_aligned_bag_frames(
 
             frame_item = {
                 "frame_index": total_frames - 1,
-                "color_img": color_img.copy(),
+                "color_img": None if depth_only else color_img.copy(),
                 "depth_raw_img": raw_depth_img.copy(),
                 "depth_filtered_img": filtered_depth_img.copy(),
                 "depth_postprocessed_img": postprocessed_depth_img.copy(),
@@ -365,8 +398,8 @@ def _collect_aligned_bag_frames(
             if include_sdk_cloud:
                 sdk_points, sdk_colors = _extract_sdk_point_cloud_from_aligned_frames(
                     rs,
-                    aligned_depth_frame,
-                    aligned_color_frame,
+                    depth_frame,
+                    color_frame,
                     color_img,
                     valid_mask=(filtered_depth_img > 0),
                 )
@@ -376,7 +409,7 @@ def _collect_aligned_bag_frames(
                     sdk_official_points, sdk_official_colors = _extract_sdk_point_cloud_from_aligned_frames(
                         rs,
                         official_depth_frame,
-                        aligned_color_frame,
+                        color_frame,
                         color_img,
                         valid_mask=(official_depth_img > 0),
                     )
@@ -395,8 +428,8 @@ def _collect_aligned_bag_frames(
     return frames_out, metadata_path, metadata
 
 
-def collect_bag_frames(cfgs, output_dir, metadata_description="Camera intrinsics exported from bag for engine debug"):
-    frames_out, metadata_path, _ = _collect_aligned_bag_frames(cfgs, output_dir, metadata_description)
+def collect_bag_frames(cfgs, output_dir, metadata_description="Camera intrinsics exported from bag for engine debug", skip_align=True):
+    frames_out, metadata_path, _ = _collect_aligned_bag_frames(cfgs, output_dir, metadata_description, skip_align=skip_align)
     return frames_out[: cfgs.bag_top_k], metadata_path
 
 
@@ -441,6 +474,50 @@ def collect_bag_candidates(cfgs, output_dir, metadata_description="Camera intrin
                 "scene_stats_filtered": compute_scene_stats(filtered_points),
                 "postprocessed_points": postprocessed_points,
                 "postprocessed_colors": postprocessed_colors,
+                "scene_stats_postprocessed": compute_scene_stats(postprocessed_points),
+            }
+        )
+        if len(candidates) >= cfgs.bag_top_k:
+            break
+    return candidates, metadata_path, camera_info
+
+
+def collect_bag_depth_only_candidates(cfgs, output_dir, metadata_description="Camera intrinsics exported from bag for depth-only debug"):
+    """与 collect_bag_candidates 类似，但跳过 RGB/对齐 — 仅用 depth 重建 3D 点云（无颜色）。"""
+    frames_out, metadata_path, metadata = _collect_aligned_bag_frames(
+        cfgs, output_dir, metadata_description, depth_only=True,
+    )
+    camera_info = build_camera_info_from_metadata(metadata)
+    candidates = []
+    for item in frames_out:
+        filtered_points, _ = create_colored_point_cloud_from_rgbd(
+            None,
+            item["depth_filtered_img"],
+            camera_info,
+            mask=None,
+        )
+        postprocessed_points, _ = create_colored_point_cloud_from_rgbd(
+            None,
+            item["depth_postprocessed_img"],
+            camera_info,
+            mask=None,
+        )
+        if filtered_points.size == 0 and postprocessed_points.size == 0:
+            continue
+
+        filtered_points, _ = filter_point_cloud_by_z(
+            filtered_points, None, z_min=cfgs.z_min, z_max=cfgs.z_max,
+        )
+        postprocessed_points, _ = filter_point_cloud_by_z(
+            postprocessed_points, None, z_min=cfgs.z_min, z_max=cfgs.z_max,
+        )
+
+        candidates.append(
+            {
+                **item,
+                "filtered_points": filtered_points,
+                "postprocessed_points": postprocessed_points,
+                "scene_stats_filtered": compute_scene_stats(filtered_points),
                 "scene_stats_postprocessed": compute_scene_stats(postprocessed_points),
             }
         )
@@ -530,6 +607,20 @@ def save_point_cloud_frame_outputs(frame_dir, frame_result):
     postprocessed_cloud_path = build_ply_output_path(frame_dir, "scene_cloud_postprocessed.ply")
     write_open3d_point_cloud(filtered_cloud_path, frame_result["filtered_points"], frame_result["filtered_colors"])
     write_open3d_point_cloud(postprocessed_cloud_path, frame_result["postprocessed_points"], frame_result["postprocessed_colors"])
+
+    return filtered_cloud_path, postprocessed_cloud_path
+
+
+def save_depth_only_frame_outputs(frame_dir, frame_result):
+    """保存 depth-only 输出：深度图 + 无颜色 PLY 点云（不保存 RGB 图片）。"""
+    ensure_dir(frame_dir)
+    cv2.imwrite(str(Path(frame_dir) / "depth_raw.png"), frame_result["depth_raw_img"])
+    cv2.imwrite(str(Path(frame_dir) / "depth_filtered.png"), frame_result["depth_filtered_img"])
+    cv2.imwrite(str(Path(frame_dir) / "depth_postprocessed.png"), frame_result["depth_postprocessed_img"])
+    filtered_cloud_path = build_ply_output_path(frame_dir, "scene_cloud_filtered.ply")
+    postprocessed_cloud_path = build_ply_output_path(frame_dir, "scene_cloud_postprocessed.ply")
+    write_open3d_point_cloud(filtered_cloud_path, frame_result["filtered_points"], None)
+    write_open3d_point_cloud(postprocessed_cloud_path, frame_result["postprocessed_points"], None)
 
     return filtered_cloud_path, postprocessed_cloud_path
 

@@ -19,6 +19,9 @@ from .utils.data_utils import (
     create_colored_point_cloud_from_rgbd,
     filter_point_cloud_by_z,
     load_camera_info_from_metadata,
+    load_color_camera_info_from_metadata,
+    load_depth_to_color_extrinsic,
+    map_depth_cloud_to_color_image,
     write_open3d_point_cloud,
 )
 from .utils.frames import FrameTransformer
@@ -44,6 +47,8 @@ class RealSenseGraspPredictor:
             torch.cuda.manual_seed_all(getattr(self.cfgs, 'random_seed', 0))
 
         self.camera_info = self._load_camera_info()
+        self.color_camera_info = self._load_color_camera_info()
+        self.depth_to_color_extrinsic = self._load_depth_to_color_extrinsic()
         self.net = self._load_grasp_model()
 
         if cfgs.debug and not os.path.exists(cfgs.dump_dir):
@@ -70,6 +75,38 @@ class RealSenseGraspPredictor:
             logger.info("Using default camera intrinsics (graspnet kinect defaults)")
             return default_camera_info
         return camera_info
+
+    def _load_color_camera_info(self):
+        """加载 color 相机内参；若与 depth 内参相同（无真实 color 内参）则返回 None 触发回退。"""
+        metadata_path = getattr(self.cfgs, 'camera_metadata', None)
+        if not metadata_path or not os.path.exists(metadata_path):
+            return None
+
+        color_cam = load_color_camera_info_from_metadata(metadata_path, default_camera=None)
+        if color_cam is None:
+            logger.info("No color camera intrinsics in metadata; using legacy alignment path")
+            return None
+
+        # 安全检查：若 color 和 depth 内参完全一致，说明 metadata 里没有真实的 color 内参
+        if (abs(color_cam.fx - self.camera_info.fx) < 1e-6
+                and abs(color_cam.fy - self.camera_info.fy) < 1e-6):
+            logger.warning(
+                "Color intrinsics appear identical to depth intrinsics; "
+                "extrinsics-dependent alignment will not be used."
+            )
+            return None
+
+        return color_cam
+
+    def _load_depth_to_color_extrinsic(self):
+        """加载 depth→color 4x4 外参矩阵。"""
+        metadata_path = getattr(self.cfgs, 'camera_metadata', None)
+        if not metadata_path or not os.path.exists(metadata_path):
+            return None
+        extrin = load_depth_to_color_extrinsic(metadata_path)
+        if extrin is not None:
+            logger.info("depth-to-color extrinsics available — 方案 B enabled (3D-based alignment)")
+        return extrin
 
     def _load_grasp_model(self):
         logger.info("Loading GraspNet model from %s", self.cfgs.checkpoint_path)
@@ -183,6 +220,51 @@ class RealSenseGraspPredictor:
             mask=seg_mask,
         )
         scene_points, scene_colors = self._build_scene_cloud(color_img, depth_img, seg_mask, bbox_mask)
+        return masked_points, masked_colors, scene_points, scene_colors
+
+    def _build_input_clouds_from_mapped_data(self, points, colors, u, v, in_view, seg_mask, bbox_mask):
+        """方案 B：根据投影到 color 空间的 UV 坐标 + YOLO mask 划分点云。
+
+        Args:
+            points: (N, 3) depth 坐标系下的完整 3D 点云。
+            colors: (N, 3) RGB 颜色（超出 color FOV 的点为黑色）。
+            u, v: (N,) 投影到 color 图像的像素坐标。
+            in_view: (N,) bool — 点是否落在 color 图像范围内。
+            seg_mask: (H, W) YOLO 分割 mask。
+            bbox_mask: (H, W) 扩张后的 bbox mask。
+
+        Returns:
+            masked_points, masked_colors: 目标物体点云（YOLO mask 命中）。
+            scene_points, scene_colors: 碰撞场景点云（bbox 区域 + color FOV 外的 depth 点）。
+        """
+        # 1. 目标点云：投影落在 YOLO seg_mask 内的点
+        target_indices = np.zeros(len(points), dtype=bool)
+        target_indices[in_view] = seg_mask[v[in_view], u[in_view]] > 0
+
+        masked_points = points[target_indices]
+        masked_colors = colors[target_indices]
+
+        # 2. 场景点云：bbox 区域 + color FOV 外的深度点
+        bbox_indices = np.zeros(len(points), dtype=bool)
+        bbox_indices[in_view] = bbox_mask[v[in_view], u[in_view]] > 0
+
+        if len(masked_points) > 0:
+            z_margin = getattr(self.cfgs, 'collision_depth_margin', 0.15)
+            z_min = max(0.0, float(masked_points[:, 2].min()) - z_margin)
+            z_max = float(masked_points[:, 2].max()) + z_margin
+            z_max = min(z_max, getattr(self.cfgs, 'scene_max_depth', 3.0))
+
+            # color FOV 外的深度点全部加入碰撞云（方案 B 的核心优势）
+            out_of_view_mask = ~in_view
+            scene_mask = bbox_indices | out_of_view_mask
+            scene_mask &= (points[:, 2] >= z_min) & (points[:, 2] <= z_max)
+
+            scene_points = points[scene_mask]
+            scene_colors = colors[scene_mask]
+        else:
+            scene_points = points[bbox_indices]
+            scene_colors = colors[bbox_indices]
+
         return masked_points, masked_colors, scene_points, scene_colors
 
     def _resolve_masks(self, color_img, target_class_id):
@@ -550,12 +632,27 @@ class RealSenseGraspPredictor:
             return None
 
         stage_tic = time.perf_counter()
-        masked_points, masked_colors, scene_points, scene_colors = self._build_input_clouds(
-            color_img,
-            depth_img,
-            seg_mask,
-            bbox_mask,
-        )
+        # ---- 方案 B: 3D 投影对齐（保留完整 depth FOV） ----
+        if self.depth_to_color_extrinsic is not None and self.color_camera_info is not None:
+            all_points, all_colors, u, v, in_view = map_depth_cloud_to_color_image(
+                depth_img,
+                color_img,
+                depth_cam=self.camera_info,
+                color_cam=self.color_camera_info,
+                depth_to_color_extrinsic=self.depth_to_color_extrinsic,
+            )
+            masked_points, masked_colors, scene_points, scene_colors = \
+                self._build_input_clouds_from_mapped_data(
+                    all_points, all_colors, u, v, in_view, seg_mask, bbox_mask,
+                )
+        else:
+            # ---- 旧路径：像素逐对映射（假定 depth/color 已对齐） ----
+            masked_points, masked_colors, scene_points, scene_colors = self._build_input_clouds(
+                color_img,
+                depth_img,
+                seg_mask,
+                bbox_mask,
+            )
         timings['clouds'] = time.perf_counter() - stage_tic
         if getattr(self.cfgs, 'debug', False):
             logger.info("Masked cloud points: %s", len(masked_points))
