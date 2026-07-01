@@ -8,7 +8,7 @@ from typing import Dict, Optional
 from .context import State
 
 
-_GRASP_RESPOND_TIMEOUT_S = 5.0
+_GRASP_RESPOND_TIMEOUT_S = 10.0
 _GRASP_RESULT_TIMEOUT_S = 15.0
 _GRASP_ARM_TIMEOUT_S = 10.0
 _GRASP_RETRY_LIMIT = 3

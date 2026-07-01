@@ -1100,6 +1100,7 @@ class ArmResponse:
     message: str = ""
     raw_line: str = ""
     ts: float = 0.0
+    parsed_status: str = ""
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "ArmResponse":
@@ -1108,6 +1109,7 @@ class ArmResponse:
             message=str(payload.get("message", "")),
             raw_line=str(payload.get("raw_line", "")),
             ts=float(payload.get("ts", now_ts())),
+            parsed_status=str(payload.get("parsed_status", "")),
         )
 
     def to_dict(self) -> Dict[str, Any]:

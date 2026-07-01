@@ -75,7 +75,7 @@ STOP_GRACE_S="${STOP_GRACE_S:-3}"
 
 # Stop 后自动生成本次 run summary。
 # 关闭：RUN_SUMMARY_ENABLE=0 ./start_robot_stack.sh stop
-RUN_SUMMARY_ENABLE="${RUN_SUMMARY_ENABLE:-1}"
+RUN_SUMMARY_ENABLE="${RUN_SUMMARY_ENABLE:-0}"
 RUN_SUMMARY_SCRIPT="${RUN_SUMMARY_SCRIPT:-$STACK_ROOT/tools/run_summary.py}"
 RUN_SUMMARY_NO_PLOTS="${RUN_SUMMARY_NO_PLOTS:-0}"
 
@@ -959,7 +959,7 @@ stop_all() {
 }
 
 run_latest_summary() {
-  [[ "${RUN_SUMMARY_ENABLE:-1}" == "1" ]] || return 0
+  [[ "${RUN_SUMMARY_ENABLE:-0}" == "1" ]] || return 0
   [[ -n "${STACK_RUN_DIR:-}" && -d "$STACK_RUN_DIR" ]] || { mark warn "run summary skipped: STACK_RUN_DIR not found"; return 0; }
   [[ -f "$RUN_SUMMARY_SCRIPT" ]] || { mark warn "run summary skipped: script not found: $RUN_SUMMARY_SCRIPT"; return 0; }
 

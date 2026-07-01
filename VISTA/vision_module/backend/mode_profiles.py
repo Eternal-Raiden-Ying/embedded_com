@@ -21,6 +21,10 @@ class RemoteProfile:
     depth_encoding: str = "png"
     rgb_quality: int = 90
     depth_compression: int = 3
+    capture_warmup_frames: int = 5
+    capture_warmup_timeout_s: float = 1.0
+    expected_rgb_shape: Tuple[int, int] = (720, 1280)
+    expected_depth_shape: Tuple[int, int] = (720, 1280)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 

@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from .metrics import ObservationMetrics
 from .schema import CONTROL_PERCEPTION_KEYS, DIAGNOSTIC_EXCLUDED_PERCEPTION_KEYS
+
+
+_LOG = logging.getLogger("vision.observation_router")
 
 
 @dataclass
@@ -88,6 +92,7 @@ class ObservationRouter:
 
         metrics_snapshot = self.metrics.snapshot(float(now), freq_warning_reason=freq_warning_reason)
         control_obs["metrics"] = metrics_snapshot
+        self._preserve_grasp_result_for_control(control_obs, vision_obs)
         for key in CONTROL_PERCEPTION_KEYS:
             obs = control_obs["perception"].get(key)
             if isinstance(obs, dict):
@@ -177,6 +182,34 @@ class ObservationRouter:
         if capture_ts is None:
             capture_ts = now
         return frame_id, float(capture_ts)
+
+    def _preserve_grasp_result_for_control(self, control_obs: Dict[str, Any], vision_obs: Dict[str, Any]) -> None:
+        stage = str((vision_obs or {}).get("stage") or "").strip().upper()
+        status = str((vision_obs or {}).get("status") or "").strip().upper()
+        if stage != "GRASP" or status not in {"RESULT_READY", "FAILED"}:
+            return
+
+        result = vision_obs.get("result")
+        if not isinstance(result, dict):
+            _LOG.warning(
+                "grasp_result_missing_in_control_obs | stage=%s status=%s has_result=%s",
+                stage,
+                status,
+                result is not None,
+            )
+            return
+
+        control_obs["result"] = result
+        grasp = result.get("grasp") if isinstance(result.get("grasp"), dict) else None
+        _LOG.info(
+            "grasp_result_preserved_in_control_obs | stage=%s status=%s has_result=%s result_keys=%s has_grasp=%s grasp_keys=%s",
+            stage,
+            status,
+            True,
+            sorted(str(key) for key in result.keys()),
+            grasp is not None,
+            sorted(str(key) for key in grasp.keys()) if isinstance(grasp, dict) else [],
+        )
 
     @staticmethod
     def _inject_latency(

@@ -464,6 +464,42 @@ class SerialConfig:
 
 
 @dataclass
+class ArmSerialConfig:
+    enabled: bool = True
+    dry_run: bool = False
+    port: str = "/dev/ttyUSB0"
+    baudrate: int = 9600
+    timeout_s: float = 0.10
+    open_settle_s: float = 3.0
+    bytesize: int = 8
+    parity: str = "N"
+    stopbits: int = 1
+    rtscts: bool = False
+    dsrdtr: bool = False
+    set_dtr: bool = False
+    set_rts: bool = False
+    readback_enabled: bool = True
+    response_timeout_s: float = 10.0
+
+
+@dataclass
+class MotionSmoothingConfig:
+    enabled: bool = True
+    bypass_on_safety_stop: bool = True
+    vx_accel_mps2: float = 0.35
+    vx_decel_mps2: float = 0.70
+    vy_accel_mps2: float = 0.20
+    vy_decel_mps2: float = 0.35
+    wz_accel_radps2: float = 0.90
+    wz_decel_radps2: float = 1.40
+    urgent_wz_accel_radps2: float = 2.20
+    urgent_wz_decel_radps2: float = 2.80
+    dt_min_s: float = 0.02
+    dt_max_s: float = 0.20
+    reset_gap_s: float = 0.50
+
+
+@dataclass
 class ControlThresholds:
     """Control and timing thresholds for the vehicle/perception state machine."""
     cmd_confidence_th: float = 0.60
@@ -726,6 +762,9 @@ class ControlThresholds:
 @dataclass
 class CarMotionConfig:
     """PID, limits, and behavior variables for actual motion control."""
+    grasp_reposition_speed_cm_s: float = 10.0
+    pre_arm_stop_settle_ms: int = 150
+    grasp_pose_time_ms: int = 800
     search_table_wz_radps: float = 0.10
     fallback_align_turn_wz_min_radps: float = 0.10
     fallback_align_turn_wz_max_radps: float = 0.45
@@ -904,6 +943,8 @@ class OrchestratorConfig:
     """Configuration structure representing the Orchestrator service."""
     runtime: OrchestratorRuntimeConfig = field(default_factory=OrchestratorRuntimeConfig)
     serial: SerialConfig = field(default_factory=SerialConfig)
+    arm_serial: ArmSerialConfig = field(default_factory=ArmSerialConfig)
+    motion_smoothing: MotionSmoothingConfig = field(default_factory=MotionSmoothingConfig)
     control: ControlThresholds = field(default_factory=ControlThresholds)
     car: CarMotionConfig = field(default_factory=CarMotionConfig)
     docking: DockingControlConfig = field(default_factory=DockingControlConfig)

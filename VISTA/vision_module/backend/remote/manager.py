@@ -5,6 +5,8 @@ import threading
 import time
 from typing import Any, Callable, Dict, Optional
 
+import numpy as np
+
 try:
     import aidcv as cv2
 except ImportError:
@@ -58,6 +60,10 @@ class RemoteManager:
             "depth_encoding": "png",
             "rgb_quality": 90,
             "depth_compression": 3,
+            "capture_warmup_frames": 5,
+            "capture_warmup_timeout_s": 1.0,
+            "expected_rgb_shape": [720, 1280],
+            "expected_depth_shape": [720, 1280],
         }
         self._service_init_state = "uninitialized"
         self._service_init_confirmed = False
@@ -243,6 +249,10 @@ class RemoteManager:
                 "depth_encoding": normalize_image_encoding(profile.get("depth_encoding"), default="png"),
                 "rgb_quality": int(profile.get("rgb_quality", 90) or 90),
                 "depth_compression": int(profile.get("depth_compression", 3) or 3),
+                "capture_warmup_frames": max(1, int(profile.get("capture_warmup_frames", 5) or 5)),
+                "capture_warmup_timeout_s": max(0.1, float(profile.get("capture_warmup_timeout_s", 1.0) or 1.0)),
+                "expected_rgb_shape": self._shape_hw_list(profile.get("expected_rgb_shape"), default=[720, 1280]),
+                "expected_depth_shape": self._shape_hw_list(profile.get("expected_depth_shape"), default=[720, 1280]),
             }
         )
         self._runtime_profile = next_profile
@@ -324,6 +334,125 @@ class RemoteManager:
             return encoded.tobytes()
         except Exception:
             return None
+
+    @staticmethod
+    def _shape_hw_list(value: Any, default=None):
+        if isinstance(value, str):
+            parts = [part.strip() for part in value.replace("x", ",").replace("X", ",").split(",") if part.strip()]
+        elif isinstance(value, (list, tuple)):
+            parts = list(value)
+        else:
+            parts = []
+        if len(parts) >= 2:
+            try:
+                shape = [int(parts[0]), int(parts[1])]
+                if shape[0] > 0 and shape[1] > 0:
+                    return shape
+            except Exception:
+                pass
+        return list(default or []) if default is not None else None
+
+    @staticmethod
+    def _frame_shape(frame) -> Optional[list]:
+        shape = getattr(frame, "shape", None)
+        if not isinstance(shape, tuple) or len(shape) < 2:
+            return None
+        try:
+            return [int(v) for v in shape]
+        except Exception:
+            return None
+
+    @staticmethod
+    def _depth_stats(depth) -> Dict[str, Any]:
+        if depth is None or not hasattr(depth, "size") or int(depth.size) <= 0:
+            return {
+                "depth_min": None,
+                "depth_max": None,
+                "depth_valid_count": 0,
+                "depth_valid_ratio": 0.0,
+            }
+        arr = np.asarray(depth)
+        valid = np.isfinite(arr)
+        if np.issubdtype(arr.dtype, np.integer):
+            valid = valid & (arr > 0)
+        valid_count = int(np.count_nonzero(valid))
+        total = int(arr.size)
+        if valid_count <= 0:
+            return {
+                "depth_min": None,
+                "depth_max": None,
+                "depth_valid_count": 0,
+                "depth_valid_ratio": 0.0,
+            }
+        valid_values = arr[valid]
+        return {
+            "depth_min": float(np.min(valid_values)),
+            "depth_max": float(np.max(valid_values)),
+            "depth_valid_count": valid_count,
+            "depth_valid_ratio": float(valid_count) / float(total or 1),
+        }
+
+    def _capture_metadata(self, frames: Dict[str, Any], frame_slot: Dict[str, Any]) -> Dict[str, Any]:
+        rgb = frames.get("rgb")
+        depth = frames.get("depth")
+        frame_seq, frame_seq_source = self._frame_seq_from_slot(frame_slot, frames)
+        timestamp_ms = frames.get("camera_frame_ts_ms")
+        if timestamp_ms is None:
+            timestamp_ms = int(round(float(frames.get("frame_capture_ts") or time.time()) * 1000.0))
+        capture = {
+            "rgb_shape": self._frame_shape(rgb),
+            "depth_shape": self._frame_shape(depth),
+            "rgb_dtype": str(getattr(getattr(rgb, "dtype", None), "name", getattr(rgb, "dtype", "")) or ""),
+            "depth_dtype": str(getattr(getattr(depth, "dtype", None), "name", getattr(depth, "dtype", "")) or ""),
+            "depth_unit": str(frames.get("depth_unit") or "raw_uint16"),
+            "depth_scale": frames.get("depth_scale"),
+            "depth_aligned_to_color": frames.get("depth_aligned_to_color", "best_effort_true"),
+            "color_intrinsics": frames.get("color_intrinsics"),
+            "depth_intrinsics": frames.get("depth_intrinsics"),
+            "frame_seq": int(frame_seq),
+            "frame_seq_source": str(frame_seq_source),
+            "timestamp_ms": int(timestamp_ms),
+        }
+        capture.update(self._depth_stats(depth))
+        return capture
+
+    def _precheck_capture_shapes(
+        self,
+        *,
+        frames: Dict[str, Any],
+        frame_slot: Dict[str, Any],
+        request_id: str,
+        require_depth: bool,
+    ) -> Optional[Dict[str, Any]]:
+        capture = self._capture_metadata(frames, frame_slot)
+        expected_rgb = self._shape_hw_list(self._runtime_profile.get("expected_rgb_shape"), default=[720, 1280])
+        expected_depth = self._shape_hw_list(self._runtime_profile.get("expected_depth_shape"), default=[720, 1280])
+        actual_rgb = (capture.get("rgb_shape") or [])[:2]
+        actual_depth = (capture.get("depth_shape") or [])[:2]
+        mismatch = bool(expected_rgb and actual_rgb != expected_rgb)
+        mismatch = mismatch or bool(require_depth and expected_depth and actual_depth != expected_depth)
+        if not mismatch:
+            return capture
+        detail = {
+            "reason": "capture_shape_mismatch",
+            "remote_error": "capture_shape_mismatch",
+            "expected_rgb_shape": expected_rgb,
+            "actual_rgb_shape": actual_rgb,
+            "expected_depth_shape": expected_depth,
+            "actual_depth_shape": actual_depth,
+            "capture": capture,
+            "request_id": request_id,
+        }
+        self._log("error", "remote_predict_precheck_failed", **detail)
+        self._update_result(
+            action="predict",
+            state="predict_failed",
+            ok=False,
+            error="capture_shape_mismatch",
+            result=detail,
+            request_id=request_id,
+        )
+        return None
 
     def _frame_seq_from_slot(self, frame_slot: Dict[str, Any], frames: Dict[str, Any]) -> tuple:
         candidates = []
@@ -437,6 +566,15 @@ class RemoteManager:
             )
             return None
 
+        capture = self._precheck_capture_shapes(
+            frames=frames,
+            frame_slot=frame_slot,
+            request_id=request_id,
+            require_depth=require_depth,
+        )
+        if capture is None:
+            return None
+
         rgb_encoding = normalize_image_encoding(self._runtime_profile.get("rgb_encoding", "jpeg"), default="jpeg")
         depth_encoding = normalize_image_encoding(self._runtime_profile.get("depth_encoding", "png"), default="png")
         rgb_bytes = self._encode_frame(
@@ -476,6 +614,7 @@ class RemoteManager:
         request_metadata = dict(cmd.get("metadata") or {}) if isinstance(cmd.get("metadata"), dict) else {}
         extras = dict(profile_metadata)
         extras.update(request_metadata)
+        extras["capture"] = capture
         target = str(cmd.get("target") or extras.get("target") or "")
         cmd_robot_id = str(cmd.get("robot_id") or "").strip()
         if cmd_robot_id == "arm_001":
@@ -487,7 +626,8 @@ class RemoteManager:
             or DEFAULT_REMOTE_ROBOT_ID
         ).strip() or DEFAULT_REMOTE_ROBOT_ID
         command = "predict"
-        frame_seq, frame_seq_source = self._frame_seq_from_slot(frame_slot, frames)
+        frame_seq = int(capture.get("frame_seq") or 0)
+        frame_seq_source = str(capture.get("frame_seq_source") or "fallback")
         camera_names = sorted(str(name) for name in frames.keys() if str(name) in {"rgb", "depth"})
         extras["request_id_source"] = request_id_source
         extras["session_id_source"] = "runtime_status" if session_id else "empty"
@@ -501,6 +641,7 @@ class RemoteManager:
             class_id=class_id,
             frame_seq=frame_seq,
             frame_seq_source=frame_seq_source,
+            timestamp_ms=int(capture.get("timestamp_ms") or 0) or None,
             camera_names=camera_names,
             extras=extras,
         )
@@ -629,6 +770,16 @@ class RemoteManager:
         finally:
             self._reset_service_init_state()
 
+    def _release_service_quiet_async(self, *, timeout_s: float, source: str = "predict_finally_async") -> None:
+        def _runner() -> None:
+            try:
+                self._release_service_quiet(timeout_s=timeout_s, source=source)
+            except Exception as exc:
+                self._log("warn", "remote_release_async_failed", source=source, error=str(exc))
+
+        thread = threading.Thread(target=_runner, name="remote.release.quiet", daemon=True)
+        thread.start()
+
     def _release_service_if_ready(self, timeout_s: float = 5.0) -> None:
         if not self.enabled or self.client is None or not self._service_init_confirmed:
             return
@@ -670,6 +821,118 @@ class RemoteManager:
             return {}
         payload = slot.get("payload")
         return dict(payload) if isinstance(payload, dict) else {}
+
+    def _wait_for_warm_capture(
+        self,
+        *,
+        expected_gen: int,
+        require_depth: bool,
+        frame_wait_timeout_s: float,
+        request_id: Optional[str],
+    ):
+        warmup_frames_requested = max(1, int(self._runtime_profile.get("capture_warmup_frames", 5) or 5))
+        warmup_timeout_s = max(0.1, float(self._runtime_profile.get("capture_warmup_timeout_s", 1.0) or 1.0))
+        deadline = time.time() + max(0.1, float(frame_wait_timeout_s))
+        warmup_deadline = time.time() + warmup_timeout_s
+        wait_start = time.time()
+        frames = None
+        selected_frame_slot = None
+        collected = 0
+        seen_seq = set()
+        last_slot = None
+        self._log(
+            "info",
+            "grasp_capture_warmup_start",
+            expected_generation=expected_gen,
+            require_depth=require_depth,
+            warmup_frames_requested=warmup_frames_requested,
+            warmup_timeout_s=warmup_timeout_s,
+            request_id=request_id,
+        )
+        while time.time() < deadline:
+            if self._worker_stop.is_set():
+                return None, None
+            frame_slot = self._scheduler.read_slot("camera_frames") if self._scheduler else None
+            last_slot = frame_slot
+            if isinstance(frame_slot, dict):
+                slot_gen = int(frame_slot.get("generation", 0) or 0)
+                payload = frame_slot.get("payload")
+                has_rgb = isinstance(payload, dict) and payload.get("rgb") is not None
+                has_depth = isinstance(payload, dict) and payload.get("depth") is not None
+                if slot_gen == expected_gen and isinstance(payload, dict) and has_rgb and (has_depth or not require_depth):
+                    frame_seq, frame_seq_source = self._frame_seq_from_slot(frame_slot, payload)
+                    seq_key = (slot_gen, frame_seq)
+                    if seq_key not in seen_seq:
+                        seen_seq.add(seq_key)
+                        collected += 1
+                    frames = payload
+                    selected_frame_slot = frame_slot
+                    if collected >= warmup_frames_requested:
+                        break
+                    if time.time() >= warmup_deadline:
+                        self._log(
+                            "warn",
+                            "grasp_capture_warmup_timeout",
+                            warmup_frames_requested=warmup_frames_requested,
+                            warmup_frames_collected=collected,
+                            warmup_elapsed_s=round(time.time() - wait_start, 3),
+                            warmup_timeout=True,
+                            final_rgb_shape=self._frame_shape(payload.get("rgb")),
+                            final_depth_shape=self._frame_shape(payload.get("depth")),
+                            frame_seq=frame_seq,
+                            frame_seq_source=frame_seq_source,
+                            request_id=request_id,
+                        )
+                        break
+            self._worker_stop.wait(timeout=0.05)
+        if frames is not None:
+            self._log(
+                "info",
+                "grasp_capture_warmup_done",
+                warmup_frames_requested=warmup_frames_requested,
+                warmup_frames_collected=collected,
+                warmup_elapsed_s=round(time.time() - wait_start, 3),
+                warmup_timeout=bool(collected < warmup_frames_requested),
+                final_rgb_shape=self._frame_shape(frames.get("rgb")),
+                final_depth_shape=self._frame_shape(frames.get("depth")),
+                request_id=request_id,
+            )
+            return frames, selected_frame_slot
+        slot_gen = None
+        has_rgb = False
+        has_depth = False
+        frame_seq, frame_seq_source = 0, "fallback_0"
+        if isinstance(last_slot, dict):
+            slot_gen = last_slot.get("generation")
+            payload = last_slot.get("payload")
+            if isinstance(payload, dict):
+                has_rgb = payload.get("rgb") is not None
+                has_depth = payload.get("depth") is not None
+            frame_seq, frame_seq_source = self._frame_seq_from_slot(last_slot, payload if isinstance(payload, dict) else {})
+        reason = "missing_camera_frames"
+        if not has_rgb:
+            reason = "missing_rgb_frame"
+        elif require_depth and not has_depth:
+            reason = "missing_depth_frame"
+        self._log(
+            "error",
+            "remote_predict_wait_camera_timeout",
+            expected_generation=expected_gen,
+            slot_generation=slot_gen,
+            wait_ms=int(round((time.time() - wait_start) * 1000.0)),
+            has_rgb=has_rgb,
+            has_depth=has_depth,
+            require_depth=require_depth,
+            frame_seq=frame_seq,
+            frame_seq_source=frame_seq_source,
+            reason=reason,
+            warmup_frames_requested=warmup_frames_requested,
+            warmup_frames_collected=collected,
+            warmup_timeout=True,
+            request_id=request_id,
+        )
+        self._update_result(action="predict", state="predict_failed", ok=False, error=reason, request_id=request_id)
+        return None, None
 
     def _run_task(self, *, action: str, max_retries: int) -> None:
         """Execute a finite task action (init / predict / release).
@@ -766,83 +1029,27 @@ class RemoteManager:
                 self._update_result(action="predict", state="predict_failed", ok=False, error="scheduler_unavailable")
                 self._release_service_quiet(timeout_s=min(2.0, timeout_s), source="scheduler_unavailable")
                 return
-            deadline = time.time() + max(0.1, float(frame_wait_timeout_s))
-            frames = None
-            selected_frame_slot = None
             expected_gen = int(self._generation_getter())
-            wait_start = time.time()
             self._log(
                 "info",
                 "remote_predict_wait_camera_start",
                 expected_generation=expected_gen,
                 require_depth=require_depth,
             )
-            while time.time() < deadline:
-                if self._worker_stop.is_set():
-                    return
-                frame_slot = self._scheduler.read_slot("camera_frames") if self._scheduler else None
-                if isinstance(frame_slot, dict):
-                    slot_gen = int(frame_slot.get("generation", 0) or 0)
-                    if slot_gen == expected_gen:
-                        payload = frame_slot.get("payload")
-                        has_rgb = isinstance(payload, dict) and payload.get("rgb") is not None
-                        has_depth = isinstance(payload, dict) and payload.get("depth") is not None
-                        if isinstance(payload, dict) and has_rgb and (has_depth or not require_depth):
-                            frames = payload
-                            selected_frame_slot = frame_slot
-                            frame_seq, frame_seq_source = self._frame_seq_from_slot(frame_slot, payload)
-                            self._log(
-                                "info",
-                                "remote_predict_wait_camera_ready",
-                                expected_generation=expected_gen,
-                                slot_generation=slot_gen,
-                                wait_ms=int(round((time.time() - wait_start) * 1000.0)),
-                                has_rgb=has_rgb,
-                                has_depth=has_depth,
-                                require_depth=require_depth,
-                                frame_seq=frame_seq,
-                                frame_seq_source=frame_seq_source,
-                            )
-                            break
-                self._worker_stop.wait(timeout=0.05)
+            frames, selected_frame_slot = self._wait_for_warm_capture(
+                expected_gen=expected_gen,
+                require_depth=require_depth,
+                frame_wait_timeout_s=frame_wait_timeout_s,
+                request_id=cmd.get("request_id"),
+            )
             if frames is None:
-                slot_gen = None
-                has_rgb = False
-                has_depth = False
-                if isinstance(frame_slot, dict):
-                    slot_gen = frame_slot.get("generation")
-                    payload = frame_slot.get("payload")
-                    if isinstance(payload, dict):
-                        has_rgb = payload.get("rgb") is not None
-                        has_depth = payload.get("depth") is not None
-                    frame_seq, frame_seq_source = self._frame_seq_from_slot(frame_slot, payload if isinstance(payload, dict) else {})
-                else:
-                    frame_seq, frame_seq_source = 0, "fallback_0"
-                reason = "missing_camera_frames"
-                if not has_rgb:
-                    reason = "missing_rgb_frame"
-                elif require_depth and not has_depth:
-                    reason = "missing_depth_frame"
-                self._log(
-                    "error",
-                    "remote_predict_wait_camera_timeout",
-                    expected_generation=expected_gen,
-                    slot_generation=slot_gen,
-                    wait_ms=int(round((time.time() - wait_start) * 1000.0)),
-                    has_rgb=has_rgb,
-                    has_depth=has_depth,
-                    require_depth=require_depth,
-                    frame_seq=frame_seq,
-                    frame_seq_source=frame_seq_source,
-                    reason=reason,
-                )
-                self._update_result(action="predict", state="predict_failed", ok=False, error=reason, request_id=cmd.get("request_id"))
                 self._release_service_quiet(timeout_s=min(2.0, timeout_s), source="missing_camera_frames")
                 return
             request = self._build_predict_request(cmd, frames=frames, frame_slot=selected_frame_slot)
             if request is not None:
                 self.predict(request, request_id=request.metadata.request_id)
-                self._release_service_quiet(timeout_s=min(2.0, timeout_s), source="predict_done")
+                self._publish_result("remote_result", dict(self._last_result))
+                self._release_service_quiet_async(timeout_s=min(2.0, timeout_s), source="predict_done")
             else:
                 self._release_service_quiet(timeout_s=min(2.0, timeout_s), source="predict_request_not_built")
             return

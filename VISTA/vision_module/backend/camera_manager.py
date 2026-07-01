@@ -106,9 +106,11 @@ class _SharedRealSenseRgbdSession:
         vp = self.color_profile.as_video_stream_profile()
         self.color_w = int(vp.width())
         self.color_h = int(vp.height())
+        self.color_intrinsics = self._intrinsics_dict(vp, source="realsense_color_profile")
 
         self.depth_sensor.open(self.depth_profile)
         self.color_sensor.open(self.color_profile)
+        self._apply_color_controls()
         self.depth_sensor.start(self.depth_queue)
         self.color_sensor.start(self.color_queue)
         self.log.info(
@@ -126,6 +128,86 @@ class _SharedRealSenseRgbdSession:
             float(getattr(self.depth_intrinsics, "cy", 0.0) or 0.0),
             self.depth_scale,
         )
+
+    def _rs_option(self, name: str):
+        return getattr(getattr(self.rs, "option", None), name, None)
+
+    def _get_option_best_effort(self, sensor, option_name: str):
+        option = self._rs_option(option_name)
+        if sensor is None or option is None:
+            return None
+        try:
+            if not sensor.supports(option):
+                return None
+        except Exception:
+            return None
+        try:
+            return sensor.get_option(option)
+        except Exception:
+            return None
+
+    def _set_option_best_effort(self, sensor, option_name: str, value: float) -> bool:
+        option = self._rs_option(option_name)
+        if sensor is None or option is None:
+            return False
+        try:
+            if not sensor.supports(option):
+                return False
+        except Exception:
+            return False
+        try:
+            sensor.set_option(option, float(value))
+            return True
+        except Exception as exc:
+            self.log.warning("realsense color option set failed: option=%s value=%s error=%s", option_name, value, exc)
+            return False
+
+    def _apply_color_controls(self) -> None:
+        auto_requested = bool(self.rgb_params.get("auto_exposure", True))
+        auto_supported = self._rs_option("enable_auto_exposure") is not None
+        if auto_supported:
+            try:
+                auto_supported = bool(self.color_sensor.supports(self._rs_option("enable_auto_exposure")))
+            except Exception:
+                auto_supported = False
+        if auto_requested:
+            auto_applied = self._set_option_best_effort(self.color_sensor, "enable_auto_exposure", 1.0)
+        else:
+            auto_applied = self._set_option_best_effort(self.color_sensor, "enable_auto_exposure", 0.0)
+            exposure = self.rgb_params.get("exposure")
+            brightness = self.rgb_params.get("brightness")
+            if exposure is not None:
+                self._set_option_best_effort(self.color_sensor, "exposure", float(exposure))
+            if brightness is not None:
+                self._set_option_best_effort(self.color_sensor, "brightness", float(brightness))
+        controls = {
+            "auto_exposure_requested": auto_requested,
+            "auto_exposure_supported": bool(auto_supported),
+            "auto_exposure_applied": bool(auto_applied),
+            "auto_exposure_enabled": self._get_option_best_effort(self.color_sensor, "enable_auto_exposure"),
+            "exposure": self._get_option_best_effort(self.color_sensor, "exposure"),
+            "gain": self._get_option_best_effort(self.color_sensor, "gain"),
+            "brightness": self._get_option_best_effort(self.color_sensor, "brightness"),
+        }
+        self.log.info("realsense_color_controls_applied %s", controls)
+
+    @staticmethod
+    def _intrinsics_dict(video_profile, *, source: str) -> Optional[Dict[str, Any]]:
+        try:
+            intr = video_profile.get_intrinsics()
+        except Exception:
+            return None
+        return {
+            "width": int(getattr(intr, "width", 0) or 0),
+            "height": int(getattr(intr, "height", 0) or 0),
+            "fx": float(getattr(intr, "fx", 0.0) or 0.0),
+            "fy": float(getattr(intr, "fy", 0.0) or 0.0),
+            "cx": float(getattr(intr, "ppx", 0.0) or 0.0),
+            "cy": float(getattr(intr, "ppy", 0.0) or 0.0),
+            "model": str(getattr(intr, "model", "") or ""),
+            "coeffs": [float(v) for v in list(getattr(intr, "coeffs", []) or [])],
+            "source": str(source or ""),
+        }
 
     def _find_profile(self, sensor, stream, fmt, width: int, height: int, fps: int):
         for profile in sensor.get_stream_profiles():
@@ -168,10 +250,17 @@ class _SharedRealSenseRgbdSession:
             "depth": depth,
             "rgb": color,
             "depth_intrinsics": self.get_depth_intrinsics(),
+            "color_intrinsics": self.get_color_intrinsics(),
+            "depth_scale": self.depth_scale,
+            "depth_unit": "m",
+            "depth_aligned_to_color": "best_effort_true",
         }
 
     def get_depth_intrinsics(self):
         return self.depth_intrinsics.to_dict() if self.depth_intrinsics is not None else None
+
+    def get_color_intrinsics(self):
+        return dict(self.color_intrinsics or {}) if self.color_intrinsics is not None else None
 
     def _convert_color(self, color_frame) -> np.ndarray:
         raw = np.asanyarray(color_frame.get_data())
@@ -656,7 +745,22 @@ class CameraManager:
         try:
             session = _SharedRealSenseRgbdSession(depth_params=depth_params, rgb_params=rgb_params, logger=self.log)
         except Exception as exc:
-            self.log.warning("shared realsense rgbd unavailable: %s", exc)
+            high_res_depth_requested = bool(
+                int(depth_params.get("width") or 0) >= 1280 and int(depth_params.get("height") or 0) >= 720
+            )
+            if high_res_depth_requested:
+                self.log.error(
+                    "shared realsense rgbd unavailable for requested high-res depth profile: depth=%sx%s@%s color=%sx%s@%s error=%s",
+                    depth_params.get("width"),
+                    depth_params.get("height"),
+                    depth_params.get("fps"),
+                    rgb_params.get("in_w"),
+                    rgb_params.get("in_h"),
+                    rgb_params.get("fps"),
+                    exc,
+                )
+            else:
+                self.log.warning("shared realsense rgbd unavailable: %s", exc)
             restored = {}
             for stream_name, stream_params in (("depth", depth_params), ("rgb", rgb_params)):
                 try:

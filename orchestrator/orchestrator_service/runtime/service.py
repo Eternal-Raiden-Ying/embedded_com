@@ -10,6 +10,7 @@ from collections import deque
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..bridge.arm_protocol import encode_pose, parse_arm_response
+from ..bridge.arm_serial_bridge import ArmSerialBridge
 from common.console_presenter import DemoConsolePresenter
 from common.base_module import BaseModule
 from common.runtime_logging import OperatorConsole
@@ -19,7 +20,9 @@ from ..bridge.uart_bridge import UartBridge
 from ..config.schema import OrchestratorConfig, SocketEndpoint
 from ..control.motion_adapter import Stm32MotionAdapter
 from ..control.motion.velocity_limits import SimpleCarMapper
+from ..control.velocity_smoother import VelocitySmoother
 from ..ipc.protocol import (
+    ArmResponse,
     HomeTagObs,
     TableEdgeObs,
     TargetObs,
@@ -79,6 +82,24 @@ _CONTROL_SUMMARY_KEYS = (
     "final_lock_reason",
     "depth_speed_envelope_reason",
     "depth_speed_envelope_vx_cap",
+    "smoothing_enabled",
+    "smoothing_applied",
+    "smoothing_bypassed",
+    "smoothing_bypass_reason",
+    "smoothing_profile",
+    "smoothing_urgent",
+    "smoothing_dt_s",
+    "cmd_before_smoothing",
+    "cmd_after_smoothing",
+    "vx_before_smoothing",
+    "vy_before_smoothing",
+    "wz_before_smoothing",
+    "vx_smoothed",
+    "vy_smoothed",
+    "wz_smoothed",
+    "smoothing_delta_vx",
+    "smoothing_delta_vy",
+    "smoothing_delta_wz",
 )
 
 
@@ -145,6 +166,8 @@ class OrchestratorService(BaseModule):
         self._last_edge_slide_obs_ts = None
         self._last_edge_slide_obs_period_ms = None
         self.mapper = SimpleCarMapper(cfg.car)
+        self.velocity_smoother = VelocitySmoother(getattr(cfg, "motion_smoothing", None))
+        self.arm_bridge = ArmSerialBridge(getattr(cfg, "arm_serial", None), logger=self.log)
         self._async_result_queue: "queue.Queue[Dict[str, Any]]" = queue.Queue()
         self._boot_ts = time.time()
         self._last_state_block_ts = 0.0
@@ -312,7 +335,7 @@ class OrchestratorService(BaseModule):
                 for key in ("ts", "seq", "frame_id", "found", "target_found", "target", "confidence", "best_cls", "matched_cls")
                 if target.get(key) is not None
             }
-        return {
+        out = {
             "ts": env.ts,
             "stage": env.stage,
             "mode": env.mode,
@@ -325,6 +348,9 @@ class OrchestratorService(BaseModule):
             "perception": lite_perception,
             "type": "vision_obs",
         }
+        if env.stage == "GRASP" and env.status in {"RESULT_READY", "FAILED"} and isinstance(env.result, dict):
+            out["result"] = dict(env.result)
+        return out
 
     @staticmethod
     def _env_bool(name: str, default: bool) -> bool:
@@ -1014,6 +1040,24 @@ class OrchestratorService(BaseModule):
             "zero_cmd_reason",
             "original_cmd",
             "effective_cmd",
+            "cmd_before_smoothing",
+            "cmd_after_smoothing",
+            "smoothing_enabled",
+            "smoothing_applied",
+            "smoothing_bypassed",
+            "smoothing_bypass_reason",
+            "smoothing_profile",
+            "smoothing_urgent",
+            "smoothing_dt_s",
+            "vx_before_smoothing",
+            "vy_before_smoothing",
+            "wz_before_smoothing",
+            "vx_smoothed",
+            "vy_smoothed",
+            "wz_smoothed",
+            "smoothing_delta_vx",
+            "smoothing_delta_vy",
+            "smoothing_delta_wz",
             "stop_class",
             "motion_class",
             "motion_intent_type",
@@ -1102,6 +1146,20 @@ class OrchestratorService(BaseModule):
             hold_ms=int(last.get("hold_ms", getattr(self.cfg.car, "cmd_hold_ms", 150)) or getattr(self.cfg.car, "cmd_hold_ms", 150)),
             brake=False,
         )
+
+    def _sync_last_valid_motion_after_smoothing(self, cmd: CmdVel, now: float) -> None:
+        if self._cmd_has_motion(cmd):
+            self._last_valid_motion_cmd = self._cmd_dict(cmd)
+            self._last_valid_motion_ts = float(now)
+        elif bool(getattr(cmd, "brake", False)) or str(getattr(cmd, "mode", "") or "").strip().upper() in {
+            "STOP",
+            "IDLE",
+            "DONE",
+            "ERROR",
+            "ERROR_RECOVERY",
+        }:
+            self._last_valid_motion_cmd = None
+            self._last_valid_motion_ts = 0.0
 
     def _arbitrate_uart_motion_cmd(self, cmd: CmdVel, summary: Dict[str, Any]) -> Tuple[CmdVel, Dict[str, Any]]:
         now = time.time()
@@ -1791,6 +1849,7 @@ class OrchestratorService(BaseModule):
         except Exception:
             pass
         self.uart.close()
+        self.arm_bridge.close()
         self.task_server.close()
         self.vision_server.close()
         self.task_ack_sender.close()
@@ -2104,11 +2163,79 @@ class OrchestratorService(BaseModule):
             self.run_logger.write_timeline("TASK_CMD_RECV", cmd_id=cmd.cmd_id, intent=cmd.intent, target=cmd.target, accepted=accepted, reason=reason, session_id=cmd.session_id, epoch=cmd.epoch)
             self._send_task_ack(cmd, accepted=accepted, reason=reason)
 
+    @staticmethod
+    def _grasp_obs_from_vision_payload(payload: Dict[str, Any], env: VisionObsEnvelope) -> Optional[Dict[str, Any]]:
+        if str(env.stage or "").strip().upper() != "GRASP":
+            return None
+        result = env.result if isinstance(env.result, dict) else None
+        if result is None and isinstance(payload.get("result"), dict):
+            result = dict(payload.get("result") or {})
+        if result is None:
+            result = {}
+
+        grasp = payload.get("grasp") if isinstance(payload.get("grasp"), dict) else None
+        if grasp is None and isinstance(result.get("grasp"), dict):
+            grasp = result.get("grasp")
+        if grasp is None and isinstance(payload.get("canonical_grasp"), dict):
+            grasp = payload.get("canonical_grasp")
+        if grasp is None and isinstance(result.get("canonical_grasp"), dict):
+            grasp = result.get("canonical_grasp")
+
+        if not result and grasp is None and str(env.status or "").strip().upper() not in {"RESULT_READY", "FAILED"}:
+            return None
+
+        grasp_obs = dict(result)
+        if isinstance(grasp, dict):
+            grasp_obs["grasp"] = dict(grasp)
+        grasp_obs["result"] = dict(result)
+        grasp_obs["status"] = str(env.status or "")
+        grasp_obs["type"] = "grasp_obs"
+        grasp_obs["ts"] = float(env.ts)
+        grasp_obs["req_id"] = env.req_id
+        grasp_obs["session_id"] = env.session_id
+        grasp_obs["epoch"] = int(env.epoch)
+        return grasp_obs
+
+    def _log_grasp_result_payload(
+        self,
+        payload: Dict[str, Any],
+        env: VisionObsEnvelope,
+        grasp_obs: Optional[Dict[str, Any]],
+    ) -> None:
+        if str(env.stage or "").strip().upper() != "GRASP":
+            return
+        result = env.result if isinstance(env.result, dict) else payload.get("result")
+        result_dict = result if isinstance(result, dict) else {}
+        grasp = None
+        if isinstance(grasp_obs, dict) and isinstance(grasp_obs.get("grasp"), dict):
+            grasp = grasp_obs.get("grasp")
+        elif isinstance(payload.get("grasp"), dict):
+            grasp = payload.get("grasp")
+        elif isinstance(payload.get("canonical_grasp"), dict):
+            grasp = payload.get("canonical_grasp")
+        log_payload = {
+            "stage": env.stage,
+            "status": env.status,
+            "obs_class": env.obs_class,
+            "has_result": isinstance(result, dict),
+            "result_keys": sorted(str(key) for key in result_dict.keys()),
+            "has_grasp": isinstance(grasp, dict),
+            "grasp_keys": sorted(str(key) for key in grasp.keys()) if isinstance(grasp, dict) else [],
+            "top_level_keys": sorted(str(key) for key in payload.keys()),
+            "req_id": env.req_id,
+            "session_id": env.session_id,
+            "epoch": int(env.epoch),
+        }
+        self.run_logger.write_jsonl("orchestrator_grasp_result_payload", log_payload)
+        self.log_ipc("RX", "vision_obs", "orchestrator_grasp_result_payload", log_payload)
+
     def _flatten_vision_payloads(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         msg_type = str(payload.get("type", "") or "").strip().lower()
         if msg_type == "vision_obs":
             env = VisionObsEnvelope.from_dict(payload)
             self.run_logger.write_jsonl("vision_obs", env.to_dict() if self._vision_full_obs_log else self._lite_vision_obs(env))
+            grasp_obs = self._grasp_obs_from_vision_payload(payload, env)
+            self._log_grasp_result_payload(payload, env, grasp_obs)
             if env.obs_class == "diagnostic":
                 metrics = payload.get("metrics")
                 if not isinstance(metrics, dict):
@@ -2139,7 +2266,7 @@ class OrchestratorService(BaseModule):
                     obs_class=env.obs_class,
                     metrics=safe_dump(self._last_diagnostic_obs_metrics),
                 )
-                return []
+                return [grasp_obs] if grasp_obs is not None else []
             self.core.confirm_vision_state(env.stage, env.mode, source="vision_obs")
             perception = dict(env.perception or {})
             has_table_edge = isinstance(perception.get("table_edge_obs"), dict)
@@ -2178,14 +2305,8 @@ class OrchestratorService(BaseModule):
         out = list(iter_vision_perception_payloads(payload))
         if msg_type == "vision_obs":
             env = VisionObsEnvelope.from_dict(payload)
-            if env.stage == "GRASP" and isinstance(env.result, dict) and env.result:
-                grasp_obs = dict(env.result)
-                grasp_obs["status"] = str(env.status or "")
-                grasp_obs["type"] = "grasp_obs"
-                grasp_obs["ts"] = float(env.ts)
-                grasp_obs["req_id"] = env.req_id
-                grasp_obs["session_id"] = env.session_id
-                grasp_obs["epoch"] = int(env.epoch)
+            grasp_obs = self._grasp_obs_from_vision_payload(payload, env)
+            if grasp_obs is not None:
                 out.append(grasp_obs)
         return out
 
@@ -2344,6 +2465,10 @@ class OrchestratorService(BaseModule):
                             latest_grasp = dict(payload)
                             latest_grasp_priority = priority
                         self._last_vision_obs_recv_ts = recv_ts
+                        result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+                        grasp = payload.get("grasp") if isinstance(payload.get("grasp"), dict) else None
+                        if grasp is None and isinstance(result.get("grasp"), dict):
+                            grasp = result.get("grasp")
                         self.run_logger.write_ipc(
                             "vision_obs_in",
                             "grasp_received",
@@ -2353,6 +2478,10 @@ class OrchestratorService(BaseModule):
                             epoch=payload.get("epoch"),
                             ok=True,
                             grasp_status=payload.get("status"),
+                            has_result=bool(result),
+                            result_keys=sorted(str(key) for key in result.keys()),
+                            has_grasp=isinstance(grasp, dict),
+                            grasp_keys=sorted(str(key) for key in grasp.keys()) if isinstance(grasp, dict) else [],
                             from_envelope=from_envelope,
                             msg_type=msg_type,
                         )
@@ -3300,8 +3429,74 @@ class OrchestratorService(BaseModule):
                 arm.claw_deg, arm.time_ms,
             )
             self.motion_adapter.cancel_active_jogs()
-            self.uart.send_arm_command(arm_line)
-            self.run_logger.write_jsonl("arm_cmd", arm.to_dict())
+            arm_planned = {
+                "request_id": self.core.ctx.active_req_id or "",
+                "input_grasp": dict(getattr(decision, "control_summary", {}) or {}).get("input_grasp"),
+                "pose_line": arm_line,
+                "x": round(float(arm.x_cm)),
+                "y": round(float(arm.y_cm)),
+                "z": round(float(arm.z_cm)),
+                "pitch": round(float(arm.pitch_deg)),
+                "roll": round(float(arm.roll_deg)),
+                "claw": round(float(arm.claw_deg)),
+                "time_ms": int(arm.time_ms),
+            }
+            self.run_logger.write_jsonl("arm_cmd_planned", dict(arm_planned))
+            self.run_logger.write_jsonl(
+                "arm_pose_encoded",
+                dict(arm_planned),
+            )
+            self.run_logger.write_jsonl(
+                "arm_cmd_sent",
+                {
+                    "line": arm_line,
+                    "request_id": self.core.ctx.active_req_id or "",
+                    "source": "remote_grasp_client",
+                    **arm.to_dict(),
+                },
+            )
+            result = self.arm_bridge.send_pose_and_wait(
+                arm_line,
+                timeout_s=float(getattr(getattr(self.cfg, "arm_serial", None), "response_timeout_s", 10.0) or 10.0),
+            )
+            resp = result.get("response") if isinstance(result, dict) else None
+            if resp is None:
+                error = str((result or {}).get("error") or "arm_serial_error")
+                parsed_status = {
+                    "arm_serial_open_failed": "ARM_SERIAL_OPEN_FAILED",
+                    "arm_serial_write_failed": "ARM_TX_FAILED",
+                    "arm_tx_failed": "ARM_TX_FAILED",
+                    "arm_response_timeout": "ARM_RESPONSE_TIMEOUT",
+                }.get(error, error.upper())
+                resp = ArmResponse(
+                    ok=False,
+                    message=error,
+                    raw_line=error,
+                    ts=time.time(),
+                    parsed_status=parsed_status,
+                )
+                if isinstance(result, dict):
+                    setattr(resp, "sent_pose", dict(result.get("sent_pose") or {}))
+                    setattr(resp, "response_pose", dict(result.get("response_pose") or {}))
+                    setattr(resp, "response_matches_sent", False)
+            if resp is not None:
+                self.core.handle_arm_response(resp)
+                self.run_logger.write_jsonl(
+                    "arm_response",
+                    {
+                        "raw": resp.raw_line,
+                        "parsed_status": getattr(resp, "parsed_status", "") or resp.message,
+                        "ok": bool(resp.ok),
+                        "error": (result or {}).get("error", ""),
+                        "sent_pose": dict(getattr(resp, "sent_pose", {}) or (result or {}).get("sent_pose") or {}),
+                        "response_pose": dict(getattr(resp, "response_pose", {}) or (result or {}).get("response_pose") or {}),
+                        "response_matches_sent": bool(getattr(resp, "response_matches_sent", False)),
+                        "received_lines_count": (result or {}).get("received_lines_count"),
+                        "mismatch_count": (result or {}).get("mismatch_count"),
+                        "last_lines": (result or {}).get("last_lines"),
+                        "mismatch_lines": (result or {}).get("mismatch_lines"),
+                    },
+                )
             return
         jog_action = str(getattr(decision, "jog_action", "") or "").strip().lower()
         if jog_action:
@@ -3309,11 +3504,33 @@ class OrchestratorService(BaseModule):
             return
         cmd = decision.cmd
         summary = dict(getattr(decision, "control_summary", None) or {})
-        
+
         effective_cmd, uart_arbitration = self._arbitrate_uart_motion_cmd(cmd, summary)
         summary.update(uart_arbitration)
-        
         allow_send = bool(summary.get("allow_uart_send", True))
+        smoothed_cmd, smoothing_meta = self.velocity_smoother.apply(
+            effective_cmd,
+            state=str(getattr(self.core.ctx.state, "value", self.core.ctx.state) or ""),
+            summary=summary,
+            task_epoch=getattr(self.core.ctx, "active_epoch", None),
+        )
+        effective_cmd = smoothed_cmd
+        summary.update(smoothing_meta)
+        self._sync_last_valid_motion_after_smoothing(effective_cmd, time.time())
+        summary["last_valid_motion_cmd"] = dict(self._last_valid_motion_cmd or {})
+        summary["last_valid_motion_age_ms"] = self._last_valid_motion_age_ms(time.time())
+        summary["effective_cmd"] = self._cmd_dict(effective_cmd)
+        summary["effective_cmd_after_service"] = self._cmd_dict(effective_cmd)
+        uart_arbitration.update(
+            {
+                "last_valid_motion_cmd": summary.get("last_valid_motion_cmd"),
+                "last_valid_motion_age_ms": summary.get("last_valid_motion_age_ms"),
+                "effective_cmd": summary.get("effective_cmd"),
+                "effective_cmd_after_service": summary.get("effective_cmd_after_service"),
+            }
+        )
+        uart_arbitration.update(smoothing_meta)
+
         if allow_send:
             summary["uart_tx_cmd"] = {
                 "vx_mps": float(effective_cmd.vx_mps),

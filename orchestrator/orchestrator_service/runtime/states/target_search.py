@@ -430,13 +430,11 @@ class TargetSearchMixin:
             self.ctx.target_found_frames += 1
             self.ctx.target_lost_frames = 0
             center_jitter = self._update_target_stability(obs)
-            align_decision = self._target_lateral_align_decision(obs, state="TARGET_CONFIRM")
-            if align_decision is not None:
-                return align_decision
             window_jitter = self._float_or_none(target_window.get("center_jitter"))
             if window_jitter is not None:
                 center_jitter = window_jitter
                 self.ctx.target_last_center_jitter = float(window_jitter)
+
             confirm_elapsed_s = self._state_elapsed()
             confirm_min_ok = confirm_elapsed_s >= float(self.cfg.target_confirm_min_s)
             found_ratio = float(target_window.get("found_ratio", 0.0) or 0.0)
@@ -446,7 +444,62 @@ class TargetSearchMixin:
             ratio_ok = found_ratio >= float(getattr(self.cfg, "target_lock_found_ratio_th", 0.6) or 0.6)
             conf_ok = conf_median is not None and conf_median >= float(self.cfg.target_lock_conf_th or 0.0)
             centered_ok = self._target_lateral_centered(obs)
+
+            # TARGET_CONFIRM uses the wider center_x_tol as the semantic "centered enough"
+            # condition.  Do not keep issuing tiny lateral-align commands merely because the
+            # target is outside the narrower deadband; otherwise the early align return can
+            # starve both lock evaluation and confirm-timeout handling.
+            if centered_ok:
+                self.ctx.target_lateral_stable_count += 1
+                self.ctx.target_lateral_vy_cmd = 0.0
+                self.ctx.target_lateral_align_reason = "target_center_tol"
+            else:
+                self.ctx.target_lateral_stable_count = 0
             lateral_stable_ok = int(self.ctx.target_lateral_stable_count) >= self._target_lateral_stable_frames()
+
+            err_x = self._target_lateral_error_x(obs)
+            deadband = abs(float(getattr(self.cfg, "target_lateral_align_center_x_deadband", 0.03) or 0.03))
+            tol = abs(float(getattr(self.cfg, "target_lateral_align_center_x_tol", 0.06) or 0.06))
+            blockers = []
+            if not lock_ok:
+                blockers.append(lock_reason)
+            if not confirm_min_ok:
+                blockers.append("confirm_min_not_reached")
+            if not stable_ok:
+                blockers.append("target_stable_not_enough")
+            if not jitter_ok:
+                blockers.append("center_jitter_high")
+            if not ratio_ok:
+                blockers.append(f"found_ratio_low ratio={found_ratio:.2f}")
+            if not conf_ok:
+                blockers.append("conf_median_low")
+            if not centered_ok:
+                blockers.append("target_not_centered")
+            if not lateral_stable_ok:
+                blockers.append("target_lateral_stable_not_enough")
+
+            debug_fields = {
+                "target_confirm_elapsed_s": float(confirm_elapsed_s),
+                "target_confirm_err_x": err_x,
+                "target_confirm_deadband": float(deadband),
+                "target_confirm_center_tol": float(tol),
+                "target_confirm_centered_ok": bool(centered_ok),
+                "target_confirm_lock_ok": bool(lock_ok),
+                "target_confirm_lock_reason": str(lock_reason or ""),
+                "target_confirm_min_ok": bool(confirm_min_ok),
+                "target_confirm_stable_ok": bool(stable_ok),
+                "target_confirm_jitter_ok": bool(jitter_ok),
+                "target_confirm_ratio_ok": bool(ratio_ok),
+                "target_confirm_conf_ok": bool(conf_ok),
+                "target_confirm_lateral_stable_ok": bool(lateral_stable_ok),
+                "target_confirm_blockers": list(blockers),
+                "target_lateral_stable_count": int(self.ctx.target_lateral_stable_count),
+                "target_lateral_stable_frames": int(self._target_lateral_stable_frames()),
+                "target_confirm_found_ratio": float(found_ratio),
+                "target_confirm_conf_median": conf_median,
+                "target_confirm_center_jitter": float(center_jitter),
+            }
+
             if lock_ok and confirm_min_ok and stable_ok and jitter_ok and ratio_ok and conf_ok and centered_ok and lateral_stable_ok:
                 self.ctx.target_last_transition_reason = (
                     f"lock_ok found_ratio={found_ratio:.2f} conf_median={float(conf_median):.3f} "
@@ -458,51 +511,70 @@ class TargetSearchMixin:
                     State.TARGET_LOCKED,
                     self._format_target_transition_reason("target_confirmed", obs),
                 )
-                return self._annotate_target_lateral_decision(
+                decision = self._annotate_target_lateral_decision(
                     self.controller.stop_cmd("TARGET_LOCKED"),
                     obs,
                     active=False,
                     reason="target_lateral_centered_locked",
                     vy_cmd=0.0,
                 )
+                if decision.control_summary is not None:
+                    decision.control_summary.update(debug_fields)
+                return decision
+
+            # Confirm timeout must be checked before any lateral-align early return.  If the
+            # target cannot satisfy the lock conditions in time, return to slide search rather
+            # than staying forever in TARGET_CONFIRM.
+            if confirm_elapsed_s >= float(self.cfg.target_confirm_timeout_s):
+                self.ctx.target_last_lost_reason = ",".join(blockers) or "lock_condition_timeout"
+                self._transition(
+                    State.EDGE_SLIDE_SEARCH,
+                    self._format_target_transition_reason("confirm_timeout", obs),
+                )
+                decision = self._annotate_target_lateral_decision(
+                    self.controller.stop_cmd("EDGE_SLIDE_SEARCH"),
+                    obs,
+                    active=False,
+                    reason=f"target_confirm_timeout blockers={self.ctx.target_last_lost_reason}",
+                    vy_cmd=0.0,
+                )
+                if decision.control_summary is not None:
+                    decision.control_summary.update(debug_fields)
+                return decision
+
+            # Only request lateral motion in TARGET_CONFIRM when the target is outside the
+            # wider tolerance band.  Inside tolerance, allow the lock/stability conditions to
+            # settle instead of starving them with micro-align commands.
+            if not centered_ok:
+                align_decision = self._target_lateral_align_decision(obs, state="TARGET_CONFIRM")
+                if align_decision is not None:
+                    if align_decision.control_summary is not None:
+                        align_decision.control_summary.update(debug_fields)
+                        align_decision.control_summary["target_confirm_align_allowed"] = True
+                    return align_decision
+
             if centered_ok and not lateral_stable_ok:
-                return self._annotate_target_lateral_decision(
+                decision = self._annotate_target_lateral_decision(
                     self.controller.stop_cmd("TARGET_CONFIRM"),
                     obs,
                     active=False,
                     reason="target_centered_wait_stable",
                     vy_cmd=0.0,
                 )
-            if self._state_elapsed() >= float(self.cfg.target_confirm_timeout_s):
-                reasons = []
-                if not lock_ok:
-                    reasons.append(lock_reason)
-                if not confirm_min_ok:
-                    reasons.append("confirm_min_not_reached")
-                if not stable_ok:
-                    reasons.append("target_stable_not_enough")
-                if not jitter_ok:
-                    reasons.append("center_jitter_high")
-                if not ratio_ok:
-                    reasons.append(f"found_ratio_low ratio={found_ratio:.2f}")
-                if not conf_ok:
-                    reasons.append("conf_median_low")
-                if not centered_ok:
-                    reasons.append("target_not_centered")
-                if not lateral_stable_ok:
-                    reasons.append("target_lateral_stable_not_enough")
-                self.ctx.target_last_lost_reason = ",".join(reasons) or "lock_condition_timeout"
-                self._transition(
-                    State.EDGE_SLIDE_SEARCH,
-                    self._format_target_transition_reason("confirm_timeout", obs),
-                )
-            return self._annotate_target_lateral_decision(
+                if decision.control_summary is not None:
+                    decision.control_summary.update(debug_fields)
+                return decision
+
+            decision = self._annotate_target_lateral_decision(
                 self.controller.stop_cmd("TARGET_CONFIRM"),
                 obs,
                 active=False,
                 reason="target_confirm_hold",
                 vy_cmd=0.0,
             )
+            if decision.control_summary is not None:
+                decision.control_summary.update(debug_fields)
+            return decision
         self.ctx.target_found_frames = 0
         self.ctx.target_lateral_stable_count = 0
         self.ctx.target_lateral_vy_cmd = 0.0

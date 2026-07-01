@@ -209,11 +209,34 @@ vision:
           metadata:
             robot_id: "sc171_car_01"
       GRASP_REMOTE:
+        enabled_cameras: ["rgb", "depth"]
+        preview_enabled: true
+        preview_layout: "rgb_depth_edge"
+        release_cooldown_s: 3.0
+        rgb:
+          in_w: 1280
+          in_h: 720
+          out_w: 1280
+          out_h: 720
+          crop_x: 0
+          crop_y: 0
+          crop_w: 1280
+          crop_h: 720
+          fps: 15
+          auto_exposure: true
+        depth:
+          width: 1280
+          height: 720
+          fps: 15
         remote:
           enabled: true
           kind: task
           action: predict
           require_depth: true
+          capture_warmup_frames: 5
+          capture_warmup_timeout_s: 1.0
+          expected_rgb_shape: [720, 1280]
+          expected_depth_shape: [720, 1280]
           base_url: "http://10.11.40.164:6006"
           robot_id: "sc171_car_01"
           metadata:
@@ -255,6 +278,36 @@ orchestrator:
     uart_lowfreq_period_s: 5.0 # Frequency of status requests in sleep
     stm32_status_enabled: false # Periodically query STM32 hardware flags
     stm32_status_period_s: 1.0 # Query STM32 hardware status period
+  arm_serial:
+    enabled: true # Use independent arm serial bridge for POSE commands
+    dry_run: false # Simulate OK POSE without opening hardware
+    port: "/dev/ttyUSB0" # Arm controller serial port
+    baudrate: 9600 # Arm controller baudrate
+    timeout_s: 0.10 # Serial read timeout
+    open_settle_s: 3.0 # Sleep after opening arm serial
+    bytesize: 8 # Serial bytesize
+    parity: "N" # Serial parity
+    stopbits: 1 # Serial stopbits
+    rtscts: false # Disable hardware flow control
+    dsrdtr: false # Disable DSR/DTR flow control
+    set_dtr: false # Keep DTR low after open
+    set_rts: false # Keep RTS low after open
+    readback_enabled: true # Wait for OK POSE / ERR line
+    response_timeout_s: 10.0 # Arm response timeout
+  motion_smoothing:
+    enabled: true # Enable final UART velocity slew limiter
+    bypass_on_safety_stop: true # Hard safety stops bypass smoothing and reset to zero
+    vx_accel_mps2: 0.35 # Forward acceleration limit
+    vx_decel_mps2: 0.70 # Forward deceleration limit
+    vy_accel_mps2: 0.20 # Lateral acceleration limit
+    vy_decel_mps2: 0.35 # Lateral deceleration limit
+    wz_accel_radps2: 0.90 # Yaw acceleration limit
+    wz_decel_radps2: 1.40 # Yaw deceleration/reversal limit
+    urgent_wz_accel_radps2: 2.20 # Yaw acceleration limit during reacquire/search
+    urgent_wz_decel_radps2: 2.80 # Yaw deceleration/reversal limit during reacquire/search
+    dt_min_s: 0.02 # Minimum slew timestep
+    dt_max_s: 0.20 # Maximum slew timestep
+    reset_gap_s: 0.50 # Reset smoother after long control gaps
   control:
     cmd_confidence_th: 0.60 # Confidence threshold for aligning/docking
     target_obs_max_age_s: 1.00 # Max age of target tag observation
@@ -449,6 +502,9 @@ orchestrator:
     enable_pick_pipeline: false # Enable picker robot subsystem integration
     assume_grasp_success_for_test: false # Bypass hardware checks during test
   car:
+    grasp_reposition_speed_cm_s: 10.0 # Base reposition speed during grasp retry
+    pre_arm_stop_settle_ms: 150 # Stop settle before sending arm POSE
+    grasp_pose_time_ms: 800 # Default arm POSE movement time
     search_table_wz_radps: 0.20 # Rotational velocity to search for table
     fallback_align_turn_wz_min_radps: 0.10 # Minimum rotation velocity in fallback
     fallback_align_turn_wz_max_radps: 0.45 # Maximum rotation velocity in fallback

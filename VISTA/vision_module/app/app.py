@@ -1181,6 +1181,18 @@ class VistaApp(BaseModule):
             return False
 
         if isinstance(control_obs, dict):
+            stage = str(control_obs.get("stage") or "").strip().upper()
+            status = str(control_obs.get("status") or "").strip().upper()
+            if stage == "GRASP" and status in {"RESULT_READY", "FAILED"}:
+                result = control_obs.get("result") if isinstance(control_obs.get("result"), dict) else None
+                grasp = result.get("grasp") if isinstance(result, dict) and isinstance(result.get("grasp"), dict) else None
+                self.log_info(
+                    "runtime",
+                    "grasp_control_obs_send_payload | "
+                    f"has_result={result is not None} "
+                    f"has_grasp={grasp is not None} "
+                    f"top_level_keys={sorted(str(key) for key in control_obs.keys())}",
+                )
             perception = control_obs.get("perception") or {}
             edge_obs = perception.get("table_edge_obs")
             if isinstance(edge_obs, dict):

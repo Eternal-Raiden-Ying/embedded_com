@@ -134,13 +134,47 @@ class TaskRuntimeMixin:
             return
         result = obs.get("result") if isinstance(obs.get("result"), dict) else {}
         self.ctx.grasp_status = status
-        self.ctx.grasp_result = obs.get("grasp") if isinstance(obs.get("grasp"), dict) else None
+        grasp = obs.get("grasp") if isinstance(obs.get("grasp"), dict) else None
+        if grasp is None and isinstance(result.get("grasp"), dict):
+            grasp = result.get("grasp")
+        if grasp is None and isinstance(obs.get("canonical_grasp"), dict):
+            grasp = obs.get("canonical_grasp")
+        if grasp is None and isinstance(result.get("canonical_grasp"), dict):
+            grasp = result.get("canonical_grasp")
+        if status == "RESULT_READY" and grasp is None:
+            self.ctx.grasp_status = "FAILED"
+            self.ctx.grasp_result = None
+            self.ctx.grasp_reason = "grasp_result_missing"
+            self._log("warn", "[GRASP][RESULT] RESULT_READY missing grasp payload; reason=grasp_result_missing")
+            return
+        self.ctx.grasp_result = grasp
         reason = str(obs.get("reason") or result.get("reason") or "")
-        remote_error = str(result.get("remote_error") or result.get("error") or "")
+        remote_error = str(
+            obs.get("remote_error")
+            or result.get("remote_error")
+            or obs.get("error")
+            or result.get("error")
+            or ""
+        )
+        status_code = obs.get("status_code", result.get("status_code"))
+        missing_fields = obs.get("missing_fields", result.get("missing_fields"))
         if status == "FAILED" and reason == "remote_predict_failed" and remote_error:
             reason = f"remote_predict_failed:{remote_error}"
+        elif status == "FAILED" and not reason and remote_error:
+            reason = remote_error
+        elif status == "FAILED" and not reason and status_code is not None:
+            reason = f"remote_status_{status_code}"
+        if status == "FAILED" and reason == "grasp_pose_schema_invalid" and missing_fields:
+            reason = f"grasp_pose_schema_invalid:{missing_fields}"
         self.ctx.grasp_reason = reason
+        if status == "RESULT_READY" and isinstance(grasp, dict):
+            self._log(
+                "info",
+                f"[GRASP][RESULT] ctx.grasp_result updated keys={sorted(str(key) for key in grasp.keys())}",
+            )
         proposal = obs.get("reposition_proposal")
+        if not isinstance(proposal, dict):
+            proposal = result.get("reposition_proposal")
         self.ctx.grasp_reposition_proposal = proposal if isinstance(proposal, dict) else None
 
     def handle_arm_response(self, resp: ArmResponse):

@@ -158,6 +158,10 @@ class ModeController:
                     "depth_encoding": str(remote_profile.depth_encoding).strip().lower(),
                     "rgb_quality": int(remote_profile.rgb_quality),
                     "depth_compression": int(remote_profile.depth_compression),
+                    "capture_warmup_frames": int(remote_profile.capture_warmup_frames),
+                    "capture_warmup_timeout_s": float(remote_profile.capture_warmup_timeout_s),
+                    "expected_rgb_shape": list(remote_profile.expected_rgb_shape or ()),
+                    "expected_depth_shape": list(remote_profile.expected_depth_shape or ()),
                     "metadata": dict(remote_profile.metadata or {}),
                 },
                 "table_edge": {

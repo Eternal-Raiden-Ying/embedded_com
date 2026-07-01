@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from ..backend.mode_profiles import ModeProfile, PreviewProfile, RemoteProfile, TableEdgeProfile
 
@@ -107,9 +107,17 @@ def _apply_remote_overrides(profile: RemoteProfile, section: Dict[str, Any]) -> 
     for key in ("timeout_s",):
         if key in remote and remote.get(key) is not None:
             setattr(profile, key, float(remote.get(key)))
-    for key in ("max_retries", "rgb_quality", "depth_compression"):
+    for key in ("max_retries", "rgb_quality", "depth_compression", "capture_warmup_frames"):
         if key in remote and remote.get(key) is not None:
             setattr(profile, key, int(remote.get(key)))
+    for key in ("capture_warmup_timeout_s",):
+        if key in remote and remote.get(key) is not None:
+            setattr(profile, key, float(remote.get(key)))
+    for key in ("expected_rgb_shape", "expected_depth_shape"):
+        if key in remote and remote.get(key) is not None:
+            shape = _shape_hw_tuple(remote.get(key))
+            if shape is not None:
+                setattr(profile, key, shape)
     if "robot_id" in remote and remote.get("robot_id") is not None:
         merged = dict(profile.metadata or {})
         merged["robot_id"] = str(remote.get("robot_id")).strip()
@@ -118,6 +126,34 @@ def _apply_remote_overrides(profile: RemoteProfile, section: Dict[str, Any]) -> 
         merged = dict(profile.metadata or {})
         merged.update(dict(remote.get("metadata") or {}))
         profile.metadata = merged
+
+
+def _shape_hw_tuple(value: Any) -> Optional[Tuple[int, int]]:
+    if isinstance(value, str):
+        parts = [part.strip() for part in value.replace("x", ",").replace("X", ",").split(",") if part.strip()]
+    elif isinstance(value, (list, tuple)):
+        parts = list(value)
+    else:
+        return None
+    if len(parts) < 2:
+        return None
+    try:
+        h = int(parts[0])
+        w = int(parts[1])
+    except Exception:
+        return None
+    if h <= 0 or w <= 0:
+        return None
+    return (h, w)
+
+
+def _apply_camera_override_section(profile: ModeProfile, section: Dict[str, Any]) -> None:
+    for camera_name in ("rgb", "depth", "grey", "ir"):
+        camera_section = section.get(camera_name)
+        if isinstance(camera_section, dict):
+            merged = dict(profile.camera_overrides.get(camera_name) or {})
+            merged.update(dict(camera_section))
+            profile.camera_overrides[camera_name] = merged
 
 
 def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) -> Dict[str, ModeProfile]:
@@ -147,6 +183,14 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
         "rgb",
         format="BGR",
         fps=15,
+        in_w=1280,
+        in_h=720,
+        out_w=1280,
+        out_h=720,
+        crop_x=0,
+        crop_y=0,
+        crop_w=1280,
+        crop_h=720,
     )
     idle_hot_rgb = _camera_override_with_updates(
         cfg,
@@ -155,9 +199,17 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
         fps=10,
     )
     depth_overrides = _camera_overrides_for(cfg, ("depth",))
+    grasp_remote_depth = _camera_override_with_updates(
+        cfg,
+        "depth",
+        width=1280,
+        height=720,
+        fps=15,
+    )
     grasp_remote_cameras = {
         "rgb": grasp_remote_rgb,
         **depth_overrides,
+        "depth": grasp_remote_depth,
     }
     preview_layout_defaults = {
         "INIT": "rgb_minimal",
@@ -428,6 +480,7 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             profile.preview.metadata["layout"] = str(section.get("preview_layout")).strip()
 
         _apply_remote_overrides(profile.remote, section)
+        _apply_camera_override_section(profile, section)
 
         table_edge_section = section.get("table_edge")
         if isinstance(table_edge_section, dict):

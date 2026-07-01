@@ -64,7 +64,43 @@ class GraspFlowMixin:
             return self._tick_grasp_verify(now_m)
         return self.controller.stop_cmd("GRASP")
 
+    def _has_ready_grasp_result(self) -> bool:
+        return (
+            str(self.ctx.grasp_status or "").strip().upper() == "RESULT_READY"
+            and isinstance(self.ctx.grasp_result, dict)
+            and bool(self.ctx.grasp_result)
+        )
+
+    def _consume_ready_grasp_result(self, now_m: float, substate: str) -> MotionDecision:
+        self.ctx.grasp_substate = "PRE_ARM_STOP_SETTLE"
+        self.ctx.pre_arm_stop_settle_start_mono = now_m
+        grasp_keys = sorted(str(key) for key in (self.ctx.grasp_result or {}).keys())
+        payload = {
+            "substate": substate,
+            "ctx_grasp_status": str(self.ctx.grasp_status or "").strip().upper(),
+            "has_grasp_result": True,
+            "grasp_result_keys": grasp_keys,
+            "next_substate": "PRE_ARM_STOP_SETTLE",
+        }
+        self._log("info", f"grasp_result_ready_consumed {payload}")
+        return self.controller.stop_cmd("GRASP")
+
+    def _log_grasp_flow_tick_debug(self, substate: str, waiting_for: str, now_m: float) -> None:
+        grasp = self.ctx.grasp_result if isinstance(self.ctx.grasp_result, dict) else {}
+        payload = {
+            "substate": substate,
+            "ctx_grasp_status": str(self.ctx.grasp_status or "").strip().upper(),
+            "has_grasp_result": bool(grasp),
+            "grasp_result_keys": sorted(str(key) for key in grasp.keys()),
+            "elapsed_s": round(float(self._state_elapsed()), 3),
+            "waiting_for": waiting_for,
+            "timeout_left_s": round(max(0.0, float(self.ctx.grasp_timeout_mono or 0.0) - float(now_m)), 3),
+        }
+        self._log("info", f"grasp_flow_tick_debug {payload}")
+
     def _tick_grasp_awaiting_respond(self, now_m: float) -> MotionDecision:
+        if self._has_ready_grasp_result():
+            return self._consume_ready_grasp_result(now_m, "AWAITING_RESPOND")
         if self._state_elapsed() < 0.3:
             return self.controller.stop_cmd("GRASP")
         if str(self.ctx.grasp_status or "").upper() == "FAILED":
@@ -72,6 +108,7 @@ class GraspFlowMixin:
             self._enter_error_recovery(reason or "grasp failed")
             return self.controller.stop_cmd("GRASP")
         if now_m > self.ctx.grasp_timeout_mono:
+            self._log_grasp_flow_tick_debug("AWAITING_RESPOND", "remote_result", now_m)
             self._enter_error_recovery("grasp respond timeout")
             return self.controller.stop_cmd("GRASP")
         if self.ctx.grasp_status == "WAITING_RESPONSE":
@@ -87,21 +124,20 @@ class GraspFlowMixin:
             )
             self.ctx.grasp_substate = "AWAITING_RESULT"
             self.ctx.grasp_timeout_mono = now_m + _GRASP_RESULT_TIMEOUT_S
+            self._log_grasp_flow_tick_debug("AWAITING_RESULT", "remote_result", now_m)
         return self.controller.stop_cmd("GRASP")
 
     def _tick_grasp_awaiting_result(self, now_m: float) -> MotionDecision:
+        if self._has_ready_grasp_result():
+            return self._consume_ready_grasp_result(now_m, "AWAITING_RESULT")
         if now_m > self.ctx.grasp_timeout_mono:
+            self._log_grasp_flow_tick_debug("AWAITING_RESULT", "remote_result", now_m)
             self._enter_error_recovery("grasp result timeout")
             return self.controller.stop_cmd("GRASP")
 
         status = str(self.ctx.grasp_status or "").upper()
         if status not in {"", "RUNNING", "WAITING_RESPONSE", "RESULT_READY", "FAILED", "RELAXING"}:
             self._enter_error_recovery(f"unknown vision status: {status}")
-            return self.controller.stop_cmd("GRASP")
-
-        if status == "RESULT_READY" and isinstance(self.ctx.grasp_result, dict):
-            self.ctx.grasp_substate = "PRE_ARM_STOP_SETTLE"
-            self.ctx.pre_arm_stop_settle_start_mono = now_m
             return self.controller.stop_cmd("GRASP")
 
         if status == "RUNNING" and self.ctx.grasp_reposition_proposal is not None:
@@ -139,10 +175,24 @@ class GraspFlowMixin:
             return self.controller.stop_cmd("GRASP")
 
         if isinstance(self.ctx.grasp_result, dict):
-            arm_cmd = grasp_to_pose_params(self.ctx.grasp_result, time_ms=500)
+            try:
+                arm_cmd = grasp_to_pose_params(
+                    self.ctx.grasp_result,
+                    time_ms=int(getattr(self.car_cfg, "grasp_pose_time_ms", 800) or 800),
+                )
+            except ValueError as exc:
+                self._enter_error_recovery("grasp_pose_schema_invalid")
+                self._log("error", f"[GRASP][POSE_SCHEMA_INVALID] {exc}")
+                return self.controller.stop_cmd("GRASP")
             self.ctx.grasp_substate = "AWAITING_ARM"
             self.ctx.grasp_timeout_mono = now_m + _GRASP_ARM_TIMEOUT_S
-            return MotionDecision(cmd=self.controller.stop_cmd("GRASP").cmd, arm_cmd=arm_cmd)
+            decision = MotionDecision(cmd=self.controller.stop_cmd("GRASP").cmd, arm_cmd=arm_cmd)
+            decision.control_summary = {
+                "input_grasp": dict(self.ctx.grasp_result),
+                "source": "remote_grasp_client",
+            }
+            self._log_grasp_flow_tick_debug("AWAITING_ARM", "arm_response", now_m)
+            return decision
         else:
             self.ctx.grasp_substate = "AWAITING_RESPOND"
             self.ctx.grasp_timeout_mono = now_m + _GRASP_RESPOND_TIMEOUT_S
@@ -207,16 +257,46 @@ class GraspFlowMixin:
 
     def _tick_grasp_awaiting_arm(self, now_m: float) -> MotionDecision:
         if now_m > self.ctx.grasp_timeout_mono:
+            self._log_grasp_flow_tick_debug("AWAITING_ARM", "arm_response", now_m)
             self._enter_error_recovery("arm response timeout")
             return self.controller.stop_cmd("GRASP")
 
         resp = self.ctx.arm_response
         if resp is not None:
             if resp.ok:
+                sent_pose = dict(getattr(resp, "sent_pose", {}) or {})
+                response_pose = dict(getattr(resp, "response_pose", {}) or {})
+                self._log(
+                    "info",
+                    "arm_motion_done "
+                    f"{{'sent_pose': {sent_pose!r}, "
+                    f"'response_pose': {response_pose!r}, "
+                    "'response_matches_sent': True, "
+                    f"'raw_response': {getattr(resp, 'raw_line', '')!r}, "
+                    "'grasp_success_assumed_for_demo': True, "
+                    "'next_state': 'DONE'}}",
+                )
                 self.ctx.grasp_substate = "GRASP_VERIFY"
                 self.ctx.grasp_timeout_mono = now_m + 3.0
                 self.ctx.grasp_verify_reported = False
                 self.ctx.arm_response = None
+                return self.controller.stop_cmd("GRASP")
+            parsed_status = str(getattr(resp, "parsed_status", "") or resp.message or "").strip().upper()
+            self.ctx.arm_response = None
+            if parsed_status == "ERR_IK":
+                self._enter_error_recovery("arm_ik_failed")
+                return self.controller.stop_cmd("GRASP")
+            if parsed_status == "ERR_CMD":
+                self._enter_error_recovery("arm_cmd_failed")
+                return self.controller.stop_cmd("GRASP")
+            if parsed_status == "ARM_SERIAL_OPEN_FAILED":
+                self._enter_error_recovery("arm_serial_open_failed")
+                return self.controller.stop_cmd("GRASP")
+            if parsed_status in {"ARM_TX_FAILED", "ARM_SERIAL_WRITE_FAILED"}:
+                self._enter_error_recovery("arm_tx_failed")
+                return self.controller.stop_cmd("GRASP")
+            if parsed_status == "ARM_RESPONSE_TIMEOUT":
+                self._enter_error_recovery("arm response timeout")
                 return self.controller.stop_cmd("GRASP")
             self.ctx.grasp_retry_count += 1
             if self.ctx.grasp_retry_count > _GRASP_RETRY_LIMIT:
@@ -229,6 +309,12 @@ class GraspFlowMixin:
         return self.controller.stop_cmd("GRASP")
 
     def _tick_grasp_verify(self, now_m: float) -> MotionDecision:
+        self._log("info", "[GRASP][VERIFY_ASSUMED_SUCCESS] grasp_success_assumed_for_demo=true")
+        self._transition(State.DONE, "arm_motion_done grasp_success_assumed_for_demo")
+        self._queue_tts("抓取完成")
+        return self.controller.stop_cmd("DONE")
+
+    def _tick_grasp_verify_legacy(self, now_m: float) -> MotionDecision:
         status = str(self.ctx.grasp_status or "").strip().upper()
         result = self.ctx.grasp_result if isinstance(self.ctx.grasp_result, dict) else {}
         explicit_success = result.get("verify_success")

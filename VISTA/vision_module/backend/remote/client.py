@@ -130,6 +130,7 @@ class RemoteGraspClient:
             metadata = json.loads(str(data.get("metadata") or "{}"))
         except Exception:
             metadata = {"parse_error": "invalid_metadata_json"}
+        capture = dict(metadata.get("capture") or {}) if isinstance(metadata.get("capture"), dict) else {}
         form = {str(key): str(value) for key, value in data.items() if key != "metadata"}
         file_summary = {}
         for field_name, file_tuple in dict(files or {}).items():
@@ -148,6 +149,12 @@ class RemoteGraspClient:
                 "content_type": content_type,
                 "bytes": len(content) if hasattr(content, "__len__") else 0,
             }
+            if str(field_name) == "rgb_file":
+                file_summary[str(field_name)]["shape"] = capture.get("rgb_shape")
+                file_summary[str(field_name)]["dtype"] = capture.get("rgb_dtype")
+            if str(field_name) == "depth_file":
+                file_summary[str(field_name)]["shape"] = capture.get("depth_shape")
+                file_summary[str(field_name)]["dtype"] = capture.get("depth_dtype")
         self._log(
             "info",
             "remote_predict_request_dump",
