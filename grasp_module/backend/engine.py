@@ -368,6 +368,10 @@ class RealSenseGraspPredictor:
         if raw_approach is None:
             return None
 
+        # 限定 robot 坐标系下 approach X 分量为正（从 +X 方向接近）
+        if float(raw_approach[0]) <= 0:
+            return None
+
         # grasp center in robot frame (cm)
         grasp_robot_cm = self.frames.camera_point_to_robot_cm(grasp.translation)
         gx, gy = float(grasp_robot_cm[0]), float(grasp_robot_cm[1])
@@ -424,6 +428,8 @@ class RealSenseGraspPredictor:
             return None
 
         roll_deg = self._signed_angle_deg(h_ref, w_plane, projected_approach)
+        roll_deg = -(((roll_deg + 90) % 180) - 90)
+        gripper_radius = 2.6
 
         # ---- rear-edge centre ----
         depth_base_cm = 100.0 * float(getattr(self.cfgs, 'protocol_depth_base', 0.02))
@@ -431,8 +437,8 @@ class RealSenseGraspPredictor:
 
         return {
             "x_cm": float(rear_edge_center_robot_cm[0]),
-            "y_cm": float(rear_edge_center_robot_cm[1]),
-            "z_cm": float(rear_edge_center_robot_cm[2]),
+            "y_cm": float(rear_edge_center_robot_cm[1]-gripper_radius*np.sin(np.deg2rad(roll_deg))),
+            "z_cm": float(rear_edge_center_robot_cm[2]+gripper_radius*(1-np.cos(np.deg2rad(roll_deg)))),
             "pitch_deg": pitch_deg,
             "roll_deg": roll_deg,
             "gripper_width_cm": 100.0 * float(grasp.width),
