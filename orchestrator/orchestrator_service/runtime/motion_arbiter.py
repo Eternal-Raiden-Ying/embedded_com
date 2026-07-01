@@ -382,7 +382,14 @@ def _docking_result(
     edge_enter = _float(safe_summary, "edge_readiness_enter_score", 0.65)
     edge_ready_for_approach = bool(_bool_field("edge_trusted") or bool(safe_summary.get("edge_handoff_complete", False)) or edge_score >= edge_enter)
     safe_summary.setdefault("edge_ready_for_approach", edge_ready_for_approach)
-    safe_summary.setdefault("edge_ready_for_final", bool(_bool_field("edge_valid") or _bool_field("edge_trusted")))
+    safe_summary.setdefault(
+        "edge_ready_for_final",
+        bool(
+            _bool_field("edge_trusted")
+            or bool(safe_summary.get("edge_handoff_complete", False))
+            or edge_score >= edge_enter
+        ),
+    )
     actual_block = str(blocked_by or safe_summary.get("effective_block_reason") or safe_summary.get("forward_block_reason") or safe_summary.get("effective_forward_block_reason") or "")
     moving = bool(abs(float(final_vx)) > 1e-9 or abs(float(final_vy)) > 1e-9 or abs(float(final_wz)) > 1e-9)
     safe_summary["effective_block_reason"] = "" if moving else actual_block
@@ -519,6 +526,41 @@ def arbitrate_table_docking_motion(
         or edge_readiness_level in {"ready", "trusted", "handoff_ready", "approach_ready"}
     )
     now_mono = time.monotonic()
+    state = str(getattr(ctx.state, "value", ctx.state) or "").strip().upper()
+    edge_ready_for_final_strong = bool(edge_approach_gate_ready)
+    edge_slope_latch_reason = ""
+    edge_slope_latch_source = ""
+    if docking_obs.edge_trusted:
+        edge_slope_latch_reason = "edge_trusted"
+        edge_slope_latch_source = "edge_trusted"
+    elif edge_handoff_complete:
+        edge_slope_latch_reason = "edge_handoff_complete"
+        edge_slope_latch_source = "edge_handoff"
+    elif edge_readiness_ready:
+        edge_slope_latch_reason = "edge_readiness_score"
+        edge_slope_latch_source = "readiness_score"
+    elif edge_readiness_level in {"ready", "trusted", "handoff_ready", "approach_ready"}:
+        edge_slope_latch_reason = f"edge_readiness_level:{edge_readiness_level}"
+        edge_slope_latch_source = "readiness_level"
+    edge_slope_latch_new = False
+    if edge_ready_for_final_strong and not bool(getattr(ctx, "edge_slope_final_ready_latched", False)):
+        try:
+            ctx.edge_slope_final_ready_latched = True
+            ctx.edge_slope_final_ready_ts = now_mono
+            ctx.edge_slope_final_ready_state = state
+            ctx.edge_slope_final_ready_reason = edge_slope_latch_reason or "edge_ready_for_final_strong"
+            ctx.edge_slope_final_ready_value = float(edge_readiness_score)
+            ctx.edge_slope_final_ready_source = edge_slope_latch_source or "edge_readiness"
+            edge_slope_latch_new = True
+        except Exception:
+            pass
+    edge_slope_final_ready_latched = bool(getattr(ctx, "edge_slope_final_ready_latched", False))
+    edge_slope_latch_age_s = None
+    if edge_slope_final_ready_latched and getattr(ctx, "edge_slope_final_ready_ts", None) is not None:
+        try:
+            edge_slope_latch_age_s = max(0.0, now_mono - float(ctx.edge_slope_final_ready_ts))
+        except Exception:
+            edge_slope_latch_age_s = None
     forward_commit_active = bool(
         float(getattr(ctx, "forward_commit_until_mono", 0.0) or 0.0) > now_mono
         and not bool(summary.get("near_table_latched", False))
@@ -537,11 +579,7 @@ def arbitrate_table_docking_motion(
         edge_lost_age_s = max(0.0, now_mono - float(getattr(ctx, "last_good_edge_yaw_mono", 0.0) or 0.0))
     elif float(getattr(ctx, "last_edge_good_mono", 0.0) or 0.0) > 0.0:
         edge_lost_age_s = max(0.0, now_mono - float(getattr(ctx, "last_edge_good_mono", 0.0) or 0.0))
-    edge_ready_for_final = bool(
-        summary.get("edge_ready_for_final", False)
-        or docking_obs.edge_valid
-        or docking_obs.edge_trusted
-    )
+    edge_ready_for_final = bool(edge_ready_for_final_strong)
     close_range_enter_p10 = _float(summary, "close_range_enter_p10_m", 0.55)
     roi_depth_valid = bool(summary.get("table_roi_depth_valid", getattr(obs, "table_roi_depth_valid", False) if obs is not None else False))
     roi_depth_value = summary.get("table_roi_depth_p10", getattr(obs, "table_roi_depth_p10", None) if obs is not None else None)
@@ -560,6 +598,19 @@ def arbitrate_table_docking_motion(
         fixed_roi_depth_m = float(fixed_roi_value) if fixed_roi_value is not None else None
     except (TypeError, ValueError):
         fixed_roi_depth_m = None
+    already_in_final_phase = bool(
+        state in {"FINAL_SLOW_STOP", "AT_TABLE_EDGE"}
+        or summary.get("final_roi_mode_latched", False)
+        or summary.get("final_edge_mode_latched", False)
+        or summary.get("final_depth_latched", False)
+        or summary.get("final_phase_active", False)
+        or summary.get("final_distance_servo_active", False)
+        or getattr(ctx, "final_roi_mode_latched", False)
+        or getattr(ctx, "final_edge_mode_latched", False)
+        or getattr(ctx, "final_depth_latched", False)
+    )
+    final_gate_allowed = bool(edge_slope_final_ready_latched or already_in_final_phase)
+    final_gate_block_reason = "" if final_gate_allowed else "fixed_roi_without_edge_slope_latch"
     final_parking_phase = bool(
         summary.get("close_range_latched", False)
         or summary.get("near_table_latched", False)
@@ -597,10 +648,11 @@ def arbitrate_table_docking_motion(
         or bool(summary.get("near_table_latched", False))
         or bool(getattr(ctx, "near_table_latched", False))
         or edge_ready_for_final
-        or fixed_roi_depth_close_enough
+        or (fixed_roi_depth_close_enough and final_gate_allowed)
     )
-    fixed_roi_selected = bool(fixed_roi_close_context and fixed_roi_valid and fixed_roi_depth_m is not None)
-    legacy_depth_allowed_for_control = bool(not final_parking_phase)
+    fixed_roi_selected = bool(final_gate_allowed and fixed_roi_close_context and fixed_roi_valid and fixed_roi_depth_m is not None)
+    fixed_roi_only_blocked = bool(fixed_roi_depth_close_enough and not final_gate_allowed)
+    legacy_depth_allowed_for_control = bool((not final_parking_phase) or already_in_final_phase or final_gate_allowed)
     final_depth_valid = bool(legacy_depth_allowed_for_control and legacy_roi_depth_valid)
     final_depth_m = legacy_roi_depth_m if final_depth_valid else None
     final_depth_source = "table_roi_or_latched_roi" if final_depth_valid else "missing"
@@ -638,10 +690,29 @@ def arbitrate_table_docking_motion(
             "final_depth_candidate_source": "fixed_center_low_roi" if fixed_roi_valid and fixed_roi_depth_m is not None else "",
             "final_depth_candidate_m": float(fixed_roi_depth_m) if fixed_roi_valid and fixed_roi_depth_m is not None else None,
             "final_depth_usable_for_control": bool(fixed_roi_selected),
-            "final_depth_gate_reason": "gate_open" if fixed_roi_selected else ("not_close_enough" if fixed_roi_valid and fixed_roi_depth_m is not None else "missing_fixed_roi"),
+            "final_depth_gate_reason": "gate_open" if fixed_roi_selected else (final_gate_block_reason if fixed_roi_only_blocked else ("not_close_enough" if fixed_roi_valid and fixed_roi_depth_m is not None else "missing_fixed_roi")),
             "final_depth_valid": bool(final_depth_valid),
             "final_depth_m": float(final_depth_m) if final_depth_m is not None else None,
             "final_depth_source": final_depth_source,
+            "final_gate_allowed": bool(final_gate_allowed),
+            "final_gate_block_reason": str(final_gate_block_reason),
+            "final_gate_state_allowed": bool(already_in_final_phase or state == "YOLO_APPROACH"),
+            "final_gate_edge_slope_latched": bool(edge_slope_final_ready_latched),
+            "final_gate_edge_slope_latch_age_s": edge_slope_latch_age_s,
+            "final_gate_fixed_roi_only_blocked": bool(fixed_roi_only_blocked),
+            "final_depth_source_candidate": "fixed_center_low_roi" if fixed_roi_valid and fixed_roi_depth_m is not None else "",
+            "final_depth_source_selected": final_depth_source,
+            "fixed_roi_depth_m": float(fixed_roi_depth_m) if fixed_roi_depth_m is not None else None,
+            "fixed_roi_depth_valid": bool(fixed_roi_valid),
+            "fixed_roi_depth_close_enough": bool(fixed_roi_depth_close_enough),
+            "edge_ready_for_final_strong": bool(edge_ready_for_final_strong),
+            "edge_slope_final_ready_latched": bool(edge_slope_final_ready_latched),
+            "edge_slope_final_ready_reason": str(getattr(ctx, "edge_slope_final_ready_reason", "") or ""),
+            "edge_slope_final_ready_source": str(getattr(ctx, "edge_slope_final_ready_source", "") or ""),
+            "edge_slope_final_ready_latch_event": bool(edge_slope_latch_new),
+            "edge_slope_final_ready_state": str(getattr(ctx, "edge_slope_final_ready_state", "") or ""),
+            "edge_slope_final_ready_value": getattr(ctx, "edge_slope_final_ready_value", None),
+            "edge_slope_final_ready_reset_reason": str(getattr(ctx, "edge_slope_final_ready_reset_reason", "") or ""),
             "legacy_table_roi_depth_valid": bool(legacy_roi_depth_valid),
             "legacy_table_roi_depth_p10": float(legacy_roi_depth_m) if legacy_roi_depth_m is not None else None,
         }
@@ -683,7 +754,7 @@ def arbitrate_table_docking_motion(
         return float(measured) - float(target), float(measured), source
 
     edge_final_dist_err, edge_measured_dist, edge_measured_source = table_final_dist_err_m()
-    final_roi_enter = bool(final_roi_enter_candidate and not edge_ready_for_final)
+    final_roi_enter = bool(final_gate_allowed and final_roi_enter_candidate and not edge_ready_for_final)
     final_roi_mode_latched = bool(summary.get("final_roi_mode_latched", False) or getattr(ctx, "final_roi_mode_latched", False) or final_roi_enter)
     if final_roi_mode_latched:
         try:
@@ -719,15 +790,13 @@ def arbitrate_table_docking_motion(
     edge_final_stop_stable = bool(edge_final_stop_reached and int(getattr(ctx, "edge_final_stop_stable_count", 0) or 0) >= 2)
     final_edge_mode_latched = bool(summary.get("final_edge_mode_latched", False) or getattr(ctx, "final_edge_mode_latched", False) or edge_final_dist_reached)
     close_range_depth_reached = bool(roi_depth_valid and roi_depth_m is not None and roi_depth_m <= close_range_enter_p10)
-    fixed_close_range_depth_reached = bool(
-        fixed_roi_depth_close_enough
-    )
+    fixed_close_range_depth_reached = bool(final_gate_allowed and fixed_roi_depth_close_enough)
     close_range_latched = bool(
         summary.get("close_range_latched", False)
         or getattr(ctx, "close_range_latched", False)
         or final_edge_mode_latched
         or final_roi_mode_latched
-        or close_range_depth_reached
+        or (final_gate_allowed and close_range_depth_reached)
         or fixed_close_range_depth_reached
         or edge_final_dist_reached
     )

@@ -233,6 +233,26 @@ class TableDockingMixin:
             "edge_readiness_level",
             "edge_readiness_enter_score",
             "edge_readiness_exit_score",
+            "edge_ready_for_final_strong",
+            "edge_slope_final_ready_latched",
+            "edge_slope_final_ready_reason",
+            "edge_slope_final_ready_source",
+            "edge_slope_final_ready_latch_event",
+            "edge_slope_final_ready_state",
+            "edge_slope_final_ready_value",
+            "edge_slope_final_ready_reset_reason",
+            "final_gate_allowed",
+            "final_gate_block_reason",
+            "final_gate_state_allowed",
+            "final_gate_edge_slope_latched",
+            "final_gate_edge_slope_latch_age_s",
+            "final_gate_fixed_roi_only_blocked",
+            "final_depth_source_candidate",
+            "final_depth_source_selected",
+            "fixed_roi_depth_m",
+            "fixed_roi_depth_valid",
+            "fixed_roi_depth_close_enough",
+            "final_lock_ignored_outside_final_phase",
             "vy_cmd_raw",
             "vy_cmd_limited",
             "vy_enabled",
@@ -283,8 +303,6 @@ class TableDockingMixin:
         summary = decision.control_summary if decision.control_summary is not None else {}
         action = str(summary.get("docking_action") or "")
         final_locked = bool(getattr(self.ctx, "final_locked", False) or summary.get("final_locked", False))
-        if final_locked:
-            self.ctx.final_locked = True
         stopped = bool(
             abs(float(decision.cmd.vx_mps)) <= 1e-6
             and abs(float(decision.cmd.vy_mps)) <= 1e-6
@@ -292,9 +310,40 @@ class TableDockingMixin:
         )
         if final_locked and action == "FINAL_LOCKED_STOP" and stopped:
             state_value = str(getattr(self.ctx.state, "value", self.ctx.state) or "")
-            docking_transition_states = {"SEARCH_TABLE", "YOLO_ACQUIRE_ALIGN", "YOLO_APPROACH", "EDGE_ADJUST", "FINAL_SLOW_STOP"}
-            if state_value not in docking_transition_states and state_value != "AT_TABLE_EDGE":
-                summary["final_state_transition_block_reason"] = "docking_final_latch_frozen_for_target_search"
+            edge_latched = bool(getattr(self.ctx, "edge_slope_final_ready_latched", False) or summary.get("edge_slope_final_ready_latched", False))
+            fixed_roi_blocked = bool(summary.get("final_gate_fixed_roi_only_blocked", False))
+            allowed = bool(
+                state_value in {"FINAL_SLOW_STOP", "AT_TABLE_EDGE"}
+                or (
+                    state_value == "YOLO_APPROACH"
+                    and edge_latched
+                    and not fixed_roi_blocked
+                    and bool(summary.get("final_gate_allowed", False))
+                )
+            )
+            if not allowed:
+                summary["final_lock_ignored_outside_final_phase"] = True
+                summary["final_state_transition_block_reason"] = "final_lock_ignored_outside_final_phase"
+                summary["final_lock_ignore_action"] = "ignore"
+                summary["final_lock_ignored_state"] = state_value
+                summary["final_lock_ignored_allowed_states"] = ["FINAL_SLOW_STOP", "YOLO_APPROACH"]
+                summary["final_lock_ignored_edge_slope_final_ready_latched"] = bool(edge_latched)
+                summary["final_lock_ignored_final_depth_source"] = str(summary.get("final_depth_source") or "")
+                summary["final_lock_ignored_final_depth_m"] = summary.get("final_depth_m")
+                summary["final_lock_ignored_reason"] = str(summary.get("final_lock_reason") or summary.get("docking_reason") or "")
+                self.ctx.final_locked = False
+                self.ctx.final_lock_reason = ""
+                self._log(
+                    "warn",
+                    "final_lock_ignored_outside_final_phase "
+                    f"{{'state': {state_value!r}, "
+                    f"'final_depth_source': {summary.get('final_depth_source')!r}, "
+                    f"'final_depth_m': {summary.get('final_depth_m')!r}, "
+                    f"'final_lock_reason': {summary.get('final_lock_reason')!r}, "
+                    f"'edge_slope_final_ready_latched': {edge_latched!r}, "
+                    "'allowed_states': ['FINAL_SLOW_STOP', 'YOLO_APPROACH'], "
+                    "'action': 'ignore'}}",
+                )
                 return
             if state_value != "AT_TABLE_EDGE":
                 reason = "final_locked_stop_reached"

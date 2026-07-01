@@ -153,6 +153,16 @@ class RuntimeContext:
     edge_readiness_score: float = 0.0
     edge_readiness_last_update_mono: float = 0.0
     edge_readiness_level: str = ""
+    edge_slope_final_ready_latched: bool = False
+    edge_slope_final_ready_ts: Optional[float] = None
+    edge_slope_final_ready_state: Optional[str] = None
+    edge_slope_final_ready_reason: Optional[str] = None
+    edge_slope_final_ready_value: Optional[float] = None
+    edge_slope_final_ready_source: Optional[str] = None
+    edge_slope_final_ready_reset_reason: str = ""
+    edge_slope_final_ready_reset_state: str = ""
+    edge_slope_final_ready_reset_epoch: int = 0
+    edge_slope_final_ready_reset_edge_id: str = ""
     edge_handoff_entered_mono: float = 0.0
     last_good_table_obs_mono: float = 0.0
     last_good_table_obs_summary: Dict[str, object] = field(default_factory=dict)
@@ -278,6 +288,19 @@ class RuntimeContext:
         self.control_phase = "SEARCH_SCAN"
         self.control_phase_since_mono = 0.0
         self.bbox_valid_streak = 0
+        self.reset_edge_slope_final_ready("clear_motion_counters")
+
+    def reset_edge_slope_final_ready(self, reason: str) -> None:
+        self.edge_slope_final_ready_latched = False
+        self.edge_slope_final_ready_ts = None
+        self.edge_slope_final_ready_state = None
+        self.edge_slope_final_ready_reason = None
+        self.edge_slope_final_ready_value = None
+        self.edge_slope_final_ready_source = None
+        self.edge_slope_final_ready_reset_reason = str(reason or "")
+        self.edge_slope_final_ready_reset_state = str(getattr(self.state, "value", self.state) or "")
+        self.edge_slope_final_ready_reset_epoch = int(self.active_epoch or 0)
+        self.edge_slope_final_ready_reset_edge_id = str(self.current_edge_id or "")
         self.bbox_centered_streak = 0
         self.edge_trusted_streak = 0
         self.edge_yaw_ema = None
@@ -414,6 +437,7 @@ class RuntimeContext:
         self.slide_ref_last_sample_key = ""
         self.handoff_state = ""
         self.last_edge_quality.clear()
+        self.reset_edge_slope_final_ready("reset_edge_plan")
 
     def advance_edge(self) -> bool:
         if not self.edge_visit_order:
@@ -425,6 +449,7 @@ class RuntimeContext:
         self.edge_transition_count += 1
         self.relocate_turn_sign *= -1
         self.slide_direction_sign = 1
+        self.reset_edge_slope_final_ready("advance_edge")
         return True
 
     def clear_task_context(self):
@@ -464,6 +489,7 @@ class RuntimeContext:
         self.arm_response = None
         self.grasp_timeout_mono = 0.0
         self.grasp_verify_reported = False
+        self.reset_edge_slope_final_ready("clear_task_context")
         self.reset_edge_plan()
         self.clear_perception_cache()
         self.clear_motion_counters()

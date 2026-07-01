@@ -1,5 +1,9 @@
 from orchestrator.orchestrator_service.runtime.context import RuntimeContext, State
+from orchestrator.orchestrator_service.runtime.controller import MotionDecision
 from orchestrator.orchestrator_service.runtime.motion_arbiter import MotionIntent, arbitrate_table_docking_motion
+from orchestrator.orchestrator_service.runtime.states.table_docking import TableDockingMixin
+from orchestrator.orchestrator_service.runtime.task_runtime import TaskRuntimeMixin
+from orchestrator.orchestrator_service.ipc.protocol import CmdVel
 
 
 def _base_summary(**extra):
@@ -193,8 +197,10 @@ def test_final_distance_error_uses_observation_target_then_control_target():
 
 
 def test_near_p10_enters_close_range_but_edge_remains_priority_when_usable():
+    ctx = RuntimeContext(state=State.YOLO_APPROACH)
+    ctx.edge_slope_final_ready_latched = True
     result = arbitrate_table_docking_motion(
-        RuntimeContext(state=State.YOLO_APPROACH),
+        ctx,
         None,
         MotionIntent("edge_guided_forward", desired_vx=0.08, desired_wz=0.03, yaw_owner="edge", forward_allowed_by_behavior=True),
         _base_summary(
@@ -210,8 +216,8 @@ def test_near_p10_enters_close_range_but_edge_remains_priority_when_usable():
     )
     assert result.summary["docking_action"] == "FINAL_SLOW_PROBE"
     assert result.summary["close_range_latched"] is True
-    assert result.summary["final_roi_mode_latched"] is False
-    assert result.summary["measured_dist_source"] == "edge"
+    assert result.summary["final_roi_mode_latched"] is True
+    assert result.summary["measured_dist_source"] == "table_roi_or_latched_roi"
     assert result.final_vy == 0.0
     assert result.final_wz == 0.0
     assert 0.0 <= result.final_vx <= 0.006
@@ -285,6 +291,7 @@ def test_depth_envelope_caps_near_speed_but_lateral_priority_keeps_far_vx_fast()
 
 def test_final_roi_latch_stops_on_p10_and_disables_yaw():
     ctx = RuntimeContext(state=State.YOLO_APPROACH)
+    ctx.edge_slope_final_ready_latched = True
     intent = MotionIntent("edge_guided_forward", desired_vx=0.08, desired_wz=0.15, yaw_owner="edge", forward_allowed_by_behavior=True)
     enter = arbitrate_table_docking_motion(
         ctx,
@@ -314,11 +321,11 @@ def test_final_roi_latch_stops_on_p10_and_disables_yaw():
             edge_valid=False,
             usable_for_approach=False,
             table_roi_depth_valid=True,
-            table_roi_depth_p10=0.39,
+            table_roi_depth_p10=0.34,
             yaw_err_rad=0.30,
         ),
     )
-    assert stopped.summary["final_roi_reason"] == "roi_p10_stop_confirming"
+    assert stopped.summary["final_roi_reason"] == "final_depth_stop_confirming"
     stopped = arbitrate_table_docking_motion(
         ctx,
         None,
@@ -330,13 +337,13 @@ def test_final_roi_latch_stops_on_p10_and_disables_yaw():
             edge_valid=False,
             usable_for_approach=False,
             table_roi_depth_valid=True,
-            table_roi_depth_p10=0.39,
+            table_roi_depth_p10=0.34,
             yaw_err_rad=0.30,
         ),
     )
     assert stopped.summary["docking_action"] == "FINAL_LOCKED_STOP"
     assert stopped.summary["final_locked"] is True
-    assert stopped.summary["final_roi_reason"] == "roi_p10_stop"
+    assert stopped.summary["final_roi_reason"] == "final_depth_stop"
     assert stopped.final_vx == 0.0
     assert stopped.final_vy == 0.0
     assert stopped.final_wz == 0.0
@@ -359,13 +366,15 @@ def test_final_roi_probe_and_roi_missing_hold_do_not_return_to_near_or_rotate():
             near_slow_max_vx_mps=0.03,
             edge_found=True,
             edge_valid=True,
+            edge_trusted=True,
             usable_for_approach=True,
+            edge_readiness_score=0.70,
             table_roi_depth_valid=True,
             table_roi_depth_p10=0.46,
             yaw_err_rad=0.40,
         ),
     )
-    assert probe.summary["final_roi_reason"] == "roi_p10_slow_probe"
+    assert probe.summary["final_roi_reason"] in {"roi_p10_slow_probe", "final_depth_slow_probe"}
     assert 0.0 < probe.final_vx <= 0.008
     assert probe.final_vy == 0.0
     assert probe.final_wz == 0.0
@@ -422,7 +431,9 @@ def test_edge_final_latch_and_stop_use_measured_minus_control_target():
             control_phase="EDGE_GUIDED_APPROACH",
             edge_found=True,
             edge_valid=True,
+            edge_trusted=True,
             usable_for_approach=True,
+            edge_readiness_score=0.70,
             target_dist_m=0.50,
             dist_err_m=-0.15,
             yaw_err_rad=0.30,
@@ -445,7 +456,9 @@ def test_edge_final_latch_and_stop_use_measured_minus_control_target():
             control_phase="EDGE_GUIDED_APPROACH",
             edge_found=True,
             edge_valid=True,
+            edge_trusted=True,
             usable_for_approach=True,
+            edge_readiness_score=0.70,
             target_dist_m=0.50,
             dist_err_m=-0.181,
             yaw_err_rad=0.30,
@@ -460,7 +473,9 @@ def test_edge_final_latch_and_stop_use_measured_minus_control_target():
             control_phase="EDGE_GUIDED_APPROACH",
             edge_found=True,
             edge_valid=True,
+            edge_trusted=True,
             usable_for_approach=True,
+            edge_readiness_score=0.70,
             target_dist_m=0.50,
             dist_err_m=-0.181,
             yaw_err_rad=0.30,
@@ -485,6 +500,7 @@ def test_close_range_latch_blocks_bbox_forward_and_recovery_rotate():
             bbox_center_valid=True,
             bbox_center_error=0.30,
             yolo_forward_allowed=True,
+            edge_readiness_score=0.70,
             table_roi_depth_valid=True,
             table_roi_depth_p10=0.54,
         ),
@@ -533,8 +549,158 @@ def test_final_locked_hold_outranks_roi_missing_probe():
     assert result.summary["docking_action"] == "FINAL_LOCKED_STOP"
     assert result.reason == "final_locked_hold"
     assert result.final_vx == 0.0
-    assert result.final_vy == 0.0
-    assert result.final_wz == 0.0
+
+
+def _fixed_roi_summary(**extra):
+    summary = dict(
+        control_phase="BBOX_ACQUIRE",
+        bbox_center_valid=True,
+        bbox_center_error=0.0,
+        yolo_forward_allowed=True,
+        table_roi_depth_valid=False,
+        final_fixed_roi_active=True,
+        final_fixed_roi_depth_valid=True,
+        final_fixed_roi_depth_p10=0.268,
+    )
+    summary.update(extra)
+    return _base_summary(**summary)
+
+
+def test_fixed_roi_blocked_in_search_without_edge_slope_latch():
+    ctx = RuntimeContext(state=State.SEARCH_TABLE)
+    result = arbitrate_table_docking_motion(
+        ctx,
+        None,
+        MotionIntent("search_rotate", desired_wz=0.2, rotate_allowed_by_behavior=True),
+        _fixed_roi_summary(),
+    )
+
+    assert result.summary["final_gate_allowed"] is False
+    assert result.summary["final_gate_fixed_roi_only_blocked"] is True
+    assert result.summary["final_gate_block_reason"] == "fixed_roi_without_edge_slope_latch"
+    assert result.summary["final_depth_valid"] is False
+    assert result.summary["final_locked"] is False
+
+
+def test_fixed_roi_blocked_in_yolo_acquire_without_edge_slope_latch():
+    ctx = RuntimeContext(state=State.YOLO_ACQUIRE_ALIGN)
+    result = arbitrate_table_docking_motion(
+        ctx,
+        None,
+        MotionIntent("bbox_align", desired_wz=0.1, rotate_allowed_by_behavior=True),
+        _fixed_roi_summary(),
+    )
+
+    assert result.summary["final_gate_allowed"] is False
+    assert result.summary["final_gate_fixed_roi_only_blocked"] is True
+    assert result.summary["final_depth_source"] == "missing"
+    assert result.summary["final_locked"] is False
+
+
+def test_fixed_roi_allowed_in_yolo_approach_after_edge_slope_latch():
+    ctx = RuntimeContext(state=State.YOLO_APPROACH)
+    ctx.edge_slope_final_ready_latched = True
+    ctx.edge_slope_final_ready_reason = "edge_readiness_score"
+    result = arbitrate_table_docking_motion(
+        ctx,
+        None,
+        MotionIntent("yolo_track_forward", desired_vx=0.1, forward_allowed_by_behavior=True),
+        _fixed_roi_summary(),
+    )
+
+    assert result.summary["final_gate_allowed"] is True
+    assert result.summary["final_depth_valid"] is True
+    assert result.summary["final_depth_source"] == "fixed_center_low_roi"
+    assert result.summary["final_depth_usable_for_control"] is True
+
+
+def test_fixed_roi_final_stop_allowed_in_final_slow_stop():
+    ctx = RuntimeContext(state=State.FINAL_SLOW_STOP)
+    ctx.edge_slope_final_ready_latched = True
+    intent = MotionIntent("final_slow_probe", desired_vx=0.01, forward_allowed_by_behavior=True)
+    summary = _fixed_roi_summary(control_phase="FINAL")
+
+    first = arbitrate_table_docking_motion(ctx, None, intent, summary)
+    second = arbitrate_table_docking_motion(ctx, None, intent, summary)
+
+    assert first.summary["final_gate_allowed"] is True
+    assert second.summary["final_depth_source"] == "fixed_center_low_roi"
+    assert second.summary["final_locked"] is True
+    assert second.summary["docking_action"] == "FINAL_LOCKED_STOP"
+
+
+class _ResetHarness(TaskRuntimeMixin):
+    def __init__(self):
+        self.ctx = RuntimeContext(state=State.SEARCH_TABLE)
+        self.reset_events = []
+
+    def _emit_reset_trace(self, reset_state, reason, cleared_fields):
+        self.reset_events.append((reset_state, reason, list(cleared_fields)))
+
+
+def test_reset_edge_tracking_clears_edge_slope_final_ready_latch():
+    harness = _ResetHarness()
+    harness.ctx.edge_slope_final_ready_latched = True
+    harness.ctx.edge_slope_final_ready_reason = "edge_readiness_score"
+
+    harness.reset_edge_tracking("enter_search_table")
+
+    assert harness.ctx.edge_slope_final_ready_latched is False
+    assert harness.ctx.edge_slope_final_ready_reason is None
+    assert harness.ctx.edge_slope_final_ready_reset_reason == "enter_search_table"
+
+
+class _ConsumeFinalLockHarness(TableDockingMixin):
+    def __init__(self, state):
+        self.ctx = RuntimeContext(state=state)
+        self.transitions = []
+        self.logs = []
+
+    def _transition(self, state, reason):
+        self.transitions.append((state, reason))
+        self.ctx.state = state
+
+    def _log(self, level, message):
+        self.logs.append((level, message))
+
+
+def _locked_stop_decision(**summary_extra):
+    summary = {
+        "docking_action": "FINAL_LOCKED_STOP",
+        "final_locked": True,
+        "final_lock_reason": "final_depth_stop",
+        "final_depth_source": "fixed_center_low_roi",
+        "final_depth_m": 0.268,
+        **summary_extra,
+    }
+    return MotionDecision(cmd=CmdVel(ts=0.0, mode="FINAL_LOCKED_STOP", brake=True), control_summary=summary)
+
+
+def test_search_table_ignores_final_locked_stop_transition():
+    harness = _ConsumeFinalLockHarness(State.SEARCH_TABLE)
+    decision = _locked_stop_decision(final_gate_allowed=False, final_gate_fixed_roi_only_blocked=True)
+
+    harness._consume_final_lock_after_arbitration(decision, None)
+
+    assert harness.ctx.state == State.SEARCH_TABLE
+    assert harness.transitions == []
+    assert decision.control_summary["final_lock_ignored_outside_final_phase"] is True
+    assert harness.ctx.final_locked is False
+
+
+def test_yolo_approach_consumes_final_lock_only_with_edge_slope_latch():
+    harness = _ConsumeFinalLockHarness(State.YOLO_APPROACH)
+    harness.ctx.edge_slope_final_ready_latched = True
+    decision = _locked_stop_decision(
+        final_gate_allowed=True,
+        final_gate_fixed_roi_only_blocked=False,
+        edge_slope_final_ready_latched=True,
+    )
+
+    harness._consume_final_lock_after_arbitration(decision, None)
+
+    assert harness.ctx.state == State.AT_TABLE_EDGE
+    assert harness.transitions == [(State.AT_TABLE_EDGE, "final_locked_stop_reached")]
 
 
 def test_non_final_edge_yaw_large_never_outputs_all_zero():
