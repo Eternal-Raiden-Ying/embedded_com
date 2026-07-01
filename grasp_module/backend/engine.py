@@ -296,6 +296,7 @@ class RealSenseGraspPredictor:
         gripper_params = {
             "height": float(getattr(self.cfgs, 'gripper_height_m', 0.004)),
             "finger_width": float(getattr(self.cfgs, 'gripper_finger_width_m', 0.004)),
+            "finger_length": float(getattr(self.cfgs, 'collision_finger_length_m', 0.07)),
             "tail_length": float(getattr(self.cfgs, 'gripper_tail_length_m', 0.04)),
             "depth_base": float(getattr(self.cfgs, 'gripper_depth_base_m', 0.02)),
         }

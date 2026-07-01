@@ -52,12 +52,30 @@ def build_gripper_mesh(
     color=None,
     height=0.004,
     finger_width=0.004,
+    finger_length=0.07,
     tail_length=0.04,
     depth_base=0.02,
 ):
     """
-    Build a debug gripper mesh in repo-local code so runtime behavior does not
-    depend on graspnetAPI's installed signature.
+    Build a debug gripper mesh whose geometry mirrors the collision detector.
+
+    Local frame (same as collision detector):
+      X = approach direction (+ toward object)
+      Y = width / opening direction
+      Z = height direction
+      Origin = grasp center (grasp.translation)
+
+    The finger, bottom, and tail boxes are anchored to ``depth`` so that
+    their X-ranges match the collision occupancy model:
+
+        finger  : X in (depth - finger_length, depth]
+        bottom  : X in (depth - finger_length - finger_width,
+                        depth - finger_length]
+        tail    : X in (depth - finger_length - finger_width - tail_length,
+                        depth - finger_length - finger_width]
+
+    ``depth_base`` is kept for signature compatibility but no longer
+    participates in geometry (engine overrides it to 0.0).
     """
     center = np.asarray(center, dtype=np.float64).reshape(3)
     rotation_matrix = np.asarray(rotation_matrix, dtype=np.float64).reshape(3, 3)
@@ -65,55 +83,65 @@ def build_gripper_mesh(
     depth = float(depth)
     height = float(height)
     finger_width = float(finger_width)
+    finger_length = float(finger_length)
     tail_length = float(tail_length)
-    depth_base = float(depth_base)
+    _ = float(depth_base)  # retained for signature compat; not used in geometry
 
     if color is None:
         color = (float(score), 0.0, 1.0 - float(score))
     color = np.asarray(color, dtype=np.float64).reshape(3)
 
-    left = create_mesh_box(depth + depth_base + finger_width, finger_width, height)
-    right = create_mesh_box(depth + depth_base + finger_width, finger_width, height)
-    bottom = create_mesh_box(finger_width, width, height)
-    tail = create_mesh_box(tail_length, finger_width, height)
-
-    left_vertices = np.asarray(left.vertices).copy()
-    left_triangles = np.asarray(left.triangles).copy()
-    left_vertices[:, 0] -= depth_base + finger_width
-    left_vertices[:, 1] -= width / 2.0 + finger_width
-    left_vertices[:, 2] -= height / 2.0
-
-    right_vertices = np.asarray(right.vertices).copy()
-    right_triangles = np.asarray(right.triangles).copy() + 8
-    right_vertices[:, 0] -= depth_base + finger_width
-    right_vertices[:, 1] += width / 2.0
-    right_vertices[:, 2] -= height / 2.0
-
-    bottom_vertices = np.asarray(bottom.vertices).copy()
-    bottom_triangles = np.asarray(bottom.triangles).copy() + 16
-    bottom_vertices[:, 0] -= finger_width + depth_base
-    bottom_vertices[:, 1] -= width / 2.0
-    bottom_vertices[:, 2] -= height / 2.0
-
-    tail_vertices = np.asarray(tail.vertices).copy()
-    tail_triangles = np.asarray(tail.triangles).copy() + 24
-    tail_vertices[:, 0] -= tail_length + finger_width + depth_base
-    tail_vertices[:, 1] -= finger_width / 2.0
-    tail_vertices[:, 2] -= height / 2.0
-
-    vertices = np.concatenate(
-        [left_vertices, right_vertices, bottom_vertices, tail_vertices],
-        axis=0,
+    # ── left finger ────────────────────────────────────────────
+    left = create_mesh_box(
+        finger_length, finger_width, height,
+        offset_x=depth - finger_length,
+        offset_y=-(width / 2.0 + finger_width),
+        offset_z=-height / 2.0,
     )
+
+    # ── right finger ───────────────────────────────────────────
+    right = create_mesh_box(
+        finger_length, finger_width, height,
+        offset_x=depth - finger_length,
+        offset_y=width / 2.0,
+        offset_z=-height / 2.0,
+    )
+
+    # ── bottom (connects the two fingers) ──────────────────────
+    bottom = create_mesh_box(
+        finger_width, width, height,
+        offset_x=depth - finger_length - finger_width,
+        offset_y=-width / 2.0,
+        offset_z=-height / 2.0,
+    )
+
+    # ── tail (rear extension) ──────────────────────────────────
+    tail = create_mesh_box(
+        tail_length, finger_width, height,
+        offset_x=depth - finger_length - finger_width - tail_length,
+        offset_y=-finger_width / 2.0,
+        offset_z=-height / 2.0,
+    )
+
+    # ── assemble & transform to world frame ────────────────────
+    left_verts = np.asarray(left.vertices)
+    right_verts = np.asarray(right.vertices)
+    bottom_verts = np.asarray(bottom.vertices)
+    tail_verts = np.asarray(tail.vertices)
+
+    left_tri = np.asarray(left.triangles)
+    right_tri = np.asarray(right.triangles) + 8
+    bottom_tri = np.asarray(bottom.triangles) + 16
+    tail_tri = np.asarray(tail.triangles) + 24
+
+    vertices = np.concatenate([left_verts, right_verts, bottom_verts, tail_verts], axis=0)
     vertices = np.dot(rotation_matrix, vertices.T).T + center
-    triangles = np.concatenate(
-        [left_triangles, right_triangles, bottom_triangles, tail_triangles],
-        axis=0,
-    )
-    colors = np.repeat(color[np.newaxis, :], len(vertices), axis=0)
+
+    triangles = np.concatenate([left_tri, right_tri, bottom_tri, tail_tri], axis=0)
+    colors_arr = np.repeat(color[np.newaxis, :], len(vertices), axis=0)
 
     gripper = o3d.geometry.TriangleMesh()
     gripper.vertices = o3d.utility.Vector3dVector(vertices)
     gripper.triangles = o3d.utility.Vector3iVector(triangles)
-    gripper.vertex_colors = o3d.utility.Vector3dVector(colors)
+    gripper.vertex_colors = o3d.utility.Vector3dVector(colors_arr)
     return gripper
