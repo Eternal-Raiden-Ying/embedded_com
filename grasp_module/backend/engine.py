@@ -223,7 +223,11 @@ class RealSenseGraspPredictor:
         return masked_points, masked_colors, scene_points, scene_colors
 
     def _build_input_clouds_from_mapped_data(self, points, colors, u, v, in_view, seg_mask, bbox_mask):
-        """方案 B：根据投影到 color 空间的 UV 坐标 + YOLO mask 划分点云。
+        """方案 B：3D 对齐 + 3D 空间扩张构建场景点云。
+
+        1. 用 seg_mask（已对齐投影）取 target 3D 点
+        2. 在 target 3D bbox 上按 collision_depth_margin 沿 XYZ 均匀扩张
+        3. scene = 扩张 3D bbox 内的点 + color FOV 外同 Z 范围的深度点
 
         Args:
             points: (N, 3) depth 坐标系下的完整 3D 点云。
@@ -231,11 +235,11 @@ class RealSenseGraspPredictor:
             u, v: (N,) 投影到 color 图像的像素坐标。
             in_view: (N,) bool — 点是否落在 color 图像范围内。
             seg_mask: (H, W) YOLO 分割 mask。
-            bbox_mask: (H, W) 扩张后的 bbox mask。
+            bbox_mask: 未使用（保留签名兼容；方案 B 用 3D 扩张替代 2D bbox）。
 
         Returns:
-            masked_points, masked_colors: 目标物体点云（YOLO mask 命中）。
-            scene_points, scene_colors: 碰撞场景点云（bbox 区域 + color FOV 外的 depth 点）。
+            masked_points, masked_colors: 目标物体点云（seg_mask 命中）。
+            scene_points, scene_colors: 碰撞场景点云。
         """
         # 1. 目标点云：投影落在 YOLO seg_mask 内的点
         target_indices = np.zeros(len(points), dtype=bool)
@@ -244,26 +248,31 @@ class RealSenseGraspPredictor:
         masked_points = points[target_indices]
         masked_colors = colors[target_indices]
 
-        # 2. 场景点云：bbox 区域 + color FOV 外的深度点
-        bbox_indices = np.zeros(len(points), dtype=bool)
-        bbox_indices[in_view] = bbox_mask[v[in_view], u[in_view]] > 0
-
+        # 2. 场景点云：target 3D bbox 扩张 + color FOV 外同深度范围的点
         if len(masked_points) > 0:
-            z_margin = getattr(self.cfgs, 'collision_depth_margin', 0.15)
-            z_min = max(0.0, float(masked_points[:, 2].min()) - z_margin)
-            z_max = float(masked_points[:, 2].max()) + z_margin
+            xyz_margin = getattr(self.cfgs, 'collision_depth_margin', 0.15)
+            x_min = float(masked_points[:, 0].min()) - xyz_margin
+            x_max = float(masked_points[:, 0].max()) + xyz_margin
+            y_min = float(masked_points[:, 1].min()) - xyz_margin
+            y_max = float(masked_points[:, 1].max()) + xyz_margin
+            z_min = max(0.0, float(masked_points[:, 2].min()) - xyz_margin)
+            z_max = float(masked_points[:, 2].max()) + xyz_margin
             z_max = min(z_max, getattr(self.cfgs, 'scene_max_depth', 3.0))
 
-            # color FOV 外的深度点全部加入碰撞云（方案 B 的核心优势）
-            out_of_view_mask = ~in_view
-            scene_mask = bbox_indices | out_of_view_mask
-            scene_mask &= (points[:, 2] >= z_min) & (points[:, 2] <= z_max)
+            # 3D bbox 内的所有点
+            in_3d_bbox = (
+                (points[:, 0] >= x_min) & (points[:, 0] <= x_max) &
+                (points[:, 1] >= y_min) & (points[:, 1] <= y_max) &
+                (points[:, 2] >= z_min) & (points[:, 2] <= z_max)
+            )
+            # color FOV 外但在同 Z 范围的深度周边点
+            out_of_view_in_z = (~in_view) & (points[:, 2] >= z_min) & (points[:, 2] <= z_max)
 
-            scene_points = points[scene_mask]
-            scene_colors = colors[scene_mask]
+            scene_points = points[in_3d_bbox | out_of_view_in_z]
+            scene_colors = colors[in_3d_bbox | out_of_view_in_z]
         else:
-            scene_points = points[bbox_indices]
-            scene_colors = colors[bbox_indices]
+            scene_points = np.empty((0, 3), dtype=np.float32)
+            scene_colors = np.empty((0, 3), dtype=np.float32)
 
         return masked_points, masked_colors, scene_points, scene_colors
 
