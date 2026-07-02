@@ -85,7 +85,7 @@ POST /api/v1/release       → 释放资源
 
 ```json
 {
-  "format_version": "1.1",
+  "format_version": "1.2",
   "status": "success | reposition_required | failure",
   "reason": "no_detection | no_grasp_detected | no_feasible_grasp | score_below_threshold | null",
   "message": "人类可读的调试信息",
@@ -245,7 +245,7 @@ curl -X POST http://127.0.0.1:6006/api/v1/predict \
 
 ```json
 {
-  "format_version": "1.1",
+  "format_version": "1.2",
   "status": "success",
   "reason": null,
   "message": "YOLO detected class_id=47, 11 feasible grasps, 1 passed score filter",
@@ -284,7 +284,7 @@ curl -X POST http://127.0.0.1:6006/api/v1/predict \
 
 ```json
 {
-  "format_version": "1.1",
+  "format_version": "1.2",
   "status": "failure",
   "reason": "no_detection",
   "message": "YOLO did not detect class_id=47",
@@ -309,7 +309,7 @@ curl -X POST http://127.0.0.1:6006/api/v1/predict \
 
 ```json
 {
-  "format_version": "1.1",
+  "format_version": "1.2",
   "status": "failure",
   "reason": "no_grasp_detected",
   "message": "YOLO detected class_id=47 (conf=0.1338, 1 instance(s)) but GraspNet produced no grasps",
@@ -334,7 +334,7 @@ curl -X POST http://127.0.0.1:6006/api/v1/predict \
 
 ```json
 {
-  "format_version": "1.1",
+  "format_version": "1.2",
   "status": "reposition_required",
   "reason": "score_below_threshold",
   "message": "YOLO detected class_id=47, 14 feasible grasps, but all below the minimum score threshold of 0.3 (best: 0.2100)",
@@ -361,7 +361,7 @@ curl -X POST http://127.0.0.1:6006/api/v1/predict \
 
 ```json
 {
-  "format_version": "1.1",
+  "format_version": "1.2",
   "status": "success",
   "reason": null,
   "message": "YOLO detected class_id=55, 5 feasible grasps, 4 passed score filter",

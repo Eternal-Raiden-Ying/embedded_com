@@ -335,8 +335,8 @@ def main():
     default_overrides = {
         "debug": True,
         "dump_dir": os.path.join(CURRENT_DIR, "debug_res"),
-        "rgb_path": os.path.join(CURRENT_DIR, "data", "color", "color_00000.png"),
-        "depth_path": os.path.join(CURRENT_DIR, "data", "depth", "depth_raw_00000.png"),
+        "rgb_path": os.path.join(PARENT_DIR, "log", "predict_images", "latest_rgb.jpg"),
+        "depth_path": os.path.join(PARENT_DIR, "log", "predict_images", "latest_depth.png"),
         "camera_metadata": os.path.join(PARENT_DIR, "config", "realsense_metadata.json"),
         "yolo_weights_dir": os.path.join(PARENT_DIR, "weights"),
     }
@@ -354,14 +354,14 @@ def main():
     parser.add_argument("--depth_max_mm", type=int, default=2000, help="Maximum valid depth in millimeters; larger values are zeroed out")
     parser.set_defaults(depth_postprocess=True)
     parser.add_argument("--disable_depth_postprocess", dest="depth_postprocess", action="store_false", help="Disable simple depth postprocessing in the test chain")
-    parser.add_argument("--depth_smooth_method", type=str, default="median", choices=["median", "bilateral", "none"], help="Smoothing: none(skip), median(only median), bilateral(median + bilateral)")
+    parser.add_argument("--depth_smooth_method", type=str, default="bilateral", choices=["median", "bilateral", "none"], help="Smoothing: none(skip), median(only median), bilateral(median + bilateral)")
     parser.add_argument("--depth_smooth_kernel", type=int, default=5, help="Smoothing kernel size for valid depth pixels; odd values only")
     parser.add_argument("--depth_bilateral_d", type=int, default=9, help="Bilateral filter diameter (pixel neighborhood)")
     parser.add_argument("--depth_bilateral_sigma_color", type=float, default=75.0, help="Bilateral sigmaColor (depth value similarity)")
-    parser.add_argument("--depth_bilateral_sigma_space", type=float, default=75.0, help="Bilateral sigmaSpace (spatial distance)")
+    parser.add_argument("--depth_bilateral_sigma_space", type=float, default=30.0, help="Bilateral sigmaSpace (spatial distance)")
     parser.add_argument("--depth_hole_fill_kernel", type=int, default=5, help="Median kernel size used when filling zero-depth holes; odd values only")
     parser.add_argument("--depth_hole_fill_iterations", type=int, default=2, help="Number of small-hole filling iterations")
-    parser.add_argument("--fallback_class_ids_csv", type=str, default="32,55", help="Comma-separated fallback class ids used when the primary class is not detected")
+    parser.add_argument("--fallback_class_ids_csv", type=str, default="", help="Comma-separated fallback class ids used when the primary class is not detected")
     parser.add_argument("--fallback_probe_conf", type=float, default=0.10, help="YOLO confidence used for class probing and fallback routing")
     cfgs = parser.parse_args()
 

@@ -14,8 +14,8 @@ try:
     from grasp_module.config.predictor_config import build_predictor_arg_parser
     from grasp_module.test.utils.bag_io import (
         build_point_cloud_frame_summary,
-        collect_bag_candidates,
-        save_point_cloud_frame_outputs,
+        collect_bag_depth_only_candidates,
+        save_depth_only_frame_outputs,
     )
     from grasp_module.test.utils.io_utils import ensure_dir, log_kv_block, save_json
 except ImportError as e:
@@ -35,7 +35,7 @@ def main():
         "camera_metadata": os.path.join(PARENT_DIR, "config", "realsense_metadata.json"),
     }
     parser = build_predictor_arg_parser(
-        description="Export aligned RGB-D frames and full scene point clouds from RealSense bag",
+        description="Export depth-only 3D point clouds from RealSense bag (no RGB/alignment)",
         default_overrides=default_overrides,
     )
     parser.add_argument("--bag_file", type=str, required=True, help="Path to RealSense .bag file")
@@ -78,10 +78,10 @@ def main():
         },
     )
 
-    selected_frames, metadata_path, _camera_info = collect_bag_candidates(
+    selected_frames, metadata_path, _camera_info = collect_bag_depth_only_candidates(
         cfgs,
         cfgs.output_dir,
-        metadata_description="Camera intrinsics exported from bag for hand-eye debug",
+        metadata_description="Camera intrinsics exported from bag for depth-only hand-eye debug",
     )
     if not selected_frames:
         raise RuntimeError("No valid frames found in the bag after depth filtering.")
@@ -95,7 +95,7 @@ def main():
     for rank, frame_result in enumerate(selected_frames, start=1):
         frame_name = f"rank_{rank:02d}_frame_{frame_result['frame_index']:05d}"
         frame_dir = ensure_dir(os.path.join(cfgs.output_dir, frame_name))
-        filtered_cloud_path, postprocessed_cloud_path = save_point_cloud_frame_outputs(frame_dir, frame_result)
+        filtered_cloud_path, postprocessed_cloud_path = save_depth_only_frame_outputs(frame_dir, frame_result)
         frame_summary = build_point_cloud_frame_summary(
             frame_result,
             filtered_cloud_path,

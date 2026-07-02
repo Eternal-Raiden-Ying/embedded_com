@@ -156,3 +156,41 @@ def choose_detection_frame(probed_frames):
         return best_multi, "best_multi_detection"
 
     return None, "no_detection"
+
+
+def probe_all_classes(model, bgr_image, conf=0.25, iou=0.7):
+    """不限 class_id，预测 YOLO 能检测到的所有目标并绘制 overlay。"""
+    results = model.predict(
+        source=bgr_image,
+        conf=conf,
+        iou=iou,
+        save=False,
+        verbose=False,
+    )
+    result = results[0]
+    overlay_img = result.plot(boxes=True, labels=True)
+
+    info = {"found": False, "count": 0, "class_ids": [], "confs": [], "class_names": []}
+    if result.boxes is not None and len(result.boxes) > 0:
+        cls_ids = result.boxes.cls.detach().cpu().numpy().astype(int)
+        confs = result.boxes.conf.detach().cpu().numpy()
+        info = {
+            "found": True,
+            "count": int(len(cls_ids)),
+            "class_ids": [int(c) for c in cls_ids],
+            "confs": [float(c) for c in confs],
+            "class_names": [result.names.get(int(c), str(int(c))) for c in cls_ids],
+        }
+
+    return {"overlay_img": overlay_img, "info": info}
+
+
+def choose_best_frame_all_classes(probed_frames):
+    """不限 class 的帧选择：按检测数降序，平局按最高置信度。"""
+    detected = [item for item in probed_frames if item["info"]["found"]]
+    if not detected:
+        return None, "no_detection"
+
+    detected.sort(key=lambda item: (item["info"]["count"], max(item["info"]["confs"]) if item["info"]["confs"] else 0), reverse=True)
+    best = detected[0]
+    return best, f"top_{best['info']['count']}_detections"

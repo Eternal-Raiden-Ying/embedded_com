@@ -16,7 +16,7 @@ class PredictorConfig:
     m_point: int = 2048
     graspness_threshold: float = 0.2
     grasp_max_width: float = 0.08
-    num_point: int = 25000
+    num_point: int = 20000
     voxel_size: float = 0.005
     collision_thresh: float = 0.01
     voxel_size_cd: float = 0.01
@@ -32,15 +32,15 @@ class PredictorConfig:
     depth_bilateral_d: int = 9
     depth_bilateral_sigma_color: float = 75.0
     depth_bilateral_sigma_space: float = 30.0
-    depth_min_mm: int = 1
+    depth_min_mm: int = 50
     depth_max_mm: int = 2000
 
     # ---- Thin-shell point cloud augmentation ----
     shell_enable: bool = True
     shell_thickness_m: float = 0.02
-    shell_steps: int = 10
-    shell_edge_threshold_mm: int = 20
-    shell_edge_kernel: int = 1
+    shell_steps: int = 2
+    shell_edge_threshold_mm: int = 30
+    shell_edge_kernel: int = 2
 
     debug_grasp_count: int = 15
 
@@ -55,7 +55,7 @@ class PredictorConfig:
     # ---- Collision detection occupancy parameters ----
     # Used by ModelFreeCollisionDetector. Independent of the debug mesh above.
     collision_finger_width_m: float = 0.02
-    collision_finger_length_m: float = 0.04
+    collision_finger_length_m: float = 0.05
     collision_height_override_m: float = -1.0
 
     rgb_path: str = os.path.join(MODULE_DIR, 'test', 'data', 'color', 'color_00000.png')
@@ -65,12 +65,12 @@ class PredictorConfig:
     yolo_model: str = 'yolo26l-finetune.pt'
     yolo_weights_dir: str = os.path.join(MODULE_DIR, 'weights')
     yolo_class_id: int = 1
-    yolo_conf: float = 0.25
+    yolo_conf: float = 0.1
     yolo_iou: float = 0.6
     bbox_expand_scale: float = 2.0
     forward_bbox_scale: float = 1.05
     collision_depth_margin: float = 0.15
-    protocol_depth_base: float = -0.03  # 0.02
+    protocol_depth_base: float = -0.02  # 0.02
     protocol_feasible_distance_cm: float = 5.0
     protocol_min_score: float = 0.0
     response_max_targets: int = 1
@@ -80,8 +80,8 @@ class PredictorConfig:
     reference_line_x_cm: float = 1.5
     reference_line_y_cm: float = 0.0
     reposition_max_distance_cm: float = 20.0
-    robot_cam_rotation_csv: str = '0.06860923,-0.33156783,0.94093334,-0.99678667,0.01630074,0.07842593,-0.04134143,-0.94329055,-0.32938401'
-    robot_cam_translation_cm_csv: str = '-13.7205499,-6.83104687,35.19270402'
+    robot_cam_rotation_csv: str = '0.05676012,-0.35245625,0.93410539,-0.99766213,-0.05569021,0.03960909,0.03806005,-0.93416979,-0.35479324'
+    robot_cam_translation_cm_csv: str = '-12.46441319,-8.01981063,36.15123249'
     robot_calibration_translation_cm_csv: str = ''
 
     debug: bool = False

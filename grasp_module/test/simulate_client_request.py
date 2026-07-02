@@ -97,7 +97,7 @@ def main():
     parser.add_argument('--server_url', type=str, default='http://127.0.0.1:6006', help='Base server URL')
     parser.add_argument('--robot_id', type=str, default='edge-sim', help='Robot id for metadata')
     parser.add_argument('--cmd', type=str, default='predict', help='Command field in metadata')
-    parser.add_argument('--class_id', type=int, default=46, help='Target class id for internal YOLO segmentation')
+    parser.add_argument('--class_id', type=int, default=3, help='Target class id for internal YOLO segmentation')
     parser.add_argument('--skip_init', action='store_true', help='Skip /init call')
     parser.add_argument('--skip_release', action='store_true', help='Skip /release call')
     parser.add_argument('--timeout', type=float, default=120.0, help='HTTP timeout in seconds')
