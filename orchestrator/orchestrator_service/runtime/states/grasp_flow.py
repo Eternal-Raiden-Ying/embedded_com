@@ -121,16 +121,27 @@ class GraspFlowMixin:
             return self.controller.stop_cmd("GRASP")
         if now_m > self.ctx.grasp_timeout_mono:
             self._log_grasp_flow_tick_debug("AWAITING_RESPOND", "remote_result", now_m)
-            self._enter_error_recovery("grasp respond timeout")
+            reason = self._normalize_grasp_failed_reason(str(self.ctx.grasp_reason or ""))
+            self._enter_error_recovery(reason or "grasp respond timeout")
             return self.controller.stop_cmd("GRASP")
         if self.ctx.grasp_status == "WAITING_RESPONSE":
+            target_obs = self.ctx.last_target_obs
             self._queue_vision_req(
                 make_grasp_req(
-                    target=self.ctx.active_target or "",
-                    class_id=target_to_class_id(self.ctx.active_target or ""),
+                    target=self.ctx.class_name or self.ctx.canonical_target or self.ctx.active_target or "",
+                    class_id=int(self.ctx.class_id) if self.ctx.class_id is not None else target_to_class_id(self.ctx.active_target or ""),
                     session_id=self.ctx.active_session_id,
                     epoch=self.ctx.active_epoch,
                     op="RESPOND",
+                    payload={
+                        "task_id": self.ctx.active_task_id,
+                        "raw_target": self.ctx.raw_target,
+                        "canonical_target": self.ctx.canonical_target or self.ctx.active_target,
+                        "class_name": self.ctx.class_name,
+                        "local_target_bbox_xyxy": getattr(target_obs, "matched_bbox", None) or getattr(target_obs, "bbox", None) if target_obs is not None else None,
+                        "local_target_conf": getattr(target_obs, "matched_conf", None) if target_obs is not None else None,
+                        "local_target_frame_id": getattr(target_obs, "frame_id", None) if target_obs is not None else None,
+                    },
                 ),
                 force=True,
             )
@@ -144,7 +155,8 @@ class GraspFlowMixin:
             return self._consume_ready_grasp_result(now_m, "AWAITING_RESULT")
         if now_m > self.ctx.grasp_timeout_mono:
             self._log_grasp_flow_tick_debug("AWAITING_RESULT", "remote_result", now_m)
-            self._enter_error_recovery("grasp result timeout")
+            reason = self._normalize_grasp_failed_reason(str(self.ctx.grasp_reason or ""))
+            self._enter_error_recovery(reason or "grasp result timeout")
             return self.controller.stop_cmd("GRASP")
 
         status = str(self.ctx.grasp_status or "").upper()
@@ -245,17 +257,27 @@ class GraspFlowMixin:
         elapsed = now_m - self.ctx.grasp_reposition_start_mono
 
         if total_distance < 0.5 or (duration - elapsed) <= 0.08:
+            target_obs = self.ctx.last_target_obs
             self._active_reposition_proposal = None
             self.ctx.grasp_reposition_proposal = None
             self.ctx.grasp_substate = "AWAITING_RESPOND"
             self.ctx.grasp_timeout_mono = now_m + _GRASP_RESPOND_TIMEOUT_S
             self._queue_vision_req(
                 make_grasp_req(
-                    target=self.ctx.active_target or "",
-                    class_id=target_to_class_id(self.ctx.active_target or ""),
+                    target=self.ctx.class_name or self.ctx.canonical_target or self.ctx.active_target or "",
+                    class_id=int(self.ctx.class_id) if self.ctx.class_id is not None else target_to_class_id(self.ctx.active_target or ""),
                     session_id=self.ctx.active_session_id,
                     epoch=self.ctx.active_epoch,
                     op="START",
+                    payload={
+                        "task_id": self.ctx.active_task_id,
+                        "raw_target": self.ctx.raw_target,
+                        "canonical_target": self.ctx.canonical_target or self.ctx.active_target,
+                        "class_name": self.ctx.class_name,
+                        "local_target_bbox_xyxy": getattr(target_obs, "matched_bbox", None) or getattr(target_obs, "bbox", None) if target_obs is not None else None,
+                        "local_target_conf": getattr(target_obs, "matched_conf", None) if target_obs is not None else None,
+                        "local_target_frame_id": getattr(target_obs, "frame_id", None) if target_obs is not None else None,
+                    },
                 ),
                 force=True,
             )

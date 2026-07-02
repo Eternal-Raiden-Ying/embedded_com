@@ -294,6 +294,13 @@ class RuntimeSupervisor:
             except Exception:
                 ok = False
         else:
+            keep_warm = False
+            try:
+                keep_warm = bool(getattr(self.remote_manager, "keep_remote_warm", lambda: False)())
+            except Exception:
+                keep_warm = False
+            if keep_warm:
+                return ok
             try:
                 self.remote_manager.stop_runtime()
             except Exception:

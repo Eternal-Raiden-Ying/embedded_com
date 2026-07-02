@@ -17,7 +17,7 @@ class RemoteProfile:
     action: str = ""         # task only: "init" | "predict" | "release"
     max_retries: int = 1     # task only
     timeout_s: float = 10.0
-    rgb_encoding: str = "jpeg"
+    rgb_encoding: str = "png"
     depth_encoding: str = "png"
     rgb_quality: int = 90
     depth_compression: int = 3

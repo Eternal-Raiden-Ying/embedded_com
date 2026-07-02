@@ -35,6 +35,15 @@ vision:
     release_model_on_idle: false # Do not release model on normal task idle
     keep_model_hot_in_standby: true # Keep YOLO model in memory during standby
     enable_infer_during_hot_standby: false # Run inference in standby
+    remote_payload_archive_enable: true # Archive remote predict payloads for replay
+    remote_payload_archive_max_keep: 20 # Max remote predict payload directories per run
+    remote_rgb_correction_enable: true # Correct remote RGB before cloud predict
+    remote_rgb_correction_mode: "auto_level_gamma" # Remote RGB correction mode
+    remote_rgb_gamma: 1.8 # Gamma brighten for remote RGB luminance
+    remote_rgb_percentile_low: 1.0 # Low percentile for remote RGB auto level
+    remote_rgb_percentile_high: 99.0 # High percentile for remote RGB auto level
+    remote_rgb_max_gain: 3.0 # Max luminance gain for remote RGB correction
+    remote_rgb_save_raw: true # Archive raw remote RGB alongside corrected upload
     capability_placeholder: false # Capability sink indicator
     heartbeat_enabled: false # Heartbeat message enabled
     heartbeat_interval_s: 5.0 # Heartbeat message interval
@@ -127,8 +136,8 @@ vision:
     final_fixed_roi_enable: true # Use fixed center-low ROI during close/final depth control
     final_fixed_roi_x0_norm: 0.42 # Fixed final ROI left edge in depth-frame normalized coords
     final_fixed_roi_x1_norm: 0.58 # Fixed final ROI right edge in depth-frame normalized coords
-    final_fixed_roi_y0_norm: 0.44 # Fixed final ROI top edge in depth-frame normalized coords
-    final_fixed_roi_y1_norm: 0.71 # Fixed final ROI bottom edge in depth-frame normalized coords
+    final_fixed_roi_y0_norm: 0.69 # Fixed final ROI top edge in depth-frame normalized coords
+    final_fixed_roi_y1_norm: 0.90 # Fixed final ROI bottom edge in depth-frame normalized coords
     final_fixed_roi_min_valid_ratio: 0.03 # Valid depth ratio for fixed final ROI sampler
     final_fixed_roi_min_sample_count: 32 # Valid depth sample count for fixed final ROI sampler
     final_depth_debug_enable: false # Keep low-level ROI sampler diagnostics out of main payload/logs
@@ -204,7 +213,7 @@ vision:
           enabled: true
           kind: task
           action: init
-          base_url: "10.11.36.181:6006"
+          base_url: "http://10.11.36.181:6006"
           robot_id: "sc171_car_01"
           metadata:
             robot_id: "sc171_car_01"
@@ -359,6 +368,10 @@ orchestrator:
     near_slow_max_vy_mps: 0.040 # Near-table lateral speed cap
     near_slow_max_wz_radps: 0.04 # Near-table yaw speed cap
     final_servo_enter_p10_m: 0.45 # ROI depth threshold to enter final servo
+    final_enter_depth_threshold_m: 0.45 # Final phase entry threshold
+    final_fixed_roi_stop_threshold_m: 0.50 # Fixed ROI median stop threshold in final phase
+    final_fixed_roi_stop_stable_count_required: 3 # Fixed ROI stop frames required
+    remote_init_min_interval_s: 30.0 # Minimum interval between remote init warmups
     edge_final_enter_margin_m: 0.06 # Edge distance margin to enter final servo
     edge_final_stop_margin_m: 0.02 # Edge distance margin for final stop confirmation
     close_range_enter_p10_m: 0.55 # ROI depth threshold to latch close range
@@ -374,7 +387,7 @@ orchestrator:
     roi_final_probe_vx_mps: 0.015 # ROI final probe forward speed
     roi_final_missing_probe_vx_mps: 0.008 # ROI final probe speed when depth is missing
     roi_final_missing_hold_s: 0.8 # ROI missing hold before zero forward
-    depth_envelope_stop_p10_m: 0.35 # Depth envelope hard stop threshold
+    depth_envelope_stop_p10_m: 0.42 # Depth envelope hard stop threshold
     depth_envelope_slow_p10_m: 0.50 # Depth envelope slow threshold
     depth_envelope_mid_p10_m: 0.70 # Depth envelope mid threshold
     depth_envelope_slow_vx_mps: 0.012 # Depth envelope slow forward cap

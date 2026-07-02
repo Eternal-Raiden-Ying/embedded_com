@@ -34,6 +34,7 @@ from ..ipc.protocol import (
     make_task_ack,
 )
 from ..ipc.transport import AsyncJsonlClientSender, JsonlClientSender, JsonlInboundServer
+from ..utils.target_utils import supported_targets
 from .common import RunLogger, ensure_dir, safe_dump
 from .state_machine import OrchestratorCore
 
@@ -479,6 +480,12 @@ class OrchestratorService(BaseModule):
         text = str(line or "")
         if not text.startswith("[MOTION]"):
             return self._operator_emit(text)
+        if (
+            text.startswith("[MOTION][STOP]")
+            and "reason=safety" in text
+            and str(getattr(self.core.ctx.state, "value", self.core.ctx.state) or "") == "IDLE"
+        ):
+            return self.operator_console.emit_rate_limited("motion_stop_idle_safety", text, 1.0)
         key = re.sub(r"\bseq=\d+\b", "seq=*", text)
         now = time.time()
         if key == self._last_motion_adapter_log_key and (now - self._last_motion_adapter_log_emit_ts) < 5.0:
@@ -1741,6 +1748,12 @@ class OrchestratorService(BaseModule):
         if expects_vel and not has_vel:
             state = str(payload.get("state") or self.core.ctx.state.value)
             reason = str(payload.get("reason") or "no_vel_line").strip() or "no_vel_line"
+            if str(payload.get("control_source") or payload.get("motion_intent_type") or "") == "manual_drive":
+                self._manual_log(
+                    "manual_override_sent",
+                    {"state": state, "reason": reason, "seq": payload.get("seq"), "cmd_id": self.core.ctx.manual_drive_last_cmd_id},
+                )
+                return
             self.operator_console.emit_error(
                 f"no_vel_sent:{state}:{reason}",
                 f"[ORCH] WARN no_vel_sent state={state} reason={reason}",
@@ -2226,7 +2239,18 @@ class OrchestratorService(BaseModule):
         self.log_ipc("TX", "task_ack", f"skipped_{skip_reason}", {"cmd_id": cmd.cmd_id, "accepted": accepted})
 
     def _send_task_ack(self, cmd: TaskCmd, accepted: bool, reason: str):
-        ack = make_task_ack(cmd, accepted=accepted, reason=reason, state=self.core.ctx.state.value)
+        extra = getattr(self.core.ctx, "last_task_ack_extra", None)
+        extra = dict(extra or {}) if isinstance(extra, dict) else {}
+        if cmd.intent == "FIND":
+            extra.setdefault("raw_target", str(cmd.target or ""))
+            if accepted:
+                extra.setdefault("canonical_target", getattr(self.core.ctx, "canonical_target", "") or getattr(self.core.ctx, "active_target", "") or "")
+                extra.setdefault("class_name", getattr(self.core.ctx, "class_name", "") or "")
+                extra.setdefault("class_id", getattr(self.core.ctx, "class_id", None))
+                extra.setdefault("task_id", getattr(self.core.ctx, "active_task_id", "") or cmd.cmd_id)
+            else:
+                extra.setdefault("supported_targets", supported_targets())
+        ack = make_task_ack(cmd, accepted=accepted, reason=reason, state=self.core.ctx.state.value, **extra)
         skip_reason = self._task_ack_out_unavailable_reason()
         if skip_reason:
             self._record_task_ack_skip(cmd, ack, accepted, reason, skip_reason)
@@ -2279,6 +2303,31 @@ class OrchestratorService(BaseModule):
 
     def _manual_log(self, event: str, payload: Dict[str, Any], level: str = "info") -> None:
         self.run_logger.write_jsonl(event, payload)
+        if event == "manual_drive_writer_tick":
+            return
+        if event == "manual_drive_writer_publish":
+            prev = getattr(self, "_manual_drive_last_console_publish", None)
+            curr = dict(payload or {})
+            remaining_ms = int(curr.get("remaining_ms", 0) or 0)
+            first = prev is None or curr.get("cmd_id") != prev.get("cmd_id") or curr.get("generation") != prev.get("generation")
+            last = remaining_ms <= 100
+            speed_change = False
+            direction_change = False
+            if isinstance(prev, dict) and not first:
+                for key in ("vx", "vy", "wz"):
+                    try:
+                        curr_v = float(curr.get(key, 0.0) or 0.0)
+                        prev_v = float(prev.get(key, 0.0) or 0.0)
+                    except (TypeError, ValueError):
+                        speed_change = True
+                        continue
+                    if abs(curr_v - prev_v) > 0.005:
+                        speed_change = True
+                    if (curr_v > 1e-9 and prev_v < -1e-9) or (curr_v < -1e-9 and prev_v > 1e-9):
+                        direction_change = True
+            self._manual_drive_last_console_publish = curr
+            if not (first or last or direction_change or speed_change):
+                return
         self.log(level, "manual_control", event, payload)
 
     def _clear_manual_drive_active(self, *, bump_generation: bool = True) -> None:
@@ -3436,7 +3485,14 @@ class OrchestratorService(BaseModule):
         return "target_search_hold"
 
     def _emit_target_obs_missing_warning(self) -> None:
-        if str(getattr(self.core.ctx.state, "value", self.core.ctx.state) or "") != "EDGE_SLIDE_SEARCH":
+        state = str(getattr(self.core.ctx.state, "value", self.core.ctx.state) or "")
+        if state not in {"SEARCH_TARGET_INIT", "EDGE_SLIDE_SEARCH"}:
+            if state not in {"FINAL_SLOW_STOP", "AT_TABLE_EDGE"}:
+                self.operator_console.emit_rate_limited(
+                    "target_preview_not_started",
+                    f"[ORCH] TARGET_PREVIEW not_started state={state}",
+                    self.operator_console.default_interval_s,
+                )
             return
         try:
             elapsed = self.core._state_elapsed()
@@ -3449,6 +3505,13 @@ class OrchestratorService(BaseModule):
         except Exception:
             fresh = self.core.ctx.last_target_obs
         if fresh is not None:
+            reason = str(getattr(self.core.ctx, "target_lateral_align_reason", "") or "bbox_filtered")
+            if not bool(getattr(fresh, "found", False)):
+                self.operator_console.emit_rate_limited(
+                    "target_obs_bbox_filtered",
+                    f"[ORCH] TARGET_PREVIEW bbox_filtered reason={reason}",
+                    self.operator_console.default_interval_s,
+                )
             return
         last_obs = getattr(self.core.ctx, "last_target_obs", None)
         if last_obs is not None and getattr(last_obs, "ts", 0.0):
@@ -3457,9 +3520,11 @@ class OrchestratorService(BaseModule):
             age = max(0.0, float(elapsed))
         desired = str(getattr(self.core.ctx, "desired_vision_mode", "") or "n/a").strip() or "n/a"
         confirmed = str(getattr(self.core.ctx, "confirmed_vision_mode", "") or "n/a").strip() or "n/a"
+        target_hz = self._rate_hz(self._target_obs_rate_ts)
+        reason = "find_object_sent_target_obs_hz_0" if desired.upper() == "FIND_OBJECT" and target_hz <= 0.0 else "waiting_find_object"
         self.operator_console.emit_rate_limited(
             "target_obs_missing",
-            f"[ORCH] WARN target_obs_missing desired_mode={desired} confirmed_mode={confirmed} age={age:.1f}s",
+            f"[ORCH] WARN target_obs_missing reason={reason} desired_mode={desired} confirmed_mode={confirmed} target_obs_hz={target_hz:.2f} age={age:.1f}s",
             self.operator_console.default_interval_s,
         )
 

@@ -43,6 +43,11 @@ class RuntimeContext:
 
     task_intent: str = ""
     active_target: Optional[str] = None
+    raw_target: str = ""
+    canonical_target: str = ""
+    class_name: str = ""
+    class_id: Optional[int] = None
+    active_task_id: str = ""
     active_session_id: str = ""
     active_epoch: int = 0
     active_req_id: str = ""
@@ -510,9 +515,23 @@ class RuntimeContext:
     def clear_task_context(self):
         self.task_intent = ""
         self.active_target = None
+        self.raw_target = ""
+        self.canonical_target = ""
+        self.class_name = ""
+        self.class_id = None
+        self.active_task_id = ""
         self.active_session_id = ""
         self.active_epoch = 0
         self.active_req_id = ""
+        self.last_vision_req_final_phase_active = False
+        self.last_vision_req_state = ""
+        self.last_vision_req_mono = 0.0
+        self.last_final_vision_req_mono = 0.0
+        self.last_final_vision_req_final_phase_active = False
+        self.last_final_vision_req_state = ""
+        self.final_vision_req_enter_logged = False
+        self.final_fixed_roi_missing_since_mono = 0.0
+        self.final_fixed_roi_missing_grace_until_mono = 0.0
         self.desired_vision_stage = ""
         self.desired_vision_mode = ""
         self.confirmed_vision_stage = ""

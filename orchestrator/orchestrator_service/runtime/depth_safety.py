@@ -64,6 +64,17 @@ def _current_obs_depth(obs: Any) -> Tuple[Optional[float], str]:
     return None, ""
 
 
+def _safety_source_from_depth_source(source: str) -> str:
+    text = str(source or "").lower()
+    if "final_fixed_roi" in text or "fixed_roi" in text:
+        return "final_fixed_roi"
+    if "table_roi_depth_p10" in text or "roi_final_p10" in text:
+        return "table_roi_p10"
+    if "depth_p10" in text:
+        return "edge_depth"
+    return "unknown"
+
+
 def resolve_best_depth_p10(ctx: Any, obs: Any, summary: Dict[str, Any], now_mono: float, depth_missing_hold_s: float) -> Dict[str, Any]:
     current_depth, current_source = _current_obs_depth(obs)
     current_valid = current_depth is not None
@@ -281,11 +292,13 @@ def apply_close_range_depth_safety_gate(ctx: Any, obs: Any, result: ArbitrationR
             blocked_by = reason
 
     summary.update(depth_info)
+    safety_source = _safety_source_from_depth_source(str(depth_info.get("best_depth_source") or ""))
     summary.update(
         {
             "depth_safety_applied": True,
             "depth_safety_state": state,
             "depth_safety_reason": reason,
+            "safety_source": safety_source,
             "vx_before_depth_gate": vx_raw,
             "vx_after_depth_gate": float(vx),
             "vy_before_depth_gate": vy_raw,

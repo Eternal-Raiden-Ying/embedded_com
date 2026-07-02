@@ -27,7 +27,7 @@ from ..utils.table_roi import table_detection_debug
 
 CapabilitySink = Optional[Callable[[str, Dict[str, Any]], None]]
 
-_FINAL_FIXED_ROI_STATES = {"FINAL_SLOW_STOP", "FINAL_LOCK"}
+_FINAL_FIXED_ROI_STATES = {"FINAL_SLOW_STOP", "FINAL_LOCK", "FINAL_LOCK_HOLD"}
 
 
 def _is_final_phase_for_fixed_roi(runtime_status: Dict[str, Any]) -> bool:
@@ -38,6 +38,10 @@ def _is_final_phase_for_fixed_roi(runtime_status: Dict[str, Any]) -> bool:
         or ""
     ).strip().upper()
     if state in _FINAL_FIXED_ROI_STATES:
+        return True
+    if bool((runtime_status or {}).get("final_roi_mode_latched", False)):
+        return True
+    if bool((runtime_status or {}).get("final_distance_servo_active", False)):
         return True
     return bool((runtime_status or {}).get("final_phase_active", False))
 
@@ -3772,18 +3776,16 @@ class TableEdgeManager:
             fixed_roi_xyxy = None
             if isinstance(depth, np.ndarray) and depth.ndim == 2 and depth.size > 0:
                 h_depth, w_depth = depth.shape[:2]
-                x0_norm = float(getattr(self.cfg.table_edge, "final_fixed_roi_x0_norm", 0.40))
-                x1_norm = float(getattr(self.cfg.table_edge, "final_fixed_roi_x1_norm", 0.60))
-                y0_norm = float(getattr(self.cfg.table_edge, "final_fixed_roi_y0_norm", 0.45))
-                y1_norm = min(float(getattr(self.cfg.table_edge, "final_fixed_roi_y1_norm", 0.62)), 0.65)
+                x0_norm = max(0.0, min(1.0, float(getattr(self.cfg.table_edge, "final_fixed_roi_x0_norm", 0.42))))
+                x1_norm = max(0.0, min(1.0, float(getattr(self.cfg.table_edge, "final_fixed_roi_x1_norm", 0.58))))
+                y0_norm = max(0.0, min(1.0, float(getattr(self.cfg.table_edge, "final_fixed_roi_y0_norm", 0.69))))
+                y1_norm = max(0.0, min(1.0, float(getattr(self.cfg.table_edge, "final_fixed_roi_y1_norm", 0.90))))
+                x0_norm, x1_norm = sorted((x0_norm, x1_norm))
+                y0_norm, y1_norm = sorted((y0_norm, y1_norm))
                 x0 = max(0, min(w_depth, int(round(w_depth * x0_norm))))
                 x1 = max(0, min(w_depth, int(round(w_depth * x1_norm))))
                 y0 = max(0, min(h_depth, int(round(h_depth * y0_norm))))
                 y1 = max(0, min(h_depth, int(round(h_depth * y1_norm))))
-                if h_depth > 60:
-                    y1 = min(y1, max(0, h_depth - 60))
-                x0, x1 = sorted((x0, x1))
-                y0, y1 = sorted((y0, y1))
                 if x1 > x0 and y1 > y0:
                     fixed_roi_xyxy = [int(x0), int(y0), int(x1), int(y1)]
             payload["fixed_roi_enabled"] = bool(fixed_roi_enabled)

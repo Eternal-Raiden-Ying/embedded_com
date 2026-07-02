@@ -87,7 +87,8 @@ class Stm32MotionAdapter:
         previous = self._last_wire_mode
         self._last_wire_mode = None
         self._wire_mode_retry_count = 0
-        self._log(f"[MOTION][MODE] uart_mode_latch_reset previous={previous or 'none'} reason={reason}")
+        if previous is not None:
+            self._log(f"[MOTION][MODE] uart_mode_latch_reset previous={previous} reason={reason}")
 
     def reset_wire_mode_latch(self, reason: str = "") -> None:
         self._reset_wire_mode_latch(reason=reason)

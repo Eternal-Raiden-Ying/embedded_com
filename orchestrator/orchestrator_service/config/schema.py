@@ -206,6 +206,10 @@ class ControlThresholds:
     near_slow_max_vy_mps: float = 0.040
     near_slow_max_wz_radps: float = 0.04
     final_servo_enter_p10_m: float = 0.45
+    final_enter_depth_threshold_m: float = 0.45
+    final_fixed_roi_stop_threshold_m: float = 0.50
+    final_fixed_roi_stop_stable_count_required: int = 3
+    remote_init_min_interval_s: float = 30.0
     edge_final_enter_margin_m: float = 0.06
     edge_final_stop_margin_m: float = 0.02
     close_range_enter_p10_m: float = 0.55

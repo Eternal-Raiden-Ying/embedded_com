@@ -114,6 +114,19 @@ def _grasp_state_from_req(req: VisionReq, target: Optional[str]) -> Dict[str, ob
     remote_metadata.setdefault("target", target)
     remote_metadata.setdefault("request_id", remote_request_id)
     remote_metadata.setdefault("session_id", session_id)
+    for key in (
+        "task_id",
+        "raw_target",
+        "canonical_target",
+        "class_name",
+        "class_id",
+        "local_target_bbox_xyxy",
+        "local_target_conf",
+        "local_target_frame_id",
+        "epoch",
+    ):
+        if payload.get(key) is not None:
+            remote_metadata.setdefault(key, payload.get(key))
     return {
         "target_obs": dict(payload.get("target_obs") or payload.get("mock_target_obs") or _default_target_obs(target)),
         "result": dict(payload.get("result") or _default_result(target)),
@@ -132,7 +145,7 @@ def _grasp_state_from_req(req: VisionReq, target: Optional[str]) -> Dict[str, ob
         "remote_init_retry_target_attempt": 0,
         "remote_robot_id": str(payload.get("robot_id") or "sc171_car_01"),
         "remote_timeout_s": float(payload.get("remote_timeout_s", 10.0) or 10.0),
-        "remote_class_id": _coerce_optional_int(payload.get("class_id")),
+            "remote_class_id": _coerce_optional_int(payload.get("class_id")),
         "remote_metadata": remote_metadata,
         "remote_required_cameras": _required_remote_cameras(need_depth),
     }
@@ -331,10 +344,28 @@ class GraspStagePlan(BaseStagePlan):
                     snapshot=snapshot,
                 )
             if ctx.server_status == "error":
+                remote = dict(results.get("remote_init_status") or results.get("remote_result") or {})
+                remote_error = str(
+                    remote.get("error_message")
+                    or remote.get("service_init_last_error")
+                    or remote.get("last_error")
+                    or remote.get("reason")
+                    or "init_failed"
+                )
                 return StageOutput(
                     vision_obs=self.build_obs(ctx, status="FAILED",
                                                perception={"target_obs": target_obs},
-                                               result={"reason": "init_failed", "server_status": ctx.server_status}),
+                                               result={
+                                                   "reason": "remote_init_failed",
+                                                   "server_status": ctx.server_status,
+                                                   "remote_error": remote_error,
+                                                   "error": remote_error,
+                                                   "base_url": remote.get("base_url"),
+                                                   "endpoint": remote.get("endpoint", "/api/v1/init"),
+                                                   "status_code": remote.get("status_code"),
+                                                   "elapsed_ms": remote.get("elapsed_ms"),
+                                                   "error_message": remote_error,
+                                               }),
                     snapshot=snapshot,
                 )
             return StageOutput(
@@ -485,12 +516,18 @@ class GraspStagePlan(BaseStagePlan):
                 )
 
             # Unknown status → FAILED
+            remote_reason = server_reason or str(server_response.get("message") or "") or server_status or "predict_failed"
             return StageOutput(
                 vision_obs=self.build_obs(
                     ctx, status="FAILED",
                     perception={"target_obs": target_obs},
                     result={
-                        "reason": server_reason or server_status or "grasp_failed",
+                        "reason": "remote_predict_failed",
+                        "remote_error": remote_reason,
+                        "remote_reason": remote_reason,
+                        "remote_no_detection_but_local_target_present": bool(server_response.get("remote_no_detection_but_local_target_present", False)),
+                        "local_target_bbox_xyxy": server_response.get("local_target_bbox_xyxy"),
+                        "local_target_conf": server_response.get("local_target_conf"),
                         "message": str(server_response.get("message") or ""),
                         "detection": dict(server_detection),
                         "source": "remote_grasp_client",

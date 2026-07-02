@@ -58,8 +58,23 @@ class VistaApp(BaseModule):
         self.scheduler = Scheduler()
         camera_manager = CameraManager(cfg=CONFIG, logger=self.child_logger("camera"))
         predictor_manager = PredictorManager(cfg=CONFIG, logger=self.child_logger("predictor"))
-        remote_manager = RemoteManager(client=RemoteGraspClient(logger=self.child_logger("remote")),
-                                       logger=self.child_logger("remote"))
+        remote_manager = RemoteManager(
+            client=RemoteGraspClient(logger=self.child_logger("remote")),
+            logger=self.child_logger("remote"),
+            archive_root=str(Path(self.run_logger.run_dir) / "remote_payloads"),
+            archive_enable=bool(CONFIG.runtime.remote_payload_archive_enable),
+            archive_max_keep=int(CONFIG.runtime.remote_payload_archive_max_keep),
+            run_id=str(self.run_logger.stack_run_id),
+            rgb_correction_config={
+                "remote_rgb_correction_enable": bool(CONFIG.runtime.remote_rgb_correction_enable),
+                "remote_rgb_correction_mode": str(CONFIG.runtime.remote_rgb_correction_mode),
+                "remote_rgb_gamma": float(CONFIG.runtime.remote_rgb_gamma),
+                "remote_rgb_percentile_low": float(CONFIG.runtime.remote_rgb_percentile_low),
+                "remote_rgb_percentile_high": float(CONFIG.runtime.remote_rgb_percentile_high),
+                "remote_rgb_max_gain": float(CONFIG.runtime.remote_rgb_max_gain),
+                "remote_rgb_save_raw": bool(CONFIG.runtime.remote_rgb_save_raw),
+            },
+        )
         table_edge_manager = TableEdgeManager(cfg=CONFIG, logger=self.child_logger("table_edge"))
         preview_manager = PreviewManager(sink=NullPreviewSink(), logger=self.child_logger("preview"), cfg=CONFIG)
         self.supervisor = RuntimeSupervisor(
@@ -107,6 +122,7 @@ class VistaApp(BaseModule):
             event_sink=self._record_stage_event,
             mode_controller=self.mode_controller,
             scheduler=self.scheduler,
+            remote_manager=remote_manager,
         )
         self.stage_controller.register_default_plans(
             {

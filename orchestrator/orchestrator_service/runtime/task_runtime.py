@@ -23,7 +23,7 @@ from ..ipc.protocol import (
 )
 from ..bridge.arm_protocol import parse_arm_response
 from ..utils.grasp_utils import grasp_to_pose_params
-from ..utils.target_utils import target_to_class_id
+from ..utils.target_utils import resolve_target, supported_targets, target_to_class_id
 from .common import monotonic_ts
 from .context import RuntimeContext, State
 from .controller import MotionController, MotionDecision
@@ -62,8 +62,15 @@ class TaskRuntimeMixin:
             self._queue_tts("命令置信度过低")
             return False, "low confidence"
         if cmd.intent == "FIND":
+            spec = resolve_target(cmd.target or "")
+            if spec is None:
+                setattr(self.ctx, "last_task_ack_extra", {
+                    "raw_target": str(cmd.target or ""),
+                    "supported_targets": supported_targets(),
+                })
+                return False, "unsupported_target"
             self._start_find_task(cmd)
-            return True, f"FIND accepted: {cmd.target}"
+            return True, "accepted"
         if cmd.intent == "RETURN":
             self._start_return_task(cmd)
             return True, "RETURN accepted"
@@ -160,6 +167,8 @@ class TaskRuntimeMixin:
         missing_fields = obs.get("missing_fields", result.get("missing_fields"))
         if status == "FAILED" and reason == "remote_predict_failed" and remote_error:
             reason = f"remote_predict_failed:{remote_error}"
+        elif status == "FAILED" and reason == "remote_init_failed" and remote_error:
+            reason = f"remote_init_failed:{remote_error}"
         elif status == "FAILED" and not reason and remote_error:
             reason = remote_error
         elif status == "FAILED" and not reason and status_code is not None:
@@ -167,6 +176,38 @@ class TaskRuntimeMixin:
         if status == "FAILED" and reason == "grasp_pose_schema_invalid" and missing_fields:
             reason = f"grasp_pose_schema_invalid:{missing_fields}"
         self.ctx.grasp_reason = reason
+        if status == "FAILED":
+            if str(reason).startswith("remote_init_failed"):
+                self._log(
+                    "error",
+                    "[GRASP_REMOTE][INIT_FAILED] "
+                    f"reason={reason} status_code={status_code} "
+                    f"base_url={obs.get('base_url') or result.get('base_url')} "
+                    f"endpoint={obs.get('endpoint') or result.get('endpoint')} "
+                    f"elapsed_ms={obs.get('elapsed_ms') or result.get('elapsed_ms')}",
+                )
+            elif str(reason).startswith("remote_") or remote_error:
+                self._log(
+                    "error",
+                    "[GRASP_REMOTE][FAILED] "
+                    f"reason={reason} status_code={status_code} remote_error={remote_error}",
+                )
+                if str(reason).startswith("remote_predict_failed"):
+                    self._log(
+                        "error",
+                        "[GRASP_REMOTE][PREDICT_FAILED] "
+                        f"reason={reason} status_code={status_code} remote_error={remote_error} "
+                        f"remote_no_detection_but_local_target_present={bool(result.get('remote_no_detection_but_local_target_present'))} "
+                        f"local_target_bbox_xyxy={result.get('local_target_bbox_xyxy')} "
+                        f"local_target_conf={result.get('local_target_conf')}",
+                    )
+        elif status == "RESULT_READY" and (
+            bool(result.get("remote_grasp"))
+            or str(result.get("source") or obs.get("source") or "").startswith("remote")
+            or isinstance(grasp, dict)
+        ):
+            setattr(self.ctx, "remote_init_last_success_mono", monotonic_ts())
+            self._log("info", "[GRASP_REMOTE][INIT_READY] source=grasp_result")
         if status == "RESULT_READY" and isinstance(grasp, dict):
             self._log(
                 "info",
@@ -433,19 +474,70 @@ class TaskRuntimeMixin:
             pass
 
     def _start_find_task(self, cmd: TaskCmd):
-        target = str(cmd.target or "").strip()
-        if not target:
+        raw_target = str(cmd.target or "").strip()
+        spec = resolve_target(raw_target)
+        if not raw_target or spec is None:
             self._log("warn", "FIND target 为空，忽略")
             return
         self.ctx.clear_task_context()
         self._reset_vision_request_dedupe()
         self.ctx.task_intent = "FIND"
-        self.ctx.active_target = target
+        self.ctx.raw_target = raw_target
+        self.ctx.canonical_target = spec.canonical_target
+        self.ctx.class_name = spec.class_name
+        self.ctx.class_id = int(spec.class_id)
+        self.ctx.active_task_id = f"task_{int(time.time() * 1000)}"
+        self.ctx.active_target = spec.canonical_target
         self.ctx.active_session_id = cmd.session_id
         self.ctx.active_epoch = cmd.epoch
         self.ctx.task_start_wall_ts = time.time()
-        self._transition(State.SEARCH_TABLE, f"开始桌边任务，进入桌边搜索，目标 {target}")
-        self._queue_tts(f"开始寻找 {target}")
+        setattr(self.ctx, "last_task_ack_extra", {
+            "raw_target": raw_target,
+            "canonical_target": spec.canonical_target,
+            "class_name": spec.class_name,
+            "class_id": int(spec.class_id),
+            "task_id": self.ctx.active_task_id,
+        })
+        self._queue_remote_init_warmup(target=spec.class_name)
+        self._transition(State.SEARCH_TABLE, f"开始桌边任务，进入桌边搜索，目标 {spec.canonical_target}")
+        self._queue_tts(f"开始寻找 {spec.class_name}")
+
+    def _queue_remote_init_warmup(self, *, target: str) -> None:
+        now = monotonic_ts()
+        min_interval = max(0.0, float(getattr(self.cfg, "remote_init_min_interval_s", 30.0) or 30.0))
+        last_success = float(getattr(self.ctx, "remote_init_last_success_mono", 0.0) or 0.0)
+        if last_success > 0.0 and (now - last_success) < min_interval:
+            self._log("info", f"[GRASP_REMOTE][INIT_SKIP] already_ready age_s={now - last_success:.1f} min_interval_s={min_interval:.1f}")
+            return
+        last_attempt = float(getattr(self.ctx, "remote_init_last_attempt_mono", 0.0) or 0.0)
+        if last_attempt > 0.0 and (now - last_attempt) < min_interval:
+            self._log("info", f"[GRASP_REMOTE][INIT_SKIP] recent_attempt age_s={now - last_attempt:.1f} min_interval_s={min_interval:.1f}")
+            return
+        setattr(self.ctx, "remote_init_last_attempt_mono", now)
+        self._log("info", "[GRASP_REMOTE][INIT_WARMUP] start base_url=from_vista_profile")
+        self._queue_vision_req(
+            make_vision_req(
+                target=target,
+                session_id=self.ctx.active_session_id,
+                epoch=self.ctx.active_epoch,
+                op="UPDATE",
+                stage="GRASP",
+                mode_hint="GRASP_REMOTE_INIT",
+                req_type="target_update",
+                payload={
+                    "remote_init_warmup": True,
+                    "remote_init_min_interval_s": min_interval,
+                    "request_reason": "task_start_remote_init_warmup",
+                    "orchestrator_state": self.ctx.state.value,
+                    "task_id": self.ctx.active_task_id,
+                    "raw_target": self.ctx.raw_target,
+                    "canonical_target": self.ctx.canonical_target or target,
+                    "class_name": self.ctx.class_name,
+                    "class_id": self.ctx.class_id,
+                },
+            ),
+            force=True,
+        )
 
     def _start_return_task(self, cmd: TaskCmd):
         self.ctx.clear_task_context()

@@ -39,7 +39,7 @@ class RemoteGraspClient:
 
     def _failure(self, error: str, status_code: Optional[int] = None) -> RemotePredictResponse:
         self._last_error = str(error or "remote_error")
-        return RemotePredictResponse(ok=False, payload={}, status_code=status_code, error=self._last_error)
+        return RemotePredictResponse(ok=False, payload={}, status_code=status_code, error=self._last_error, elapsed_ms=0)
 
     def _simple_request_dump(self, event: str, *, url: str, timeout_s: float) -> None:
         if not event:
@@ -87,16 +87,19 @@ class RemoteGraspClient:
             resp = self._session.post(url, timeout=max(0.1, float(timeout_s)), **kwargs)
         except Exception as exc:
             err = str(exc)
+            elapsed_ms = int(round((time.time() - start) * 1000.0))
             self._response_dump(
                 response_dump_event,
                 status_code=None,
-                elapsed_ms=int(round((time.time() - start) * 1000.0)),
+                elapsed_ms=elapsed_ms,
                 error=err,
                 raw_text="",
             )
+            failure = self._failure("timeout" if ("timeout" in err.lower() or "timed out" in err.lower()) else err)
+            failure.elapsed_ms = elapsed_ms
             if "timeout" in err.lower() or "timed out" in err.lower():
-                return self._failure("timeout")
-            return self._failure(err)
+                return failure
+            return failure
         elapsed_ms = int(round((time.time() - start) * 1000.0))
         status_code = int(resp.status_code)
         raw_text = ""
@@ -115,8 +118,10 @@ class RemoteGraspClient:
         )
         if 200 <= status_code < 300:
             self._last_error = ""
-            return RemotePredictResponse(ok=True, payload=payload if isinstance(payload, dict) else {"value": payload}, status_code=status_code)
-        return self._failure(str(payload), status_code=status_code)
+            return RemotePredictResponse(ok=True, payload=payload if isinstance(payload, dict) else {"value": payload}, status_code=status_code, elapsed_ms=elapsed_ms)
+        failure = self._failure(str(payload), status_code=status_code)
+        failure.elapsed_ms = elapsed_ms
+        return failure
 
     def _request_dump(
         self,

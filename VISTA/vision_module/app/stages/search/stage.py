@@ -125,9 +125,28 @@ def _sync_edge_follow_payload(req: VisionReq, ctx: StageContext) -> None:
         "current_edge_id",
         "orchestrator_state",
         "final_phase_active",
+        "final_roi_mode_latched",
+        "final_distance_servo_active",
     ):
         if key in payload:
             ctx.stage_state[key] = payload.get(key)
+
+
+def _sync_target_payload(req: VisionReq, ctx: StageContext) -> None:
+    payload = req.payload if isinstance(req.payload, dict) else {}
+    for key in ("task_id", "raw_target", "canonical_target", "class_name", "class_id", "session_id", "epoch"):
+        if key in payload:
+            ctx.stage_state[key] = payload.get(key)
+
+
+def _annotate_target_obs(target_obs: dict, ctx: StageContext) -> dict:
+    out = dict(target_obs or {})
+    out.setdefault("raw_target", ctx.stage_state.get("raw_target") or ctx.target_name)
+    out.setdefault("canonical_target", ctx.stage_state.get("canonical_target") or ctx.target_name)
+    out.setdefault("expected_class_name", ctx.stage_state.get("class_name") or ctx.stage_state.get("canonical_target") or ctx.target_name)
+    out.setdefault("expected_class_id", ctx.stage_state.get("class_id"))
+    out.setdefault("task_id", ctx.stage_state.get("task_id"))
+    return out
 
 
 class SearchStagePlan(BaseStagePlan):
@@ -165,6 +184,7 @@ class SearchStagePlan(BaseStagePlan):
             )
         ctx.current_mode = self._mode_for_request(req, search_kind, self.default_mode)
         ctx.stage_state["search_kind"] = search_kind
+        _sync_target_payload(req, ctx)
         ctx.stage_state["target_obs"] = target_obs_from_payload(payload, ctx.target_name)
         ctx.stage_state["table_edge_obs"] = table_edge_obs_from_payload(payload)
         _sync_edge_follow_payload(req, ctx)
@@ -188,6 +208,7 @@ class SearchStagePlan(BaseStagePlan):
                 )
             ctx.current_mode = self._mode_for_request(req, search_kind, self.default_mode)
             ctx.stage_state["search_kind"] = search_kind
+            _sync_target_payload(req, ctx)
             _sync_edge_follow_payload(req, ctx)
             if payload_has_target_obs(req.payload):
                 ctx.stage_state["target_obs"] = target_obs_from_payload(req.payload, ctx.target_name)
@@ -462,6 +483,7 @@ class SearchStagePlan(BaseStagePlan):
                     default_factory=lambda: target_obs_from_payload(None, ctx.target_name),
                     result_factory=lambda payload: target_obs_from_results(payload, ctx.target_name),
                 )
+                target_obs = _annotate_target_obs(target_obs, ctx)
                 ctx.stage_state["target_obs"] = dict(target_obs)
             
             table_edge_obs, table_edge_source, force_send = self._process_table_edge_obs(
@@ -504,6 +526,7 @@ class SearchStagePlan(BaseStagePlan):
                 default_factory=lambda: target_obs_from_payload(None, ctx.target_name),
                 result_factory=lambda payload: target_obs_from_results(payload, ctx.target_name),
             )
+            target_obs = _annotate_target_obs(target_obs, ctx)
             return StageOutput(
                 vision_obs=self.build_obs(
                     ctx,
@@ -526,6 +549,7 @@ class SearchStagePlan(BaseStagePlan):
                 default_factory=lambda: target_obs_from_payload(None, ctx.target_name),
                 result_factory=lambda payload: target_obs_from_results(payload, ctx.target_name),
             )
+            target_obs = _annotate_target_obs(target_obs, ctx)
             
             table_edge_obs, table_edge_source, force_send = self._process_table_edge_obs(
                 results, ctx, tick_input, results.get("local_perception")

@@ -444,8 +444,7 @@ class TaskCmd:
             target = str(target or "").strip()
             if not target:
                 raise ProtocolError("FIND 缺少 target")
-            if target not in frozen_targets:
-                raise ProtocolError(f"target 不在冻结词表中: {target}")
+            _ = frozen_targets
         else:
             target = None
         return cls(
@@ -486,6 +485,13 @@ class TaskAck:
     session_id: str = ""
     epoch: int = 0
     reason: str = ""
+    target: str = ""
+    raw_target: str = ""
+    canonical_target: str = ""
+    class_name: str = ""
+    class_id: Optional[int] = None
+    task_id: str = ""
+    supported_targets: Optional[List[str]] = None
     source: str = "orchestrator"
     type: str = "task_ack"
 
@@ -909,8 +915,13 @@ class TargetObs:
     ts: float
     found: bool
     target: Optional[str] = None
+    raw_target: Optional[str] = None
+    canonical_target: Optional[str] = None
+    expected_class_name: Optional[str] = None
+    expected_class_id: Optional[int] = None
     target_found: Optional[bool] = None
     matched_cls: Optional[str] = None
+    matched_class_id: Optional[int] = None
     matched_conf: Optional[float] = None
     matched_bbox: Optional[list] = None
     matched_center: Optional[Dict[str, Any]] = None
@@ -965,8 +976,13 @@ class TargetObs:
             ts=_payload_ts(payload),
             found=bool(payload.get("target_found", payload.get("found", False))),
             target=(str(payload.get("target")).strip() if payload.get("target") is not None else None),
+            raw_target=_pick_optional_str(payload, "raw_target"),
+            canonical_target=_pick_optional_str(payload, "canonical_target"),
+            expected_class_name=_pick_optional_str(payload, "expected_class_name", "class_name"),
+            expected_class_id=_pick_optional_int(payload, "expected_class_id", "class_id"),
             target_found=_pick_optional_bool(payload, "target_found"),
             matched_cls=_pick_optional_str(payload, "matched_cls", "target_cls"),
+            matched_class_id=_pick_optional_int(payload, "matched_class_id", "matched_cls_id", "target_class_id"),
             matched_conf=_pick_optional_float(payload, "matched_conf", "target_conf"),
             matched_bbox=payload.get("matched_bbox"),
             matched_center=matched_center,
@@ -1162,7 +1178,19 @@ class ArmResponse:
         return {"ok": self.ok, "message": self.message, "raw_line": self.raw_line, "ts": self.ts}
 
 
-def make_task_ack(cmd: TaskCmd, accepted: bool, state: str, reason: str = "") -> Dict[str, Any]:
+def make_task_ack(
+    cmd: TaskCmd,
+    accepted: bool,
+    state: str,
+    reason: str = "",
+    *,
+    raw_target: str = "",
+    canonical_target: str = "",
+    class_name: str = "",
+    class_id: Optional[int] = None,
+    task_id: str = "",
+    supported_targets: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     cmd_name = str(cmd.cmd or cmd.intent or "").strip().lower()
     message = str(reason or "")
     if accepted and cmd_name in {"manual_drive", "manual_stop"} and "accepted" not in message:
@@ -1178,6 +1206,13 @@ def make_task_ack(cmd: TaskCmd, accepted: bool, state: str, reason: str = "") ->
         message=message,
         state=str(state),
         reason=str(reason or ""),
+        target=str(canonical_target or class_name or cmd.target or ""),
+        raw_target=str(raw_target or cmd.target or ""),
+        canonical_target=str(canonical_target or ""),
+        class_name=str(class_name or ""),
+        class_id=class_id,
+        task_id=str(task_id or ""),
+        supported_targets=list(supported_targets or []) if supported_targets is not None else None,
     ).to_dict()
 
 
@@ -1240,7 +1275,15 @@ def make_grasp_req(
     req_id: str = "",
     *,
     op: str = "START",
+    payload: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    req_payload = {
+        "class_id": int(class_id),
+        "remote_grasp": True,
+        "need_depth": True,
+    }
+    if isinstance(payload, dict):
+        req_payload.update(payload)
     return make_vision_req(
         target=target,
         session_id=session_id,
@@ -1249,11 +1292,7 @@ def make_grasp_req(
         op=op,
         stage="GRASP",
         mode_hint="GRASP_REMOTE",
-        payload={
-            "class_id": int(class_id),
-            "remote_grasp": True,
-            "need_depth": True,
-        },
+        payload=req_payload,
     )
 
 

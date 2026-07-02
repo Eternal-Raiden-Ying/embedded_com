@@ -80,6 +80,7 @@ class RemotePredictRequest:
     """One remote grasp request assembled from local synchronized inputs."""
 
     rgb_bytes: Optional[bytes] = None
+    rgb_raw_bytes: Optional[bytes] = None
     depth_bytes: Optional[bytes] = None
     class_id: Optional[int] = None
     metadata: RemoteMetadata = field(default_factory=RemoteMetadata)
@@ -96,6 +97,7 @@ class RemotePredictResponse:
     payload: Dict[str, Any] = field(default_factory=dict)
     status_code: Optional[int] = None
     error: str = ""
+    elapsed_ms: Optional[int] = None
 
 
 def build_predict_multipart(request: RemotePredictRequest) -> Tuple[Dict[str, Any], Dict[str, Tuple[str, bytes, str]]]:
@@ -113,6 +115,8 @@ def build_predict_multipart(request: RemotePredictRequest) -> Tuple[Dict[str, An
         "session_id": str(metadata_payload["session_id"]),
         "target": str(metadata_payload["target"]),
         "class_id": str(metadata_payload["class_id"]),
+        "canonical_target": str(metadata_payload.get("canonical_target", "")),
+        "class_name": str(metadata_payload.get("class_name", "")),
         "frame_seq": str(metadata_payload["frame_seq"]),
         "frame_seq_source": str(metadata_payload["frame_seq_source"]),
         "timestamp_ms": str(metadata_payload["timestamp_ms"]),

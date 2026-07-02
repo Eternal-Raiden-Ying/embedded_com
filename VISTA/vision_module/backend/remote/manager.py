@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import json
+import shutil
 import threading
 import time
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 import numpy as np
@@ -26,6 +29,93 @@ from .protocol import (
 )
 
 
+def _cfg_bool(cfg: Dict[str, Any], key: str, default: bool) -> bool:
+    return bool(dict(cfg or {}).get(key, default))
+
+
+def _cfg_float(cfg: Dict[str, Any], key: str, default: float) -> float:
+    try:
+        return float(dict(cfg or {}).get(key, default))
+    except Exception:
+        return float(default)
+
+
+def prepare_remote_rgb(rgb, cfg: Dict[str, Any]):
+    """Prepare an HxWx3 RGB uint8 frame for remote detection/upload."""
+    arr = np.asarray(rgb)
+    input_dtype = str(getattr(arr.dtype, "name", arr.dtype))
+    info: Dict[str, Any] = {
+        "rgb_correction_enable": _cfg_bool(cfg, "remote_rgb_correction_enable", True),
+        "rgb_correction_mode": str(dict(cfg or {}).get("remote_rgb_correction_mode") or "auto_level_gamma"),
+        "rgb_gamma": _cfg_float(cfg, "remote_rgb_gamma", 1.8),
+        "rgb_percentile_low": _cfg_float(cfg, "remote_rgb_percentile_low", 1.0),
+        "rgb_percentile_high": _cfg_float(cfg, "remote_rgb_percentile_high", 99.0),
+        "rgb_input_dtype": input_dtype,
+        "rgb_gain_applied": 1.0,
+    }
+    if arr.ndim != 3 or arr.shape[2] < 3:
+        raise ValueError(f"remote rgb must be HxWx3, got shape={getattr(arr, 'shape', None)}")
+    if arr.dtype != np.uint8:
+        if np.issubdtype(arr.dtype, np.floating):
+            finite = np.nan_to_num(arr[:, :, :3], nan=0.0, posinf=255.0, neginf=0.0)
+            if float(np.nanmax(finite)) <= 1.0:
+                finite = finite * 255.0
+            arr_u8 = np.clip(finite, 0.0, 255.0).astype(np.uint8)
+        else:
+            arr_u8 = np.clip(arr[:, :, :3], 0, 255).astype(np.uint8)
+    else:
+        arr_u8 = arr[:, :, :3].copy()
+
+    raw_mean = float(np.mean(arr_u8)) if arr_u8.size else 0.0
+    info["rgb_raw_mean"] = raw_mean
+    if cv2 is None or not info["rgb_correction_enable"] or info["rgb_correction_mode"] != "auto_level_gamma":
+        info.update(
+            {
+                "rgb_y_p_low": None,
+                "rgb_y_p50": None,
+                "rgb_y_p_high": None,
+                "rgb_corrected_mean": raw_mean,
+            }
+        )
+        return arr_u8, info
+
+    ycc = cv2.cvtColor(arr_u8, cv2.COLOR_RGB2YCrCb)
+    y = ycc[:, :, 0].astype(np.float32)
+    p_low = max(0.0, min(100.0, float(info["rgb_percentile_low"])))
+    p_high = max(0.0, min(100.0, float(info["rgb_percentile_high"])))
+    if p_high <= p_low:
+        p_low, p_high = 1.0, 99.0
+    y_low = float(np.percentile(y, p_low))
+    y_p50 = float(np.percentile(y, 50.0))
+    y_high = float(np.percentile(y, p_high))
+    info.update(
+        {
+            "rgb_y_p_low": y_low,
+            "rgb_y_p50": y_p50,
+            "rgb_y_p_high": y_high,
+        }
+    )
+    raw_bright_enough = bool(raw_mean >= 115.0 or y_p50 >= 125.0 or y_high >= 245.0)
+    if raw_bright_enough or y_high - y_low < 8.0:
+        corrected = arr_u8
+    else:
+        y_norm = y / 255.0
+        stretched = np.clip((y - y_low) / max(1.0, y_high - y_low), 0.0, 1.0)
+        gamma = max(1.0, float(info["rgb_gamma"]))
+        corrected_y = np.power(stretched, 1.0 / gamma)
+        max_gain = max(1.0, _cfg_float(cfg, "remote_rgb_max_gain", 3.0))
+        corrected_y = np.minimum(corrected_y, np.clip(y_norm * max_gain, 0.0, 1.0))
+        y_out = np.clip(np.round(corrected_y * 255.0), 0.0, 255.0).astype(np.uint8)
+        ycc[:, :, 0] = y_out
+        corrected = cv2.cvtColor(ycc, cv2.COLOR_YCrCb2RGB)
+        raw_y_mean = float(np.mean(y)) if y.size else 0.0
+        corrected_y_mean = float(np.mean(y_out)) if y_out.size else raw_y_mean
+        if raw_y_mean > 1e-6:
+            info["rgb_gain_applied"] = min(max_gain, corrected_y_mean / raw_y_mean)
+    info["rgb_corrected_mean"] = float(np.mean(corrected)) if corrected.size else raw_mean
+    return corrected, info
+
+
 class RemoteManager:
     """Own remote client lifecycle and remote request orchestration."""
 
@@ -34,10 +124,29 @@ class RemoteManager:
         client: Optional[RemoteGraspClient] = None,
         logger=None,
         capability_sink: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+        archive_root: Optional[str] = None,
+        archive_enable: bool = True,
+        archive_max_keep: int = 20,
+        run_id: str = "",
+        rgb_correction_config: Optional[Dict[str, Any]] = None,
     ):
         self.client = client
         self.logger = logger
         self._capability_sink = capability_sink
+        self._archive_root = Path(archive_root) if archive_root else None
+        self._archive_enable = bool(archive_enable)
+        self._archive_max_keep = max(0, int(archive_max_keep or 0))
+        self._run_id = str(run_id or "")
+        self._rgb_correction_config = {
+            "remote_rgb_correction_enable": True,
+            "remote_rgb_correction_mode": "auto_level_gamma",
+            "remote_rgb_gamma": 1.8,
+            "remote_rgb_percentile_low": 1.0,
+            "remote_rgb_percentile_high": 99.0,
+            "remote_rgb_max_gain": 3.0,
+            "remote_rgb_save_raw": True,
+        }
+        self._rgb_correction_config.update(dict(rgb_correction_config or {}))
         self.enabled = False
         self._scheduler = None
         self._generation_getter = lambda: 0
@@ -64,6 +173,7 @@ class RemoteManager:
             "capture_warmup_timeout_s": 1.0,
             "expected_rgb_shape": [720, 1280],
             "expected_depth_shape": [720, 1280],
+            **self._rgb_correction_config,
         }
         self._service_init_state = "uninitialized"
         self._service_init_confirmed = False
@@ -73,6 +183,7 @@ class RemoteManager:
         self._service_init_last_ts: Optional[float] = None
         self._service_init_pending = False
         self._service_init_inflight = False
+        self._warmup_keepalive_until = 0.0
         self._last_result: Dict[str, Any] = {
             "enabled": False,
             "state": "disabled",
@@ -253,6 +364,13 @@ class RemoteManager:
                 "capture_warmup_timeout_s": max(0.1, float(profile.get("capture_warmup_timeout_s", 1.0) or 1.0)),
                 "expected_rgb_shape": self._shape_hw_list(profile.get("expected_rgb_shape"), default=[720, 1280]),
                 "expected_depth_shape": self._shape_hw_list(profile.get("expected_depth_shape"), default=[720, 1280]),
+                "remote_rgb_correction_enable": bool(profile.get("remote_rgb_correction_enable", next_profile.get("remote_rgb_correction_enable", True))),
+                "remote_rgb_correction_mode": str(profile.get("remote_rgb_correction_mode", next_profile.get("remote_rgb_correction_mode", "auto_level_gamma")) or "auto_level_gamma"),
+                "remote_rgb_gamma": float(profile.get("remote_rgb_gamma", next_profile.get("remote_rgb_gamma", 1.8)) or 1.8),
+                "remote_rgb_percentile_low": float(profile.get("remote_rgb_percentile_low", next_profile.get("remote_rgb_percentile_low", 1.0)) or 1.0),
+                "remote_rgb_percentile_high": float(profile.get("remote_rgb_percentile_high", next_profile.get("remote_rgb_percentile_high", 99.0)) or 99.0),
+                "remote_rgb_max_gain": float(profile.get("remote_rgb_max_gain", next_profile.get("remote_rgb_max_gain", 3.0)) or 3.0),
+                "remote_rgb_save_raw": bool(profile.get("remote_rgb_save_raw", next_profile.get("remote_rgb_save_raw", True))),
             }
         )
         self._runtime_profile = next_profile
@@ -282,6 +400,65 @@ class RemoteManager:
         self._worker_thread = threading.Thread(target=self._worker_loop, name="remote_manager.loop", daemon=True)
         self._worker_thread.start()
 
+    def start_init_warmup(self, *, min_interval_s: float = 30.0, source: str = "task_start_warmup") -> Dict[str, Any]:
+        now = time.time()
+        min_interval_s = max(0.0, float(min_interval_s or 0.0))
+        base_url = self._runtime_base_url()
+        remote_request_id = f"ri_{int(now * 1000)}"
+        if self._service_init_confirmed and self._service_init_last_ts is not None and now - float(self._service_init_last_ts) < min_interval_s:
+            payload = {
+                "op": "INIT",
+                "ok": True,
+                "reason": "already_ready",
+                "base_url": base_url,
+                "endpoint": "/api/v1/init",
+                "elapsed_ms": 0,
+                "source": source,
+                "request_id": remote_request_id,
+            }
+            self._log("info", "[GRASP_REMOTE][INIT_SKIP] already_ready", base_url=base_url, age_s=now - float(self._service_init_last_ts))
+            self._publish_result("remote_init_status", {**self._task_payload("init"), **payload})
+            return payload
+        if self._service_init_inflight:
+            payload = {
+                "op": "INIT",
+                "ok": False,
+                "reason": "already_inflight",
+                "base_url": base_url,
+                "endpoint": "/api/v1/init",
+                "elapsed_ms": 0,
+                "source": source,
+                "request_id": remote_request_id,
+            }
+            self._log("info", "[GRASP_REMOTE][INIT_SKIP] already_inflight", base_url=base_url)
+            return payload
+
+        def _runner() -> None:
+            self._warmup_keepalive_until = time.time() + max(5.0, min_interval_s)
+            self._log("info", "[GRASP_REMOTE][INIT_WARMUP] start", base_url=self._runtime_base_url(), request_id=remote_request_id)
+            result = self._run_service_init(timeout_s=float(self._runtime_profile.get("timeout_s", 10.0) or 10.0), source=source, request_id=remote_request_id)
+            payload = {**self._task_payload("init"), **dict(result or {})}
+            self._publish_result("remote_init_status", payload)
+            if bool(result.get("ok")):
+                self._log("info", "[GRASP_REMOTE][INIT_READY]", base_url=self._runtime_base_url(), elapsed_ms=result.get("elapsed_ms"), request_id=remote_request_id)
+            else:
+                self._log("error", "[GRASP_REMOTE][INIT_FAILED]", base_url=self._runtime_base_url(), status_code=result.get("status_code"), elapsed_ms=result.get("elapsed_ms"), error_message=result.get("error_message") or result.get("reason"), request_id=remote_request_id)
+
+        thread = threading.Thread(target=_runner, name="remote.init_warmup", daemon=True)
+        thread.start()
+        return {
+            "op": "INIT",
+            "ok": None,
+            "reason": "started",
+            "base_url": base_url,
+            "endpoint": "/api/v1/init",
+            "source": source,
+            "request_id": remote_request_id,
+        }
+
+    def keep_remote_warm(self) -> bool:
+        return bool(self._service_init_inflight or (self._service_init_confirmed and time.time() < float(self._warmup_keepalive_until or 0.0)))
+
     def stop_runtime(self) -> None:
         self._runtime_running = False
         self._worker_stop.set()
@@ -302,8 +479,15 @@ class RemoteManager:
             generation = 0
         try:
             scheduler.publish_result(route, payload, generation=generation)
-        except Exception:
-            pass
+        except Exception as exc:
+            if str(route) == "remote_init_status":
+                fallback = dict(payload or {}) if isinstance(payload, dict) else {"payload": payload}
+                fallback["route_missing"] = True
+                fallback["route_error"] = str(exc)
+                try:
+                    scheduler.publish_result("remote_result", fallback, generation=generation)
+                except Exception:
+                    pass
 
     def _resolve_class_id(self, explicit_class_id: Any = None) -> Optional[int]:
         if explicit_class_id is None:
@@ -334,6 +518,43 @@ class RemoteManager:
             return encoded.tobytes()
         except Exception:
             return None
+
+    def _encode_rgb_frame(self, encoding: str, rgb, *, quality: int = 90) -> Optional[bytes]:
+        if rgb is None:
+            return None
+        arr = np.asarray(rgb)
+        if cv2 is not None and arr.ndim == 3 and arr.shape[2] >= 3:
+            try:
+                return self._encode_frame(encoding, cv2.cvtColor(arr[:, :, :3], cv2.COLOR_RGB2BGR), quality=quality)
+            except Exception:
+                return None
+        return self._encode_frame(encoding, rgb, quality=quality)
+
+    @staticmethod
+    def _remote_rgb_cfg_from_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "remote_rgb_correction_enable": bool(profile.get("remote_rgb_correction_enable", True)),
+            "remote_rgb_correction_mode": str(profile.get("remote_rgb_correction_mode") or "auto_level_gamma"),
+            "remote_rgb_gamma": float(profile.get("remote_rgb_gamma", 1.8) or 1.8),
+            "remote_rgb_percentile_low": float(profile.get("remote_rgb_percentile_low", 1.0) or 1.0),
+            "remote_rgb_percentile_high": float(profile.get("remote_rgb_percentile_high", 99.0) or 99.0),
+            "remote_rgb_max_gain": float(profile.get("remote_rgb_max_gain", 3.0) or 3.0),
+            "remote_rgb_save_raw": bool(profile.get("remote_rgb_save_raw", True)),
+        }
+
+    @staticmethod
+    def _rgb_upload_order(frames: Dict[str, Any]) -> str:
+        explicit = str((frames or {}).get("rgb_channel_order") or "").strip().upper()
+        if explicit in {"RGB", "BGR"}:
+            return explicit
+        return "BGR"
+
+    @staticmethod
+    def _frame_to_rgb(frame, channel_order: str):
+        arr = np.asarray(frame)
+        if arr.ndim == 3 and arr.shape[2] >= 3 and str(channel_order).upper() == "BGR" and cv2 is not None:
+            return cv2.cvtColor(arr[:, :, :3], cv2.COLOR_BGR2RGB)
+        return arr[:, :, :3].copy() if arr.ndim == 3 and arr.shape[2] >= 3 else arr
 
     @staticmethod
     def _shape_hw_list(value: Any, default=None):
@@ -431,6 +652,72 @@ class RemoteManager:
         }
         capture.update(self._depth_stats(depth))
         return capture
+
+    def _archive_predict_payload(
+        self,
+        request: RemotePredictRequest,
+        frames: Dict[str, Any],
+    ) -> Optional[Path]:
+        if not self._archive_enable or self._archive_root is None or cv2 is None:
+            return None
+        request_id = str(request.metadata.request_id or f"rr_{int(time.time() * 1000)}")
+        archive_dir = self._archive_root / request_id
+        try:
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            metadata = dict(request.metadata.to_metadata_payload())
+            capture = dict(metadata.get("capture") or {})
+            metadata.update(
+                {
+                    "run_id": self._run_id,
+                    "request_id": request_id,
+                    "rgb_shape": capture.get("rgb_shape"),
+                    "rgb_dtype": capture.get("rgb_dtype"),
+                    "depth_shape": capture.get("depth_shape"),
+                    "depth_dtype": capture.get("depth_dtype"),
+                    "depth_scale": capture.get("depth_scale"),
+                    "depth_intrinsics": capture.get("depth_intrinsics"),
+                    "url": f"{self._runtime_base_url().rstrip('/')}/api/v1/predict",
+                }
+            )
+            (archive_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+            if bool(metadata.get("remote_rgb_save_raw", True)) and request.rgb_raw_bytes is not None:
+                (archive_dir / "rgb_raw.jpg").write_bytes(request.rgb_raw_bytes)
+            if request.rgb_bytes is not None:
+                (archive_dir / "rgb.jpg").write_bytes(request.rgb_bytes)
+            depth = frames.get("depth") if isinstance(frames, dict) else None
+            if depth is not None:
+                cv2.imwrite(str(archive_dir / "depth.png"), depth)
+            self._prune_payload_archive()
+            return archive_dir
+        except Exception as exc:
+            self._log("warn", "remote_payload_archive_failed", request_id=request_id, error=str(exc))
+            return None
+
+    def _archive_predict_response(self, archive_dir: Optional[Path], response: Optional[RemotePredictResponse]) -> None:
+        if archive_dir is None:
+            return
+        payload = {
+            "ok": bool(response is not None and response.ok),
+            "status_code": getattr(response, "status_code", None),
+            "elapsed_ms": getattr(response, "elapsed_ms", None),
+            "error": str(getattr(response, "error", "") or ""),
+            "payload": getattr(response, "payload", None),
+        }
+        try:
+            (archive_dir / "response.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as exc:
+            self._log("warn", "remote_payload_response_archive_failed", archive_dir=str(archive_dir), error=str(exc))
+
+    def _prune_payload_archive(self) -> None:
+        if self._archive_root is None or self._archive_max_keep <= 0:
+            return
+        try:
+            dirs = [path for path in self._archive_root.iterdir() if path.is_dir()]
+            dirs.sort(key=lambda path: path.stat().st_mtime)
+            for old in dirs[:-self._archive_max_keep]:
+                shutil.rmtree(old, ignore_errors=True)
+        except Exception as exc:
+            self._log("warn", "remote_payload_archive_prune_failed", error=str(exc))
 
     def _precheck_capture_shapes(
         self,
@@ -609,9 +896,30 @@ class RemoteManager:
 
         rgb_encoding = normalize_image_encoding(self._runtime_profile.get("rgb_encoding", "jpeg"), default="jpeg")
         depth_encoding = normalize_image_encoding(self._runtime_profile.get("depth_encoding", "png"), default="png")
-        rgb_bytes = self._encode_frame(
+        rgb_channel_order = self._rgb_upload_order(upload_frames)
+        rgb_rgb = self._frame_to_rgb(rgb, rgb_channel_order)
+        remote_rgb_cfg = self._remote_rgb_cfg_from_profile(self._runtime_profile)
+        try:
+            corrected_rgb, correction_info = prepare_remote_rgb(rgb_rgb, remote_rgb_cfg)
+        except Exception as exc:
+            self._log("error", "remote_predict_precheck_failed", reason="rgb_prepare_failed", request_id=request_id, error=str(exc))
+            self._update_result(
+                action="predict",
+                state="predict_failed",
+                ok=False,
+                error="rgb_prepare_failed",
+                request_id=request_id,
+            )
+            return None
+        raw_rgb_bytes = self._encode_rgb_frame(
             rgb_encoding,
-            rgb,
+            rgb_rgb,
+            quality=int(self._runtime_profile.get("rgb_quality", 90) or 90),
+        )
+        upload_rgb = corrected_rgb if bool(correction_info.get("rgb_correction_enable", True)) else rgb_rgb
+        rgb_bytes = self._encode_rgb_frame(
+            rgb_encoding,
+            upload_rgb,
             quality=int(self._runtime_profile.get("rgb_quality", 90) or 90),
         )
         depth_bytes = None
@@ -631,6 +939,8 @@ class RemoteManager:
                 request_id=request_id,
             )
             return None
+        if raw_rgb_bytes is None:
+            raw_rgb_bytes = rgb_bytes
         if require_depth and depth_bytes is None:
             self._log("error", "remote_predict_precheck_failed", reason="depth_encode_failed", request_id=request_id)
             self._update_result(
@@ -646,8 +956,38 @@ class RemoteManager:
         request_metadata = dict(cmd.get("metadata") or {}) if isinstance(cmd.get("metadata"), dict) else {}
         extras = dict(profile_metadata)
         extras.update(request_metadata)
+        capture["rgb_channel_order"] = "RGB"
+        capture["rgb_source_channel_order"] = rgb_channel_order
+        capture["rgb_save_backend"] = "cv2"
+        capture["rgb_uploaded_corrected"] = bool(correction_info.get("rgb_correction_enable", True))
+        capture["rgb_raw_archive_name"] = "rgb_raw.jpg"
+        capture["rgb_upload_archive_name"] = "rgb.jpg"
+        capture["depth_archive_name"] = "depth.png"
+        correction_info["rgb_channel_order"] = "RGB"
+        correction_info["rgb_source_channel_order"] = rgb_channel_order
+        correction_info["rgb_save_backend"] = "cv2"
         extras["capture"] = capture
+        extras["correction_info"] = dict(correction_info)
+        extras.update(dict(correction_info))
         target = str(cmd.get("target") or extras.get("target") or "")
+        for key in (
+            "task_id",
+            "raw_target",
+            "canonical_target",
+            "class_name",
+            "local_target_bbox_xyxy",
+            "local_target_conf",
+            "local_target_frame_id",
+            "epoch",
+        ):
+            if key in cmd and cmd.get(key) is not None:
+                extras[key] = cmd.get(key)
+            elif key in request_metadata and request_metadata.get(key) is not None:
+                extras[key] = request_metadata.get(key)
+        extras.setdefault("class_name", request_metadata.get("class_name") or target)
+        extras.setdefault("canonical_target", request_metadata.get("canonical_target") or target)
+        extras.setdefault("raw_target", request_metadata.get("raw_target") or target)
+        extras["class_id"] = int(class_id)
         cmd_robot_id = str(cmd.get("robot_id") or "").strip()
         if cmd_robot_id == "arm_001":
             cmd_robot_id = ""
@@ -677,8 +1017,18 @@ class RemoteManager:
             camera_names=camera_names,
             extras=extras,
         )
+        self._log(
+            "info",
+            "[GRASP_REMOTE][RGB_CORRECT]",
+            request_id=request_id,
+            raw_mean=round(float(correction_info.get("rgb_raw_mean") or 0.0), 3),
+            corrected_mean=round(float(correction_info.get("rgb_corrected_mean") or 0.0), 3),
+            gamma=correction_info.get("rgb_gamma"),
+            gain=round(float(correction_info.get("rgb_gain_applied") or 1.0), 3),
+        )
         return RemotePredictRequest(
             rgb_bytes=rgb_bytes,
+            rgb_raw_bytes=raw_rgb_bytes,
             depth_bytes=depth_bytes,
             class_id=class_id,
             metadata=metadata,
@@ -696,6 +1046,7 @@ class RemoteManager:
         error = str((response.error if response is not None else "") or "")
         payload = response.payload if isinstance(getattr(response, "payload", None), dict) else {}
         status_code = getattr(response, "status_code", None)
+        elapsed_ms = getattr(response, "elapsed_ms", None)
         self._service_init_confirmed = bool(ok)
         self._service_init_state = "ready" if ok else "failed"
         self._service_init_last_error = "" if ok else (error or "init_failed")
@@ -709,9 +1060,19 @@ class RemoteManager:
             ok=bool(ok),
             error="" if ok else self._service_init_last_error,
             status_code=status_code,
+            elapsed_ms=elapsed_ms,
             result=payload if payload else None,
             request_id=None,
         )
+        if not ok:
+            detail = {
+                "base_url": self._runtime_base_url(),
+                "endpoint": "/api/v1/init",
+                "status_code": status_code,
+                "elapsed_ms": elapsed_ms,
+                "error_message": self._service_init_last_error,
+            }
+            self._log("error", "remote_init_failed", **detail)
         return response
 
     def _service_init_unavailable(self, *, timeout_s: float, reason: str) -> Dict[str, Any]:
@@ -729,18 +1090,30 @@ class RemoteManager:
             state="init_failed",
             ok=False,
             error=self._service_init_last_error,
+            elapsed_ms=0,
             request_id=None,
+        )
+        self._log(
+            "error",
+            "remote_init_failed",
+            base_url=self._runtime_base_url(),
+            endpoint="/api/v1/init",
+            status_code=None,
+            elapsed_ms=0,
+            error_message=self._service_init_last_error,
         )
         return {
             "op": "INIT",
             "ok": False,
             "reason": self._service_init_last_error,
+            "error_message": self._service_init_last_error,
             "status_code": None,
+            "elapsed_ms": 0,
             "request_id": None,
             "timeout_s": float(timeout_s),
         }
 
-    def _run_service_init(self, *, timeout_s: float, source: str = "service") -> Dict[str, Any]:
+    def _run_service_init(self, *, timeout_s: float, source: str = "service", request_id: Optional[str] = None) -> Dict[str, Any]:
         client = self.client
         base_url = self._runtime_base_url()
         if not self.enabled or client is None:
@@ -764,8 +1137,10 @@ class RemoteManager:
             "op": "INIT",
             "ok": bool(response is not None and response.ok),
             "reason": str((response.error if response is not None else "") or ""),
+            "error_message": str((response.error if response is not None else "") or ""),
             "status_code": getattr(response, "status_code", None),
-            "request_id": None,
+            "elapsed_ms": getattr(response, "elapsed_ms", None),
+            "request_id": request_id,
             "source": str(source or "service"),
         }
 
@@ -789,6 +1164,7 @@ class RemoteManager:
             ok=False,
             error="init_not_confirmed",
             status_code=result.get("status_code"),
+            elapsed_ms=result.get("elapsed_ms"),
         )
         return False
 
@@ -1079,7 +1455,38 @@ class RemoteManager:
                 return
             request = self._build_predict_request(cmd, frames=frames, frame_slot=selected_frame_slot)
             if request is not None:
-                self.predict(request, request_id=request.metadata.request_id)
+                metadata_payload = request.metadata.to_metadata_payload()
+                self._log(
+                    "info",
+                    "[GRASP_REMOTE][PREDICT_SEND]",
+                    request_id=request.metadata.request_id,
+                    target=metadata_payload.get("target"),
+                    class_name=metadata_payload.get("class_name"),
+                    class_id=metadata_payload.get("class_id"),
+                )
+                archive_dir = self._archive_predict_payload(request, frames)
+                response = self.predict(request, request_id=request.metadata.request_id)
+                self._archive_predict_response(archive_dir, response)
+                payload = response.payload if isinstance(getattr(response, "payload", None), dict) else {}
+                server_status = str(payload.get("status") or "").strip().lower()
+                if response is not None and response.ok and server_status not in {"failure", "failed", "error"}:
+                    self._log("info", "[GRASP_REMOTE][PREDICT_OK]", request_id=request.metadata.request_id, status_code=response.status_code, elapsed_ms=response.elapsed_ms)
+                else:
+                    reason = str(payload.get("reason") or payload.get("message") or getattr(response, "error", "") or "predict_failed")
+                    local_bbox = metadata_payload.get("local_target_bbox_xyxy")
+                    remote_no_detection = "detect" in reason.lower() or "no_detection" in reason.lower()
+                    if remote_no_detection and local_bbox:
+                        result = dict(self._last_result.get("result") or {})
+                        result.update(
+                            {
+                                "remote_no_detection_but_local_target_present": True,
+                                "local_target_bbox_xyxy": local_bbox,
+                                "local_target_conf": metadata_payload.get("local_target_conf"),
+                                "remote_reason": reason,
+                            }
+                        )
+                        self._last_result["result"] = result
+                    self._log("error", "[GRASP_REMOTE][PREDICT_FAILED]", request_id=request.metadata.request_id, status=response.status_code if response is not None else None, reason=reason)
                 self._publish_result("remote_result", dict(self._last_result))
                 self._release_service_quiet_async(timeout_s=min(2.0, timeout_s), source="predict_done")
             else:
@@ -1104,6 +1511,11 @@ class RemoteManager:
                 "service_init_last_error": str(self._service_init_last_error or ""),
                 "service_init_last_ok": bool(self._service_init_last_ok),
                 "service_init_last_ts": self._service_init_last_ts,
+                "base_url": self._runtime_base_url(),
+                "endpoint": "/api/v1/init",
+                "status_code": self._last_result.get("status_code"),
+                "elapsed_ms": self._last_result.get("elapsed_ms"),
+                "error_message": str(self._service_init_last_error or ""),
                 "ts": time.time(),
             }
         # predict / release
@@ -1112,6 +1524,7 @@ class RemoteManager:
             "last_ok": bool(self._last_result.get("last_ok", False)),
             "last_error": str(self._last_result.get("last_error") or ""),
             "status_code": self._last_result.get("status_code"),
+            "elapsed_ms": self._last_result.get("elapsed_ms"),
             "has_result": bool(self._last_result.get("has_result", False)),
             "result": self._last_result.get("result"),
             "request_id": self._last_result.get("request_id"),
@@ -1127,6 +1540,7 @@ class RemoteManager:
         ok: bool,
         error: str = "",
         status_code: Optional[int] = None,
+        elapsed_ms: Optional[int] = None,
         result: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
     ) -> None:
@@ -1138,6 +1552,7 @@ class RemoteManager:
             "last_ok": bool(ok),
             "last_error": str(error or ""),
             "status_code": status_code,
+            "elapsed_ms": elapsed_ms,
             "has_result": result is not None,
             "result": dict(result or {}) if isinstance(result, dict) else result,
             "request_id": request_id,
@@ -1187,6 +1602,7 @@ class RemoteManager:
                 state=f"{action}_skipped",
                 ok=False,
                 error="no_response",
+                elapsed_ms=0,
                 request_id=request_id,
             )
             return None
@@ -1197,6 +1613,7 @@ class RemoteManager:
             ok=bool(response.ok),
             error=str(response.error or ""),
             status_code=response.status_code,
+            elapsed_ms=getattr(response, "elapsed_ms", None),
             result=payload,
             request_id=request_id,
         )

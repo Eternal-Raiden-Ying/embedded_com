@@ -236,6 +236,10 @@ class TransitionsMixin:
         if state == State.SEARCH_TARGET_INIT:
             self._log("info", "target_search_enter")
             self._log("info", "docking_final_latch_frozen_for_target_search")
+            self._log("info", f"[TARGET_SEARCH][VISION_REQ] mode=FIND_OBJECT target={self.ctx.active_target or ''}")
+            req_payload = self._active_req_payload()
+            if req_payload is not None:
+                self._queue_vision_req(req_payload, force=True)
             self.ctx.final_locked = False
             self.ctx.final_depth_latched = False
             self.ctx.final_roi_mode_latched = False

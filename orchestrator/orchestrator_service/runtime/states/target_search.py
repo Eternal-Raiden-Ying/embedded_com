@@ -23,7 +23,7 @@ from ...ipc.protocol import (
 )
 from ...bridge.arm_protocol import parse_arm_response
 from ...utils.grasp_utils import grasp_to_pose_params
-from ...utils.target_utils import target_to_class_id
+from ...utils.target_utils import resolve_target, target_to_class_id
 from ..common import monotonic_ts
 from ..context import RuntimeContext, State
 from ..controller import MotionController, MotionDecision
@@ -92,13 +92,11 @@ class TargetSearchMixin:
             min_area=self.cfg.target_confirm_min_bbox_area,
         )
         target_window = self._record_target_window_sample(target_obs, candidate_reason)
+        timed_out = self._state_elapsed() >= float(self.cfg.target_search_timeout_s)
         if candidate_ok and target_obs is not None:
             self.ctx.target_found_frames += 1
             self.ctx.target_lost_frames = 0
             self._update_target_stability(target_obs)
-            align_decision = self._target_lateral_align_decision(target_obs, state="EDGE_SLIDE_SEARCH")
-            if align_decision is not None:
-                return align_decision
             found_ratio_ok = (
                 float(target_window.get("found_ratio", 0.0) or 0.0)
                 >= float(getattr(self.cfg, "target_confirm_found_ratio_th", 0.5) or 0.5)
@@ -124,6 +122,11 @@ class TargetSearchMixin:
                     reason="target_lateral_centered_confirm",
                     vy_cmd=0.0,
                 )
+            if timed_out:
+                return self._handle_edge_slide_target_timeout(target_obs, target_window, candidate_reason)
+            align_decision = self._target_lateral_align_decision(target_obs, state="EDGE_SLIDE_SEARCH")
+            if align_decision is not None:
+                return align_decision
             if centered_ok:
                 return self._annotate_target_lateral_decision(
                     self.controller.stop_cmd("EDGE_SLIDE_SEARCH"),
@@ -133,6 +136,8 @@ class TargetSearchMixin:
                     vy_cmd=0.0,
                 )
         else:
+            if timed_out:
+                return self._handle_edge_slide_target_timeout(target_obs, target_window, candidate_reason)
             had_recent_target = bool(
                 self.ctx.target_found_frames > 0
                 or self.ctx.target_lateral_stable_count > 0
@@ -163,16 +168,6 @@ class TargetSearchMixin:
                 reason=candidate_reason or "target_not_found_hold",
                 vy_cmd=0.0,
             )
-        if self._state_elapsed() >= float(self.cfg.target_search_timeout_s):
-            self.ctx.last_fail_reason = "当前桌边未找到目标"
-            if self._can_relocate_edge():
-                self.ctx.advance_edge()
-                self._transition(State.LEAVE_EDGE, f"{self.ctx.last_fail_reason}，切换到边 {self.ctx.current_edge_id}")
-                self._queue_tts("当前边未找到目标，准备换边")
-                return self.controller.leave_edge_cmd()
-            self._transition(State.NEXT_TABLE, f"{self.ctx.last_fail_reason}，准备切换下一张桌")
-            self._queue_tts("当前桌位未找到目标，尝试下一张桌")
-            return self.controller.next_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
         edge_obs = self._fresh_table_obs()
         if edge_obs is None or not self._table_visible(edge_obs):
             return self._annotate_target_lateral_decision(
@@ -288,6 +283,37 @@ class TargetSearchMixin:
             reason=reason,
         )
         return self._annotate_edge_slide_decision(decision, quality, fallback_decision="slide")
+
+    def _handle_edge_slide_target_timeout(
+        self,
+        target_obs: Optional[TargetObs],
+        target_window: Dict[str, Any],
+        candidate_reason: str,
+    ) -> MotionDecision:
+        reject_reason = self._target_search_reject_reason(target_obs, target_window, candidate_reason, timeout=True)
+        self.ctx.target_last_lost_reason = reject_reason
+        self.ctx.last_fail_reason = f"当前桌边未找到目标 reject_reason={reject_reason}"
+        if self._can_relocate_edge():
+            self.ctx.advance_edge()
+            self._transition(State.LEAVE_EDGE, f"{self.ctx.last_fail_reason}，切换到边 {self.ctx.current_edge_id}")
+            self._queue_tts("当前边未找到目标，准备换边")
+            decision = self.controller.leave_edge_cmd()
+        else:
+            self._transition(State.NEXT_TABLE, f"{self.ctx.last_fail_reason}，准备切换下一张桌")
+            self._queue_tts("当前桌位未找到目标，尝试下一张桌")
+            decision = self.controller.next_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+        if decision.control_summary is not None:
+            decision.control_summary.update(
+                {
+                    "target_search_reject_reason": reject_reason,
+                    "target_search_timeout": True,
+                    "found_ratio": float(target_window.get("found_ratio", 0.0) or 0.0),
+                    "stable_count": int(self.ctx.target_found_frames),
+                    "lateral_stable_count": int(self.ctx.target_lateral_stable_count),
+                    "center_jitter": float(target_window.get("center_jitter", 0.0) or 0.0),
+                }
+            )
+        return decision
 
     def _edge_slide_fallback_state(self) -> State:
         if not self._table_final_lock_enabled():
@@ -781,18 +807,34 @@ class TargetSearchMixin:
         return self.controller.stop_cmd("DONE")
 
     def _target_matches_active(self, obs: TargetObs) -> bool:
-        if not self.ctx.active_target or not obs.target:
+        if not self.ctx.active_target:
             return True
-        return str(obs.target).strip() == str(self.ctx.active_target).strip()
+        candidate = str(obs.canonical_target or obs.target or "").strip()
+        if not candidate:
+            return True
+        spec = resolve_target(candidate)
+        candidate_canonical = spec.canonical_target if spec is not None else candidate
+        return candidate_canonical == str(self.ctx.canonical_target or self.ctx.active_target).strip()
 
     def _target_cls_matches_active(self, obs: TargetObs) -> bool:
         active = str(self.ctx.active_target or "").strip()
         if not active:
             return True
+        expected_id = self.ctx.class_id
+        matched_id = getattr(obs, "matched_class_id", None)
+        if expected_id is not None and matched_id is not None:
+            try:
+                return int(expected_id) == int(matched_id)
+            except Exception:
+                pass
+        expected_name = str(self.ctx.class_name or "").strip()
         candidate_cls = str(obs.matched_cls or obs.target or "").strip()
         if not candidate_cls:
             return True
-        return candidate_cls == active
+        spec = resolve_target(candidate_cls)
+        if spec is not None:
+            return spec.canonical_target == str(self.ctx.canonical_target or active).strip()
+        return bool(expected_name and candidate_cls == expected_name) or candidate_cls == active
 
     def _target_conf_value(self, obs: TargetObs) -> Optional[float]:
         value = obs.matched_conf if obs.matched_conf is not None else obs.confidence
@@ -972,12 +1014,30 @@ class TargetSearchMixin:
         summary.update(
             {
                 "target_found": bool(obs is not None and getattr(obs, "found", False)),
+                "raw_target": str(getattr(obs, "raw_target", "") or self.ctx.raw_target or "") if obs is not None else self.ctx.raw_target,
+                "canonical_target": str(getattr(obs, "canonical_target", "") or self.ctx.canonical_target or "") if obs is not None else self.ctx.canonical_target,
+                "expected_class_name": str(getattr(obs, "expected_class_name", "") or self.ctx.class_name or "") if obs is not None else self.ctx.class_name,
+                "expected_class_id": getattr(obs, "expected_class_id", None) if obs is not None else self.ctx.class_id,
                 "target_cls": str(getattr(obs, "matched_cls", None) or getattr(obs, "target", "") or "") if obs is not None else "",
+                "matched_cls": str(getattr(obs, "matched_cls", None) or "") if obs is not None else "",
+                "matched_class_id": getattr(obs, "matched_class_id", None) if obs is not None else None,
+                "best_cls": str(getattr(obs, "best_cls", "") or "") if obs is not None else "",
+                "best_conf": getattr(obs, "best_conf", None) if obs is not None else None,
                 "target_conf": conf,
                 "target_center_x_norm": cx,
                 "target_err_x": err,
                 "target_lateral_align_active": bool(active),
                 "target_lateral_align_reason": str(reason or ""),
+                "target_search_reject_reason": self._target_search_reject_reason(
+                    obs,
+                    self._target_window_stats(),
+                    str(reason or ""),
+                ),
+                "centered_ok": bool(self._target_lateral_centered(obs)),
+                "bbox_valid": bool(self._target_bbox_valid(obs)),
+                "stable_count": int(self.ctx.target_found_frames),
+                "found_ratio": float(self._target_window_stats().get("found_ratio", 0.0) or 0.0),
+                "center_jitter": float(self.ctx.target_last_center_jitter),
                 "target_lateral_vy_cmd": float(vy_cmd),
                 "target_lateral_stable_count": int(self.ctx.target_lateral_stable_count),
                 "target_lateral_stable_frames": int(self._target_lateral_stable_frames()),
@@ -996,6 +1056,40 @@ class TargetSearchMixin:
         self.ctx.target_lateral_align_reason = str(reason or "")
         self.ctx.target_lateral_vy_cmd = float(vy_cmd)
         return decision
+
+    def _target_search_reject_reason(
+        self,
+        obs: Optional[TargetObs],
+        target_window: Dict[str, Any],
+        reason: str,
+        *,
+        timeout: bool = False,
+    ) -> str:
+        if timeout:
+            return "timeout"
+        raw = str(reason or "").strip()
+        if obs is None:
+            return "target_missing"
+        if raw in {"class_mismatch", "target_cls_mismatch", "target_mismatch"}:
+            return "class_mismatch"
+        if raw.startswith("bbox_") or raw == "target_bbox_invalid":
+            return "bbox_invalid"
+        if raw.startswith("target_lost") or raw in {"target_missing", "vision_stale"}:
+            return "target_missing"
+        if not self._target_lateral_centered(obs):
+            return "not_centered"
+        if not self._target_bbox_valid(obs):
+            return "bbox_invalid"
+        found_ratio = float(target_window.get("found_ratio", 0.0) or 0.0)
+        if found_ratio < float(getattr(self.cfg, "target_confirm_found_ratio_th", 0.5) or 0.5):
+            return "found_ratio_low"
+        if int(self.ctx.target_found_frames) < int(self.cfg.target_found_frames_to_confirm):
+            return "stable_count_not_enough"
+        if float(target_window.get("center_jitter", 0.0) or 0.0) > float(self.cfg.target_lock_center_jitter_th):
+            return "jitter_too_large"
+        if int(self.ctx.target_lateral_stable_count) < self._target_lateral_stable_frames():
+            return "stable_count_not_enough"
+        return raw or "stable_count_not_enough"
 
     def _target_lateral_align_decision(self, obs: Optional[TargetObs], *, state: str) -> Optional[MotionDecision]:
         if not bool(getattr(self.cfg, "target_lateral_align_enable", True)):
@@ -1049,9 +1143,9 @@ class TargetSearchMixin:
         min_area: float = 0.0,
     ) -> Tuple[bool, str]:
         if obs is None:
-            return False, "vision_stale"
+            return False, "target_missing"
         if not bool(obs.found):
-            return False, "target_lost"
+            return False, "target_missing"
         if not self._target_cls_matches_active(obs):
             return False, "class_mismatch"
         if not self._target_matches_active(obs):
@@ -1167,7 +1261,7 @@ class TargetSearchMixin:
         
         active_target = str(self.ctx.active_target or "").strip()
         matched_cls = str(obs.matched_cls or obs.target or "").strip()
-        if active_target and matched_cls and matched_cls != active_target:
+        if active_target and matched_cls and not self._target_cls_matches_active(obs):
             return False, "target_cls_mismatch"
             
         conf = obs.matched_conf if obs.matched_conf is not None else 0.0

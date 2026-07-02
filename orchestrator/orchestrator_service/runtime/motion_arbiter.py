@@ -429,8 +429,20 @@ def _docking_result(
     safe_summary["close_range_latched"] = is_close_range
     safe_summary["final_distance_servo_active"] = is_final_servo
     safe_summary["final_phase_active"] = bool(final_phase_state)
-    safe_summary["final_stop_threshold_m"] = float(_float(safe_summary, "depth_envelope_stop_p10_m", 0.35))
+    safe_summary["legacy_edge_stop_threshold_m"] = float(_float(safe_summary, "depth_envelope_stop_p10_m", 0.35))
     safe_summary["docking_action"] = action.value
+    if action == DockingAction.DEPTH_SAFETY_HOLD:
+        depth_source = str(safe_summary.get("best_depth_source") or safe_summary.get("measured_dist_source") or "")
+        if "final_fixed_roi" in depth_source or "fixed_roi" in depth_source:
+            safe_summary["safety_source"] = "final_fixed_roi"
+        elif "table_roi_depth_p10" in depth_source or "roi_final_p10" in depth_source:
+            safe_summary["safety_source"] = "table_roi_p10"
+        elif "depth_p10" in depth_source or "edge" in depth_source:
+            safe_summary["safety_source"] = "edge_depth"
+        else:
+            safe_summary.setdefault("safety_source", "unknown")
+        if safe_summary.get("final_fixed_roi_stop_stat") is None and safe_summary.get("roi_depth_stat") is None:
+            safe_summary.setdefault("fixed_roi_status", "missing")
 
     return _from_docking_result(
         DockingMotionResult(
@@ -614,8 +626,8 @@ def arbitrate_table_docking_motion(
             or fixed_roi_width_px / max(1e-6, fixed_roi_height_px) > 4.0
         )
     )
-    fixed_roi_value = fixed_roi_mean_value if fixed_roi_mean_value is not None else fixed_roi_median_value
-    fixed_roi_stat_used = "mean" if fixed_roi_mean_value is not None else ("median" if fixed_roi_median_value is not None else "missing")
+    fixed_roi_value = fixed_roi_median_value if fixed_roi_median_value is not None else fixed_roi_mean_value
+    fixed_roi_stat_used = "median" if fixed_roi_median_value is not None else ("mean" if fixed_roi_mean_value is not None else "missing")
     try:
         fixed_roi_depth_m = float(fixed_roi_value) if fixed_roi_value is not None else None
     except (TypeError, ValueError):
@@ -782,7 +794,8 @@ def arbitrate_table_docking_motion(
             "legacy_table_roi_depth_p10": float(legacy_roi_depth_m) if legacy_roi_depth_m is not None else None,
         }
     )
-    fixed_roi_final_stop_threshold = _float(summary, "depth_envelope_stop_p10_m", _float(summary, "roi_final_stop_p10_m", 0.35))
+    fixed_roi_final_stop_threshold = _float(summary, "final_fixed_roi_stop_threshold_m", 0.50)
+    fixed_roi_stop_stable_required = max(1, int(_float(summary, "final_fixed_roi_stop_stable_count_required", 3)))
     fixed_roi_final_stop_reached = bool(
         final_phase_state
         and fixed_roi_selected
@@ -802,15 +815,17 @@ def arbitrate_table_docking_motion(
         pass
     fixed_roi_final_stop_stable = bool(
         fixed_roi_final_stop_reached
-        and int(getattr(ctx, "fixed_roi_final_stop_stable_count", 0) or 0) >= 2
+        and int(getattr(ctx, "fixed_roi_final_stop_stable_count", 0) or 0) >= fixed_roi_stop_stable_required
     )
     summary.update(
         {
             "final_fixed_roi_stop_threshold": float(fixed_roi_final_stop_threshold),
+            "final_fixed_roi_stop_threshold_m": float(fixed_roi_final_stop_threshold),
             "final_fixed_roi_stop_stat": float(fixed_roi_depth_m) if fixed_roi_depth_m is not None else None,
             "final_fixed_roi_stop_stat_used": fixed_roi_stat_used,
             "final_fixed_roi_stop_reached": bool(fixed_roi_final_stop_reached),
             "final_fixed_roi_stop_stable_count": int(getattr(ctx, "fixed_roi_final_stop_stable_count", 0) or 0),
+            "final_fixed_roi_stop_stable_count_required": int(fixed_roi_stop_stable_required),
             "final_fixed_roi_stop_stable": bool(fixed_roi_final_stop_stable),
             "final_fixed_roi_min_stat_m": getattr(ctx, "final_fixed_roi_min_stat_m", None),
         }
