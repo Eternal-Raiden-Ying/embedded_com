@@ -13,10 +13,10 @@ class PredictorConfig:
     checkpoint_path: str = os.path.join(MODULE_DIR, 'weights', 'minkuresunet_realsense.tar')
     dump_dir: str = os.path.join(MODULE_DIR, 'test', 'debug_res')
     seed_feat_dim: int = 512
-    m_point: int = 1024
+    m_point: int = 2048
     graspness_threshold: float = 0.1
-    grasp_max_width: float = 0.1
-    num_point: int = 15000
+    grasp_max_width: float = 0.08
+    num_point: int = 25000
     voxel_size: float = 0.005
     collision_thresh: float = 0.01
     voxel_size_cd: float = 0.01
@@ -53,7 +53,10 @@ class PredictorConfig:
     protocol_depth_base: float = -0.03  # 0.02
     protocol_feasible_distance_cm: float = 3.0
     protocol_min_score: float = 0.0
-    response_max_targets: int = 5
+    response_max_targets: int = 1
+    composite_score_weight: float = 1.0
+    composite_pitch_weight: float = 0.3
+    composite_dist_weight: float = 0.2
     reference_line_x_cm: float = 1.5
     reference_line_y_cm: float = 0.0
     reposition_max_distance_cm: float = 20.0
@@ -110,6 +113,9 @@ def add_predictor_args(parser, default_overrides=None):
     parser.add_argument('--protocol_feasible_distance_cm', type=float, default=defaults['protocol_feasible_distance_cm'], help='Maximum allowed 3D distance (cm) between the approach line and the reference Z-line')
     parser.add_argument('--protocol_min_score', type=float, default=defaults['protocol_min_score'], help='Minimum score required for a grasp to be reported as executable; <=0 disables this filter')
     parser.add_argument('--response_max_targets', type=int, default=defaults['response_max_targets'], help='Maximum number of protocol targets returned to downstream clients')
+    parser.add_argument('--composite_score_weight', type=float, default=defaults['composite_score_weight'], help='Weight for confidence in composite ranking (0 disables confidence factor)')
+    parser.add_argument('--composite_pitch_weight', type=float, default=defaults['composite_pitch_weight'], help='Weight for pitch penalty in composite ranking (higher = flatter approach preferred)')
+    parser.add_argument('--composite_dist_weight', type=float, default=defaults['composite_dist_weight'], help='Weight for feasible distance penalty in composite ranking (higher = closer to reference line preferred)')
     parser.add_argument('--reference_line_x_cm', type=float, default=defaults['reference_line_x_cm'], help='X coordinate of the reference Z-parallel line in robot frame (cm)')
     parser.add_argument('--reference_line_y_cm', type=float, default=defaults['reference_line_y_cm'], help='Y coordinate of the reference Z-parallel line in robot frame (cm)')
     parser.add_argument('--reposition_max_distance_cm', type=float, default=defaults['reposition_max_distance_cm'], help='Maximum allowed XY distance from reference line to grasp in reposition proposal (cm)')

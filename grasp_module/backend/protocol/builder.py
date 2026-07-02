@@ -89,12 +89,28 @@ def build_downstream_response(
             reposition_proposal=reposition_proposal,
         )
 
-    # --- reposition_required: feasible grasps exist but all below score ---
+    # --- composite ranking ---
     min_score = float(getattr(predictor_cfgs, "protocol_min_score", 0.0))
     max_targets = max(1, int(getattr(predictor_cfgs, "response_max_targets", 5)))
-    output_targets = [
-        target for target in protocol_targets if target["confidence"] >= min_score
-    ][:max_targets]
+    w_score = float(getattr(predictor_cfgs, "composite_score_weight", 1.0))
+    w_pitch = float(getattr(predictor_cfgs, "composite_pitch_weight", 0.0))
+    w_dist = float(getattr(predictor_cfgs, "composite_dist_weight", 0.0))
+
+    dist_threshold = float(getattr(predictor_cfgs, "protocol_feasible_distance_cm", 3.0))
+    if dist_threshold <= 0:
+        dist_threshold = 1.0  # guard against division by zero
+
+    def _composite(target):
+        s = w_score * target["confidence"]
+        if w_pitch > 0:
+            s += w_pitch * (1.0 - abs(target["pitch_deg"]) / 90.0)
+        if w_dist > 0:
+            s += w_dist * (1.0 - min(target["feasible_distance_cm"], dist_threshold) / dist_threshold)
+        return s
+
+    candidates = [t for t in protocol_targets if t["confidence"] >= min_score]
+    candidates.sort(key=_composite, reverse=True)
+    output_targets = candidates[:max_targets]
 
     if not output_targets:
         best_conf = protocol_targets[0]["confidence"]
