@@ -6,6 +6,7 @@ import json
 import logging
 import os
 
+import cv2
 import numpy as np
 
 
@@ -407,3 +408,104 @@ def map_depth_cloud_to_color_image(depth, color, depth_cam, color_cam, depth_to_
         n, int(in_view.sum()), int((~in_view & front_mask).sum()),
     )
     return points, colors, u, v, in_view
+
+
+# ============================================================
+# 深度图预处理工具
+# ============================================================
+
+def normalize_depth_shape(depth_img):
+    """Squeeze single-channel trailing dimension: (H,W,1) -> (H,W)."""
+    if depth_img is None:
+        return depth_img
+    if depth_img.ndim == 3 and depth_img.shape[2] == 1:
+        return depth_img[:, :, 0]
+    return depth_img
+
+
+def sanitize_depth_image(depth_img, depth_min_mm=1, depth_max_mm=2000):
+    """Clip depth to [depth_min_mm, depth_max_mm], zero out invalid pixels."""
+    depth_img = normalize_depth_shape(depth_img)
+    if depth_img is None:
+        return depth_img
+
+    depth = depth_img.astype(np.uint16, copy=True)
+    valid_mask = depth > 0
+    if depth_min_mm is not None:
+        valid_mask &= depth >= int(depth_min_mm)
+    if depth_max_mm is not None:
+        valid_mask &= depth <= int(depth_max_mm)
+    depth[~valid_mask] = 0
+    return depth
+
+
+def _fill_zero_holes_with_median(depth_img, kernel_size=5, iterations=1):
+    """Iterative median-based hole filling: only fills zero pixels that have non-zero neighbours."""
+    if kernel_size <= 1 or iterations <= 0:
+        return depth_img
+
+    filled = depth_img.astype(np.uint16, copy=True)
+    for _ in range(iterations):
+        candidate = cv2.medianBlur(filled, kernel_size)
+        hole_mask = (filled == 0) & (candidate > 0)
+        if not np.any(hole_mask):
+            break
+        filled[hole_mask] = candidate[hole_mask]
+    return filled
+
+
+def postprocess_depth_image(depth_img, cfgs):
+    """Full depth pre-processing pipeline used by both test_engine and server.
+
+    Stages: clip range -> median denoise -> hole-fill -> bilateral (optional) -> clip.
+    """
+    depth = sanitize_depth_image(
+        depth_img,
+        depth_min_mm=getattr(cfgs, "depth_min_mm", 1),
+        depth_max_mm=getattr(cfgs, "depth_max_mm", 2000),
+    )
+
+    if not getattr(cfgs, "depth_postprocess", True):
+        return depth
+
+    smooth_method = str(getattr(cfgs, "depth_smooth_method", "median"))
+    smooth_kernel = int(getattr(cfgs, "depth_smooth_kernel", 5))
+    hole_fill_kernel = int(getattr(cfgs, "depth_hole_fill_kernel", 5))
+    hole_fill_iterations = int(getattr(cfgs, "depth_hole_fill_iterations", 2))
+
+    if smooth_kernel % 2 == 0:
+        smooth_kernel += 1
+    if hole_fill_kernel % 2 == 0:
+        hole_fill_kernel += 1
+
+    processed = depth.copy()
+
+    # ── 阶段 1: median 去飞点 ──
+    if smooth_kernel > 1 and smooth_method != "none":
+        median_smoothed = cv2.medianBlur(processed, smooth_kernel)
+        processed = np.where(processed > 0, median_smoothed, 0).astype(np.uint16)
+
+    # ── 阶段 2: 孔洞填充 ──
+    processed = _fill_zero_holes_with_median(
+        processed,
+        kernel_size=hole_fill_kernel,
+        iterations=hole_fill_iterations,
+    )
+
+    # ── 阶段 3: bilateral 保边平滑 ──
+    if smooth_method == "bilateral":
+        bilat_d = int(getattr(cfgs, "depth_bilateral_d", 9))
+        sigma_color = float(getattr(cfgs, "depth_bilateral_sigma_color", 75.0))
+        sigma_space = float(getattr(cfgs, "depth_bilateral_sigma_space", 75.0))
+        bilat_smoothed = cv2.bilateralFilter(
+            processed.astype(np.float32), bilat_d,
+            sigma_color, sigma_space,
+        ).astype(np.uint16)
+        processed = np.where(processed > 0, bilat_smoothed, 0).astype(np.uint16)
+
+    processed = sanitize_depth_image(
+        processed,
+        depth_min_mm=getattr(cfgs, "depth_min_mm", 1),
+        depth_max_mm=getattr(cfgs, "depth_max_mm", 2000),
+    )
+    return processed

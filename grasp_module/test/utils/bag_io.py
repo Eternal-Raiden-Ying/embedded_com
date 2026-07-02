@@ -5,103 +5,17 @@ import numpy as np
 
 from grasp_module.backend.utils.data_utils import (
     CameraInfo,
+    _fill_zero_holes_with_median,
     build_ply_output_path,
     create_colored_point_cloud_from_rgbd,
     filter_point_cloud_by_z,
+    normalize_depth_shape,
+    postprocess_depth_image,
+    sanitize_depth_image,
     write_open3d_point_cloud,
 )
 
 from .io_utils import ensure_dir, save_json
-
-
-def normalize_depth_shape(depth_img):
-    if depth_img is None:
-        return depth_img
-    if depth_img.ndim == 3 and depth_img.shape[2] == 1:
-        return depth_img[:, :, 0]
-    return depth_img
-
-
-def sanitize_depth_image(depth_img, depth_min_mm=1, depth_max_mm=2000):
-    depth_img = normalize_depth_shape(depth_img)
-    if depth_img is None:
-        return depth_img
-
-    depth = depth_img.astype(np.uint16, copy=True)
-    valid_mask = depth > 0
-    if depth_min_mm is not None:
-        valid_mask &= depth >= int(depth_min_mm)
-    if depth_max_mm is not None:
-        valid_mask &= depth <= int(depth_max_mm)
-    depth[~valid_mask] = 0
-    return depth
-
-
-def _fill_zero_holes_with_median(depth_img, kernel_size=5, iterations=1):
-    if kernel_size <= 1 or iterations <= 0:
-        return depth_img
-
-    filled = depth_img.astype(np.uint16, copy=True)
-    for _ in range(iterations):
-        candidate = cv2.medianBlur(filled, kernel_size)
-        hole_mask = (filled == 0) & (candidate > 0)
-        if not np.any(hole_mask):
-            break
-        filled[hole_mask] = candidate[hole_mask]
-    return filled
-
-
-def postprocess_depth_image(depth_img, cfgs):
-    depth = sanitize_depth_image(
-        depth_img,
-        depth_min_mm=getattr(cfgs, "depth_min_mm", 1),
-        depth_max_mm=getattr(cfgs, "depth_max_mm", 2000),
-    )
-
-    if not getattr(cfgs, "depth_postprocess", True):
-        return depth
-
-    smooth_method = str(getattr(cfgs, "depth_smooth_method", "median"))
-    smooth_kernel = int(getattr(cfgs, "depth_smooth_kernel", 5))
-    hole_fill_kernel = int(getattr(cfgs, "depth_hole_fill_kernel", 5))
-    hole_fill_iterations = int(getattr(cfgs, "depth_hole_fill_iterations", 2))
-
-    if smooth_kernel % 2 == 0:
-        smooth_kernel += 1
-    if hole_fill_kernel % 2 == 0:
-        hole_fill_kernel += 1
-
-    processed = depth.copy()
-
-    # ── 阶段 1: median 去飞点 ──
-    if smooth_kernel > 1 and smooth_method != "none":
-        median_smoothed = cv2.medianBlur(processed, smooth_kernel)
-        processed = np.where(processed > 0, median_smoothed, 0).astype(np.uint16)
-
-    # ── 阶段 2: 孔洞填充 ──
-    processed = _fill_zero_holes_with_median(
-        processed,
-        kernel_size=hole_fill_kernel,
-        iterations=hole_fill_iterations,
-    )
-
-    # ── 阶段 3: bilateral 保边平滑 ──
-    if smooth_method == "bilateral":
-        bilat_d = int(getattr(cfgs, "depth_bilateral_d", 9))
-        sigma_color = float(getattr(cfgs, "depth_bilateral_sigma_color", 75.0))
-        sigma_space = float(getattr(cfgs, "depth_bilateral_sigma_space", 75.0))
-        bilat_smoothed = cv2.bilateralFilter(
-            processed.astype(np.float32), bilat_d,
-            sigma_color, sigma_space,
-        ).astype(np.uint16)
-        processed = np.where(processed > 0, bilat_smoothed, 0).astype(np.uint16)
-
-    processed = sanitize_depth_image(
-        processed,
-        depth_min_mm=getattr(cfgs, "depth_min_mm", 1),
-        depth_max_mm=getattr(cfgs, "depth_max_mm", 2000),
-    )
-    return processed
 
 
 def apply_rs_official_filters(rs_module, depth_frame, cfgs):

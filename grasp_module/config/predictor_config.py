@@ -14,7 +14,7 @@ class PredictorConfig:
     dump_dir: str = os.path.join(MODULE_DIR, 'test', 'debug_res')
     seed_feat_dim: int = 512
     m_point: int = 2048
-    graspness_threshold: float = 0.1
+    graspness_threshold: float = 0.2
     grasp_max_width: float = 0.08
     num_point: int = 25000
     voxel_size: float = 0.005
@@ -22,6 +22,19 @@ class PredictorConfig:
     voxel_size_cd: float = 0.01
     random_seed: int = 0
     scene_max_depth: float = 3.0
+
+    # ---- Depth pre-processing ----
+    depth_postprocess: bool = True
+    depth_smooth_method: str = "median"
+    depth_smooth_kernel: int = 5
+    depth_hole_fill_kernel: int = 5
+    depth_hole_fill_iterations: int = 2
+    depth_bilateral_d: int = 9
+    depth_bilateral_sigma_color: float = 75.0
+    depth_bilateral_sigma_space: float = 75.0
+    depth_min_mm: int = 1
+    depth_max_mm: int = 2000
+
     debug_grasp_count: int = 15
 
     # ---- Debug gripper mesh (PLY visualisation only) ----
@@ -35,7 +48,7 @@ class PredictorConfig:
     # ---- Collision detection occupancy parameters ----
     # Used by ModelFreeCollisionDetector. Independent of the debug mesh above.
     collision_finger_width_m: float = 0.02
-    collision_finger_length_m: float = 0.05
+    collision_finger_length_m: float = 0.04
     collision_height_override_m: float = -1.0
 
     rgb_path: str = os.path.join(MODULE_DIR, 'test', 'data', 'color', 'color_00000.png')
@@ -51,11 +64,11 @@ class PredictorConfig:
     forward_bbox_scale: float = 1.0
     collision_depth_margin: float = 0.15
     protocol_depth_base: float = -0.03  # 0.02
-    protocol_feasible_distance_cm: float = 3.0
+    protocol_feasible_distance_cm: float = 5.0
     protocol_min_score: float = 0.0
     response_max_targets: int = 1
     composite_score_weight: float = 1.0
-    composite_pitch_weight: float = 0.3
+    composite_pitch_weight: float = 0.7
     composite_dist_weight: float = 0.2
     reference_line_x_cm: float = 1.5
     reference_line_y_cm: float = 0.0

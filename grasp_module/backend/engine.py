@@ -22,6 +22,7 @@ from .utils.data_utils import (
     load_color_camera_info_from_metadata,
     load_depth_to_color_extrinsic,
     map_depth_cloud_to_color_image,
+    postprocess_depth_image,
     write_open3d_point_cloud,
 )
 from .utils.frames import FrameTransformer
@@ -644,6 +645,11 @@ class RealSenseGraspPredictor:
         self.rng = np.random.default_rng(getattr(self.cfgs, 'random_seed', 0))
         tic = time.perf_counter()
         timings = {}
+
+        # ── 深度图预处理 ──
+        stage_tic = time.perf_counter()
+        depth_img = postprocess_depth_image(depth_img, self.cfgs)
+        timings['depth_preprocess'] = time.perf_counter() - stage_tic
 
         stage_tic = time.perf_counter()
         seg_mask, bbox_mask, overlay_img, yolo_info = self._resolve_masks(color_img, int(class_id))
