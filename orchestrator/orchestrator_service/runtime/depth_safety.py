@@ -192,7 +192,23 @@ def apply_close_range_depth_safety_gate(ctx: Any, obs: Any, result: ArbitrationR
     depth_missing_age_s = float(depth_info.get("depth_missing_age_s") or 0.0)
     last_valid_age = _as_float(depth_info.get("last_valid_depth_p10_age_s"))
     last_valid_fresh = bool(last_valid_age is not None and last_valid_age <= depth_missing_hold_s)
-    already_locked = bool(summary.get("final_locked", False) or getattr(ctx, "final_locked", False))
+    state_value = _state_value(ctx)
+    fixed_roi_lock_ok = bool(summary.get("final_fixed_roi_stop_stable", False))
+    already_locked = bool(fixed_roi_lock_ok and (summary.get("final_locked", False) or getattr(ctx, "final_locked", False)))
+    if not fixed_roi_lock_ok and bool(summary.get("final_locked", False) or getattr(ctx, "final_locked", False)):
+        try:
+            ctx.final_locked = False
+            ctx.final_lock_reason = ""
+        except Exception:
+            pass
+        summary["final_locked"] = False
+        summary["final_lock_reason"] = ""
+        summary["final_lock_rejected"] = {
+            "state": state_value,
+            "reason": "depth_safety_final_lock_not_allowed",
+            "final_depth_usable_for_control": bool(summary.get("final_depth_usable_for_control", False)),
+            "final_depth_gate_reason": str(summary.get("final_depth_gate_reason") or ""),
+        }
 
     vx = _positive_cap(vx_raw, final_probe_vx_mps)
     vy = 0.0
@@ -220,25 +236,12 @@ def apply_close_range_depth_safety_gate(ctx: Any, obs: Any, result: ArbitrationR
             ctx.depth_stop_stable_count = int(getattr(ctx, "depth_stop_stable_count", 0) or 0) + 1
         except Exception:
             pass
-        if int(getattr(ctx, "depth_stop_stable_count", 0) or 0) >= 2:
-            state = "hard_stop_locked"
-            reason = "depth_hard_stop"
-            action = DockingAction.FINAL_LOCKED_STOP.value
-            final_locked = True
-            allow_forward = False
-            blocked_by = reason
-            try:
-                ctx.final_locked = True
-                ctx.final_lock_reason = reason
-            except Exception:
-                pass
-        else:
-            state = "hard_stop_confirming"
-            reason = "depth_hard_stop_confirming"
-            action = DockingAction.DEPTH_SAFETY_HOLD.value
-            final_locked = False
-            allow_forward = False
-            blocked_by = reason
+        state = "hard_stop_hold"
+        reason = "depth_safety_hold"
+        action = DockingAction.DEPTH_SAFETY_HOLD.value
+        final_locked = False
+        allow_forward = False
+        blocked_by = reason
     else:
         try:
             ctx.depth_stop_stable_count = 0

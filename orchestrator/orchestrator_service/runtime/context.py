@@ -196,10 +196,14 @@ class RuntimeContext:
     final_depth_latched_mono: float = 0.0
     final_yaw_align_active: bool = False
     final_locked: bool = False
-    final_slow_enter_mono: float = 0.0
-    final_slow_enter_tick: int = 0
-    final_fixed_roi_seen_after_enter: bool = False
-    final_stop_stable_count: int = 0
+    final_edge_seen_after_find: bool = False
+    final_descending_seen_after_find: bool = False
+    final_enter_candidate_stable_count: int = 0
+    final_enter_candidate_first_ts: Optional[float] = None
+    final_enter_candidate_last_reason: Optional[str] = None
+    final_enter_depth_window: List[Dict[str, object]] = field(default_factory=list)
+    final_enter_edge_seen_ts: Optional[float] = None
+    final_enter_candidate_last_log_mono: float = 0.0
     hard_stop_barrier_until_mono: float = 0.0
     hard_stop_barrier_reason: str = ""
     last_valid_depth_p10_m: Optional[float] = None
@@ -274,6 +278,61 @@ class RuntimeContext:
     arm_response: Optional[object] = None
     grasp_timeout_mono: float = 0.0
     grasp_verify_reported: bool = False
+
+    def clear_final_enter_candidate(self) -> None:
+        self.final_edge_seen_after_find = False
+        self.final_descending_seen_after_find = False
+        self.final_enter_candidate_stable_count = 0
+        self.final_enter_candidate_first_ts = None
+        self.final_enter_candidate_last_reason = None
+        self.final_enter_depth_window.clear()
+        self.final_enter_edge_seen_ts = None
+        self.final_enter_candidate_last_log_mono = 0.0
+
+    def clear_close_final_latches(self) -> None:
+        self.near_table_latched = False
+        self.near_table_latched_mono = 0.0
+        self.final_depth_latched = False
+        self.final_depth_latched_mono = 0.0
+        self.final_yaw_align_active = False
+        self.final_locked = False
+        self.final_lock_reason = ""
+        self.final_depth_latch_reason = ""
+        self.near_table_latch_reason = ""
+        self.depth_stop_stable_count = 0
+        self.depth_missing_started_mono = 0.0
+        self.depth_safety_state = ""
+        self.depth_safety_reason = ""
+        self.close_range_probe_start_mono = 0.0
+        self.close_range_probe_last_mono = 0.0
+        self.close_range_probe_distance_used_m = 0.0
+        self.last_valid_depth_p10_m = None
+        self.last_valid_depth_p10_source = ""
+        self.last_valid_depth_p10_mono = 0.0
+        for name in (
+            "close_range_latched",
+            "close_range_since_mono",
+            "final_roi_mode_latched",
+            "final_roi_mode_since_mono",
+            "final_roi_last_valid_mono",
+            "final_edge_mode_latched",
+            "final_edge_mode_since_mono",
+            "final_distance_servo_active",
+            "edge_final_stop_stable_count",
+            "roi_final_stop_stable_count",
+            "fixed_roi_final_stop_stable_count",
+            "final_fixed_roi_min_stat_m",
+            "final_reverse_too_close_count",
+            "final_fixed_roi_status_last_log_mono",
+            "final_motion_policy_last_log_mono",
+            "final_stop_observation_last_log_mono",
+            "final_stop_continue_forward_last_log_mono",
+        ):
+            if hasattr(self, name):
+                try:
+                    delattr(self, name)
+                except Exception:
+                    setattr(self, name, False if name.endswith("_latched") or name.endswith("_active") else 0.0)
 
     def clear_motion_counters(self):
         self.table_found_frames = 0
@@ -351,34 +410,12 @@ class RuntimeContext:
         self.fov_guard_level = "none"
         self.fov_guard_reason = ""
         self.zero_escape_reason = ""
-        self.near_table_latched = False
-        self.near_table_latched_mono = 0.0
-        self.final_depth_latched = False
-        self.final_depth_latched_mono = 0.0
-        self.final_yaw_align_active = False
-        self.final_locked = False
-        self.final_slow_enter_mono = 0.0
-        self.final_slow_enter_tick = 0
-        self.final_fixed_roi_seen_after_enter = False
-        self.final_stop_stable_count = 0
+        self.clear_close_final_latches()
         self.hard_stop_barrier_until_mono = 0.0
         self.hard_stop_barrier_reason = ""
-        self.last_valid_depth_p10_m = None
-        self.last_valid_depth_p10_source = ""
-        self.last_valid_depth_p10_mono = 0.0
-        self.close_range_probe_start_mono = 0.0
-        self.close_range_probe_last_mono = 0.0
-        self.close_range_probe_distance_used_m = 0.0
-        self.depth_stop_stable_count = 0
-        self.depth_missing_started_mono = 0.0
-        self.depth_safety_state = ""
-        self.depth_safety_reason = ""
         self.last_good_edge_yaw_cmd = 0.0
         self.last_good_edge_yaw_mono = 0.0
         self.last_good_near_depth_mono = 0.0
-        self.near_table_latch_reason = ""
-        self.final_depth_latch_reason = ""
-        self.final_lock_reason = ""
         self.near_depth_stable_frames = 0
         self.near_dist_stable_frames = 0
         self.final_depth_stable_frames = 0
@@ -507,6 +544,7 @@ class RuntimeContext:
         self.arm_response = None
         self.grasp_timeout_mono = 0.0
         self.grasp_verify_reported = False
+        self.clear_final_enter_candidate()
         self.reset_edge_slope_final_ready("clear_task_context")
         self.reset_edge_plan()
         self.clear_perception_cache()

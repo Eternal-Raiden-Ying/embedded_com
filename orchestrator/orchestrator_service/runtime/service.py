@@ -86,24 +86,30 @@ _CONTROL_SUMMARY_KEYS = (
     "table_target_dist_m",
     "final_stop_threshold_m",
     "final_depth_latched",
-    "final_phase_policy",
-    "near_table_candidate_active",
-    "yolo_dynamic_roi_policy",
-    "yolo_dynamic_roi_rejected",
-    "yolo_dynamic_roi_rejected_reason",
-    "allowed_for_final_enter",
-    "roi_touches_bottom",
+    "final_edge_seen_after_find",
+    "final_descending_seen_after_find",
+    "final_enter_candidate_status",
+    "final_enter_edge_seen",
+    "final_enter_descending_seen",
+    "final_enter_transition_reason",
     "final_enter_rejected",
     "final_lock_rejected",
-    "final_lock_invariant_violation",
-    "final_lock_consume_rejected",
-    "final_lock_consume_rejected_reason",
-    "final_lock_consumed",
-    "final_slow_dwell_ms",
-    "final_fixed_roi_seen_after_enter",
-    "final_stop_stable_count",
-    "final_state_min_dwell_not_met",
-    "missing_fresh_final_fixed_roi",
+    "final_fixed_roi_status",
+    "final_fixed_roi_xyxy",
+    "final_fixed_roi_shape_valid",
+    "final_fixed_roi_shape_invalid",
+    "final_fixed_roi_stop_stat",
+    "final_fixed_roi_stop_stat_used",
+    "final_fixed_roi_stop_threshold",
+    "final_fixed_roi_stop_stable_count",
+    "final_fixed_roi_min_stat_m",
+    "final_motion_policy",
+    "final_stop_observation",
+    "final_stop_continue_forward",
+    "final_stop_depth_source",
+    "final_stop_depth_m",
+    "final_stop_reached",
+    "final_exit",
     "final_distance_servo_reason",
     "final_locked",
     "final_lock_reason",
@@ -610,32 +616,29 @@ class OrchestratorService(BaseModule):
             "state",
             f"[ORCH] STATE {old_state} -> {new_state} reason={reason}",
         )
+        if old_state == "FINAL_SLOW_STOP" and new_state not in {"FINAL_SLOW_STOP", "AT_TABLE_EDGE", "DONE"}:
+            self.core.ctx.clear_close_final_latches()
+            self.core.ctx.clear_final_enter_candidate()
+            self.log("warn", "service", f"final_exit latch cleanup old={old_state} new={new_state} reason={reason}")
         if self._demo_start_pending_target and new_state in {"SEARCH_TABLE", "RETURN_HOME"}:
             self._demo_deferred_phases.append((old_state, new_state, reason))
         else:
             self._emit_demo_phase(old_state, new_state, reason)
-        if new_state == "FINAL_SLOW_STOP":
-            self.core.ctx.final_slow_enter_mono = time.monotonic()
-            self.core.ctx.final_slow_enter_tick = 0
-            self.core.ctx.final_fixed_roi_seen_after_enter = False
-            self.core.ctx.final_stop_stable_count = 0
-            self.core.ctx.final_locked = False
-            self.core.ctx.final_lock_reason = ""
-            self.core.ctx.final_depth_latched = False
-            self.core.ctx.final_depth_latched_mono = 0.0
-            self.core.ctx.final_depth_latch_reason = ""
         if new_state == "DONE":
             self.operator_console.emit_change("task_done", self._task_done_summary_line(reason))
             self._emit_demo_task_finished(success=True, reason=reason)
         if new_state == "ERROR_RECOVERY":
+            self.core.ctx.clear_final_enter_candidate()
             self.log("warn", "service", f"Immediate transition to ERROR_RECOVERY due to: {reason}, triggering emergency stop")
             self.uart.send_emergency_stop()
             self.motion_adapter.cancel_active_jogs()
             self._emit_demo_task_finished(success=False, reason=reason)
         if old_state == "DONE" and new_state == "IDLE":
+            self.core.ctx.clear_final_enter_candidate()
             self.operator_console.emit_change("idle_after_done", "[ORCH][IDLE] task finished, waiting for next command")
             self._emit_demo_idle_hot()
         if old_state == "ERROR_RECOVERY" and new_state == "IDLE":
+            self.core.ctx.clear_final_enter_candidate()
             self._emit_demo_idle_hot()
 
     def _emit_demo_phase(self, old_state: str, new_state: str, reason: str) -> None:
@@ -2532,6 +2535,9 @@ class OrchestratorService(BaseModule):
             return
         if cmd.intent in {"FIND", "RETURN"} and self.core.ctx.manual_drive_active:
             self._stop_manual_drive("auto_task_received", "manual_drive_interrupted_stop")
+        if cmd.intent in {"FIND", "RETURN", "STOP"}:
+            self.core.ctx.clear_close_final_latches()
+            self.core.ctx.clear_final_enter_candidate()
         if cmd.intent in {"FIND", "RETURN"}:
             self._demo_start_pending_target = cmd.target or ("return_home" if cmd.intent == "RETURN" else "n/a")
         if cmd.intent == "STOP":
@@ -3297,7 +3303,15 @@ class OrchestratorService(BaseModule):
         summary["near_table_latched"] = bool(summary.get("near_table_latched") or self.core.ctx.near_table_latched)
         summary["final_depth_latched"] = bool(summary.get("final_depth_latched") or self.core.ctx.final_depth_latched)
         summary["final_yaw_align_active"] = bool(summary.get("final_yaw_align_active") or self.core.ctx.final_yaw_align_active)
-        summary["final_locked"] = bool(summary.get("final_locked") or self.core.ctx.final_locked)
+        final_lock_state_allowed = str(summary.get("state") or self.core.ctx.state.value) in {"FINAL_SLOW_STOP", "AT_TABLE_EDGE"}
+        if not final_lock_state_allowed and bool(summary.get("final_locked") or self.core.ctx.final_locked):
+            self.core.ctx.final_locked = False
+            self.core.ctx.final_lock_reason = ""
+            summary["final_lock_rejected"] = {
+                "state": str(summary.get("state") or self.core.ctx.state.value),
+                "reason": "service_summary_non_final_state",
+            }
+        summary["final_locked"] = bool(final_lock_state_allowed and (summary.get("final_locked") or self.core.ctx.final_locked))
         summary["stop_class"] = summary.get("stop_class") or "none"
         summary["service_override"] = bool(getattr(self, "_last_service_override", False))
         summary["uart_tx_ok"] = bool(getattr(self, "_last_uart_tx_ok", True))

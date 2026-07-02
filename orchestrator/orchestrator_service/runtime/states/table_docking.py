@@ -48,10 +48,11 @@ from ..core_types import (
     _GRASP_RETRY_LIMIT,
 )
 
-FINAL_STATES = {"FINAL_SLOW_STOP"}
-FINAL_LOCK_CONSUME_STATES = {"FINAL_SLOW_STOP"}
-MIN_FINAL_SLOW_STOP_DWELL_MS = 600.0
-FINAL_STOP_STABLE_COUNT_REQUIRED = 3
+FINAL_ENTER_STABLE_COUNT_REQUIRED = 2
+FINAL_ENTER_DEPTH_THRESHOLD_M = 0.55
+FINAL_ENTER_DESCENDING_DELTA_M = 0.06
+FINAL_ENTER_WINDOW_SIZE = 6
+FINAL_ENTER_MIN_DESCENDING_SAMPLES = 4
 
 
 class TableDockingMixin:
@@ -297,39 +298,16 @@ class TableDockingMixin:
             return
 
         state_value = str(getattr(self.ctx.state, "value", self.ctx.state) or "")
-        if state_value not in FINAL_STATES:
-            source = str(summary.get("table_roi_depth_mapping_source") or summary.get("final_depth_source") or "")
-            summary["final_enter_rejected"] = {
-                "state": state_value,
-                "reason": "final_depth_latched_outside_final_phase",
-                "table_roi_xyxy": summary.get("table_roi_xyxy"),
-                "table_roi_depth_mapping_source": source,
-                "table_roi_depth_p10": summary.get("table_roi_depth_p10"),
-            }
-            summary["final_enter_rejected_reason"] = "final_depth_latched_outside_final_phase"
-            summary["final_state_transition_block_reason"] = "final_depth_latched_outside_final_phase"
-            self.ctx.final_depth_latched = False
-            self.ctx.final_depth_latched_mono = 0.0
-            self.ctx.final_depth_latch_reason = ""
-            self.ctx.final_locked = False
-            self.ctx.final_lock_reason = ""
-            summary["final_depth_latched"] = False
-            summary["final_locked"] = False
-            summary["final_lock_reason"] = ""
-            self._log(
-                "warn",
-                "final_enter_rejected "
-                f"{{'state': {state_value!r}, 'reason': 'final_depth_latched_outside_final_phase', "
-                f"'table_roi_depth_mapping_source': {source!r}, "
-                f"'table_roi_depth_p10': {summary.get('table_roi_depth_p10')!r}}}",
-            )
-            return
         if state_value in {"YOLO_APPROACH", "EDGE_ADJUST"}:
-            self.ctx.table_dock_phase = self.ctx.table_dock_phase or "STOP_AND_SETTLE"
-            self.ctx.table_dock_phase_since_mono = self.ctx.table_dock_phase_since_mono or monotonic_ts()
-            self.ctx.final_lock_last_transition_reason = "final_depth_latched"
-            summary["final_state_transition_reason"] = "final_depth_latched"
-            self._transition(State.FINAL_SLOW_STOP, "final_depth_latched")
+            summary["final_state_transition_block_reason"] = "final_depth_latched_requires_explicit_candidate"
+            summary["final_state_transition_reason"] = ""
+            try:
+                self.ctx.final_depth_latched = False
+                self.ctx.final_depth_latched_mono = 0.0
+                self.ctx.final_depth_latch_reason = ""
+            except Exception:
+                pass
+            summary["final_depth_latched"] = False
 
     def _consume_final_lock_after_arbitration(self, decision: MotionDecision, obs: Optional[TableEdgeObs]) -> None:
         summary = decision.control_summary if decision.control_summary is not None else {}
@@ -343,112 +321,77 @@ class TableDockingMixin:
         if final_locked and action == "FINAL_LOCKED_STOP" and stopped:
             state_value = str(getattr(self.ctx.state, "value", self.ctx.state) or "")
             edge_latched = bool(getattr(self.ctx, "edge_slope_final_ready_latched", False) or summary.get("edge_slope_final_ready_latched", False))
-            final_depth_source = str(summary.get("final_depth_source") or "")
-            if state_value == "AT_TABLE_EDGE":
-                summary["final_lock_consumed"] = {
-                    "state": state_value,
-                    "final_depth_source": final_depth_source,
-                    "final_depth_m": summary.get("final_depth_m"),
-                    "reason": "already_at_table_edge",
-                }
-                return
-            allowed_states = list(FINAL_LOCK_CONSUME_STATES)
-            final_phase = state_value in set(allowed_states)
-            source_ok = bool(
-                final_depth_source not in {"", "missing"}
-                or str(summary.get("measured_dist_source") or "") == "edge"
-                or bool(summary.get("final_edge_mode_latched", False))
+            final_depth_usable = bool(summary.get("final_depth_usable_for_control", False))
+            allowed = bool(
+                state_value == "AT_TABLE_EDGE"
+                or (state_value == "FINAL_SLOW_STOP" and final_depth_usable)
             )
-            dwell_ms = 0.0
-            enter_mono = float(getattr(self.ctx, "final_slow_enter_mono", 0.0) or 0.0)
-            if enter_mono > 0.0:
-                dwell_ms = max(0.0, (monotonic_ts() - enter_mono) * 1000.0)
-            fixed_roi_seen = bool(getattr(self.ctx, "final_fixed_roi_seen_after_enter", False))
-            stable_count = int(getattr(self.ctx, "final_stop_stable_count", 0) or 0)
-            reject_reason = ""
-            if final_depth_source == "fixed_center_low_roi" and not final_phase:
-                reject_reason = "fixed_roi_not_allowed_before_final"
-            elif not final_phase:
-                reject_reason = "not_final_phase"
-            elif not source_ok:
-                reject_reason = "invalid_final_depth_source"
-            elif dwell_ms < MIN_FINAL_SLOW_STOP_DWELL_MS:
-                reject_reason = "final_state_min_dwell_not_met"
-            elif not fixed_roi_seen:
-                reject_reason = "missing_fresh_final_fixed_roi"
-            elif stable_count < FINAL_STOP_STABLE_COUNT_REQUIRED:
-                reject_reason = "final_stop_stable_count_not_met"
-            if reject_reason:
+            if not allowed:
                 summary["final_lock_ignored_outside_final_phase"] = True
                 summary["final_state_transition_block_reason"] = "final_lock_ignored_outside_final_phase"
                 summary["final_lock_ignore_action"] = "ignore"
                 summary["final_lock_ignored_state"] = state_value
-                summary["final_lock_ignored_allowed_states"] = list(allowed_states)
+                summary["final_lock_ignored_allowed_states"] = ["FINAL_SLOW_STOP", "AT_TABLE_EDGE"]
                 summary["final_lock_ignored_edge_slope_final_ready_latched"] = bool(edge_latched)
-                summary["final_lock_ignored_final_depth_source"] = final_depth_source
+                summary["final_lock_ignored_final_depth_source"] = str(summary.get("final_depth_source") or "")
                 summary["final_lock_ignored_final_depth_m"] = summary.get("final_depth_m")
+                summary["final_lock_ignored_final_depth_usable_for_control"] = bool(final_depth_usable)
                 summary["final_lock_ignored_reason"] = str(summary.get("final_lock_reason") or summary.get("docking_reason") or "")
-                summary["final_lock_consume_rejected"] = {
-                    "state": state_value,
-                    "reason": reject_reason,
-                    "allowed_states": list(allowed_states),
-                    "dwell_ms": float(dwell_ms),
-                    "stable_count": int(stable_count),
-                    "fixed_roi_seen_after_enter": bool(fixed_roi_seen),
-                }
-                summary["final_lock_consume_rejected_state"] = state_value
-                summary["final_lock_consume_rejected_reason"] = reject_reason
-                summary["final_lock_consume_rejected_allowed_states"] = list(allowed_states)
-                summary["final_slow_dwell_ms"] = float(dwell_ms)
-                summary["final_fixed_roi_seen_after_enter"] = bool(fixed_roi_seen)
-                summary["final_stop_stable_count"] = int(stable_count)
-                if reject_reason == "final_state_min_dwell_not_met":
-                    summary["final_state_min_dwell_not_met"] = True
-                if reject_reason == "missing_fresh_final_fixed_roi":
-                    summary["missing_fresh_final_fixed_roi"] = True
                 self.ctx.final_locked = False
                 self.ctx.final_lock_reason = ""
                 summary["final_locked"] = False
                 summary["final_lock_reason"] = ""
                 self._log(
                     "warn",
-                    "final_lock_consume_rejected "
+                    "final_lock_ignored_outside_final_phase "
                     f"{{'state': {state_value!r}, "
-                    f"'reason': {reject_reason!r}, "
-                    f"'final_depth_source': {final_depth_source!r}, "
+                    f"'final_depth_source': {summary.get('final_depth_source')!r}, "
                     f"'final_depth_m': {summary.get('final_depth_m')!r}, "
+                    f"'final_depth_usable_for_control': {final_depth_usable!r}, "
                     f"'final_lock_reason': {summary.get('final_lock_reason')!r}, "
                     f"'edge_slope_final_ready_latched': {edge_latched!r}, "
-                    f"'dwell_ms': {dwell_ms!r}, "
-                    f"'stable_count': {stable_count!r}, "
-                    f"'fixed_roi_seen_after_enter': {fixed_roi_seen!r}, "
-                    f"'allowed_states': {allowed_states!r}, "
+                    "'allowed_states': ['FINAL_SLOW_STOP', 'AT_TABLE_EDGE'], "
                     "'action': 'ignore'}}",
                 )
                 return
+            if state_value == "FINAL_SLOW_STOP":
+                fixed_stop_stable = bool(summary.get("final_fixed_roi_stop_stable", False))
+                fixed_stat = self._final_enter_float(summary.get("final_fixed_roi_stop_stat"))
+                fixed_threshold = self._final_enter_float(summary.get("final_fixed_roi_stop_threshold"))
+                fixed_shape_valid = bool(summary.get("final_fixed_roi_shape_valid", False))
+                fixed_above_threshold = bool(
+                    fixed_stat is None
+                    or fixed_threshold is None
+                    or fixed_stat > fixed_threshold
+                    or not fixed_shape_valid
+                    or not fixed_stop_stable
+                )
+                if fixed_above_threshold:
+                    reject_reason = "fixed_roi_stat_above_threshold"
+                    if not fixed_shape_valid:
+                        reject_reason = "final_fixed_roi_shape_invalid"
+                    elif not fixed_stop_stable:
+                        reject_reason = "fixed_roi_stop_not_stable"
+                    payload = {
+                        "state": state_value,
+                        "reason": reject_reason,
+                        "stat": fixed_stat,
+                        "stat_used": summary.get("final_fixed_roi_stop_stat_used"),
+                        "threshold": fixed_threshold,
+                        "stable_count": summary.get("final_fixed_roi_stop_stable_count"),
+                        "xyxy": summary.get("final_fixed_roi_xyxy"),
+                    }
+                    summary["final_lock_rejected"] = payload
+                    summary["final_state_transition_block_reason"] = reject_reason
+                    summary["final_locked"] = False
+                    summary["final_lock_reason"] = ""
+                    self.ctx.final_locked = False
+                    self.ctx.final_lock_reason = ""
+                    self._log("warn", f"final_lock_rejected {payload}")
+                    return
             if state_value != "AT_TABLE_EDGE":
                 reason = "final_locked_stop_reached"
                 self.ctx.final_locked = True
-                summary["final_lock_consumed"] = {
-                    "state": state_value,
-                    "final_depth_source": final_depth_source,
-                    "final_depth_m": summary.get("final_depth_m"),
-                    "dwell_ms": float(dwell_ms),
-                    "stable_count": int(stable_count),
-                    "fixed_roi_seen_after_enter": bool(fixed_roi_seen),
-                    "reason": reason,
-                }
-                self._log(
-                    "info",
-                    "final_lock_consumed "
-                    f"{{'state': {state_value!r}, "
-                    f"'final_depth_source': {final_depth_source!r}, "
-                    f"'final_depth_m': {summary.get('final_depth_m')!r}, "
-                    f"'dwell_ms': {dwell_ms!r}, "
-                    f"'stable_count': {stable_count!r}, "
-                    f"'fixed_roi_seen_after_enter': {fixed_roi_seen!r}, "
-                    f"'reason': {reason!r}}}",
-                )
                 self._transition(State.AT_TABLE_EDGE, reason)
 
     def _bbox_control_geometry(self, obs: Optional[TableEdgeObs]) -> Dict[str, object]:
@@ -753,57 +696,6 @@ class TableDockingMixin:
         bbox_area = float(getattr(obs, "table_bbox_area_ratio", getattr(obs, "yolo_bbox_area_norm", 0.0)) or 0.0) if obs is not None else 0.0
         bbox_near_hint = bool(bbox_area >= 0.35 and depth_valid and edge_usable)
         depth_stop_ready = bool(depth_status.get("depth_roi_stop_ready", False))
-        attempted_depth_stop_ready = bool(depth_stop_ready)
-        state_value = str(getattr(self.ctx.state, "value", self.ctx.state) or "")
-        final_phase_active = state_value in FINAL_STATES
-        near_table_candidate_active = bool(self.ctx.near_table_latched or near_depth or near_dist or bbox_near_hint)
-        roi_policy = self._yolo_dynamic_roi_policy(obs, state_value)
-        final_depth_source = str(summary.get("final_depth_source") or roi_policy.get("table_roi_depth_mapping_source") or "")
-        final_depth_usable_for_control = bool(summary.get("final_depth_usable_for_control", final_phase_active and depth_valid))
-        final_depth_valid_for_control = bool(summary.get("final_depth_valid", depth_valid))
-        final_depth_m = summary.get("final_depth_m", depth_value)
-        dynamic_roi_allowed = bool(roi_policy.get("allowed_for_final_enter", True))
-        fixed_roi_active = bool(
-            summary.get("final_fixed_roi_active", False)
-            or final_depth_source == "fixed_center_low_roi"
-            or str(roi_policy.get("table_roi_depth_mapping_source") or "") == "fixed_center_low_roi"
-        )
-        final_depth_allowed = bool(
-            final_phase_active
-            and final_depth_usable_for_control
-            and final_depth_valid_for_control
-            and final_depth_m is not None
-            and dynamic_roi_allowed
-        )
-        if not dynamic_roi_allowed:
-            summary["yolo_dynamic_roi_rejected"] = True
-            summary["yolo_dynamic_roi_rejected_reason"] = str(roi_policy.get("reject_reason") or "dynamic_roi_rejected")
-            if str(roi_policy.get("reject_reason") or "") == "roi_touches_bottom":
-                summary["yolo_dynamic_roi_rejected_reason"] = "roi_touches_bottom"
-        if not final_depth_allowed:
-            if attempted_depth_stop_ready:
-                reject_reason = "depth_not_usable_for_control"
-                if not final_phase_active:
-                    reject_reason = "not_final_phase"
-                elif not dynamic_roi_allowed:
-                    reject_reason = str(roi_policy.get("reject_reason") or "dynamic_roi_rejected")
-                summary["final_enter_rejected"] = {
-                    "state": state_value,
-                    "reason": reject_reason,
-                    "table_roi_xyxy": roi_policy.get("table_roi_xyxy"),
-                    "table_roi_depth_mapping_source": roi_policy.get("table_roi_depth_mapping_source"),
-                    "table_roi_depth_p10": roi_policy.get("table_roi_depth_p10"),
-                }
-                summary["final_lock_rejected"] = {
-                    "state": state_value,
-                    "reason": "depth_not_usable_for_control",
-                    "final_depth_source": final_depth_source,
-                    "final_depth_m": final_depth_m,
-                    "final_depth_usable_for_control": bool(final_depth_usable_for_control),
-                    "final_depth_gate_reason": str(summary.get("final_depth_gate_reason") or ""),
-                    "attempted_reason": "depth_hard_stop" if bool(summary.get("depth_hard_stop_active")) else "depth_roi_stop_ready",
-                }
-            depth_stop_ready = False
         control_source = str(summary.get("control_source") or summary.get("motion_intent_type") or "").strip().lower()
         phase = str(summary.get("control_phase") or self.ctx.control_phase or "").strip().upper()
         edge_guided_phase = bool(phase == "EDGE_GUIDED_APPROACH" or control_source in {"edge_guided_forward", "near_edge_approach", "near_edge_hold"})
@@ -834,12 +726,8 @@ class TableDockingMixin:
         elif self.ctx.near_dist_stable_frames >= self._near_table_latch_frames():
             near_reason = "near_dist_stable"
 
-        # Separate near latch gating. A near latch is only a candidate; it does
-        # not make YOLO_APPROACH a final phase.
-        final_ok = bool(
-            final_phase_active
-            and (self.ctx.final_depth_latched or depth_stop_ready or phase == "DEPTH_FINAL_STOP" or str(depth_status.get("reason") or "") == "stable_dynamic_roi_depth")
-        )
+        # Separate near latch gating
+        final_ok = bool(self.ctx.final_depth_latched or depth_stop_ready or phase == "DEPTH_FINAL_STOP" or str(depth_status.get("reason") or "") == "stable_dynamic_roi_depth")
         if self.ctx.near_table_latched:
             near_allowed = True
             block_near = False
@@ -856,22 +744,7 @@ class TableDockingMixin:
                 self.ctx.near_table_latched_mono = now
                 self.ctx.near_table_latch_reason = near_reason
 
-        if not final_phase_active:
-            if self.ctx.final_depth_latched or self.ctx.final_locked:
-                summary["final_lock_invariant_violation"] = {
-                    "state": state_value,
-                    "final_depth_source": final_depth_source,
-                    "final_depth_m": final_depth_m,
-                    "final_depth_usable_for_control": bool(final_depth_usable_for_control),
-                    "attempted_reason": str(self.ctx.final_lock_reason or self.ctx.final_depth_latch_reason or "outside_final_phase"),
-                }
-            self.ctx.final_depth_latched = False
-            self.ctx.final_depth_latched_mono = 0.0
-            self.ctx.final_depth_latch_reason = ""
-            self.ctx.final_locked = False
-            self.ctx.final_lock_reason = ""
-
-        self.ctx.final_depth_stable_frames = self.ctx.final_depth_stable_frames + 1 if (depth_stop_ready and final_depth_allowed) else 0
+        self.ctx.final_depth_stable_frames = self.ctx.final_depth_stable_frames + 1 if depth_stop_ready else 0
         if depth_stop_ready and self.ctx.final_depth_stable_frames >= self._final_depth_latch_frames():
             if not self.ctx.final_depth_latched:
                 self.ctx.final_depth_latched = True
@@ -882,13 +755,6 @@ class TableDockingMixin:
                     self.ctx.near_table_latched = True
                     self.ctx.near_table_latched_mono = now
                     self.ctx.near_table_latch_reason = "final_depth_latched"
-
-        if final_phase_active and fixed_roi_active and final_depth_allowed:
-            self.ctx.final_fixed_roi_seen_after_enter = True
-            if depth_stop_ready:
-                self.ctx.final_stop_stable_count = int(getattr(self.ctx, "final_stop_stable_count", 0) or 0) + 1
-        elif final_phase_active:
-            self.ctx.final_stop_stable_count = 0
 
         # Populate summary fields
         dropout_allowed = bool(self.ctx.approach_commit_active and last_good_unexpired)
@@ -923,8 +789,9 @@ class TableDockingMixin:
 
         final_yaw_lock_block_reason = "none"
         final_realign_triggered = False
+        final_phase_state = str(getattr(self.ctx.state, "value", self.ctx.state) or "") == "FINAL_SLOW_STOP"
 
-        if final_phase_active and final_depth_allowed and self.ctx.final_depth_latched:
+        if self.ctx.final_depth_latched and final_phase_state:
             if self.ctx.final_yaw_align_start_mono <= 0.0:
                 self.ctx.final_yaw_align_start_mono = now
                 if yaw_abs is not None and yaw_abs <= yaw_deadband:
@@ -985,42 +852,17 @@ class TableDockingMixin:
                         self.ctx.final_lock_reason = "final_hold_edge_lost"
                         final_yaw_lock_block_reason = "edge_lost"
         elif self.ctx.final_locked:
-            summary["final_lock_rejected"] = {
-                "state": state_value,
-                "reason": "depth_not_usable_for_control",
-                "final_depth_source": final_depth_source,
-                "final_depth_m": final_depth_m,
-                "final_depth_usable_for_control": bool(final_depth_usable_for_control),
-                "final_depth_gate_reason": str(summary.get("final_depth_gate_reason") or ""),
-                "attempted_reason": str(self.ctx.final_lock_reason or "final_lock"),
-            }
             self.ctx.final_locked = False
             self.ctx.final_lock_reason = ""
             summary["final_locked"] = False
             summary["final_lock_reason"] = ""
+            summary["final_lock_rejected"] = {
+                "state": str(getattr(self.ctx.state, "value", self.ctx.state) or ""),
+                "reason": "not_final_phase",
+            }
 
         summary.update(
             {
-                "final_phase_policy": {
-                    "state": state_value,
-                    "final_phase_active": bool(final_phase_active),
-                    "near_table_latched": bool(self.ctx.near_table_latched),
-                    "near_table_candidate_active": bool(near_table_candidate_active),
-                },
-                "final_phase_active": bool(final_phase_active),
-                "near_table_candidate_active": bool(near_table_candidate_active),
-                "yolo_dynamic_roi_policy": {
-                    "state": state_value,
-                    "table_roi_xyxy": roi_policy.get("table_roi_xyxy"),
-                    "table_roi_depth_mapping_source": roi_policy.get("table_roi_depth_mapping_source"),
-                    "table_roi_depth_p10": roi_policy.get("table_roi_depth_p10"),
-                    "roi_touches_bottom": bool(roi_policy.get("roi_touches_bottom")),
-                    "allowed_for_final_enter": bool(dynamic_roi_allowed),
-                },
-                "roi_touches_bottom": bool(roi_policy.get("roi_touches_bottom")),
-                "allowed_for_final_enter": bool(dynamic_roi_allowed),
-                "final_fixed_roi_seen_after_enter": bool(getattr(self.ctx, "final_fixed_roi_seen_after_enter", False)),
-                "final_stop_stable_count": int(getattr(self.ctx, "final_stop_stable_count", 0) or 0),
                 "near_table_latched": bool(self.ctx.near_table_latched),
                 "near_table_latch_reason": str(self.ctx.near_table_latch_reason or near_reason),
                 "final_depth_latched": bool(self.ctx.final_depth_latched),
@@ -1060,10 +902,6 @@ class TableDockingMixin:
         self.ctx.final_depth_latched_mono = 0.0
         self.ctx.final_yaw_align_active = False
         self.ctx.final_locked = False
-        self.ctx.final_slow_enter_mono = 0.0
-        self.ctx.final_slow_enter_tick = 0
-        self.ctx.final_fixed_roi_seen_after_enter = False
-        self.ctx.final_stop_stable_count = 0
         self.ctx.near_table_latch_reason = ""
         self.ctx.final_depth_latch_reason = ""
         self.ctx.final_lock_reason = ""
@@ -1967,6 +1805,9 @@ class TableDockingMixin:
         decision = self._tick_yolo_approach_impl()
         obs = self._fresh_table_obs()
         decision = self._apply_control_authority(decision, obs)
+        final_enter_decision = self._maybe_enter_explicit_final_slow_stop(obs, decision)
+        if final_enter_decision is not None:
+            decision = final_enter_decision
         self._ensure_speed_profile(decision)
         return decision
 
@@ -1981,7 +1822,172 @@ class TableDockingMixin:
         decision = self._tick_final_slow_stop_impl()
         obs = self._fresh_table_obs()
         decision = self._apply_control_authority(decision, obs)
+        decision = self._enforce_final_slow_forward_only(decision, obs)
+        summary = decision.control_summary if decision.control_summary is not None else {}
+        fixed_status = summary.get("final_fixed_roi_status")
+        if isinstance(fixed_status, dict):
+            now = monotonic_ts()
+            last_log = float(getattr(self.ctx, "final_fixed_roi_status_last_log_mono", 0.0) or 0.0)
+            if now - last_log >= 0.5:
+                setattr(self.ctx, "final_fixed_roi_status_last_log_mono", now)
+                level = "warn" if not bool(fixed_status.get("shape_valid", True)) else "info"
+                prefix = "final_fixed_roi_shape_invalid" if level == "warn" else "final_fixed_roi_status"
+                self._log(level, f"{prefix} {fixed_status}")
         self._ensure_speed_profile(decision)
+        return decision
+
+    def _final_slow_vx_mps(self) -> float:
+        configured = float(
+            getattr(
+                self.cfg,
+                "final_slow_vx_mps",
+                getattr(self.cfg, "roi_final_probe_vx_mps", getattr(self.cfg, "final_probe_vx_mps", 0.010)),
+            )
+            or 0.010
+        )
+        return max(0.004, min(abs(configured), 0.012))
+
+    def _final_slow_hard_safety_active(self, summary: Dict[str, object], decision: Optional[MotionDecision] = None) -> bool:
+        if decision is not None and bool(getattr(decision.cmd, "brake", False)):
+            return True
+        hard_keys = (
+            "emergency_stop_active",
+            "car_estop",
+            "estop_active",
+            "obstacle_active",
+            "obstacle_stop_active",
+            "base_depth_hard_safety",
+            "base_depth_stop_active",
+            "base_depth_emergency_active",
+            "hard_stop_barrier_active",
+            "safety_stop_active",
+            "explicit_stop_active",
+        )
+        if any(bool(summary.get(key, False)) for key in hard_keys):
+            return True
+        return str(summary.get("stale_level") or "").lower() in {"hard_stale", "dead"}
+
+    def _final_stop_observation_payload(self, status: Dict[str, object]) -> Dict[str, object]:
+        stat_used = str(status.get("roi_depth_stat_used") or "missing")
+        source = "final_fixed_roi_mean" if stat_used == "mean" else ("final_fixed_roi_median" if stat_used == "median" else "missing")
+        return {
+            "active": bool(status.get("final_fixed_roi_shape_valid", False)),
+            "final_stop_depth_source": source,
+            "final_stop_depth_m": status.get("roi_depth_stat"),
+            "mean": status.get("final_fixed_roi_mean"),
+            "median": status.get("final_fixed_roi_median"),
+            "p10": status.get("final_fixed_roi_p10"),
+            "threshold": status.get("roi_depth_threshold"),
+            "stable_count": int(status.get("lock_ready_obs_count", status.get("stable_count", 0)) or 0),
+            "xyxy": status.get("final_fixed_roi_xyxy"),
+            "shape_valid": bool(status.get("final_fixed_roi_shape_valid", False)),
+        }
+
+    def _final_slow_forward_decision(self, obs: Optional[TableEdgeObs], status: Dict[str, object], *, vx: float, reason: str) -> MotionDecision:
+        decision = MotionDecision(cmd=self.controller._cmd("FINAL_SLOW_STOP", vx=vx, vy=0.0, wz=0.0), control_summary={})
+        obs_payload = self._final_stop_observation_payload(status)
+        decision.control_summary.update(
+            {
+                **status,
+                "state": "FINAL_SLOW_STOP",
+                "docking_action": "FINAL_SLOW_PROBE" if abs(float(vx)) > 1e-9 else "DEPTH_SAFETY_HOLD",
+                "docking_reason": reason,
+                "control_source": "final_slow_forward_only",
+                "motion_intent_type": "final_slow_forward_only",
+                "final_motion_policy": {
+                    "state": "FINAL_SLOW_STOP",
+                    "vx": float(vx),
+                    "vy": 0.0,
+                    "wz": 0.0,
+                    "reason": "final_slow_forward_only",
+                },
+                "final_stop_observation": obs_payload,
+                "final_stop_depth_source": obs_payload["final_stop_depth_source"],
+                "final_stop_depth_m": obs_payload["final_stop_depth_m"],
+                "final_stop_threshold_m": obs_payload["threshold"],
+                "final_locked": False,
+                "final_lock_reason": "",
+                "final_phase_active": True,
+                "allow_forward": bool(abs(float(vx)) > 1e-9),
+                "allow_lateral": False,
+                "allow_rotate": False,
+                "yaw_owner": "none",
+                "lateral_owner": "none",
+                "forward_owner": "final_fixed_roi",
+                "vy_mps": 0.0,
+                "wz_radps": 0.0,
+                "final_vy": 0.0,
+                "final_wz": 0.0,
+            }
+        )
+        if reason == "fixed_roi_above_threshold":
+            decision.control_summary["final_stop_continue_forward"] = {
+                "final_stop_depth_m": obs_payload["final_stop_depth_m"],
+                "threshold": obs_payload["threshold"],
+                "reason": "fixed_roi_above_threshold",
+            }
+        return decision
+
+    def _enforce_final_slow_forward_only(self, decision: MotionDecision, obs: Optional[TableEdgeObs]) -> MotionDecision:
+        if self.ctx.state != State.FINAL_SLOW_STOP:
+            return decision
+        summary = decision.control_summary if decision.control_summary is not None else {}
+        decision.control_summary = summary
+        if self._final_slow_hard_safety_active(summary, decision):
+            summary.setdefault("final_exit", {"reason": "hard_safety"})
+            decision.cmd.vy_mps = 0.0
+            decision.cmd.wz_radps = 0.0
+            return decision
+        stop_depth = self._final_enter_float(summary.get("final_stop_depth_m"))
+        stop_threshold = self._final_enter_float(summary.get("final_stop_threshold_m"))
+        if bool(summary.get("final_locked", False)) or str(summary.get("docking_action") or "") == "FINAL_LOCKED_STOP":
+            decision.cmd.vx_mps = 0.0
+            decision.cmd.vy_mps = 0.0
+            decision.cmd.wz_radps = 0.0
+        elif stop_depth is None or stop_threshold is None or str(summary.get("docking_reason") or "") in {"final_fixed_roi_invalid", "final_fixed_roi_shape_invalid", "no_recent_obs"}:
+            decision.cmd.vx_mps = 0.0
+            decision.cmd.vy_mps = 0.0
+            decision.cmd.wz_radps = 0.0
+        elif stop_depth > stop_threshold:
+            decision.cmd.vx_mps = self._final_slow_vx_mps()
+            decision.cmd.vy_mps = 0.0
+            decision.cmd.wz_radps = 0.0
+            summary["docking_action"] = "FINAL_SLOW_PROBE"
+            summary["docking_reason"] = "fixed_roi_above_threshold"
+            summary["final_stop_continue_forward"] = {
+                "final_stop_depth_m": summary.get("final_stop_depth_m"),
+                "threshold": summary.get("final_stop_threshold_m"),
+                "reason": "fixed_roi_above_threshold",
+            }
+        else:
+            decision.cmd.vx_mps = 0.0
+            decision.cmd.vy_mps = 0.0
+            decision.cmd.wz_radps = 0.0
+            summary["docking_action"] = "DEPTH_SAFETY_HOLD"
+            summary["docking_reason"] = "fixed_roi_stop_confirming"
+        summary["final_motion_policy"] = {
+            "state": "FINAL_SLOW_STOP",
+            "vx": float(decision.cmd.vx_mps),
+            "vy": 0.0,
+            "wz": 0.0,
+            "reason": "final_slow_forward_only",
+        }
+        now = monotonic_ts()
+        last_log = float(getattr(self.ctx, "final_motion_policy_last_log_mono", 0.0) or 0.0)
+        if now - last_log >= 0.5:
+            setattr(self.ctx, "final_motion_policy_last_log_mono", now)
+            self._log("info", f"final_motion_policy {summary['final_motion_policy']}")
+        summary["final_vx"] = float(decision.cmd.vx_mps)
+        summary["final_vy"] = 0.0
+        summary["final_wz"] = 0.0
+        summary["vx_mps"] = float(decision.cmd.vx_mps)
+        summary["vy_mps"] = 0.0
+        summary["wz_radps"] = 0.0
+        summary["allow_lateral"] = False
+        summary["allow_rotate"] = False
+        summary["yaw_owner"] = "none"
+        summary["lateral_owner"] = "none"
+        summary["final_phase_active"] = True
         return decision
 
     def _tick_at_table_edge(self) -> MotionDecision:
@@ -1996,6 +2002,226 @@ class TableDockingMixin:
         if decision.control_summary is not None and "speed_profile" not in decision.control_summary:
             mode = decision.control_summary.get("state", decision.cmd.mode)
             decision.control_summary["speed_profile"] = self.controller._table_speed_profile_name(mode, "")
+
+    @staticmethod
+    def _final_enter_float(value: object) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _final_enter_cfg_int(self, name: str, default: int) -> int:
+        try:
+            return max(1, int(getattr(self.cfg, name, default) or default))
+        except Exception:
+            return int(default)
+
+    def _final_enter_cfg_float(self, name: str, default: float) -> float:
+        try:
+            return float(getattr(self.cfg, name, default) or default)
+        except Exception:
+            return float(default)
+
+    def _final_enter_depth_sample(self, obs: Optional[TableEdgeObs], summary: Dict[str, object]) -> Tuple[Optional[float], str]:
+        if obs is not None and bool(getattr(obs, "table_roi_depth_valid", False)):
+            median = self._final_enter_float(getattr(obs, "table_roi_depth_median", None))
+            if median is not None:
+                return median, "table_roi_depth_median"
+            p10 = self._final_enter_float(getattr(obs, "table_roi_depth_p10", None))
+            if p10 is not None:
+                return p10, "table_roi_depth_p10"
+        for key in ("table_roi_depth_median", "table_roi_depth_p10", "final_depth_m"):
+            value = self._final_enter_float(summary.get(key))
+            if value is not None:
+                return value, key
+        measured = self._table_measured_dist_m(obs)
+        if measured is not None:
+            return float(measured), "edge_measured_dist"
+        return None, ""
+
+    def _update_final_enter_edge_seen(self, obs: Optional[TableEdgeObs], summary: Dict[str, object], now: float) -> None:
+        if bool(getattr(self.ctx, "final_edge_seen_after_find", False)):
+            return
+        edge_source = ""
+        if obs is not None and bool(getattr(obs, "edge_trusted", False)):
+            edge_source = "edge_trusted"
+        elif obs is not None and bool(getattr(obs, "edge_valid", False)):
+            edge_source = "edge_valid"
+        elif obs is not None and bool(getattr(obs, "usable_for_approach", False)):
+            edge_source = "usable_for_approach"
+        elif bool(summary.get("edge_ready_for_final", False)):
+            edge_source = "edge_ready_for_final"
+        elif bool(summary.get("edge_ready_for_approach", False)):
+            edge_source = "edge_ready_for_approach"
+        elif obs is not None and getattr(obs, "dist_err_m", None) is not None and bool(getattr(obs, "edge_found", False)):
+            edge_source = "edge_found_dist"
+        if not edge_source:
+            return
+        self.ctx.final_edge_seen_after_find = True
+        self.ctx.final_enter_edge_seen_ts = now
+        payload = {
+            "state": str(getattr(self.ctx.state, "value", self.ctx.state) or ""),
+            "edge_source": edge_source,
+            "dist_err_m": getattr(obs, "dist_err_m", None) if obs is not None else None,
+            "slope": getattr(obs, "edge_slope", getattr(obs, "edge_line_slope", None)) if obs is not None else None,
+            "ts": float(now),
+        }
+        summary["final_enter_edge_seen"] = payload
+        self._log("info", f"final_enter_edge_seen {payload}")
+
+    def _update_final_enter_descending(self, obs: Optional[TableEdgeObs], summary: Dict[str, object], now: float) -> Tuple[Optional[float], str]:
+        depth, source = self._final_enter_depth_sample(obs, summary)
+        if depth is None:
+            return None, source
+        window_size = self._final_enter_cfg_int("final_enter_window_size", FINAL_ENTER_WINDOW_SIZE)
+        window = self.ctx.final_enter_depth_window
+        window.append({"depth": float(depth), "source": source, "ts": float(now)})
+        if len(window) > window_size:
+            del window[: len(window) - window_size]
+        min_samples = min(window_size, self._final_enter_cfg_int("final_enter_min_descending_samples", FINAL_ENTER_MIN_DESCENDING_SAMPLES))
+        if self.ctx.final_descending_seen_after_find or len(window) < min_samples:
+            return depth, source
+        depths = [float(item["depth"]) for item in window if item.get("depth") is not None]
+        if len(depths) < min_samples:
+            return depth, source
+        first_depth = depths[0]
+        last_depth = depths[-1]
+        delta_m = first_depth - last_depth
+        descending_steps = sum(1 for prev, curr in zip(depths, depths[1:]) if curr <= prev + 0.01)
+        required_delta = self._final_enter_cfg_float("final_enter_descending_delta_m", FINAL_ENTER_DESCENDING_DELTA_M)
+        if delta_m >= required_delta and descending_steps >= max(2, len(depths) - 2):
+            self.ctx.final_descending_seen_after_find = True
+            payload = {
+                "state": str(getattr(self.ctx.state, "value", self.ctx.state) or ""),
+                "source": source,
+                "first_depth": float(first_depth),
+                "last_depth": float(last_depth),
+                "delta_m": float(delta_m),
+                "sample_count": int(len(depths)),
+            }
+            summary["final_enter_descending_seen"] = payload
+            self._log("info", f"final_enter_descending_seen {payload}")
+        return depth, source
+
+    def _final_enter_candidate_status(self, obs: Optional[TableEdgeObs], summary: Dict[str, object]) -> Dict[str, object]:
+        now = monotonic_ts()
+        state_value = str(getattr(self.ctx.state, "value", self.ctx.state) or "")
+        self._update_final_enter_edge_seen(obs, summary, now)
+        current_depth, depth_source = self._update_final_enter_descending(obs, summary, now)
+        enter_threshold = self._final_enter_cfg_float("final_enter_depth_threshold_m", FINAL_ENTER_DEPTH_THRESHOLD_M)
+        stable_required = self._final_enter_cfg_int("final_enter_stable_count_required", FINAL_ENTER_STABLE_COUNT_REQUIRED)
+        final_dist_err = self._table_final_dist_err_m(obs)
+        current_obs_valid = bool(
+            obs is not None
+            and (
+                self._table_yolo_reliable(obs)
+                or bool(getattr(obs, "edge_found", False))
+                or bool(getattr(obs, "edge_valid", False))
+                or bool(getattr(obs, "edge_trusted", False))
+                or bool(summary.get("current_obs_healthy", False))
+            )
+        )
+        near_by_depth = bool(current_depth is not None and float(current_depth) <= enter_threshold)
+        near_by_edge = bool(final_dist_err is not None and abs(float(final_dist_err)) <= self._near_dist_err_threshold_m())
+        depth_safety_hint = str(summary.get("docking_action") or "") in {"FINAL_SLOW_PROBE", "CLOSE_RANGE_PROBE", "DEPTH_SAFETY_HOLD"}
+        near_condition_ok = bool(near_by_depth or near_by_edge)
+        if near_by_depth and near_by_edge:
+            near_condition_source = "depth_and_edge"
+        elif near_by_depth:
+            near_condition_source = "depth"
+        elif near_by_edge:
+            near_condition_source = "edge"
+        else:
+            near_condition_source = "none"
+        reason = ""
+        if state_value != "YOLO_APPROACH":
+            reason = "not_yolo_approach"
+        elif not self.ctx.final_edge_seen_after_find:
+            reason = "edge_not_seen"
+        elif not self.ctx.final_descending_seen_after_find:
+            reason = "descending_not_seen"
+        elif not current_obs_valid:
+            reason = "no_current_approach_obs"
+        elif not near_condition_ok:
+            reason = "not_near_enter_threshold"
+        allowed_frame = not bool(reason)
+        if allowed_frame:
+            if self.ctx.final_enter_candidate_stable_count <= 0:
+                self.ctx.final_enter_candidate_first_ts = now
+            self.ctx.final_enter_candidate_stable_count += 1
+            reason = "candidate_frame"
+        else:
+            self.ctx.final_enter_candidate_stable_count = 0
+            self.ctx.final_enter_candidate_first_ts = None
+        allowed = bool(allowed_frame and self.ctx.final_enter_candidate_stable_count >= stable_required)
+        status = {
+            "state": state_value,
+            "edge_seen": bool(self.ctx.final_edge_seen_after_find),
+            "descending_seen": bool(self.ctx.final_descending_seen_after_find),
+            "stable_count": int(self.ctx.final_enter_candidate_stable_count),
+            "stable_required": int(stable_required),
+            "current_depth": float(current_depth) if current_depth is not None else None,
+            "depth_source": depth_source,
+            "enter_threshold": float(enter_threshold),
+            "final_dist_err_m": float(final_dist_err) if final_dist_err is not None else None,
+            "near_by_depth": bool(near_by_depth),
+            "near_by_edge": bool(near_by_edge),
+            "near_condition_ok": bool(near_condition_ok),
+            "near_condition_source": near_condition_source,
+            "depth_safety_hint": bool(depth_safety_hint),
+            "allowed": bool(allowed),
+            "reason": "explicit_final_enter_candidate_stable" if allowed else reason,
+        }
+        self.ctx.final_enter_candidate_last_reason = str(status["reason"])
+        summary["final_enter_candidate_status"] = status
+        if status["reason"] == "not_near_enter_threshold":
+            summary["final_enter_rejected"] = {
+                "reason": "not_near_enter_threshold",
+                "near_by_depth": bool(near_by_depth),
+                "near_by_edge": bool(near_by_edge),
+                "depth_safety_hint": bool(depth_safety_hint),
+                "current_depth": status["current_depth"],
+                "final_dist_err_m": status["final_dist_err_m"],
+            }
+        last_log = float(getattr(self.ctx, "final_enter_candidate_last_log_mono", 0.0) or 0.0)
+        if allowed or now - last_log >= 0.5:
+            self.ctx.final_enter_candidate_last_log_mono = now
+            self._log("info", f"final_enter_candidate_status {status}")
+        if reason == "not_near_enter_threshold" and now - last_log >= 0.5:
+            self._log("info", f"final_enter_rejected {status}")
+        return status
+
+    def _maybe_enter_explicit_final_slow_stop(self, obs: Optional[TableEdgeObs], decision: MotionDecision) -> Optional[MotionDecision]:
+        summary = decision.control_summary if decision.control_summary is not None else {}
+        decision.control_summary = summary
+        status = self._final_enter_candidate_status(obs, summary)
+        if not bool(status.get("allowed", False)):
+            return None
+        self.ctx.final_locked = False
+        self.ctx.final_lock_reason = ""
+        self.ctx.final_depth_latched = False
+        self.ctx.final_depth_latched_mono = 0.0
+        self.ctx.final_depth_latch_reason = ""
+        self.ctx.final_yaw_align_active = False
+        self._transition(State.FINAL_SLOW_STOP, "explicit_final_enter_candidate_stable")
+        self.ctx.table_dock_phase = "APPROACH"
+        self.ctx.table_dock_phase_since_mono = monotonic_ts()
+        final_decision = self.controller.fov_table_approach_cmd(obs, phase="PLANE_FINAL_LOCK", mode="FINAL_SLOW_STOP")
+        if final_decision.control_summary is not None:
+            final_decision.control_summary.update(
+                {
+                    "final_enter_candidate_status": status,
+                    "final_enter_transition_reason": "explicit_final_enter_candidate_stable",
+                    "final_edge_seen_after_find": bool(self.ctx.final_edge_seen_after_find),
+                    "final_descending_seen_after_find": bool(self.ctx.final_descending_seen_after_find),
+                    "final_locked": False,
+                    "final_depth_latched": False,
+                    "final_phase_active": True,
+                }
+            )
+        return final_decision
 
     def _get_memory_search_params(self) -> Tuple[int, str, str]:
         turn_sign = self.ctx.relocate_turn_sign
@@ -2513,127 +2739,84 @@ class TableDockingMixin:
 
         self._reset_table_loss()
 
-        phase = str(self.ctx.table_dock_phase or "APPROACH").upper()
-        if phase == "APPROACH":
-            status = self._update_final_lock_count(obs)
-            self._log_final_lock_summary(
-                obs,
-                lock_ready=bool(status["lock_ready"]),
-                reason=str(status["reason"]),
-                stable_count=self.ctx.table_lock_frames,
-                phase=phase,
-                status=status,
+        final_timeout_s = max(0.0, float(getattr(self.cfg, "final_slow_stop_timeout_s", 8.0) or 8.0))
+        if final_timeout_s > 0.0 and self._state_elapsed() >= final_timeout_s:
+            status = self._final_lock_status(obs, stable_count=self.ctx.table_lock_frames)
+            status.update(
+                {
+                    "final_slow_stop_timeout": True,
+                    "final_slow_stop_timeout_s": float(final_timeout_s),
+                    "final_slow_stop_elapsed_s": float(self._state_elapsed()),
+                    "final_fixed_roi_missing": not bool(status.get("final_depth_usable_for_control", False)),
+                }
             )
-            level = str(status.get("normalized_control_level") or self._control_level(obs))
-            if not self._table_micro_adjust_enabled() and str(status.get("reason") or "") == "distance_too_far":
-                if not is_holding:
-                    self._transition(State.EDGE_ADJUST, "final_lock_distance_too_far_return_adjust")
-                    return self._table_approach_decision(obs, phase="PLANE_APPROACH")
-            if bool(status.get("final_lock_window_ready")):
-                return self._final_lock_arrived_decision(obs, status)
-            if bool(status["lock_ready"]) or level == "stop" or bool(getattr(obs, "usable_for_stop", False)):
-                self.ctx.table_stop_sent = True
-                self._enter_table_dock_phase("STOP_AND_SETTLE", "[TABLE_DOCK][STOP] final lock/stop condition reached")
-                self._log("info", "[TABLE_DOCK][SETTLE] begin after STOP")
-                return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_SLOW_STOP"), status)
-            self._maybe_resend_req(self._active_req_payload())
-            if level == "none":
-                return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_SLOW_STOP"), status)
-            if level == "approach":
-                return self.controller.plane_approach_cmd(obs, mode="FINAL_SLOW_STOP", reason="plane_final_approach")
-            if level == "stop":
-                return self.controller.fov_table_approach_cmd(obs, phase="PLANE_STOP", mode="FINAL_SLOW_STOP")
-            return self.controller.fov_table_approach_cmd(obs, phase="PLANE_FINAL_LOCK", mode="FINAL_SLOW_STOP")
+            status["final_exit"] = {
+                "reason": "final_slow_stop_timeout",
+                "fixed_roi_mean": status.get("final_fixed_roi_mean"),
+                "fixed_roi_median": status.get("final_fixed_roi_median"),
+                "threshold": status.get("roi_depth_threshold"),
+                "timeout_ms": int(final_timeout_s * 1000.0),
+            }
+            self._log("warn", f"final_slow_stop_timeout {status}")
+            self.ctx.clear_close_final_latches()
+            self.ctx.clear_final_enter_candidate()
+            self._transition(State.ERROR_RECOVERY, "final_slow_stop_timeout")
+            return self._annotate_final_lock_decision(
+                self.controller.stop_cmd("ERROR_RECOVERY", brake=True),
+                status,
+            )
 
-        if phase == "STOP_AND_SETTLE":
-            settle_s = max(0.0, float(getattr(self.cfg, "table_settle_s", 0.30)))
-            if monotonic_ts() - float(self.ctx.table_dock_phase_since_mono or 0.0) < settle_s:
-                return self._annotate_final_lock_decision(
-                    self.controller.stop_cmd("FINAL_SLOW_STOP"),
-                    self._final_lock_status(obs, stable_count=self.ctx.table_lock_frames),
-                )
-            lock_status = self._update_final_lock_count(obs)
-            self._log_final_lock_summary(
-                obs,
-                lock_ready=bool(lock_status["lock_ready"]),
-                reason=str(lock_status["reason"]),
-                stable_count=self.ctx.table_lock_frames,
-                phase=phase,
-                status=lock_status,
+        status = self._update_final_lock_count(obs)
+        stop_obs = self._final_stop_observation_payload(status)
+        status["final_stop_observation"] = stop_obs
+        status["final_stop_depth_source"] = stop_obs["final_stop_depth_source"]
+        status["final_stop_depth_m"] = stop_obs["final_stop_depth_m"]
+        status["final_stop_threshold_m"] = stop_obs["threshold"]
+        now = monotonic_ts()
+        last_obs_log = float(getattr(self.ctx, "final_stop_observation_last_log_mono", 0.0) or 0.0)
+        if now - last_obs_log >= 0.5:
+            setattr(self.ctx, "final_stop_observation_last_log_mono", now)
+            self._log("info", f"final_stop_observation {stop_obs}")
+
+        if bool(status.get("final_lock_window_ready")):
+            status["final_stop_reached"] = {
+                "final_stop_depth_m": stop_obs.get("final_stop_depth_m"),
+                "threshold": stop_obs.get("threshold"),
+                "stable_count": status.get("lock_ready_obs_count"),
+            }
+            self._log(
+                "info",
+                "final_stop_reached "
+                f"{{'final_stop_depth_m': {stop_obs.get('final_stop_depth_m')!r}, "
+                f"'threshold': {stop_obs.get('threshold')!r}, "
+                f"'stable_count': {status.get('lock_ready_obs_count')!r}}}",
             )
-            if bool(lock_status.get("final_lock_window_ready")):
-                return self._final_lock_arrived_decision(obs, lock_status)
-            if bool(lock_status["lock_ready"]):
+            return self._final_lock_arrived_decision(obs, status)
+
+        reason = str(status.get("reason") or "")
+        if reason == "distance_too_far":
+            vx = self._final_slow_vx_mps()
+            last_forward_log = float(getattr(self.ctx, "final_stop_continue_forward_last_log_mono", 0.0) or 0.0)
+            if now - last_forward_log >= 0.5:
+                setattr(self.ctx, "final_stop_continue_forward_last_log_mono", now)
                 self._log(
                     "info",
-                    "[TABLE_DOCK][STABLE] "
-                    f"frames={self.ctx.table_lock_frames}/{self._required_lock_count()} "
-                    f"dist_err={obs.dist_err_m} yaw_err={obs.yaw_err_rad}",
+                    "final_stop_continue_forward "
+                    f"{{'final_stop_depth_m': {stop_obs.get('final_stop_depth_m')!r}, "
+                    f"'threshold': {stop_obs.get('threshold')!r}, "
+                    "'reason': 'fixed_roi_above_threshold'}}",
                 )
-                if self.ctx.table_lock_frames >= self._required_lock_count():
-                    consume_status = self._final_slow_stop_consume_status()
-                    if not bool(consume_status.get("final_lock_consume_allowed", False)):
-                        lock_status.update(consume_status)
-                        self._log(
-                            "warn",
-                            "final_lock_consume_rejected "
-                            f"{{'state': 'FINAL_SLOW_STOP', "
-                            f"'reason': {consume_status.get('final_lock_consume_rejected_reason')!r}, "
-                            f"'dwell_ms': {consume_status.get('final_slow_dwell_ms')!r}, "
-                            f"'stable_count': {consume_status.get('final_stop_stable_count')!r}, "
-                            f"'fixed_roi_seen_after_enter': {consume_status.get('final_fixed_roi_seen_after_enter')!r}}}",
-                        )
-                        return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_SLOW_STOP"), lock_status)
-                    self.ctx.no_progress_recovery_count = 0
-                    self._capture_locked_edge(obs)
-                    self._log("info", "[TABLE_DOCK][DONE] stable final lock confirmed")
-                    if self._table_edge_only_test_enabled():
-                        self._log("info", "[TABLE_EDGE_ONLY][DONE] table edge reached; stopping before target search")
-                        self._transition(State.DONE, "table_edge_only_done")
-                        self._queue_tts("桌边停靠测试完成")
-                        return self._annotate_final_lock_decision(self.controller.stop_cmd("DONE"), lock_status)
-                    self._transition(State.AT_TABLE_EDGE, "lock_ready")
-                    self._queue_tts("已完成桌边停靠")
-                    return self._annotate_final_lock_decision(self._at_table_edge_hard_stop_barrier_cmd("lock_ready"), lock_status)
-                return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_SLOW_STOP"), lock_status)
+            return self._final_slow_forward_decision(obs, status, vx=vx, reason="fixed_roi_above_threshold")
 
-            hold_reason = str(lock_status.get("lock_count_hold_reason") or "")
-            if hold_reason:
-                return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_SLOW_STOP"), lock_status)
-
-            if not self._table_micro_adjust_enabled() and str(lock_status.get("reason") or "") == "distance_too_far":
-                if not is_holding:
-                    self._transition(State.EDGE_ADJUST, "final_lock_distance_too_far_return_adjust")
-                    return self._table_approach_decision(obs, phase="PLANE_APPROACH")
-
-            self._enter_table_dock_phase("MICRO_ADJUST", f"[TABLE_DOCK][SETTLE] done reason={lock_status['reason']}")
-
-        if str(self.ctx.table_dock_phase or "").upper() == "MICRO_ADJUST":
-            decision = self._table_dock_micro_adjust(obs)
-            if decision is not None:
-                return decision
+        if bool(status.get("lock_ready", False)):
+            return self._final_slow_forward_decision(obs, status, vx=0.0, reason="fixed_roi_stop_confirming")
 
         self._maybe_resend_req(self._active_req_payload())
-        return self._annotate_final_lock_decision(
-            self.controller.stop_cmd("FINAL_SLOW_STOP"),
-            self._final_lock_status(obs, stable_count=self.ctx.table_lock_frames),
-        )
+        return self._final_slow_forward_decision(obs, status, vx=0.0, reason=reason or "final_fixed_roi_missing")
+
 
     def _final_lock_arrived_decision(self, obs: TableEdgeObs, status: Dict[str, object]) -> MotionDecision:
         status = dict(status or {})
-        consume_status = self._final_slow_stop_consume_status()
-        if not bool(consume_status.get("final_lock_consume_allowed", False)):
-            status.update(consume_status)
-            self._log(
-                "warn",
-                "final_lock_consume_rejected "
-                f"{{'state': 'FINAL_SLOW_STOP', "
-                f"'reason': {consume_status.get('final_lock_consume_rejected_reason')!r}, "
-                f"'dwell_ms': {consume_status.get('final_slow_dwell_ms')!r}, "
-                f"'stable_count': {consume_status.get('final_stop_stable_count')!r}, "
-                f"'fixed_roi_seen_after_enter': {consume_status.get('final_fixed_roi_seen_after_enter')!r}}}",
-            )
-            return self._annotate_final_lock_decision(self.controller.stop_cmd("FINAL_SLOW_STOP"), status)
         status.update(
             {
                 "final_lock_transition_reason": "final_lock_window_ready",
@@ -2666,29 +2849,6 @@ class TableDockingMixin:
         self._transition(State.AT_TABLE_EDGE, "final_lock_window_ready")
         self._queue_tts("已完成桌边停靠")
         return self._annotate_final_lock_decision(self._at_table_edge_hard_stop_barrier_cmd("final_lock_window_ready"), status)
-
-    def _final_slow_stop_consume_status(self) -> Dict[str, object]:
-        enter_mono = float(getattr(self.ctx, "final_slow_enter_mono", 0.0) or 0.0)
-        dwell_ms = max(0.0, (monotonic_ts() - enter_mono) * 1000.0) if enter_mono > 0.0 else 0.0
-        fixed_roi_seen = bool(getattr(self.ctx, "final_fixed_roi_seen_after_enter", False))
-        stable_count = int(getattr(self.ctx, "final_stop_stable_count", 0) or 0)
-        reason = ""
-        if dwell_ms < MIN_FINAL_SLOW_STOP_DWELL_MS:
-            reason = "final_state_min_dwell_not_met"
-        elif not fixed_roi_seen:
-            reason = "missing_fresh_final_fixed_roi"
-        elif stable_count < FINAL_STOP_STABLE_COUNT_REQUIRED:
-            reason = "final_stop_stable_count_not_met"
-        return {
-            "final_lock_consume_allowed": not bool(reason),
-            "final_lock_consume_rejected": bool(reason),
-            "final_lock_consume_rejected_reason": reason,
-            "final_slow_dwell_ms": float(dwell_ms),
-            "final_fixed_roi_seen_after_enter": bool(fixed_roi_seen),
-            "final_stop_stable_count": int(stable_count),
-            "final_state_min_dwell_not_met": reason == "final_state_min_dwell_not_met",
-            "missing_fresh_final_fixed_roi": reason == "missing_fresh_final_fixed_roi",
-        }
 
     def _tick_at_table_edge_impl(self) -> MotionDecision:
         barrier = self._at_table_edge_hard_stop_barrier_status()
@@ -3201,48 +3361,95 @@ class TableDockingMixin:
             "depth_roi_stop_ready": False,
             "reason": "",
             "roi_depth_stat": None,
+            "roi_depth_stat_used": "missing",
             "roi_depth_valid_ratio": None,
             "roi_depth_sample_count": None,
             "roi_depth_threshold": None,
-            "roi_depth_threshold_semantics": "table_roi_depth_p10_not_geometric_edge_distance",
+            "roi_depth_threshold_semantics": "final_fixed_roi_mean_or_median",
             "target_dist": None,
             "margin": None,
+            "final_fixed_roi_xyxy": None,
+            "final_fixed_roi_mean": None,
+            "final_fixed_roi_median": None,
+            "final_fixed_roi_p10": None,
+            "final_fixed_roi_shape_valid": False,
+            "final_fixed_roi_shape_invalid": False,
+            "final_lock_rejected": None,
         }
         if obs is None:
             status["reason"] = "no_recent_obs"
             return status
-        edge_usable = bool(getattr(obs, "edge_found", False) or getattr(obs, "usable_for_approach", False) or getattr(obs, "edge_trusted", False))
-        near_or_final = bool(getattr(self.ctx, "near_table_latched", False) or getattr(self.ctx, "final_depth_latched", False))
-        if not self._table_yolo_reliable(obs) and not edge_usable and not near_or_final:
-            status["reason"] = "no_current_table_bbox"
+
+        xyxy_value = getattr(obs, "final_fixed_roi_xyxy", None)
+        xyxy = list(xyxy_value) if isinstance(xyxy_value, (list, tuple)) and len(xyxy_value) >= 4 else None
+        width_px = None
+        height_px = None
+        if xyxy is not None:
+            try:
+                width_px = max(0.0, float(xyxy[2]) - float(xyxy[0]))
+                height_px = max(0.0, float(xyxy[3]) - float(xyxy[1]))
+            except (TypeError, ValueError):
+                width_px = None
+                height_px = None
+        shape_invalid = bool(
+            xyxy is not None
+            and (
+                height_px is None
+                or height_px < 25.0
+                or width_px is None
+                or width_px / max(1e-6, height_px) > 4.0
+            )
+        )
+        shape_valid = bool(xyxy is not None and not shape_invalid)
+        depth_valid = bool(getattr(obs, "final_fixed_roi_depth_valid", False))
+        depth_mean = getattr(obs, "final_fixed_roi_depth_mean", None)
+        depth_median = getattr(obs, "final_fixed_roi_depth_median", None)
+        depth_p10 = getattr(obs, "final_fixed_roi_depth_p10", None)
+        depth_value = depth_mean if depth_mean is not None else depth_median
+        stat_used = "mean" if depth_mean is not None else ("median" if depth_median is not None else "missing")
+        ratio = getattr(obs, "final_fixed_roi_depth_valid_ratio", None)
+        samples = getattr(obs, "final_fixed_roi_depth_sample_count", None)
+        status.update(
+            {
+                "final_fixed_roi_xyxy": xyxy,
+                "final_fixed_roi_width_px": width_px,
+                "final_fixed_roi_height_px": height_px,
+                "final_fixed_roi_shape_valid": bool(shape_valid),
+                "final_fixed_roi_shape_invalid": bool(shape_invalid),
+                "final_fixed_roi_mean": depth_mean,
+                "final_fixed_roi_median": depth_median,
+                "final_fixed_roi_p10": depth_p10,
+                "roi_depth_stat_used": stat_used,
+                "roi_depth_valid_ratio": ratio,
+                "roi_depth_sample_count": samples,
+                "final_fixed_roi_min_stat_m": getattr(self.ctx, "final_fixed_roi_min_stat_m", None),
+                "last_edge_dist_err": getattr(obs, "dist_err_m", None),
+                "last_dynamic_roi_depth": getattr(obs, "table_roi_depth_median", getattr(obs, "table_roi_depth_p10", None)),
+            }
+        )
+        if shape_invalid:
+            status["reason"] = "final_fixed_roi_shape_invalid"
+            status["final_lock_rejected"] = {"reason": "final_fixed_roi_shape_invalid"}
             return status
-        
-        # Check table visibility
-        if not self._table_visible(obs) and not edge_usable and not near_or_final:
-            status["reason"] = "table_not_visible"
-            return status
-            
-        depth_valid = bool(getattr(obs, "table_roi_depth_valid", False))
-        depth_p10 = getattr(obs, "table_roi_depth_p10", None)
-        depth_median = getattr(obs, "table_roi_depth_median", None)
-        depth_value = depth_p10 if depth_p10 is not None else depth_median
-        ratio = getattr(obs, "table_roi_depth_valid_ratio", None)
-        samples = getattr(obs, "table_roi_depth_sample_count", None)
-        if not depth_valid or depth_value is None:
-            status["reason"] = "depth_roi_invalid"
+        if not depth_valid or depth_value is None or not shape_valid:
+            status["reason"] = "final_fixed_roi_invalid"
             return status
             
         target_dist = self._table_target_dist_m(obs)
         margin = max(0.0, float(getattr(self.cfg, "table_stop_margin_m", 0.05)))
         status["roi_depth_stat"] = float(depth_value)
-        status["roi_depth_valid_ratio"] = ratio
-        status["roi_depth_sample_count"] = samples
         status["target_dist"] = float(target_dist)
         status["margin"] = float(margin)
         status["roi_depth_threshold"] = float(target_dist + margin)
         
         if float(depth_value) > target_dist + margin:
             status["reason"] = "distance_too_far"
+            status["final_lock_rejected"] = {
+                "reason": "fixed_roi_stat_above_threshold",
+                "stat": float(depth_value),
+                "stat_used": stat_used,
+                "threshold": float(target_dist + margin),
+            }
             return status
             
         status["depth_roi_stop_ready"] = True
@@ -3251,40 +3458,6 @@ class TableDockingMixin:
 
     def _roi_depth_stop_ready(self, obs: Optional[TableEdgeObs]) -> bool:
         return bool(self._depth_roi_stop_status(obs)["depth_roi_stop_ready"])
-
-    def _yolo_dynamic_roi_policy(self, obs: Optional[TableEdgeObs], state_value: str = "") -> Dict[str, object]:
-        roi_source = str(getattr(obs, "table_roi_depth_mapping_source", "") or "")
-        roi_xyxy = getattr(obs, "table_roi_xyxy", None) if obs is not None else None
-        depth_p10 = getattr(obs, "table_roi_depth_p10", None) if obs is not None else None
-        image_h = getattr(obs, "image_h", None) if obs is not None else None
-        if image_h is None and obs is not None:
-            image_h = getattr(obs, "frame_h", None)
-        try:
-            image_h_f = float(image_h) if image_h is not None else 240.0
-        except Exception:
-            image_h_f = 240.0
-        roi_touches_bottom = False
-        if isinstance(roi_xyxy, (list, tuple)) and len(roi_xyxy) >= 4:
-            try:
-                roi_touches_bottom = float(roi_xyxy[3]) >= image_h_f - 2.0
-            except Exception:
-                roi_touches_bottom = False
-        boundary_extend = roi_source == "yolo_table_bbox_boundary_extend"
-        allowed_for_final_enter = not bool(boundary_extend or roi_touches_bottom)
-        reason = ""
-        if boundary_extend:
-            reason = "yolo_table_bbox_boundary_extend"
-        elif roi_touches_bottom:
-            reason = "roi_touches_bottom"
-        return {
-            "state": state_value,
-            "table_roi_xyxy": roi_xyxy,
-            "table_roi_depth_mapping_source": roi_source,
-            "table_roi_depth_p10": depth_p10,
-            "roi_touches_bottom": bool(roi_touches_bottom),
-            "allowed_for_final_enter": bool(allowed_for_final_enter),
-            "reject_reason": reason,
-        }
 
     def _final_lock_enter_status(self, obs: Optional[TableEdgeObs]) -> Dict[str, object]:
         level = self._control_level(obs)
@@ -3318,27 +3491,6 @@ class TableDockingMixin:
             
         depth_status = self._depth_roi_stop_status(obs)
         depth_stop_ready = bool(depth_status.get("depth_roi_stop_ready"))
-        roi_policy = self._yolo_dynamic_roi_policy(obs, str(getattr(self.ctx.state, "value", self.ctx.state) or ""))
-        status["yolo_dynamic_roi_policy"] = dict(roi_policy)
-        status.update(
-            {
-                "table_roi_depth_mapping_source": roi_policy.get("table_roi_depth_mapping_source"),
-                "table_roi_xyxy": roi_policy.get("table_roi_xyxy"),
-                "roi_touches_bottom": bool(roi_policy.get("roi_touches_bottom")),
-                "allowed_for_final_enter": bool(roi_policy.get("allowed_for_final_enter")),
-            }
-        )
-        if not bool(roi_policy.get("allowed_for_final_enter", True)):
-            if depth_stop_ready:
-                status["final_enter_rejected"] = {
-                    "state": roi_policy.get("state"),
-                    "reason": str(roi_policy.get("reject_reason") or "dynamic_roi_rejected"),
-                    "table_roi_xyxy": roi_policy.get("table_roi_xyxy"),
-                    "table_roi_depth_mapping_source": roi_policy.get("table_roi_depth_mapping_source"),
-                    "table_roi_depth_p10": roi_policy.get("table_roi_depth_p10"),
-                }
-            status["final_lock_enter_block_reason"] = str(roi_policy.get("reject_reason") or "dynamic_roi_rejected")
-            return status
         lock_status = self._update_final_lock_count(obs) if depth_stop_ready else {}
         depth_window_ready = bool(lock_status.get("final_lock_window_ready", False))
         status.update(depth_status)
@@ -3458,23 +3610,17 @@ class TableDockingMixin:
 
     def _enter_final_slow_stop_or_keep_approach(self, obs: Optional[TableEdgeObs], reason: str) -> MotionDecision:
         enter_status = self._final_lock_enter_status(obs)
-        if bool(enter_status.get("final_lock_enter_allowed")):
-            self.ctx.final_slow_enter_mono = monotonic_ts()
-            self.ctx.final_slow_enter_tick = 0
-            self.ctx.final_fixed_roi_seen_after_enter = False
-            self.ctx.final_stop_stable_count = 0
-            self.ctx.final_locked = False
-            self.ctx.final_lock_reason = ""
-            self.ctx.final_depth_latched = False
-            self.ctx.final_depth_latched_mono = 0.0
-            self.ctx.final_depth_latch_reason = ""
-            self._transition(State.FINAL_SLOW_STOP, reason)
-            decision = self.controller.fov_table_approach_cmd(obs, phase="PLANE_FINAL_LOCK", mode="FINAL_SLOW_STOP")
-            if decision.control_summary is not None:
-                decision.control_summary.update(enter_status)
-            return decision
         block_reason = str(enter_status.get("final_lock_enter_block_reason") or "blocked")
         decision = self._table_approach_decision(obs, phase="PLANE_APPROACH", stop_ready_ignored=True)
+        if decision.control_summary is not None:
+            decision.control_summary.update(
+                {
+                    **enter_status,
+                    "final_slow_stop_legacy_enter_blocked": True,
+                    "final_slow_stop_legacy_enter_block_reason": "explicit_final_enter_candidate_required",
+                    "final_slow_stop_legacy_enter_original_reason": str(reason),
+                }
+            )
         if self.ctx.state != State.EDGE_ADJUST:
             self._transition(State.EDGE_ADJUST, f"final_slow_stop_enter_blocked:{block_reason}")
         return decision
@@ -3765,7 +3911,7 @@ class TableDockingMixin:
             out_reason = str(reason or "")
             hold_text = str(lock_count_hold_reason or "")
             reset_text = str(lock_count_reset_reason or ("" if (bool(lock_ready) or hold_text) else out_reason))
-            return {
+            result = {
                 "lock_ready": bool(lock_ready),
                 "reason": out_reason,
                 "yaw_locked": bool(yaw_locked),
@@ -3802,8 +3948,11 @@ class TableDockingMixin:
                 "lock_reset_reason": reset_text,
                 "vision_stale_reason": stale_reason,
             }
+            result.update(depth_stop_status)
+            return result
 
-        depth_stop_ready = self._roi_depth_stop_ready(obs)
+        depth_stop_status = self._depth_roi_stop_status(obs)
+        depth_stop_ready = bool(depth_stop_status["depth_roi_stop_ready"])
 
         if obs is None:
             reason = "vision_stale" if self.ctx.last_table_obs is not None else "table_lost"

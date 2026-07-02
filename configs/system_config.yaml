@@ -125,10 +125,10 @@ vision:
     table_roi_depth_current_min_valid_ratio: 0.08 # Valid depth ratio for current ROI sampler
     table_roi_depth_current_min_sample_count: 64 # Valid depth sample count for current ROI sampler
     final_fixed_roi_enable: true # Use fixed center-low ROI during close/final depth control
-    final_fixed_roi_x0_norm: 0.40 # Fixed final ROI left edge in depth-frame normalized coords
-    final_fixed_roi_x1_norm: 0.60 # Fixed final ROI right edge in depth-frame normalized coords
-    final_fixed_roi_y0_norm: 0.45 # Fixed final ROI top edge in depth-frame normalized coords
-    final_fixed_roi_y1_norm: 0.62 # Fixed final ROI bottom edge in depth-frame normalized coords
+    final_fixed_roi_x0_norm: 0.42 # Fixed final ROI left edge in depth-frame normalized coords
+    final_fixed_roi_x1_norm: 0.58 # Fixed final ROI right edge in depth-frame normalized coords
+    final_fixed_roi_y0_norm: 0.44 # Fixed final ROI top edge in depth-frame normalized coords
+    final_fixed_roi_y1_norm: 0.71 # Fixed final ROI bottom edge in depth-frame normalized coords
     final_fixed_roi_min_valid_ratio: 0.03 # Valid depth ratio for fixed final ROI sampler
     final_fixed_roi_min_sample_count: 32 # Valid depth sample count for fixed final ROI sampler
     final_depth_debug_enable: false # Keep low-level ROI sampler diagnostics out of main payload/logs
