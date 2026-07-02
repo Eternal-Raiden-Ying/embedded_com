@@ -78,21 +78,24 @@ def postprocess_depth_image(depth_img, cfgs):
         median_smoothed = cv2.medianBlur(processed, smooth_kernel)
         processed = np.where(processed > 0, median_smoothed, 0).astype(np.uint16)
 
-    # ── 阶段 2: bilateral 保边平滑 ──
-    if smooth_method == "bilateral":
-        bilat_d = int(getattr(cfgs, "depth_bilateral_d", 9))
-        bilat_sigma = float(getattr(cfgs, "depth_bilateral_sigma", 75.0))
-        bilat_smoothed = cv2.bilateralFilter(
-            processed.astype(np.float32), bilat_d,
-            bilat_sigma, bilat_sigma,
-        ).astype(np.uint16)
-        processed = np.where(processed > 0, bilat_smoothed, 0).astype(np.uint16)
-
+    # ── 阶段 2: 孔洞填充 ──
     processed = _fill_zero_holes_with_median(
         processed,
         kernel_size=hole_fill_kernel,
         iterations=hole_fill_iterations,
     )
+
+    # ── 阶段 3: bilateral 保边平滑 ──
+    if smooth_method == "bilateral":
+        bilat_d = int(getattr(cfgs, "depth_bilateral_d", 9))
+        sigma_color = float(getattr(cfgs, "depth_bilateral_sigma_color", 75.0))
+        sigma_space = float(getattr(cfgs, "depth_bilateral_sigma_space", 75.0))
+        bilat_smoothed = cv2.bilateralFilter(
+            processed.astype(np.float32), bilat_d,
+            sigma_color, sigma_space,
+        ).astype(np.uint16)
+        processed = np.where(processed > 0, bilat_smoothed, 0).astype(np.uint16)
+
     processed = sanitize_depth_image(
         processed,
         depth_min_mm=getattr(cfgs, "depth_min_mm", 1),
