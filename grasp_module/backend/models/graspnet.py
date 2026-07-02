@@ -90,27 +90,27 @@ class GraspNet(nn.Module):
         return end_points
 
 
-def pred_decode(end_points, grasp_max_width=GRASP_MAX_WIDTH):
+def pred_decode(end_points, grasp_max_width=GRASP_MAX_WIDTH, M_points=M_POINT):
     batch_size = len(end_points['point_clouds'])
     grasp_preds = []
     for i in range(batch_size):
         grasp_center = end_points['xyz_graspable'][i].float()
 
         grasp_score = end_points['grasp_score_pred'][i].float()
-        grasp_score = grasp_score.view(M_POINT, NUM_ANGLE*NUM_DEPTH)
-        grasp_score, grasp_score_inds = torch.max(grasp_score, -1)  # [M_POINT]
+        grasp_score = grasp_score.view(M_points, NUM_ANGLE*NUM_DEPTH)
+        grasp_score, grasp_score_inds = torch.max(grasp_score, -1)  # [M_points]
         grasp_score = grasp_score.view(-1, 1)
         grasp_angle = (grasp_score_inds // NUM_DEPTH) * np.pi / 12
         grasp_depth = (grasp_score_inds % NUM_DEPTH + 1) * 0.01
         grasp_depth = grasp_depth.view(-1, 1)
         grasp_width = 1.2 * end_points['grasp_width_pred'][i] / 10.
-        grasp_width = grasp_width.view(M_POINT, NUM_ANGLE*NUM_DEPTH)
+        grasp_width = grasp_width.view(M_points, NUM_ANGLE*NUM_DEPTH)
         grasp_width = torch.gather(grasp_width, 1, grasp_score_inds.view(-1, 1))
         grasp_width = torch.clamp(grasp_width, min=0., max=grasp_max_width)
 
         approaching = -end_points['grasp_top_view_xyz'][i].float()
         grasp_rot = batch_viewpoint_params_to_matrix(approaching, grasp_angle)
-        grasp_rot = grasp_rot.view(M_POINT, 9)
+        grasp_rot = grasp_rot.view(M_points, 9)
 
         # merge preds
         grasp_height = 0.02 * torch.ones_like(grasp_score)

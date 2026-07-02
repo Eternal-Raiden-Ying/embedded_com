@@ -374,10 +374,6 @@ class RealSenseGraspPredictor:
         if raw_approach is None:
             return None
 
-        # 限定 robot 坐标系下 approach X 分量为正（从 +X 方向接近）
-        # if float(raw_approach[0]) <= 0:
-        #     return None
-
         # grasp center in robot frame (cm)
         grasp_robot_cm = self.frames.camera_point_to_robot_cm(grasp.translation)
         gx, gy = float(grasp_robot_cm[0]), float(grasp_robot_cm[1])
@@ -411,6 +407,10 @@ class RealSenseGraspPredictor:
                 projected_approach = self._normalize_vector(v_proj)
                 if projected_approach is None:
                     projected_approach = np.asarray(raw_approach, dtype=np.float64)
+
+        # remove reverse grasp (always noise)
+        if projected_approach[2]>0:
+            return None
 
         # ---- pitch: elevation of projected approach from horizontal ----
         pitch_deg = float(np.degrees(math.atan2(
@@ -586,7 +586,7 @@ class RealSenseGraspPredictor:
     def _forward_grasps(self, batch_data):
         with torch.no_grad():
             end_points = self.net(batch_data)
-            grasp_preds_list = pred_decode(end_points, grasp_max_width=self.cfgs.grasp_max_width)
+            grasp_preds_list = pred_decode(end_points, grasp_max_width=self.cfgs.grasp_max_width, M_points=self.cfgs.m_point)
         preds = grasp_preds_list[0].detach().cpu().numpy()
         return GraspGroup(preds)
 
