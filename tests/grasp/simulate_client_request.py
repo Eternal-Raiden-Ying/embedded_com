@@ -90,7 +90,7 @@ def main():
         # 'depth_path': r"E:\Documents_E\vscode\embedded_com\output_dataset\20260422\depth_raw_16bit\depth_raw_00000.png",
     }
     parser = build_predictor_arg_parser(description='Simulate edge-side requests to grasp server', default_overrides=default_overrides)
-    parser.add_argument('--server_url', type=str, default='http://127.0.0.1:6006', help='Base server URL')
+    parser.add_argument('--server_url', type=str, default='http://10.11.36.181:6006', help='Base server URL')
     parser.add_argument('--robot_id', type=str, default='edge-sim', help='Robot id for metadata')
     parser.add_argument('--cmd', type=str, default='predict', help='Command field in metadata')
     parser.add_argument('--class_id', type=int, default=46, help='Target class id for internal YOLO segmentation')

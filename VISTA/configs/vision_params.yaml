@@ -156,6 +156,13 @@ table_edge:
   yolo_table_bbox_hold_enable: true
   yolo_table_bbox_hold_frames: 8
   yolo_table_roi_hold_enable: true
+  final_fixed_roi_enable: true
+  final_fixed_roi_x0_norm: 0.40
+  final_fixed_roi_x1_norm: 0.60
+  final_fixed_roi_y0_norm: 0.45
+  final_fixed_roi_y1_norm: 0.62
+  final_fixed_roi_min_valid_ratio: 0.03
+  final_fixed_roi_min_sample_count: 32
   # 当前小ROI未检测到edge且bbox贴RGB左/右/下边界时，第二次尝试把对应ROI边向depth边界延伸。
   yolo_table_roi_boundary_extend_enable: true
   yolo_table_roi_boundary_margin_norm: 0.03
@@ -296,6 +303,10 @@ mode_profiles:
       preview_layout: rgb_depth_edge
       release_cooldown_s: 3.0
       rgb:
+        fps: 15
+      depth:
+        width: 424
+        height: 240
         fps: 15
 
     IDLE_HOT:

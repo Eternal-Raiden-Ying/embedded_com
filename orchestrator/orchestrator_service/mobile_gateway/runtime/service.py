@@ -7,6 +7,7 @@ import os
 import queue
 import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -81,6 +82,78 @@ TCP_BACKEND_ALIASES = {
     "orchestrator_bridge": "orchestrator_tcp",
     "dry_orchestrator_tcp": "tcp_no_ack",
     "dry_orchestrator_uds": "uds_no_ack",
+}
+
+CORE_CONTROL_ALIASES: Dict[str, str] = {
+    "core_start": "core_start",
+    "core-start": "core_start",
+    "core-stop": "core_stop",
+    "core_stop": "core_stop",
+    "core-restart": "core_restart",
+    "core_restart": "core_restart",
+    "call_start": "core_start",
+    "call_stop": "core_stop",
+    "call_restart": "core_restart",
+    "start_core": "core_start",
+    "stop_core": "core_stop",
+    "restart_core": "core_restart",
+}
+
+CORE_STATUS_ALIASES: Dict[str, str] = {
+    "core_status": "core_status",
+    "status_core": "core_status",
+    "get_core_status": "core_status",
+}
+
+TASK_STATUS_ALIASES: Dict[str, str] = {
+    "task_status": "task_status",
+    "progress_status": "task_status",
+    "status_task": "task_status",
+    "get_task_status": "task_status",
+}
+
+ORCHESTRATOR_BUSY_STATES = {
+    "SEARCH_TABLE",
+    "YOLO_ACQUIRE_ALIGN",
+    "YOLO_APPROACH",
+    "FINAL_SLOW_STOP",
+    "AT_TABLE_EDGE",
+    "SEARCH_TARGET_INIT",
+    "EDGE_SLIDE_SEARCH",
+    "TARGET_CONFIRM",
+    "TARGET_LOCKED",
+    "FREEZE_BASE",
+    "GRASP",
+}
+
+ORCHESTRATOR_CLEAR_BUSY_STATES = {"IDLE", "DONE"}
+
+TASK_PHASE_BY_ORCH_STATE = {
+    "IDLE": "idle",
+    "SEARCH_TABLE": "searching_table",
+    "YOLO_ACQUIRE_ALIGN": "aligning_table",
+    "YOLO_APPROACH": "approaching_table",
+    "FINAL_SLOW_STOP": "approaching_table",
+    "AT_TABLE_EDGE": "at_table_edge",
+    "SEARCH_TARGET_INIT": "searching_target",
+    "EDGE_SLIDE_SEARCH": "searching_target",
+    "TARGET_CONFIRM": "confirming_target",
+    "TARGET_LOCKED": "target_locked",
+    "FREEZE_BASE": "preparing_grasp",
+    "GRASP": "grasping",
+    "DONE": "done",
+    "ERROR_RECOVERY": "recovering",
+}
+
+CORE_CONTROL_SCRIPT_ACTIONS: Dict[str, str] = {
+    "core_start": "core-start",
+    "core_stop": "core-stop",
+    "core_restart": "core-restart",
+}
+
+MANUAL_COMMAND_INTENTS: Dict[str, str] = {
+    "manual_drive": "MANUAL_DRIVE",
+    "manual_stop": "MANUAL_STOP",
 }
 
 
@@ -687,6 +760,574 @@ class MobileGatewayService(BaseModule):
             return self.http_server.snapshot()
         return self.command_server.snapshot()
 
+    def _normalize_core_control_action(self, payload: Dict[str, Any]) -> Tuple[Optional[str], str]:
+        for field in ("cmd", "action", "intent", "command"):
+            raw_value = str(payload.get(field) or "").strip()
+            if not raw_value:
+                continue
+            normalized = CORE_CONTROL_ALIASES.get(raw_value.lower())
+            if normalized:
+                return normalized, raw_value
+        return None, ""
+
+    def _normalize_core_status_action(self, payload: Dict[str, Any]) -> Tuple[Optional[str], str]:
+        for field in ("cmd", "action", "intent", "command"):
+            raw_value = str(payload.get(field) or "").strip()
+            if not raw_value:
+                continue
+            normalized = CORE_STATUS_ALIASES.get(raw_value.lower())
+            if normalized:
+                return normalized, raw_value
+        return None, ""
+
+    def _normalize_task_status_action(self, payload: Dict[str, Any]) -> Tuple[Optional[str], str]:
+        for field in ("cmd", "action", "intent", "command"):
+            raw_value = str(payload.get(field) or "").strip()
+            if not raw_value:
+                continue
+            normalized = TASK_STATUS_ALIASES.get(raw_value.lower())
+            if normalized:
+                return normalized, raw_value
+        return None, ""
+
+    def _stack_script_path(self) -> Path:
+        configured = str(os.environ.get("MOBILE_GATEWAY_STACK_SCRIPT_PATH") or "").strip()
+        if configured:
+            return Path(configured).expanduser()
+        repo_root = Path(str(self.cfg.runtime.repo_root or "")).expanduser()
+        if repo_root:
+            candidate = repo_root / "start_robot_stack.sh"
+            if candidate.exists():
+                return candidate
+        cwd_candidate = Path.cwd() / "start_robot_stack.sh"
+        if cwd_candidate.exists():
+            return cwd_candidate
+        return repo_root / "start_robot_stack.sh"
+
+    @staticmethod
+    def _pid_status(pid_file: Path) -> Tuple[bool, Optional[int]]:
+        try:
+            pid_text = pid_file.read_text(encoding="utf-8").strip()
+            pid = int(pid_text)
+        except Exception:
+            return False, None
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False, pid
+        return True, pid
+
+    def _handle_core_status_payload(self, payload: Dict[str, Any], raw_cmd: str) -> Dict[str, Any]:
+        repo_root = Path(str(self.cfg.runtime.repo_root or "")).expanduser()
+        latest_run_file = repo_root / "logs" / "runs" / "latest_run_id"
+        latest_run_id = ""
+        try:
+            latest_run_id = latest_run_file.read_text(encoding="utf-8").strip()
+        except Exception:
+            latest_run_id = ""
+        latest_run_dir = str(repo_root / "logs" / "runs" / latest_run_id) if latest_run_id else ""
+        vision_running, vision_pid = self._pid_status(repo_root / "VISTA" / "pids" / "vision.pid")
+        orchestrator_running, orchestrator_pid = self._pid_status(repo_root / "orchestrator" / "pids" / "orchestrator.pid")
+        status = {
+            "ok": True,
+            "accepted": True,
+            "action": "core_status",
+            "gateway_running": True,
+            "vision_running": bool(vision_running),
+            "orchestrator_running": bool(orchestrator_running),
+            "core_running": bool(vision_running and orchestrator_running),
+            "vision_pid": vision_pid,
+            "orchestrator_pid": orchestrator_pid,
+            "task_cmd_socket": Path("/tmp/robot_stack/task_cmd.sock").exists(),
+            "vision_obs_socket": Path("/tmp/robot_stack/vision_obs.sock").exists(),
+            "vision_req_socket": Path("/tmp/robot_stack/vision_req.sock").exists(),
+            "latest_run_id": latest_run_id,
+            "latest_run_dir": latest_run_dir,
+            "message": "core running" if (vision_running and orchestrator_running) else "core stopped",
+        }
+        req_log = {
+            "action": "core_status",
+            "raw_cmd": raw_cmd,
+            "source": str(payload.get("source") or "mobile"),
+            "cmd_id": payload.get("cmd_id"),
+            "session_id": payload.get("session_id"),
+        }
+        req_log = {k: v for k, v in req_log.items() if v not in (None, "", [], {})}
+        self.log_info("protocol", "gateway_core_status_requested", req_log)
+        self.run_logger.write_jsonl("gateway_core_status_requested", req_log)
+        report_log = {
+            "core_running": status["core_running"],
+            "vision_running": status["vision_running"],
+            "orchestrator_running": status["orchestrator_running"],
+            "task_cmd_socket": status["task_cmd_socket"],
+            "latest_run_id": latest_run_id,
+            "cmd_id": payload.get("cmd_id"),
+            "session_id": payload.get("session_id"),
+        }
+        report_log = {k: v for k, v in report_log.items() if v not in (None, "", [], {})}
+        self.log_info("protocol", "gateway_core_status_reported", report_log)
+        self.run_logger.write_jsonl("gateway_core_status_reported", report_log)
+        return status
+
+    def _runs_root(self) -> Path:
+        return Path(str(self.cfg.runtime.repo_root or "")).expanduser() / "logs" / "runs"
+
+    def _latest_run_id(self) -> str:
+        latest_run_file = self._runs_root() / "latest_run_id"
+        try:
+            return latest_run_file.read_text(encoding="utf-8").strip()
+        except Exception:
+            return ""
+
+    def _latest_orchestrator_log_dir(self) -> Tuple[Path, str]:
+        runs_root = self._runs_root()
+        latest_link = runs_root / "latest"
+        if latest_link.exists():
+            return latest_link / "orchestrator", latest_link.resolve().name
+        latest_run_id = self._latest_run_id()
+        if latest_run_id:
+            return runs_root / latest_run_id / "orchestrator", latest_run_id
+        candidates = [path for path in runs_root.glob("run_*/orchestrator") if path.is_dir()]
+        if not candidates:
+            return runs_root / "latest" / "orchestrator", ""
+        latest = max(candidates, key=lambda path: path.stat().st_mtime)
+        return latest, latest.parent.name
+
+    @staticmethod
+    def _read_recent_jsonl(path: Path, limit: int = 40) -> List[Dict[str, Any]]:
+        if not path.exists():
+            return []
+        try:
+            lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except Exception:
+            return []
+        records: List[Dict[str, Any]] = []
+        for line in lines[-max(1, int(limit)):]:
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                obj = json.loads(text)
+            except Exception:
+                continue
+            if isinstance(obj, dict):
+                records.append(obj)
+        return records
+
+    def _latest_orchestrator_status(self) -> Dict[str, Any]:
+        orch_dir, latest_run_id = self._latest_orchestrator_log_dir()
+        block_records = self._read_recent_jsonl(orch_dir / "state_blocks_lite.jsonl", limit=80)
+        trace_records = self._read_recent_jsonl(orch_dir / "state_trace.jsonl", limit=80)
+        latest_block = block_records[-1] if block_records else {}
+        latest_trace = trace_records[-1] if trace_records else {}
+        transition_records = [rec for rec in trace_records if str(rec.get("event") or "") == "state_transition"]
+        latest_transition = transition_records[-1] if transition_records else latest_trace
+        orch_state = str(
+            latest_block.get("state")
+            or latest_transition.get("next_state")
+            or latest_trace.get("next_state")
+            or latest_trace.get("state")
+            or ""
+        ).strip().upper()
+        target = str(
+            latest_block.get("active_target")
+            or latest_transition.get("target")
+            or latest_transition.get("target_cls")
+            or latest_trace.get("target")
+            or latest_trace.get("target_cls")
+            or self._snapshot.get("target")
+            or ""
+        ).strip()
+        last_transition_reason = str(
+            latest_transition.get("transition_reason")
+            or latest_transition.get("reason")
+            or latest_block.get("last_enter_reason")
+            or ""
+        ).strip()
+        last_failure_reason = str(
+            latest_block.get("last_fail_reason")
+            or latest_trace.get("last_fail_reason")
+            or ""
+        ).strip()
+        phase = TASK_PHASE_BY_ORCH_STATE.get(orch_state, ORCHESTRATOR_STATE_MAP.get(orch_state, ("unknown", 0))[0])
+        vision_running, _ = self._pid_status(Path(str(self.cfg.runtime.repo_root or "")).expanduser() / "VISTA" / "pids" / "vision.pid")
+        orchestrator_running, _ = self._pid_status(Path(str(self.cfg.runtime.repo_root or "")).expanduser() / "orchestrator" / "pids" / "orchestrator.pid")
+        return {
+            "orch_state": orch_state,
+            "task_phase": phase,
+            "target": target,
+            "last_transition_reason": last_transition_reason,
+            "last_failure_reason": last_failure_reason,
+            "latest_run_id": latest_run_id,
+            "latest_run_dir": str(orch_dir.parent) if latest_run_id else "",
+            "core_running": bool(vision_running and orchestrator_running),
+            "orchestrator_running": bool(orchestrator_running),
+            "vision_running": bool(vision_running),
+            "state_log_path": str(orch_dir / "state_blocks_lite.jsonl"),
+            "trace_log_path": str(orch_dir / "state_trace.jsonl"),
+        }
+
+    def refresh_task_state_from_orchestrator(self, reason: str = "") -> Dict[str, Any]:
+        before_state = str(self._snapshot.get("state") or "").strip().lower()
+        status = self._latest_orchestrator_status()
+        orch_state = str(status.get("orch_state") or "").strip().upper()
+        cleared = False
+        if before_state in {"submitted", "accepted", "searching", "running"} and orch_state in ORCHESTRATOR_CLEAR_BUSY_STATES:
+            unified_state, progress = ORCHESTRATOR_STATE_MAP.get(orch_state, ("idle", 0))
+            payload = MobileStatus(
+                robot_id=ROBOT_ID,
+                session_id=str(self._snapshot.get("session_id") or ""),
+                state=unified_state,
+                target=str(status.get("target") or self._snapshot.get("target") or "").strip() or None,
+                message="任务完成，回到空闲" if orch_state == "DONE" else "orchestrator idle; stale busy cleared",
+                progress=progress,
+                command=self._snapshot.get("command"),
+                epoch=int(self._snapshot.get("epoch", 0) or 0),
+                ts=now_ts(),
+            ).to_dict()
+            payload["backend_state"] = orch_state
+            payload["raw_backend_state"] = orch_state
+            payload["task_phase"] = status.get("task_phase")
+            self._active_template = None
+            if orch_state == "DONE":
+                self._paused_template = None
+            self._publish_status(payload, force=True)
+            cleared = True
+            log_payload = {
+                "reason": reason,
+                "previous_gateway_state": before_state,
+                "orch_state": orch_state,
+                "task_phase": status.get("task_phase"),
+                "latest_run_id": status.get("latest_run_id"),
+                "target": status.get("target"),
+            }
+            self.log_info("backend", "gateway_stale_busy_cleared", log_payload)
+            self.run_logger.write_jsonl("gateway_stale_busy_cleared", log_payload)
+        status["cleared_stale_busy"] = cleared
+        status["previous_gateway_state"] = before_state
+        return status
+
+    def _handle_task_status_payload(self, payload: Dict[str, Any], raw_cmd: str) -> Dict[str, Any]:
+        status = self.refresh_task_state_from_orchestrator(reason="task_status")
+        response = {
+            "ok": True,
+            "accepted": True,
+            "action": "task_status",
+            "core_running": bool(status.get("core_running")),
+            "orch_state": status.get("orch_state") or "",
+            "task_phase": status.get("task_phase") or "unknown",
+            "target": status.get("target") or "",
+            "last_transition_reason": status.get("last_transition_reason") or "",
+            "last_failure_reason": status.get("last_failure_reason") or "",
+            "latest_run_id": status.get("latest_run_id") or "",
+            "latest_run_dir": status.get("latest_run_dir") or "",
+            "gateway_state": self._snapshot.get("state", ""),
+            "message": f"task phase: {status.get('task_phase') or 'unknown'}",
+        }
+        log_payload = {
+            "action": "task_status",
+            "raw_cmd": raw_cmd,
+            "cmd_id": payload.get("cmd_id"),
+            "session_id": payload.get("session_id"),
+            "orch_state": response["orch_state"],
+            "task_phase": response["task_phase"],
+            "core_running": response["core_running"],
+            "latest_run_id": response["latest_run_id"],
+        }
+        log_payload = {k: v for k, v in log_payload.items() if v not in (None, "", [], {})}
+        self.log_info("protocol", "gateway_task_status_reported", log_payload)
+        self.run_logger.write_jsonl("gateway_task_status_reported", log_payload)
+        return response
+
+    def _core_control_log_dir(self, script_path: Path) -> Path:
+        configured = str(os.environ.get("MOBILE_GATEWAY_CORE_CONTROL_LOG_DIR") or "").strip()
+        if configured:
+            return Path(configured).expanduser()
+        runs_dir = Path(str(os.environ.get("MOBILE_GATEWAY_RUNS_DIR") or "")).expanduser()
+        if runs_dir and runs_dir.name == "runs" and runs_dir.parent.name == "logs":
+            return runs_dir.parent / "mobile_gateway" / "core_control"
+        if script_path:
+            return script_path.parent / "logs" / "mobile_gateway" / "core_control"
+        repo_root = Path(str(self.cfg.runtime.repo_root or "")).expanduser()
+        return repo_root / "logs" / "mobile_gateway" / "core_control"
+
+    def _core_control_log_path(self, action: str, script_path: Path) -> Path:
+        log_dir = self._core_control_log_dir(script_path)
+        ensure_dir(str(log_dir))
+        stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+        suffix = new_id("ctl").split("_", 1)[-1][:8]
+        return log_dir / f"{action}_{stamp}_{suffix}.out"
+
+    def _core_control_env(self, script_path: Path, control_log_path: Path) -> Dict[str, str]:
+        env = os.environ.copy()
+        orch_use_sudo = os.environ.get("MOBILE_GATEWAY_CORE_ORCH_USE_SUDO", os.environ.get("ORCH_USE_SUDO", "0")) or "0"
+        env["ORCH_USE_SUDO"] = str(orch_use_sudo)
+        env["FOLLOW_STACK_LOGS_AFTER_START"] = "0"
+        env["ROBOT_CONSOLE_COLOR"] = "never"
+        env["ENABLE_GATEWAY_LOGS"] = os.environ.get("ENABLE_GATEWAY_LOGS", "true")
+        env["MOBILE_GATEWAY_STACK_SCRIPT_PATH"] = str(script_path)
+        env["MOBILE_GATEWAY_CORE_CONTROL_LOG_DIR"] = str(control_log_path.parent)
+        env.pop("STACK_RUN_ID", None)
+        env.pop("STACK_RUN_DIR", None)
+        return env
+
+    def _core_control_log_payload(
+        self,
+        payload: Dict[str, Any],
+        *,
+        action: str,
+        raw_cmd: str,
+        script_path: Path,
+        script_action: str = "",
+        control_log_path: Optional[Path] = None,
+        orch_use_sudo: str = "",
+        pid: Optional[int] = None,
+        returncode: Optional[int] = None,
+        error: str = "",
+    ) -> Dict[str, Any]:
+        data = {
+            "action": action,
+            "script_action": script_action,
+            "raw_cmd": raw_cmd,
+            "script_path": str(script_path),
+            "control_log_path": str(control_log_path) if control_log_path is not None else "",
+            "ORCH_USE_SUDO": orch_use_sudo,
+            "pid": pid,
+            "returncode": returncode,
+            "source": str(payload.get("source") or "mobile"),
+            "cmd_id": payload.get("cmd_id"),
+            "session_id": payload.get("session_id"),
+            "error": error,
+        }
+        return {k: v for k, v in data.items() if v not in (None, "", [], {})}
+
+    def _handle_core_control_payload(self, payload: Dict[str, Any], action: str, raw_cmd: str) -> Dict[str, Any]:
+        script_path = self._stack_script_path()
+        script_action = CORE_CONTROL_SCRIPT_ACTIONS.get(action, "")
+        control_log_path = self._core_control_log_path(action, script_path)
+        env = self._core_control_env(script_path, control_log_path)
+        orch_use_sudo = env.get("ORCH_USE_SUDO", "0")
+        log_payload = self._core_control_log_payload(
+            payload,
+            action=action,
+            raw_cmd=raw_cmd,
+            script_path=script_path,
+            script_action=script_action,
+            control_log_path=control_log_path,
+            orch_use_sudo=orch_use_sudo,
+        )
+        self.log_info("protocol", "gateway_core_control_received", log_payload)
+        self.run_logger.write_jsonl("gateway_core_control_received", log_payload)
+        self.log_info("protocol", "gateway_core_control_env", log_payload)
+        self.run_logger.write_jsonl("gateway_core_control_env", log_payload)
+
+        if action not in CORE_CONTROL_SCRIPT_ACTIONS:
+            error = "core control action rejected"
+            log_payload = self._core_control_log_payload(
+                payload,
+                action=action,
+                raw_cmd=raw_cmd,
+                script_path=script_path,
+                control_log_path=control_log_path,
+                orch_use_sudo=orch_use_sudo,
+                error=error,
+            )
+            self.log_error("protocol", "gateway_core_control_rejected", log_payload)
+            self.run_logger.write_jsonl("gateway_core_control_rejected", log_payload)
+            return {
+                "ok": False,
+                "accepted": False,
+                "action": action,
+                "message": error,
+                "script_path": str(script_path),
+                "control_log_path": str(control_log_path),
+                "error": error,
+            }
+
+        if not script_path.is_file() or not os.access(script_path, os.X_OK):
+            error = "stack script not found or not executable"
+            log_payload = self._core_control_log_payload(
+                payload,
+                action=action,
+                raw_cmd=raw_cmd,
+                script_path=script_path,
+                script_action=script_action,
+                control_log_path=control_log_path,
+                orch_use_sudo=orch_use_sudo,
+                error=error,
+            )
+            self.log_error("protocol", "gateway_core_control_error", log_payload)
+            self.run_logger.write_jsonl("gateway_core_control_error", log_payload)
+            return {
+                "ok": False,
+                "accepted": False,
+                "action": action,
+                "message": error,
+                "script_path": str(script_path),
+                "script_action": script_action,
+                "control_log_path": str(control_log_path),
+                "orchestrator_use_sudo": orch_use_sudo,
+                "error": error,
+            }
+
+        start_payload = dict(log_payload)
+        self.log_info("protocol", "gateway_core_control_start", start_payload)
+        self.run_logger.write_jsonl("gateway_core_control_start", start_payload)
+
+        if action == "core_stop":
+            try:
+                with open(control_log_path, "ab") as log_f:
+                    completed = subprocess.run(
+                        [str(script_path), script_action],
+                        cwd=str(script_path.parent),
+                        stdin=subprocess.DEVNULL,
+                        stdout=log_f,
+                        stderr=subprocess.STDOUT,
+                        env=env,
+                        shell=False,
+                        timeout=20,
+                    )
+            except subprocess.TimeoutExpired as exc:
+                error = f"core_stop timeout after {exc.timeout}s"
+                timeout_payload = self._core_control_log_payload(
+                    payload,
+                    action=action,
+                    raw_cmd=raw_cmd,
+                    script_path=script_path,
+                    script_action=script_action,
+                    control_log_path=control_log_path,
+                    orch_use_sudo=orch_use_sudo,
+                    error=error,
+                )
+                self.log_error("protocol", "gateway_core_control_timeout", timeout_payload)
+                self.run_logger.write_jsonl("gateway_core_control_timeout", timeout_payload)
+                return {
+                    "ok": False,
+                    "accepted": False,
+                    "action": action,
+                    "script_action": script_action,
+                    "message": error,
+                    "script_path": str(script_path),
+                    "control_log_path": str(control_log_path),
+                    "orchestrator_use_sudo": orch_use_sudo,
+                    "error": error,
+                }
+            except Exception as exc:
+                error = str(exc)
+                err_payload = self._core_control_log_payload(
+                    payload,
+                    action=action,
+                    raw_cmd=raw_cmd,
+                    script_path=script_path,
+                    script_action=script_action,
+                    control_log_path=control_log_path,
+                    orch_use_sudo=orch_use_sudo,
+                    error=error,
+                )
+                self.log_error("protocol", "gateway_core_control_error", err_payload)
+                self.run_logger.write_jsonl("gateway_core_control_error", err_payload)
+                return {
+                    "ok": False,
+                    "accepted": False,
+                    "action": action,
+                    "script_action": script_action,
+                    "message": error,
+                    "script_path": str(script_path),
+                    "control_log_path": str(control_log_path),
+                    "orchestrator_use_sudo": orch_use_sudo,
+                    "error": error,
+                }
+
+            completed_payload = self._core_control_log_payload(
+                payload,
+                action=action,
+                raw_cmd=raw_cmd,
+                script_path=script_path,
+                script_action=script_action,
+                control_log_path=control_log_path,
+                orch_use_sudo=orch_use_sudo,
+                returncode=completed.returncode,
+            )
+            self.log_info("protocol", "gateway_core_control_completed", completed_payload)
+            self.run_logger.write_jsonl("gateway_core_control_completed", completed_payload)
+            ok = completed.returncode == 0
+            return {
+                "ok": ok,
+                "accepted": ok,
+                "action": action,
+                "script_action": script_action,
+                "returncode": completed.returncode,
+                "message": "core_stop completed" if ok else "core_stop failed",
+                "script_path": str(script_path),
+                "control_log_path": str(control_log_path),
+                "orchestrator_use_sudo": orch_use_sudo,
+            }
+
+        try:
+            log_f = open(control_log_path, "ab")
+            try:
+                proc = subprocess.Popen(
+                    [str(script_path), script_action],
+                    cwd=str(script_path.parent),
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_f,
+                    stderr=subprocess.STDOUT,
+                    env=env,
+                    shell=False,
+                    start_new_session=True,
+                )
+            finally:
+                log_f.close()
+        except Exception as exc:
+            error = str(exc)
+            err_payload = self._core_control_log_payload(
+                payload,
+                action=action,
+                raw_cmd=raw_cmd,
+                script_path=script_path,
+                script_action=script_action,
+                control_log_path=control_log_path,
+                orch_use_sudo=orch_use_sudo,
+                error=error,
+            )
+            self.log_error("protocol", "gateway_core_control_error", err_payload)
+            self.run_logger.write_jsonl("gateway_core_control_error", err_payload)
+            return {
+                "ok": False,
+                "accepted": False,
+                "action": action,
+                "script_action": script_action,
+                "message": error,
+                "script_path": str(script_path),
+                "control_log_path": str(control_log_path),
+                "orchestrator_use_sudo": orch_use_sudo,
+                "error": error,
+            }
+
+        spawned_payload = self._core_control_log_payload(
+            payload,
+            action=action,
+            raw_cmd=raw_cmd,
+            script_path=script_path,
+            script_action=script_action,
+            control_log_path=control_log_path,
+            orch_use_sudo=orch_use_sudo,
+            pid=proc.pid,
+        )
+        self.log_info("protocol", "gateway_core_control_spawned", spawned_payload)
+        self.run_logger.write_jsonl("gateway_core_control_spawned", spawned_payload)
+        return {
+            "ok": True,
+            "accepted": True,
+            "action": action,
+            "script_action": script_action,
+            "pid": proc.pid,
+            "message": f"{action} accepted",
+            "script_path": str(script_path),
+            "control_log_path": str(control_log_path),
+            "orchestrator_use_sudo": orch_use_sudo,
+        }
+
     def _http_health_payload(self) -> Dict[str, Any]:
         return {
             "ok": True,
@@ -710,6 +1351,19 @@ class MobileGatewayService(BaseModule):
     def _coerce_http_task_cmd(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         raw_action = str(payload.get("action") or "").strip().lower()
         raw_intent = str(payload.get("intent") or "").strip().upper()
+        if raw_action in MANUAL_COMMAND_INTENTS:
+            task_cmd = dict(payload)
+            task_cmd.update({
+                "ts": float(payload.get("ts", now_ts()) or now_ts()),
+                "type": "task_cmd",
+                "intent": MANUAL_COMMAND_INTENTS[raw_action],
+                "cmd": raw_action,
+                "cmd_id": str(payload.get("cmd_id") or payload.get("task_id") or new_id("cmd")),
+                "session_id": str(payload.get("session_id") or payload.get("task_id") or new_id("sess")),
+                "epoch": int(payload.get("epoch", 0) or 0),
+                "source": str(payload.get("source") or "mobile_http"),
+            })
+            return {k: v for k, v in task_cmd.items() if v not in (None, "")}
         if not raw_intent:
             if raw_action in {"stop", "halt", "cancel"}:
                 raw_intent = "STOP"
@@ -738,9 +1392,35 @@ class MobileGatewayService(BaseModule):
     def _handle_http_task_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         self._last_req_ts = now_ts()
         self.log_info("protocol", "received mobile command", {"transport": "http", "payload": payload})
+        status_action, status_raw_cmd = self._normalize_core_status_action(payload)
+        if status_action:
+            result = self._handle_core_status_payload(payload, status_raw_cmd)
+            ack_payload = dict(payload)
+            ack_payload.update({"cmd": status_action, **result})
+            self._publish_gateway_ack(ack_payload, accepted=True, message=str(result.get("message") or ""))
+            return result
+        task_status_action, task_status_raw_cmd = self._normalize_task_status_action(payload)
+        if task_status_action:
+            result = self._handle_task_status_payload(payload, task_status_raw_cmd)
+            ack_payload = dict(payload)
+            ack_payload.update({"cmd": task_status_action, **result})
+            self._publish_gateway_ack(ack_payload, accepted=True, message=str(result.get("message") or ""))
+            return result
+        core_action, raw_cmd = self._normalize_core_control_action(payload)
+        if core_action:
+            result = self._handle_core_control_payload(payload, core_action, raw_cmd)
+            ack_payload = dict(payload)
+            ack_payload.update({
+                "cmd": core_action,
+                "action": core_action,
+                "ok": bool(result.get("ok")),
+                **result,
+            })
+            self._publish_gateway_ack(ack_payload, accepted=bool(result.get("accepted")), message=str(result.get("message") or ""))
+            return result
         if "cmd" in payload or str(payload.get("type", "")).strip().upper() == "FIND_AND_PICK":
-            self.handle_mobile_command_payload(payload)
-            return {"ok": True, "accepted": True, "mode": "mobile_command"}
+            result = self.handle_mobile_command_payload(payload)
+            return result or {"ok": True, "accepted": True, "mode": "mobile_command"}
 
         task_cmd = self._coerce_http_task_cmd(payload)
         ok, reason = self.backend.submit(task_cmd)
@@ -763,6 +1443,30 @@ class MobileGatewayService(BaseModule):
                 "session_id": task_cmd.get("session_id"),
                 "reason": reason,
             })
+            if str(task_cmd.get("cmd") or "").strip().lower() == "manual_drive":
+                manual_payload = {
+                    "cmd_id": task_cmd.get("cmd_id"),
+                    "session_id": task_cmd.get("session_id"),
+                    "intent": task_cmd.get("intent"),
+                    "vx": task_cmd.get("vx"),
+                    "vy": task_cmd.get("vy"),
+                    "wz": task_cmd.get("wz"),
+                    "duration_ms": task_cmd.get("duration_ms"),
+                    "ok": bool(ok),
+                    "reason": reason,
+                }
+                self.log_info("backend", "gateway_manual_drive_forwarded", manual_payload)
+                self.run_logger.write_jsonl("gateway_manual_drive_forwarded", manual_payload)
+            if str(task_cmd.get("cmd") or "").strip().lower() == "manual_stop":
+                manual_payload = {
+                    "cmd_id": task_cmd.get("cmd_id"),
+                    "session_id": task_cmd.get("session_id"),
+                    "intent": task_cmd.get("intent"),
+                    "ok": bool(ok),
+                    "reason": reason,
+                }
+                self.log_info("backend", "gateway_manual_stop_forwarded", manual_payload)
+                self.run_logger.write_jsonl("gateway_manual_stop_forwarded", manual_payload)
         else:
             self.log_error("backend", "forward task_cmd failed", {
                 "cmd_id": task_cmd.get("cmd_id"),
@@ -947,7 +1651,36 @@ class MobileGatewayService(BaseModule):
         for payload in self.observer.poll():
             self._handle_state_block(payload)
 
-    def handle_mobile_command_payload(self, payload: Dict[str, Any]) -> None:
+    def handle_mobile_command_payload(self, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        status_action, status_raw_cmd = self._normalize_core_status_action(payload)
+        if status_action:
+            result = self._handle_core_status_payload(payload, status_raw_cmd)
+            ack_payload = dict(payload)
+            ack_payload.update({"cmd": status_action, **result})
+            self._publish_gateway_ack(ack_payload, accepted=True, message=str(result.get("message") or ""))
+            return result
+
+        task_status_action, task_status_raw_cmd = self._normalize_task_status_action(payload)
+        if task_status_action:
+            result = self._handle_task_status_payload(payload, task_status_raw_cmd)
+            ack_payload = dict(payload)
+            ack_payload.update({"cmd": task_status_action, **result})
+            self._publish_gateway_ack(ack_payload, accepted=True, message=str(result.get("message") or ""))
+            return result
+
+        core_action, raw_cmd = self._normalize_core_control_action(payload)
+        if core_action:
+            result = self._handle_core_control_payload(payload, core_action, raw_cmd)
+            ack_payload = dict(payload)
+            ack_payload.update({
+                "cmd": core_action,
+                "action": core_action,
+                "ok": bool(result.get("ok")),
+                **result,
+            })
+            self._publish_gateway_ack(ack_payload, accepted=bool(result.get("accepted")), message=str(result.get("message") or ""))
+            return result
+
         try:
             command = MobileCommand.from_dict(
                 payload,
@@ -980,7 +1713,7 @@ class MobileGatewayService(BaseModule):
                 command=payload.get("cmd"),
                 epoch=int(payload.get("epoch", 0) or 0),
             ))
-            return
+            return {"ok": False, "accepted": False, "message": str(exc)}
         if self._is_duplicate_cmd(command.cmd_id):
             self._publish_gateway_ack(command.to_dict(), accepted=True, message="gateway command accepted")
             if self._is_debug_mode():
@@ -989,7 +1722,7 @@ class MobileGatewayService(BaseModule):
                     "cmd": command.cmd,
                     "session_id": command.session_id,
                 })
-            return
+            return {"ok": True, "accepted": True, "message": "duplicate command ignored"}
         self.log_info("protocol", "received mobile command", {
             "cmd_id": command.cmd_id,
             "cmd": command.cmd,
@@ -1004,6 +1737,45 @@ class MobileGatewayService(BaseModule):
             "target": command.target,
             "stop_cooldown_active": bool(self._in_stop_cooldown()),
         })
+        if (
+            command.cmd in {"fetch_object", "go_home"}
+            and self.cfg.backend.enforce_single_flight
+            and self._is_busy()
+        ):
+            orch_status = self.refresh_task_state_from_orchestrator(reason=f"pre_{command.cmd}")
+        else:
+            orch_status = {}
+        if (
+            command.cmd in {"fetch_object", "go_home"}
+            and self.cfg.backend.enforce_single_flight
+            and self._is_busy()
+        ):
+            error_payload = dict(command.to_dict())
+            error_payload["reason"] = "busy"
+            if orch_status:
+                error_payload["orch_state"] = orch_status.get("orch_state")
+                error_payload["task_phase"] = orch_status.get("task_phase")
+            self._publish_gateway_ack(error_payload, accepted=False, message="gateway busy; send stop before starting another task")
+            reject_log = {
+                "cmd": command.cmd,
+                "cmd_id": command.cmd_id,
+                "session_id": command.session_id,
+                "target": command.target,
+                "gateway_state": self._snapshot.get("state"),
+                "orch_state": orch_status.get("orch_state"),
+                "task_phase": orch_status.get("task_phase"),
+                "latest_run_id": orch_status.get("latest_run_id"),
+            }
+            self.log_info("backend", "gateway_busy_rejected", reject_log)
+            self.run_logger.write_jsonl("gateway_busy_rejected", reject_log)
+            return {
+                "ok": False,
+                "accepted": False,
+                "reason": "busy",
+                "orch_state": orch_status.get("orch_state"),
+                "task_phase": orch_status.get("task_phase"),
+                "message": "gateway busy; send stop before starting another task",
+            }
         if command.cmd != "stop" and self._in_stop_cooldown():
             self._queue_after_stop(command)
             ack_payload = dict(command.to_dict())
@@ -1011,7 +1783,7 @@ class MobileGatewayService(BaseModule):
             ack_payload["reason"] = "stop_cooldown_queue"
             self._publish_gateway_ack(ack_payload, accepted=True, message="gateway command queued after stop cooldown")
             self.run_logger.write_jsonl("gateway_ack_queued_after_stop", ack_payload)
-            return
+            return {"ok": True, "accepted": True, "message": "gateway command queued after stop cooldown"}
         self._remember_cmd_id(command.cmd_id)
         if command.cmd not in {"query_status", "stop"}:
             self.demo_console.phone_command(command.target or "n/a")
@@ -1024,38 +1796,31 @@ class MobileGatewayService(BaseModule):
             snapshot["ts"] = now_ts()
             snapshot["kind"] = "status"
             self._publish_status(snapshot, force=True)
-            return
+            return {"ok": True, "accepted": True, "message": "query_status accepted"}
         if command.cmd == "resume":
             self._handle_resume(command)
-            return
+            return {"ok": True, "accepted": True, "message": "resume accepted"}
         if command.cmd == "retry_search":
             self._handle_retry_search(command)
-            return
+            return {"ok": True, "accepted": True, "message": "retry_search accepted"}
         if command.cmd == "stop":
             self._handle_stop(command)
-            return
-        if self.cfg.backend.enforce_single_flight and self._is_busy():
-            self._publish_status(make_error_status(
-                ROBOT_ID,
-                command.session_id,
-                "gateway busy; send stop before starting another task",
-                ERROR_CODES["busy"],
-                target=command.target,
-                command=command.cmd,
-                epoch=command.epoch,
-            ))
-            return
+            return {"ok": True, "accepted": True, "message": "stop accepted"}
+        if command.cmd in MANUAL_COMMAND_INTENTS:
+            self._submit_manual_task(command, payload)
+            return {"ok": True, "accepted": True, "message": f"{command.cmd} forwarded"}
         if command.cmd == "fetch_object":
             template = TaskTemplate(command="fetch_object", target=command.target, session_id=command.session_id, text=command.text)
             self._last_fetch_template = template
             self._active_template = template
             self._submit_orchestrator_task(command, intent="FIND", target=command.target, session_id=command.session_id)
-            return
+            return {"ok": True, "accepted": True, "message": "fetch_object accepted"}
         if command.cmd == "go_home":
             template = TaskTemplate(command="go_home", target=None, session_id=command.session_id, text=command.text)
             self._active_template = template
             self._submit_orchestrator_task(command, intent="RETURN", session_id=command.session_id)
-            return
+            return {"ok": True, "accepted": True, "message": "go_home accepted"}
+        return {"ok": False, "accepted": False, "message": f"unsupported cmd: {command.cmd}"}
 
     def _handle_command_payload(self, payload: Dict[str, Any]) -> None:
         self.handle_mobile_command_payload(payload)
@@ -1104,6 +1869,54 @@ class MobileGatewayService(BaseModule):
         self._last_stop_session_id = session_id
         self._last_stop_ts = now_ts()
         self._submit_orchestrator_task(command, intent="STOP", session_id=session_id, high_level_command="stop", force=True)
+
+    def _submit_manual_task(self, command: MobileCommand, payload: Dict[str, Any]) -> None:
+        intent = MANUAL_COMMAND_INTENTS[command.cmd]
+        task_cmd = dict(payload)
+        task_cmd.update({
+            "ts": float(payload.get("ts", now_ts()) or now_ts()),
+            "type": "task_cmd",
+            "intent": intent,
+            "cmd": command.cmd,
+            "cmd_id": command.cmd_id,
+            "session_id": command.session_id,
+            "epoch": int(payload.get("epoch", command.epoch) or 0),
+            "source": command.source,
+        })
+        task_cmd = {k: v for k, v in task_cmd.items() if v not in (None, "")}
+        ok, reason = self.backend.submit(task_cmd)
+        self.run_logger.write_jsonl("mobile_command", payload)
+        self.run_logger.write_jsonl("task_cmd_forward", task_cmd)
+        event_name = "gateway_manual_drive_forwarded" if command.cmd == "manual_drive" else "gateway_manual_stop_forwarded"
+        event_payload = {
+            "cmd_id": command.cmd_id,
+            "intent": intent,
+            "session_id": command.session_id,
+            "vx": task_cmd.get("vx"),
+            "vy": task_cmd.get("vy"),
+            "wz": task_cmd.get("wz"),
+            "duration_ms": task_cmd.get("duration_ms"),
+            "ok": bool(ok),
+            "reason": reason,
+        }
+        if command.cmd == "manual_stop":
+            event_payload.pop("vx", None)
+            event_payload.pop("vy", None)
+            event_payload.pop("wz", None)
+            event_payload.pop("duration_ms", None)
+        self.run_logger.write_jsonl(event_name, event_payload)
+        if ok:
+            self.log_info("backend", event_name, event_payload)
+        else:
+            self.log_error("backend", "task_cmd forward failed", event_payload)
+            self._publish_status(make_error_status(
+                ROBOT_ID,
+                command.session_id,
+                reason,
+                ERROR_CODES["backend_unavailable"],
+                command=command.cmd,
+                epoch=int(task_cmd.get("epoch", 0) or 0),
+            ))
 
     def _submit_orchestrator_task(
         self,
@@ -1516,14 +2329,39 @@ class MobileGatewayService(BaseModule):
         ack = {
             "type": "mobile_ack",
             "kind": "gateway_ack",
+            "ok": bool(payload.get("ok", accepted)),
             "robot_id": ROBOT_ID,
             "cmd_id": str(payload.get("cmd_id") or new_id("cmd")),
             "session_id": str(payload.get("session_id") or ""),
             "epoch": int(payload.get("epoch", 0) or 0),
             "cmd": str(payload.get("cmd") or ""),
+            "action": payload.get("action"),
+            "script_action": payload.get("script_action"),
             "target": payload.get("target"),
             "message": message,
             "accepted": bool(accepted),
+            "script_path": payload.get("script_path"),
+            "control_log_path": payload.get("control_log_path"),
+            "orchestrator_use_sudo": payload.get("orchestrator_use_sudo"),
+            "gateway_running": payload.get("gateway_running"),
+            "vision_running": payload.get("vision_running"),
+            "orchestrator_running": payload.get("orchestrator_running"),
+            "core_running": payload.get("core_running"),
+            "vision_pid": payload.get("vision_pid"),
+            "orchestrator_pid": payload.get("orchestrator_pid"),
+            "task_cmd_socket": payload.get("task_cmd_socket"),
+            "vision_obs_socket": payload.get("vision_obs_socket"),
+            "vision_req_socket": payload.get("vision_req_socket"),
+            "orch_state": payload.get("orch_state"),
+            "task_phase": payload.get("task_phase"),
+            "last_transition_reason": payload.get("last_transition_reason"),
+            "last_failure_reason": payload.get("last_failure_reason"),
+            "gateway_state": payload.get("gateway_state"),
+            "latest_run_id": payload.get("latest_run_id"),
+            "latest_run_dir": payload.get("latest_run_dir"),
+            "pid": payload.get("pid"),
+            "returncode": payload.get("returncode"),
+            "error": payload.get("error"),
             "error_code": error_code,
             "queued_after_stop": bool(payload.get("queued_after_stop", False)),
             "reason": payload.get("reason"),

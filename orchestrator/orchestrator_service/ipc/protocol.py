@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Set
 
 import msgpack
 
-ALLOWED_INTENTS: Set[str] = {"FIND", "RETURN", "STOP"}
+ALLOWED_INTENTS: Set[str] = {"FIND", "RETURN", "STOP", "MANUAL_DRIVE", "MANUAL_STOP"}
 ALLOWED_VISTA_OPS: Set[str] = {"START", "UPDATE", "RESPOND", "STOP"}
 ALLOWED_VISTA_STAGES: Set[str] = {"SEARCH", "GRASP", "RETURN", "IDLE"}
 ALLOWED_VISION_OBS_CLASSES: Set[str] = {"control", "diagnostic"}
@@ -30,6 +30,21 @@ def _new_id(prefix: str) -> str:
 def _upper_text(value: Any, default: str = "") -> str:
     text = str(value or default).strip().upper()
     return text or str(default).strip().upper()
+
+
+def _optional_float(value: Any, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    return number if math.isfinite(number) else float(default)
+
+
+def _optional_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
 
 
 def canonical_vision_obs_class(value: Any) -> str:
@@ -401,10 +416,26 @@ class TaskCmd:
     high_priority: bool = False
     state: Optional[str] = None
     wake_score: Optional[float] = None
+    cmd: Optional[str] = None
+    vx: float = 0.0
+    vy: float = 0.0
+    wz: float = 0.0
+    duration_ms: int = 0
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any], frozen_targets: Set[str]) -> "TaskCmd":
-        intent = str(payload.get("intent", "")).upper().strip()
+        raw_cmd = ""
+        for key in ("cmd", "action", "intent", "command"):
+            raw_cmd = str(payload.get(key) or "").strip()
+            if raw_cmd:
+                break
+        raw_cmd_l = raw_cmd.lower()
+        if raw_cmd_l == "manual_drive":
+            intent = "MANUAL_DRIVE"
+        elif raw_cmd_l == "manual_stop":
+            intent = "MANUAL_STOP"
+        else:
+            intent = str(payload.get("intent", "")).upper().strip()
         if intent not in ALLOWED_INTENTS:
             raise ProtocolError(f"非法 intent: {intent!r}")
         confidence = float(payload.get("confidence", 0.0))
@@ -432,6 +463,11 @@ class TaskCmd:
             high_priority=bool(payload.get("high_priority", False)),
             state=(str(payload.get("state")).strip() if payload.get("state") is not None else None),
             wake_score=(float(payload["wake_score"]) if payload.get("wake_score") is not None else None),
+            cmd=(raw_cmd_l or None),
+            vx=_optional_float(payload.get("vx", payload.get("vx_mps", 0.0)), 0.0),
+            vy=_optional_float(payload.get("vy", payload.get("vy_mps", 0.0)), 0.0),
+            wz=_optional_float(payload.get("wz", payload.get("wz_radps", 0.0)), 0.0),
+            duration_ms=_optional_int(payload.get("duration_ms", 0), 0),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -444,6 +480,9 @@ class TaskAck:
     cmd_id: str
     accepted: bool
     state: str
+    ok: bool = False
+    cmd: str = ""
+    message: str = ""
     session_id: str = ""
     epoch: int = 0
     reason: str = ""
@@ -540,8 +579,11 @@ class TableEdgeObs:
     final_fixed_roi_active: bool = False
     final_fixed_roi_xyxy: Optional[list] = None
     final_fixed_roi_depth_valid: bool = False
+    final_fixed_roi_depth_mean: Optional[float] = None
+    final_fixed_roi_depth_median: Optional[float] = None
     final_fixed_roi_depth_p10: Optional[float] = None
     final_fixed_roi_depth_sample_count: Optional[int] = None
+    final_fixed_roi_depth_valid_ratio: Optional[float] = None
     final_fixed_roi_depth_invalid_reason: Optional[str] = None
     edge_angle_rad: Optional[float] = None
     edge_k: Optional[float] = None
@@ -758,8 +800,11 @@ class TableEdgeObs:
             final_fixed_roi_active=bool(payload.get("final_fixed_roi_active", False)),
             final_fixed_roi_xyxy=_pick_optional_bbox(payload, "final_fixed_roi_xyxy"),
             final_fixed_roi_depth_valid=bool(payload.get("final_fixed_roi_depth_valid", False)),
+            final_fixed_roi_depth_mean=_pick_optional_float(payload, "final_fixed_roi_depth_mean", "fixed_roi_depth_mean"),
+            final_fixed_roi_depth_median=_pick_optional_float(payload, "final_fixed_roi_depth_median", "fixed_roi_depth_median"),
             final_fixed_roi_depth_p10=_pick_optional_float(payload, "final_fixed_roi_depth_p10"),
             final_fixed_roi_depth_sample_count=_pick_optional_int(payload, "final_fixed_roi_depth_sample_count"),
+            final_fixed_roi_depth_valid_ratio=_pick_optional_float(payload, "final_fixed_roi_depth_valid_ratio", "fixed_roi_valid_ratio"),
             final_fixed_roi_depth_invalid_reason=_pick_optional_str(payload, "final_fixed_roi_depth_invalid_reason"),
             edge_angle_rad=_pick_optional_float(payload, "edge_angle_rad"),
             edge_k=_pick_optional_float(payload, "edge_k"),
@@ -1089,6 +1134,7 @@ class ArmCommand:
     roll_deg: float
     claw_deg: float
     time_ms: int = 500
+    command: str = "POSE"
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -1117,12 +1163,19 @@ class ArmResponse:
 
 
 def make_task_ack(cmd: TaskCmd, accepted: bool, state: str, reason: str = "") -> Dict[str, Any]:
+    cmd_name = str(cmd.cmd or cmd.intent or "").strip().lower()
+    message = str(reason or "")
+    if accepted and cmd_name in {"manual_drive", "manual_stop"} and "accepted" not in message:
+        message = f"{cmd_name} accepted"
     return TaskAck(
         ts=now_ts(),
         cmd_id=cmd.cmd_id,
         session_id=cmd.session_id,
         epoch=cmd.epoch,
         accepted=bool(accepted),
+        ok=bool(accepted),
+        cmd=cmd_name,
+        message=message,
         state=str(state),
         reason=str(reason or ""),
     ).to_dict()

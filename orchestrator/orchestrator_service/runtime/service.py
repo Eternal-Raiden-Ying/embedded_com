@@ -6,6 +6,7 @@ import re
 import signal
 import time
 import os
+import math
 from collections import deque
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -35,6 +36,14 @@ from ..ipc.protocol import (
 from ..ipc.transport import AsyncJsonlClientSender, JsonlClientSender, JsonlInboundServer
 from .common import RunLogger, ensure_dir, safe_dump
 from .state_machine import OrchestratorCore
+
+MANUAL_DRIVE_ALLOWED_STATES = {"IDLE"}
+MANUAL_DRIVE_MAX_ABS_VX_MPS = 0.06
+MANUAL_DRIVE_MAX_ABS_VY_MPS = 0.06
+MANUAL_DRIVE_MAX_ABS_WZ_RADPS = 0.30
+MANUAL_DRIVE_MIN_DURATION_MS = 100
+MANUAL_DRIVE_MAX_DURATION_MS = 1000
+MANUAL_DRIVE_DEFAULT_DURATION_MS = 400
 
 
 _CONTROL_SUMMARY_KEYS = (
@@ -77,6 +86,24 @@ _CONTROL_SUMMARY_KEYS = (
     "table_target_dist_m",
     "final_stop_threshold_m",
     "final_depth_latched",
+    "final_phase_policy",
+    "near_table_candidate_active",
+    "yolo_dynamic_roi_policy",
+    "yolo_dynamic_roi_rejected",
+    "yolo_dynamic_roi_rejected_reason",
+    "allowed_for_final_enter",
+    "roi_touches_bottom",
+    "final_enter_rejected",
+    "final_lock_rejected",
+    "final_lock_invariant_violation",
+    "final_lock_consume_rejected",
+    "final_lock_consume_rejected_reason",
+    "final_lock_consumed",
+    "final_slow_dwell_ms",
+    "final_fixed_roi_seen_after_enter",
+    "final_stop_stable_count",
+    "final_state_min_dwell_not_met",
+    "missing_fresh_final_fixed_roi",
     "final_distance_servo_reason",
     "final_locked",
     "final_lock_reason",
@@ -200,6 +227,9 @@ class OrchestratorService(BaseModule):
             "vision_req_out": 0.0,
             "tts_event_out": 0.0,
         }
+        self._task_ack_skip_until_ts = 0.0
+        self._task_ack_missing_warned = False
+        self._task_ack_last_fail_log_ts = 0.0
         self._uart_console_key = ""
         self._uart_console_last_emit_ts = 0.0
         self._uart_console_repeat_count = 0
@@ -584,6 +614,16 @@ class OrchestratorService(BaseModule):
             self._demo_deferred_phases.append((old_state, new_state, reason))
         else:
             self._emit_demo_phase(old_state, new_state, reason)
+        if new_state == "FINAL_SLOW_STOP":
+            self.core.ctx.final_slow_enter_mono = time.monotonic()
+            self.core.ctx.final_slow_enter_tick = 0
+            self.core.ctx.final_fixed_roi_seen_after_enter = False
+            self.core.ctx.final_stop_stable_count = 0
+            self.core.ctx.final_locked = False
+            self.core.ctx.final_lock_reason = ""
+            self.core.ctx.final_depth_latched = False
+            self.core.ctx.final_depth_latched_mono = 0.0
+            self.core.ctx.final_depth_latch_reason = ""
         if new_state == "DONE":
             self.operator_console.emit_change("task_done", self._task_done_summary_line(reason))
             self._emit_demo_task_finished(success=True, reason=reason)
@@ -1095,6 +1135,13 @@ class OrchestratorService(BaseModule):
         ):
             if context.get(key) is not None:
                 meta[key] = context.get(key)
+        if str(reason or "").strip() == "manual_drive":
+            meta.update({
+                "control_source": "manual_drive",
+                "motion_intent_type": "manual_drive",
+                "estop_cooldown_applied": False,
+                "estop_cooldown_reason": "manual_drive_idle_control",
+            })
         return meta
 
     @staticmethod
@@ -1777,10 +1824,43 @@ class OrchestratorService(BaseModule):
             payload.update({k: v for k, v in tx_meta.items() if v not in (None, "")})
         payload["summary_key"] = self._uart_event_key(payload)
         payload["rendered"] = self._render_uart_line(payload)
+        if bool(payload.get("uart_mode_send_required")) or str(payload.get("stm32_kind") or "") == "mode":
+            mode_event = "uart_mode_sent" if bool(payload.get("uart_tx_ok")) and payload.get("writer_accept_cmd") is not False else "uart_mode_send_failed"
+            mode_payload = {
+                "state": payload.get("state"),
+                "requested_mode": payload.get("wire_mode"),
+                "last_wire_mode": payload.get("last_wire_mode"),
+                "reason": payload.get("reason"),
+                "uart_tx_ok": payload.get("uart_tx_ok"),
+                "writer_accept_cmd": payload.get("writer_accept_cmd"),
+                "retry_count": payload.get("uart_mode_retry_count"),
+                "seq": payload.get("seq"),
+            }
+            self.run_logger.write_jsonl(mode_event, mode_payload)
+            self.log("info" if mode_event == "uart_mode_sent" else "warn", "uart", mode_event, mode_payload)
         if self._uart_full_log or not bool(dry_run):
             self.run_logger.write_jsonl("uart_tx", payload)
         self._update_uart_lowfreq(payload)
         actual_payloads = self._actual_uart_payloads(payload)
+        if str(payload.get("control_source") or payload.get("motion_intent_type") or "") == "manual_drive":
+            if payload.get("writer_accept_cmd") is False:
+                self._manual_log("manual_drive_discarded", {
+                    "reason": str(payload.get("writer_discard_reason") or "writer_rejected"),
+                    "raw": payload.get("raw"),
+                    "cmd_id": self.core.ctx.manual_drive_last_cmd_id,
+                }, level="warn")
+            elif any(str(item.get("uart_kind") or "") == "vel" for item in actual_payloads):
+                vel_item = next((item for item in actual_payloads if str(item.get("uart_kind") or "") == "vel"), payload)
+                self._manual_log("manual_drive_uart_sent", {
+                    "vx": vel_item.get("vx_mps", payload.get("vx_mps")),
+                    "vy": vel_item.get("vy_mps", payload.get("vy_mps")),
+                    "wz": vel_item.get("wz_radps", payload.get("wz_radps")),
+                    "mode": payload.get("wire_mode") or payload.get("mode") or "SEARCH",
+                    "seq": payload.get("seq"),
+                    "writer_accept_cmd": payload.get("writer_accept_cmd"),
+                    "serial_write_ok": payload.get("serial_write_ok"),
+                    "cmd_id": self.core.ctx.manual_drive_last_cmd_id,
+                })
         self._emit_no_vel_if_needed(payload, actual_payloads)
         self._update_uart_keepalive_stats(payload, actual_payloads)
         for item in actual_payloads or [payload]:
@@ -1871,6 +1951,13 @@ class OrchestratorService(BaseModule):
                 self._drain_uart_feedback()
                 self._drain_task_cmds()
                 self._drain_vision_msgs()
+                if self._check_manual_drive_timeout():
+                    self._emit_state_block_if_needed()
+                    self._emit_heartbeat_if_needed()
+                    self._emit_system_metrics_if_needed()
+                    elapsed = time.time() - loop_start
+                    time.sleep(max(0.0, period_s - elapsed))
+                    continue
                 self._mark_state_machine_consume(loop_start)
                 decision = self.core.tick()
                 self._mark_cmd_publish(decision)
@@ -2082,15 +2169,78 @@ class OrchestratorService(BaseModule):
             self.motion_status["jog_running"] = False
             self.motion_status["stm32_timeout_seen"] = True
 
-    def _send_task_ack(self, cmd: TaskCmd, accepted: bool, reason: str):
-        ack = make_task_ack(cmd, accepted=accepted, reason=reason, state=self.core.ctx.state.value)
-        disabled = str(getattr(self.cfg.task_ack_out, "transport", "") or "").lower() == "disabled"
-        sent = True if disabled else self.task_ack_sender.send(ack)
+    def _task_ack_socket_path(self) -> str:
+        endpoint = self.cfg.task_ack_out
+        return str(
+            getattr(endpoint, "uds_path", "")
+            or getattr(endpoint, "ipc_socket_path", "")
+            or ""
+        ).strip()
+
+    def _task_ack_out_unavailable_reason(self) -> str:
+        endpoint = self.cfg.task_ack_out
+        transport = str(getattr(endpoint, "transport", "") or "").strip().lower()
+        if transport == "disabled":
+            return "disabled"
+        if transport == "uds":
+            path = self._task_ack_socket_path()
+            if path and not os.path.exists(path):
+                return "socket_missing"
+        if self._task_ack_skip_until_ts > time.time():
+            return "recent_send_failed"
+        return ""
+
+    def _record_task_ack_skip(self, cmd: TaskCmd, ack: Dict[str, Any], accepted: bool, reason: str, skip_reason: str) -> None:
         self._last_tx_summary["task_ack_out"] = time.time()
         self.run_logger.write_jsonl("task_ack", ack)
         self.run_logger.write_ipc(
             "task_ack_out",
-            "disabled" if disabled else ("ack_sent" if sent else "ack_send_failed"),
+            f"skipped_{skip_reason}",
+            direction="TX",
+            cmd_id=cmd.cmd_id,
+            session_id=cmd.session_id,
+            epoch=cmd.epoch,
+            accepted=accepted,
+            ok=True,
+            reason=reason,
+        )
+        if skip_reason != "disabled":
+            now = time.time()
+            should_warn = False
+            if skip_reason == "socket_missing":
+                should_warn = not self._task_ack_missing_warned
+            elif now - self._task_ack_last_fail_log_ts >= 2.0:
+                should_warn = True
+                self._task_ack_last_fail_log_ts = now
+            if should_warn:
+                self.log_warn("task_ack_out", f"ack skipped reason={skip_reason} path={self._task_ack_socket_path() or 'n/a'}")
+                self._task_ack_missing_warned = True
+        self._operator_ipc_event(
+            "task_ack_out",
+            f"skipped_{skip_reason}",
+            {"cmd_id": cmd.cmd_id, "accepted": accepted, "error": skip_reason},
+        )
+        self.log_ipc("TX", "task_ack", f"skipped_{skip_reason}", {"cmd_id": cmd.cmd_id, "accepted": accepted})
+
+    def _send_task_ack(self, cmd: TaskCmd, accepted: bool, reason: str):
+        ack = make_task_ack(cmd, accepted=accepted, reason=reason, state=self.core.ctx.state.value)
+        skip_reason = self._task_ack_out_unavailable_reason()
+        if skip_reason:
+            self._record_task_ack_skip(cmd, ack, accepted, reason, skip_reason)
+            return
+
+        sent = self.task_ack_sender.send(ack)
+        if not sent:
+            now = time.time()
+            self._task_ack_skip_until_ts = now + 2.0
+            if now - self._task_ack_last_fail_log_ts >= 2.0:
+                self.log_warn("task_ack_out", f"ack_send_failed; suppressing retries briefly path={self._task_ack_socket_path() or 'n/a'}")
+                self._task_ack_last_fail_log_ts = now
+        self._last_tx_summary["task_ack_out"] = time.time()
+        self.run_logger.write_jsonl("task_ack", ack)
+        self.run_logger.write_ipc(
+            "task_ack_out",
+            "ack_sent" if sent else "ack_send_failed",
             direction="TX",
             cmd_id=cmd.cmd_id,
             session_id=cmd.session_id,
@@ -2101,67 +2251,397 @@ class OrchestratorService(BaseModule):
         )
         self._operator_ipc_event(
             "task_ack_out",
-            "disabled" if disabled else ("ack_sent" if sent else "ack_send_failed"),
+            "ack_sent" if sent else "ack_send_failed",
             {"cmd_id": cmd.cmd_id, "accepted": accepted, "error": "" if sent else reason},
         )
-        self.log_ipc("TX", "task_ack", "disabled" if disabled else ("sent" if sent else "failed"), {"cmd_id": cmd.cmd_id, "accepted": accepted})
+        self.log_ipc("TX", "task_ack", "sent" if sent else "failed", {"cmd_id": cmd.cmd_id, "accepted": accepted})
+
+    @staticmethod
+    def _clamp_float(value: Any, lo: float, hi: float) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            number = 0.0
+        if not math.isfinite(number):
+            number = 0.0
+        return max(float(lo), min(float(hi), number))
+
+    @staticmethod
+    def _clamp_int(value: Any, lo: int, hi: int, default: int) -> int:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            number = int(default)
+        return max(int(lo), min(int(hi), number))
+
+    def _manual_log(self, event: str, payload: Dict[str, Any], level: str = "info") -> None:
+        self.run_logger.write_jsonl(event, payload)
+        self.log(level, "manual_control", event, payload)
+
+    def _clear_manual_drive_active(self, *, bump_generation: bool = True) -> None:
+        if bump_generation:
+            self.core.ctx.manual_drive_generation = int(getattr(self.core.ctx, "manual_drive_generation", 0) or 0) + 1
+        self.core.ctx.manual_drive_active = False
+        self.core.ctx.manual_drive_until_ts = 0.0
+        self.core.ctx.manual_drive_vx_mps = 0.0
+        self.core.ctx.manual_drive_vy_mps = 0.0
+        self.core.ctx.manual_drive_wz_radps = 0.0
+        self.core.ctx.manual_drive_last_cmd_id = None
+        self.core.ctx.manual_drive_source = None
+
+    def _stop_manual_drive(self, reason: str, event: str) -> None:
+        generation = int(getattr(self.core.ctx, "manual_drive_generation", 0) or 0)
+        seq = self.motion_adapter.stop(reason=reason)
+        payload = {
+            "reason": reason,
+            "state": self.core.ctx.state.value,
+            "cmd_id": self.core.ctx.manual_drive_last_cmd_id,
+            "stm32_seq": seq,
+            "generation": generation,
+        }
+        self._clear_manual_drive_active()
+        self.motion_status["last_seq"] = seq
+        self.motion_status["jog_running"] = False
+        self._last_uart_tx_ts = time.time()
+        self._manual_log(event, payload)
+
+    def _manual_drive_allowed(self) -> Tuple[bool, str]:
+        state = self.core.ctx.state.value
+        if state not in MANUAL_DRIVE_ALLOWED_STATES:
+            return False, "state_not_allowed"
+        if self.core.ctx.task_intent or self.core.ctx.active_target:
+            return False, "auto_task_active"
+        return True, ""
+
+    def _emit_manual_drive_velocity(self, *, duration_ms: Optional[int] = None) -> int:
+        now = time.time()
+        generation = int(getattr(self.core.ctx, "manual_drive_generation", 0) or 0)
+        if not self.core.ctx.manual_drive_active:
+            self._manual_log("manual_drive_discarded", {
+                "reason": "inactive_before_writer_tick",
+                "generation": generation,
+            }, level="warn")
+            return 0
+        remaining_ms = max(0, int(round((float(self.core.ctx.manual_drive_until_ts or now) - now) * 1000.0)))
+        vx = float(self.core.ctx.manual_drive_vx_mps or 0.0)
+        vy = float(self.core.ctx.manual_drive_vy_mps or 0.0)
+        wz = float(self.core.ctx.manual_drive_wz_radps or 0.0)
+        tick_payload = {
+            "state": self.core.ctx.state.value,
+            "vx": vx,
+            "vy": vy,
+            "wz": wz,
+            "remaining_ms": remaining_ms,
+            "cmd_id": self.core.ctx.manual_drive_last_cmd_id,
+            "source": self.core.ctx.manual_drive_source,
+            "generation": generation,
+        }
+        self._manual_log("manual_drive_writer_tick", tick_payload)
+        if not self.core.ctx.manual_drive_active or generation != int(getattr(self.core.ctx, "manual_drive_generation", 0) or 0):
+            self._manual_log("manual_drive_discarded", {
+                "reason": "generation_changed_before_send",
+                "generation": generation,
+                "current_generation": int(getattr(self.core.ctx, "manual_drive_generation", 0) or 0),
+            }, level="warn")
+            return 0
+        self._last_motion_tx_context = {
+            "control_source": "manual_drive",
+            "motion_intent_type": "manual_drive",
+            "motion_class": "manual",
+            "yaw_owner": "manual_drive",
+            "forward_owner": "manual_drive" if abs(vx) > 1e-9 else "none",
+            "lateral_owner": "manual_drive" if abs(vy) > 1e-9 else "none",
+            "arbitration_reason": "manual_drive_idle_control",
+            "uart_emit_reason": "manual_drive",
+            "speed_profile": "manual_drive",
+            "stop_class": "none",
+            "allow_uart_send": True,
+            "service_override": True,
+            "service_override_reason": "manual_drive",
+            "estop_cooldown_applied": False,
+            "estop_cooldown_reason": "manual_drive_idle_control",
+            "vx_mps": vx,
+            "vy_mps": vy,
+            "wz_radps": wz,
+        }
+        seq = self.motion_adapter.set_velocity(vx, vy, wz, mode="SEARCH", reason="manual_drive")
+        self.motion_status["last_seq"] = seq
+        self.motion_status["jog_running"] = False
+        self._last_uart_tx_ts = now
+        sent_payload = {
+            "vx": vx,
+            "vy": vy,
+            "wz": wz,
+            "mode": "SEARCH",
+            "seq": seq,
+            "remaining_ms": remaining_ms,
+            "cmd_id": self.core.ctx.manual_drive_last_cmd_id,
+            "generation": generation,
+        }
+        if duration_ms is not None:
+            sent_payload["duration_ms"] = int(duration_ms)
+        self._manual_log("manual_drive_writer_publish", sent_payload)
+        return seq
+
+    def _handle_manual_drive_cmd(self, cmd: TaskCmd) -> Tuple[bool, str]:
+        state = self.core.ctx.state.value
+        raw_cmd = cmd.cmd or "manual_drive"
+        received = {
+            "raw_cmd": raw_cmd,
+            "state": state,
+            "vx": cmd.vx,
+            "vy": cmd.vy,
+            "wz": cmd.wz,
+            "duration_ms": cmd.duration_ms or MANUAL_DRIVE_DEFAULT_DURATION_MS,
+            "cmd_id": cmd.cmd_id,
+            "session_id": cmd.session_id,
+            "source": cmd.source,
+        }
+        self._manual_log("manual_drive_received", received)
+
+        allowed, reason = self._manual_drive_allowed()
+        if not allowed:
+            rejected = {"state": state, "reason": reason, "cmd_id": cmd.cmd_id, "session_id": cmd.session_id}
+            self._manual_log("manual_drive_rejected", rejected, level="warn")
+            return False, reason
+
+        vx = self._clamp_float(cmd.vx, -MANUAL_DRIVE_MAX_ABS_VX_MPS, MANUAL_DRIVE_MAX_ABS_VX_MPS)
+        vy = self._clamp_float(cmd.vy, -MANUAL_DRIVE_MAX_ABS_VY_MPS, MANUAL_DRIVE_MAX_ABS_VY_MPS)
+        wz = self._clamp_float(cmd.wz, -MANUAL_DRIVE_MAX_ABS_WZ_RADPS, MANUAL_DRIVE_MAX_ABS_WZ_RADPS)
+        duration_ms = self._clamp_int(
+            cmd.duration_ms or MANUAL_DRIVE_DEFAULT_DURATION_MS,
+            MANUAL_DRIVE_MIN_DURATION_MS,
+            MANUAL_DRIVE_MAX_DURATION_MS,
+            MANUAL_DRIVE_DEFAULT_DURATION_MS,
+        )
+        if abs(vx) < 1e-9 and abs(vy) < 1e-9 and abs(wz) < 1e-9:
+            return self._handle_manual_stop_cmd(cmd)
+
+        now = time.time()
+        until_ts = now + (float(duration_ms) / 1000.0)
+        self.core.ctx.manual_drive_generation = int(getattr(self.core.ctx, "manual_drive_generation", 0) or 0) + 1
+        self.core.ctx.manual_drive_active = True
+        self.core.ctx.manual_drive_until_ts = until_ts
+        self.core.ctx.manual_drive_vx_mps = vx
+        self.core.ctx.manual_drive_vy_mps = vy
+        self.core.ctx.manual_drive_wz_radps = wz
+        self.core.ctx.manual_drive_last_cmd_id = cmd.cmd_id
+        self.core.ctx.manual_drive_source = cmd.source
+        accepted = {
+            "state": state,
+            "vx_clamped": vx,
+            "vy_clamped": vy,
+            "wz_clamped": wz,
+            "duration_ms_clamped": duration_ms,
+            "until_ts": until_ts,
+            "cmd_id": cmd.cmd_id,
+            "session_id": cmd.session_id,
+            "generation": self.core.ctx.manual_drive_generation,
+        }
+        self._manual_log("manual_drive_accepted", accepted)
+        self._emit_manual_drive_velocity(duration_ms=duration_ms)
+        return True, "manual_drive accepted"
+
+    def _handle_manual_stop_cmd(self, cmd: TaskCmd) -> Tuple[bool, str]:
+        previous_active = bool(self.core.ctx.manual_drive_active)
+        previous_until_ts = float(self.core.ctx.manual_drive_until_ts or 0.0)
+        previous_vx = float(self.core.ctx.manual_drive_vx_mps or 0.0)
+        previous_vy = float(self.core.ctx.manual_drive_vy_mps or 0.0)
+        previous_wz = float(self.core.ctx.manual_drive_wz_radps or 0.0)
+        remaining_ms = max(0, int(round((previous_until_ts - time.time()) * 1000.0))) if previous_until_ts > 0.0 else 0
+        payload = {
+            "state": self.core.ctx.state.value,
+            "manual_drive_active": previous_active,
+            "cmd_id": cmd.cmd_id,
+            "session_id": cmd.session_id,
+            "source": cmd.source,
+        }
+        self._manual_log("manual_stop_received", payload)
+        self.core.ctx.manual_stop_seq = int(getattr(self.core.ctx, "manual_stop_seq", 0) or 0) + 1
+        generation = int(getattr(self.core.ctx, "manual_drive_generation", 0) or 0) + 1
+        self.core.ctx.manual_drive_generation = generation
+        self._clear_manual_drive_active(bump_generation=False)
+        if previous_active or any(abs(v) > 1e-9 for v in (previous_vx, previous_vy, previous_wz)):
+            self._manual_log("manual_drive_cancelled_by_stop", {
+                "previous_vx": previous_vx,
+                "previous_vy": previous_vy,
+                "previous_wz": previous_wz,
+                "remaining_ms": remaining_ms,
+                "previous_until_ts": previous_until_ts,
+                "generation": generation,
+                "manual_stop_seq": self.core.ctx.manual_stop_seq,
+                "cmd_id": cmd.cmd_id,
+            })
+        seq = self.motion_adapter.stop(reason="manual_stop")
+        self.motion_status["last_seq"] = seq
+        self.motion_status["jog_running"] = False
+        self._last_uart_tx_ts = time.time()
+        accepted = dict(payload)
+        accepted["stm32_seq"] = seq
+        accepted.update({
+            "reason": "manual_stop",
+            "cleared_manual_drive": True,
+            "previous_until_ts": previous_until_ts,
+            "generation": generation,
+            "manual_stop_seq": self.core.ctx.manual_stop_seq,
+        })
+        self._manual_log("manual_stop_accepted", accepted)
+        self._manual_log("manual_stop_sent", accepted)
+        return True, "manual_stop accepted"
+
+    def _check_manual_drive_timeout(self) -> bool:
+        if not self.core.ctx.manual_drive_active:
+            return False
+        if time.time() < float(self.core.ctx.manual_drive_until_ts or 0.0):
+            self._emit_manual_drive_velocity()
+            return True
+        self._stop_manual_drive("duration_elapsed", "manual_drive_timeout_stop")
+        return False
+
+    def _record_bad_task_cmd(self, payload: Dict[str, Any], exc: Exception) -> None:
+        self.log_warn("task_cmd", f"bad task_cmd err={self._short_err(exc)}")
+        self.operator_console.emit_error(
+            f"task_cmd_bad:{exc}",
+            f"[ORCH] ERROR task_cmd invalid err={self._short_err(exc)}",
+        )
+        self.run_logger.write_event(f"bad task_cmd: {payload} ({exc})")
+        self.run_logger.write_ipc(
+            "task_cmd_in",
+            "bad_payload",
+            direction="RX",
+            ok=False,
+            error=str(exc),
+            payload=safe_dump(payload),
+        )
+        self.run_logger.write_timeline("TASK_CMD_BAD", payload=safe_dump(payload), error=str(exc))
+
+    def _process_task_cmd(self, item: Dict[str, Any], payload: Dict[str, Any], cmd: TaskCmd) -> None:
+        self._last_task_cmd_recv_ts = float(item.get("recv_ts", time.time()))
+        self.log_ipc("RX", "task_cmd", "received", {"cmd_id": payload.get("cmd_id"), "intent": cmd.intent})
+        if cmd.intent == "MANUAL_DRIVE":
+            accepted, reason = self._handle_manual_drive_cmd(cmd)
+            self.run_logger.write_jsonl("task_cmd", cmd.to_dict())
+            self.run_logger.write_timeline("TASK_CMD_RECV", cmd_id=cmd.cmd_id, intent=cmd.intent, target=cmd.target, accepted=accepted, reason=reason, session_id=cmd.session_id, epoch=cmd.epoch)
+            self._send_task_ack(cmd, accepted=accepted, reason=reason)
+            return
+        if cmd.intent == "MANUAL_STOP":
+            accepted, reason = self._handle_manual_stop_cmd(cmd)
+            self.run_logger.write_jsonl("task_cmd", cmd.to_dict())
+            self.run_logger.write_timeline("TASK_CMD_RECV", cmd_id=cmd.cmd_id, intent=cmd.intent, target=cmd.target, accepted=accepted, reason=reason, session_id=cmd.session_id, epoch=cmd.epoch)
+            self._send_task_ack(cmd, accepted=accepted, reason=reason)
+            return
+        if cmd.intent in {"FIND", "RETURN"} and self.core.ctx.manual_drive_active:
+            self._stop_manual_drive("auto_task_received", "manual_drive_interrupted_stop")
+        if cmd.intent in {"FIND", "RETURN"}:
+            self._demo_start_pending_target = cmd.target or ("return_home" if cmd.intent == "RETURN" else "n/a")
+        if cmd.intent == "STOP":
+            if self.core.ctx.manual_drive_active:
+                self._clear_manual_drive_active()
+            self.log("warn", "service", "Immediate task_cmd STOP received: triggering emergency stop")
+            self.motion_adapter.reset_wire_mode_latch(reason="task_cmd_stop")
+            self.uart.send_emergency_stop()
+            self.motion_adapter.cancel_active_jogs()
+        accepted, reason = self.core.handle_task_cmd(cmd)
+        if accepted and cmd.intent in {"FIND", "RETURN"}:
+            self.demo_console.dry_run = bool(getattr(self.cfg.serial, "dry_run", False))
+            self.demo_console.task_start(self._demo_start_pending_target)
+            self._flush_demo_deferred_phases()
+        else:
+            self._demo_deferred_phases = []
+        self._demo_start_pending_target = ""
+        self.operator_console.emit_change(
+            f"task:{cmd.session_id}:{cmd.epoch}:{cmd.cmd_id}",
+            f"[ORCH] TASK cmd={cmd.intent.lower()} target={cmd.target or ''} session={cmd.session_id or ''} epoch={cmd.epoch}",
+        )
+        self.run_logger.write_jsonl("task_cmd", cmd.to_dict())
+        self.run_logger.write_ipc(
+            "task_cmd_in",
+            "received",
+            direction="RX",
+            cmd_id=cmd.cmd_id,
+            session_id=cmd.session_id,
+            epoch=cmd.epoch,
+            ok=True,
+            intent=cmd.intent,
+            target=cmd.target,
+        )
+        self.run_logger.write_timeline("TASK_CMD_RECV", cmd_id=cmd.cmd_id, intent=cmd.intent, target=cmd.target, accepted=accepted, reason=reason, session_id=cmd.session_id, epoch=cmd.epoch)
+        self._send_task_ack(cmd, accepted=accepted, reason=reason)
+
+    def _log_skipped_manual_drive(self, event: str, skipped: TaskCmd, latest: Optional[TaskCmd], reason: str) -> None:
+        payload: Dict[str, Any] = {
+            "cmd_id": skipped.cmd_id,
+            "session_id": skipped.session_id,
+            "vx": skipped.vx,
+            "vy": skipped.vy,
+            "wz": skipped.wz,
+            "duration_ms": skipped.duration_ms,
+            "reason": reason,
+        }
+        if latest is not None:
+            payload.update({
+                "latest_cmd_id": latest.cmd_id,
+                "latest_session_id": latest.session_id,
+                "latest_vx": latest.vx,
+                "latest_vy": latest.vy,
+                "latest_wz": latest.wz,
+                "latest_duration_ms": latest.duration_ms,
+            })
+        self._manual_log(event, payload)
 
     def _drain_task_cmds(self):
-        for item in self.task_server.drain():
+        raw_items = list(self.task_server.drain())
+        if not raw_items:
+            return
+
+        parsed: List[Tuple[Dict[str, Any], Dict[str, Any], TaskCmd]] = []
+        for item in raw_items:
             payload = item["payload"]
-            self._last_task_cmd_recv_ts = float(item.get("recv_ts", time.time()))
-            self.log_ipc("RX", "task_cmd", "received", {"cmd_id": payload.get("cmd_id"), "intent": payload.get("intent")})
             try:
                 cmd = TaskCmd.from_dict(payload, set(self.cfg.frozen_targets.keys()))
             except Exception as exc:
-                self.log_warn("task_cmd", f"bad task_cmd err={self._short_err(exc)}")
-                self.operator_console.emit_error(
-                    f"task_cmd_bad:{exc}",
-                    f"[ORCH] ERROR task_cmd invalid err={self._short_err(exc)}",
-                )
-                self.run_logger.write_event(f"bad task_cmd: {payload} ({exc})")
-                self.run_logger.write_ipc(
-                    "task_cmd_in",
-                    "bad_payload",
-                    direction="RX",
-                    ok=False,
-                    error=str(exc),
-                    payload=safe_dump(payload),
-                )
-                self.run_logger.write_timeline("TASK_CMD_BAD", payload=safe_dump(payload), error=str(exc))
+                self._last_task_cmd_recv_ts = float(item.get("recv_ts", time.time()))
+                self.log_ipc("RX", "task_cmd", "received", {"cmd_id": payload.get("cmd_id"), "intent": payload.get("intent")})
+                self._record_bad_task_cmd(payload, exc)
                 continue
-            if cmd.intent in {"FIND", "RETURN"}:
-                self._demo_start_pending_target = cmd.target or ("return_home" if cmd.intent == "RETURN" else "n/a")
-            if cmd.intent == "STOP":
-                self.log("warn", "service", "Immediate task_cmd STOP received: triggering emergency stop")
-                self.uart.send_emergency_stop()
-                self.motion_adapter.cancel_active_jogs()
-            accepted, reason = self.core.handle_task_cmd(cmd)
-            if accepted and cmd.intent in {"FIND", "RETURN"}:
-                self.demo_console.dry_run = bool(getattr(self.cfg.serial, "dry_run", False))
-                self.demo_console.task_start(self._demo_start_pending_target)
-                self._flush_demo_deferred_phases()
-            else:
-                self._demo_deferred_phases = []
-            self._demo_start_pending_target = ""
-            self.operator_console.emit_change(
-                f"task:{cmd.session_id}:{cmd.epoch}:{cmd.cmd_id}",
-                f"[ORCH] TASK cmd={cmd.intent.lower()} target={cmd.target or ''} session={cmd.session_id or ''} epoch={cmd.epoch}",
-            )
-            self.run_logger.write_jsonl("task_cmd", cmd.to_dict())
-            self.run_logger.write_ipc(
-                "task_cmd_in",
-                "received",
-                direction="RX",
-                cmd_id=cmd.cmd_id,
-                session_id=cmd.session_id,
-                epoch=cmd.epoch,
-                ok=True,
-                intent=cmd.intent,
-                target=cmd.target,
-            )
-            self.run_logger.write_timeline("TASK_CMD_RECV", cmd_id=cmd.cmd_id, intent=cmd.intent, target=cmd.target, accepted=accepted, reason=reason, session_id=cmd.session_id, epoch=cmd.epoch)
-            self._send_task_ack(cmd, accepted=accepted, reason=reason)
+            parsed.append((item, payload, cmd))
+
+        if not parsed:
+            return
+
+        manual_stop_indices = [idx for idx, (_, _, cmd) in enumerate(parsed) if cmd.intent == "MANUAL_STOP"]
+        process_indices: List[int] = []
+        skipped_indices = set()
+        if manual_stop_indices:
+            stop_idx = manual_stop_indices[-1]
+            stop_cmd = parsed[stop_idx][2]
+            process_indices.append(stop_idx)
+            for idx, (_, _, cmd) in enumerate(parsed):
+                if idx <= stop_idx and cmd.intent == "MANUAL_DRIVE":
+                    skipped_indices.add(idx)
+                    self._log_skipped_manual_drive("manual_drive_cancelled_by_stop", cmd, stop_cmd, "queued_before_manual_stop")
+            for idx, (_, _, cmd) in enumerate(parsed):
+                if idx == stop_idx or idx in skipped_indices:
+                    continue
+                if idx < stop_idx and cmd.intent == "MANUAL_STOP":
+                    continue
+                process_indices.append(idx)
+        else:
+            manual_drive_indices = [idx for idx, (_, _, cmd) in enumerate(parsed) if cmd.intent == "MANUAL_DRIVE"]
+            latest_drive_idx = manual_drive_indices[-1] if manual_drive_indices else None
+            latest_drive_cmd = parsed[latest_drive_idx][2] if latest_drive_idx is not None else None
+            for idx in manual_drive_indices[:-1]:
+                skipped_indices.add(idx)
+                self._log_skipped_manual_drive("manual_drive_replaced_previous", parsed[idx][2], latest_drive_cmd, "newer_manual_drive_pending")
+            process_indices = [idx for idx in range(len(parsed)) if idx not in skipped_indices]
+
+        seen = set()
+        for idx in process_indices:
+            if idx in seen:
+                continue
+            seen.add(idx)
+            item, payload, cmd = parsed[idx]
+            self._process_task_cmd(item, payload, cmd)
 
     @staticmethod
     def _grasp_obs_from_vision_payload(payload: Dict[str, Any], env: VisionObsEnvelope) -> Optional[Dict[str, Any]]:
@@ -3423,6 +3903,66 @@ class OrchestratorService(BaseModule):
     def _emit_motion(self, decision):
         if getattr(decision, "arm_cmd", None) is not None:
             arm = decision.arm_cmd
+            arm_command = str(getattr(arm, "command", "POSE") or "POSE").strip().upper()
+            if arm_command == "GRABBED":
+                self.motion_adapter.cancel_active_jogs()
+                self.run_logger.write_jsonl("arm_grabbed_send", {
+                    "request_id": self.core.ctx.active_req_id or "",
+                    "target": self.core.ctx.active_target or "",
+                    "line": "GRABBED",
+                })
+                result = self.arm_bridge.send_grabbed_and_wait(
+                    timeout_s=float(getattr(getattr(self.cfg, "arm_serial", None), "response_timeout_s", 10.0) or 10.0),
+                )
+                resp = result.get("response") if isinstance(result, dict) else None
+                if resp is None:
+                    error = str((result or {}).get("error") or "arm_grabbed_error")
+                    parsed_status = {
+                        "arm_serial_open_failed": "ARM_SERIAL_OPEN_FAILED",
+                        "arm_tx_failed": "ARM_TX_FAILED",
+                        "arm_grabbed_timeout": "ARM_GRABBED_TIMEOUT",
+                    }.get(error, error.upper())
+                    resp = ArmResponse(
+                        ok=False,
+                        message=error,
+                        raw_line=error,
+                        ts=time.time(),
+                        parsed_status=parsed_status,
+                    )
+                if resp is not None:
+                    parsed_status = str(getattr(resp, "parsed_status", "") or resp.message or "").strip().upper()
+                    if parsed_status == "OK_GRABBED_DONE" and bool(resp.ok):
+                        self.run_logger.write_jsonl("arm_grabbed_done", {
+                            "raw": resp.raw_line,
+                            "parsed_status": parsed_status,
+                            "ok": True,
+                            "received_lines": (result or {}).get("received_lines"),
+                        })
+                    elif parsed_status == "ARM_GRABBED_TIMEOUT":
+                        self.run_logger.write_jsonl("arm_grabbed_timeout", {
+                            "raw": resp.raw_line,
+                            "parsed_status": parsed_status,
+                            "ok": False,
+                            "last_lines": (result or {}).get("last_lines"),
+                        })
+                    else:
+                        self.run_logger.write_jsonl("arm_grabbed_failed", {
+                            "raw": resp.raw_line,
+                            "parsed_status": parsed_status,
+                            "ok": bool(resp.ok),
+                            "error": (result or {}).get("error", ""),
+                            "received_lines": (result or {}).get("received_lines"),
+                        })
+                    self.core.handle_arm_response(resp)
+                    self.run_logger.write_jsonl("arm_response", {
+                        "raw": resp.raw_line,
+                        "parsed_status": parsed_status,
+                        "ok": bool(resp.ok),
+                        "error": (result or {}).get("error", ""),
+                        "received_lines_count": (result or {}).get("received_lines_count"),
+                        "last_lines": (result or {}).get("last_lines"),
+                    })
+                return
             arm_line = encode_pose(
                 arm.x_cm, arm.y_cm, arm.z_cm,
                 arm.pitch_deg, arm.roll_deg,
@@ -3455,6 +3995,15 @@ class OrchestratorService(BaseModule):
                     **arm.to_dict(),
                 },
             )
+            self.run_logger.write_jsonl(
+                "arm_pose_send",
+                {
+                    "line": arm_line,
+                    "request_id": self.core.ctx.active_req_id or "",
+                    "target": self.core.ctx.active_target or "",
+                    **arm.to_dict(),
+                },
+            )
             result = self.arm_bridge.send_pose_and_wait(
                 arm_line,
                 timeout_s=float(getattr(getattr(self.cfg, "arm_serial", None), "response_timeout_s", 10.0) or 10.0),
@@ -3481,11 +4030,22 @@ class OrchestratorService(BaseModule):
                     setattr(resp, "response_matches_sent", False)
             if resp is not None:
                 self.core.handle_arm_response(resp)
+                parsed_status = str(getattr(resp, "parsed_status", "") or resp.message or "").strip().upper()
+                pose_log = {
+                    "raw": resp.raw_line,
+                    "parsed_status": parsed_status,
+                    "ok": bool(resp.ok),
+                    "error": (result or {}).get("error", ""),
+                    "sent_pose": dict(getattr(resp, "sent_pose", {}) or (result or {}).get("sent_pose") or {}),
+                    "response_pose": dict(getattr(resp, "response_pose", {}) or (result or {}).get("response_pose") or {}),
+                    "response_matches_sent": bool(getattr(resp, "response_matches_sent", False)),
+                }
+                self.run_logger.write_jsonl("arm_pose_success" if bool(resp.ok) else "arm_pose_failed", pose_log)
                 self.run_logger.write_jsonl(
                     "arm_response",
                     {
                         "raw": resp.raw_line,
-                        "parsed_status": getattr(resp, "parsed_status", "") or resp.message,
+                        "parsed_status": parsed_status,
                         "ok": bool(resp.ok),
                         "error": (result or {}).get("error", ""),
                         "sent_pose": dict(getattr(resp, "sent_pose", {}) or (result or {}).get("sent_pose") or {}),

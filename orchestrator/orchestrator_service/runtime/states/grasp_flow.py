@@ -60,9 +60,21 @@ class GraspFlowMixin:
             return self._tick_grasp_repositioning(now_m)
         if substate == "AWAITING_ARM":
             return self._tick_grasp_awaiting_arm(now_m)
+        if substate == "AWAITING_GRABBED":
+            return self._tick_grasp_awaiting_grabbed(now_m)
+        if substate == "AWAITING_GRABBED_DONE":
+            return self._tick_grasp_awaiting_grabbed_done(now_m)
         if substate == "GRASP_VERIFY":
             return self._tick_grasp_verify(now_m)
         return self.controller.stop_cmd("GRASP")
+
+    def _log_grasp_phase_update(self, phase: str, reason: str = "") -> None:
+        payload = {
+            "phase": phase,
+            "target": self.ctx.active_target or "",
+            "reason": reason,
+        }
+        self._log("info", f"grasp_phase_update {payload}")
 
     def _has_ready_grasp_result(self) -> bool:
         return (
@@ -186,6 +198,7 @@ class GraspFlowMixin:
                 return self.controller.stop_cmd("GRASP")
             self.ctx.grasp_substate = "AWAITING_ARM"
             self.ctx.grasp_timeout_mono = now_m + _GRASP_ARM_TIMEOUT_S
+            self._log_grasp_phase_update("pose_wait", "arm_pose_send")
             decision = MotionDecision(cmd=self.controller.stop_cmd("GRASP").cmd, arm_cmd=arm_cmd)
             decision.control_summary = {
                 "input_grasp": dict(self.ctx.grasp_result),
@@ -258,7 +271,9 @@ class GraspFlowMixin:
     def _tick_grasp_awaiting_arm(self, now_m: float) -> MotionDecision:
         if now_m > self.ctx.grasp_timeout_mono:
             self._log_grasp_flow_tick_debug("AWAITING_ARM", "arm_response", now_m)
-            self._enter_error_recovery("arm response timeout")
+            self._log("warn", "arm_pose_failed {'reason': 'arm_pose_timeout'}")
+            self._log_grasp_phase_update("error", "arm_pose_timeout")
+            self._enter_error_recovery("arm_pose_timeout")
             return self.controller.stop_cmd("GRASP")
 
         resp = self.ctx.arm_response
@@ -268,44 +283,104 @@ class GraspFlowMixin:
                 response_pose = dict(getattr(resp, "response_pose", {}) or {})
                 self._log(
                     "info",
-                    "arm_motion_done "
+                    "arm_pose_success "
                     f"{{'sent_pose': {sent_pose!r}, "
                     f"'response_pose': {response_pose!r}, "
                     "'response_matches_sent': True, "
                     f"'raw_response': {getattr(resp, 'raw_line', '')!r}, "
-                    "'grasp_success_assumed_for_demo': True, "
-                    "'next_state': 'DONE'}}",
+                    "'next_substate': 'AWAITING_GRABBED'}}",
                 )
-                self.ctx.grasp_substate = "GRASP_VERIFY"
-                self.ctx.grasp_timeout_mono = now_m + 3.0
-                self.ctx.grasp_verify_reported = False
+                self.ctx.grasp_substate = "AWAITING_GRABBED"
+                self.ctx.grasp_timeout_mono = now_m + _GRASP_ARM_TIMEOUT_S
                 self.ctx.arm_response = None
+                self._log_grasp_phase_update("grabbed_wait", "arm_pose_success")
                 return self.controller.stop_cmd("GRASP")
             parsed_status = str(getattr(resp, "parsed_status", "") or resp.message or "").strip().upper()
             self.ctx.arm_response = None
             if parsed_status == "ERR_IK":
-                self._enter_error_recovery("arm_ik_failed")
+                self._log("warn", "arm_pose_failed {'reason': 'arm_pose_ik_failed'}")
+                self._log_grasp_phase_update("error", "arm_pose_ik_failed")
+                self._enter_error_recovery("arm_pose_ik_failed")
                 return self.controller.stop_cmd("GRASP")
             if parsed_status == "ERR_CMD":
-                self._enter_error_recovery("arm_cmd_failed")
+                self._log("warn", "arm_pose_failed {'reason': 'arm_pose_cmd_error'}")
+                self._log_grasp_phase_update("error", "arm_pose_cmd_error")
+                self._enter_error_recovery("arm_pose_cmd_error")
                 return self.controller.stop_cmd("GRASP")
             if parsed_status == "ARM_SERIAL_OPEN_FAILED":
+                self._log("warn", "arm_pose_failed {'reason': 'arm_serial_open_failed'}")
                 self._enter_error_recovery("arm_serial_open_failed")
                 return self.controller.stop_cmd("GRASP")
             if parsed_status in {"ARM_TX_FAILED", "ARM_SERIAL_WRITE_FAILED"}:
+                self._log("warn", "arm_pose_failed {'reason': 'arm_tx_failed'}")
                 self._enter_error_recovery("arm_tx_failed")
                 return self.controller.stop_cmd("GRASP")
             if parsed_status == "ARM_RESPONSE_TIMEOUT":
-                self._enter_error_recovery("arm response timeout")
+                self._log("warn", "arm_pose_failed {'reason': 'arm_pose_timeout'}")
+                self._log_grasp_phase_update("error", "arm_pose_timeout")
+                self._enter_error_recovery("arm_pose_timeout")
                 return self.controller.stop_cmd("GRASP")
             self.ctx.grasp_retry_count += 1
             if self.ctx.grasp_retry_count > _GRASP_RETRY_LIMIT:
-                self._enter_error_recovery("arm IK exhausted")
+                self._enter_error_recovery("arm_pose_unknown_error")
                 return self.controller.stop_cmd("GRASP")
             self.ctx.grasp_substate = "AWAITING_RESPOND"
             self.ctx.grasp_timeout_mono = now_m + _GRASP_RESPOND_TIMEOUT_S
             self.ctx.arm_response = None
 
+        return self.controller.stop_cmd("GRASP")
+
+    def _tick_grasp_awaiting_grabbed(self, now_m: float) -> MotionDecision:
+        self.ctx.grasp_substate = "AWAITING_GRABBED_DONE"
+        self.ctx.grasp_timeout_mono = now_m + _GRASP_ARM_TIMEOUT_S
+        self.ctx.arm_response = None
+        self._log("info", "arm_grabbed_send {'command': 'GRABBED'}")
+        self._log_grasp_phase_update("grabbed_wait", "arm_grabbed_send")
+        arm_cmd = ArmCommand(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, command="GRABBED")
+        decision = MotionDecision(cmd=self.controller.stop_cmd("GRASP").cmd, arm_cmd=arm_cmd)
+        decision.control_summary = {
+            "grasp_phase": "retracting_with_object",
+            "source": "arm_grabbed",
+        }
+        return decision
+
+    def _tick_grasp_awaiting_grabbed_done(self, now_m: float) -> MotionDecision:
+        if now_m > self.ctx.grasp_timeout_mono:
+            self._log_grasp_flow_tick_debug("AWAITING_GRABBED_DONE", "arm_grabbed_response", now_m)
+            self._log("warn", "arm_grabbed_timeout {'reason': 'arm_grabbed_timeout'}")
+            self._log_grasp_phase_update("error", "arm_grabbed_timeout")
+            self._enter_error_recovery("arm_grabbed_timeout")
+            return self.controller.stop_cmd("GRASP")
+
+        resp = self.ctx.arm_response
+        if resp is None:
+            return self.controller.stop_cmd("GRASP")
+
+        parsed_status = str(getattr(resp, "parsed_status", "") or resp.message or "").strip().upper()
+        raw = getattr(resp, "raw_line", "")
+        self.ctx.arm_response = None
+        if bool(resp.ok) and parsed_status == "OK_GRABBED_DONE":
+            self._log("info", f"arm_grabbed_done {{'raw_response': {raw!r}, 'next_state': 'DONE'}}")
+            self.ctx.grasp_substate = "GRASP_VERIFY"
+            self.ctx.grasp_timeout_mono = now_m + 3.0
+            self.ctx.grasp_verify_reported = False
+            self._log_grasp_phase_update("done", "arm_grabbed_done")
+            return self.controller.stop_cmd("GRASP")
+        if parsed_status == "OK_GRABBED_START":
+            self._log("info", f"arm_grabbed_started {{'raw_response': {raw!r}}}")
+            return self.controller.stop_cmd("GRASP")
+        if parsed_status == "OK_KEEP_CLAW":
+            self._log("info", f"arm_grabbed_keep_claw {{'raw_response': {raw!r}}}")
+            return self.controller.stop_cmd("GRASP")
+        if parsed_status == "ERR_CMD":
+            reason = "arm_grabbed_cmd_error"
+        elif parsed_status == "ARM_GRABBED_TIMEOUT":
+            reason = "arm_grabbed_timeout"
+        else:
+            reason = "arm_grabbed_unknown_error"
+        self._log("warn", f"arm_grabbed_failed {{'reason': {reason!r}, 'parsed_status': {parsed_status!r}, 'raw_response': {raw!r}}}")
+        self._log_grasp_phase_update("error", reason)
+        self._enter_error_recovery(reason)
         return self.controller.stop_cmd("GRASP")
 
     def _tick_grasp_verify(self, now_m: float) -> MotionDecision:

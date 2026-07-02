@@ -49,6 +49,7 @@ class Stm32MotionAdapter:
         self.jog_duration_ms = clamp_int(jog_duration_ms, 60, 500)
         self._seq = 0
         self._last_wire_mode: Optional[str] = None
+        self._wire_mode_retry_count = 0
         self._jog_cancel_events = []
         self._jog_lock = threading.Lock()
 
@@ -81,6 +82,30 @@ class Stm32MotionAdapter:
             except Exception:
                 pass
         print(line, flush=True)
+
+    def _reset_wire_mode_latch(self, reason: str = "") -> None:
+        previous = self._last_wire_mode
+        self._last_wire_mode = None
+        self._wire_mode_retry_count = 0
+        self._log(f"[MOTION][MODE] uart_mode_latch_reset previous={previous or 'none'} reason={reason}")
+
+    def reset_wire_mode_latch(self, reason: str = "") -> None:
+        self._reset_wire_mode_latch(reason=reason)
+
+    def _send_mode_now(self, wire_mode: str, seq: int, reason: str, **extra: Any) -> bool:
+        meta = self._meta(
+            "mode",
+            seq,
+            reason,
+            wire_mode=wire_mode,
+            last_wire_mode=self._last_wire_mode,
+            uart_mode_send_required=True,
+            uart_mode_retry_count=self._wire_mode_retry_count,
+            **extra,
+        )
+        if hasattr(self.uart, "send_motion_line_now"):
+            return bool(self.uart.send_motion_line_now(encode_mode(wire_mode) + "\r\n", tx_meta=meta))
+        return bool(self.uart.send_motion_line(encode_mode(wire_mode) + "\r\n", tx_meta=meta, latest_override=False))
 
     @staticmethod
     def wire_mode_for_mode(mode: str) -> str:
@@ -127,26 +152,37 @@ class Stm32MotionAdapter:
         )
         target_lateral = str(mode or "").strip().upper() == "EDGE_SLIDE_SEARCH" and abs(vy) > 1e-9 and abs(vx) < 1e-9 and abs(wz) < 1e-9
         mode_required = wire_mode != self._last_wire_mode
-        if mode_required and target_lateral:
-            sent = bool(
-                self.uart.send_motion_line(
-                    encode_mode(wire_mode) + "\r\n",
-                    tx_meta=self._meta(
-                        "mode",
-                        seq,
-                        reason,
-                        wire_mode=wire_mode,
-                        last_wire_mode=self._last_wire_mode,
-                        target_lateral_uart_mode_required=bool(target_lateral),
-                        target_lateral_uart_mode_sent=True,
-                        target_lateral_uart_mode_rearm=True,
-                    ),
+        if mode_required:
+            if self._wire_mode_retry_count > 0:
+                self._log(
+                    f"[MOTION][MODE] uart_mode_retry seq={seq} requested_mode={wire_mode} "
+                    f"last_wire_mode={self._last_wire_mode or 'none'} retry_count={self._wire_mode_retry_count} reason={reason}"
                 )
+            self._log(
+                f"[MOTION][MODE] uart_mode_send_required seq={seq} "
+                f"requested_mode={wire_mode} last_wire_mode={self._last_wire_mode or 'none'} reason={reason}"
+            )
+            sent = self._send_mode_now(
+                wire_mode,
+                seq,
+                reason,
+                target_lateral_uart_mode_required=bool(target_lateral),
             )
             if sent:
                 self._last_wire_mode = wire_mode
+                self._wire_mode_retry_count = 0
+                self._log(
+                    f"[MOTION][MODE] uart_mode_sent seq={seq} "
+                    f"requested_mode={wire_mode} last_wire_mode={self._last_wire_mode} reason={reason}"
+                )
+            else:
+                self._wire_mode_retry_count += 1
+                self._log(
+                    f"[MOTION][MODE] uart_mode_send_failed seq={seq} "
+                    f"requested_mode={wire_mode} last_wire_mode={self._last_wire_mode or 'none'} reason={reason}"
+                )
             return seq
-        line = (encode_mode(wire_mode) + "\r\n" if mode_required else "") + encode_vel(vx, vy, wz) + "\r\n"
+        line = encode_vel(vx, vy, wz) + "\r\n"
         sent = bool(self.uart.send_motion_line(
             line,
             tx_meta=self._meta(
@@ -163,8 +199,6 @@ class Stm32MotionAdapter:
                 target_lateral_uart_mode_rearm=False,
             ),
         ))
-        if sent and mode_required:
-            self._last_wire_mode = wire_mode
         return seq
 
     def send_cmd_vel(self, cmd: Any, reason: str = "") -> int:
@@ -176,7 +210,7 @@ class Stm32MotionAdapter:
     def stop(self, reason: str = "", soft: bool = False) -> int:
         self.cancel_active_jogs()
         seq = self._next_seq()
-        self._last_wire_mode = None
+        self._reset_wire_mode_latch(reason=reason or "stop")
         self._log(f"[MOTION][STOP] seq={seq} reason={reason} soft={soft}")
         if soft:
             stop_policy.soft_stop(self.uart, tx_meta=self._meta("stop", seq, reason, wire_mode="SSTOP"))
@@ -194,7 +228,7 @@ class Stm32MotionAdapter:
         self.cancel_active_jogs()
         seq = self._next_seq()
         duration = self.jog_duration_ms
-        self._last_wire_mode = None
+        self._reset_wire_mode_latch(reason=reason or "jog_velocity")
         self._log(
             f"[MOTION][PULSE] seq={seq} mode=SEARCH vx_mps={vx_mps:.3f} "
             f"vy_mps={vy_mps:.3f} wz_radps={wz_radps:.3f} duration_ms={duration} reason={reason}"

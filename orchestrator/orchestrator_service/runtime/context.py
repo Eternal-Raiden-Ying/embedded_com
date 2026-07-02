@@ -82,6 +82,16 @@ class RuntimeContext:
     last_home_obs: Optional[HomeTagObs] = None
     last_car_state: Optional[CarState] = None
 
+    manual_drive_active: bool = False
+    manual_drive_until_ts: float = 0.0
+    manual_drive_vx_mps: float = 0.0
+    manual_drive_vy_mps: float = 0.0
+    manual_drive_wz_radps: float = 0.0
+    manual_drive_last_cmd_id: Optional[str] = None
+    manual_drive_source: Optional[str] = None
+    manual_drive_generation: int = 0
+    manual_stop_seq: int = 0
+
     last_table_bbox_xyxy: Optional[List[float]] = None
     last_table_center_x_norm: Optional[float] = None
     last_table_center_y_norm: Optional[float] = None
@@ -186,6 +196,10 @@ class RuntimeContext:
     final_depth_latched_mono: float = 0.0
     final_yaw_align_active: bool = False
     final_locked: bool = False
+    final_slow_enter_mono: float = 0.0
+    final_slow_enter_tick: int = 0
+    final_fixed_roi_seen_after_enter: bool = False
+    final_stop_stable_count: int = 0
     hard_stop_barrier_until_mono: float = 0.0
     hard_stop_barrier_reason: str = ""
     last_valid_depth_p10_m: Optional[float] = None
@@ -343,6 +357,10 @@ class RuntimeContext:
         self.final_depth_latched_mono = 0.0
         self.final_yaw_align_active = False
         self.final_locked = False
+        self.final_slow_enter_mono = 0.0
+        self.final_slow_enter_tick = 0
+        self.final_fixed_roi_seen_after_enter = False
+        self.final_stop_stable_count = 0
         self.hard_stop_barrier_until_mono = 0.0
         self.hard_stop_barrier_reason = ""
         self.last_valid_depth_p10_m = None

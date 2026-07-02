@@ -170,6 +170,14 @@ class TableEdgeConfig:
     yolo_table_roi_hold_enable: bool = True
     final_roi_latch_enable: bool = True
     final_roi_latch_max_age_s: float = 2.0
+    final_fixed_roi_enable: bool = True
+    final_fixed_roi_x0_norm: float = 0.40
+    final_fixed_roi_x1_norm: float = 0.60
+    final_fixed_roi_y0_norm: float = 0.45
+    final_fixed_roi_y1_norm: float = 0.62
+    final_fixed_roi_min_valid_ratio: float = 0.03
+    final_fixed_roi_min_sample_count: int = 32
+    final_depth_debug_enable: bool = False
     # Boundary extension is a second-pass ROI fallback: when the normal small
     # YOLO ROI fails to find an edge and the RGB bbox touches left/right/bottom,
     # extend only the touched ROI side to the depth-frame boundary.

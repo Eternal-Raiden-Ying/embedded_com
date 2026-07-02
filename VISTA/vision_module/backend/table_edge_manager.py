@@ -27,6 +27,20 @@ from ..utils.table_roi import table_detection_debug
 
 CapabilitySink = Optional[Callable[[str, Dict[str, Any]], None]]
 
+_FINAL_FIXED_ROI_STATES = {"FINAL_SLOW_STOP", "FINAL_LOCK"}
+
+
+def _is_final_phase_for_fixed_roi(runtime_status: Dict[str, Any]) -> bool:
+    state = str(
+        (runtime_status or {}).get("orchestrator_state")
+        or (runtime_status or {}).get("robot_state")
+        or (runtime_status or {}).get("state")
+        or ""
+    ).strip().upper()
+    if state in _FINAL_FIXED_ROI_STATES:
+        return True
+    return bool((runtime_status or {}).get("final_phase_active", False))
+
 
 class TableEdgeManager:
     """Own depth-based table-edge perception and publish summarized results."""
@@ -3750,41 +3764,88 @@ class TableEdgeManager:
             payload["camera_frame_seq"] = int(seq)
             payload["depth_p10"] = depth_p10
             payload["close_depth_ratio"] = close_depth_ratio
-            fixed_roi_enabled = bool(getattr(self.cfg.table_edge, "final_fixed_roi_enable", True))
+            runtime_status = self._runtime_status()
+            orchestrator_state = str(runtime_status.get("orchestrator_state") or runtime_status.get("state") or "").strip().upper()
+            final_phase_active = _is_final_phase_for_fixed_roi(runtime_status)
+            fixed_roi_enabled = bool(getattr(self.cfg.table_edge, "final_fixed_roi_enable", True) and final_phase_active)
+            fixed_roi_skip_reason = "" if fixed_roi_enabled else ("disabled_by_config" if not bool(getattr(self.cfg.table_edge, "final_fixed_roi_enable", True)) else "not_final_phase")
             fixed_roi_xyxy = None
-            if fixed_roi_enabled and isinstance(depth, np.ndarray) and depth.ndim == 2 and depth.size > 0:
+            if isinstance(depth, np.ndarray) and depth.ndim == 2 and depth.size > 0:
                 h_depth, w_depth = depth.shape[:2]
-                x0_norm = float(getattr(self.cfg.table_edge, "final_fixed_roi_x0_norm", 0.22))
-                x1_norm = float(getattr(self.cfg.table_edge, "final_fixed_roi_x1_norm", 0.78))
-                y0_norm = float(getattr(self.cfg.table_edge, "final_fixed_roi_y0_norm", 0.60))
-                y1_norm = float(getattr(self.cfg.table_edge, "final_fixed_roi_y1_norm", 0.96))
+                x0_norm = float(getattr(self.cfg.table_edge, "final_fixed_roi_x0_norm", 0.40))
+                x1_norm = float(getattr(self.cfg.table_edge, "final_fixed_roi_x1_norm", 0.60))
+                y0_norm = float(getattr(self.cfg.table_edge, "final_fixed_roi_y0_norm", 0.45))
+                y1_norm = min(float(getattr(self.cfg.table_edge, "final_fixed_roi_y1_norm", 0.62)), 0.65)
                 x0 = max(0, min(w_depth, int(round(w_depth * x0_norm))))
                 x1 = max(0, min(w_depth, int(round(w_depth * x1_norm))))
                 y0 = max(0, min(h_depth, int(round(h_depth * y0_norm))))
                 y1 = max(0, min(h_depth, int(round(h_depth * y1_norm))))
+                if h_depth > 60:
+                    y1 = min(y1, max(0, h_depth - 60))
                 x0, x1 = sorted((x0, x1))
                 y0, y1 = sorted((y0, y1))
                 if x1 > x0 and y1 > y0:
                     fixed_roi_xyxy = [int(x0), int(y0), int(x1), int(y1)]
-            payload["final_fixed_roi_active"] = bool(fixed_roi_xyxy is not None)
+            payload["fixed_roi_enabled"] = bool(fixed_roi_enabled)
+            payload["fixed_roi_skip_reason"] = fixed_roi_skip_reason
+            payload["fixed_roi_xyxy"] = fixed_roi_xyxy
+            payload["final_phase_active"] = bool(final_phase_active)
+            payload["orchestrator_state"] = orchestrator_state
+            payload["final_roi_policy"] = {
+                "state": orchestrator_state,
+                "final_phase_active": bool(final_phase_active),
+                "fixed_roi_enabled": bool(fixed_roi_enabled),
+                "fixed_roi_skip_reason": fixed_roi_skip_reason,
+                "fixed_roi_xyxy": fixed_roi_xyxy,
+            }
+            payload["preview_roi_draw"] = {
+                "roi_name": "final_fixed_roi",
+                "enabled": bool(fixed_roi_enabled and fixed_roi_xyxy is not None),
+                "xyxy": fixed_roi_xyxy,
+            }
+            payload["final_fixed_roi_active"] = bool(fixed_roi_enabled and fixed_roi_xyxy is not None)
             payload["final_fixed_roi_xyxy"] = fixed_roi_xyxy
-            payload["final_fixed_roi_source"] = "fixed_center_low_roi" if fixed_roi_xyxy is not None else ""
-            fixed_stats = table_roi_depth_statistics(
-                depth,
-                depth_scale,
-                fixed_roi_xyxy,
-                current_table_bbox_found=True,
-                allow_without_table_bbox=True,
-                roi_is_latched=True,
-                min_valid_ratio=float(getattr(self.cfg.table_edge, "final_fixed_roi_min_valid_ratio", 0.03)),
-                min_sample_count=int(getattr(self.cfg.table_edge, "final_fixed_roi_min_sample_count", 32)),
-            )
-            payload["final_fixed_roi_depth_valid"] = bool(fixed_stats.get("table_roi_depth_valid", False))
-            payload["final_fixed_roi_depth_p10"] = fixed_stats.get("table_roi_depth_p10")
-            payload["final_fixed_roi_depth_sample_count"] = int(fixed_stats.get("table_roi_depth_sample_count", 0) or 0)
-            payload["final_fixed_roi_depth_invalid_reason"] = str(fixed_stats.get("table_roi_depth_invalid_reason") or "")
+            payload["final_fixed_roi_source"] = "fixed_center_low_roi" if fixed_roi_enabled and fixed_roi_xyxy is not None else ""
+            fixed_stats = {}
+            if fixed_roi_enabled and fixed_roi_xyxy is not None:
+                fixed_stats = table_roi_depth_statistics(
+                    depth,
+                    depth_scale,
+                    fixed_roi_xyxy,
+                    current_table_bbox_found=True,
+                    allow_without_table_bbox=True,
+                    roi_is_latched=True,
+                    min_valid_ratio=float(getattr(self.cfg.table_edge, "final_fixed_roi_min_valid_ratio", 0.03)),
+                    min_sample_count=int(getattr(self.cfg.table_edge, "final_fixed_roi_min_sample_count", 32)),
+                )
+            fixed_valid = bool(fixed_stats.get("table_roi_depth_valid", False))
+            fixed_mean = fixed_stats.get("table_roi_depth_mean") if fixed_roi_enabled else None
+            fixed_median = fixed_stats.get("table_roi_depth_median") if fixed_roi_enabled else None
+            fixed_p10 = fixed_stats.get("table_roi_depth_p10") if fixed_roi_enabled else None
+            fixed_count = int(fixed_stats.get("table_roi_depth_sample_count", 0) or 0) if fixed_roi_enabled else 0
+            fixed_ratio = fixed_stats.get("table_roi_depth_valid_ratio") if fixed_roi_enabled else None
+            payload["final_fixed_roi_depth_valid"] = bool(fixed_valid)
+            payload["final_fixed_roi_depth_mean"] = fixed_mean
+            payload["final_fixed_roi_depth_median"] = fixed_median
+            payload["final_fixed_roi_depth_p10"] = fixed_p10
+            payload["final_fixed_roi_depth_sample_count"] = fixed_count
+            payload["final_fixed_roi_depth_valid_count"] = fixed_count
+            payload["final_fixed_roi_depth_valid_ratio"] = fixed_ratio
+            payload["fixed_roi_depth_mean"] = fixed_mean
+            payload["fixed_roi_depth_median"] = fixed_median
+            payload["fixed_roi_depth_p10"] = fixed_p10
+            payload["fixed_roi_valid_count"] = fixed_count
+            payload["fixed_roi_valid_ratio"] = fixed_ratio
+            payload["final_fixed_roi_depth"] = {
+                "mean": fixed_mean,
+                "median": fixed_median,
+                "p10": fixed_p10,
+                "valid_count": fixed_count,
+                "valid_ratio": fixed_ratio,
+            }
+            payload["final_fixed_roi_depth_invalid_reason"] = str(fixed_stats.get("table_roi_depth_invalid_reason") or fixed_roi_skip_reason)
             final_depth_debug = bool(getattr(self.cfg.table_edge, "final_depth_debug_enable", False))
-            if final_depth_debug:
+            if final_depth_debug and fixed_roi_enabled:
                 for key, value in fixed_stats.items():
                     if key.startswith("table_roi_depth_"):
                         payload["final_fixed_roi_depth_debug_" + key[len("table_roi_depth_"):]] = value

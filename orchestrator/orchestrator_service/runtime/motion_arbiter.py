@@ -82,6 +82,24 @@ _EMERGENCY_KEYS = {
     "base_depth_emergency_active",
 }
 
+
+_FIXED_ROI_FINAL_PHASE_STATES = {"FINAL_SLOW_STOP", "FINAL_LOCK"}
+
+
+def _is_final_phase_for_fixed_roi(state: str) -> bool:
+    return str(state or "").strip().upper() in _FIXED_ROI_FINAL_PHASE_STATES
+
+
+def _dynamic_table_roi_source(summary: Dict[str, Any], docking_obs: Any, state: str) -> str:
+    source = str(summary.get("table_roi_source") or getattr(docking_obs, "table_roi_source", "") or "").strip()
+    if source:
+        return source
+    if bool(summary.get("table_roi_latched", getattr(docking_obs, "table_roi_latched", False))):
+        return "latched_yolo_table_roi"
+    if str(state or "").strip().upper() in {"YOLO_APPROACH", "YOLO_FORWARD", "YOLO_ACQUIRE_ALIGN", "SEARCH_TABLE"}:
+        return "current_yolo_table_roi"
+    return "dynamic_table_roi"
+
 _HARD_SAFETY_KEYS = {
     "base_depth_hard_safety",
     "base_depth_stop_active",
@@ -591,15 +609,43 @@ def arbitrate_table_docking_motion(
         roi_depth_m = None
     legacy_roi_depth_valid = bool(roi_depth_valid and roi_depth_m is not None)
     legacy_roi_depth_m = roi_depth_m if legacy_roi_depth_valid else None
-    fixed_roi_active = bool(summary.get("final_fixed_roi_active", getattr(obs, "final_fixed_roi_active", False) if obs is not None else False))
-    fixed_roi_valid = bool(summary.get("final_fixed_roi_depth_valid", getattr(obs, "final_fixed_roi_depth_valid", False) if obs is not None else False))
-    fixed_roi_value = summary.get("final_fixed_roi_depth_p10", getattr(obs, "final_fixed_roi_depth_p10", None) if obs is not None else None)
-    try:
-        fixed_roi_depth_m = float(fixed_roi_value) if fixed_roi_value is not None else None
-    except (TypeError, ValueError):
+    raw_fixed_roi_active = bool(summary.get("final_fixed_roi_active", getattr(obs, "final_fixed_roi_active", False) if obs is not None else False))
+    fixed_roi_enabled = _is_final_phase_for_fixed_roi(state)
+    fixed_roi_skip_reason = "" if fixed_roi_enabled else "not_final_phase"
+    if fixed_roi_enabled:
+        fixed_roi_active = raw_fixed_roi_active
+        fixed_roi_valid = bool(summary.get("final_fixed_roi_depth_valid", getattr(obs, "final_fixed_roi_depth_valid", False) if obs is not None else False))
+        fixed_roi_mean_value = summary.get("final_fixed_roi_depth_mean", getattr(obs, "final_fixed_roi_depth_mean", None) if obs is not None else None)
+        fixed_roi_median_value = summary.get("final_fixed_roi_depth_median", getattr(obs, "final_fixed_roi_depth_median", None) if obs is not None else None)
+        fixed_roi_p10_value = summary.get("final_fixed_roi_depth_p10", getattr(obs, "final_fixed_roi_depth_p10", None) if obs is not None else None)
+        fixed_roi_value = fixed_roi_mean_value if fixed_roi_mean_value is not None else (fixed_roi_median_value if fixed_roi_median_value is not None else fixed_roi_p10_value)
+        fixed_roi_depth_source_stat = "mean" if fixed_roi_mean_value is not None else ("median" if fixed_roi_median_value is not None else ("p10" if fixed_roi_p10_value is not None else "missing"))
+        try:
+            fixed_roi_depth_m = float(fixed_roi_value) if fixed_roi_value is not None else None
+        except (TypeError, ValueError):
+            fixed_roi_depth_m = None
+        try:
+            fixed_roi_depth_mean_m = float(fixed_roi_mean_value) if fixed_roi_mean_value is not None else None
+        except (TypeError, ValueError):
+            fixed_roi_depth_mean_m = None
+        try:
+            fixed_roi_depth_median_m = float(fixed_roi_median_value) if fixed_roi_median_value is not None else None
+        except (TypeError, ValueError):
+            fixed_roi_depth_median_m = None
+        try:
+            fixed_roi_depth_p10_m = float(fixed_roi_p10_value) if fixed_roi_p10_value is not None else None
+        except (TypeError, ValueError):
+            fixed_roi_depth_p10_m = None
+    else:
+        fixed_roi_active = False
+        fixed_roi_valid = False
         fixed_roi_depth_m = None
+        fixed_roi_depth_mean_m = None
+        fixed_roi_depth_median_m = None
+        fixed_roi_depth_p10_m = None
+        fixed_roi_depth_source_stat = "not_computed"
     already_in_final_phase = bool(
-        state in {"FINAL_SLOW_STOP", "AT_TABLE_EDGE"}
+        state in {"FINAL_SLOW_STOP", "FINAL_LOCK", "AT_TABLE_EDGE"}
         or summary.get("final_roi_mode_latched", False)
         or summary.get("final_edge_mode_latched", False)
         or summary.get("final_depth_latched", False)
@@ -609,8 +655,8 @@ def arbitrate_table_docking_motion(
         or getattr(ctx, "final_edge_mode_latched", False)
         or getattr(ctx, "final_depth_latched", False)
     )
-    final_gate_allowed = bool(edge_slope_final_ready_latched or already_in_final_phase)
-    final_gate_block_reason = "" if final_gate_allowed else "fixed_roi_without_edge_slope_latch"
+    final_gate_allowed = bool(fixed_roi_enabled)
+    final_gate_block_reason = "" if final_gate_allowed else "fixed_roi_not_allowed_before_final"
     final_parking_phase = bool(
         summary.get("close_range_latched", False)
         or summary.get("near_table_latched", False)
@@ -647,15 +693,16 @@ def arbitrate_table_docking_motion(
         fixed_roi_context_active
         or bool(summary.get("near_table_latched", False))
         or bool(getattr(ctx, "near_table_latched", False))
-        or edge_ready_for_final
+        or (edge_ready_for_final and fixed_roi_enabled)
         or (fixed_roi_depth_close_enough and final_gate_allowed)
     )
     fixed_roi_selected = bool(final_gate_allowed and fixed_roi_close_context and fixed_roi_valid and fixed_roi_depth_m is not None)
-    fixed_roi_only_blocked = bool(fixed_roi_depth_close_enough and not final_gate_allowed)
+    fixed_roi_only_blocked = bool(raw_fixed_roi_active and not final_gate_allowed)
     legacy_depth_allowed_for_control = bool((not final_parking_phase) or already_in_final_phase or final_gate_allowed)
     final_depth_valid = bool(legacy_depth_allowed_for_control and legacy_roi_depth_valid)
     final_depth_m = legacy_roi_depth_m if final_depth_valid else None
-    final_depth_source = "table_roi_or_latched_roi" if final_depth_valid else "missing"
+    dynamic_roi_source = _dynamic_table_roi_source(summary, docking_obs, state)
+    final_depth_source = dynamic_roi_source if final_depth_valid else "missing"
     if fixed_roi_selected:
         final_depth_valid = True
         final_depth_m = fixed_roi_depth_m
@@ -663,7 +710,7 @@ def arbitrate_table_docking_motion(
     elif legacy_depth_allowed_for_control and legacy_roi_depth_valid and legacy_roi_depth_m is not None:
         final_depth_valid = True
         final_depth_m = legacy_roi_depth_m
-        final_depth_source = "table_roi_or_latched_roi"
+        final_depth_source = dynamic_roi_source
     else:
         final_depth_valid = False
         final_depth_m = None
@@ -673,22 +720,37 @@ def arbitrate_table_docking_motion(
     summary.update(
         {
             "final_fixed_roi_active": bool(fixed_roi_active),
+            "final_fixed_roi_xyxy": summary.get("final_fixed_roi_xyxy", getattr(obs, "final_fixed_roi_xyxy", None) if obs is not None else None),
             "final_fixed_roi_depth_valid": bool(fixed_roi_valid),
-            "final_fixed_roi_depth_p10": fixed_roi_depth_m,
-            "final_fixed_roi_depth_sample_count": summary.get(
-                "final_fixed_roi_depth_sample_count",
-                getattr(obs, "final_fixed_roi_depth_sample_count", None) if obs is not None else None,
+            "final_fixed_roi_depth_mean": fixed_roi_depth_mean_m,
+            "final_fixed_roi_depth_median": fixed_roi_depth_median_m,
+            "final_fixed_roi_depth_p10": fixed_roi_depth_p10_m,
+            "final_fixed_roi_depth_sample_count": (
+                summary.get(
+                    "final_fixed_roi_depth_sample_count",
+                    getattr(obs, "final_fixed_roi_depth_sample_count", None) if obs is not None else None,
+                )
+                if fixed_roi_enabled
+                else None
             ),
-            "final_fixed_roi_depth_valid_ratio": summary.get(
-                "final_fixed_roi_depth_valid_ratio",
-                getattr(obs, "final_fixed_roi_depth_valid_ratio", None) if obs is not None else None,
+            "final_fixed_roi_depth_valid_ratio": (
+                summary.get(
+                    "final_fixed_roi_depth_valid_ratio",
+                    getattr(obs, "final_fixed_roi_depth_valid_ratio", None) if obs is not None else None,
+                )
+                if fixed_roi_enabled
+                else None
             ),
-            "final_fixed_roi_depth_invalid_reason": summary.get(
-                "final_fixed_roi_depth_invalid_reason",
-                getattr(obs, "final_fixed_roi_depth_invalid_reason", "") if obs is not None else "",
+            "final_fixed_roi_depth_invalid_reason": (
+                summary.get(
+                    "final_fixed_roi_depth_invalid_reason",
+                    getattr(obs, "final_fixed_roi_depth_invalid_reason", "") if obs is not None else "",
+                )
+                if fixed_roi_enabled
+                else "not_final_phase"
             ),
-            "final_depth_candidate_source": "fixed_center_low_roi" if fixed_roi_valid and fixed_roi_depth_m is not None else "",
-            "final_depth_candidate_m": float(fixed_roi_depth_m) if fixed_roi_valid and fixed_roi_depth_m is not None else None,
+            "final_depth_candidate_source": "fixed_center_low_roi" if fixed_roi_enabled and fixed_roi_valid and fixed_roi_depth_m is not None else "",
+            "final_depth_candidate_m": float(fixed_roi_depth_m) if fixed_roi_enabled and fixed_roi_valid and fixed_roi_depth_m is not None else None,
             "final_depth_usable_for_control": bool(fixed_roi_selected),
             "final_depth_gate_reason": "gate_open" if fixed_roi_selected else (final_gate_block_reason if fixed_roi_only_blocked else ("not_close_enough" if fixed_roi_valid and fixed_roi_depth_m is not None else "missing_fixed_roi")),
             "final_depth_valid": bool(final_depth_valid),
@@ -696,15 +758,49 @@ def arbitrate_table_docking_motion(
             "final_depth_source": final_depth_source,
             "final_gate_allowed": bool(final_gate_allowed),
             "final_gate_block_reason": str(final_gate_block_reason),
-            "final_gate_state_allowed": bool(already_in_final_phase or state == "YOLO_APPROACH"),
+            "final_gate_state_allowed": bool(fixed_roi_enabled),
             "final_gate_edge_slope_latched": bool(edge_slope_final_ready_latched),
             "final_gate_edge_slope_latch_age_s": edge_slope_latch_age_s,
             "final_gate_fixed_roi_only_blocked": bool(fixed_roi_only_blocked),
-            "final_depth_source_candidate": "fixed_center_low_roi" if fixed_roi_valid and fixed_roi_depth_m is not None else "",
+            "final_depth_source_candidate": "fixed_center_low_roi" if fixed_roi_enabled and fixed_roi_valid and fixed_roi_depth_m is not None else "",
             "final_depth_source_selected": final_depth_source,
             "fixed_roi_depth_m": float(fixed_roi_depth_m) if fixed_roi_depth_m is not None else None,
+            "fixed_roi_depth_mean": fixed_roi_depth_mean_m,
+            "fixed_roi_depth_median": fixed_roi_depth_median_m,
+            "fixed_roi_depth_p10": fixed_roi_depth_p10_m,
+            "fixed_roi_depth_source_stat": fixed_roi_depth_source_stat,
             "fixed_roi_depth_valid": bool(fixed_roi_valid),
             "fixed_roi_depth_close_enough": bool(fixed_roi_depth_close_enough),
+            "final_fixed_roi_depth": {
+                "mean": fixed_roi_depth_mean_m,
+                "median": fixed_roi_depth_median_m,
+                "p10": fixed_roi_depth_p10_m,
+                "valid_count": summary.get(
+                    "final_fixed_roi_depth_sample_count",
+                    getattr(obs, "final_fixed_roi_depth_sample_count", None) if obs is not None else None,
+                ) if fixed_roi_enabled else 0,
+                "valid_ratio": summary.get(
+                    "final_fixed_roi_depth_valid_ratio",
+                    getattr(obs, "final_fixed_roi_depth_valid_ratio", None) if obs is not None else None,
+                ) if fixed_roi_enabled else None,
+            },
+            "fixed_roi_enabled": bool(fixed_roi_enabled),
+            "fixed_roi_skip_reason": fixed_roi_skip_reason,
+            "fixed_roi_depth_m_if_computed": float(fixed_roi_depth_m) if fixed_roi_enabled and fixed_roi_depth_m is not None else None,
+            "fixed_roi_raw_active": bool(raw_fixed_roi_active),
+            "dynamic_roi_enabled": True,
+            "dynamic_roi_depth_m": float(legacy_roi_depth_m) if legacy_roi_depth_m is not None else None,
+            "dynamic_roi_depth_valid": bool(legacy_roi_depth_valid),
+            "yolo_dynamic_roi_depth_p10": float(legacy_roi_depth_m) if state in {"YOLO_APPROACH", "YOLO_FORWARD"} and legacy_roi_depth_m is not None else None,
+            "yolo_dynamic_roi_valid": bool(state in {"YOLO_APPROACH", "YOLO_FORWARD"} and legacy_roi_depth_valid),
+            "final_roi_policy": {
+                "state": state,
+                "fixed_roi_enabled": bool(fixed_roi_enabled),
+                "fixed_roi_skip_reason": fixed_roi_skip_reason,
+                "fixed_roi_xyxy": summary.get("final_fixed_roi_xyxy", getattr(obs, "final_fixed_roi_xyxy", None) if obs is not None else None),
+                "dynamic_roi_enabled": True,
+                "final_depth_source": final_depth_source,
+            },
             "edge_ready_for_final_strong": bool(edge_ready_for_final_strong),
             "edge_slope_final_ready_latched": bool(edge_slope_final_ready_latched),
             "edge_slope_final_ready_reason": str(getattr(ctx, "edge_slope_final_ready_reason", "") or ""),
@@ -1567,6 +1663,36 @@ def arbitrate_table_docking_motion(
             reason="hard_safety",
             service_may_override=True,
         )
+
+    locked_before_final = bool(summary.get("final_locked", False) or getattr(ctx, "final_locked", False))
+    if locked_before_final and not (state in {"FINAL_SLOW_STOP", "FINAL_LOCK", "AT_TABLE_EDGE"}):
+        rejected_reason = (
+            "fixed_roi_not_allowed_before_final"
+            if str(summary.get("final_depth_source") or "") == "fixed_center_low_roi" or bool(summary.get("final_gate_fixed_roi_only_blocked", False))
+            else "not_final_phase"
+        )
+        summary.update(
+            {
+                "final_locked": False,
+                "final_lock_reason": "",
+                "final_lock_rejected": {
+                    "state": state,
+                    "reason": rejected_reason,
+                    "final_depth_source": str(summary.get("final_depth_source") or ""),
+                    "fixed_roi_enabled": bool(summary.get("fixed_roi_enabled", False)),
+                    "dynamic_roi_depth_m": summary.get("dynamic_roi_depth_m"),
+                    "fixed_roi_depth_m_if_computed": summary.get("fixed_roi_depth_m_if_computed"),
+                },
+                "final_lock_rejected_state": state,
+                "final_lock_rejected_reason": rejected_reason,
+                "final_lock_rejected_final_depth_source": str(summary.get("final_depth_source") or ""),
+            }
+        )
+        try:
+            ctx.final_locked = False
+            ctx.final_lock_reason = ""
+        except Exception:
+            pass
 
     if bool(summary.get("final_locked", False) or getattr(ctx, "final_locked", False)):
         return _docking_result(

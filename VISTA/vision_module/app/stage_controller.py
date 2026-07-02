@@ -294,6 +294,8 @@ class StageController:
             "locked_edge_conf",
             "locked_obs_seq",
             "current_edge_id",
+            "orchestrator_state",
+            "final_phase_active",
             "remote_class_id",
             "remote_robot_id",
             "remote_timeout_s",

@@ -55,6 +55,11 @@ def encode_reset() -> str:
     return "RESET\n"
 
 
+def encode_grabbed() -> str:
+    """Encode a GRABBED command for retracting with the object held."""
+    return "GRABBED"
+
+
 def pose_dict_from_command(line: str) -> Dict[str, int]:
     """Parse a POSE command line into the integer pose sent to firmware."""
     parts = str(line or "").strip().split()
@@ -107,7 +112,8 @@ def parse_arm_response_detail(line: str) -> Dict[str, Any]:
     """Parse one raw line from the arm serial port.
 
     Returns a dict with status in:
-      OK_POSE, ERR_IK, ERR_CMD, NOISE, UNKNOWN.
+      OK_POSE, OK_GRABBED_START, OK_KEEP_CLAW, OK_GRABBED_DONE,
+      ERR_IK, ERR_CMD, NOISE, UNKNOWN.
     """
     raw = str(line or "").strip()
     if not raw:
@@ -120,6 +126,15 @@ def parse_arm_response_detail(line: str) -> Dict[str, Any]:
 
     if upper.startswith("OK POSE"):
         return {"status": "OK_POSE", "raw": raw, "pose": parse_pose_fields(raw)}
+
+    if upper.startswith("OK GRABBED DONE"):
+        return {"status": "OK_GRABBED_DONE", "raw": raw}
+
+    if upper.startswith("OK GRABBED START"):
+        return {"status": "OK_GRABBED_START", "raw": raw}
+
+    if upper.startswith("OK KEEP_CLAW"):
+        return {"status": "OK_KEEP_CLAW", "raw": raw}
 
     if upper.startswith("ERR IK"):
         detail = {"status": "ERR_IK", "raw": raw}
@@ -168,6 +183,24 @@ def parse_arm_response(line: str) -> Optional[ArmResponse]:
             raw_line=line,
             ts=now_ts(),
             parsed_status="OK_POSE",
+        )
+
+    if status == "OK_GRABBED_DONE":
+        return ArmResponse(
+            ok=True,
+            message="OK_GRABBED_DONE",
+            raw_line=line,
+            ts=now_ts(),
+            parsed_status="OK_GRABBED_DONE",
+        )
+
+    if status in {"OK_GRABBED_START", "OK_KEEP_CLAW"}:
+        return ArmResponse(
+            ok=False,
+            message=status,
+            raw_line=line,
+            ts=now_ts(),
+            parsed_status=status,
         )
 
     if status == "ERR_IK":

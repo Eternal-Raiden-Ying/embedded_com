@@ -202,8 +202,6 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
     grasp_remote_depth = _camera_override_with_updates(
         cfg,
         "depth",
-        width=1280,
-        height=720,
         fps=15,
     )
     grasp_remote_cameras = {

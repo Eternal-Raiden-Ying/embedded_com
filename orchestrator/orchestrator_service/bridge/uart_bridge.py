@@ -136,6 +136,11 @@ class UartBridge:
         self._tx_event.set()
         return True
 
+    def send_motion_line_now(self, command_line: str, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
+        if not str(command_line or "").strip():
+            return False
+        return bool(self._write_line(str(command_line).strip(), tx_meta=tx_meta, publish_mono=time.monotonic()))
+
     def send_stm32_vel(self, vx_mps, vy_mps, wz_radps, _unused=None, seq=None, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
         del _unused, seq
         return self.send_motion_line(encode_vel(vx_mps, vy_mps, wz_radps), tx_meta=tx_meta)
@@ -367,9 +372,9 @@ class UartBridge:
             except Exception:
                 pass
 
-    def _write_line(self, line: str, tx_meta: Optional[Dict[str, Any]] = None, publish_mono: Optional[float] = None):
+    def _write_line(self, line: str, tx_meta: Optional[Dict[str, Any]] = None, publish_mono: Optional[float] = None) -> bool:
         if not line:
-            return
+            return False
         with self._write_lock:
             if publish_mono is not None or tx_meta is not None:
                 item_to_check = {
@@ -381,7 +386,7 @@ class UartBridge:
                 if discard_reason:
                     self._log("warn", f"Discarding velocity command under write lock: {line}")
                     self._emit_writer_discard(item_to_check, discard_reason)
-                    return
+                    return False
             raw_line = str(line).rstrip("\r\n")
             wire_line = raw_line.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r\n") + "\r\n"
             self._last_line = raw_line
@@ -422,3 +427,4 @@ class UartBridge:
             if error:
                 meta["uart_tx_error"] = error
             self._emit_tx_callback(wire_line, self.dry_run, meta)
+            return bool(ok)

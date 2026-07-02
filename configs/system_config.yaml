@@ -125,10 +125,10 @@ vision:
     table_roi_depth_current_min_valid_ratio: 0.08 # Valid depth ratio for current ROI sampler
     table_roi_depth_current_min_sample_count: 64 # Valid depth sample count for current ROI sampler
     final_fixed_roi_enable: true # Use fixed center-low ROI during close/final depth control
-    final_fixed_roi_x0_norm: 0.22 # Fixed final ROI left edge in depth-frame normalized coords
-    final_fixed_roi_x1_norm: 0.78 # Fixed final ROI right edge in depth-frame normalized coords
-    final_fixed_roi_y0_norm: 0.60 # Fixed final ROI top edge in depth-frame normalized coords
-    final_fixed_roi_y1_norm: 0.96 # Fixed final ROI bottom edge in depth-frame normalized coords
+    final_fixed_roi_x0_norm: 0.40 # Fixed final ROI left edge in depth-frame normalized coords
+    final_fixed_roi_x1_norm: 0.60 # Fixed final ROI right edge in depth-frame normalized coords
+    final_fixed_roi_y0_norm: 0.45 # Fixed final ROI top edge in depth-frame normalized coords
+    final_fixed_roi_y1_norm: 0.62 # Fixed final ROI bottom edge in depth-frame normalized coords
     final_fixed_roi_min_valid_ratio: 0.03 # Valid depth ratio for fixed final ROI sampler
     final_fixed_roi_min_sample_count: 32 # Valid depth sample count for fixed final ROI sampler
     final_depth_debug_enable: false # Keep low-level ROI sampler diagnostics out of main payload/logs
@@ -204,7 +204,7 @@ vision:
           enabled: true
           kind: task
           action: init
-          base_url: "http://10.11.40.164:6006"
+          base_url: "10.11.36.181:6006"
           robot_id: "sc171_car_01"
           metadata:
             robot_id: "sc171_car_01"
@@ -237,7 +237,7 @@ vision:
           capture_warmup_timeout_s: 1.0
           expected_rgb_shape: [720, 1280]
           expected_depth_shape: [720, 1280]
-          base_url: "http://10.11.40.164:6006"
+          base_url: "http://10.11.36.181:6006"
           robot_id: "sc171_car_01"
           metadata:
             robot_id: "sc171_car_01"

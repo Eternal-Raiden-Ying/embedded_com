@@ -123,6 +123,8 @@ def _sync_edge_follow_payload(req: VisionReq, ctx: StageContext) -> None:
         "locked_edge_conf",
         "locked_obs_seq",
         "current_edge_id",
+        "orchestrator_state",
+        "final_phase_active",
     ):
         if key in payload:
             ctx.stage_state[key] = payload.get(key)

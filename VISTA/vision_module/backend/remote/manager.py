@@ -363,6 +363,22 @@ class RemoteManager:
             return None
 
     @staticmethod
+    def _resize_frame_hw(frame, shape_hw, *, nearest: bool = False):
+        if frame is None or cv2 is None:
+            return frame
+        shape = RemoteManager._shape_hw_list(shape_hw, default=None)
+        if not shape:
+            return frame
+        current = RemoteManager._frame_shape(frame)
+        if current is not None and current[:2] == shape[:2]:
+            return frame
+        try:
+            interpolation = cv2.INTER_NEAREST if nearest else cv2.INTER_AREA
+            return cv2.resize(frame, (int(shape[1]), int(shape[0])), interpolation=interpolation)
+        except Exception:
+            return frame
+
+    @staticmethod
     def _depth_stats(depth) -> Dict[str, Any]:
         if depth is None or not hasattr(depth, "size") or int(depth.size) <= 0:
             return {
@@ -566,14 +582,30 @@ class RemoteManager:
             )
             return None
 
+        expected_rgb = self._shape_hw_list(self._runtime_profile.get("expected_rgb_shape"), default=[720, 1280])
+        expected_depth = self._shape_hw_list(self._runtime_profile.get("expected_depth_shape"), default=[720, 1280])
+        raw_rgb_shape = self._frame_shape(rgb)
+        raw_depth_shape = self._frame_shape(depth)
+        upload_frames = dict(frames)
+        rgb_upload = self._resize_frame_hw(rgb, expected_rgb, nearest=False)
+        depth_upload = self._resize_frame_hw(depth, expected_depth, nearest=True) if depth is not None else None
+        upload_frames["rgb"] = rgb_upload
+        if depth_upload is not None:
+            upload_frames["depth"] = depth_upload
+        rgb = rgb_upload
+        depth = depth_upload
         capture = self._precheck_capture_shapes(
-            frames=frames,
+            frames=upload_frames,
             frame_slot=frame_slot,
             request_id=request_id,
             require_depth=require_depth,
         )
         if capture is None:
             return None
+        capture["raw_rgb_shape"] = raw_rgb_shape
+        capture["raw_depth_shape"] = raw_depth_shape
+        capture["rgb_upload_resized"] = bool(raw_rgb_shape is not None and self._frame_shape(rgb) is not None and raw_rgb_shape[:2] != self._frame_shape(rgb)[:2])
+        capture["depth_upload_resized"] = bool(raw_depth_shape is not None and self._frame_shape(depth) is not None and raw_depth_shape[:2] != self._frame_shape(depth)[:2])
 
         rgb_encoding = normalize_image_encoding(self._runtime_profile.get("rgb_encoding", "jpeg"), default="jpeg")
         depth_encoding = normalize_image_encoding(self._runtime_profile.get("depth_encoding", "png"), default="png")

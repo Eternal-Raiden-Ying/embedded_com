@@ -325,10 +325,10 @@ class TableEdgeConfig:
     table_roi_depth_current_min_valid_ratio: float = 0.08
     table_roi_depth_current_min_sample_count: int = 64
     final_fixed_roi_enable: bool = True
-    final_fixed_roi_x0_norm: float = 0.22
-    final_fixed_roi_x1_norm: float = 0.78
-    final_fixed_roi_y0_norm: float = 0.60
-    final_fixed_roi_y1_norm: float = 0.96
+    final_fixed_roi_x0_norm: float = 0.40
+    final_fixed_roi_x1_norm: float = 0.60
+    final_fixed_roi_y0_norm: float = 0.45
+    final_fixed_roi_y1_norm: float = 0.62
     final_fixed_roi_min_valid_ratio: float = 0.03
     final_fixed_roi_min_sample_count: int = 32
     final_depth_debug_enable: bool = False

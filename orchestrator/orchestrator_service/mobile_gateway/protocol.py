@@ -19,6 +19,8 @@ SUPPORTED_COMMANDS: Set[str] = {
     "retry_search",
     "go_home",
     "query_status",
+    "manual_drive",
+    "manual_stop",
 }
 
 SUPPORTED_TARGETS: Set[str] = {

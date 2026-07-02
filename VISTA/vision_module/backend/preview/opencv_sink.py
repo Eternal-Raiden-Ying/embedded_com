@@ -302,6 +302,13 @@ class OpenCVPreviewSink(PreviewSink):
             roi = table_edge.get(name)
             if roi:
                 self._draw_roi(panel, roi, scale, offset, name, color, dashed=(name != "depth_edge_roi"))
+        preview_roi = table_edge.get("preview_roi_draw") if isinstance(table_edge.get("preview_roi_draw"), dict) else {}
+        fixed_roi_enabled = self._boolish(table_edge.get("fixed_roi_enabled") or preview_roi.get("enabled"))
+        fixed_roi = table_edge.get("final_fixed_roi_xyxy") or table_edge.get("fixed_roi_xyxy") or preview_roi.get("xyxy")
+        if fixed_roi_enabled and fixed_roi:
+            mean = self._fmt_na(table_edge.get("final_fixed_roi_depth_mean") or table_edge.get("fixed_roi_depth_mean"))
+            p10 = self._fmt_na(table_edge.get("final_fixed_roi_depth_p10") or table_edge.get("fixed_roi_depth_p10"))
+            self._draw_roi(panel, fixed_roi, scale, offset, f"final_fixed_roi mean={mean} p10={p10}", (255, 120, 40), dashed=False)
         self._draw_pixel_points_transformed(panel, table_edge.get("fast_sampled_pixels"), scale, offset, (80, 80, 120), radius=1, alpha=0.35)
         self._draw_pixel_points_transformed(panel, table_edge.get("fast_candidate_pixels"), scale, offset, (0, 220, 255), radius=1, alpha=0.78)
         self._draw_pixel_points_transformed(panel, table_edge.get("fast_edge_pixels"), scale, offset, (255, 190, 40), radius=2, alpha=0.95)
@@ -1002,6 +1009,8 @@ class OpenCVPreviewSink(PreviewSink):
                 f"edge_roi={table_edge.get('edge_roi') or table_edge.get('table_edge_roi') or 'n/a'}",
                 f"table_bbox={table_bbox_status} table_quadrant={table_quadrant}",
                 f"roi_source={table_edge.get('roi_source') or 'n/a'}",
+                f"final_fixed_roi enabled={self._boolish(table_edge.get('fixed_roi_enabled'))} xyxy={table_edge.get('final_fixed_roi_xyxy') or table_edge.get('fixed_roi_xyxy') or 'n/a'}",
+                f"final_fixed_depth mean={self._fmt_na(table_edge.get('final_fixed_roi_depth_mean'))} median={self._fmt_na(table_edge.get('final_fixed_roi_depth_median'))} p10={self._fmt_na(table_edge.get('final_fixed_roi_depth_p10'))}",
             ]),
             ("TARGET", [
                 f"target={target_name}",

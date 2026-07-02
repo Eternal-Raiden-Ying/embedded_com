@@ -175,6 +175,8 @@ class VisionSyncMixin:
         payload = dict(binding.payload or {})
         payload["req_type"] = req_type
         payload["request_reason"] = "vision_mode_changed" if req_type == "mode_request" else "target_or_stage_update"
+        payload["orchestrator_state"] = self.ctx.state.value
+        payload["final_phase_active"] = self.ctx.state == State.FINAL_SLOW_STOP
         
         self._log("info", f"[VISION_PAYLOAD] state={self.ctx.state.value} type={req_type} op={op} desired={self.ctx.desired_vision_stage}/{self.ctx.desired_vision_mode} confirmed={prev_stage}/{prev_mode}")
         
