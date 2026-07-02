@@ -61,6 +61,7 @@ def postprocess_depth_image(depth_img, cfgs):
     if not getattr(cfgs, "depth_postprocess", True):
         return depth
 
+    smooth_method = str(getattr(cfgs, "depth_smooth_method", "median"))
     smooth_kernel = int(getattr(cfgs, "depth_smooth_kernel", 5))
     hole_fill_kernel = int(getattr(cfgs, "depth_hole_fill_kernel", 5))
     hole_fill_iterations = int(getattr(cfgs, "depth_hole_fill_iterations", 2))
@@ -71,8 +72,16 @@ def postprocess_depth_image(depth_img, cfgs):
         hole_fill_kernel += 1
 
     processed = depth.copy()
-    if smooth_kernel > 1:
-        smoothed = cv2.medianBlur(processed, smooth_kernel)
+    if smooth_kernel > 1 and smooth_method != "none":
+        if smooth_method == "bilateral":
+            bilat_d = int(getattr(cfgs, "depth_bilateral_d", 9))
+            bilat_sigma = float(getattr(cfgs, "depth_bilateral_sigma", 75.0))
+            smoothed = cv2.bilateralFilter(
+                processed.astype(np.float32), bilat_d,
+                bilat_sigma, bilat_sigma,
+            ).astype(np.uint16)
+        else:
+            smoothed = cv2.medianBlur(processed, smooth_kernel)
         processed = np.where(processed > 0, smoothed, 0).astype(np.uint16)
 
     processed = _fill_zero_holes_with_median(
@@ -304,8 +313,11 @@ def _collect_aligned_bag_frames(
             depth_to_color_extrin = depth_stream.as_video_stream_profile().get_extrinsics_to(
                 color_stream.as_video_stream_profile()
             )
-        except Exception:
-            pass
+            rot = [f"{v:.6f}" for v in depth_to_color_extrin.rotation]
+            trans = [f"{v:.6f}" for v in depth_to_color_extrin.translation]
+            print(f"[bag_io] depth→color extrinsics extracted — rotation: {rot}, translation: {trans}")
+        except Exception as e:
+            print(f"[bag_io] depth→color extrinsics unavailable: {e}")
 
     align = None if skip_align else rs.align(rs.stream.depth)
 
