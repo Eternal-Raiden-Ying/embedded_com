@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 
-from .server_log import log_msg, log_recv, log_send
+from .server_log import log_msg, log_recv, log_send, request_logger, save_predict_images
 from ..config.global_config import cfgs
 from ..backend.engine import RealSenseGraspPredictor
 from ..backend.protocol import build_downstream_response
@@ -133,23 +133,26 @@ async def init_model():
     if global_predictor is not None:
         msg = "Predictor is already running."
         log_msg(msg, level=logging.WARNING)
+        request_logger.log({"endpoint": "/api/v1/init", "status": "already_loaded"})
         return {"status": "already_loaded", "message": msg}
-    
+
     log_msg("Initializing predictor and loading weights to GPU...")
     try:
         # 1. 实例化模型并加载权重
         global_predictor = RealSenseGraspPredictor(cfgs)
         warmup_predictor(global_predictor)
-        
+
         response = {"status": "success", "message": "Predictor loaded and warmed up successfully."}
         log_send("Model initialization complete.")
+        request_logger.log({"endpoint": "/api/v1/init", "status": "success"})
         return response
-        
+
     except Exception as e:
         if global_predictor is not None:
             del global_predictor
             global_predictor = None
         log_msg(f"Failed to load model: {str(e)}", level=logging.ERROR)
+        request_logger.log({"endpoint": "/api/v1/init", "status": "error", "error": str(e)})
         raise HTTPException(status_code=500, detail=f"Init failed: {str(e)}")
 
 @app.post("/api/v1/predict")
@@ -182,16 +185,23 @@ async def predict_grasp(
 
     log_msg(f"Starting inference pipeline for {robot_id}...")
     tic = time.time()
-    
-    # --- 您的解码和推理逻辑 ---
-    rgb = _decode_rgb_image(await rgb_file.read())
-    depth = _decode_depth_image(await depth_file.read())
+
+    # --- 读取原始字节并保存最新图片（每次覆盖） ---
+    rgb_bytes = await rgb_file.read()
+    depth_bytes = await depth_file.read()
+    save_predict_images(rgb_bytes, depth_bytes)
+
+    # --- 解码和推理逻辑 ---
+    rgb = _decode_rgb_image(rgb_bytes)
+    depth = _decode_depth_image(depth_bytes)
     grasp_results = global_predictor.infer(rgb, depth, int(class_id))
     yolo_info = global_predictor.get_last_yolo_info()
 
-    toc = time.time()
-    log_msg(f"Inference finished in {toc - tic:.3f}s")
+    infer_time = time.time() - tic
+    log_msg(f"Inference finished in {infer_time:.3f}s")
 
+    # --- protocol 过滤 + 下游响应 ---
+    tic_protocol = time.time()
     protocol_targets = global_predictor.build_protocol_targets(grasp_results)
     reposition_proposal = None
     if not protocol_targets:
@@ -205,6 +215,8 @@ async def predict_grasp(
         requested_class_id=int(class_id),
         reposition_proposal=reposition_proposal,
     )
+    protocol_time = time.time() - tic_protocol
+    log_msg(f"Protocol filtering + response built in {protocol_time:.3f}s")
     if response["status"] == "success":
         for idx, target in enumerate(response["targets"], start=1):
             log_msg(
@@ -230,7 +242,23 @@ async def predict_grasp(
                 f"capped={proposal['capped']}"
             )
     log_send(f"Sending results back to '{robot_id}'")
-    
+
+    request_logger.log({
+        "endpoint": "/api/v1/predict",
+        "robot_id": robot_id,
+        "cmd": cmd,
+        "class_id": class_id,
+        "rgb_size": rgb_file.size,
+        "depth_size": depth_file.size,
+        "inference_time_s": round(infer_time, 3),
+        "protocol_time_s": round(protocol_time, 3),
+        "status": response.get("status"),
+        "reason": response.get("reason"),
+        "grasp_count": response.get("grasp_count"),
+        "feasible_count": response.get("feasible_count"),
+        "target_count": len(response.get("targets", [])),
+    })
+
     return response
 
 @app.post("/api/v1/release")
@@ -243,10 +271,11 @@ async def release_model():
         log_msg(msg, level=logging.WARNING)
         response = {"status": "already_released", "message": msg}
         log_send(f"Response: {response['status']}")
+        request_logger.log({"endpoint": "/api/v1/release", "status": "already_released"})
         return response
-    
+
     log_msg("Releasing predictor and freeing GPU memory...")
-    
+
     # 释放显存逻辑
     del global_predictor
     global_predictor = None
@@ -254,9 +283,10 @@ async def release_model():
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         log_msg("CUDA cache cleared.")
-        
+
     response = {"status": "success", "message": "GPU memory freed."}
     log_send("Model released successfully.")
+    request_logger.log({"endpoint": "/api/v1/release", "status": "success"})
     return response
 
 if __name__ == "__main__":
@@ -264,4 +294,4 @@ if __name__ == "__main__":
 
     # 使用 dataclass 中的参数控制
     # uvicorn_logger 设为 warning 防止其自带的格式打乱我们的清晰日志
-    uvicorn.run(app, host="127.0.0.1", port=6006, log_level="warning")
+    uvicorn.run(app, host="0.0.0.0", port=6006, log_level="warning")

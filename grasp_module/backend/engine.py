@@ -722,6 +722,11 @@ class RealSenseGraspPredictor:
             )
             timings['debug_export'] = time.perf_counter() - stage_tic
 
+            # 保存 protocol 过滤后的抓取结果
+            stage_tic = time.perf_counter()
+            self._save_debug_protocol_grasps(gg)
+            timings['protocol_debug'] = time.perf_counter() - stage_tic
+
         timings['total'] = time.perf_counter() - tic
         self._print_debug_timings(
             timings,
@@ -735,6 +740,48 @@ class RealSenseGraspPredictor:
         logger.info('Inference finished. Found %s grasps. Time: %.4fs', gg.__len__(), timings['total'])
 
         return gg
+
+    def _save_debug_protocol_grasps(self, gg):
+        """保存 protocol 过滤后的抓取结果到 PLY（debug 模式）。"""
+        protocol_targets = self.build_protocol_targets(gg)
+        if not protocol_targets:
+            logger.info("[DEBUG] No grasps passed protocol filtering — nothing to save")
+            return
+
+        protocol_group = self.build_protocol_grasp_group(gg)
+        if protocol_group is None or len(protocol_group) == 0:
+            return
+
+        export_count = min(len(protocol_group), int(getattr(self.cfgs, 'debug_grasp_count', 3)))
+        for i in range(export_count):
+            grasp = protocol_group[i]
+            mesh = build_gripper_mesh(
+                center=grasp.translation,
+                rotation_matrix=grasp.rotation_matrix,
+                width=grasp.width,
+                depth=grasp.depth,
+                score=grasp.score,
+                height=float(getattr(self.cfgs, 'gripper_height_m', 0.004)),
+                finger_width=float(getattr(self.cfgs, 'gripper_finger_width_m', 0.004)),
+                finger_length=float(getattr(self.cfgs, 'collision_finger_length_m', 0.07)),
+                tail_length=float(getattr(self.cfgs, 'gripper_tail_length_m', 0.04)),
+                depth_base=float(getattr(self.cfgs, 'gripper_depth_base_m', 0.02)),
+            )
+            target = protocol_targets[i] if i < len(protocol_targets) else {}
+            output_path = build_ply_output_path(
+                self.cfgs.dump_dir,
+                f"protocol_grasp_{i:02d}_score{target.get('confidence', 0):.4f}_dist{target.get('feasible_distance_cm', 0):.2f}cm.ply",
+            )
+            o3d.io.write_triangle_mesh(output_path, mesh)
+            logger.info(
+                "[DEBUG] Protocol grasp #%d: score=%.4f x=%.2f y=%.2f z=%.2f → %s",
+                i + 1,
+                target.get('confidence', 0),
+                target.get('x_cm', 0),
+                target.get('y_cm', 0),
+                target.get('z_cm', 0),
+                output_path,
+            )
 
     def save_debug_visualizations(self, color_img, depth_img, seg_mask, bbox_mask, gg, scene_points=None, scene_colors=None, overlay_img=None, masked_points=None, masked_colors=None):
         """
