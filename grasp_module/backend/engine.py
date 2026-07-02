@@ -110,7 +110,12 @@ class RealSenseGraspPredictor:
 
     def _load_grasp_model(self):
         logger.info("Loading GraspNet model from %s", self.cfgs.checkpoint_path)
-        net = GraspNet(seed_feat_dim=self.cfgs.seed_feat_dim, is_training=False)
+        net = GraspNet(
+            seed_feat_dim=self.cfgs.seed_feat_dim,
+            is_training=False,
+            M_points=self.cfgs.m_point,
+            graspness_threshold=self.cfgs.graspness_threshold,
+        )
         net.to(self.device)
 
         checkpoint = torch.load(self.cfgs.checkpoint_path, map_location=self.device)
@@ -581,7 +586,7 @@ class RealSenseGraspPredictor:
     def _forward_grasps(self, batch_data):
         with torch.no_grad():
             end_points = self.net(batch_data)
-            grasp_preds_list = pred_decode(end_points)
+            grasp_preds_list = pred_decode(end_points, grasp_max_width=self.cfgs.grasp_max_width)
         preds = grasp_preds_list[0].detach().cpu().numpy()
         return GraspGroup(preds)
 

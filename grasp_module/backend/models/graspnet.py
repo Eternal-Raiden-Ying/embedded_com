@@ -17,13 +17,14 @@ from pointnet2.pointnet2_utils import furthest_point_sample, gather_operation
 
 
 class GraspNet(nn.Module):
-    def __init__(self, cylinder_radius=0.05, seed_feat_dim=512, is_training=True):
+    def __init__(self, cylinder_radius=0.05, seed_feat_dim=512, is_training=True, M_points=M_POINT, graspness_threshold=GRASPNESS_THRESHOLD):
         super().__init__()
         self.is_training = is_training
         self.seed_feature_dim = seed_feat_dim
         self.num_depth = NUM_DEPTH
         self.num_angle = NUM_ANGLE
-        self.M_points = M_POINT
+        self.M_points = M_points
+        self.graspness_threshold = graspness_threshold
         self.num_view = NUM_VIEW
 
         self.backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
@@ -48,7 +49,7 @@ class GraspNet(nn.Module):
         graspness_score = end_points['graspness_score'].squeeze(1) # what  is this and if this will influence when running infer only
         objectness_pred = torch.argmax(objectness_score, 1) # 2dim: 不能抓，能抓
         objectness_mask = (objectness_pred == 1)
-        graspness_mask = graspness_score > GRASPNESS_THRESHOLD
+        graspness_mask = graspness_score > self.graspness_threshold
         graspable_mask = objectness_mask & graspness_mask
 
         seed_features_graspable = []
@@ -89,7 +90,7 @@ class GraspNet(nn.Module):
         return end_points
 
 
-def pred_decode(end_points):
+def pred_decode(end_points, grasp_max_width=GRASP_MAX_WIDTH):
     batch_size = len(end_points['point_clouds'])
     grasp_preds = []
     for i in range(batch_size):
@@ -105,7 +106,7 @@ def pred_decode(end_points):
         grasp_width = 1.2 * end_points['grasp_width_pred'][i] / 10.
         grasp_width = grasp_width.view(M_POINT, NUM_ANGLE*NUM_DEPTH)
         grasp_width = torch.gather(grasp_width, 1, grasp_score_inds.view(-1, 1))
-        grasp_width = torch.clamp(grasp_width, min=0., max=GRASP_MAX_WIDTH)
+        grasp_width = torch.clamp(grasp_width, min=0., max=grasp_max_width)
 
         approaching = -end_points['grasp_top_view_xyz'][i].float()
         grasp_rot = batch_viewpoint_params_to_matrix(approaching, grasp_angle)

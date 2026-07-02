@@ -13,6 +13,9 @@ class PredictorConfig:
     checkpoint_path: str = os.path.join(MODULE_DIR, 'weights', 'minkuresunet_realsense.tar')
     dump_dir: str = os.path.join(MODULE_DIR, 'test', 'debug_res')
     seed_feat_dim: int = 512
+    m_point: int = 1024
+    graspness_threshold: float = 0.1
+    grasp_max_width: float = 0.1
     num_point: int = 15000
     voxel_size: float = 0.005
     collision_thresh: float = 0.01
@@ -43,7 +46,7 @@ class PredictorConfig:
     yolo_weights_dir: str = os.path.join(MODULE_DIR, 'weights')
     yolo_class_id: int = 1
     yolo_conf: float = 0.25
-    yolo_iou: float = 0.7
+    yolo_iou: float = 0.6
     bbox_expand_scale: float = 2.0
     forward_bbox_scale: float = 1.0
     collision_depth_margin: float = 0.15
@@ -74,6 +77,9 @@ def add_predictor_args(parser, default_overrides=None):
     parser.add_argument('--checkpoint_path', type=str, default=defaults['checkpoint_path'], help='Model checkpoint path')
     parser.add_argument('--dump_dir', type=str, default=defaults['dump_dir'], help='Folder to save debug outputs')
     parser.add_argument('--seed_feat_dim', type=int, default=defaults['seed_feat_dim'], help='Point wise feature dim')
+    parser.add_argument('--m_point', type=int, default=defaults['m_point'], help='Number of grasp seeds (FPS-sampled from graspable points)')
+    parser.add_argument('--graspness_threshold', type=float, default=defaults['graspness_threshold'], help='Minimum graspness score for a point to enter seed pool')
+    parser.add_argument('--grasp_max_width', type=float, default=defaults['grasp_max_width'], help='Maximum gripper opening width in meters (clamp network output)')
     parser.add_argument('--num_point', type=int, default=defaults['num_point'], help='Point Number')
     parser.add_argument('--voxel_size', type=float, default=defaults['voxel_size'], help='Voxel size for sparse convolution')
     parser.add_argument('--collision_thresh', type=float, default=defaults['collision_thresh'], help='Collision threshold, <=0 disables collision detection')
