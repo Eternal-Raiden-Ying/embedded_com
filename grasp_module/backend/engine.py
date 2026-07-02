@@ -693,6 +693,7 @@ class RealSenseGraspPredictor:
                 shell_thickness_m=float(getattr(self.cfgs, 'shell_thickness_m', 0.02)),
                 shell_steps=int(getattr(self.cfgs, 'shell_steps', 2)),
                 depth_diff_threshold_mm=int(getattr(self.cfgs, 'shell_edge_threshold_mm', 20)),
+                edge_kernel=int(getattr(self.cfgs, 'shell_edge_kernel', 1)),
             )
             if len(shell_points) > 0:
                 masked_points = np.concatenate([masked_points, shell_points], axis=0)

@@ -515,7 +515,7 @@ def postprocess_depth_image(depth_img, cfgs):
 # 薄壳点云补充 — 沿视线方向在边缘/空洞处延伸
 # ============================================================
 
-def generate_shell_points(depth, camera, shell_thickness_m=0.02, shell_steps=2, depth_diff_threshold_mm=20):
+def generate_shell_points(depth, camera, shell_thickness_m=0.02, shell_steps=2, depth_diff_threshold_mm=20, edge_kernel=1):
     """在深度不连续处和孔洞边界，沿视线方向生成额外的薄壳点。
 
     用于弥补 depth 图中薄表面/边缘/遮挡区域采集不足的问题。
@@ -528,6 +528,8 @@ def generate_shell_points(depth, camera, shell_thickness_m=0.02, shell_steps=2, 
         shell_thickness_m: 沿视线延伸的总厚度 (米)。
         shell_steps: 延伸点数。
         depth_diff_threshold_mm: 判定为边的深度差阈值 (mm)。
+        edge_kernel: 边缘检测步长 (像素), >=1。k=1 比较相邻像素,
+                     k=N 比较相距 N 像素的两个点。
 
     Returns:
         shell_points: (K, 3) float32 — 补充的 3D 点。
@@ -535,21 +537,24 @@ def generate_shell_points(depth, camera, shell_thickness_m=0.02, shell_steps=2, 
     """
     h, w = depth.shape
     valid = (depth > 0)
+    k = max(1, int(edge_kernel))
 
-    # ── 边缘检测: 近邻深度差 > 阈值 ──
+    # ── 边缘检测: 相距 k 像素的深度差 > 阈值 ──
     edge = np.zeros((h, w), dtype=bool)
-    # 水平方向
-    valid_h = valid[:, 1:] & valid[:, :-1]
-    diff_h = np.abs(depth[:, 1:].astype(np.int32) - depth[:, :-1].astype(np.int32))
-    h_edge = valid_h & (diff_h > depth_diff_threshold_mm)
-    edge[:, 1:] |= h_edge
-    edge[:, :-1] |= h_edge
-    # 垂直方向
-    valid_v = valid[1:, :] & valid[:-1, :]
-    diff_v = np.abs(depth[1:, :].astype(np.int32) - depth[:-1, :].astype(np.int32))
-    v_edge = valid_v & (diff_v > depth_diff_threshold_mm)
-    edge[1:, :] |= v_edge
-    edge[:-1, :] |= v_edge
+    # 水平方向: pixel[x] vs pixel[x+k]
+    if w > k:
+        valid_h = valid[:, k:] & valid[:, :-k]
+        diff_h = np.abs(depth[:, k:].astype(np.int32) - depth[:, :-k].astype(np.int32))
+        h_edge = valid_h & (diff_h > depth_diff_threshold_mm)
+        edge[:, k:] |= h_edge
+        edge[:, :-k] |= h_edge
+    # 垂直方向: pixel[y] vs pixel[y+k]
+    if h > k:
+        valid_v = valid[k:, :] & valid[:-k, :]
+        diff_v = np.abs(depth[k:, :].astype(np.int32) - depth[:-k, :].astype(np.int32))
+        v_edge = valid_v & (diff_v > depth_diff_threshold_mm)
+        edge[k:, :] |= v_edge
+        edge[:-k, :] |= v_edge
 
     # ── 孔洞边界: 有效像素邻接零像素 ──
     kernel = np.ones((3, 3), dtype=np.uint8)

@@ -36,10 +36,11 @@ class PredictorConfig:
     depth_max_mm: int = 2000
 
     # ---- Thin-shell point cloud augmentation ----
-    shell_enable: bool = False
+    shell_enable: bool = True
     shell_thickness_m: float = 0.02
-    shell_steps: int = 2
+    shell_steps: int = 10
     shell_edge_threshold_mm: int = 20
+    shell_edge_kernel: int = 1
 
     debug_grasp_count: int = 15
 
@@ -67,7 +68,7 @@ class PredictorConfig:
     yolo_conf: float = 0.25
     yolo_iou: float = 0.6
     bbox_expand_scale: float = 2.0
-    forward_bbox_scale: float = 1.0
+    forward_bbox_scale: float = 1.05
     collision_depth_margin: float = 0.15
     protocol_depth_base: float = -0.03  # 0.02
     protocol_feasible_distance_cm: float = 5.0
