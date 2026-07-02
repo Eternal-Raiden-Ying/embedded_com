@@ -695,16 +695,9 @@ class RealSenseGraspPredictor:
                 depth_diff_threshold_mm=int(getattr(self.cfgs, 'shell_edge_threshold_mm', 20)),
             )
             if len(shell_points) > 0:
-                # 壳点加到 masked cloud（帮助薄物体生成更多 grasp）
                 masked_points = np.concatenate([masked_points, shell_points], axis=0)
                 masked_colors = np.concatenate([
                     masked_colors,
-                    np.full((len(shell_points), 3), 0.5, dtype=np.float32),  # 灰色
-                ], axis=0)
-                # 壳点加到 scene cloud（提升碰撞检测的鲁棒性）
-                scene_points = np.concatenate([scene_points, shell_points], axis=0)
-                scene_colors = np.concatenate([
-                    scene_colors,
                     np.full((len(shell_points), 3), 0.5, dtype=np.float32),
                 ], axis=0)
                 if getattr(self.cfgs, 'debug', False):
