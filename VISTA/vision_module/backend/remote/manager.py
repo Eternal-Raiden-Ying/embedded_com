@@ -41,20 +41,12 @@ def _cfg_float(cfg: Dict[str, Any], key: str, default: float) -> float:
 
 
 def prepare_remote_rgb(rgb, cfg: Dict[str, Any]):
-    """Prepare an HxWx3 RGB uint8 frame for remote detection/upload."""
+    """Prepare an HxWx3 RGB uint8 frame for remote detection/upload with white balance, exposure gain, gamma, and saturation boost."""
     arr = np.asarray(rgb)
-    input_dtype = str(getattr(arr.dtype, "name", arr.dtype))
-    info: Dict[str, Any] = {
-        "rgb_correction_enable": _cfg_bool(cfg, "remote_rgb_correction_enable", True),
-        "rgb_correction_mode": str(dict(cfg or {}).get("remote_rgb_correction_mode") or "auto_level_gamma"),
-        "rgb_gamma": _cfg_float(cfg, "remote_rgb_gamma", 1.8),
-        "rgb_percentile_low": _cfg_float(cfg, "remote_rgb_percentile_low", 1.0),
-        "rgb_percentile_high": _cfg_float(cfg, "remote_rgb_percentile_high", 99.0),
-        "rgb_input_dtype": input_dtype,
-        "rgb_gain_applied": 1.0,
-    }
     if arr.ndim != 3 or arr.shape[2] < 3:
         raise ValueError(f"remote rgb must be HxWx3, got shape={getattr(arr, 'shape', None)}")
+
+    # 1. Ensure input is RGB uint8
     if arr.dtype != np.uint8:
         if np.issubdtype(arr.dtype, np.floating):
             finite = np.nan_to_num(arr[:, :, :3], nan=0.0, posinf=255.0, neginf=0.0)
@@ -66,54 +58,160 @@ def prepare_remote_rgb(rgb, cfg: Dict[str, Any]):
     else:
         arr_u8 = arr[:, :, :3].copy()
 
-    raw_mean = float(np.mean(arr_u8)) if arr_u8.size else 0.0
-    info["rgb_raw_mean"] = raw_mean
-    if cv2 is None or not info["rgb_correction_enable"] or info["rgb_correction_mode"] != "auto_level_gamma":
-        info.update(
-            {
-                "rgb_y_p_low": None,
-                "rgb_y_p50": None,
-                "rgb_y_p_high": None,
-                "rgb_corrected_mean": raw_mean,
-            }
-        )
+    # Raw channels & luma mean
+    R_f = arr_u8[:, :, 0].astype(np.float32)
+    G_f = arr_u8[:, :, 1].astype(np.float32)
+    B_f = arr_u8[:, :, 2].astype(np.float32)
+
+    raw_r_mean = float(np.mean(R_f)) if R_f.size else 0.0
+    raw_g_mean = float(np.mean(G_f)) if G_f.size else 0.0
+    raw_b_mean = float(np.mean(B_f)) if B_f.size else 0.0
+    raw_channel_mean = [raw_r_mean, raw_g_mean, raw_b_mean]
+
+    raw_luma = 0.299 * R_f + 0.587 * G_f + 0.114 * B_f
+    raw_luma_mean = float(np.mean(raw_luma)) if raw_luma.size else 0.0
+
+    correction_enable = _cfg_bool(cfg, "remote_rgb_correction_enable", True)
+    wb_enable = _cfg_bool(cfg, "remote_rgb_white_balance_enable", True)
+    max_gain = max(1.0, float(_cfg_float(cfg, "remote_rgb_max_gain", 4.0)))
+    target_mean = float(_cfg_float(cfg, "remote_rgb_exposure_target_mean", 90.0))
+    gamma_val = float(_cfg_float(cfg, "remote_rgb_gamma", 1.4))
+    sat_scale = float(_cfg_float(cfg, "remote_rgb_saturation_scale", 1.25))
+
+    if not correction_enable:
+        corrected_luma = raw_luma
+        corrected_luma_mean = raw_luma_mean
+        corrected_channel_mean = raw_channel_mean
+        info = {
+            "remote_rgb_correction_enable": False,
+            "raw_channel_mean": raw_channel_mean,
+            "wb_channel_gain": [1.0, 1.0, 1.0],
+            "raw_luma_mean": raw_luma_mean,
+            "exposure_gain": 1.0,
+            "gamma": 1.0,
+            "saturation_scale": 1.0,
+            "corrected_channel_mean": corrected_channel_mean,
+            "corrected_luma_mean": corrected_luma_mean,
+        }
         return arr_u8, info
 
-    ycc = cv2.cvtColor(arr_u8, cv2.COLOR_RGB2YCrCb)
-    y = ycc[:, :, 0].astype(np.float32)
-    p_low = max(0.0, min(100.0, float(info["rgb_percentile_low"])))
-    p_high = max(0.0, min(100.0, float(info["rgb_percentile_high"])))
-    if p_high <= p_low:
-        p_low, p_high = 1.0, 99.0
-    y_low = float(np.percentile(y, p_low))
-    y_p50 = float(np.percentile(y, 50.0))
-    y_high = float(np.percentile(y, p_high))
-    info.update(
-        {
-            "rgb_y_p_low": y_low,
-            "rgb_y_p50": y_p50,
-            "rgb_y_p_high": y_high,
-        }
-    )
-    raw_bright_enough = bool(raw_mean >= 115.0 or y_p50 >= 125.0 or y_high >= 245.0)
-    if raw_bright_enough or y_high - y_low < 8.0:
-        corrected = arr_u8
+    # Step a: Gray-world White Balance
+    if wb_enable and cv2 is not None:
+        valid_mask = (raw_luma > 5.0) & (raw_luma < 245.0)
+        # Check if valid pixel count is too small (e.g. < 10)
+        if np.count_nonzero(valid_mask) >= 10:
+            r_valid = R_f[valid_mask]
+            g_valid = G_f[valid_mask]
+            b_valid = B_f[valid_mask]
+            r_mean_valid = float(np.mean(r_valid))
+            g_mean_valid = float(np.mean(g_valid))
+            b_mean_valid = float(np.mean(b_valid))
+        else:
+            # Fallback to whole image statistics
+            r_mean_valid = raw_r_mean
+            g_mean_valid = raw_g_mean
+            b_mean_valid = raw_b_mean
+
+        gray_val = (r_mean_valid + g_mean_valid + b_mean_valid) / 3.0
+
+        # gain = target_channel_mean / channel_mean
+        r_gain = gray_val / r_mean_valid if r_mean_valid > 0.0 else 1.0
+        g_gain = gray_val / g_mean_valid if g_mean_valid > 0.0 else 1.0
+        b_gain = gray_val / b_mean_valid if b_mean_valid > 0.0 else 1.0
+
+        # Clip to [1 / max_gain, max_gain]
+        min_g = 1.0 / max_gain
+        r_gain = max(min_g, min(max_gain, r_gain))
+        g_gain = max(min_g, min(max_gain, g_gain))
+        b_gain = max(min_g, min(max_gain, b_gain))
     else:
-        y_norm = y / 255.0
-        stretched = np.clip((y - y_low) / max(1.0, y_high - y_low), 0.0, 1.0)
-        gamma = max(1.0, float(info["rgb_gamma"]))
-        corrected_y = np.power(stretched, 1.0 / gamma)
-        max_gain = max(1.0, _cfg_float(cfg, "remote_rgb_max_gain", 3.0))
-        corrected_y = np.minimum(corrected_y, np.clip(y_norm * max_gain, 0.0, 1.0))
-        y_out = np.clip(np.round(corrected_y * 255.0), 0.0, 255.0).astype(np.uint8)
-        ycc[:, :, 0] = y_out
-        corrected = cv2.cvtColor(ycc, cv2.COLOR_YCrCb2RGB)
-        raw_y_mean = float(np.mean(y)) if y.size else 0.0
-        corrected_y_mean = float(np.mean(y_out)) if y_out.size else raw_y_mean
-        if raw_y_mean > 1e-6:
-            info["rgb_gain_applied"] = min(max_gain, corrected_y_mean / raw_y_mean)
-    info["rgb_corrected_mean"] = float(np.mean(corrected)) if corrected.size else raw_mean
-    return corrected, info
+        r_gain, g_gain, b_gain = 1.0, 1.0, 1.0
+
+    R_wb = np.clip(R_f * r_gain, 0.0, 255.0)
+    G_wb = np.clip(G_f * g_gain, 0.0, 255.0)
+    B_wb = np.clip(B_f * b_gain, 0.0, 255.0)
+
+    # Step b: Exposure Gain
+    wb_luma = 0.299 * R_wb + 0.587 * G_wb + 0.114 * B_wb
+    wb_luma_mean = float(np.mean(wb_luma)) if wb_luma.size else 0.0
+
+    exposure_gain = target_mean / wb_luma_mean if wb_luma_mean > 0.0 else 1.0
+    min_g = 1.0 / max_gain
+    exposure_gain = max(min_g, min(max_gain, exposure_gain))
+
+    R_exp = np.clip(R_wb * exposure_gain, 0.0, 255.0)
+    G_exp = np.clip(G_wb * exposure_gain, 0.0, 255.0)
+    B_exp = np.clip(B_wb * exposure_gain, 0.0, 255.0)
+
+    # Step c: Gamma Brighten (on all individual channels)
+    if gamma_val > 0.0:
+        R_gamma = np.clip(((R_exp / 255.0) ** (1.0 / gamma_val)) * 255.0, 0.0, 255.0)
+        G_gamma = np.clip(((G_exp / 255.0) ** (1.0 / gamma_val)) * 255.0, 0.0, 255.0)
+        B_gamma = np.clip(((B_exp / 255.0) ** (1.0 / gamma_val)) * 255.0, 0.0, 255.0)
+    else:
+        R_gamma, G_gamma, B_gamma = R_exp, G_exp, B_exp
+
+    # Step d: Mild Saturation Boost
+    rgb_temp = np.stack([R_gamma, G_gamma, B_gamma], axis=-1).astype(np.uint8)
+    if cv2 is not None and sat_scale != 1.0:
+        hsv = cv2.cvtColor(rgb_temp, cv2.COLOR_RGB2HSV)
+        h = hsv[:, :, 0]
+        s = hsv[:, :, 1].astype(np.float32)
+        v = hsv[:, :, 2]
+        s_boosted = np.clip(s * sat_scale, 0.0, 255.0).astype(np.uint8)
+        hsv_boosted = np.stack([h, s_boosted, v], axis=-1)
+        corrected_rgb = cv2.cvtColor(hsv_boosted, cv2.COLOR_HSV2RGB)
+    else:
+        corrected_rgb = rgb_temp
+
+    # Corrected channels & luma mean
+    corr_r_mean = float(np.mean(corrected_rgb[:, :, 0])) if corrected_rgb.size else 0.0
+    corr_g_mean = float(np.mean(corrected_rgb[:, :, 1])) if corrected_rgb.size else 0.0
+    corr_b_mean = float(np.mean(corrected_rgb[:, :, 2])) if corrected_rgb.size else 0.0
+    corrected_channel_mean = [corr_r_mean, corr_g_mean, corr_b_mean]
+
+    corr_luma = 0.299 * corrected_rgb[:, :, 0] + 0.587 * corrected_rgb[:, :, 1] + 0.114 * corrected_rgb[:, :, 2]
+    corrected_luma_mean = float(np.mean(corr_luma)) if corr_luma.size else 0.0
+
+    info = {
+        "remote_rgb_correction_enable": True,
+        "raw_channel_mean": raw_channel_mean,
+        "wb_channel_gain": [float(r_gain), float(g_gain), float(b_gain)],
+        "raw_luma_mean": raw_luma_mean,
+        "exposure_gain": float(exposure_gain),
+        "gamma": gamma_val,
+        "saturation_scale": sat_scale,
+        "corrected_channel_mean": corrected_channel_mean,
+        "corrected_luma_mean": corrected_luma_mean,
+    }
+    return corrected_rgb, info
+
+
+def encode_jpeg_from_rgb(rgb_uint8, quality: int = 95) -> Optional[bytes]:
+    if rgb_uint8 is None or cv2 is None:
+        return None
+    arr = np.asarray(rgb_uint8)
+    if arr.ndim == 3 and arr.shape[2] >= 3:
+        try:
+            bgr = cv2.cvtColor(arr[:, :, :3], cv2.COLOR_RGB2BGR)
+            ok, encoded = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), max(0, min(100, int(quality)))])
+            if ok:
+                return encoded.tobytes()
+        except Exception:
+            pass
+    return None
+
+
+def save_jpeg_from_rgb(path, rgb_uint8, quality: int = 95) -> None:
+    if rgb_uint8 is None or cv2 is None:
+        return
+    arr = np.asarray(rgb_uint8)
+    if arr.ndim == 3 and arr.shape[2] >= 3:
+        try:
+            bgr = cv2.cvtColor(arr[:, :, :3], cv2.COLOR_RGB2BGR)
+            cv2.imwrite(str(path), bgr, [int(cv2.IMWRITE_JPEG_QUALITY), max(0, min(100, int(quality)))])
+        except Exception:
+            pass
 
 
 class RemoteManager:
@@ -139,12 +237,13 @@ class RemoteManager:
         self._run_id = str(run_id or "")
         self._rgb_correction_config = {
             "remote_rgb_correction_enable": True,
-            "remote_rgb_correction_mode": "auto_level_gamma",
-            "remote_rgb_gamma": 1.8,
-            "remote_rgb_percentile_low": 1.0,
-            "remote_rgb_percentile_high": 99.0,
-            "remote_rgb_max_gain": 3.0,
+            "remote_rgb_white_balance_enable": True,
+            "remote_rgb_exposure_target_mean": 90.0,
+            "remote_rgb_max_gain": 4.0,
+            "remote_rgb_gamma": 1.4,
+            "remote_rgb_saturation_scale": 1.25,
             "remote_rgb_save_raw": True,
+            "remote_rgb_jpeg_quality": 95,
         }
         self._rgb_correction_config.update(dict(rgb_correction_config or {}))
         self.enabled = False
@@ -534,12 +633,13 @@ class RemoteManager:
     def _remote_rgb_cfg_from_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "remote_rgb_correction_enable": bool(profile.get("remote_rgb_correction_enable", True)),
-            "remote_rgb_correction_mode": str(profile.get("remote_rgb_correction_mode") or "auto_level_gamma"),
-            "remote_rgb_gamma": float(profile.get("remote_rgb_gamma", 1.8) or 1.8),
-            "remote_rgb_percentile_low": float(profile.get("remote_rgb_percentile_low", 1.0) or 1.0),
-            "remote_rgb_percentile_high": float(profile.get("remote_rgb_percentile_high", 99.0) or 99.0),
-            "remote_rgb_max_gain": float(profile.get("remote_rgb_max_gain", 3.0) or 3.0),
+            "remote_rgb_white_balance_enable": bool(profile.get("remote_rgb_white_balance_enable", True)),
+            "remote_rgb_exposure_target_mean": float(profile.get("remote_rgb_exposure_target_mean", 90.0)),
+            "remote_rgb_max_gain": float(profile.get("remote_rgb_max_gain", 4.0)),
+            "remote_rgb_gamma": float(profile.get("remote_rgb_gamma", 1.4)),
+            "remote_rgb_saturation_scale": float(profile.get("remote_rgb_saturation_scale", 1.25)),
             "remote_rgb_save_raw": bool(profile.get("remote_rgb_save_raw", True)),
+            "remote_rgb_jpeg_quality": int(profile.get("remote_rgb_jpeg_quality", 95)),
         }
 
     @staticmethod
@@ -683,6 +783,7 @@ class RemoteManager:
             if bool(metadata.get("remote_rgb_save_raw", True)) and request.rgb_raw_bytes is not None:
                 (archive_dir / "rgb_raw.jpg").write_bytes(request.rgb_raw_bytes)
             if request.rgb_bytes is not None:
+                (archive_dir / "rgb_upload.jpg").write_bytes(request.rgb_bytes)
                 (archive_dir / "rgb.jpg").write_bytes(request.rgb_bytes)
             depth = frames.get("depth") if isinstance(frames, dict) else None
             if depth is not None:
@@ -896,8 +997,13 @@ class RemoteManager:
 
         rgb_encoding = normalize_image_encoding(self._runtime_profile.get("rgb_encoding", "jpeg"), default="jpeg")
         depth_encoding = normalize_image_encoding(self._runtime_profile.get("depth_encoding", "png"), default="png")
-        rgb_channel_order = self._rgb_upload_order(upload_frames)
-        rgb_rgb = self._frame_to_rgb(rgb, rgb_channel_order)
+
+        camera_color_frame_format = str(frames.get("camera_color_frame_format") or "BGR").upper()
+        if camera_color_frame_format == "BGR":
+            rgb_rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
+        else:
+            rgb_rgb = rgb.copy()
+
         remote_rgb_cfg = self._remote_rgb_cfg_from_profile(self._runtime_profile)
         try:
             corrected_rgb, correction_info = prepare_remote_rgb(rgb_rgb, remote_rgb_cfg)
@@ -911,17 +1017,21 @@ class RemoteManager:
                 request_id=request_id,
             )
             return None
-        raw_rgb_bytes = self._encode_rgb_frame(
-            rgb_encoding,
-            rgb_rgb,
-            quality=int(self._runtime_profile.get("rgb_quality", 90) or 90),
-        )
-        upload_rgb = corrected_rgb if bool(correction_info.get("rgb_correction_enable", True)) else rgb_rgb
-        rgb_bytes = self._encode_rgb_frame(
-            rgb_encoding,
-            upload_rgb,
-            quality=int(self._runtime_profile.get("rgb_quality", 90) or 90),
-        )
+
+        jpeg_quality = int(remote_rgb_cfg.get("remote_rgb_jpeg_quality", 95) or 95)
+        raw_rgb_bytes = None
+        if bool(remote_rgb_cfg.get("remote_rgb_save_raw", True)):
+            raw_rgb_bytes = encode_jpeg_from_rgb(rgb_rgb, quality=jpeg_quality)
+
+        upload_rgb = corrected_rgb if bool(correction_info.get("remote_rgb_correction_enable", True)) else rgb_rgb
+        rgb_bytes = encode_jpeg_from_rgb(upload_rgb, quality=jpeg_quality)
+
+        import hashlib
+        rgb_upload_sha256 = ""
+        if rgb_bytes is not None:
+            rgb_upload_sha256 = hashlib.sha256(rgb_bytes).hexdigest()
+        if raw_rgb_bytes is None:
+            raw_rgb_bytes = rgb_bytes
         depth_bytes = None
         if depth is not None:
             depth_bytes = self._encode_frame(
@@ -957,18 +1067,46 @@ class RemoteManager:
         extras = dict(profile_metadata)
         extras.update(request_metadata)
         capture["rgb_channel_order"] = "RGB"
-        capture["rgb_source_channel_order"] = rgb_channel_order
+        capture["rgb_source_channel_order"] = camera_color_frame_format
         capture["rgb_save_backend"] = "cv2"
-        capture["rgb_uploaded_corrected"] = bool(correction_info.get("rgb_correction_enable", True))
+        capture["rgb_uploaded_corrected"] = bool(correction_info.get("remote_rgb_correction_enable", True))
         capture["rgb_raw_archive_name"] = "rgb_raw.jpg"
         capture["rgb_upload_archive_name"] = "rgb.jpg"
         capture["depth_archive_name"] = "depth.png"
+
+        # New audit requirements
+        capture["camera_color_frame_format"] = camera_color_frame_format
+        capture["remote_rgb_format"] = "RGB"
+        capture["rgb_upload_sha256"] = rgb_upload_sha256
+        capture["rgb_upload_file"] = "rgb_upload.jpg"
+        capture["rgb_raw_file"] = "rgb_raw.jpg"
+
+        # Warmup and camera options requirements
+        camera_auto_exposure = frames.get("camera_auto_exposure")
+        camera_auto_white_balance = frames.get("camera_auto_white_balance")
+        remote_rgb_warmup_frames = int(self._runtime_profile.get("capture_warmup_frames", 5) or 5)
+        capture["camera_auto_exposure"] = camera_auto_exposure
+        capture["camera_auto_white_balance"] = camera_auto_white_balance
+        capture["remote_rgb_warmup_frames"] = remote_rgb_warmup_frames
+
         correction_info["rgb_channel_order"] = "RGB"
-        correction_info["rgb_source_channel_order"] = rgb_channel_order
+        correction_info["rgb_source_channel_order"] = camera_color_frame_format
         correction_info["rgb_save_backend"] = "cv2"
+
         extras["capture"] = capture
         extras["correction_info"] = dict(correction_info)
         extras.update(dict(correction_info))
+        extras["camera_color_frame_format"] = camera_color_frame_format
+        extras["remote_rgb_format"] = "RGB"
+        extras["rgb_channel_order"] = "RGB"
+        extras["rgb_save_backend"] = "cv2"
+        extras["rgb_upload_sha256"] = rgb_upload_sha256
+        extras["rgb_upload_file"] = "rgb_upload.jpg"
+        extras["rgb_raw_file"] = "rgb_raw.jpg"
+        extras["camera_auto_exposure"] = camera_auto_exposure
+        extras["camera_auto_white_balance"] = camera_auto_white_balance
+        extras["remote_rgb_warmup_frames"] = remote_rgb_warmup_frames
+
         target = str(cmd.get("target") or extras.get("target") or "")
         for key in (
             "task_id",
@@ -1017,14 +1155,22 @@ class RemoteManager:
             camera_names=camera_names,
             extras=extras,
         )
+
+        wb_gain_str = "[" + ", ".join(f"{g:.3f}" for g in correction_info.get("wb_channel_gain", [1.0, 1.0, 1.0])) + "]"
         self._log(
             "info",
-            "[GRASP_REMOTE][RGB_CORRECT]",
-            request_id=request_id,
-            raw_mean=round(float(correction_info.get("rgb_raw_mean") or 0.0), 3),
-            corrected_mean=round(float(correction_info.get("rgb_corrected_mean") or 0.0), 3),
-            gamma=correction_info.get("rgb_gamma"),
-            gain=round(float(correction_info.get("rgb_gain_applied") or 1.0), 3),
+            f"[GRASP_REMOTE][RGB_CORRECT] request_id={request_id} "
+            f"raw_luma={correction_info.get('raw_luma_mean', 0.0):.3f} "
+            f"corrected_luma={correction_info.get('corrected_luma_mean', 0.0):.3f} "
+            f"wb_gain={wb_gain_str} "
+            f"exposure_gain={correction_info.get('exposure_gain', 1.0):.3f} "
+            f"gamma={correction_info.get('gamma', 1.0):.3f} "
+            f"saturation={correction_info.get('saturation_scale', 1.0):.3f}"
+        )
+        self._log(
+            "info",
+            f"[GRASP_REMOTE][RGB_UPLOAD] request_id={request_id} "
+            f"sha256={rgb_upload_sha256} file=rgb_upload.jpg"
         )
         return RemotePredictRequest(
             rgb_bytes=rgb_bytes,

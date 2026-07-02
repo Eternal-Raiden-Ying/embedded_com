@@ -67,12 +67,13 @@ class VistaApp(BaseModule):
             run_id=str(self.run_logger.stack_run_id),
             rgb_correction_config={
                 "remote_rgb_correction_enable": bool(CONFIG.runtime.remote_rgb_correction_enable),
-                "remote_rgb_correction_mode": str(CONFIG.runtime.remote_rgb_correction_mode),
-                "remote_rgb_gamma": float(CONFIG.runtime.remote_rgb_gamma),
-                "remote_rgb_percentile_low": float(CONFIG.runtime.remote_rgb_percentile_low),
-                "remote_rgb_percentile_high": float(CONFIG.runtime.remote_rgb_percentile_high),
+                "remote_rgb_white_balance_enable": bool(CONFIG.runtime.remote_rgb_white_balance_enable),
+                "remote_rgb_exposure_target_mean": float(CONFIG.runtime.remote_rgb_exposure_target_mean),
                 "remote_rgb_max_gain": float(CONFIG.runtime.remote_rgb_max_gain),
+                "remote_rgb_gamma": float(CONFIG.runtime.remote_rgb_gamma),
+                "remote_rgb_saturation_scale": float(CONFIG.runtime.remote_rgb_saturation_scale),
                 "remote_rgb_save_raw": bool(CONFIG.runtime.remote_rgb_save_raw),
+                "remote_rgb_jpeg_quality": int(CONFIG.runtime.remote_rgb_jpeg_quality),
             },
         )
         table_edge_manager = TableEdgeManager(cfg=CONFIG, logger=self.child_logger("table_edge"))

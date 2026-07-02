@@ -424,8 +424,15 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             camera_overrides=grasp_remote_cameras,
             predictor_enabled=False,
             predictor_model=None,
-            remote=_default_remote_profile(enabled=True, require_depth=True,
-                                             kind="task", action="predict", max_retries=1),
+            remote=RemoteProfile(
+                enabled=True,
+                require_depth=True,
+                kind="task",
+                action="predict",
+                max_retries=1,
+                capture_warmup_frames=5,
+                capture_warmup_timeout_s=0.5,
+            ),
             preview=preview_profile("GRASP_REMOTE", enabled=True),
             release_cooldown_s=3.0,
             metadata={

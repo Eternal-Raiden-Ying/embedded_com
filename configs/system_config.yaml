@@ -38,12 +38,13 @@ vision:
     remote_payload_archive_enable: true # Archive remote predict payloads for replay
     remote_payload_archive_max_keep: 20 # Max remote predict payload directories per run
     remote_rgb_correction_enable: true # Correct remote RGB before cloud predict
-    remote_rgb_correction_mode: "auto_level_gamma" # Remote RGB correction mode
-    remote_rgb_gamma: 1.8 # Gamma brighten for remote RGB luminance
-    remote_rgb_percentile_low: 1.0 # Low percentile for remote RGB auto level
-    remote_rgb_percentile_high: 99.0 # High percentile for remote RGB auto level
-    remote_rgb_max_gain: 3.0 # Max luminance gain for remote RGB correction
+    remote_rgb_white_balance_enable: true # Enable white balance correction
+    remote_rgb_exposure_target_mean: 90.0 # Target mean luma for remote RGB exposure correction
+    remote_rgb_max_gain: 4.0 # Max gain for remote RGB correction
+    remote_rgb_gamma: 1.4 # Gamma correction factor for remote RGB
+    remote_rgb_saturation_scale: 1.25 # Saturation boost scale for remote RGB
     remote_rgb_save_raw: true # Archive raw remote RGB alongside corrected upload
+    remote_rgb_jpeg_quality: 95 # JPEG encoding quality for remote RGB upload
     capability_placeholder: false # Capability sink indicator
     heartbeat_enabled: false # Heartbeat message enabled
     heartbeat_interval_s: 5.0 # Heartbeat message interval

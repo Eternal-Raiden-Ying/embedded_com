@@ -163,33 +163,36 @@ class _SharedRealSenseRgbdSession:
             return False
 
     def _apply_color_controls(self) -> None:
-        auto_requested = bool(self.rgb_params.get("auto_exposure", True))
-        auto_supported = self._rs_option("enable_auto_exposure") is not None
-        if auto_supported:
-            try:
-                auto_supported = bool(self.color_sensor.supports(self._rs_option("enable_auto_exposure")))
-            except Exception:
-                auto_supported = False
-        if auto_requested:
-            auto_applied = self._set_option_best_effort(self.color_sensor, "enable_auto_exposure", 1.0)
-        else:
-            auto_applied = self._set_option_best_effort(self.color_sensor, "enable_auto_exposure", 0.0)
-            exposure = self.rgb_params.get("exposure")
+        try:
+            ae_requested = bool(self.rgb_params.get("auto_exposure", True))
+            ae_applied = self._set_option_best_effort(self.color_sensor, "enable_auto_exposure", 1.0 if ae_requested else 0.0)
+            if not ae_requested:
+                exposure = self.rgb_params.get("exposure")
+                if exposure is not None:
+                    self._set_option_best_effort(self.color_sensor, "exposure", float(exposure))
+
+            # Auto White Balance
+            awb_requested = bool(self.rgb_params.get("auto_white_balance", True))
+            awb_applied = self._set_option_best_effort(self.color_sensor, "enable_auto_white_balance", 1.0 if awb_requested else 0.0)
+
             brightness = self.rgb_params.get("brightness")
-            if exposure is not None:
-                self._set_option_best_effort(self.color_sensor, "exposure", float(exposure))
             if brightness is not None:
                 self._set_option_best_effort(self.color_sensor, "brightness", float(brightness))
-        controls = {
-            "auto_exposure_requested": auto_requested,
-            "auto_exposure_supported": bool(auto_supported),
-            "auto_exposure_applied": bool(auto_applied),
-            "auto_exposure_enabled": self._get_option_best_effort(self.color_sensor, "enable_auto_exposure"),
-            "exposure": self._get_option_best_effort(self.color_sensor, "exposure"),
-            "gain": self._get_option_best_effort(self.color_sensor, "gain"),
-            "brightness": self._get_option_best_effort(self.color_sensor, "brightness"),
-        }
-        self.log.info("realsense_color_controls_applied %s", controls)
+
+            controls = {
+                "auto_exposure_requested": ae_requested,
+                "auto_exposure_applied": bool(ae_applied),
+                "auto_exposure_enabled": self._get_option_best_effort(self.color_sensor, "enable_auto_exposure"),
+                "auto_white_balance_requested": awb_requested,
+                "auto_white_balance_applied": bool(awb_applied),
+                "auto_white_balance_enabled": self._get_option_best_effort(self.color_sensor, "enable_auto_white_balance"),
+                "exposure": self._get_option_best_effort(self.color_sensor, "exposure"),
+                "gain": self._get_option_best_effort(self.color_sensor, "gain"),
+                "brightness": self._get_option_best_effort(self.color_sensor, "brightness"),
+            }
+            self.log.info("realsense_color_controls_applied %s", controls)
+        except Exception as exc:
+            self.log.warning("failed to apply realsense color controls defensively: %s", exc)
 
     @staticmethod
     def _intrinsics_dict(video_profile, *, source: str) -> Optional[Dict[str, Any]]:
@@ -246,6 +249,22 @@ class _SharedRealSenseRgbdSession:
             color_frame = None
         depth = np.asanyarray(depth_frame.get_data()).copy() if depth_frame is not None else np.array([])
         color = self._convert_color(color_frame) if color_frame is not None else np.array([])
+        # Query auto controls defensively
+        camera_auto_exposure = None
+        camera_auto_white_balance = None
+        try:
+            ae = self._get_option_best_effort(self.color_sensor, "enable_auto_exposure")
+            if ae is not None:
+                camera_auto_exposure = bool(ae)
+        except Exception:
+            pass
+        try:
+            awb = self._get_option_best_effort(self.color_sensor, "enable_auto_white_balance")
+            if awb is not None:
+                camera_auto_white_balance = bool(awb)
+        except Exception:
+            pass
+
         return {
             "depth": depth,
             "rgb": color,
@@ -254,6 +273,8 @@ class _SharedRealSenseRgbdSession:
             "depth_scale": self.depth_scale,
             "depth_unit": "m",
             "depth_aligned_to_color": "best_effort_true",
+            "camera_auto_exposure": camera_auto_exposure,
+            "camera_auto_white_balance": camera_auto_white_balance,
         }
 
     def get_depth_intrinsics(self):
@@ -461,6 +482,7 @@ class CameraManager:
             "rgb_crop_rect": [crop_x, crop_y, crop_w, crop_h],
             "rgb_output_shape_config": [out_h, out_w] if out_w > 0 and out_h > 0 else None,
             "rgb_config_source": "vision_params.yaml+mode_profile" if values else "default",
+            "camera_color_frame_format": str(values.get("format") or "BGR").upper(),
         }
 
     def bind_runtime(self, scheduler, generation_getter=None) -> None:
@@ -549,6 +571,12 @@ class CameraManager:
             rgb_shape_actual = list(rgb_shape[:2]) if isinstance(rgb_shape, tuple) and len(rgb_shape) >= 2 else None
             rgb_meta = self._rgb_config_meta(self._params.get("rgb") or {})
             frame_bundle.update(rgb_meta)
+            if self._shared_rgbd is not None and self._shared_rgbd_cycle_bundle:
+                for key in ("camera_auto_exposure", "camera_auto_white_balance"):
+                    if key in self._shared_rgbd_cycle_bundle:
+                        frame_bundle[key] = self._shared_rgbd_cycle_bundle[key]
+            frame_bundle.setdefault("camera_auto_exposure", None)
+            frame_bundle.setdefault("camera_auto_white_balance", None)
             frame_bundle["rgb_output_shape_actual"] = rgb_shape_actual
             frame_bundle["depth_shape_actual"] = depth_shape_actual
             log_key = (
