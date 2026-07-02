@@ -515,6 +515,13 @@ orchestrator:
     task_done_shutdown_vision: false # Only explicit stack stop should close vision/preview
     enable_pick_pipeline: false # Enable picker robot subsystem integration
     assume_grasp_success_for_test: false # Bypass hardware checks during test
+    target_gripper_widths:
+      "苹果": 50.0
+      "猕猴桃": 65.0
+      "瓶子": 70.0
+      "apple": 80.0
+      "bottle": 80.0
+      "kiwi_fruit": 70.0
   car:
     grasp_reposition_speed_cm_s: 10.0 # Base reposition speed during grasp retry
     pre_arm_stop_settle_ms: 150 # Stop settle before sending arm POSE
@@ -717,13 +724,6 @@ orchestrator:
     star fruit: ["杨桃"]
     starfruit: ["杨桃"]
     strawberry: ["草莓"]
-  target_gripper_widths:
-    "苹果": 50.0
-    "猕猴桃": 65.0
-    "瓶子": 70.0
-    "apple": 50.0
-    "kiwi fruit": 65.0
-    "bottle": 70.0
 
 ### === Mobile Gateway Configuration === ###
 gateway:

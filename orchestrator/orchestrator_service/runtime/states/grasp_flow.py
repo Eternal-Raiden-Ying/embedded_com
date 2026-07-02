@@ -199,56 +199,99 @@ class GraspFlowMixin:
             return self.controller.stop_cmd("GRASP")
 
         if isinstance(self.ctx.grasp_result, dict):
+            raw_target = self.ctx.active_target
+            canonical_target = None
+            class_name = None
             class_id = self.ctx.grasp_result.get("class_id")
-            active_target = self.ctx.active_target
-            if class_id is None and active_target:
+
+            if class_id is None and raw_target:
                 try:
-                    class_id = target_to_class_id(active_target)
+                    class_id = target_to_class_id(raw_target)
                 except Exception:
                     pass
 
-            cfg = getattr(self, "cfg", None)
-            lookup_map = getattr(cfg.orchestrator, "target_gripper_widths", {}) if cfg is not None else {}
-            if lookup_map:
-                override_val = None
-                if class_id is not None and str(class_id) in lookup_map:
-                    override_val = lookup_map[str(class_id)]
-                elif class_id is not None and class_id in lookup_map:
-                    override_val = lookup_map[class_id]
+            if raw_target:
+                try:
+                    from ...utils.target_utils import resolve_target
+                    spec = resolve_target(raw_target)
+                    if spec is not None:
+                        canonical_target = spec.canonical_target
+                        class_name = spec.class_name
+                except Exception:
+                    pass
 
-                if override_val is None and class_id is not None:
-                    try:
-                        from ...utils.target_utils import OBJECT_REGISTRY
-                        for spec in OBJECT_REGISTRY.values():
-                            if int(spec.class_id) == int(class_id):
-                                if spec.class_name in lookup_map:
-                                    override_val = lookup_map[spec.class_name]
-                                    break
-                                if spec.canonical_target in lookup_map:
-                                    override_val = lookup_map[spec.canonical_target]
-                                    break
-                    except Exception:
-                        pass
+            if (canonical_target is None or class_name is None) and class_id is not None:
+                try:
+                    from ...utils.target_utils import OBJECT_REGISTRY
+                    for spec in OBJECT_REGISTRY.values():
+                        if int(spec.class_id) == int(class_id):
+                            canonical_target = spec.canonical_target
+                            class_name = spec.class_name
+                            break
+                except Exception:
+                    pass
 
-                if override_val is None and active_target:
-                    if active_target in lookup_map:
-                        override_val = lookup_map[active_target]
-                    else:
-                        try:
-                            from ...utils.target_utils import target_to_canonical
-                            canonical = target_to_canonical(active_target)
-                            if canonical in lookup_map:
-                                override_val = lookup_map[canonical]
-                        except Exception:
-                            pass
+            override_val = None
+            matched_key = None
+            try:
+                cfg = getattr(self, "cfg", None)
+                lookup_map = getattr(cfg, "target_gripper_widths", {}) if cfg is not None else {}
+                if not isinstance(lookup_map, dict):
+                    self._log("warn", f"[GRASP][GRIPPER_WIDTH] target_gripper_widths is not a dict: {type(lookup_map)}")
+                    lookup_map = {}
 
-                if override_val is not None:
+                if lookup_map:
+                    if canonical_target is not None and canonical_target in lookup_map:
+                        override_val = lookup_map[canonical_target]
+                        matched_key = canonical_target
+                    elif class_name is not None and class_name in lookup_map:
+                        override_val = lookup_map[class_name]
+                        matched_key = class_name
+                    elif raw_target is not None and raw_target in lookup_map:
+                        override_val = lookup_map[raw_target]
+                        matched_key = raw_target
+                    elif class_id is not None and str(class_id) in lookup_map:
+                        override_val = lookup_map[str(class_id)]
+                        matched_key = str(class_id)
+                    elif class_id is not None and class_id in lookup_map:
+                        override_val = lookup_map[class_id]
+                        matched_key = str(class_id)
+            except Exception as exc:
+                self._log("warn", f"[GRASP][GRIPPER_WIDTH] failed to lookup target_gripper_widths: {exc}")
+
+            cloud_width = self.ctx.grasp_result.get("gripper_width_cm")
+            override_applied = False
+            final_width = None
+            source = "default"
+            key = "N/A"
+
+            if override_val is not None:
+                try:
                     override_val_float = float(override_val)
                     if override_val_float > 15.0:
-                        self.ctx.grasp_result["gripper_width_cm"] = override_val_float / 10.0
+                        final_width = override_val_float / 10.0
                     else:
-                        self.ctx.grasp_result["gripper_width_cm"] = override_val_float
-                    self._log("info", f"[GRASP][OVERRIDE] Overriding gripper width to {self.ctx.grasp_result['gripper_width_cm']} cm (configured raw={override_val_float}) for class_id={class_id} target={active_target}")
+                        final_width = override_val_float
+                    self.ctx.grasp_result["gripper_width_cm"] = final_width
+                    override_applied = True
+                    source = "override"
+                    key = str(matched_key)
+                except Exception as exc:
+                    self._log("warn", f"[GRASP][GRIPPER_WIDTH] failed to parse override_val {override_val}: {exc}")
+
+            if not override_applied:
+                if cloud_width is not None:
+                    final_width = float(cloud_width)
+                    source = "cloud"
+                else:
+                    final_width = 8.0
+                    self.ctx.grasp_result["gripper_width_cm"] = 8.0
+                    source = "default"
+
+            self._log(
+                "info",
+                f"[GRASP][GRIPPER_WIDTH] target={raw_target} key={key} width={final_width:.3f} source={source}"
+            )
 
             try:
                 arm_cmd = grasp_to_pose_params(

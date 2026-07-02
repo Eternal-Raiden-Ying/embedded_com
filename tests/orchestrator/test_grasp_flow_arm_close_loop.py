@@ -107,12 +107,10 @@ def test_pre_arm_settle_overrides_gripper_width_from_lookup_table():
     flow.ctx.active_target = "苹果"
 
     class ConfigMock:
-        class OrchestratorMock:
-            target_gripper_widths = {
-                "apple": 50.0,
-                "苹果": 50.0,
-            }
-        orchestrator = OrchestratorMock()
+        target_gripper_widths = {
+            "apple": 50.0,
+            "苹果": 50.0,
+        }
     flow.cfg = ConfigMock()
 
     flow.ctx.grasp_result = dict(CANONICAL_GRASP)
