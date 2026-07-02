@@ -509,3 +509,88 @@ def postprocess_depth_image(depth_img, cfgs):
         depth_max_mm=getattr(cfgs, "depth_max_mm", 2000),
     )
     return processed
+
+
+# ============================================================
+# 薄壳点云补充 — 沿视线方向在边缘/空洞处延伸
+# ============================================================
+
+def generate_shell_points(depth, camera, shell_thickness_m=0.02, shell_steps=2, depth_diff_threshold_mm=20):
+    """在深度不连续处和孔洞边界，沿视线方向生成额外的薄壳点。
+
+    用于弥补 depth 图中薄表面/边缘/遮挡区域采集不足的问题。
+    每个标记点沿 camera ray 方向延伸 shell_thickness_m 米，
+    等距生成 shell_steps 个补充点。
+
+    Args:
+        depth: (H,W) uint16 深度图 (mm)。
+        camera: CameraInfo。
+        shell_thickness_m: 沿视线延伸的总厚度 (米)。
+        shell_steps: 延伸点数。
+        depth_diff_threshold_mm: 判定为边的深度差阈值 (mm)。
+
+    Returns:
+        shell_points: (K, 3) float32 — 补充的 3D 点。
+        shell_mask:  (H,W) bool — 哪些像素生成了壳点。
+    """
+    h, w = depth.shape
+    valid = (depth > 0)
+
+    # ── 边缘检测: 近邻深度差 > 阈值 ──
+    edge = np.zeros((h, w), dtype=bool)
+    # 水平方向
+    valid_h = valid[:, 1:] & valid[:, :-1]
+    diff_h = np.abs(depth[:, 1:].astype(np.int32) - depth[:, :-1].astype(np.int32))
+    h_edge = valid_h & (diff_h > depth_diff_threshold_mm)
+    edge[:, 1:] |= h_edge
+    edge[:, :-1] |= h_edge
+    # 垂直方向
+    valid_v = valid[1:, :] & valid[:-1, :]
+    diff_v = np.abs(depth[1:, :].astype(np.int32) - depth[:-1, :].astype(np.int32))
+    v_edge = valid_v & (diff_v > depth_diff_threshold_mm)
+    edge[1:, :] |= v_edge
+    edge[:-1, :] |= v_edge
+
+    # ── 孔洞边界: 有效像素邻接零像素 ──
+    kernel = np.ones((3, 3), dtype=np.uint8)
+    zero_neighbors = cv2.filter2D(
+        (depth == 0).astype(np.uint8), -1, kernel,
+    )
+    hole_boundary = valid & (zero_neighbors > 0)
+
+    # ── 合并 ──
+    shell_mask = edge | hole_boundary
+    if not np.any(shell_mask):
+        return np.empty((0, 3), dtype=np.float32), shell_mask
+
+    # ── 生成 3D 点 ──
+    xmap = np.arange(w, dtype=np.float32)
+    ymap = np.arange(h, dtype=np.float32)
+    xmap, ymap = np.meshgrid(xmap, ymap)
+
+    z_valid = depth[shell_mask].astype(np.float32) / camera.scale
+    x_valid = (xmap[shell_mask] - camera.cx) * z_valid / camera.fx
+    y_valid = (ymap[shell_mask] - camera.cy) * z_valid / camera.fy
+
+    # 视线方向 (camera center → point)
+    ray_x = x_valid / camera.fx  # 未归一化，direction ~ (x/fx, y/fy, z)
+    ray_y = y_valid / camera.fy
+    ray_z = z_valid
+    ray_norm = np.sqrt(ray_x**2 + ray_y**2 + ray_z**2) + 1e-9
+    ray_x /= ray_norm
+    ray_y /= ray_norm
+    ray_z /= ray_norm
+
+    # 沿视线方向延伸 shell_thickness_m，等距生成 shell_steps 层
+    n_base = int(np.sum(shell_mask))
+    shell_points_list = []
+    for step in range(1, shell_steps + 1):
+        delta = shell_thickness_m * step / shell_steps
+        shell_points_list.append(np.stack([
+            x_valid + ray_x * delta,
+            y_valid + ray_y * delta,
+            z_valid + ray_z * delta,
+        ], axis=-1))
+
+    shell_points = np.concatenate(shell_points_list, axis=0).astype(np.float32)
+    return shell_points, shell_mask

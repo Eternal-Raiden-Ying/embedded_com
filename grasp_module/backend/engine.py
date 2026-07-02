@@ -18,6 +18,7 @@ from .utils.data_utils import (
     build_ply_output_path,
     create_colored_point_cloud_from_rgbd,
     filter_point_cloud_by_z,
+    generate_shell_points,
     load_camera_info_from_metadata,
     load_color_camera_info_from_metadata,
     load_depth_to_color_extrinsic,
@@ -682,10 +683,38 @@ class RealSenseGraspPredictor:
                 bbox_mask,
             )
         timings['clouds'] = time.perf_counter() - stage_tic
+
+        # ── 薄壳补充：在边缘/空洞处沿视线延伸 ──
+        shell_tic = time.perf_counter()
+        if getattr(self.cfgs, 'shell_enable', False):
+            shell_points, _shell_mask = generate_shell_points(
+                depth_img,
+                self.camera_info,
+                shell_thickness_m=float(getattr(self.cfgs, 'shell_thickness_m', 0.02)),
+                shell_steps=int(getattr(self.cfgs, 'shell_steps', 2)),
+                depth_diff_threshold_mm=int(getattr(self.cfgs, 'shell_edge_threshold_mm', 20)),
+            )
+            if len(shell_points) > 0:
+                # 壳点加到 masked cloud（帮助薄物体生成更多 grasp）
+                masked_points = np.concatenate([masked_points, shell_points], axis=0)
+                masked_colors = np.concatenate([
+                    masked_colors,
+                    np.full((len(shell_points), 3), 0.5, dtype=np.float32),  # 灰色
+                ], axis=0)
+                # 壳点加到 scene cloud（提升碰撞检测的鲁棒性）
+                scene_points = np.concatenate([scene_points, shell_points], axis=0)
+                scene_colors = np.concatenate([
+                    scene_colors,
+                    np.full((len(shell_points), 3), 0.5, dtype=np.float32),
+                ], axis=0)
+                if getattr(self.cfgs, 'debug', False):
+                    logger.info("Shell points added: %s", len(shell_points))
+        timings['shell'] = time.perf_counter() - shell_tic
+
         if getattr(self.cfgs, 'debug', False):
             logger.info("Masked cloud points: %s", len(masked_points))
             logger.info("Scene cloud points: %s", len(scene_points))
-        
+
         stage_tic = time.perf_counter()
         data_dict = self.preprocess_points(masked_points, masked_colors)
         timings['preprocess'] = time.perf_counter() - stage_tic

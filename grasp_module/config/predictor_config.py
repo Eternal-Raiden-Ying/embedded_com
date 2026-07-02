@@ -25,15 +25,21 @@ class PredictorConfig:
 
     # ---- Depth pre-processing ----
     depth_postprocess: bool = True
-    depth_smooth_method: str = "median"
+    depth_smooth_method: str = "bilateral"
     depth_smooth_kernel: int = 5
     depth_hole_fill_kernel: int = 5
     depth_hole_fill_iterations: int = 2
     depth_bilateral_d: int = 9
     depth_bilateral_sigma_color: float = 75.0
-    depth_bilateral_sigma_space: float = 75.0
+    depth_bilateral_sigma_space: float = 30.0
     depth_min_mm: int = 1
     depth_max_mm: int = 2000
+
+    # ---- Thin-shell point cloud augmentation ----
+    shell_enable: bool = False
+    shell_thickness_m: float = 0.02
+    shell_steps: int = 2
+    shell_edge_threshold_mm: int = 20
 
     debug_grasp_count: int = 15
 
