@@ -72,17 +72,21 @@ def postprocess_depth_image(depth_img, cfgs):
         hole_fill_kernel += 1
 
     processed = depth.copy()
+
+    # ── 阶段 1: median 去飞点 ──
     if smooth_kernel > 1 and smooth_method != "none":
-        if smooth_method == "bilateral":
-            bilat_d = int(getattr(cfgs, "depth_bilateral_d", 9))
-            bilat_sigma = float(getattr(cfgs, "depth_bilateral_sigma", 75.0))
-            smoothed = cv2.bilateralFilter(
-                processed.astype(np.float32), bilat_d,
-                bilat_sigma, bilat_sigma,
-            ).astype(np.uint16)
-        else:
-            smoothed = cv2.medianBlur(processed, smooth_kernel)
-        processed = np.where(processed > 0, smoothed, 0).astype(np.uint16)
+        median_smoothed = cv2.medianBlur(processed, smooth_kernel)
+        processed = np.where(processed > 0, median_smoothed, 0).astype(np.uint16)
+
+    # ── 阶段 2: bilateral 保边平滑 ──
+    if smooth_method == "bilateral":
+        bilat_d = int(getattr(cfgs, "depth_bilateral_d", 9))
+        bilat_sigma = float(getattr(cfgs, "depth_bilateral_sigma", 75.0))
+        bilat_smoothed = cv2.bilateralFilter(
+            processed.astype(np.float32), bilat_d,
+            bilat_sigma, bilat_sigma,
+        ).astype(np.uint16)
+        processed = np.where(processed > 0, bilat_smoothed, 0).astype(np.uint16)
 
     processed = _fill_zero_holes_with_median(
         processed,

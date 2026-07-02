@@ -353,7 +353,7 @@ def main():
     parser.add_argument("--depth_max_mm", type=int, default=2000, help="Maximum valid depth in millimeters; larger values are zeroed out")
     parser.set_defaults(depth_postprocess=True)
     parser.add_argument("--disable_depth_postprocess", dest="depth_postprocess", action="store_false", help="Disable simple depth postprocessing in the test chain")
-    parser.add_argument("--depth_smooth_method", type=str, default="median", choices=["median", "bilateral", "none"], help="Depth smoothing method: median, bilateral, or none")
+    parser.add_argument("--depth_smooth_method", type=str, default="median", choices=["median", "bilateral", "none"], help="Smoothing: none(skip), median(only median), bilateral(median + bilateral)")
     parser.add_argument("--depth_smooth_kernel", type=int, default=5, help="Smoothing kernel size for valid depth pixels; odd values only")
     parser.add_argument("--depth_bilateral_d", type=int, default=9, help="Bilateral filter diameter (pixel neighborhood)")
     parser.add_argument("--depth_bilateral_sigma", type=float, default=75.0, help="Bilateral filter sigma (higher = more smoothing)")
