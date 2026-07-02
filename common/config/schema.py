@@ -996,6 +996,14 @@ class OrchestratorConfig:
         "starfruit": ["杨桃"],
         "strawberry": ["草莓"],
     })
+    target_gripper_widths: Dict[str, float] = field(default_factory=lambda: {
+        "苹果": 50.0,
+        "猕猴桃": 65.0,
+        "瓶子": 70.0,
+        "apple": 50.0,
+        "kiwi fruit": 65.0,
+        "bottle": 70.0,
+    })
 
 
 # ==============================================================================

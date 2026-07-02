@@ -199,6 +199,57 @@ class GraspFlowMixin:
             return self.controller.stop_cmd("GRASP")
 
         if isinstance(self.ctx.grasp_result, dict):
+            class_id = self.ctx.grasp_result.get("class_id")
+            active_target = self.ctx.active_target
+            if class_id is None and active_target:
+                try:
+                    class_id = target_to_class_id(active_target)
+                except Exception:
+                    pass
+
+            cfg = getattr(self, "cfg", None)
+            lookup_map = getattr(cfg.orchestrator, "target_gripper_widths", {}) if cfg is not None else {}
+            if lookup_map:
+                override_val = None
+                if class_id is not None and str(class_id) in lookup_map:
+                    override_val = lookup_map[str(class_id)]
+                elif class_id is not None and class_id in lookup_map:
+                    override_val = lookup_map[class_id]
+
+                if override_val is None and class_id is not None:
+                    try:
+                        from ...utils.target_utils import OBJECT_REGISTRY
+                        for spec in OBJECT_REGISTRY.values():
+                            if int(spec.class_id) == int(class_id):
+                                if spec.class_name in lookup_map:
+                                    override_val = lookup_map[spec.class_name]
+                                    break
+                                if spec.canonical_target in lookup_map:
+                                    override_val = lookup_map[spec.canonical_target]
+                                    break
+                    except Exception:
+                        pass
+
+                if override_val is None and active_target:
+                    if active_target in lookup_map:
+                        override_val = lookup_map[active_target]
+                    else:
+                        try:
+                            from ...utils.target_utils import target_to_canonical
+                            canonical = target_to_canonical(active_target)
+                            if canonical in lookup_map:
+                                override_val = lookup_map[canonical]
+                        except Exception:
+                            pass
+
+                if override_val is not None:
+                    override_val_float = float(override_val)
+                    if override_val_float > 15.0:
+                        self.ctx.grasp_result["gripper_width_cm"] = override_val_float / 10.0
+                    else:
+                        self.ctx.grasp_result["gripper_width_cm"] = override_val_float
+                    self._log("info", f"[GRASP][OVERRIDE] Overriding gripper width to {self.ctx.grasp_result['gripper_width_cm']} cm (configured raw={override_val_float}) for class_id={class_id} target={active_target}")
+
             try:
                 arm_cmd = grasp_to_pose_params(
                     self.ctx.grasp_result,

@@ -98,3 +98,27 @@ def test_pre_arm_settle_missing_pose_field_enters_schema_error():
 
     assert decision.arm_cmd is None
     assert flow.errors == ["grasp_pose_schema_invalid"]
+
+
+def test_pre_arm_settle_overrides_gripper_width_from_lookup_table():
+    flow = _GraspFlowHarness()
+    flow.ctx.grasp_substate = "PRE_ARM_STOP_SETTLE"
+    flow.ctx.pre_arm_stop_settle_start_mono = 100.0
+    flow.ctx.active_target = "苹果"
+
+    class ConfigMock:
+        class OrchestratorMock:
+            target_gripper_widths = {
+                "apple": 50.0,
+                "苹果": 50.0,
+            }
+        orchestrator = OrchestratorMock()
+    flow.cfg = ConfigMock()
+
+    flow.ctx.grasp_result = dict(CANONICAL_GRASP)
+
+    decision = flow._tick_grasp_pre_arm_stop_settle(100.1)
+
+    assert flow.ctx.grasp_substate == "AWAITING_ARM"
+    assert decision.arm_cmd is not None
+    assert round(decision.arm_cmd.claw_deg) == 50

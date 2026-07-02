@@ -450,6 +450,8 @@ class GraspStagePlan(BaseStagePlan):
                 targets = server_response.get("targets") or server_response.get("grasps")
                 first_target = dict(targets[0]) if isinstance(targets, (list, tuple)) and targets else {}
                 canonical_grasp, schema_error = canonicalize_remote_grasp_target(first_target)
+                if canonical_grasp is not None and stage_state.get("remote_class_id") is not None:
+                    canonical_grasp["class_id"] = stage_state.get("remote_class_id")
                 if schema_error is not None:
                     result = {
                         **schema_error,
