@@ -488,6 +488,7 @@ export PYTHONPATH="$STACK_ROOT:$VISION_ROOT\${PYTHONPATH:+:\$PYTHONPATH}"
 export SYSTEM_CONFIG_FILE="$SYSTEM_CONFIG_FILE"
 export SYSTEM_CONFIG_PROFILE="$SYSTEM_CONFIG_PROFILE"
 export PYTHONUNBUFFERED="$PYTHONUNBUFFERED"
+export VISION_LOG_FILE="$VISION_LOG_FILE"
 export ROBOT_CONSOLE_COLOR=never
 export ROBOT_CONSOLE_LEVEL="$ROBOT_CONSOLE_LEVEL"
 export ROBOT_RUN_MODULE_SUBDIRS=1
@@ -502,7 +503,7 @@ export VISTA_MOCK_TABLE_BBOX="$VISTA_MOCK_TABLE_BBOX"
 if [[ -n "$VISION_LD_PRELOAD" && -e "$VISION_LD_PRELOAD" ]]; then
   export LD_PRELOAD="$VISION_LD_PRELOAD\${LD_PRELOAD:+:\$LD_PRELOAD}"
 fi
-exec stdbuf -oL -eL /usr/bin/python3 -m vision_module.app.app
+exec stdbuf -oL -eL /usr/bin/python3 -u -m vision_module.app.app
 CMD
 )
   launch_bg_user "vision" "$VISION_PID_FILE" "$VISION_LOG_FILE" "$cmd"

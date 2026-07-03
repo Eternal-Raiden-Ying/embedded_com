@@ -61,6 +61,10 @@ ORCHESTRATOR_STATE_MAP: Dict[str, Tuple[str, int]] = {
     "AVOID_OBSTACLE": ("searching", 65),
     "RETURN_HOME": ("running", 75),
     "GRASP": ("running", 90),
+    "POST_GRASP_TURN_180": ("returning", 92),
+    "SEARCH_BASKET": ("returning", 94),
+    "APPROACH_BASKET": ("placing", 96),
+    "PLACE_TO_BASKET": ("placing", 98),
     "ERROR_RECOVERY": ("error", 0),
     "STOP": ("stopped", 0),
     "STOPPED": ("stopped", 0),
@@ -124,6 +128,10 @@ ORCHESTRATOR_BUSY_STATES = {
     "TARGET_LOCKED",
     "FREEZE_BASE",
     "GRASP",
+    "POST_GRASP_TURN_180",
+    "SEARCH_BASKET",
+    "APPROACH_BASKET",
+    "PLACE_TO_BASKET",
 }
 
 ORCHESTRATOR_CLEAR_BUSY_STATES = {"IDLE", "DONE"}
@@ -141,6 +149,10 @@ TASK_PHASE_BY_ORCH_STATE = {
     "TARGET_LOCKED": "target_locked",
     "FREEZE_BASE": "preparing_grasp",
     "GRASP": "grasping",
+    "POST_GRASP_TURN_180": "returning",
+    "SEARCH_BASKET": "searching_basket",
+    "APPROACH_BASKET": "approaching_basket",
+    "PLACE_TO_BASKET": "placing",
     "DONE": "done",
     "ERROR_RECOVERY": "recovering",
 }
@@ -2581,6 +2593,8 @@ class MobileGatewayService(BaseModule):
             if "edge_distance_out_of_tolerance_after_retries" in str(fallback or "").lower():
                 return "任务失败，无法稳定锁定桌边。"
             return fallback or "任务失败"
+        if raw_state in {"POST_GRASP_TURN_180", "SEARCH_BASKET", "APPROACH_BASKET", "PLACE_TO_BASKET"}:
+            return "正在放置到篮子"
         if raw_state in {"TARGET_LOCKED", "GRASP", "CONTROLLED_APPROACH", "FINAL_LOCK", "AT_TABLE_EDGE"}:
             return f"正在执行取物任务，目标 {target}" if target else "正在执行取物任务"
         if raw_state in {"STOP", "STOPPED"}:

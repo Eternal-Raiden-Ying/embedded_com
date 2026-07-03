@@ -119,14 +119,19 @@ class VisionRuntimeConfig:
     enable_infer_during_hot_standby: bool = False
     remote_payload_archive_enable: bool = True
     remote_payload_archive_max_keep: int = 20
-    remote_rgb_correction_enable: bool = True
+    remote_rgb_correction_enable: bool = False
+    remote_rgb_correction_mode: str = "none"
     remote_rgb_white_balance_enable: bool = True
     remote_rgb_exposure_target_mean: float = 90.0
     remote_rgb_max_gain: float = 4.0
     remote_rgb_gamma: float = 1.4
     remote_rgb_saturation_scale: float = 1.25
-    remote_rgb_save_raw: bool = True
+    remote_rgb_save_raw: bool = False
     remote_rgb_jpeg_quality: int = 95
+    remote_rgb_capture_warmup_frames: int = 10
+    remote_rgb_capture_wait_timeout_s: float = 2.0
+    remote_rgb_min_luma_mean: float = 40.0
+    remote_rgb_require_fresh_after_mode_enter: bool = True
     capability_placeholder: bool = False
     heartbeat_enabled: bool = False
     heartbeat_interval_s: float = 5.0
@@ -567,30 +572,39 @@ class ControlThresholds:
     near_slow_max_vy_mps: float = 0.040
     near_slow_max_wz_radps: float = 0.04
     final_servo_enter_p10_m: float = 0.45
-    final_enter_depth_threshold_m: float = 0.45
-    final_fixed_roi_stop_threshold_m: float = 0.50
+    final_enter_depth_threshold_m: float = 0.58
+    final_enter_stable_count_required: int = 2
+    final_handoff_on_yolo_lost_enable: bool = True
+    final_handoff_recent_obs_max_age_s: float = 1.0
+    final_handoff_min_recent_depth_m: float = 0.65
+    final_fixed_roi_stop_threshold_m: float = 0.45
     final_fixed_roi_stop_stable_count_required: int = 3
     remote_init_min_interval_s: float = 30.0
     edge_final_enter_margin_m: float = 0.06
     edge_final_stop_margin_m: float = 0.02
     close_range_enter_p10_m: float = 0.55
-    final_probe_vx_mps: float = 0.015
+    final_probe_vx_mps: float = 0.020
     final_missing_probe_vx_mps: float = 0.010
-    final_missing_probe_grace_s: float = 0.80
+    final_missing_probe_grace_s: float = 2.0
+    final_slow_stop_timeout_s: float = 12.0
     final_missing_reuse_s: float = 0.50
     final_missing_probe_margin_m: float = 0.04
     close_range_probe_vx_mps: float = 0.015
     close_range_missing_probe_vx_mps: float = 0.008
     roi_final_stop_p10_m: float = 0.42
     roi_final_slow_p10_m: float = 0.52
-    roi_final_probe_vx_mps: float = 0.015
+    roi_final_probe_vx_mps: float = 0.020
     roi_final_missing_probe_vx_mps: float = 0.008
     roi_final_missing_hold_s: float = 0.8
-    depth_envelope_stop_p10_m: float = 0.35
+    depth_envelope_stop_p10_m: float = 0.30
     depth_envelope_slow_p10_m: float = 0.50
+    depth_emergency_stop_p10_m: float = 0.20
     depth_envelope_mid_p10_m: float = 0.70
     depth_envelope_slow_vx_mps: float = 0.012
     depth_envelope_mid_vx_mps: float = 0.015
+    yolo_approach_min_vx_mps: float = 0.02
+    yolo_approach_depth_stat_for_envelope: str = "median"
+    yolo_approach_use_p10_for_safety_only: bool = True
     bbox_track_forward_enabled: bool = True
     min_forward_vx_mps: float = 0.040
     bbox_track_forward_vx_mps: float = 0.100
@@ -689,7 +703,7 @@ class ControlThresholds:
     target_confirm_window_s: float = 1.50
     target_confirm_found_ratio_th: float = 0.50
     target_lateral_align_enable: bool = True
-    target_lateral_align_center_x_target: float = 0.50
+    target_lateral_align_center_x_target: float = 0.45
     target_lateral_align_center_x_tol: float = 0.06
     target_lateral_align_center_x_deadband: float = 0.03
     target_lateral_align_kp_vy: float = 0.10
@@ -698,6 +712,28 @@ class ControlThresholds:
     target_lateral_align_stable_frames: int = 3
     target_lateral_align_lost_hold_s: float = 0.80
     target_lateral_align_timeout_s: float = 12.0
+    post_grasp_place_enable: bool = True
+    post_grasp_turn_enable: bool = True
+    post_grasp_turn_wz_radps: float = 0.45
+    post_grasp_turn_duration_s: float = 3.5
+    post_grasp_turn_direction: str = "left"
+    basket_search_timeout_s: float = 15.0
+    basket_search_wz_radps: float = 0.25
+    basket_align_center_x_target: float = 0.50
+    basket_align_center_x_tol: float = 0.08
+    basket_approach_vx_mps: float = 0.08
+    basket_approach_vx_slow_mps: float = 0.035
+    basket_stop_bbox_area_norm: float = 0.18
+    basket_stop_bbox_height_norm: float = 0.38
+    basket_stop_stable_count_required: int = 3
+    basket_approach_timeout_s: float = 20.0
+    place_pose_x_cm: float = 12.0
+    place_pose_y_cm: float = 0.0
+    place_pose_z_cm: float = 8.0
+    place_pose_pitch_deg: float = 0.0
+    place_pose_roll_deg: float = 0.0
+    place_gripper_width: float = 80.0
+    place_duration_ms: int = 800
     target_lock_conf_th: float = 0.40
     target_lock_found_ratio_th: float = 0.60
     target_lock_settle_s: float = 0.50
@@ -991,7 +1027,7 @@ class OrchestratorConfig:
         "keys": ["钥匙", "钥匙串"],
         "apple": ["苹果"],
         "banana": ["香蕉"],
-        "basket": ["篮子"],
+        "basket": ["篮子", "筐", "收纳篮"],
         "grape": ["葡萄"],
         "kiwi fruit": ["猕猴桃", "奇异果"],
         "kiwi": ["猕猴桃", "奇异果"],

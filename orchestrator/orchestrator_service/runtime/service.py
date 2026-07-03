@@ -36,6 +36,7 @@ from ..ipc.protocol import (
 from ..ipc.transport import AsyncJsonlClientSender, JsonlClientSender, JsonlInboundServer
 from ..utils.target_utils import supported_targets
 from .common import RunLogger, ensure_dir, safe_dump
+from .context import State
 from .state_machine import OrchestratorCore
 
 MANUAL_DRIVE_ALLOWED_STATES = {"IDLE"}
@@ -85,11 +86,16 @@ _CONTROL_SUMMARY_KEYS = (
     "final_depth_usable_for_control",
     "final_depth_gate_reason",
     "table_target_dist_m",
-    "final_stop_threshold_m",
     "final_depth_latched",
     "final_edge_seen_after_find",
     "final_descending_seen_after_find",
     "final_enter_candidate_status",
+    "final_enter_stat_used",
+    "final_enter_stat_value",
+    "final_enter_threshold",
+    "final_enter_stable_count",
+    "final_enter_allowed",
+    "final_enter_reject_reason",
     "final_enter_edge_seen",
     "final_enter_descending_seen",
     "final_enter_transition_reason",
@@ -104,10 +110,20 @@ _CONTROL_SUMMARY_KEYS = (
     "final_fixed_roi_stop_threshold",
     "final_fixed_roi_stop_stable_count",
     "final_fixed_roi_min_stat_m",
+    "fixed_roi_valid",
+    "fixed_roi_missing_age_s",
+    "final_motion_mode",
+    "final_transition_reason",
     "final_motion_policy",
     "final_stop_observation",
     "final_stop_continue_forward",
     "final_stop_depth_source",
+    "final_arrival_source",
+    "final_arrival_value",
+    "final_arrival_threshold",
+    "final_arrival_stable_count",
+    "final_arrival_reached",
+    "final_arrival_latched",
     "final_stop_depth_m",
     "final_stop_reached",
     "final_exit",
@@ -115,7 +131,19 @@ _CONTROL_SUMMARY_KEYS = (
     "final_locked",
     "final_lock_reason",
     "depth_speed_envelope_reason",
+    "depth_speed_envelope_stat_used",
+    "depth_speed_envelope_stat_value",
     "depth_speed_envelope_vx_cap",
+    "yolo_approach_min_vx_mps",
+    "safety_source",
+    "safety_value",
+    "safety_slow_threshold",
+    "safety_hard_hold_threshold",
+    "safety_emergency_threshold",
+    "safety_action",
+    "safety_blocks_forward",
+    "safety_blocks_arrival_transition",
+    "speed_limit_reason",
     "smoothing_enabled",
     "smoothing_applied",
     "smoothing_bypassed",
@@ -258,6 +286,7 @@ class OrchestratorService(BaseModule):
         self._last_motion_log_signature = None
         self._last_motion_adapter_log_key = ""
         self._last_motion_adapter_log_emit_ts = 0.0
+        self._last_final_forward_only_state = ""
         self._last_motion_tx_context: Dict[str, Any] = {}
         self._last_valid_motion_cmd: Optional[Dict[str, Any]] = None
         self._last_valid_motion_ts = 0.0
@@ -1233,6 +1262,13 @@ class OrchestratorService(BaseModule):
         }
         target_flow_state = bool(state in target_flow_states or mode in target_flow_states)
         edge_slide_state = bool(state == "EDGE_SLIDE_SEARCH" or mode == "EDGE_SLIDE_SEARCH")
+        return_place_states = {
+            "POST_GRASP_TURN_180",
+            "SEARCH_BASKET",
+            "APPROACH_BASKET",
+            "PLACE_TO_BASKET",
+        }
+        return_place_state = bool(state in return_place_states or mode in return_place_states)
         if state == "EDGE_SLIDE_SEARCH" or mode == "EDGE_SLIDE_SEARCH":
             vy_max = abs(float(getattr(self.cfg.control, "target_lateral_align_vy_max_mps", 0.025) or 0.025))
             vy = max(-vy_max, min(vy_max, float(getattr(cmd, "vy_mps", 0.0) or 0.0)))
@@ -1326,13 +1362,15 @@ class OrchestratorService(BaseModule):
                 ),
                 "estop_cooldown_reason": "hard_stop" if (stop_class or "").lower() in {"emergency", "safety"} else "",
                 "service_override": service_override,
-                "service_override_reason": emit_reason if service_override else "",
-                "effective_cmd_before_service": self._cmd_dict(cmd),
-                "effective_cmd_after_service": self._cmd_dict(effective),
-                "perception_dropout_hold_active": bool(summary.get("perception_dropout_hold_active", False)),
-                "service_may_override": bool(summary.get("service_may_override", False)),
-                "active_table_docking": bool(active_table_docking),
-            }
+            "service_override_reason": emit_reason if service_override else "",
+            "effective_cmd_before_service": self._cmd_dict(cmd),
+            "effective_cmd_after_service": self._cmd_dict(effective),
+            "perception_dropout_hold_active": bool(summary.get("perception_dropout_hold_active", False)),
+            "service_may_override": bool(summary.get("service_may_override", False)),
+            "return_place_state": bool(return_place_state),
+            "return_place_ignores_table_stale": bool(return_place_state),
+            "active_table_docking": bool(active_table_docking),
+        }
         # Legacy fallback for non-table-docking or pre-arbiter commands.
         # Table docking commands with arbiter_applied=True bypass this visual
         # stale gate; final motion is decided by table docking motion arbiter.
@@ -1342,7 +1380,19 @@ class OrchestratorService(BaseModule):
         last_age_ms = self._last_valid_motion_age_ms(now)
         hold_ms = max(0, int(getattr(self.cfg.car, "motion_hold_ms", getattr(self.cfg.car, "cmd_hold_ms", 150)) or 0))
         hard_stale_stop_ms = max(0, int(getattr(self.cfg.car, "hard_stale_stop_ms", 800) or 800))
-        explicit_stop = bool(getattr(cmd, "brake", False) or mode in {"STOP", "IDLE", "DONE", "ERROR", "ERROR_RECOVERY"} or state in {"IDLE", "STOP"})
+        emergency_stop_active = bool(
+            summary.get("emergency_stop_active", False)
+            or summary.get("car_estop", False)
+            or summary.get("estop_active", False)
+            or str(summary.get("stop_class") or "").strip().lower() in {"emergency", "safety"}
+        )
+        explicit_stop = bool(
+            emergency_stop_active
+            or getattr(cmd, "brake", False)
+            or mode in {"STOP", "IDLE", "DONE", "ERROR", "ERROR_RECOVERY"}
+            or state in {"IDLE", "STOP"}
+        )
+        return_place_zero_cmd = bool(return_place_state and not self._cmd_has_motion(cmd) and not explicit_stop)
         soft_stale_timed_out = bool(stale_level == "soft_stale" and last_age_ms is not None and last_age_ms >= float(hard_stale_stop_ms))
         perception_dead = bool(
             "perception_dead" in stale_reason
@@ -1383,6 +1433,7 @@ class OrchestratorService(BaseModule):
             and not yolo_allows_edge_stale
             and not bbox_lost_hold_active
             and not target_lateral_vy_allowed
+            and not return_place_state
         )
         dropout_hold_active = bool(summary.get("perception_dropout_hold_active", False))
         if dropout_hold_active:
@@ -1426,6 +1477,14 @@ class OrchestratorService(BaseModule):
             emit_reason = "target_flow_stale_stop" if hard_stale_raw else "target_flow_no_recovery_stop"
             zero_cmd_reason = stale_level or stale_reason or "target_flow_recovery_motion_blocked"
             stop_class = "stale_recovery" if hard_stale_raw else "control_recovery"
+            effective = self._make_stop_cmd(now, hold_ms=int(getattr(cmd, "hold_ms", self.cfg.car.cmd_hold_ms) or self.cfg.car.cmd_hold_ms))
+            self._last_valid_motion_cmd = None
+            self._last_valid_motion_ts = 0.0
+            last_age_ms = None
+        elif return_place_zero_cmd:
+            emit_reason = "return_place_stop"
+            zero_cmd_reason = "return_place_zero_cmd"
+            stop_class = "control_recovery"
             effective = self._make_stop_cmd(now, hold_ms=int(getattr(cmd, "hold_ms", self.cfg.car.cmd_hold_ms) or self.cfg.car.cmd_hold_ms))
             self._last_valid_motion_cmd = None
             self._last_valid_motion_ts = 0.0
@@ -1482,6 +1541,9 @@ class OrchestratorService(BaseModule):
             "search_allows_edge_stale": bool(search_allows_edge_stale),
             "target_lateral_vy_allowed": bool(target_lateral_vy_allowed),
             "target_flow_stop_only": bool(target_flow_stop_only),
+            "return_place_state": bool(return_place_state),
+            "return_place_ignores_table_stale": bool(return_place_state),
+            "return_place_zero_cmd": bool(return_place_zero_cmd),
             "search_table_stale_gate_bypass": bool(search_allows_edge_stale and hard_stale_raw),
             "stale_gate_stop_source_state": state if hard_stale else "",
             "stop_class": stop_class,
@@ -1496,6 +1558,57 @@ class OrchestratorService(BaseModule):
             "effective_cmd_after_service": self._cmd_dict(effective),
             "perception_dropout_hold_active": dropout_hold_active,
         }
+
+    def _apply_final_forward_only_clamp(self, cmd: CmdVel, summary: Dict[str, Any]) -> Tuple[CmdVel, Dict[str, Any]]:
+        state = str(getattr(self.core.ctx.state, "value", self.core.ctx.state) or "").strip().upper()
+        if state not in {"FINAL_SLOW_STOP", "AT_TABLE_EDGE"}:
+            if self._last_final_forward_only_state:
+                self._last_final_forward_only_state = ""
+            return cmd, {}
+        before_vx = float(getattr(cmd, "vx_mps", 0.0) or 0.0)
+        before_vy = float(getattr(cmd, "vy_mps", 0.0) or 0.0)
+        before_wz = float(getattr(cmd, "wz_radps", 0.0) or 0.0)
+        after_vx = max(0.0, before_vx)
+        meta = {
+            "final_forward_only_clamp_applied": True,
+            "final_forward_only_before_vx": before_vx,
+            "final_forward_only_before_vy": before_vy,
+            "final_forward_only_before_wz": before_wz,
+            "final_forward_only_after_vx": after_vx,
+            "final_forward_only_after_vy": 0.0,
+            "final_forward_only_after_wz": 0.0,
+            "vx_mps": after_vx,
+            "vy_mps": 0.0,
+            "wz_radps": 0.0,
+            "final_vx": after_vx,
+            "final_vy": 0.0,
+            "final_wz": 0.0,
+        }
+        clamped = CmdVel(
+            ts=float(getattr(cmd, "ts", time.time()) or time.time()),
+            mode=str(getattr(cmd, "mode", "") or state),
+            vx_mps=after_vx,
+            vy_mps=0.0,
+            wz_radps=0.0,
+            hold_ms=int(getattr(cmd, "hold_ms", self.cfg.car.cmd_hold_ms) or self.cfg.car.cmd_hold_ms),
+            brake=bool(getattr(cmd, "brake", False)),
+        )
+        entered = self._last_final_forward_only_state != state
+        changed = bool(abs(before_vy) > 1e-9 or abs(before_wz) > 1e-9 or before_vx < -1e-9)
+        self._last_final_forward_only_state = state
+        if entered or changed:
+            self._operator_emit(
+                "[FINAL][FORWARD_ONLY_CLAMP] "
+                f"state={state} "
+                f"before_vx={before_vx:.3f} before_vy={before_vy:.3f} before_wz={before_wz:.3f} "
+                f"after_vx={after_vx:.3f} after_vy=0 after_wz=0"
+            )
+        try:
+            self.run_logger.write_jsonl("final_forward_only_clamp", {"state": state, **meta})
+        except Exception:
+            pass
+        summary.update(meta)
+        return clamped, meta
 
     def _render_uart_line(self, payload: Dict[str, Any]) -> str:
         raw = str(payload.get("raw", "")).strip("\n")
@@ -2525,6 +2638,8 @@ class OrchestratorService(BaseModule):
                 "cmd_id": cmd.cmd_id,
             })
         seq = self.motion_adapter.stop(reason="manual_stop")
+        if self.core.ctx.state in {State.POST_GRASP_TURN_180, State.SEARCH_BASKET, State.APPROACH_BASKET, State.PLACE_TO_BASKET}:
+            self.core._interrupt_to_idle("manual_stop_return_place", tts_text="已停止", interrupt_tts=True, send_vision_idle=True)
         self.motion_status["last_seq"] = seq
         self.motion_status["jog_running"] = False
         self._last_uart_tx_ts = time.time()
@@ -4155,6 +4270,9 @@ class OrchestratorService(BaseModule):
         )
         effective_cmd = smoothed_cmd
         summary.update(smoothing_meta)
+        effective_cmd, final_clamp_meta = self._apply_final_forward_only_clamp(effective_cmd, summary)
+        if final_clamp_meta:
+            summary.update(final_clamp_meta)
         self._sync_last_valid_motion_after_smoothing(effective_cmd, time.time())
         summary["last_valid_motion_cmd"] = dict(self._last_valid_motion_cmd or {})
         summary["last_valid_motion_age_ms"] = self._last_valid_motion_age_ms(time.time())

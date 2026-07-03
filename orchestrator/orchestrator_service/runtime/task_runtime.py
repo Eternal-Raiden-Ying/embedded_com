@@ -457,12 +457,14 @@ class TaskRuntimeMixin:
     def _interrupt_to_idle(self, reason: str, tts_text: Optional[str] = None, interrupt_tts: bool = False, send_vision_idle: bool = False):
         if send_vision_idle:
             self._queue_vision_req(make_vision_idle(session_id=self.ctx.active_session_id, epoch=self.ctx.active_epoch), force=True)
+        self.ctx.clear_carrying_object()
         self._transition(State.IDLE, reason)
         if tts_text:
             self._queue_tts(tts_text, interrupt=interrupt_tts)
 
     def _enter_error_recovery(self, reason: str, tts_text: Optional[str] = None, interrupt_tts: bool = False):
         self.ctx.resume_state = None
+        self.ctx.clear_carrying_object()
         self._transition(State.ERROR_RECOVERY, reason)
         if tts_text:
             self._queue_tts(tts_text, interrupt=interrupt_tts)

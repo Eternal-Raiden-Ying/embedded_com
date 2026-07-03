@@ -1011,6 +1011,8 @@ class TargetSearchMixin:
         conf = self._target_conf_value(obs) if obs is not None else None
         cx = self._target_lateral_center_x(obs)
         err = self._target_lateral_error_x(obs)
+        target_x = max(0.0, min(1.0, float(getattr(self.cfg, "target_lateral_align_center_x_target", 0.5) or 0.5)))
+        centered_ok = bool(self._target_lateral_centered(obs))
         summary.update(
             {
                 "target_found": bool(obs is not None and getattr(obs, "found", False)),
@@ -1025,7 +1027,9 @@ class TargetSearchMixin:
                 "best_conf": getattr(obs, "best_conf", None) if obs is not None else None,
                 "target_conf": conf,
                 "target_center_x_norm": cx,
+                "target_lateral_align_center_x_target": float(target_x),
                 "target_err_x": err,
+                "target_lateral_centered_ok": bool(centered_ok),
                 "target_lateral_align_active": bool(active),
                 "target_lateral_align_reason": str(reason or ""),
                 "target_search_reject_reason": self._target_search_reject_reason(
@@ -1033,7 +1037,7 @@ class TargetSearchMixin:
                     self._target_window_stats(),
                     str(reason or ""),
                 ),
-                "centered_ok": bool(self._target_lateral_centered(obs)),
+                "centered_ok": bool(centered_ok),
                 "bbox_valid": bool(self._target_bbox_valid(obs)),
                 "stable_count": int(self.ctx.target_found_frames),
                 "found_ratio": float(self._target_window_stats().get("found_ratio", 0.0) or 0.0),
@@ -1055,6 +1059,17 @@ class TargetSearchMixin:
         decision.control_summary = summary
         self.ctx.target_lateral_align_reason = str(reason or "")
         self.ctx.target_lateral_vy_cmd = float(vy_cmd)
+        if obs is not None and (active or reason in {"target_locked_hold", "target_locked_freeze_base", "target_lateral_centered_locked", "target_lateral_centered_confirm"}):
+            self._log(
+                "info",
+                "[TARGET][LATERAL_ALIGN] "
+                f"target={self.ctx.active_target or self.ctx.canonical_target or ''} "
+                f"cx={cx if cx is not None else 'n/a'} "
+                f"target_x={target_x:.2f} "
+                f"err={err if err is not None else 'n/a'} "
+                f"centered={str(centered_ok).lower()} "
+                f"target_lateral_stable_count={int(self.ctx.target_lateral_stable_count)}"
+            )
         return decision
 
     def _target_search_reject_reason(

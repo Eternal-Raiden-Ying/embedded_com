@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import json
+import hashlib
 import shutil
 import threading
 import time
@@ -187,16 +188,28 @@ def prepare_remote_rgb(rgb, cfg: Dict[str, Any]):
     return corrected_rgb, info
 
 
+def encode_jpeg_from_bgr(clean_bgr, quality: int = 95) -> Optional[bytes]:
+    if clean_bgr is None or cv2 is None:
+        return None
+    clean_bgr = np.asarray(clean_bgr)
+    if clean_bgr.ndim == 3 and clean_bgr.shape[2] >= 3:
+        try:
+            clean_bgr = clean_bgr[:, :, :3]
+            ok, encoded = cv2.imencode(".jpg", clean_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), max(0, min(100, int(quality)))])
+            if ok:
+                return encoded.tobytes()
+        except Exception:
+            pass
+    return None
+
+
 def encode_jpeg_from_rgb(rgb_uint8, quality: int = 95) -> Optional[bytes]:
     if rgb_uint8 is None or cv2 is None:
         return None
     arr = np.asarray(rgb_uint8)
     if arr.ndim == 3 and arr.shape[2] >= 3:
         try:
-            bgr = cv2.cvtColor(arr[:, :, :3], cv2.COLOR_RGB2BGR)
-            ok, encoded = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), max(0, min(100, int(quality)))])
-            if ok:
-                return encoded.tobytes()
+            return encode_jpeg_from_bgr(cv2.cvtColor(arr[:, :, :3], cv2.COLOR_RGB2BGR), quality=quality)
         except Exception:
             pass
     return None
@@ -236,14 +249,19 @@ class RemoteManager:
         self._archive_max_keep = max(0, int(archive_max_keep or 0))
         self._run_id = str(run_id or "")
         self._rgb_correction_config = {
-            "remote_rgb_correction_enable": True,
+            "remote_rgb_correction_enable": False,
+            "remote_rgb_correction_mode": "none",
             "remote_rgb_white_balance_enable": True,
             "remote_rgb_exposure_target_mean": 90.0,
             "remote_rgb_max_gain": 4.0,
             "remote_rgb_gamma": 1.4,
             "remote_rgb_saturation_scale": 1.25,
-            "remote_rgb_save_raw": True,
+            "remote_rgb_save_raw": False,
             "remote_rgb_jpeg_quality": 95,
+            "remote_rgb_capture_warmup_frames": 10,
+            "remote_rgb_capture_wait_timeout_s": 2.0,
+            "remote_rgb_min_luma_mean": 40.0,
+            "remote_rgb_require_fresh_after_mode_enter": True,
         }
         self._rgb_correction_config.update(dict(rgb_correction_config or {}))
         self.enabled = False
@@ -463,13 +481,18 @@ class RemoteManager:
                 "capture_warmup_timeout_s": max(0.1, float(profile.get("capture_warmup_timeout_s", 1.0) or 1.0)),
                 "expected_rgb_shape": self._shape_hw_list(profile.get("expected_rgb_shape"), default=[720, 1280]),
                 "expected_depth_shape": self._shape_hw_list(profile.get("expected_depth_shape"), default=[720, 1280]),
-                "remote_rgb_correction_enable": bool(profile.get("remote_rgb_correction_enable", next_profile.get("remote_rgb_correction_enable", True))),
-                "remote_rgb_correction_mode": str(profile.get("remote_rgb_correction_mode", next_profile.get("remote_rgb_correction_mode", "auto_level_gamma")) or "auto_level_gamma"),
+                "remote_rgb_correction_enable": bool(profile.get("remote_rgb_correction_enable", next_profile.get("remote_rgb_correction_enable", False))),
+                "remote_rgb_correction_mode": str(profile.get("remote_rgb_correction_mode", next_profile.get("remote_rgb_correction_mode", "none")) or "none"),
                 "remote_rgb_gamma": float(profile.get("remote_rgb_gamma", next_profile.get("remote_rgb_gamma", 1.8)) or 1.8),
                 "remote_rgb_percentile_low": float(profile.get("remote_rgb_percentile_low", next_profile.get("remote_rgb_percentile_low", 1.0)) or 1.0),
                 "remote_rgb_percentile_high": float(profile.get("remote_rgb_percentile_high", next_profile.get("remote_rgb_percentile_high", 99.0)) or 99.0),
                 "remote_rgb_max_gain": float(profile.get("remote_rgb_max_gain", next_profile.get("remote_rgb_max_gain", 3.0)) or 3.0),
-                "remote_rgb_save_raw": bool(profile.get("remote_rgb_save_raw", next_profile.get("remote_rgb_save_raw", True))),
+                "remote_rgb_save_raw": bool(profile.get("remote_rgb_save_raw", next_profile.get("remote_rgb_save_raw", False))),
+                "remote_rgb_jpeg_quality": int(profile.get("remote_rgb_jpeg_quality", next_profile.get("remote_rgb_jpeg_quality", 95)) or 95),
+                "remote_rgb_capture_warmup_frames": max(0, int(profile.get("remote_rgb_capture_warmup_frames", next_profile.get("remote_rgb_capture_warmup_frames", 10)) or 0)),
+                "remote_rgb_capture_wait_timeout_s": max(0.1, float(profile.get("remote_rgb_capture_wait_timeout_s", next_profile.get("remote_rgb_capture_wait_timeout_s", 2.0)) or 2.0)),
+                "remote_rgb_min_luma_mean": max(0.0, float(profile.get("remote_rgb_min_luma_mean", next_profile.get("remote_rgb_min_luma_mean", 40.0)) or 0.0)),
+                "remote_rgb_require_fresh_after_mode_enter": bool(profile.get("remote_rgb_require_fresh_after_mode_enter", next_profile.get("remote_rgb_require_fresh_after_mode_enter", True))),
             }
         )
         self._runtime_profile = next_profile
@@ -632,14 +655,19 @@ class RemoteManager:
     @staticmethod
     def _remote_rgb_cfg_from_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
         return {
-            "remote_rgb_correction_enable": bool(profile.get("remote_rgb_correction_enable", True)),
+            "remote_rgb_correction_enable": bool(profile.get("remote_rgb_correction_enable", False)),
+            "remote_rgb_correction_mode": str(profile.get("remote_rgb_correction_mode", "none") or "none"),
             "remote_rgb_white_balance_enable": bool(profile.get("remote_rgb_white_balance_enable", True)),
             "remote_rgb_exposure_target_mean": float(profile.get("remote_rgb_exposure_target_mean", 90.0)),
             "remote_rgb_max_gain": float(profile.get("remote_rgb_max_gain", 4.0)),
             "remote_rgb_gamma": float(profile.get("remote_rgb_gamma", 1.4)),
             "remote_rgb_saturation_scale": float(profile.get("remote_rgb_saturation_scale", 1.25)),
-            "remote_rgb_save_raw": bool(profile.get("remote_rgb_save_raw", True)),
+            "remote_rgb_save_raw": bool(profile.get("remote_rgb_save_raw", False)),
             "remote_rgb_jpeg_quality": int(profile.get("remote_rgb_jpeg_quality", 95)),
+            "remote_rgb_capture_warmup_frames": max(0, int(profile.get("remote_rgb_capture_warmup_frames", 10) or 0)),
+            "remote_rgb_capture_wait_timeout_s": max(0.1, float(profile.get("remote_rgb_capture_wait_timeout_s", 2.0) or 2.0)),
+            "remote_rgb_min_luma_mean": max(0.0, float(profile.get("remote_rgb_min_luma_mean", 40.0) or 0.0)),
+            "remote_rgb_require_fresh_after_mode_enter": bool(profile.get("remote_rgb_require_fresh_after_mode_enter", True)),
         }
 
     @staticmethod
@@ -700,6 +728,168 @@ class RemoteManager:
             return frame
 
     @staticmethod
+    def _clean_bgr_from_frames(frames: Dict[str, Any], rgb):
+        for key in ("clean_bgr", "color_bgr_for_display"):
+            value = frames.get(key) if isinstance(frames, dict) else None
+            arr = np.asarray(value) if value is not None else None
+            if arr is not None and arr.ndim == 3 and arr.shape[2] >= 3:
+                return arr[:, :, :3].copy(), "frame_to_display_clean_bgr"
+        arr = np.asarray(rgb)
+        if arr.ndim == 3 and arr.shape[2] >= 3:
+            fmt = str((frames or {}).get("camera_color_frame_format") or (frames or {}).get("rgb_channel_order") or "BGR").strip().upper()
+            if fmt == "RGB" and cv2 is not None:
+                return cv2.cvtColor(arr[:, :, :3], cv2.COLOR_RGB2BGR), "frame_to_display_clean_bgr"
+            return arr[:, :, :3].copy(), "frame_to_display_clean_bgr"
+        return None, "missing"
+
+    @staticmethod
+    def _bgr_channel_stats(clean_bgr) -> Dict[str, Any]:
+        arr = np.asarray(clean_bgr) if clean_bgr is not None else None
+        if arr is None or arr.ndim != 3 or arr.shape[2] < 3 or arr.size <= 0:
+            return {"bgr_channel_mean": None, "luma_mean": None}
+        b = arr[:, :, 0].astype(np.float32)
+        g = arr[:, :, 1].astype(np.float32)
+        r = arr[:, :, 2].astype(np.float32)
+        luma = 0.114 * b + 0.587 * g + 0.299 * r
+        return {
+            "bgr_channel_mean": [float(np.mean(b)), float(np.mean(g)), float(np.mean(r))],
+            "luma_mean": float(np.mean(luma)),
+        }
+
+    def _select_remote_rgb_frame(
+        self,
+        frames: Dict[str, Any],
+        frame_slot: Dict[str, Any],
+        *,
+        request_id: str,
+    ) -> tuple:
+        cfg = self._remote_rgb_cfg_from_profile(self._runtime_profile)
+        warmup_frames = max(0, int(cfg.get("remote_rgb_capture_warmup_frames", 10) or 0))
+        timeout_s = max(0.1, float(cfg.get("remote_rgb_capture_wait_timeout_s", 2.0) or 2.0))
+        min_luma = max(0.0, float(cfg.get("remote_rgb_min_luma_mean", 40.0) or 0.0))
+        require_fresh = bool(cfg.get("remote_rgb_require_fresh_after_mode_enter", True))
+        capture_start_seq, _ = self._frame_seq_from_slot(frame_slot, frames)
+        start_mono = time.monotonic()
+        deadline = start_mono + timeout_s
+        best_frames = dict(frames or {})
+        best_slot = dict(frame_slot or {})
+        best_luma = -1.0
+        best_seq = int(capture_start_seq or 0)
+        last_seen_seq = None
+        warmup_actual = 0
+        last_wait_log = 0.0
+
+        def evaluate(candidate_frames: Dict[str, Any], candidate_slot: Dict[str, Any], *, fresh: bool) -> Optional[tuple]:
+            nonlocal best_frames, best_slot, best_luma, best_seq, last_seen_seq, warmup_actual, last_wait_log
+            if not isinstance(candidate_frames, dict):
+                return None
+            seq, _ = self._frame_seq_from_slot(candidate_slot, candidate_frames)
+            if require_fresh and not fresh:
+                return None
+            if last_seen_seq != int(seq):
+                last_seen_seq = int(seq)
+                warmup_actual += 1
+            clean_bgr, _ = self._clean_bgr_from_frames(candidate_frames, candidate_frames.get("rgb"))
+            stats = self._bgr_channel_stats(clean_bgr)
+            luma = stats.get("luma_mean")
+            if luma is None:
+                return None
+            luma_f = float(luma)
+            if luma_f > best_luma:
+                best_luma = luma_f
+                best_seq = int(seq)
+                best_frames = dict(candidate_frames)
+                best_slot = dict(candidate_slot or {})
+            now = time.monotonic()
+            if now - last_wait_log >= 0.4:
+                last_wait_log = now
+                waited_ms = int(round((now - start_mono) * 1000.0))
+                self._log("info", f"[GRASP_REMOTE][RGB_WAIT] frame_seq={int(seq)} luma={luma_f:.3f} waited_ms={waited_ms}")
+            return int(seq), luma_f
+
+        scheduler = self._scheduler
+        if scheduler is None:
+            clean_bgr, _ = self._clean_bgr_from_frames(frames, frames.get("rgb"))
+            best_luma = float(self._bgr_channel_stats(clean_bgr).get("luma_mean") or 0.0)
+            wait_ms = int(round((time.monotonic() - start_mono) * 1000.0))
+            meta = {
+                "capture_start_frame_seq": int(capture_start_seq or 0),
+                "upload_frame_seq": best_seq,
+                "warmup_frames_actual": 0,
+                "upload_luma_mean": best_luma,
+                "best_luma_mean": best_luma,
+                "rgb_exposure_fallback": bool(best_luma < min_luma),
+                "rgb_wait_elapsed_ms": wait_ms,
+                "remote_rgb_capture_warmup_frames": warmup_frames,
+                "remote_rgb_capture_wait_timeout_s": timeout_s,
+                "remote_rgb_min_luma_mean": min_luma,
+            }
+            if best_luma < min_luma:
+                self._log("warn", f"[GRASP_REMOTE][RGB_DARK_FALLBACK] best_luma={best_luma:.3f} timeout_s=0.000")
+            else:
+                self._log("info", f"[GRASP_REMOTE][RGB_READY] frame_seq={best_seq} luma={best_luma:.3f} warmup_frames=0")
+            return best_frames, best_slot, meta
+
+        while time.monotonic() <= deadline and not self._worker_stop.is_set():
+            try:
+                candidate_slot = scheduler.read_slot("camera_frames")
+                candidate_frames = candidate_slot.get("payload") if isinstance(candidate_slot, dict) else None
+            except Exception:
+                candidate_slot = {}
+                candidate_frames = None
+            if isinstance(candidate_frames, dict):
+                candidate_seq, _ = self._frame_seq_from_slot(candidate_slot, candidate_frames)
+                fresh = (not require_fresh) or int(candidate_seq) > int(capture_start_seq or 0)
+                evaluated = evaluate(candidate_frames, candidate_slot if isinstance(candidate_slot, dict) else {}, fresh=fresh)
+                if evaluated is not None:
+                    seq, luma = evaluated
+                    if luma >= min_luma:
+                        elapsed_ms = int(round((time.monotonic() - start_mono) * 1000.0))
+                        self._log("info", f"[GRASP_REMOTE][RGB_READY] frame_seq={seq} luma={luma:.3f} warmup_frames={warmup_actual}")
+                        meta = {
+                            "capture_start_frame_seq": int(capture_start_seq or 0),
+                            "upload_frame_seq": int(seq),
+                            "warmup_frames_actual": int(warmup_actual),
+                            "upload_luma_mean": float(luma),
+                            "best_luma_mean": float(best_luma),
+                            "rgb_exposure_fallback": False,
+                            "rgb_wait_elapsed_ms": elapsed_ms,
+                            "remote_rgb_capture_warmup_frames": warmup_frames,
+                            "remote_rgb_capture_wait_timeout_s": timeout_s,
+                            "remote_rgb_min_luma_mean": min_luma,
+                        }
+                        return dict(candidate_frames), dict(candidate_slot or {}), meta
+                    if warmup_frames > 0 and warmup_actual >= warmup_frames:
+                        break
+            self._worker_stop.wait(0.05)
+
+        if best_luma < 0.0:
+            clean_bgr, _ = self._clean_bgr_from_frames(frames, frames.get("rgb"))
+            best_luma = float(self._bgr_channel_stats(clean_bgr).get("luma_mean") or 0.0)
+            best_frames = dict(frames or {})
+            best_slot = dict(frame_slot or {})
+            best_seq = int(capture_start_seq or 0)
+        elapsed_ms = int(round((time.monotonic() - start_mono) * 1000.0))
+        fallback = bool(best_luma < min_luma)
+        if fallback:
+            self._log("warn", f"[GRASP_REMOTE][RGB_DARK_FALLBACK] best_luma={best_luma:.3f} timeout_s={timeout_s:.3f}")
+        else:
+            self._log("info", f"[GRASP_REMOTE][RGB_READY] frame_seq={best_seq} luma={best_luma:.3f} warmup_frames={warmup_actual}")
+        meta = {
+            "capture_start_frame_seq": int(capture_start_seq or 0),
+            "upload_frame_seq": int(best_seq),
+            "warmup_frames_actual": int(warmup_actual),
+            "upload_luma_mean": float(best_luma),
+            "best_luma_mean": float(best_luma),
+            "rgb_exposure_fallback": fallback,
+            "rgb_wait_elapsed_ms": elapsed_ms,
+            "remote_rgb_capture_warmup_frames": warmup_frames,
+            "remote_rgb_capture_wait_timeout_s": timeout_s,
+            "remote_rgb_min_luma_mean": min_luma,
+        }
+        return best_frames, best_slot, meta
+
+    @staticmethod
     def _depth_stats(depth) -> Dict[str, Any]:
         if depth is None or not hasattr(depth, "size") or int(depth.size) <= 0:
             return {
@@ -743,7 +933,7 @@ class RemoteManager:
             "depth_dtype": str(getattr(getattr(depth, "dtype", None), "name", getattr(depth, "dtype", "")) or ""),
             "depth_unit": str(frames.get("depth_unit") or "raw_uint16"),
             "depth_scale": frames.get("depth_scale"),
-            "depth_aligned_to_color": frames.get("depth_aligned_to_color", "best_effort_true"),
+            "depth_aligned_to_color": frames.get("depth_aligned_to_color", "not_aligned"),
             "color_intrinsics": frames.get("color_intrinsics"),
             "depth_intrinsics": frames.get("depth_intrinsics"),
             "frame_seq": int(frame_seq),
@@ -780,11 +970,8 @@ class RemoteManager:
                 }
             )
             (archive_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
-            if bool(metadata.get("remote_rgb_save_raw", True)) and request.rgb_raw_bytes is not None:
-                (archive_dir / "rgb_raw.jpg").write_bytes(request.rgb_raw_bytes)
             if request.rgb_bytes is not None:
                 (archive_dir / "rgb_upload.jpg").write_bytes(request.rgb_bytes)
-                (archive_dir / "rgb.jpg").write_bytes(request.rgb_bytes)
             depth = frames.get("depth") if isinstance(frames, dict) else None
             if depth is not None:
                 cv2.imwrite(str(archive_dir / "depth.png"), depth)
@@ -923,6 +1110,7 @@ class RemoteManager:
                 request_id=request_id,
             )
             return None
+        frames, frame_slot, rgb_wait_meta = self._select_remote_rgb_frame(frames, frame_slot, request_id=request_id)
 
         rgb = frames.get("rgb")
         depth = frames.get("depth")
@@ -998,17 +1186,9 @@ class RemoteManager:
         rgb_encoding = normalize_image_encoding(self._runtime_profile.get("rgb_encoding", "jpeg"), default="jpeg")
         depth_encoding = normalize_image_encoding(self._runtime_profile.get("depth_encoding", "png"), default="png")
 
-        camera_color_frame_format = str(frames.get("camera_color_frame_format") or "BGR").upper()
-        if camera_color_frame_format == "BGR":
-            rgb_rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
-        else:
-            rgb_rgb = rgb.copy()
-
-        remote_rgb_cfg = self._remote_rgb_cfg_from_profile(self._runtime_profile)
-        try:
-            corrected_rgb, correction_info = prepare_remote_rgb(rgb_rgb, remote_rgb_cfg)
-        except Exception as exc:
-            self._log("error", "remote_predict_precheck_failed", reason="rgb_prepare_failed", request_id=request_id, error=str(exc))
+        clean_bgr, rgb_source = self._clean_bgr_from_frames(upload_frames, rgb)
+        if clean_bgr is None:
+            self._log("error", "remote_predict_precheck_failed", reason="rgb_prepare_failed", request_id=request_id, error="missing_clean_bgr")
             self._update_result(
                 action="predict",
                 state="predict_failed",
@@ -1017,21 +1197,36 @@ class RemoteManager:
                 request_id=request_id,
             )
             return None
-
+        remote_rgb_cfg = self._remote_rgb_cfg_from_profile(self._runtime_profile)
         jpeg_quality = int(remote_rgb_cfg.get("remote_rgb_jpeg_quality", 95) or 95)
+        correction_enabled = bool(remote_rgb_cfg.get("remote_rgb_correction_enable", False))
+        correction_info = {
+            "remote_rgb_correction_enable": False,
+            "remote_rgb_correction_mode": str(remote_rgb_cfg.get("remote_rgb_correction_mode", "none") or "none"),
+            "rgb_source": rgb_source,
+            "rgb_encode_input_format": "BGR",
+            "rgb_save_backend": "cv2.imencode",
+        }
+        upload_bgr = clean_bgr
+        if correction_enabled:
+            try:
+                clean_rgb = cv2.cvtColor(clean_bgr, cv2.COLOR_BGR2RGB)
+                corrected_rgb, correction_info = prepare_remote_rgb(clean_rgb, remote_rgb_cfg)
+                upload_bgr = cv2.cvtColor(corrected_rgb, cv2.COLOR_RGB2BGR)
+                correction_info["rgb_source"] = rgb_source
+                correction_info["rgb_encode_input_format"] = "BGR"
+                correction_info["rgb_save_backend"] = "cv2.imencode"
+            except Exception as exc:
+                self._log("warn", "[GRASP_REMOTE][RGB_SOURCE] correction_failed_using_clean_bgr", request_id=request_id, error=str(exc))
+                upload_bgr = clean_bgr
+                correction_info["remote_rgb_correction_enable"] = False
+                correction_info["correction_fallback_reason"] = str(exc)
+        upload_jpg_bytes = encode_jpeg_from_bgr(upload_bgr, quality=jpeg_quality)
+        rgb_bytes = upload_jpg_bytes
         raw_rgb_bytes = None
-        if bool(remote_rgb_cfg.get("remote_rgb_save_raw", True)):
-            raw_rgb_bytes = encode_jpeg_from_rgb(rgb_rgb, quality=jpeg_quality)
-
-        upload_rgb = corrected_rgb if bool(correction_info.get("remote_rgb_correction_enable", True)) else rgb_rgb
-        rgb_bytes = encode_jpeg_from_rgb(upload_rgb, quality=jpeg_quality)
-
-        import hashlib
-        rgb_upload_sha256 = ""
-        if rgb_bytes is not None:
-            rgb_upload_sha256 = hashlib.sha256(rgb_bytes).hexdigest()
-        if raw_rgb_bytes is None:
-            raw_rgb_bytes = rgb_bytes
+        rgb_upload_sha256 = hashlib.sha256(upload_jpg_bytes).hexdigest() if upload_jpg_bytes is not None else ""
+        raw_stats = self._bgr_channel_stats(clean_bgr)
+        upload_stats = self._bgr_channel_stats(upload_bgr)
         depth_bytes = None
         if depth is not None:
             depth_bytes = self._encode_frame(
@@ -1049,8 +1244,6 @@ class RemoteManager:
                 request_id=request_id,
             )
             return None
-        if raw_rgb_bytes is None:
-            raw_rgb_bytes = rgb_bytes
         if require_depth and depth_bytes is None:
             self._log("error", "remote_predict_precheck_failed", reason="depth_encode_failed", request_id=request_id)
             self._update_result(
@@ -1066,46 +1259,52 @@ class RemoteManager:
         request_metadata = dict(cmd.get("metadata") or {}) if isinstance(cmd.get("metadata"), dict) else {}
         extras = dict(profile_metadata)
         extras.update(request_metadata)
-        capture["rgb_channel_order"] = "RGB"
+        camera_color_frame_format = str(frames.get("camera_color_frame_format") or "BGR").upper()
+        capture["rgb_channel_order"] = "BGR"
         capture["rgb_source_channel_order"] = camera_color_frame_format
-        capture["rgb_save_backend"] = "cv2"
-        capture["rgb_uploaded_corrected"] = bool(correction_info.get("remote_rgb_correction_enable", True))
-        capture["rgb_raw_archive_name"] = "rgb_raw.jpg"
-        capture["rgb_upload_archive_name"] = "rgb.jpg"
+        capture["rgb_source"] = rgb_source
+        capture["rgb_encode_input_format"] = "BGR"
+        capture["rgb_save_backend"] = "cv2.imencode"
+        capture["rgb_uploaded_corrected"] = bool(correction_info.get("remote_rgb_correction_enable", False))
+        capture["rgb_file"] = "rgb_upload.jpg"
         capture["depth_archive_name"] = "depth.png"
-
-        # New audit requirements
         capture["camera_color_frame_format"] = camera_color_frame_format
-        capture["remote_rgb_format"] = "RGB"
+        capture["remote_rgb_format"] = "BGR"
+        capture["raw_bgr_channel_mean"] = raw_stats.get("bgr_channel_mean")
+        capture["upload_bgr_channel_mean"] = upload_stats.get("bgr_channel_mean")
+        capture["upload_luma_mean"] = upload_stats.get("luma_mean")
         capture["rgb_upload_sha256"] = rgb_upload_sha256
         capture["rgb_upload_file"] = "rgb_upload.jpg"
-        capture["rgb_raw_file"] = "rgb_raw.jpg"
+        capture.update(dict(rgb_wait_meta or {}))
 
         # Warmup and camera options requirements
         camera_auto_exposure = frames.get("camera_auto_exposure")
         camera_auto_white_balance = frames.get("camera_auto_white_balance")
-        remote_rgb_warmup_frames = int(self._runtime_profile.get("capture_warmup_frames", 5) or 5)
         capture["camera_auto_exposure"] = camera_auto_exposure
         capture["camera_auto_white_balance"] = camera_auto_white_balance
-        capture["remote_rgb_warmup_frames"] = remote_rgb_warmup_frames
 
-        correction_info["rgb_channel_order"] = "RGB"
+        correction_info["rgb_channel_order"] = "BGR"
         correction_info["rgb_source_channel_order"] = camera_color_frame_format
-        correction_info["rgb_save_backend"] = "cv2"
+        correction_info["rgb_save_backend"] = "cv2.imencode"
 
         extras["capture"] = capture
         extras["correction_info"] = dict(correction_info)
         extras.update(dict(correction_info))
         extras["camera_color_frame_format"] = camera_color_frame_format
-        extras["remote_rgb_format"] = "RGB"
-        extras["rgb_channel_order"] = "RGB"
-        extras["rgb_save_backend"] = "cv2"
+        extras["remote_rgb_format"] = "BGR"
+        extras["rgb_channel_order"] = "BGR"
+        extras["rgb_source"] = rgb_source
+        extras["rgb_encode_input_format"] = "BGR"
+        extras["rgb_save_backend"] = "cv2.imencode"
+        extras["raw_bgr_channel_mean"] = raw_stats.get("bgr_channel_mean")
+        extras["upload_bgr_channel_mean"] = upload_stats.get("bgr_channel_mean")
+        extras["upload_luma_mean"] = upload_stats.get("luma_mean")
         extras["rgb_upload_sha256"] = rgb_upload_sha256
+        extras["rgb_file"] = "rgb_upload.jpg"
         extras["rgb_upload_file"] = "rgb_upload.jpg"
-        extras["rgb_raw_file"] = "rgb_raw.jpg"
         extras["camera_auto_exposure"] = camera_auto_exposure
         extras["camera_auto_white_balance"] = camera_auto_white_balance
-        extras["remote_rgb_warmup_frames"] = remote_rgb_warmup_frames
+        extras.update(dict(rgb_wait_meta or {}))
 
         target = str(cmd.get("target") or extras.get("target") or "")
         for key in (
@@ -1156,17 +1355,24 @@ class RemoteManager:
             extras=extras,
         )
 
-        wb_gain_str = "[" + ", ".join(f"{g:.3f}" for g in correction_info.get("wb_channel_gain", [1.0, 1.0, 1.0])) + "]"
         self._log(
             "info",
-            f"[GRASP_REMOTE][RGB_CORRECT] request_id={request_id} "
-            f"raw_luma={correction_info.get('raw_luma_mean', 0.0):.3f} "
-            f"corrected_luma={correction_info.get('corrected_luma_mean', 0.0):.3f} "
-            f"wb_gain={wb_gain_str} "
-            f"exposure_gain={correction_info.get('exposure_gain', 1.0):.3f} "
-            f"gamma={correction_info.get('gamma', 1.0):.3f} "
-            f"saturation={correction_info.get('saturation_scale', 1.0):.3f}"
+            f"[GRASP_REMOTE][RGB_SOURCE] source={rgb_source} "
+            f"shape={getattr(clean_bgr, 'shape', None)} dtype={getattr(getattr(clean_bgr, 'dtype', None), 'name', getattr(clean_bgr, 'dtype', ''))} "
+            "rgb_encode_input_format=BGR"
         )
+        if bool(correction_info.get("remote_rgb_correction_enable", False)):
+            wb_gain_str = "[" + ", ".join(f"{g:.3f}" for g in correction_info.get("wb_channel_gain", [1.0, 1.0, 1.0])) + "]"
+            self._log(
+                "info",
+                f"[GRASP_REMOTE][RGB_CORRECT] request_id={request_id} "
+                f"raw_luma={correction_info.get('raw_luma_mean', 0.0):.3f} "
+                f"corrected_luma={correction_info.get('corrected_luma_mean', 0.0):.3f} "
+                f"wb_gain={wb_gain_str} "
+                f"exposure_gain={correction_info.get('exposure_gain', 1.0):.3f} "
+                f"gamma={correction_info.get('gamma', 1.0):.3f} "
+                f"saturation={correction_info.get('saturation_scale', 1.0):.3f}"
+            )
         self._log(
             "info",
             f"[GRASP_REMOTE][RGB_UPLOAD] request_id={request_id} "

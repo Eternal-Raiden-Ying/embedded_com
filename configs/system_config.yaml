@@ -37,14 +37,19 @@ vision:
     enable_infer_during_hot_standby: false # Run inference in standby
     remote_payload_archive_enable: true # Archive remote predict payloads for replay
     remote_payload_archive_max_keep: 20 # Max remote predict payload directories per run
-    remote_rgb_correction_enable: true # Correct remote RGB before cloud predict
+    remote_rgb_correction_enable: false # Correct remote RGB before cloud predict
+    remote_rgb_correction_mode: "none" # Main path uses frame_to_display clean BGR
     remote_rgb_white_balance_enable: true # Enable white balance correction
     remote_rgb_exposure_target_mean: 90.0 # Target mean luma for remote RGB exposure correction
     remote_rgb_max_gain: 4.0 # Max gain for remote RGB correction
     remote_rgb_gamma: 1.4 # Gamma correction factor for remote RGB
     remote_rgb_saturation_scale: 1.25 # Saturation boost scale for remote RGB
-    remote_rgb_save_raw: true # Archive raw remote RGB alongside corrected upload
+    remote_rgb_save_raw: false # Legacy switch; GRASP_REMOTE now archives only rgb_upload.jpg
     remote_rgb_jpeg_quality: 95 # JPEG encoding quality for remote RGB upload
+    remote_rgb_capture_warmup_frames: 10 # Observe fresh frames before GRASP_REMOTE upload
+    remote_rgb_capture_wait_timeout_s: 2.0 # Max wait for remote RGB exposure warmup
+    remote_rgb_min_luma_mean: 40.0 # Preferred luma before upload; timeout still sends best frame
+    remote_rgb_require_fresh_after_mode_enter: true # Wait for a new frame after capture starts
     capability_placeholder: false # Capability sink indicator
     heartbeat_enabled: false # Heartbeat message enabled
     heartbeat_interval_s: 5.0 # Heartbeat message interval
@@ -214,7 +219,7 @@ vision:
           enabled: true
           kind: task
           action: init
-          base_url: "http://10.11.36.181:6006"
+          base_url: "http://10.11.40.8:6006"
           robot_id: "sc171_car_01"
           metadata:
             robot_id: "sc171_car_01"
@@ -247,7 +252,7 @@ vision:
           capture_warmup_timeout_s: 1.0
           expected_rgb_shape: [720, 1280]
           expected_depth_shape: [720, 1280]
-          base_url: "http://10.11.36.181:6006"
+          base_url: "http://10.11.40.8:6006"
           robot_id: "sc171_car_01"
           metadata:
             robot_id: "sc171_car_01"
@@ -369,30 +374,39 @@ orchestrator:
     near_slow_max_vy_mps: 0.040 # Near-table lateral speed cap
     near_slow_max_wz_radps: 0.04 # Near-table yaw speed cap
     final_servo_enter_p10_m: 0.45 # ROI depth threshold to enter final servo
-    final_enter_depth_threshold_m: 0.45 # Final phase entry threshold
-    final_fixed_roi_stop_threshold_m: 0.50 # Fixed ROI median stop threshold in final phase
+    final_enter_depth_threshold_m: 0.58 # Final phase handoff depth threshold
+    final_enter_stable_count_required: 2 # Stable frames required to enter final
+    final_handoff_on_yolo_lost_enable: true # Prefer final handoff over search when YOLO table is lost near table
+    final_handoff_recent_obs_max_age_s: 1.0 # Max age for recent edge/table observation used for handoff
+    final_handoff_min_recent_depth_m: 0.65 # Recent depth must be this close or closer for handoff
+    final_fixed_roi_stop_threshold_m: 0.45 # Fixed ROI median stop threshold in final phase
     final_fixed_roi_stop_stable_count_required: 3 # Fixed ROI stop frames required
     remote_init_min_interval_s: 30.0 # Minimum interval between remote init warmups
     edge_final_enter_margin_m: 0.06 # Edge distance margin to enter final servo
     edge_final_stop_margin_m: 0.02 # Edge distance margin for final stop confirmation
     close_range_enter_p10_m: 0.55 # ROI depth threshold to latch close range
-    final_probe_vx_mps: 0.015 # Final probe forward speed
+    final_probe_vx_mps: 0.020 # Final slow probe forward speed
     final_missing_probe_vx_mps: 0.010 # Final probe speed when final signal is missing
-    final_missing_probe_grace_s: 0.80 # Short missing-distance grace probe window
+    final_missing_probe_grace_s: 2.0 # Short missing-distance grace probe window
+    final_slow_stop_timeout_s: 12.0 # Final slow stop timeout
     final_missing_reuse_s: 0.50 # Reuse window for last valid final distance
     final_missing_probe_margin_m: 0.04 # Last valid distance margin before missing probe
     close_range_probe_vx_mps: 0.015 # Close-range probe forward speed
     close_range_missing_probe_vx_mps: 0.008 # Close-range probe speed when depth is missing
     roi_final_stop_p10_m: 0.42 # ROI P10 threshold for final lock stop
     roi_final_slow_p10_m: 0.52 # ROI P10 threshold for slow final probe
-    roi_final_probe_vx_mps: 0.015 # ROI final probe forward speed
+    roi_final_probe_vx_mps: 0.020 # ROI final probe forward speed
     roi_final_missing_probe_vx_mps: 0.008 # ROI final probe speed when depth is missing
     roi_final_missing_hold_s: 0.8 # ROI missing hold before zero forward
-    depth_envelope_stop_p10_m: 0.42 # Depth envelope hard stop threshold
+    depth_envelope_stop_p10_m: 0.30 # Depth envelope hard hold threshold, below final fixed ROI stop
     depth_envelope_slow_p10_m: 0.50 # Depth envelope slow threshold
+    depth_emergency_stop_p10_m: 0.20 # Emergency depth stop threshold
     depth_envelope_mid_p10_m: 0.70 # Depth envelope mid threshold
     depth_envelope_slow_vx_mps: 0.012 # Depth envelope slow forward cap
     depth_envelope_mid_vx_mps: 0.015 # Depth envelope mid forward cap
+    yolo_approach_min_vx_mps: 0.02 # Min forward speed for YOLO_APPROACH when forward is allowed
+    yolo_approach_depth_stat_for_envelope: "median" # Use median, not mean, for approach speed envelope
+    yolo_approach_use_p10_for_safety_only: true # Keep p10 for hard safety/hold only
     yolo_table_lost_to_search_frames: 8 # Frame drop threshold to trigger search
     no_table_bbox_timeout_s: 10.0 # Timeout only when YOLO table bbox is also absent
     edge_geometry_timeout_s: 10.0 # Time to degrade edge geometry before YOLO assist fallback
@@ -438,7 +452,7 @@ orchestrator:
     target_confirm_window_s: 1.50 # Sliding window size for target detection
     target_confirm_found_ratio_th: 0.50 # Ratio of successful detections in window
     target_lateral_align_enable: true # Center target bbox by lateral base motion
-    target_lateral_align_center_x_target: 0.50 # Desired target bbox center x
+    target_lateral_align_center_x_target: 0.45 # Desired target bbox center x for grasp targets
     target_lateral_align_center_x_tol: 0.06 # Center tolerance for lock
     target_lateral_align_center_x_deadband: 0.03 # No-motion deadband
     target_lateral_align_kp_vy: 0.10 # Lateral proportional gain
@@ -447,6 +461,28 @@ orchestrator:
     target_lateral_align_stable_frames: 3 # Consecutive centered frames
     target_lateral_align_lost_hold_s: 0.80 # Hold duration after target loss
     target_lateral_align_timeout_s: 12.0 # Target lateral align timeout
+    post_grasp_place_enable: true # Continue to basket place flow after successful grasp
+    post_grasp_turn_enable: true # Open-loop 180 degree turn before basket search
+    post_grasp_turn_wz_radps: 0.45 # Open-loop turn angular speed
+    post_grasp_turn_duration_s: 3.5 # Open-loop turn duration
+    post_grasp_turn_direction: "left" # left or right
+    basket_search_timeout_s: 15.0 # Basket search timeout
+    basket_search_wz_radps: 0.25 # Basket search rotation speed
+    basket_align_center_x_target: 0.50 # Basket bbox center x for placing target
+    basket_align_center_x_tol: 0.08 # Basket center tolerance
+    basket_approach_vx_mps: 0.08 # Basket approach forward speed
+    basket_approach_vx_slow_mps: 0.035 # Slow basket approach forward speed
+    basket_stop_bbox_area_norm: 0.18 # Stop when basket bbox area is large enough
+    basket_stop_bbox_height_norm: 0.38 # Stop when basket bbox height is large enough
+    basket_stop_stable_count_required: 3 # Stable stop frames for basket approach
+    basket_approach_timeout_s: 20.0 # Basket approach timeout
+    place_pose_x_cm: 12.0 # Configured place pose x in cm
+    place_pose_y_cm: 0.0 # Configured place pose y in cm
+    place_pose_z_cm: 8.0 # Configured place pose z in cm
+    place_pose_pitch_deg: 0.0 # Configured place pose pitch in degrees
+    place_pose_roll_deg: 0.0 # Configured place pose roll in degrees
+    place_gripper_width: 80.0 # Configured claw/open value for place POSE
+    place_duration_ms: 800 # Configured place POSE duration in ms
     target_lock_conf_th: 0.40 # Trust limit for locking target tag
     target_lock_found_ratio_th: 0.60 # Detections ratio required to lock tag
     target_lock_settle_s: 0.50 # Delay after locking target tag
@@ -517,11 +553,11 @@ orchestrator:
     assume_grasp_success_for_test: false # Bypass hardware checks during test
     target_gripper_widths:
       "苹果": 50.0
-      "猕猴桃": 65.0
-      "瓶子": 70.0
-      "apple": 80.0
-      "bottle": 80.0
-      "kiwi_fruit": 70.0
+      "猕猴桃": 20.0
+      "瓶子": 30.0
+      "apple": 50.0
+      "bottle": 30.0
+      "kiwi_fruit": 20.0
   car:
     grasp_reposition_speed_cm_s: 10.0 # Base reposition speed during grasp retry
     pre_arm_stop_settle_ms: 150 # Stop settle before sending arm POSE

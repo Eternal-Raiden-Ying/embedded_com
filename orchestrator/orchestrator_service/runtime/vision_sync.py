@@ -278,6 +278,24 @@ class VisionSyncMixin:
                     "class_id": self.ctx.class_id,
                 },
             )
+        if state in {State.SEARCH_BASKET, State.APPROACH_BASKET}:
+            return VisionStageBinding(
+                stage="SEARCH",
+                mode_hint="FIND_OBJECT",
+                target="basket",
+                payload={
+                    "search_kind": "RETURN_PLACE_BASKET",
+                    "target": "basket",
+                    "canonical_target": "basket",
+                    "class_name": "basket",
+                    "class_id": target_to_class_id("basket"),
+                    "return_place_target": "basket",
+                    "carried_target": getattr(self.ctx, "carried_target", None),
+                    "need_depth": False,
+                    "orchestrator_state": state.value,
+                    "basket_align_center_x_target": float(getattr(self.cfg, "basket_align_center_x_target", 0.50) or 0.50),
+                },
+            )
         if state == State.GRASP:
             class_id = int(self.ctx.class_id) if self.ctx.class_id is not None else target_to_class_id(self.ctx.active_target or "")
             target_obs = self.ctx.last_target_obs

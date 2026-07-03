@@ -160,8 +160,13 @@ class MotionController:
         if obs is not None:
             obs_target_dist = getattr(obs, "obs_target_dist_m", None) or getattr(obs, "target_dist_m", None)
         obs_target_dist_val = float(obs_target_dist) if obs_target_dist is not None else table_target_dist
-        if obs is not None and obs.dist_err_m is not None:
-            measured_distance = obs_target_dist_val + float(obs.dist_err_m)
+        obs_dist_err = getattr(obs, "dist_err_m", None) if obs is not None else None
+        obs_yaw_err = getattr(obs, "yaw_err_rad", None) if obs is not None else None
+        obs_edge_found = getattr(obs, "edge_found", False) if obs is not None else False
+        obs_confidence = getattr(obs, "confidence", None) if obs is not None else None
+        obs_edge_conf = getattr(obs, "edge_conf", obs_confidence) if obs is not None else None
+        if obs is not None and obs_dist_err is not None:
+            measured_distance = obs_target_dist_val + float(obs_dist_err)
             final_dist_err_m = measured_distance - table_target_dist
         timing = self._stale_guard(obs, cmd.ts)
         stale_level = str(timing.get("stale_level") or "")
@@ -174,7 +179,16 @@ class MotionController:
             if yolo_table_fresh_raw is None
             else bool(yolo_table_fresh_raw)
         )
-        semantic_fields = self._semantic_summary_fields(obs) if obs is not None else {
+        table_like_obs = bool(
+            obs is not None
+            and (
+                hasattr(obs, "edge_found")
+                or hasattr(obs, "table_bbox_found")
+                or hasattr(obs, "dist_err_m")
+                or hasattr(obs, "yaw_err_rad")
+            )
+        )
+        semantic_fields = self._semantic_summary_fields(obs) if table_like_obs else {
             "table_bbox_current_found": False,
             "table_bbox_control_valid": False,
             "table_bbox_hold_active": False,
@@ -209,12 +223,12 @@ class MotionController:
         }
         return {
             "state": mode,
-            "edge_found": bool(edge_found if edge_found is not None else (obs.edge_found if obs is not None else False)),
-            "edge_valid": bool(getattr(obs, "edge_valid", obs.edge_found) if obs is not None else False),
-            "confidence": (float(obs.confidence) if obs is not None and obs.confidence is not None else None),
-            "edge_conf": (float(getattr(obs, "edge_conf", obs.confidence)) if obs is not None and getattr(obs, "edge_conf", obs.confidence) is not None else None),
-            "yaw_err_rad": (float(obs.yaw_err_rad) if obs is not None and obs.yaw_err_rad is not None else None),
-            "dist_err_m": (float(obs.dist_err_m) if obs is not None and obs.dist_err_m is not None else None),
+            "edge_found": bool(edge_found if edge_found is not None else obs_edge_found),
+            "edge_valid": bool(getattr(obs, "edge_valid", obs_edge_found) if obs is not None else False),
+            "confidence": (float(obs_confidence) if obs_confidence is not None else None),
+            "edge_conf": (float(obs_edge_conf) if obs_edge_conf is not None else None),
+            "yaw_err_rad": (float(obs_yaw_err) if obs_yaw_err is not None else None),
+            "dist_err_m": (float(obs_dist_err) if obs_dist_err is not None else None),
             "target_dist_m": table_target_dist,
             "measured_distance_m": measured_distance,
             "measured_dist_m": measured_distance,
@@ -233,7 +247,7 @@ class MotionController:
             "fov_guard_reason": str(getattr(obs, "fov_guard_reason", "") or "") if obs is not None else "",
             "stale_source": (
                 "edge"
-                if obs is not None and stale_level and stale_level != "fresh" and self._yolo_reliable(obs)
+                if table_like_obs and stale_level and stale_level != "fresh" and self._yolo_reliable(obs)
                 else ("table" if obs is not None and stale_level and stale_level != "fresh" else "")
             ),
             **timing,

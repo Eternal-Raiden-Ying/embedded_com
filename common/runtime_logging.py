@@ -1079,6 +1079,21 @@ class RunLogger:
         self._event_fp.write(f"[{time.strftime('%H:%M:%S')}] {text}\n")
         self._event_fp.flush()
 
+    def flush(self) -> None:
+        try:
+            if self._event_fp is not None:
+                self._event_fp.flush()
+        except Exception:
+            pass
+        if self._async_enabled and self._log_queue is not None:
+            deadline = time.time() + 1.0
+            while not self._log_queue.empty() and time.time() < deadline:
+                time.sleep(0.02)
+        try:
+            self._flush_log_writer_files()
+        except Exception:
+            pass
+
     def write_timeline(self, event: str, **fields: Any) -> None:
         payload = {"event": str(event)}
         payload.update(fields)

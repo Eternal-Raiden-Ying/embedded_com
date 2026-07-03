@@ -501,6 +501,17 @@ class GraspFlowMixin:
 
     def _tick_grasp_verify(self, now_m: float) -> MotionDecision:
         self._log("info", "[GRASP][VERIFY_ASSUMED_SUCCESS] grasp_success_assumed_for_demo=true")
+        if bool(getattr(self.cfg, "post_grasp_place_enable", True)):
+            self.ctx.carrying_object = True
+            self.ctx.carried_target = str(self.ctx.canonical_target or self.ctx.active_target or "")
+            self.ctx.post_grasp_place_enabled = True
+            self.ctx.basket_search_start_ts = 0.0
+            self.ctx.basket_approach_stable_count = 0
+            self.ctx.basket_place_substate = ""
+            self.ctx.arm_response = None
+            self._transition(State.POST_GRASP_TURN_180, "arm_motion_done post_grasp_place_enable=true")
+            self._queue_tts("抓取完成，开始寻找篮子")
+            return self.controller.stop_cmd("POST_GRASP_TURN_180")
         self._transition(State.DONE, "arm_motion_done grasp_success_assumed_for_demo")
         self._queue_tts("抓取完成")
         return self.controller.stop_cmd("DONE")

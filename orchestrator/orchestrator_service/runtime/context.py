@@ -24,6 +24,10 @@ class State(str, Enum):
     TARGET_LOCKED = "TARGET_LOCKED"
     FREEZE_BASE = "FREEZE_BASE"
     GRASP = "GRASP"
+    POST_GRASP_TURN_180 = "POST_GRASP_TURN_180"
+    SEARCH_BASKET = "SEARCH_BASKET"
+    APPROACH_BASKET = "APPROACH_BASKET"
+    PLACE_TO_BASKET = "PLACE_TO_BASKET"
     LEAVE_EDGE = "LEAVE_EDGE"
     RELOCATE_TO_EDGE = "RELOCATE_TO_EDGE"
     REACQUIRE_TABLE = "REACQUIRE_TABLE"
@@ -199,6 +203,12 @@ class RuntimeContext:
     near_table_latched_mono: float = 0.0
     final_depth_latched: bool = False
     final_depth_latched_mono: float = 0.0
+    final_arrival_reached: bool = False
+    final_arrival_ts: float = 0.0
+    final_arrival_source: str = ""
+    final_arrival_value: Optional[float] = None
+    final_arrival_threshold: Optional[float] = None
+    final_arrival_stable_count: int = 0
     final_yaw_align_active: bool = False
     final_locked: bool = False
     final_edge_seen_after_find: bool = False
@@ -283,6 +293,24 @@ class RuntimeContext:
     arm_response: Optional[object] = None
     grasp_timeout_mono: float = 0.0
     grasp_verify_reported: bool = False
+    carrying_object: bool = False
+    carried_target: str = ""
+    post_grasp_place_enabled: bool = False
+    basket_search_start_ts: float = 0.0
+    basket_approach_stable_count: int = 0
+    basket_last_seen_mono: float = 0.0
+    basket_place_substate: str = ""
+    basket_place_timeout_mono: float = 0.0
+
+    def clear_carrying_object(self) -> None:
+        self.carrying_object = False
+        self.carried_target = ""
+        self.post_grasp_place_enabled = False
+        self.basket_search_start_ts = 0.0
+        self.basket_approach_stable_count = 0
+        self.basket_last_seen_mono = 0.0
+        self.basket_place_substate = ""
+        self.basket_place_timeout_mono = 0.0
 
     def clear_final_enter_candidate(self) -> None:
         self.final_edge_seen_after_find = False
@@ -299,6 +327,12 @@ class RuntimeContext:
         self.near_table_latched_mono = 0.0
         self.final_depth_latched = False
         self.final_depth_latched_mono = 0.0
+        self.final_arrival_reached = False
+        self.final_arrival_ts = 0.0
+        self.final_arrival_source = ""
+        self.final_arrival_value = None
+        self.final_arrival_threshold = None
+        self.final_arrival_stable_count = 0
         self.final_yaw_align_active = False
         self.final_locked = False
         self.final_lock_reason = ""
@@ -563,6 +597,7 @@ class RuntimeContext:
         self.arm_response = None
         self.grasp_timeout_mono = 0.0
         self.grasp_verify_reported = False
+        self.clear_carrying_object()
         self.clear_final_enter_candidate()
         self.reset_edge_slope_final_ready("clear_task_context")
         self.reset_edge_plan()

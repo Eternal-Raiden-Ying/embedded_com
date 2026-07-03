@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import json
+import logging
 import os
 import sys
 import time
@@ -55,6 +57,11 @@ class VistaApp(BaseModule):
             default_interval_s=CONFIG.runtime.operator_summary_interval_s,
         )
         self.log_paths = self.run_logger.structured_paths(heartbeat_enabled=CONFIG.runtime.heartbeat_enabled)
+        self._vision_stdout_file = str(os.getenv("VISION_LOG_FILE") or (Path(self.run_logger.run_dir) / "vision.out"))
+        self._vision_log_health_file = Path(self.run_logger.run_dir) / "log_health.json"
+        self._vision_log_first_write_ts = 0.0
+        self._vision_log_last_flush_ts = 0.0
+        self._stop_reason = "normal"
         self.scheduler = Scheduler()
         camera_manager = CameraManager(cfg=CONFIG, logger=self.child_logger("camera"))
         predictor_manager = PredictorManager(cfg=CONFIG, logger=self.child_logger("predictor"))
@@ -67,6 +74,7 @@ class VistaApp(BaseModule):
             run_id=str(self.run_logger.stack_run_id),
             rgb_correction_config={
                 "remote_rgb_correction_enable": bool(CONFIG.runtime.remote_rgb_correction_enable),
+                "remote_rgb_correction_mode": str(getattr(CONFIG.runtime, "remote_rgb_correction_mode", "none") or "none"),
                 "remote_rgb_white_balance_enable": bool(CONFIG.runtime.remote_rgb_white_balance_enable),
                 "remote_rgb_exposure_target_mean": float(CONFIG.runtime.remote_rgb_exposure_target_mean),
                 "remote_rgb_max_gain": float(CONFIG.runtime.remote_rgb_max_gain),
@@ -74,6 +82,10 @@ class VistaApp(BaseModule):
                 "remote_rgb_saturation_scale": float(CONFIG.runtime.remote_rgb_saturation_scale),
                 "remote_rgb_save_raw": bool(CONFIG.runtime.remote_rgb_save_raw),
                 "remote_rgb_jpeg_quality": int(CONFIG.runtime.remote_rgb_jpeg_quality),
+                "remote_rgb_capture_warmup_frames": int(CONFIG.runtime.remote_rgb_capture_warmup_frames),
+                "remote_rgb_capture_wait_timeout_s": float(CONFIG.runtime.remote_rgb_capture_wait_timeout_s),
+                "remote_rgb_min_luma_mean": float(CONFIG.runtime.remote_rgb_min_luma_mean),
+                "remote_rgb_require_fresh_after_mode_enter": bool(CONFIG.runtime.remote_rgb_require_fresh_after_mode_enter),
             },
         )
         table_edge_manager = TableEdgeManager(cfg=CONFIG, logger=self.child_logger("table_edge"))
@@ -175,6 +187,88 @@ class VistaApp(BaseModule):
         self._rate_diag_send_ts = deque(maxlen=256)
         self.obs_metrics = ObservationMetrics()
         self.obs_router = ObservationRouter(metrics=self.obs_metrics, control_send_interval_s=self._control_send_interval_s())
+
+    def _logger_handlers_snapshot(self):
+        names = ["vision"]
+        for name in sorted(logging.Logger.manager.loggerDict.keys()):
+            if str(name).startswith("vision."):
+                names.append(str(name))
+        snapshot = []
+        for name in names:
+            logger = logging.getLogger(name)
+            for handler in list(logger.handlers):
+                snapshot.append(
+                    {
+                        "logger": name,
+                        "handler": handler.__class__.__name__,
+                        "level": logging.getLevelName(handler.level),
+                        "file": getattr(handler, "baseFilename", ""),
+                    }
+                )
+        return snapshot
+
+    def _flush_log_outputs(self) -> None:
+        for logger_name in ["vision"] + [str(name) for name in logging.Logger.manager.loggerDict.keys() if str(name).startswith("vision.")]:
+            logger = logging.getLogger(logger_name)
+            for handler in list(logger.handlers):
+                try:
+                    handler.flush()
+                except Exception:
+                    pass
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.flush()
+            except Exception:
+                pass
+        flush_fn = getattr(self.run_logger, "flush", None)
+        if callable(flush_fn):
+            try:
+                flush_fn()
+            except Exception:
+                pass
+        self._vision_log_last_flush_ts = time.time()
+
+    def _write_log_health(self) -> None:
+        stdout_path = Path(self._vision_stdout_file)
+        try:
+            stdout_size = int(stdout_path.stat().st_size) if stdout_path.exists() else 0
+        except OSError:
+            stdout_size = 0
+        payload = {
+            "run_id": str(self.run_logger.stack_run_id),
+            "run_dir": str(self.run_logger.run_dir),
+            "log_file": str(stdout_path),
+            "stdout_file": str(stdout_path),
+            "stderr_file": "",
+            "combined_out_file": str(stdout_path),
+            "file_exists": bool(stdout_path.exists()),
+            "size_bytes": stdout_size,
+            "first_write_ts": float(self._vision_log_first_write_ts or 0.0),
+            "last_flush_ts": float(self._vision_log_last_flush_ts or 0.0),
+            "logger_handlers": self._logger_handlers_snapshot(),
+        }
+        self._vision_log_health_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(self._vision_log_health_file, "w", encoding="utf-8") as fp:
+            json.dump(payload, fp, ensure_ascii=False, indent=2)
+            fp.write("\n")
+            fp.flush()
+
+    def _emit_log_lifecycle(self, event: str, *, reason: str = "") -> None:
+        level = logging.getLevelName(logging.getLogger("vision").level)
+        if event == "start":
+            self._vision_log_first_write_ts = time.time()
+            line = (
+                f"[VISION][LOG_START] run_id={self.run_logger.stack_run_id} "
+                f"log_file={self._vision_stdout_file} pid={os.getpid()} level={level}"
+            )
+            self._record_event("LOG_START", trigger="start", data={"log_file": self._vision_stdout_file, "pid": os.getpid(), "level": str(level)})
+        else:
+            line = f"[VISION][LOG_STOP] reason={reason or 'stop'} flushed=true"
+            self._record_event("LOG_STOP", trigger="stop", data={"reason": reason or "stop", "flushed": True})
+        print(line, flush=True)
+        self.log_info("runtime", line)
+        self._flush_log_outputs()
+        self._write_log_health()
 
     def _ctx(self):
         return self.stage_controller.context()
@@ -1433,6 +1527,7 @@ class VistaApp(BaseModule):
                 "config": cfg_dump,
             }
         )
+        self._emit_log_lifecycle("start")
         self._record_event("SERVICE_STARTING", trigger="start", data={"run_dir": str(self.run_logger.run_dir)})
         self.operator_console.emit(f"[VISTA] SERVICE_STARTING run={self.run_logger.stack_run_id}")
         if self._console_is_full():
@@ -1474,7 +1569,7 @@ class VistaApp(BaseModule):
         self._emit_heartbeat_if_needed(force=True)
         self._emit_system_metrics_if_needed(force=True)
 
-    def stop(self):
+    def stop(self, reason: str = "stop"):
         if self._stopped:
             return
         self._stopped = True
@@ -1489,6 +1584,7 @@ class VistaApp(BaseModule):
         self.operator_console.emit(f"[VISTA] SERVICE_STOPPED run={self.run_logger.stack_run_id}")
         if self._console_is_full():
             self.log_info("runtime", "SERVICE_STOPPED")
+        self._emit_log_lifecycle("stop", reason=reason)
         self.run_logger.close()
 
     def run(self):
@@ -1527,12 +1623,14 @@ class VistaApp(BaseModule):
                     time.sleep(target_frame_time - dt)
 
         except KeyboardInterrupt:
+            self._stop_reason = "keyboard_interrupt"
             self.log_info("runtime", "keyboard interrupt received")
         except Exception as exc:
+            self._stop_reason = "exception"
             self._record_event("FATAL", level="error", trigger="main_loop", data={"error": str(exc)})
             self.log_error("runtime", f"vista main loop crashed: {exc}")
         finally:
-            self.stop()
+            self.stop(reason=self._stop_reason)
 
     def _emit_system_metrics_if_needed(self, force: bool = False) -> None:
         sample = self._system_metrics.sample_if_due(force=force)

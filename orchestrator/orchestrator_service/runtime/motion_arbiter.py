@@ -316,29 +316,77 @@ def _docking_result(
         or state_name in {"FINAL_SLOW_STOP", "AT_TABLE_EDGE"}
     )
     depth_p10 = _optional_field_float("final_depth_m")
-    if depth_p10 is None and not final_parking_depth_phase:
-        depth_p10 = _optional_field_float("table_roi_depth_p10")
-    if depth_p10 is None:
+    depth_stat_used = "final_depth_m" if depth_p10 is not None else "missing"
+    depth_stat_value = depth_p10
+    safety_p10 = None
+    if not final_parking_depth_phase:
+        safety_p10 = _optional_field_float("table_roi_depth_p10")
+        if safety_p10 is None:
+            safety_p10 = _optional_field_float("depth_p10")
+        if state_name == "YOLO_APPROACH":
+            median_value = _optional_field_float("table_roi_depth_median")
+            if median_value is not None:
+                depth_p10 = median_value
+                depth_stat_value = median_value
+                depth_stat_used = "table_roi_depth_median"
+            else:
+                depth_p10 = None
+                depth_stat_value = None
+                depth_stat_used = "missing"
+        elif depth_p10 is None:
+            depth_p10 = safety_p10
+            depth_stat_value = depth_p10
+            depth_stat_used = "table_roi_depth_p10" if depth_p10 is not None else "missing"
+    if depth_p10 is None and state_name != "YOLO_APPROACH":
         depth_p10 = _optional_field_float("depth_p10")
+        depth_stat_value = depth_p10
+        depth_stat_used = "depth_p10" if depth_p10 is not None else "missing"
     vx_cap: Optional[float] = None
     envelope_reason = ""
     final_distance_servo_active = bool(safe_summary.get("final_distance_servo_active", False))
     if (final_locked or final_depth_latched) and not final_distance_servo_active:
         vx_cap = 0.0
         envelope_reason = "final_locked" if final_locked else "final_depth_latched"
+    elif state_name == "YOLO_APPROACH" and safety_p10 is not None and safety_p10 <= _float(safe_summary, "depth_envelope_stop_p10_m", 0.30):
+        vx_cap = 0.0
+        envelope_reason = "depth_p10_stop"
+        safe_summary["safety_source"] = "table_roi_p10"
+        safe_summary["safety_value"] = float(safety_p10)
+        safe_summary["safety_hard_hold_threshold"] = float(_float(safe_summary, "depth_envelope_stop_p10_m", 0.30))
+        safe_summary["safety_emergency_threshold"] = float(_float(safe_summary, "depth_emergency_stop_p10_m", 0.20))
+        safe_summary["safety_action"] = "emergency_stop" if float(safety_p10) <= float(_float(safe_summary, "depth_emergency_stop_p10_m", 0.20)) else "hold"
+        safe_summary["safety_blocks_forward"] = True
+        safe_summary["safety_blocks_arrival_transition"] = bool(float(safety_p10) <= float(_float(safe_summary, "depth_emergency_stop_p10_m", 0.20)))
+        depth_stat_used = "table_roi_depth_p10"
+        depth_stat_value = safety_p10
     elif depth_p10 is not None:
-        stop_p10 = _float(safe_summary, "depth_envelope_stop_p10_m", 0.35)
+        stop_p10 = _float(safe_summary, "depth_envelope_stop_p10_m", 0.30)
         slow_p10 = _float(safe_summary, "depth_envelope_slow_p10_m", 0.50)
+        emergency_p10 = _float(safe_summary, "depth_emergency_stop_p10_m", 0.20)
         mid_p10 = _float(safe_summary, "depth_envelope_mid_p10_m", 0.70)
         if depth_p10 <= stop_p10:
             vx_cap = 0.0
-            envelope_reason = "depth_p10_stop"
+            envelope_reason = "depth_median_stop" if state_name == "YOLO_APPROACH" else "depth_p10_stop"
+            safe_summary.setdefault("safety_value", float(depth_p10))
+            safe_summary.setdefault("safety_hard_hold_threshold", float(stop_p10))
+            safe_summary.setdefault("safety_emergency_threshold", float(emergency_p10))
+            safe_summary["safety_action"] = "emergency_stop" if float(depth_p10) <= float(emergency_p10) else "hold"
+            safe_summary["safety_blocks_forward"] = True
+            safe_summary["safety_blocks_arrival_transition"] = bool(float(depth_p10) <= float(emergency_p10))
         elif depth_p10 <= slow_p10:
             vx_cap = abs(_float(safe_summary, "depth_envelope_slow_vx_mps", 0.006))
-            envelope_reason = "depth_p10_slow"
+            envelope_reason = "depth_median_slow" if state_name == "YOLO_APPROACH" else "depth_p10_slow"
+            safe_summary.setdefault("safety_value", float(depth_p10))
+            safe_summary["safety_action"] = "slow"
+            safe_summary["safety_blocks_forward"] = False
+            safe_summary["safety_blocks_arrival_transition"] = False
         elif depth_p10 <= mid_p10:
             vx_cap = abs(_float(safe_summary, "depth_envelope_mid_vx_mps", 0.015))
-            envelope_reason = "depth_p10_mid"
+            envelope_reason = "depth_median_mid" if state_name == "YOLO_APPROACH" else "depth_p10_mid"
+            safe_summary.setdefault("safety_value", float(depth_p10))
+            safe_summary["safety_action"] = "slow"
+            safe_summary["safety_blocks_forward"] = False
+            safe_summary["safety_blocks_arrival_transition"] = False
     if vx_cap is None and near_table_latched:
         vx_cap = abs(_float(safe_summary, "near_slow_max_vx_mps", _float(safe_summary, "depth_envelope_slow_vx_mps", 0.030)))
         envelope_reason = "near_table_latched"
@@ -356,6 +404,25 @@ def _docking_result(
         final_no_yaw = True
     if vx_cap is not None and abs(final_vx) > vx_cap:
         final_vx = max(-vx_cap, min(vx_cap, final_vx))
+    yolo_min_vx = abs(_float(safe_summary, "yolo_approach_min_vx_mps", 0.02))
+    yolo_min_allowed = bool(
+        state_name == "YOLO_APPROACH"
+        and final_vx > 1e-9
+        and yolo_min_vx > 0.0
+        and stop_class == StopClass.NONE
+        and not bool(safe_summary.get("emergency_stop_active", False))
+        and not bool(safe_summary.get("obstacle_active", False))
+        and not bool(safe_summary.get("obstacle_stop_active", False))
+        and not bool(safe_summary.get("base_depth_hard_safety", False))
+        and not bool(safe_summary.get("base_depth_stop_active", False))
+        and not bool(safe_summary.get("depth_hard_stop_active", False))
+        and not bool(safe_summary.get("safety_stop_active", False))
+        and str(safe_summary.get("stale_level") or "").strip().lower() not in {"hard_stale", "dead"}
+        and str(safe_summary.get("stop_class") or "").strip().lower() not in {"emergency", "safety", "stale_recovery"}
+    )
+    if yolo_min_allowed and final_vx < yolo_min_vx:
+        final_vx = yolo_min_vx
+        safe_summary["speed_limit_reason"] = str(safe_summary.get("speed_limit_reason") or "yolo_approach_min_vx")
     if final_no_yaw:
         final_vy = 0.0
         final_wz = 0.0
@@ -377,7 +444,15 @@ def _docking_result(
             safe_summary["docking_reason"] = "final_depth_latched"
     if envelope_reason:
         safe_summary["depth_speed_envelope_reason"] = envelope_reason
+        safe_summary["depth_speed_envelope_stat_used"] = str(depth_stat_used)
+        safe_summary["depth_speed_envelope_stat_value"] = depth_stat_value
         safe_summary["depth_speed_envelope_vx_cap"] = float(vx_cap if vx_cap is not None else 0.0)
+    if state_name == "YOLO_APPROACH":
+        safe_summary["yolo_approach_min_vx_mps"] = float(yolo_min_vx)
+        safe_summary.setdefault("depth_speed_envelope_stat_used", str(depth_stat_used))
+        safe_summary.setdefault("depth_speed_envelope_stat_value", depth_stat_value)
+        safe_summary.setdefault("safety_source", "")
+        safe_summary.setdefault("speed_limit_reason", str(envelope_reason or ""))
     edge_score = _float(safe_summary, "edge_readiness_score", 0.0)
     edge_enter = _float(safe_summary, "edge_readiness_enter_score", 0.65)
     edge_ready_for_approach = bool(_bool_field("edge_trusted") or bool(safe_summary.get("edge_handoff_complete", False)) or edge_score >= edge_enter)
@@ -429,18 +504,39 @@ def _docking_result(
     safe_summary["close_range_latched"] = is_close_range
     safe_summary["final_distance_servo_active"] = is_final_servo
     safe_summary["final_phase_active"] = bool(final_phase_state)
-    safe_summary["legacy_edge_stop_threshold_m"] = float(_float(safe_summary, "depth_envelope_stop_p10_m", 0.35))
+    safe_summary["legacy_edge_stop_threshold_m"] = float(_float(safe_summary, "depth_envelope_stop_p10_m", 0.30))
+    safe_summary.setdefault("safety_slow_threshold", float(_float(safe_summary, "depth_envelope_slow_p10_m", 0.50)))
+    safe_summary.setdefault("safety_hard_hold_threshold", float(_float(safe_summary, "depth_envelope_stop_p10_m", 0.30)))
+    safe_summary.setdefault("safety_emergency_threshold", float(_float(safe_summary, "depth_emergency_stop_p10_m", 0.20)))
+    safe_summary.setdefault("safety_action", "none")
+    safe_summary.setdefault("safety_blocks_forward", False)
+    safe_summary.setdefault("safety_blocks_arrival_transition", False)
     safe_summary["docking_action"] = action.value
     if action == DockingAction.DEPTH_SAFETY_HOLD:
         depth_source = str(safe_summary.get("best_depth_source") or safe_summary.get("measured_dist_source") or "")
+        safety_value = safe_summary.get("best_depth_value", safe_summary.get("measured_dist_m"))
         if "final_fixed_roi" in depth_source or "fixed_roi" in depth_source:
             safe_summary["safety_source"] = "final_fixed_roi"
+            safety_value = safe_summary.get("final_fixed_roi_stop_stat", safety_value)
         elif "table_roi_depth_p10" in depth_source or "roi_final_p10" in depth_source:
             safe_summary["safety_source"] = "table_roi_p10"
+            safety_value = safe_summary.get("table_roi_depth_p10", safety_value)
         elif "depth_p10" in depth_source or "edge" in depth_source:
             safe_summary["safety_source"] = "edge_depth"
+            safety_value = safe_summary.get("edge_depth_p10", safe_summary.get("depth_p10", safety_value))
         else:
             safe_summary.setdefault("safety_source", "unknown")
+        safe_summary.setdefault("safety_value", safety_value)
+        safe_summary.setdefault("safety_hard_hold_threshold", float(_float(safe_summary, "depth_envelope_stop_p10_m", 0.30)))
+        safe_summary.setdefault("safety_emergency_threshold", float(_float(safe_summary, "depth_emergency_stop_p10_m", 0.20)))
+        emergency = False
+        try:
+            emergency = safety_value is not None and float(safety_value) <= float(safe_summary.get("safety_emergency_threshold"))
+        except Exception:
+            emergency = False
+        safe_summary["safety_action"] = "emergency_stop" if emergency else "hold"
+        safe_summary["safety_blocks_forward"] = True
+        safe_summary["safety_blocks_arrival_transition"] = bool(emergency)
         if safe_summary.get("final_fixed_roi_stop_stat") is None and safe_summary.get("roi_depth_stat") is None:
             safe_summary.setdefault("fixed_roi_status", "missing")
 
@@ -794,7 +890,7 @@ def arbitrate_table_docking_motion(
             "legacy_table_roi_depth_p10": float(legacy_roi_depth_m) if legacy_roi_depth_m is not None else None,
         }
     )
-    fixed_roi_final_stop_threshold = _float(summary, "final_fixed_roi_stop_threshold_m", 0.50)
+    fixed_roi_final_stop_threshold = _float(summary, "final_fixed_roi_stop_threshold_m", 0.45)
     fixed_roi_stop_stable_required = max(1, int(_float(summary, "final_fixed_roi_stop_stable_count_required", 3)))
     fixed_roi_final_stop_reached = bool(
         final_phase_state
@@ -823,6 +919,7 @@ def arbitrate_table_docking_motion(
             "final_fixed_roi_stop_threshold_m": float(fixed_roi_final_stop_threshold),
             "final_fixed_roi_stop_stat": float(fixed_roi_depth_m) if fixed_roi_depth_m is not None else None,
             "final_fixed_roi_stop_stat_used": fixed_roi_stat_used,
+            "final_arrival_source": f"fixed_roi_{fixed_roi_stat_used}" if fixed_roi_stat_used in {"median", "mean"} else "missing",
             "final_fixed_roi_stop_reached": bool(fixed_roi_final_stop_reached),
             "final_fixed_roi_stop_stable_count": int(getattr(ctx, "fixed_roi_final_stop_stable_count", 0) or 0),
             "final_fixed_roi_stop_stable_count_required": int(fixed_roi_stop_stable_required),
@@ -1239,7 +1336,7 @@ def arbitrate_table_docking_motion(
                 global_depth_p10_m = float(global_depth_p10) if global_depth_p10 is not None else None
             except (TypeError, ValueError):
                 global_depth_p10_m = None
-            stop_p10 = _float(summary, "depth_envelope_stop_p10_m", 0.35)
+            stop_p10 = _float(summary, "depth_envelope_stop_p10_m", 0.30)
             missing_probe_cap = abs(_float(summary, "final_missing_probe_vx_mps", 0.010))
             missing_probe_vx = min(missing_probe_cap, abs(_float(summary, "final_forward_vx_max_mps", 0.015)))
             reuse_s = max(0.0, _float(summary, "final_missing_reuse_s", 0.50))
@@ -1333,12 +1430,12 @@ def arbitrate_table_docking_motion(
         }
 
     def final_roi_mode_result() -> ArbitrationResult:
-        stop_p10 = _float(summary, "depth_envelope_stop_p10_m", _float(summary, "roi_final_stop_p10_m", 0.35))
+        stop_p10 = _float(summary, "depth_envelope_stop_p10_m", _float(summary, "roi_final_stop_p10_m", 0.30))
         slow_p10 = _float(summary, "roi_final_slow_p10_m", 0.52)
         probe_vx = abs(_float(summary, "roi_final_probe_vx_mps", 0.008))
         missing_probe_vx = abs(_float(summary, "roi_final_missing_probe_vx_mps", 0.004))
         missing_hold_s = max(0.0, _float(summary, "roi_final_missing_hold_s", 0.8))
-        legacy_safety_p10 = _float(summary, "legacy_roi_emergency_depth_m", _float(summary, "depth_envelope_stop_p10_m", 0.35))
+        legacy_safety_p10 = _float(summary, "legacy_roi_emergency_depth_m", _float(summary, "depth_envelope_stop_p10_m", 0.30))
         legacy_safety_hold = bool(legacy_roi_depth_valid and legacy_roi_depth_m is not None and legacy_roi_depth_m <= legacy_safety_p10)
         last_valid = float(getattr(ctx, "final_roi_last_valid_mono", 0.0) or 0.0)
         since = float(getattr(ctx, "final_roi_mode_since_mono", now_mono) or now_mono)
@@ -1572,10 +1669,10 @@ def arbitrate_table_docking_motion(
     def close_range_mode_result() -> ArbitrationResult:
         if edge_ready_for_final and edge_measured_source == "edge" and edge_final_dist_err is not None:
             return final_edge_mode_result()
-        stop_p10 = _float(summary, "depth_envelope_stop_p10_m", _float(summary, "roi_final_stop_p10_m", 0.35))
+        stop_p10 = _float(summary, "depth_envelope_stop_p10_m", _float(summary, "roi_final_stop_p10_m", 0.30))
         probe_vx = abs(_float(summary, "close_range_probe_vx_mps", 0.008))
         missing_probe_vx = abs(_float(summary, "close_range_missing_probe_vx_mps", 0.004))
-        legacy_safety_p10 = _float(summary, "legacy_roi_emergency_depth_m", _float(summary, "depth_envelope_stop_p10_m", 0.35))
+        legacy_safety_p10 = _float(summary, "legacy_roi_emergency_depth_m", _float(summary, "depth_envelope_stop_p10_m", 0.30))
         legacy_safety_hold = bool(legacy_roi_depth_valid and legacy_roi_depth_m is not None and legacy_roi_depth_m <= legacy_safety_p10)
         if roi_depth_valid and roi_depth_m is not None and roi_depth_m <= stop_p10:
             try:

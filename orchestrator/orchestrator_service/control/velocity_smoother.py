@@ -41,9 +41,10 @@ class VelocitySmoother:
         "TARGET_LOCKED",
         "FREEZE_BASE",
         "GRASP",
+        "PLACE_TO_BASKET",
         "FINAL_LOCKED_STOP",
     }
-    _STOP_MODES = {"STOP", "IDLE", "DONE", "ERROR", "ERROR_RECOVERY", "FINAL_LOCKED_STOP"}
+    _STOP_MODES = {"STOP", "IDLE", "DONE", "ERROR", "ERROR_RECOVERY", "PLACE_TO_BASKET", "FINAL_LOCKED_STOP"}
 
     def __init__(self, cfg: Optional[MotionSmoothingConfig] = None):
         self.cfg = cfg or MotionSmoothingConfig()

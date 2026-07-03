@@ -71,7 +71,7 @@ def build_camera_kwargs(stream: str) -> Dict[str, object]:
             "auto_exposure": True,
         }
     if stream == "depth":
-        return {"width": 640, "height": 480, "fps": 30}
+        return {"width": 1280, "height": 720, "fps": 30}
     return {
         "device": "/dev/video4",
         "in_w": 1280,
@@ -148,6 +148,9 @@ def print_demo_info(stream: str, requested_backend: str) -> None:
     print(f"stream={stream}")
     print(f"requested_backend={requested_backend}")
     print("=" * 72)
+    print("Controls:")
+    print("  'q' or 'ESC' : Quit")
+    print("=" * 72)
 
 
 def main() -> int:
@@ -166,6 +169,7 @@ def main() -> int:
 
         prev_time = time.time()
         frame_count = 0
+        has_auto_saved = False
 
         while True:
             frame = camera.read_frame()
@@ -176,7 +180,15 @@ def main() -> int:
                     cv2.waitKey(5)
                 continue
 
+            # 转换为 BGR 格式仅用于屏幕显示
             vis_bgr = frame_to_display(stream, frame)
+            
+            # 决定保存内容：如果是深度模式且数据类型是 uint16，直接复制原始帧；否则使用纯净的视窗帧
+            if stream == "depth" and str(frame.dtype) == "uint16":
+                frame_to_save = frame.copy()
+            else:
+                frame_to_save = vis_bgr.copy()
+
             current_time = time.time()
             fps = 1.0 / max(1e-6, current_time - prev_time)
             prev_time = current_time
@@ -186,6 +198,14 @@ def main() -> int:
                 cv2.imshow(window_name, vis_bgr)
 
             frame_count += 1
+            
+            # 统一自动保存逻辑：等几帧让画面稳定后保存一次
+            if not has_auto_saved and frame_count == 10:
+                filename = f"saved_image_{stream}.png"
+                cv2.imwrite(filename, frame_to_save)
+                print(f"[INFO] 自动保存图片: {filename} (数据类型: {frame_to_save.dtype})")
+                has_auto_saved = True
+
             if args.max_frames and frame_count >= args.max_frames:
                 break
 

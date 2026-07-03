@@ -77,6 +77,10 @@ def apply_base_motion_safety(decision: Any, *, ctx: Any, cfg: Any, log_fn: Optio
         State.NEXT_TABLE,
         State.RETURN_HOME,
         State.AVOID_OBSTACLE,
+        State.POST_GRASP_TURN_180,
+        State.SEARCH_BASKET,
+        State.APPROACH_BASKET,
+        State.PLACE_TO_BASKET,
     }
 
     state_allows_motion = False

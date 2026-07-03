@@ -33,6 +33,10 @@ MOVING_STATES = {
     State.RETURN_HOME,
     State.AVOID_OBSTACLE,
     State.GRASP,
+    State.POST_GRASP_TURN_180,
+    State.SEARCH_BASKET,
+    State.APPROACH_BASKET,
+    State.PLACE_TO_BASKET,
 }
 
 
@@ -52,6 +56,11 @@ TARGET_VISION_STATES = {
     State.TARGET_CONFIRM,
     State.TARGET_LOCKED,
     State.FREEZE_BASE,
+}
+
+RETURN_PLACE_VISION_STATES = {
+    State.SEARCH_BASKET,
+    State.APPROACH_BASKET,
 }
 
 

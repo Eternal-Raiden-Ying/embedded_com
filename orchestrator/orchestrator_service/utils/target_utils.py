@@ -16,7 +16,7 @@ class TargetSpec:
 OBJECT_REGISTRY: Dict[str, TargetSpec] = {
     "apple": TargetSpec("apple", "apple", 1, ("apple", "苹果")),
     "banana": TargetSpec("banana", "banana", 2, ("banana", "香蕉")),
-    "basket": TargetSpec("basket", "basket", 3, ("basket", "篮子")),
+    "basket": TargetSpec("basket", "basket", 3, ("basket", "篮子", "筐", "收纳篮")),
     "bottle": TargetSpec("bottle", "bottle", 4, ("bottle", "瓶子", "水瓶", "矿泉水", "饮料瓶")),
     "grape": TargetSpec("grape", "grape", 5, ("grape", "葡萄")),
     "key": TargetSpec("key", "key", 6, ("key", "keys", "钥匙", "钥匙串")),
