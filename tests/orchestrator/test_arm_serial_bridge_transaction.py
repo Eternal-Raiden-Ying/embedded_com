@@ -75,3 +75,30 @@ def test_send_pose_ignores_before_tx_lines_and_mismatched_ok():
     assert "arm_serial_write_done" in joined_logs
     assert "arm_response_pose_mismatch" in joined_logs
     assert "arm_response_pose_matched" in joined_logs
+
+
+def test_send_pose_bottle_and_wait_success():
+    logs = []
+    cfg = SimpleNamespace(enabled=True, dry_run=False, readback_enabled=True, response_timeout_s=0.5)
+    bridge = ArmSerialBridge(cfg, logger=lambda level, channel, message: logs.append((level, channel, message)))
+    fake = _FakeSerial(
+        [
+            "UART1 direct alive",
+            "OK POSE x=24.00 y=1.00 z=9.00 pitch=8.00 roll=83.00 claw=90.00 t=800",
+        ]
+    )
+    bridge._ser = fake
+    bridge._opened = True
+    bridge._drain_pending_lines = lambda duration_s=0.2: ["UART1 printf alive"]
+
+    result = bridge.send_pose_bottle_and_wait(timeout_s=0.5)
+
+    assert result["ok"] is True
+    assert result["response"].parsed_status == "OK_POSE"
+    assert fake.writes == [b"POSE_BOTTLE\r\n"]
+    assert fake.flush_count == 1
+    assert fake.input_reset_count == 1
+    assert fake.output_reset_count == 1
+    joined_logs = "\n".join(message for _, _, message in logs)
+    assert "arm_serial_buffers_cleared" in joined_logs
+    assert "arm_serial_write_done" in joined_logs

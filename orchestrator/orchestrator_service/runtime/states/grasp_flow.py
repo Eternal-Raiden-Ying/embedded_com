@@ -22,7 +22,7 @@ from ...ipc.protocol import (
     make_vision_req,
 )
 from ...bridge.arm_protocol import parse_arm_response
-from ...utils.grasp_utils import grasp_to_pose_params
+from ...utils.grasp_utils import grasp_to_pose_params, width_to_claw_angle
 from ...utils.target_utils import target_to_class_id
 from ..common import monotonic_ts
 from ..context import RuntimeContext, State
@@ -111,6 +111,26 @@ class GraspFlowMixin:
         self._log("info", f"grasp_flow_tick_debug {payload}")
 
     def _tick_grasp_awaiting_respond(self, now_m: float) -> MotionDecision:
+        from common.config_loader import get_config
+        pose_bottle_cfg = get_config().POSE_BOTTLE
+        is_bottle = (str(self.ctx.canonical_target or "").strip().lower() == "bottle" or
+                     str(self.ctx.active_target or "").strip().lower() == "bottle")
+        if pose_bottle_cfg.fall_back_grasp and is_bottle:
+            obs = self.ctx.last_target_obs
+            cx = self._target_lateral_center_x(obs)
+            if cx is not None:
+                err = self._target_lateral_error_x(obs)
+                if err is not None and abs(err) <= pose_bottle_cfg.x_center_tolerance:
+                    self._log("info", f"[GRASP][FALLBACK] Triggering fallback grasp for target={self.ctx.active_target} error_x={err:.4f}")
+                    self.ctx.use_fallback_grasp = True
+                    self.ctx.grasp_substate = "PRE_ARM_STOP_SETTLE"
+                    self.ctx.pre_arm_stop_settle_start_mono = now_m
+                    return self.controller.stop_cmd("GRASP")
+                else:
+                    self._log("warn", f"[GRASP][FALLBACK] Target X center not centered: error_x={err} tolerance={pose_bottle_cfg.x_center_tolerance}")
+            else:
+                self._log("warn", "[GRASP][FALLBACK] Target X center position not available")
+
         if self._has_ready_grasp_result():
             return self._consume_ready_grasp_result(now_m, "AWAITING_RESPOND")
         if self._state_elapsed() < 0.3:
@@ -197,6 +217,28 @@ class GraspFlowMixin:
         settle_s = float(settle_ms) / 1000.0
         if now_m - self.ctx.pre_arm_stop_settle_start_mono < settle_s:
             return self.controller.stop_cmd("GRASP")
+
+        if getattr(self.ctx, "use_fallback_grasp", False):
+            arm_cmd = ArmCommand(
+                x_cm=0.0,
+                y_cm=0.0,
+                z_cm=0.0,
+                pitch_deg=0.0,
+                roll_deg=0.0,
+                claw_deg=0.0,
+                time_ms=0,
+                command="POSE_BOTTLE",
+            )
+            self.ctx.grasp_substate = "AWAITING_ARM"
+            self.ctx.grasp_timeout_mono = now_m + _GRASP_ARM_TIMEOUT_S
+            self._log_grasp_phase_update("pose_wait", "arm_pose_send_fallback")
+            decision = MotionDecision(cmd=self.controller.stop_cmd("GRASP").cmd, arm_cmd=arm_cmd)
+            decision.control_summary = {
+                "input_grasp": {},
+                "source": "fallback_grasp",
+            }
+            self._log_grasp_flow_tick_debug("AWAITING_ARM", "arm_response", now_m)
+            return decision
 
         if isinstance(self.ctx.grasp_result, dict):
             raw_target = self.ctx.active_target

@@ -948,3 +948,8 @@ online_edge:
     control_alignment_min_stable_frames: 3 # Stable frames before alignment task
     control_stop_min_stable_frames: 5 # Stable frames before stop task
     control_stop_dist_abs_max_m: 0.08 # Distance threshold to trigger stop task
+
+### === Pose Bottle Switch Configuration === ###
+POSE_BOTTLE:
+  fall_back_grasp: false # Switch to bypass cloud prediction and directly send instructions to arm
+  x_center_tolerance: 0.06 # Tolerable error in normalized coordinates for target center X alignment
