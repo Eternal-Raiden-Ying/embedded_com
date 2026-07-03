@@ -4042,6 +4042,86 @@ class OrchestratorService(BaseModule):
                         "last_lines": (result or {}).get("last_lines"),
                     })
                 return
+            elif arm_command == "POSE_BOTTLE":
+                self.motion_adapter.cancel_active_jogs()
+                arm_planned = {
+                    "request_id": self.core.ctx.active_req_id or "",
+                    "input_grasp": {},
+                    "pose_line": "POSE_BOTTLE",
+                    "x": 0, "y": 0, "z": 0, "pitch": 0, "roll": 0, "claw": 0, "time_ms": 0,
+                }
+                self.run_logger.write_jsonl("arm_cmd_planned", dict(arm_planned))
+                self.run_logger.write_jsonl("arm_pose_encoded", dict(arm_planned))
+                self.run_logger.write_jsonl(
+                    "arm_cmd_sent",
+                    {
+                        "line": "POSE_BOTTLE",
+                        "request_id": self.core.ctx.active_req_id or "",
+                        "source": "remote_grasp_client",
+                        **arm.to_dict(),
+                    },
+                )
+                self.run_logger.write_jsonl(
+                    "arm_pose_send",
+                    {
+                        "line": "POSE_BOTTLE",
+                        "request_id": self.core.ctx.active_req_id or "",
+                        "target": self.core.ctx.active_target or "",
+                        **arm.to_dict(),
+                    },
+                )
+                result = self.arm_bridge.send_pose_bottle_and_wait(
+                    timeout_s=float(getattr(getattr(self.cfg, "arm_serial", None), "response_timeout_s", 10.0) or 10.0),
+                )
+                resp = result.get("response") if isinstance(result, dict) else None
+                if resp is None:
+                    error = str((result or {}).get("error") or "arm_response_timeout")
+                    parsed_status = {
+                        "arm_serial_open_failed": "ARM_SERIAL_OPEN_FAILED",
+                        "arm_tx_failed": "ARM_TX_FAILED",
+                        "arm_response_timeout": "ARM_RESPONSE_TIMEOUT",
+                    }.get(error, error.upper())
+                    resp = ArmResponse(
+                        ok=False,
+                        message=error,
+                        raw_line=error,
+                        ts=time.time(),
+                        parsed_status=parsed_status,
+                    )
+                if resp is not None:
+                    parsed_status = str(getattr(resp, "parsed_status", "") or resp.message or "").strip().upper()
+                    if parsed_status == "OK_POSE" and bool(resp.ok):
+                        self.run_logger.write_jsonl("arm_pose_done", {
+                            "raw": resp.raw_line,
+                            "parsed_status": parsed_status,
+                            "ok": True,
+                            "received_lines": (result or {}).get("received_lines"),
+                        })
+                    elif parsed_status == "ARM_RESPONSE_TIMEOUT":
+                        self.run_logger.write_jsonl("arm_pose_timeout", {
+                            "raw": resp.raw_line,
+                            "parsed_status": parsed_status,
+                            "ok": False,
+                            "last_lines": (result or {}).get("last_lines"),
+                        })
+                    else:
+                        self.run_logger.write_jsonl("arm_pose_failed", {
+                            "raw": resp.raw_line,
+                            "parsed_status": parsed_status,
+                            "ok": bool(resp.ok),
+                            "error": (result or {}).get("error", ""),
+                            "received_lines": (result or {}).get("received_lines"),
+                        })
+                    self.core.handle_arm_response(resp)
+                    self.run_logger.write_jsonl("arm_response", {
+                        "raw": resp.raw_line,
+                        "parsed_status": parsed_status,
+                        "ok": bool(resp.ok),
+                        "error": (result or {}).get("error", ""),
+                        "received_lines_count": (result or {}).get("received_lines_count"),
+                        "last_lines": (result or {}).get("last_lines"),
+                    })
+                return
             arm_line = encode_pose(
                 arm.x_cm, arm.y_cm, arm.z_cm,
                 arm.pitch_deg, arm.roll_deg,

@@ -356,6 +356,7 @@ class CameraManager:
         self._shared_rgbd_signature = None
         self._shared_rgbd_cycle_bundle: Optional[Dict[str, Any]] = None
         self._last_shape_log_key = ""
+        self._intrinsics_saved = False
 
     @staticmethod
     def _shared_rgbd_enabled() -> bool:
@@ -568,6 +569,8 @@ class CameraManager:
                 except Exception:
                     rgb_shape = None
             depth_shape_actual = self._shape_hw_from_frame(frame_bundle.get("depth"))
+            if not getattr(self, "_intrinsics_saved", False) and rgb is not None and frame_bundle.get("depth") is not None:
+                self._save_intrinsics_and_images(frame_bundle)
             rgb_shape_actual = list(rgb_shape[:2]) if isinstance(rgb_shape, tuple) and len(rgb_shape) >= 2 else None
             rgb_meta = self._rgb_config_meta(self._params.get("rgb") or {})
             frame_bundle.update(rgb_meta)
@@ -871,3 +874,82 @@ class CameraManager:
                 "backend_status": dict(self._backend_status or {}),
                 "shared_rgbd_running": bool(self._shared_rgbd is not None),
             }
+
+    def _save_intrinsics_and_images(self, frame_bundle: Dict[str, Any]) -> None:
+        import json
+        from pathlib import Path
+        try:
+            log_dir = getattr(getattr(self.cfg, "runtime", None), "log_dir", "") if self.cfg is not None else ""
+            if not log_dir:
+                log_dir = "logs"
+            vista_dir = Path(log_dir) / "vista"
+            intrinsics_dir = vista_dir / "camera_intrinsics"
+            intrinsics_dir.mkdir(parents=True, exist_ok=True)
+
+            color_intr = None
+            session = getattr(self, "_shared_rgbd", None)
+            if session is not None and getattr(session, "color_intrinsics", None):
+                color_intr = session.color_intrinsics
+
+            depth_intr = frame_bundle.get("depth_intrinsics")
+            if depth_intr is None and session is not None and getattr(session, "depth_intrinsics", None):
+                depth_intr = session.depth_intrinsics
+            if depth_intr is None:
+                depth_cam = self.cams.get("depth")
+                if depth_cam is not None:
+                    getter = getattr(depth_cam, "get_depth_intrinsics", None)
+                    if callable(getter):
+                        try:
+                            depth_intr = getter()
+                        except Exception:
+                            pass
+
+            if color_intr:
+                color_dict = color_intr.to_dict() if hasattr(color_intr, "to_dict") else color_intr
+                if isinstance(color_dict, dict):
+                    color_json_path = intrinsics_dir / "color_intrinsics.json"
+                    with open(color_json_path, "w", encoding="utf-8") as f:
+                        json.dump(color_dict, f, indent=4, ensure_ascii=False)
+
+            if depth_intr:
+                depth_dict = depth_intr.to_dict() if hasattr(depth_intr, "to_dict") else depth_intr
+                if isinstance(depth_dict, dict):
+                    depth_json_path = intrinsics_dir / "depth_intrinsics.json"
+                    with open(depth_json_path, "w", encoding="utf-8") as f:
+                        json.dump(depth_dict, f, indent=4, ensure_ascii=False)
+
+            rgb = frame_bundle.get("rgb")
+            depth = frame_bundle.get("depth")
+
+            if isinstance(rgb, np.ndarray) and rgb.size > 0:
+                color_res = rgb.copy()
+                if color_res.shape[1] != 1280 or color_res.shape[0] != 720:
+                    color_res = cv2.resize(color_res, (1280, 720), interpolation=cv2.INTER_LINEAR)
+
+                is_rgb = False
+                if session is not None and getattr(session, "output_format", "BGR") == "RGB":
+                    is_rgb = True
+
+                if is_rgb:
+                    color_bgr = cv2.cvtColor(color_res, cv2.COLOR_RGB2BGR)
+                else:
+                    color_bgr = color_res
+
+                color_img_path = intrinsics_dir / "color.jpg"
+                cv2.imwrite(str(color_img_path), color_bgr)
+
+            if isinstance(depth, np.ndarray) and depth.size > 0:
+                depth_res = depth.copy()
+                if depth_res.shape[1] != 1280 or depth_res.shape[0] != 720:
+                    depth_res = cv2.resize(depth_res, (1280, 720), interpolation=cv2.INTER_NEAREST)
+                depth_img_path = intrinsics_dir / "depth.png"
+                cv2.imwrite(str(depth_img_path), depth_res)
+
+            self._intrinsics_saved = True
+            self.log.info(
+                "[CAMERA][CALIB_EXPORT] Successfully exported camera intrinsics and 1280x720 color/depth images to %s",
+                intrinsics_dir
+            )
+        except Exception as exc:
+            self._intrinsics_saved = True
+            self.log.error("[CAMERA][CALIB_EXPORT] Failed to export camera intrinsics/images: %s", exc)

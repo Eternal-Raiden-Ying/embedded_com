@@ -1260,6 +1260,12 @@ class DetectorConfig:
 
 
 @dataclass
+class PoseBottleConfig:
+    fall_back_grasp: bool = False
+    x_center_tolerance: float = 0.06
+
+
+@dataclass
 class OnlineEdgeConfig:
     """Configuration structure representing the Online Edge Detector service."""
     runtime: OnlineEdgeRuntimeConfig = field(default_factory=OnlineEdgeRuntimeConfig)
@@ -1280,3 +1286,4 @@ class SystemGlobalConfig:
     orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
     gateway: MobileGatewayConfig = field(default_factory=MobileGatewayConfig)
     online_edge: OnlineEdgeConfig = field(default_factory=OnlineEdgeConfig)
+    POSE_BOTTLE: PoseBottleConfig = field(default_factory=PoseBottleConfig)
