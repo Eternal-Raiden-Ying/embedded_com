@@ -25,6 +25,10 @@ class State(str, Enum):
     FREEZE_BASE = "FREEZE_BASE"
     GRASP = "GRASP"
     POST_GRASP_TURN_180 = "POST_GRASP_TURN_180"
+    POST_GRASP_TURN_FIXED = "POST_GRASP_TURN_FIXED"
+    POST_GRASP_FORWARD_FIXED = "POST_GRASP_FORWARD_FIXED"
+    POST_GRASP_STOP = "POST_GRASP_STOP"
+    POST_GRASP_POSE_RISE = "POST_GRASP_POSE_RISE"
     SEARCH_BASKET = "SEARCH_BASKET"
     APPROACH_BASKET = "APPROACH_BASKET"
     PLACE_TO_BASKET = "PLACE_TO_BASKET"
@@ -298,6 +302,8 @@ class RuntimeContext:
     grasp_source: str = ""
     remote_grasp_active: bool = False
     builtin_bottle_active: bool = False
+    builtin_grasp_active: bool = False
+    builtin_grasp_target: str = ""
     builtin_bottle_pose_started: bool = False
     remote_result_ignored: bool = False
     carrying_object: bool = False
@@ -308,6 +314,9 @@ class RuntimeContext:
     basket_last_seen_mono: float = 0.0
     basket_place_substate: str = ""
     basket_place_timeout_mono: float = 0.0
+    post_grasp_fixed_entry_logged: bool = False
+    post_grasp_rise_substate: str = ""
+    post_grasp_rise_timeout_mono: float = 0.0
 
     def clear_carrying_object(self) -> None:
         self.carrying_object = False
@@ -318,6 +327,9 @@ class RuntimeContext:
         self.basket_last_seen_mono = 0.0
         self.basket_place_substate = ""
         self.basket_place_timeout_mono = 0.0
+        self.post_grasp_fixed_entry_logged = False
+        self.post_grasp_rise_substate = ""
+        self.post_grasp_rise_timeout_mono = 0.0
 
     def clear_final_enter_candidate(self) -> None:
         self.final_edge_seen_after_find = False
@@ -503,6 +515,8 @@ class RuntimeContext:
         self.grasp_source = ""
         self.remote_grasp_active = False
         self.builtin_bottle_active = False
+        self.builtin_grasp_active = False
+        self.builtin_grasp_target = ""
         self.builtin_bottle_pose_started = False
         self.remote_result_ignored = False
 
@@ -612,6 +626,8 @@ class RuntimeContext:
         self.grasp_source = ""
         self.remote_grasp_active = False
         self.builtin_bottle_active = False
+        self.builtin_grasp_active = False
+        self.builtin_grasp_target = ""
         self.builtin_bottle_pose_started = False
         self.remote_result_ignored = False
         self.clear_carrying_object()

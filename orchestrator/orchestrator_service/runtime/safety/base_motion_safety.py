@@ -78,6 +78,10 @@ def apply_base_motion_safety(decision: Any, *, ctx: Any, cfg: Any, log_fn: Optio
         State.RETURN_HOME,
         State.AVOID_OBSTACLE,
         State.POST_GRASP_TURN_180,
+        State.POST_GRASP_TURN_FIXED,
+        State.POST_GRASP_FORWARD_FIXED,
+        State.POST_GRASP_STOP,
+        State.POST_GRASP_POSE_RISE,
         State.SEARCH_BASKET,
         State.APPROACH_BASKET,
         State.PLACE_TO_BASKET,
@@ -157,7 +161,17 @@ def apply_base_motion_safety(decision: Any, *, ctx: Any, cfg: Any, log_fn: Optio
         depth_p10 = obs.depth_p10
         near_stop_depth_m = getattr(cfg, "near_stop_depth_m", 0.25)
         return_place_depth_bypass = bool(
-            state in {State.POST_GRASP_TURN_180, State.SEARCH_BASKET, State.APPROACH_BASKET, State.PLACE_TO_BASKET}
+            state
+            in {
+                State.POST_GRASP_TURN_180,
+                State.POST_GRASP_TURN_FIXED,
+                State.POST_GRASP_FORWARD_FIXED,
+                State.POST_GRASP_STOP,
+                State.POST_GRASP_POSE_RISE,
+                State.SEARCH_BASKET,
+                State.APPROACH_BASKET,
+                State.PLACE_TO_BASKET,
+            }
             and bool(summary.get("return_place_ignores_table_stale", False))
         )
         if depth_p10 < near_stop_depth_m:

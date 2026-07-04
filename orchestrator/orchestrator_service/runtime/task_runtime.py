@@ -139,13 +139,14 @@ class TaskRuntimeMixin:
         if status and status not in KNOWN_VISION_STATUS:
             self._enter_error_recovery(f"unknown vision status: {status}")
             return
-        if bool(getattr(self.ctx, "builtin_bottle_active", False)):
+        if bool(getattr(self.ctx, "builtin_grasp_active", False) or getattr(self.ctx, "builtin_bottle_active", False)):
             reason = str(obs.get("reason") or (obs.get("result") if isinstance(obs.get("result"), dict) else {}).get("reason") or "")
             self.ctx.remote_result_ignored = True
+            target = str(getattr(self.ctx, "builtin_grasp_target", "") or getattr(self.ctx, "canonical_target", "") or "")
             if status == "FAILED" or "timeout" in reason.lower():
-                self._log("warn", f"[GRASP][REMOTE_TIMEOUT_IGNORED] reason=builtin_bottle_active status={status} remote_reason={reason}")
+                self._log("warn", f"[GRASP][REMOTE_TIMEOUT_IGNORED] reason=builtin_grasp_active target={target} status={status} remote_reason={reason}")
             else:
-                self._log("info", f"[GRASP][REMOTE_RESULT_IGNORED] reason=builtin_bottle_active status={status}")
+                self._log("info", f"[GRASP][REMOTE_RESULT_IGNORED] reason=builtin_grasp_active target={target} status={status}")
             return
         result = obs.get("result") if isinstance(obs.get("result"), dict) else {}
         self.ctx.grasp_status = status

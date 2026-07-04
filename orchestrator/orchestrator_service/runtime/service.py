@@ -1268,6 +1268,10 @@ class OrchestratorService(BaseModule):
         edge_slide_state = bool(state == "EDGE_SLIDE_SEARCH" or mode == "EDGE_SLIDE_SEARCH")
         return_place_states = {
             "POST_GRASP_TURN_180",
+            "POST_GRASP_TURN_FIXED",
+            "POST_GRASP_FORWARD_FIXED",
+            "POST_GRASP_STOP",
+            "POST_GRASP_POSE_RISE",
             "SEARCH_BASKET",
             "APPROACH_BASKET",
             "PLACE_TO_BASKET",
@@ -1959,7 +1963,7 @@ class OrchestratorService(BaseModule):
         wz = float(payload.get("wz_radps", 0.0) or 0.0)
         raw_upper = str(raw_line or "").strip().upper()
         is_velocity_line = bool(raw_upper.startswith("V ") or raw_upper.startswith("VEL "))
-        if is_velocity_line and state in {"POST_GRASP_TURN_180", "SEARCH_BASKET"} and abs(wz) > 1e-9:
+        if is_velocity_line and state in {"POST_GRASP_TURN_180", "POST_GRASP_TURN_FIXED", "SEARCH_BASKET"} and abs(wz) > 1e-9:
             accepted = bool(payload.get("writer_accept_cmd") is not False and payload.get("uart_tx_ok", True))
             if accepted:
                 if state == "POST_GRASP_TURN_180" and not bool(getattr(self.core.ctx, "post_grasp_turn_cmd_accepted", False)):
@@ -2663,7 +2667,16 @@ class OrchestratorService(BaseModule):
                 "cmd_id": cmd.cmd_id,
             })
         seq = self.motion_adapter.stop(reason="manual_stop")
-        if self.core.ctx.state in {State.POST_GRASP_TURN_180, State.SEARCH_BASKET, State.APPROACH_BASKET, State.PLACE_TO_BASKET}:
+        if self.core.ctx.state in {
+            State.POST_GRASP_TURN_180,
+            State.POST_GRASP_TURN_FIXED,
+            State.POST_GRASP_FORWARD_FIXED,
+            State.POST_GRASP_STOP,
+            State.POST_GRASP_POSE_RISE,
+            State.SEARCH_BASKET,
+            State.APPROACH_BASKET,
+            State.PLACE_TO_BASKET,
+        }:
             self.core._interrupt_to_idle("manual_stop_return_place", tts_text="已停止", interrupt_tts=True, send_vision_idle=True)
         self.motion_status["last_seq"] = seq
         self.motion_status["jog_running"] = False
@@ -4124,8 +4137,15 @@ class OrchestratorService(BaseModule):
             arm = decision.arm_cmd
             arm_command = str(getattr(arm, "command", "POSE") or "POSE").strip().upper()
             builtin_pose_line = str(getattr(self.cfg.control, "builtin_bottle_pose_line", "POSE_BOTTLE") or "POSE_BOTTLE").strip()
+            builtin_apple_pose_line = str(getattr(self.cfg.control, "builtin_apple_pose_line", "POSE_APPLE") or "POSE_APPLE").strip()
+            post_grasp_rise_line = str(getattr(self.cfg.control, "post_grasp_rise_line", "POSE_RISE") or "POSE_RISE").strip()
             builtin_grab_line = str(getattr(self.cfg.control, "builtin_bottle_grab_line", "GRABBED") or "GRABBED").strip()
-            builtin_active = bool(getattr(self.core.ctx, "builtin_bottle_active", False))
+            builtin_target = str(getattr(self.core.ctx, "builtin_grasp_target", "") or "")
+            if not builtin_target and str(getattr(self.core.ctx, "canonical_target", "") or "").strip().lower() in {"apple", "bottle"}:
+                builtin_target = str(getattr(self.core.ctx, "canonical_target", "") or "").strip().lower()
+            builtin_grab_line = str(getattr(self.cfg.control, f"builtin_{builtin_target}_grab_line", builtin_grab_line) or builtin_grab_line).strip()
+            builtin_active = bool(getattr(self.core.ctx, "builtin_grasp_active", False) or getattr(self.core.ctx, "builtin_bottle_active", False))
+            builtin_pose_lines = {builtin_pose_line.upper(), builtin_apple_pose_line.upper(), post_grasp_rise_line.upper(), "POSE_BOTTLE", "POSE_APPLE", "POSE_RISE"}
             if arm_command == (builtin_grab_line or "GRABBED").upper() or arm_command == "GRABBED":
                 grab_line = str(getattr(arm, "command", "") or builtin_grab_line or "GRABBED").strip() or "GRABBED"
                 self.motion_adapter.cancel_active_jogs()
@@ -4133,21 +4153,25 @@ class OrchestratorService(BaseModule):
                     "request_id": self.core.ctx.active_req_id or "",
                     "target": self.core.ctx.active_target or "",
                     "line": grab_line,
-                    "grasp_source": "builtin_bottle" if builtin_active else str(getattr(self.core.ctx, "grasp_source", "") or ""),
+                    "grasp_source": "builtin" if builtin_active else str(getattr(self.core.ctx, "grasp_source", "") or ""),
+                    "builtin_target": builtin_target,
                     "builtin_bottle_active": builtin_active,
+                    "builtin_grasp_active": builtin_active,
                 })
                 self.run_logger.write_jsonl("arm_cmd_planned", {
                     "request_id": self.core.ctx.active_req_id or "",
-                    "grasp_source": "builtin_bottle" if builtin_active else str(getattr(self.core.ctx, "grasp_source", "") or ""),
+                    "grasp_source": "builtin" if builtin_active else str(getattr(self.core.ctx, "grasp_source", "") or ""),
+                    "builtin_target": builtin_target,
                     "builtin_bottle_active": builtin_active,
+                    "builtin_grasp_active": builtin_active,
                     "pose_line": builtin_pose_line,
                     "grab_line": grab_line,
-                    "skip_remote": bool(getattr(self.cfg.control, "builtin_bottle_skip_remote", True)) if builtin_active else False,
+                    "skip_remote": bool(getattr(self.cfg.control, f"builtin_{builtin_target}_skip_remote", True)) if builtin_active else False,
                 })
                 result = self.arm_bridge.send_grabbed_and_wait(
                     line=grab_line,
                     timeout_s=(
-                        float(getattr(self.cfg.control, "builtin_bottle_grab_timeout_s", 10.0) or 10.0)
+                        float(getattr(self.cfg.control, f"builtin_{builtin_target}_grab_timeout_s", 10.0) or 10.0)
                         if builtin_active
                         else float(getattr(getattr(self.cfg, "arm_serial", None), "response_timeout_s", 10.0) or 10.0)
                     ),
@@ -4202,17 +4226,20 @@ class OrchestratorService(BaseModule):
                         "last_lines": (result or {}).get("last_lines"),
                     })
                 return
-            elif arm_command == (builtin_pose_line or "POSE_BOTTLE").upper() or arm_command == "POSE_BOTTLE":
+            elif arm_command in builtin_pose_lines:
                 pose_line = str(getattr(arm, "command", "") or builtin_pose_line or "POSE_BOTTLE").strip() or "POSE_BOTTLE"
+                is_rise = bool(pose_line.strip().upper() == post_grasp_rise_line.upper() or pose_line.strip().upper() == "POSE_RISE")
                 self.motion_adapter.cancel_active_jogs()
                 arm_planned = {
                     "request_id": self.core.ctx.active_req_id or "",
                     "input_grasp": {},
-                    "grasp_source": "builtin_bottle",
+                    "grasp_source": "post_grasp_fixed" if is_rise else "builtin",
+                    "builtin_target": builtin_target,
                     "builtin_bottle_active": bool(getattr(self.core.ctx, "builtin_bottle_active", False)),
+                    "builtin_grasp_active": bool(getattr(self.core.ctx, "builtin_grasp_active", False)),
                     "pose_line": pose_line,
                     "grab_line": builtin_grab_line,
-                    "skip_remote": bool(getattr(self.cfg.control, "builtin_bottle_skip_remote", True)),
+                    "skip_remote": bool(getattr(self.cfg.control, f"builtin_{builtin_target}_skip_remote", True)) if builtin_target else False,
                     "x": 0, "y": 0, "z": 0, "pitch": 0, "roll": 0, "claw": 0, "time_ms": 0,
                 }
                 self.run_logger.write_jsonl("arm_cmd_planned", dict(arm_planned))
@@ -4222,7 +4249,7 @@ class OrchestratorService(BaseModule):
                     {
                         "line": pose_line,
                         "request_id": self.core.ctx.active_req_id or "",
-                        "source": "builtin_bottle",
+                        "source": "post_grasp_fixed" if is_rise else "builtin",
                         **arm.to_dict(),
                     },
                 )
@@ -4237,7 +4264,11 @@ class OrchestratorService(BaseModule):
                 )
                 result = self.arm_bridge.send_pose_bottle_and_wait(
                     line=pose_line,
-                    timeout_s=float(getattr(self.cfg.control, "builtin_bottle_pose_timeout_s", 15.0) or 15.0),
+                    timeout_s=(
+                        float(getattr(self.cfg.control, "post_grasp_rise_timeout_s", 10.0) or 10.0)
+                        if is_rise
+                        else float(getattr(self.cfg.control, f"builtin_{builtin_target}_pose_timeout_s", 15.0) or 15.0)
+                    ),
                 )
                 resp = result.get("response") if isinstance(result, dict) else None
                 if resp is None:
@@ -4257,16 +4288,29 @@ class OrchestratorService(BaseModule):
                 if resp is not None:
                     parsed_status = str(getattr(resp, "parsed_status", "") or resp.message or "").strip().upper()
                     received_lines = list((result or {}).get("received_lines") or [])
-                    start_ack = str(getattr(self.cfg.control, "builtin_bottle_pose_start_ack", "OK POSE_BOTTLE START")).upper()
+                    start_ack = str(
+                        getattr(
+                            self.cfg.control,
+                            "post_grasp_rise_start_ack" if is_rise else f"builtin_{builtin_target}_pose_start_ack",
+                            "OK POSE_RISE START" if is_rise else "OK POSE_BOTTLE START",
+                        )
+                    ).upper()
                     start_line = next((str(line) for line in received_lines if str(line).strip().upper().startswith(start_ack)), "")
                     if start_line:
-                        self.core._log("info", f"[GRASP][BUILTIN_POSE_START] raw={start_line!r}")
+                        if is_rise:
+                            self.core._log("info", f"[POST_GRASP_FIXED][POSE_RISE_START] raw={start_line!r}")
+                        else:
+                            self.core._log("info", f"[GRASP][BUILTIN_POSE_START] target={builtin_target} raw={start_line!r}")
                     if parsed_status == "OK_BUILTIN_POSE_DONE" and bool(resp.ok):
-                        self.core._log("info", f"[GRASP][BUILTIN_POSE_DONE] raw={resp.raw_line!r}")
+                        if is_rise:
+                            self.core._log("info", f"[POST_GRASP_FIXED][POSE_RISE_DONE] raw={resp.raw_line!r}")
+                        else:
+                            self.core._log("info", f"[GRASP][BUILTIN_POSE_DONE] target={builtin_target} raw={resp.raw_line!r}")
                         self.run_logger.write_jsonl("arm_pose_done", {
                             "raw": resp.raw_line,
                             "parsed_status": parsed_status,
                             "builtin_stage": "pose_done",
+                            "builtin_target": "rise" if is_rise else builtin_target,
                             "ok": True,
                             "received_lines": received_lines,
                         })

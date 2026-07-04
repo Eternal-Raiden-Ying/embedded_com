@@ -62,6 +62,10 @@ ORCHESTRATOR_STATE_MAP: Dict[str, Tuple[str, int]] = {
     "RETURN_HOME": ("running", 75),
     "GRASP": ("running", 90),
     "POST_GRASP_TURN_180": ("returning", 92),
+    "POST_GRASP_TURN_FIXED": ("returning", 92),
+    "POST_GRASP_FORWARD_FIXED": ("returning", 94),
+    "POST_GRASP_STOP": ("placing", 96),
+    "POST_GRASP_POSE_RISE": ("placing", 98),
     "SEARCH_BASKET": ("returning", 94),
     "APPROACH_BASKET": ("placing", 96),
     "PLACE_TO_BASKET": ("placing", 98),
@@ -129,6 +133,10 @@ ORCHESTRATOR_BUSY_STATES = {
     "FREEZE_BASE",
     "GRASP",
     "POST_GRASP_TURN_180",
+    "POST_GRASP_TURN_FIXED",
+    "POST_GRASP_FORWARD_FIXED",
+    "POST_GRASP_STOP",
+    "POST_GRASP_POSE_RISE",
     "SEARCH_BASKET",
     "APPROACH_BASKET",
     "PLACE_TO_BASKET",
@@ -150,6 +158,10 @@ TASK_PHASE_BY_ORCH_STATE = {
     "FREEZE_BASE": "preparing_grasp",
     "GRASP": "grasping",
     "POST_GRASP_TURN_180": "returning",
+    "POST_GRASP_TURN_FIXED": "returning",
+    "POST_GRASP_FORWARD_FIXED": "returning",
+    "POST_GRASP_STOP": "placing",
+    "POST_GRASP_POSE_RISE": "placing",
     "SEARCH_BASKET": "searching_basket",
     "APPROACH_BASKET": "approaching_basket",
     "PLACE_TO_BASKET": "placing",
@@ -2593,6 +2605,8 @@ class MobileGatewayService(BaseModule):
             if "edge_distance_out_of_tolerance_after_retries" in str(fallback or "").lower():
                 return "任务失败，无法稳定锁定桌边。"
             return fallback or "任务失败"
+        if raw_state in {"POST_GRASP_TURN_FIXED", "POST_GRASP_FORWARD_FIXED", "POST_GRASP_STOP", "POST_GRASP_POSE_RISE"}:
+            return "正在执行固定放置动作"
         if raw_state in {"POST_GRASP_TURN_180", "SEARCH_BASKET", "APPROACH_BASKET", "PLACE_TO_BASKET"}:
             return "正在放置到篮子"
         if raw_state in {"TARGET_LOCKED", "GRASP", "CONTROLLED_APPROACH", "FINAL_LOCK", "AT_TABLE_EDGE"}:

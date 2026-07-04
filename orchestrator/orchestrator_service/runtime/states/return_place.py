@@ -13,6 +13,164 @@ from ..controller import MotionDecision
 
 
 class ReturnPlaceMixin:
+    def _fixed_post_grasp_summary(
+        self,
+        mode: str,
+        cmd: Any,
+        *,
+        reason: str,
+        elapsed: float = 0.0,
+        duration: float = 0.0,
+        motion_allowed: bool = True,
+        block_reason: str = "",
+    ) -> Dict[str, Any]:
+        summary = self.controller._summary(mode, cmd, None, reason=reason)
+        direction_sign = int(float(getattr(self.cfg, "post_grasp_turn_direction_sign", -1) or -1))
+        summary.update(
+            {
+                "post_grasp_fixed_flow_active": True,
+                "state": mode,
+                "carried_target": getattr(self.ctx, "carried_target", None),
+                "vx_mps": float(getattr(cmd, "vx_mps", 0.0) or 0.0),
+                "vy_mps": 0.0,
+                "wz_radps": float(getattr(cmd, "wz_radps", 0.0) or 0.0),
+                "direction_sign": direction_sign,
+                "elapsed_s": float(elapsed),
+                "duration_s": float(duration),
+                "motion_allowed": bool(motion_allowed),
+                "block_reason": str(block_reason or ""),
+                "allow_forward": bool(float(getattr(cmd, "vx_mps", 0.0) or 0.0) > 1e-9),
+                "allow_rotate": bool(abs(float(getattr(cmd, "wz_radps", 0.0) or 0.0)) > 1e-9),
+                "allow_lateral": False,
+                "return_place_ignores_table_stale": True,
+            }
+        )
+        return summary
+
+    def _log_post_grasp_fixed_entry_once(self) -> None:
+        if not bool(getattr(self.ctx, "post_grasp_fixed_entry_logged", False)):
+            self.ctx.post_grasp_fixed_entry_logged = True
+            self._log("info", f"[POST_GRASP_FIXED][ENTRY] carried_target={getattr(self.ctx, 'carried_target', '')}")
+
+    def _tick_post_grasp_turn_fixed(self) -> MotionDecision:
+        self._log_post_grasp_fixed_entry_once()
+        duration = max(0.0, float(getattr(self.cfg, "post_grasp_turn_duration_s", 3.5) or 3.5))
+        elapsed = self._state_elapsed()
+        sign = int(float(getattr(self.cfg, "post_grasp_turn_direction_sign", -1) or -1))
+        sign = -1 if sign < 0 else 1
+        wz = sign * abs(float(getattr(self.cfg, "post_grasp_turn_wz_radps", 0.45) or 0.45))
+        if elapsed >= duration:
+            self._transition(State.POST_GRASP_FORWARD_FIXED, "post_grasp_fixed_turn_done")
+            return self.controller.stop_cmd("POST_GRASP_FORWARD_FIXED")
+        self._log("info", f"[POST_GRASP_FIXED][TURN] wz={wz:.3f} elapsed={elapsed:.2f} duration={duration:.2f}")
+        cmd = self.controller._cmd("POST_GRASP_TURN_FIXED", vx=0.0, vy=0.0, wz=wz)
+        return MotionDecision(
+            cmd=cmd,
+            control_summary=self._fixed_post_grasp_summary(
+                "POST_GRASP_TURN_FIXED",
+                cmd,
+                reason="post_grasp_fixed_turn",
+                elapsed=elapsed,
+                duration=duration,
+            ),
+        )
+
+    def _tick_post_grasp_forward_fixed(self) -> MotionDecision:
+        duration = max(0.0, float(getattr(self.cfg, "post_grasp_forward_duration_s", 2.0) or 2.0))
+        elapsed = self._state_elapsed()
+        vx = max(0.0, float(getattr(self.cfg, "post_grasp_forward_vx_mps", 0.08) or 0.08))
+        if elapsed >= duration:
+            self._transition(State.POST_GRASP_STOP, "post_grasp_fixed_forward_done")
+            return self.controller.stop_cmd("POST_GRASP_STOP")
+        self._log("info", f"[POST_GRASP_FIXED][FORWARD] vx={vx:.3f} elapsed={elapsed:.2f} duration={duration:.2f}")
+        cmd = self.controller._cmd("POST_GRASP_FORWARD_FIXED", vx=vx, vy=0.0, wz=0.0)
+        return MotionDecision(
+            cmd=cmd,
+            control_summary=self._fixed_post_grasp_summary(
+                "POST_GRASP_FORWARD_FIXED",
+                cmd,
+                reason="post_grasp_fixed_forward",
+                elapsed=elapsed,
+                duration=duration,
+            ),
+        )
+
+    def _tick_post_grasp_stop(self) -> MotionDecision:
+        hold_s = max(0.0, float(getattr(self.cfg, "post_grasp_stop_hold_s", 0.5) or 0.5))
+        elapsed = self._state_elapsed()
+        self._log("info", f"[POST_GRASP_FIXED][STOP] hold_s={hold_s:.2f} elapsed={elapsed:.2f}")
+        if elapsed >= hold_s:
+            if bool(getattr(self.cfg, "post_grasp_rise_enable", True)):
+                self.ctx.post_grasp_rise_substate = ""
+                self.ctx.post_grasp_rise_timeout_mono = 0.0
+                self._transition(State.POST_GRASP_POSE_RISE, "post_grasp_fixed_stop_done")
+                return self.controller.stop_cmd("POST_GRASP_POSE_RISE")
+            self._log("info", "[POST_GRASP_FIXED][DONE] rise_enable=false")
+            self.ctx.clear_carrying_object()
+            self._transition(State.DONE, "post_grasp_fixed_done_no_rise")
+            return self.controller.stop_cmd("DONE")
+        cmd = self.controller._cmd("POST_GRASP_STOP", vx=0.0, vy=0.0, wz=0.0, brake=True)
+        return MotionDecision(
+            cmd=cmd,
+            control_summary=self._fixed_post_grasp_summary(
+                "POST_GRASP_STOP",
+                cmd,
+                reason="post_grasp_fixed_stop_hold",
+                elapsed=elapsed,
+                duration=hold_s,
+                motion_allowed=False,
+                block_reason="stop_hold",
+            ),
+        )
+
+    def _tick_post_grasp_pose_rise(self) -> MotionDecision:
+        substate = str(getattr(self.ctx, "post_grasp_rise_substate", "") or "")
+        now_m = monotonic_ts()
+        line = str(getattr(self.cfg, "post_grasp_rise_line", "POSE_RISE") or "POSE_RISE").strip() or "POSE_RISE"
+        timeout_s = max(0.1, float(getattr(self.cfg, "post_grasp_rise_timeout_s", 10.0) or 10.0))
+        if not substate:
+            self.ctx.post_grasp_rise_substate = "WAIT_DONE"
+            self.ctx.post_grasp_rise_timeout_mono = now_m + timeout_s
+            self.ctx.arm_response = None
+            self._log("info", f"[POST_GRASP_FIXED][POSE_RISE_SEND] line={line}")
+            arm_cmd = ArmCommand(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, command=line)
+            decision = MotionDecision(cmd=self.controller.stop_cmd("POST_GRASP_POSE_RISE").cmd, arm_cmd=arm_cmd)
+            decision.control_summary = self._fixed_post_grasp_summary(
+                "POST_GRASP_POSE_RISE",
+                decision.cmd,
+                reason="post_grasp_pose_rise_send",
+                elapsed=self._state_elapsed(),
+                duration=timeout_s,
+                motion_allowed=False,
+                block_reason="pose_rise_wait",
+            )
+            decision.control_summary.update({"pose_line": line, "waiting_for": "OK_BUILTIN_POSE_DONE"})
+            return decision
+
+        resp = self.ctx.arm_response
+        if resp is not None:
+            parsed_status = str(getattr(resp, "parsed_status", "") or getattr(resp, "message", "") or "").strip().upper()
+            raw = str(getattr(resp, "raw_line", "") or "")
+            self.ctx.arm_response = None
+            start_ack = str(getattr(self.cfg, "post_grasp_rise_start_ack", "OK POSE_RISE START") or "OK POSE_RISE START").upper()
+            done_ack = str(getattr(self.cfg, "post_grasp_rise_done_ack", "OK POSE_RISE DONE") or "OK POSE_RISE DONE").upper()
+            if raw.upper().startswith(start_ack) or parsed_status == "OK_BUILTIN_POSE_START":
+                self._log("info", f"[POST_GRASP_FIXED][POSE_RISE_START] raw={raw!r}")
+                return self.controller.stop_cmd("POST_GRASP_POSE_RISE")
+            if raw.upper().startswith(done_ack) or parsed_status == "OK_BUILTIN_POSE_DONE":
+                self._log("info", f"[POST_GRASP_FIXED][POSE_RISE_DONE] raw={raw!r}")
+                self._log("info", "[POST_GRASP_FIXED][DONE]")
+                self.ctx.clear_carrying_object()
+                self._transition(State.DONE, "post_grasp_fixed_pose_rise_done")
+                return self.controller.stop_cmd("DONE")
+            if parsed_status in {"ARM_RESPONSE_TIMEOUT", "ARM_TX_FAILED", "ARM_SERIAL_OPEN_FAILED", "ERR_CMD", "ERR_IK"}:
+                self._enter_error_recovery(f"post_grasp_pose_rise_failed:{parsed_status}")
+                return self.controller.stop_cmd("ERROR_RECOVERY", brake=True)
+        if now_m > float(getattr(self.ctx, "post_grasp_rise_timeout_mono", 0.0) or 0.0):
+            self._enter_error_recovery("post_grasp_pose_rise_timeout")
+            return self.controller.stop_cmd("ERROR_RECOVERY", brake=True)
+        return self.controller.stop_cmd("POST_GRASP_POSE_RISE")
+
     def _return_place_summary(
         self,
         mode: str,

@@ -357,12 +357,13 @@ class ArmSerialBridge:
 
     def send_pose_bottle_and_wait(self, *, line: Optional[str] = None, timeout_s: Optional[float] = None) -> Dict[str, Any]:
         line = str(line or "POSE_BOTTLE").strip() or "POSE_BOTTLE"
+        ack_base = line.upper() if line.upper().startswith("POSE_") else "POSE_BOTTLE"
         if not bool(getattr(self.cfg, "enabled", True)):
             resp = self._command_failure_response(parsed_status="ARM_SERIAL_DISABLED", message="arm_serial_disabled", raw_line="arm_serial_disabled")
             return {"ok": False, "error": "arm_serial_disabled", "response": resp, "line": line}
         if bool(getattr(self.cfg, "dry_run", False)):
             write_result = self._write_line(line)
-            received_lines = ["OK POSE_BOTTLE START", "OK POSE_BOTTLE DONE"]
+            received_lines = [f"OK {ack_base} START", f"OK {ack_base} DONE"]
             for raw in received_lines:
                 status = str(parse_arm_response_detail(raw).get("status") or "UNKNOWN")
                 self._emit("info", "arm_rx_line", raw=raw, parsed_status=status, dry_run=True)

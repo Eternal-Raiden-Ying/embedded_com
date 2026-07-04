@@ -125,11 +125,22 @@ def parse_arm_response_detail(line: str) -> Dict[str, Any]:
     if _is_noise_line(raw):
         return {"status": "NOISE", "raw": raw}
 
-    if upper.startswith("OK POSE_BOTTLE START"):
-        return {"status": "OK_BUILTIN_POSE_START", "raw": raw, "builtin_stage": "pose_start"}
-
-    if upper.startswith("OK POSE_BOTTLE DONE"):
-        return {"status": "OK_BUILTIN_POSE_DONE", "raw": raw, "builtin_stage": "pose_done"}
+    for builtin_name in ("BOTTLE", "APPLE", "RISE"):
+        prefix = f"OK POSE_{builtin_name} "
+        if upper.startswith(prefix + "START"):
+            return {
+                "status": "OK_BUILTIN_POSE_START",
+                "raw": raw,
+                "builtin_stage": "pose_start",
+                "builtin_name": builtin_name.lower(),
+            }
+        if upper.startswith(prefix + "DONE"):
+            return {
+                "status": "OK_BUILTIN_POSE_DONE",
+                "raw": raw,
+                "builtin_stage": "pose_done",
+                "builtin_name": builtin_name.lower(),
+            }
 
     if upper.startswith("OK POSE"):
         return {"status": "OK_POSE", "raw": raw, "pose": parse_pose_fields(raw)}

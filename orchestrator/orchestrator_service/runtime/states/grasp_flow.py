@@ -230,22 +230,32 @@ class GraspFlowMixin:
             return "remote_predict_failed:http_" + text[len(prefix):]
         return text
 
-    def _builtin_bottle_target_active(self) -> bool:
-        if not bool(getattr(self.cfg, "builtin_bottle_grasp_enable", True)):
-            return False
+    def _builtin_grasp_target(self) -> str:
         names = {
             str(self.ctx.canonical_target or "").strip().lower(),
             str(self.ctx.class_name or "").strip().lower(),
             str(self.ctx.active_target or "").strip().lower(),
             str(self.ctx.raw_target or "").strip().lower(),
         }
-        return "bottle" in names
+        for target in ("apple", "bottle"):
+            if target in names and bool(getattr(self.cfg, f"builtin_{target}_grasp_enable", True)):
+                return target
+        return ""
+
+    def _builtin_bottle_target_active(self) -> bool:
+        return bool(self._builtin_grasp_target())
+
+    def _builtin_grasp_cfg(self, suffix: str, default: Any) -> Any:
+        target = self._builtin_grasp_target() or str(getattr(self.ctx, "builtin_grasp_target", "") or "bottle")
+        return getattr(self.cfg, f"builtin_{target}_{suffix}", default)
 
     def _builtin_bottle_pose_line(self) -> str:
-        return str(getattr(self.cfg, "builtin_bottle_pose_line", "POSE_BOTTLE") or "POSE_BOTTLE").strip() or "POSE_BOTTLE"
+        target = self._builtin_grasp_target() or str(getattr(self.ctx, "builtin_grasp_target", "") or "bottle")
+        default = "POSE_APPLE" if target == "apple" else "POSE_BOTTLE"
+        return str(self._builtin_grasp_cfg("pose_line", default) or default).strip() or default
 
     def _builtin_bottle_grab_line(self) -> str:
-        return str(getattr(self.cfg, "builtin_bottle_grab_line", "GRABBED") or "GRABBED").strip() or "GRABBED"
+        return str(self._builtin_grasp_cfg("grab_line", "GRABBED") or "GRABBED").strip() or "GRABBED"
 
     def _builtin_ack_matches(self, resp: Any, configured_ack: str, parsed_status: str) -> bool:
         status = str(getattr(resp, "parsed_status", "") or getattr(resp, "message", "") or "").strip().upper()
@@ -256,15 +266,17 @@ class GraspFlowMixin:
     def _builtin_bottle_summary(self, phase: str, *, waiting_for: str = "") -> Dict[str, Any]:
         return {
             "grasp_phase": phase,
-            "grasp_source": "builtin_bottle",
+            "grasp_source": "builtin",
+            "builtin_target": self._builtin_grasp_target() or str(getattr(self.ctx, "builtin_grasp_target", "") or ""),
             "builtin_bottle_active": True,
+            "builtin_grasp_active": True,
             "builtin_substate": str(getattr(self.ctx, "grasp_substate", "") or ""),
             "waiting_for": waiting_for,
             "remote_grasp_active": False,
             "remote_result_ignored": bool(getattr(self.ctx, "remote_result_ignored", False)),
             "pose_line": self._builtin_bottle_pose_line(),
             "grab_line": self._builtin_bottle_grab_line(),
-            "skip_remote": bool(getattr(self.cfg, "builtin_bottle_skip_remote", True)),
+            "skip_remote": bool(self._builtin_grasp_cfg("skip_remote", True)),
             "vx_mps": 0.0,
             "vy_mps": 0.0,
             "wz_radps": 0.0,
@@ -273,20 +285,24 @@ class GraspFlowMixin:
     def _tick_builtin_bottle_send_pose(self, now_m: float) -> MotionDecision:
         if not self._builtin_bottle_target_active():
             self.ctx.builtin_bottle_active = False
+            self.ctx.builtin_grasp_active = False
             self.ctx.grasp_source = ""
             self.ctx.remote_grasp_active = True
             self.ctx.grasp_substate = "AWAITING_RESPOND"
             self.ctx.grasp_timeout_mono = now_m + _GRASP_RESPOND_TIMEOUT_S
             return self.controller.stop_cmd("GRASP")
         pose_line = self._builtin_bottle_pose_line()
-        self.ctx.grasp_source = "builtin_bottle"
+        target = self._builtin_grasp_target()
+        self.ctx.grasp_source = "builtin"
+        self.ctx.builtin_grasp_target = target
         self.ctx.remote_grasp_active = False
         self.ctx.builtin_bottle_active = True
+        self.ctx.builtin_grasp_active = True
         self.ctx.builtin_bottle_pose_started = False
         self.ctx.arm_response = None
         self.ctx.grasp_substate = "BUILTIN_BOTTLE_WAIT_POSE_DONE"
-        self.ctx.grasp_timeout_mono = now_m + max(0.1, float(getattr(self.cfg, "builtin_bottle_pose_timeout_s", 15.0) or 15.0))
-        self._log("info", f"[GRASP][BUILTIN_POSE_SEND] line={pose_line}")
+        self.ctx.grasp_timeout_mono = now_m + max(0.1, float(self._builtin_grasp_cfg("pose_timeout_s", 15.0) or 15.0))
+        self._log("info", f"[GRASP][BUILTIN_POSE_SEND] target={target} line={pose_line}")
         arm_cmd = ArmCommand(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, command=pose_line)
         decision = MotionDecision(cmd=self.controller.stop_cmd("GRASP").cmd, arm_cmd=arm_cmd)
         decision.control_summary = self._builtin_bottle_summary("builtin_pose_send", waiting_for="OK_BUILTIN_POSE_DONE")
@@ -294,13 +310,14 @@ class GraspFlowMixin:
 
     def _tick_builtin_bottle_wait_pose_start(self, now_m: float) -> MotionDecision:
         resp = self.ctx.arm_response
-        if resp is not None and self._builtin_ack_matches(resp, getattr(self.cfg, "builtin_bottle_pose_start_ack", "OK POSE_BOTTLE START"), "OK_BUILTIN_POSE_START"):
+        target = str(getattr(self.ctx, "builtin_grasp_target", "") or self._builtin_grasp_target() or "bottle")
+        if resp is not None and self._builtin_ack_matches(resp, self._builtin_grasp_cfg("pose_start_ack", f"OK POSE_{target.upper()} START"), "OK_BUILTIN_POSE_START"):
             self.ctx.arm_response = None
             self.ctx.builtin_bottle_pose_started = True
             self.ctx.grasp_substate = "BUILTIN_BOTTLE_WAIT_POSE_DONE"
-            self._log("info", f"[GRASP][BUILTIN_POSE_START] raw={getattr(resp, 'raw_line', '')!r}")
+            self._log("info", f"[GRASP][BUILTIN_POSE_START] target={target} raw={getattr(resp, 'raw_line', '')!r}")
             return self.controller.stop_cmd("GRASP")
-        if resp is not None and self._builtin_ack_matches(resp, getattr(self.cfg, "builtin_bottle_pose_done_ack", "OK POSE_BOTTLE DONE"), "OK_BUILTIN_POSE_DONE"):
+        if resp is not None and self._builtin_ack_matches(resp, self._builtin_grasp_cfg("pose_done_ack", f"OK POSE_{target.upper()} DONE"), "OK_BUILTIN_POSE_DONE"):
             return self._handle_builtin_bottle_pose_done(resp, now_m)
         if now_m > self.ctx.grasp_timeout_mono:
             self._log_grasp_flow_tick_debug("BUILTIN_BOTTLE_WAIT_POSE_START", "OK_BUILTIN_POSE_START", now_m)
@@ -311,8 +328,9 @@ class GraspFlowMixin:
         self.ctx.arm_response = None
         self.ctx.builtin_bottle_pose_started = True
         self.ctx.grasp_substate = "BUILTIN_BOTTLE_SEND_GRAB"
-        self.ctx.grasp_timeout_mono = now_m + max(0.1, float(getattr(self.cfg, "builtin_bottle_grab_timeout_s", 10.0) or 10.0))
-        self._log("info", f"[GRASP][BUILTIN_POSE_DONE] raw={getattr(resp, 'raw_line', '')!r}")
+        target = str(getattr(self.ctx, "builtin_grasp_target", "") or self._builtin_grasp_target() or "bottle")
+        self.ctx.grasp_timeout_mono = now_m + max(0.1, float(self._builtin_grasp_cfg("grab_timeout_s", 10.0) or 10.0))
+        self._log("info", f"[GRASP][BUILTIN_POSE_DONE] target={target} raw={getattr(resp, 'raw_line', '')!r}")
         return self.controller.stop_cmd("GRASP")
 
     def _tick_builtin_bottle_wait_pose_done(self, now_m: float) -> MotionDecision:
@@ -323,12 +341,13 @@ class GraspFlowMixin:
         resp = self.ctx.arm_response
         if resp is None:
             return self.controller.stop_cmd("GRASP")
-        if self._builtin_ack_matches(resp, getattr(self.cfg, "builtin_bottle_pose_start_ack", "OK POSE_BOTTLE START"), "OK_BUILTIN_POSE_START"):
+        target = str(getattr(self.ctx, "builtin_grasp_target", "") or self._builtin_grasp_target() or "bottle")
+        if self._builtin_ack_matches(resp, self._builtin_grasp_cfg("pose_start_ack", f"OK POSE_{target.upper()} START"), "OK_BUILTIN_POSE_START"):
             self.ctx.arm_response = None
             self.ctx.builtin_bottle_pose_started = True
-            self._log("info", f"[GRASP][BUILTIN_POSE_START] raw={getattr(resp, 'raw_line', '')!r}")
+            self._log("info", f"[GRASP][BUILTIN_POSE_START] target={target} raw={getattr(resp, 'raw_line', '')!r}")
             return self.controller.stop_cmd("GRASP")
-        if self._builtin_ack_matches(resp, getattr(self.cfg, "builtin_bottle_pose_done_ack", "OK POSE_BOTTLE DONE"), "OK_BUILTIN_POSE_DONE"):
+        if self._builtin_ack_matches(resp, self._builtin_grasp_cfg("pose_done_ack", f"OK POSE_{target.upper()} DONE"), "OK_BUILTIN_POSE_DONE"):
             return self._handle_builtin_bottle_pose_done(resp, now_m)
         parsed_status = str(getattr(resp, "parsed_status", "") or getattr(resp, "message", "") or "").strip().upper()
         raw = getattr(resp, "raw_line", "")
@@ -342,14 +361,15 @@ class GraspFlowMixin:
         return self.controller.stop_cmd("GRASP")
 
     def _tick_builtin_bottle_send_grab(self, now_m: float) -> MotionDecision:
-        if not bool(getattr(self.cfg, "builtin_bottle_grab_enable", True)):
+        target = str(getattr(self.ctx, "builtin_grasp_target", "") or self._builtin_grasp_target() or "bottle")
+        if not bool(self._builtin_grasp_cfg("grab_enable", True)):
             self.ctx.grasp_substate = "BUILTIN_BOTTLE_DONE"
             return self.controller.stop_cmd("GRASP")
         grab_line = self._builtin_bottle_grab_line()
         self.ctx.arm_response = None
         self.ctx.grasp_substate = "BUILTIN_BOTTLE_WAIT_GRAB_DONE"
-        self.ctx.grasp_timeout_mono = now_m + max(0.1, float(getattr(self.cfg, "builtin_bottle_grab_timeout_s", 10.0) or 10.0))
-        self._log("info", f"[GRASP][BUILTIN_GRAB_SEND] line={grab_line}")
+        self.ctx.grasp_timeout_mono = now_m + max(0.1, float(self._builtin_grasp_cfg("grab_timeout_s", 10.0) or 10.0))
+        self._log("info", f"[GRASP][BUILTIN_GRAB_SEND] target={target} line={grab_line}")
         arm_cmd = ArmCommand(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, command=grab_line)
         decision = MotionDecision(cmd=self.controller.stop_cmd("GRASP").cmd, arm_cmd=arm_cmd)
         decision.control_summary = self._builtin_bottle_summary("builtin_grab_send", waiting_for="OK_GRABBED_DONE")
@@ -366,9 +386,10 @@ class GraspFlowMixin:
         parsed_status = str(getattr(resp, "parsed_status", "") or getattr(resp, "message", "") or "").strip().upper()
         raw = getattr(resp, "raw_line", "")
         self.ctx.arm_response = None
-        if self._builtin_ack_matches(resp, getattr(self.cfg, "builtin_bottle_grab_done_ack", "OK GRABBED DONE"), "OK_GRABBED_DONE"):
+        target = str(getattr(self.ctx, "builtin_grasp_target", "") or self._builtin_grasp_target() or "bottle")
+        if self._builtin_ack_matches(resp, self._builtin_grasp_cfg("grab_done_ack", "OK GRABBED DONE"), "OK_GRABBED_DONE"):
             self.ctx.grasp_substate = "BUILTIN_BOTTLE_DONE"
-            self._log("info", f"[GRASP][BUILTIN_GRAB_DONE] raw={raw!r}")
+            self._log("info", f"[GRASP][BUILTIN_GRAB_DONE] target={target} raw={raw!r}")
             return self.controller.stop_cmd("GRASP")
         if parsed_status in {"OK_GRABBED_START", "OK_KEEP_CLAW"}:
             self._log("info", f"[GRASP][BUILTIN_GRAB_PROGRESS] parsed_status={parsed_status} raw={raw!r}")
@@ -380,14 +401,23 @@ class GraspFlowMixin:
 
     def _tick_builtin_bottle_done(self, now_m: float) -> MotionDecision:
         del now_m
-        self.ctx.grasp_source = "builtin_bottle"
+        target = str(getattr(self.ctx, "builtin_grasp_target", "") or self._builtin_grasp_target() or "bottle")
+        self.ctx.grasp_source = "builtin"
         self.ctx.builtin_bottle_active = False
+        self.ctx.builtin_grasp_active = False
         self.ctx.remote_grasp_active = False
         self.ctx.carrying_object = True
-        self.ctx.carried_target = "bottle"
+        self.ctx.carried_target = target
         self.ctx.arm_response = None
         self.ctx.grasp_substate = "BUILTIN_BOTTLE_DONE"
-        self._log("info", "[GRASP][BUILTIN_BOTTLE_DONE] target=bottle grasp_source=builtin_bottle")
+        self._log("info", f"[GRASP][BUILTIN_DONE] target={target}")
+        if bool(getattr(self.cfg, "post_grasp_fixed_flow_enable", True)):
+            self.ctx.post_grasp_fixed_entry_logged = False
+            self.ctx.post_grasp_rise_substate = ""
+            self.ctx.post_grasp_rise_timeout_mono = 0.0
+            self._transition(State.POST_GRASP_TURN_FIXED, f"arm_motion_done builtin_{target} post_grasp_fixed_flow_enable=true")
+            self._queue_tts("抓取完成，开始固定放置动作")
+            return self.controller.stop_cmd("POST_GRASP_TURN_FIXED")
         if bool(getattr(self.cfg, "post_grasp_place_enable", True)):
             self.ctx.post_grasp_place_enabled = True
             self.ctx.basket_search_start_ts = 0.0
@@ -731,6 +761,16 @@ class GraspFlowMixin:
 
     def _tick_grasp_verify(self, now_m: float) -> MotionDecision:
         self._log("info", "[GRASP][VERIFY_ASSUMED_SUCCESS] grasp_success_assumed_for_demo=true")
+        if bool(getattr(self.cfg, "post_grasp_fixed_flow_enable", True)):
+            self.ctx.carrying_object = True
+            self.ctx.carried_target = str(self.ctx.canonical_target or self.ctx.active_target or "")
+            self.ctx.arm_response = None
+            self.ctx.post_grasp_fixed_entry_logged = False
+            self.ctx.post_grasp_rise_substate = ""
+            self.ctx.post_grasp_rise_timeout_mono = 0.0
+            self._transition(State.POST_GRASP_TURN_FIXED, "arm_motion_done post_grasp_fixed_flow_enable=true")
+            self._queue_tts("抓取完成，开始固定放置动作")
+            return self.controller.stop_cmd("POST_GRASP_TURN_FIXED")
         if bool(getattr(self.cfg, "post_grasp_place_enable", True)):
             self.ctx.carrying_object = True
             self.ctx.carried_target = str(self.ctx.canonical_target or self.ctx.active_target or "")
