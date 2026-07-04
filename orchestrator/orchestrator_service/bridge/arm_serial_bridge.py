@@ -281,8 +281,8 @@ class ArmSerialBridge:
     def _command_failure_response(*, parsed_status: str, message: str, raw_line: str) -> ArmResponse:
         return ArmResponse(ok=False, message=message, raw_line=raw_line, ts=time.time(), parsed_status=parsed_status)
 
-    def send_grabbed_and_wait(self, *, timeout_s: Optional[float] = None) -> Dict[str, Any]:
-        line = encode_grabbed()
+    def send_grabbed_and_wait(self, *, line: Optional[str] = None, timeout_s: Optional[float] = None) -> Dict[str, Any]:
+        line = str(line or encode_grabbed()).strip() or encode_grabbed()
         if not bool(getattr(self.cfg, "enabled", True)):
             resp = self._command_failure_response(parsed_status="ARM_SERIAL_DISABLED", message="arm_serial_disabled", raw_line="arm_serial_disabled")
             return {"ok": False, "error": "arm_serial_disabled", "response": resp, "line": line}
@@ -292,7 +292,7 @@ class ArmSerialBridge:
             for raw in received_lines:
                 self._emit("info", "arm_rx_line", raw=raw, parsed_status=parse_arm_response_detail(raw).get("status"), dry_run=True)
             resp = ArmResponse(ok=True, message="OK_GRABBED_DONE", raw_line="OK GRABBED DONE", ts=time.time(), parsed_status="OK_GRABBED_DONE")
-            return {"ok": True, "error": "", "response": resp, "line": line, "received_lines": received_lines, **write_result}
+            return {"ok": True, "error": "", "response": resp, "line": line, "received_lines": received_lines, "received_lines_count": len(received_lines), **write_result}
         if not self.open():
             resp = self._command_failure_response(parsed_status="ARM_SERIAL_OPEN_FAILED", message="arm_serial_open_failed", raw_line="arm_serial_open_failed")
             return {"ok": False, "error": "arm_serial_open_failed", "response": resp, "line": line}
@@ -330,7 +330,7 @@ class ArmSerialBridge:
                 continue
             if status == "OK_GRABBED_DONE":
                 resp = ArmResponse(ok=True, message="OK_GRABBED_DONE", raw_line=raw, ts=time.time(), parsed_status="OK_GRABBED_DONE")
-                return {"ok": True, "error": "", "response": resp, "line": line, "received_lines": received_lines, **write_result}
+                return {"ok": True, "error": "", "response": resp, "line": line, "received_lines": received_lines, "received_lines_count": len(received_lines), **write_result}
             if status == "ERR_CMD":
                 resp = self._command_failure_response(parsed_status="ERR_CMD", message="ERR_CMD", raw_line=raw)
                 return {"ok": False, "error": "err_cmd", "response": resp, "line": line, "received_lines": received_lines, **write_result}
@@ -355,18 +355,20 @@ class ArmSerialBridge:
             **write_result,
         }
 
-    def send_pose_bottle_and_wait(self, *, timeout_s: Optional[float] = None) -> Dict[str, Any]:
-        line = "POSE_BOTTLE"
+    def send_pose_bottle_and_wait(self, *, line: Optional[str] = None, timeout_s: Optional[float] = None) -> Dict[str, Any]:
+        line = str(line or "POSE_BOTTLE").strip() or "POSE_BOTTLE"
         if not bool(getattr(self.cfg, "enabled", True)):
             resp = self._command_failure_response(parsed_status="ARM_SERIAL_DISABLED", message="arm_serial_disabled", raw_line="arm_serial_disabled")
             return {"ok": False, "error": "arm_serial_disabled", "response": resp, "line": line}
         if bool(getattr(self.cfg, "dry_run", False)):
             write_result = self._write_line(line)
-            raw = "OK POSE"
-            self._emit("info", "arm_rx_line", raw=raw, parsed_status="OK_POSE", dry_run=True)
-            self._emit("info", "arm_response_parsed", status="OK_POSE", raw=raw, dry_run=True)
-            resp = ArmResponse(ok=True, message="OK_POSE", raw_line=raw, ts=time.time(), parsed_status="OK_POSE")
-            return {"ok": True, "error": "", "response": resp, "line": line, **write_result}
+            received_lines = ["OK POSE_BOTTLE START", "OK POSE_BOTTLE DONE"]
+            for raw in received_lines:
+                status = str(parse_arm_response_detail(raw).get("status") or "UNKNOWN")
+                self._emit("info", "arm_rx_line", raw=raw, parsed_status=status, dry_run=True)
+                self._emit("info", "arm_response_parsed", status=status, raw=raw, dry_run=True)
+            resp = ArmResponse(ok=True, message="OK_BUILTIN_POSE_DONE", raw_line=received_lines[-1], ts=time.time(), parsed_status="OK_BUILTIN_POSE_DONE")
+            return {"ok": True, "error": "", "response": resp, "line": line, "received_lines": received_lines, **write_result}
         if not self.open():
             resp = self._command_failure_response(parsed_status="ARM_SERIAL_OPEN_FAILED", message="arm_serial_open_failed", raw_line="arm_serial_open_failed")
             return {"ok": False, "error": "arm_serial_open_failed", "response": resp, "line": line}
@@ -394,10 +396,13 @@ class ArmSerialBridge:
                 self._emit("info", "arm_rx_line", raw=raw, parsed_status=status)
             self._emit("info", "arm_response_parsed", status=status, raw=raw)
 
-            if status in {"NOISE", "UNKNOWN"}:
+            if status in {"NOISE", "UNKNOWN", "OK_POSE"}:
                 continue
-            if status == "OK_POSE":
-                resp = ArmResponse(ok=True, message="OK_POSE", raw_line=raw, ts=time.time(), parsed_status="OK_POSE")
+            if status == "OK_BUILTIN_POSE_START":
+                self._emit("info", "arm_builtin_pose_started", raw=raw, line=line)
+                continue
+            if status == "OK_BUILTIN_POSE_DONE":
+                resp = ArmResponse(ok=True, message="OK_BUILTIN_POSE_DONE", raw_line=raw, ts=time.time(), parsed_status="OK_BUILTIN_POSE_DONE")
                 return {"ok": True, "error": "", "response": resp, "line": line, "received_lines": received_lines, **write_result}
             if status == "ERR_IK":
                 resp = self._command_failure_response(parsed_status="ERR_IK", message="ERR_IK", raw_line=raw)

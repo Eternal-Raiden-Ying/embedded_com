@@ -148,6 +148,8 @@ class RuntimeContext:
     align_hysteresis_last_obs_key: str = ""
     approach_hysteresis_last_obs_key: str = ""
     table_motion_pending_transition_reason: str = ""
+    post_grasp_turn_started_mono: float = 0.0
+    post_grasp_turn_cmd_accepted: bool = False
     edge_hard_yaw_frames: int = 0
     edge_hard_yaw_since_mono: float = 0.0
     control_phase: str = "SEARCH_SCAN"
@@ -293,6 +295,11 @@ class RuntimeContext:
     arm_response: Optional[object] = None
     grasp_timeout_mono: float = 0.0
     grasp_verify_reported: bool = False
+    grasp_source: str = ""
+    remote_grasp_active: bool = False
+    builtin_bottle_active: bool = False
+    builtin_bottle_pose_started: bool = False
+    remote_result_ignored: bool = False
     carrying_object: bool = False
     carried_target: str = ""
     post_grasp_place_enabled: bool = False
@@ -493,6 +500,11 @@ class RuntimeContext:
         self.grasp_retry_count = 0
         self.grasp_substate = ""
         self.grasp_verify_reported = False
+        self.grasp_source = ""
+        self.remote_grasp_active = False
+        self.builtin_bottle_active = False
+        self.builtin_bottle_pose_started = False
+        self.remote_result_ignored = False
 
     def clear_perception_cache(self):
         self.last_table_obs = None
@@ -597,6 +609,11 @@ class RuntimeContext:
         self.arm_response = None
         self.grasp_timeout_mono = 0.0
         self.grasp_verify_reported = False
+        self.grasp_source = ""
+        self.remote_grasp_active = False
+        self.builtin_bottle_active = False
+        self.builtin_bottle_pose_started = False
+        self.remote_result_ignored = False
         self.clear_carrying_object()
         self.clear_final_enter_candidate()
         self.reset_edge_slope_final_ready("clear_task_context")

@@ -55,7 +55,8 @@ class ReturnPlaceMixin:
             self._transition(State.SEARCH_BASKET, "post_grasp_turn_disabled")
             return self.controller.stop_cmd("SEARCH_BASKET")
         duration = max(0.0, float(getattr(self.cfg, "post_grasp_turn_duration_s", 3.5) or 3.5))
-        elapsed = self._state_elapsed()
+        started_mono = float(getattr(self.ctx, "post_grasp_turn_started_mono", 0.0) or 0.0)
+        elapsed = 0.0 if started_mono <= 0.0 else max(0.0, monotonic_ts() - started_mono)
         direction = str(getattr(self.cfg, "post_grasp_turn_direction", "left") or "left").strip().lower()
         sign = -1.0 if direction == "right" else 1.0
         wz = sign * abs(float(getattr(self.cfg, "post_grasp_turn_wz_radps", 0.45) or 0.45))
@@ -122,6 +123,11 @@ class ReturnPlaceMixin:
         obs = self._fresh_target_obs()
         found, conf = self._basket_found(obs)
         elapsed = self._state_elapsed()
+        cx, h, area = self._basket_bbox_metrics(obs) if obs is not None else (None, None, None)
+        self._log(
+            "info",
+            f"[RETURN_PLACE][BASKET_OBS] found={str(found).lower()} cx={cx} area={area} h={h} conf={conf}",
+        )
         if not found:
             self.ctx.basket_approach_stable_count = 0
             if elapsed >= float(getattr(self.cfg, "basket_approach_timeout_s", 20.0) or 20.0):
@@ -129,21 +135,20 @@ class ReturnPlaceMixin:
                 return self.controller.stop_cmd("ERROR_RECOVERY", brake=True)
             return self.controller.stop_cmd("APPROACH_BASKET")
 
-        cx, h, area = self._basket_bbox_metrics(obs)
         target_x = float(getattr(self.cfg, "basket_align_center_x_target", 0.50) or 0.50)
         tol = abs(float(getattr(self.cfg, "basket_align_center_x_tol", 0.08) or 0.08))
         err = None if cx is None else float(cx) - target_x
         centered = bool(err is not None and abs(err) <= tol)
         area_stop = bool(area is not None and area >= float(getattr(self.cfg, "basket_stop_bbox_area_norm", 0.18) or 0.18))
         height_stop = bool(h is not None and h >= float(getattr(self.cfg, "basket_stop_bbox_height_norm", 0.38) or 0.38))
-        if centered and (area_stop or height_stop):
-            self.ctx.basket_approach_stable_count += 1
-        else:
-            self.ctx.basket_approach_stable_count = 0
-        stable_required = max(1, int(getattr(self.cfg, "basket_stop_stable_count_required", 3) or 3))
-        if self.ctx.basket_approach_stable_count >= stable_required:
-            self._transition(State.PLACE_TO_BASKET, "basket_stop_stable_bbox")
+        if area_stop or height_stop:
+            self._log(
+                "info",
+                f"[RETURN_PLACE][BASKET_STOP_REACHED] reason=area_or_height cx={cx} area={area} h={h}",
+            )
+            self._transition(State.PLACE_TO_BASKET, "basket_stop_reached_area_or_height")
             return self.controller.stop_cmd("PLACE_TO_BASKET")
+        self.ctx.basket_approach_stable_count = 0
 
         if elapsed >= float(getattr(self.cfg, "basket_approach_timeout_s", 20.0) or 20.0):
             self._enter_error_recovery("basket_approach_timeout")
@@ -279,16 +284,68 @@ class ReturnPlaceMixin:
             conf = None
         return bool(cls_ok), conf
 
-    def _basket_bbox_metrics(self, obs: TargetObs) -> Tuple[Optional[float], Optional[float], Optional[float]]:
-        bbox = getattr(obs, "matched_bbox", None) or getattr(obs, "bbox", None) or getattr(obs, "mask_bbox", None)
-        if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
-            return None, None, None
+    @staticmethod
+    def _as_float(value: Any) -> Optional[float]:
         try:
-            x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
+            if value is None:
+                return None
+            return float(value)
         except Exception:
-            return None, None, None
+            return None
+
+    def _basket_center_x(self, obs: TargetObs) -> Optional[float]:
+        center = getattr(obs, "matched_center", None)
+        if isinstance(center, dict):
+            for key in ("cx", "cx_norm", "x_norm"):
+                value = self._as_float(center.get(key))
+                if value is not None:
+                    return value
+        for key in ("cx_norm", "x_norm", "cx"):
+            value = self._as_float(getattr(obs, key, None))
+            if value is not None:
+                return value
+        return None
+
+    def _bbox_xyxy(self, bbox: Any) -> Optional[Tuple[float, float, float, float]]:
+        if isinstance(bbox, dict):
+            if all(k in bbox for k in ("x1", "y1", "x2", "y2")):
+                values = [bbox.get(k) for k in ("x1", "y1", "x2", "y2")]
+            elif all(k in bbox for k in ("xmin", "ymin", "xmax", "ymax")):
+                values = [bbox.get(k) for k in ("xmin", "ymin", "xmax", "ymax")]
+            elif all(k in bbox for k in ("x", "y", "w", "h")):
+                x = self._as_float(bbox.get("x"))
+                y = self._as_float(bbox.get("y"))
+                w = self._as_float(bbox.get("w"))
+                h = self._as_float(bbox.get("h"))
+                if x is None or y is None or w is None or h is None:
+                    return None
+                return x, y, x + w, y + h
+            else:
+                return None
+        elif isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+            values = bbox[:4]
+        else:
+            return None
+        try:
+            x1, y1, x2, y2 = [float(v) for v in values]
+        except Exception:
+            return None
+        return x1, y1, x2, y2
+
+    def _basket_bbox_metrics(self, obs: TargetObs) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+        cx = self._basket_center_x(obs)
+        area = self._as_float(getattr(obs, "matched_area", None))
+        bbox = getattr(obs, "matched_bbox", None) or getattr(obs, "bbox", None) or getattr(obs, "mask_bbox", None)
+        xyxy = self._bbox_xyxy(bbox)
+        if xyxy is None:
+            return cx, None, area
+        x1, y1, x2, y2 = xyxy
         w = abs(x2 - x1)
         h = abs(y2 - y1)
         if w > 1.0 or h > 1.0:
-            return None, None, None
-        return (x1 + x2) * 0.5, h, w * h
+            return cx, None, area
+        if cx is None:
+            cx = (x1 + x2) * 0.5
+        if area is None:
+            area = w * h
+        return cx, h, area

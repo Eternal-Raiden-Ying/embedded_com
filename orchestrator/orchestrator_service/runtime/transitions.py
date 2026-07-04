@@ -249,6 +249,12 @@ class TransitionsMixin:
             self.ctx.final_lock_reason = ""
             self.ctx.final_lock_last_transition_reason = ""
             self._reset_slide_ref_handoff()
+        if state == State.POST_GRASP_TURN_180:
+            self.ctx.post_grasp_turn_started_mono = 0.0
+            self.ctx.post_grasp_turn_cmd_accepted = False
+        elif state != State.POST_GRASP_TURN_180:
+            self.ctx.post_grasp_turn_started_mono = 0.0
+            self.ctx.post_grasp_turn_cmd_accepted = False
         if state == State.SEARCH_TABLE:
             self.reset_edge_tracking("enter_search_table")
             self.reset_target_tracking("enter_search_table")
@@ -261,7 +267,6 @@ class TransitionsMixin:
             self.reset_slide_reference(reason)
         elif state == State.GRASP:
             self._log("info", "grasp_enter")
-            self.ctx.grasp_substate = "AWAITING_RESPOND"
             self.ctx.grasp_result = None
             self.ctx.grasp_status = ""
             self.ctx.grasp_reason = ""
@@ -269,9 +274,26 @@ class TransitionsMixin:
             self.ctx.grasp_reposition_start_mono = 0.0
             self.ctx.grasp_retry_count = 0
             self.ctx.arm_response = None
-            self.ctx.grasp_timeout_mono = monotonic_ts() + _GRASP_RESPOND_TIMEOUT_S
             self.ctx.grasp_verify_reported = False
-            self._log("info", "grasp_remote_request_sent")
+            self.ctx.remote_result_ignored = False
+            if self._builtin_bottle_target_active():
+                self.ctx.grasp_source = "builtin_bottle"
+                self.ctx.remote_grasp_active = False
+                self.ctx.builtin_bottle_active = True
+                self.ctx.builtin_bottle_pose_started = False
+                self.ctx.grasp_substate = "BUILTIN_BOTTLE_SEND_POSE"
+                self.ctx.grasp_timeout_mono = monotonic_ts() + float(getattr(self.cfg, "builtin_bottle_pose_timeout_s", 15.0) or 15.0)
+                self._log("info", "[GRASP][BUILTIN_BOTTLE_SELECTED] target=bottle reason=grasp_enter_target_bottle")
+                if bool(getattr(self.cfg, "builtin_bottle_skip_remote", True)):
+                    self._log("info", "[GRASP][REMOTE_SKIPPED] reason=builtin_bottle_active")
+            else:
+                self.ctx.grasp_source = "remote"
+                self.ctx.remote_grasp_active = True
+                self.ctx.builtin_bottle_active = False
+                self.ctx.builtin_bottle_pose_started = False
+                self.ctx.grasp_substate = "AWAITING_RESPOND"
+                self.ctx.grasp_timeout_mono = monotonic_ts() + _GRASP_RESPOND_TIMEOUT_S
+                self._log("info", "grasp_remote_request_sent")
         elif state == State.DONE:
             if self.ctx.last_fail_reason:
                 warning = str(self.ctx.last_fail_reason).strip()

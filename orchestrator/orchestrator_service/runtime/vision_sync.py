@@ -297,7 +297,10 @@ class VisionSyncMixin:
                 },
             )
         if state == State.GRASP:
-            if getattr(self.ctx, "use_fallback_grasp", False):
+            if getattr(self.ctx, "use_fallback_grasp", False) or (
+                bool(getattr(self.ctx, "builtin_bottle_active", False))
+                and bool(getattr(self.cfg, "builtin_bottle_skip_remote", True))
+            ):
                 return None
             class_id = int(self.ctx.class_id) if self.ctx.class_id is not None else target_to_class_id(self.ctx.active_target or "")
             target_obs = self.ctx.last_target_obs

@@ -112,8 +112,9 @@ def parse_arm_response_detail(line: str) -> Dict[str, Any]:
     """Parse one raw line from the arm serial port.
 
     Returns a dict with status in:
-      OK_POSE, OK_GRABBED_START, OK_KEEP_CLAW, OK_GRABBED_DONE,
-      ERR_IK, ERR_CMD, NOISE, UNKNOWN.
+      OK_BUILTIN_POSE_START, OK_BUILTIN_POSE_DONE, OK_POSE,
+      OK_GRABBED_START, OK_KEEP_CLAW, OK_GRABBED_DONE, ERR_IK,
+      ERR_CMD, NOISE, UNKNOWN.
     """
     raw = str(line or "").strip()
     if not raw:
@@ -123,6 +124,12 @@ def parse_arm_response_detail(line: str) -> Dict[str, Any]:
 
     if _is_noise_line(raw):
         return {"status": "NOISE", "raw": raw}
+
+    if upper.startswith("OK POSE_BOTTLE START"):
+        return {"status": "OK_BUILTIN_POSE_START", "raw": raw, "builtin_stage": "pose_start"}
+
+    if upper.startswith("OK POSE_BOTTLE DONE"):
+        return {"status": "OK_BUILTIN_POSE_DONE", "raw": raw, "builtin_stage": "pose_done"}
 
     if upper.startswith("OK POSE"):
         return {"status": "OK_POSE", "raw": raw, "pose": parse_pose_fields(raw)}
@@ -183,6 +190,15 @@ def parse_arm_response(line: str) -> Optional[ArmResponse]:
             raw_line=line,
             ts=now_ts(),
             parsed_status="OK_POSE",
+        )
+
+    if status in {"OK_BUILTIN_POSE_START", "OK_BUILTIN_POSE_DONE"}:
+        return ArmResponse(
+            ok=status == "OK_BUILTIN_POSE_DONE",
+            message=status,
+            raw_line=line,
+            ts=now_ts(),
+            parsed_status=status,
         )
 
     if status == "OK_GRABBED_DONE":

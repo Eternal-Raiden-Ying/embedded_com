@@ -35,7 +35,7 @@ from ..ipc.protocol import (
 )
 from ..ipc.transport import AsyncJsonlClientSender, JsonlClientSender, JsonlInboundServer
 from ..utils.target_utils import supported_targets
-from .common import RunLogger, ensure_dir, safe_dump
+from .common import RunLogger, ensure_dir, monotonic_ts, safe_dump
 from .context import State
 from .state_machine import OrchestratorCore
 
@@ -1089,6 +1089,10 @@ class OrchestratorService(BaseModule):
             "speed_profile",
             "speed_limit_reason",
             "forward_block_reason",
+            "rotate_block_reason",
+            "return_place_phase",
+            "return_place_depth_slowdown_bypassed",
+            "return_place_depth_p10_m",
             "vx_mps",
             "vy_mps",
             "wz_radps",
@@ -1951,6 +1955,27 @@ class OrchestratorService(BaseModule):
         }
         if tx_meta:
             payload.update({k: v for k, v in tx_meta.items() if v not in (None, "")})
+        state = str(payload.get("state") or self.core.ctx.state.value or "").strip().upper()
+        wz = float(payload.get("wz_radps", 0.0) or 0.0)
+        raw_upper = str(raw_line or "").strip().upper()
+        is_velocity_line = bool(raw_upper.startswith("V ") or raw_upper.startswith("VEL "))
+        if is_velocity_line and state in {"POST_GRASP_TURN_180", "SEARCH_BASKET"} and abs(wz) > 1e-9:
+            accepted = bool(payload.get("writer_accept_cmd") is not False and payload.get("uart_tx_ok", True))
+            if accepted:
+                if state == "POST_GRASP_TURN_180" and not bool(getattr(self.core.ctx, "post_grasp_turn_cmd_accepted", False)):
+                    self.core.ctx.post_grasp_turn_started_mono = monotonic_ts()
+                    self.core.ctx.post_grasp_turn_cmd_accepted = True
+                self.log("info", "state_machine", f"[RETURN_PLACE][TURN_CMD_ACCEPTED] state={state} wz={wz:.3f}")
+            else:
+                reason = str(
+                    payload.get("writer_discard_reason")
+                    or payload.get("service_override_reason")
+                    or payload.get("estop_cooldown_reason")
+                    or payload.get("rotate_block_reason")
+                    or payload.get("uart_tx_error")
+                    or "uart_not_accepted"
+                )
+                self.log("warn", "state_machine", f"[RETURN_PLACE][UART_BLOCKED] reason={reason} state={state}")
         payload["summary_key"] = self._uart_event_key(payload)
         payload["rendered"] = self._render_uart_line(payload)
         if bool(payload.get("uart_mode_send_required")) or str(payload.get("stm32_kind") or "") == "mode":
@@ -4098,15 +4123,34 @@ class OrchestratorService(BaseModule):
         if getattr(decision, "arm_cmd", None) is not None:
             arm = decision.arm_cmd
             arm_command = str(getattr(arm, "command", "POSE") or "POSE").strip().upper()
-            if arm_command == "GRABBED":
+            builtin_pose_line = str(getattr(self.cfg.control, "builtin_bottle_pose_line", "POSE_BOTTLE") or "POSE_BOTTLE").strip()
+            builtin_grab_line = str(getattr(self.cfg.control, "builtin_bottle_grab_line", "GRABBED") or "GRABBED").strip()
+            builtin_active = bool(getattr(self.core.ctx, "builtin_bottle_active", False))
+            if arm_command == (builtin_grab_line or "GRABBED").upper() or arm_command == "GRABBED":
+                grab_line = str(getattr(arm, "command", "") or builtin_grab_line or "GRABBED").strip() or "GRABBED"
                 self.motion_adapter.cancel_active_jogs()
                 self.run_logger.write_jsonl("arm_grabbed_send", {
                     "request_id": self.core.ctx.active_req_id or "",
                     "target": self.core.ctx.active_target or "",
-                    "line": "GRABBED",
+                    "line": grab_line,
+                    "grasp_source": "builtin_bottle" if builtin_active else str(getattr(self.core.ctx, "grasp_source", "") or ""),
+                    "builtin_bottle_active": builtin_active,
+                })
+                self.run_logger.write_jsonl("arm_cmd_planned", {
+                    "request_id": self.core.ctx.active_req_id or "",
+                    "grasp_source": "builtin_bottle" if builtin_active else str(getattr(self.core.ctx, "grasp_source", "") or ""),
+                    "builtin_bottle_active": builtin_active,
+                    "pose_line": builtin_pose_line,
+                    "grab_line": grab_line,
+                    "skip_remote": bool(getattr(self.cfg.control, "builtin_bottle_skip_remote", True)) if builtin_active else False,
                 })
                 result = self.arm_bridge.send_grabbed_and_wait(
-                    timeout_s=float(getattr(getattr(self.cfg, "arm_serial", None), "response_timeout_s", 10.0) or 10.0),
+                    line=grab_line,
+                    timeout_s=(
+                        float(getattr(self.cfg.control, "builtin_bottle_grab_timeout_s", 10.0) or 10.0)
+                        if builtin_active
+                        else float(getattr(getattr(self.cfg, "arm_serial", None), "response_timeout_s", 10.0) or 10.0)
+                    ),
                 )
                 resp = result.get("response") if isinstance(result, dict) else None
                 if resp is None:
@@ -4151,18 +4195,24 @@ class OrchestratorService(BaseModule):
                     self.run_logger.write_jsonl("arm_response", {
                         "raw": resp.raw_line,
                         "parsed_status": parsed_status,
+                        "builtin_stage": "grab_done" if parsed_status == "OK_GRABBED_DONE" and builtin_active else "",
                         "ok": bool(resp.ok),
                         "error": (result or {}).get("error", ""),
                         "received_lines_count": (result or {}).get("received_lines_count"),
                         "last_lines": (result or {}).get("last_lines"),
                     })
                 return
-            elif arm_command == "POSE_BOTTLE":
+            elif arm_command == (builtin_pose_line or "POSE_BOTTLE").upper() or arm_command == "POSE_BOTTLE":
+                pose_line = str(getattr(arm, "command", "") or builtin_pose_line or "POSE_BOTTLE").strip() or "POSE_BOTTLE"
                 self.motion_adapter.cancel_active_jogs()
                 arm_planned = {
                     "request_id": self.core.ctx.active_req_id or "",
                     "input_grasp": {},
-                    "pose_line": "POSE_BOTTLE",
+                    "grasp_source": "builtin_bottle",
+                    "builtin_bottle_active": bool(getattr(self.core.ctx, "builtin_bottle_active", False)),
+                    "pose_line": pose_line,
+                    "grab_line": builtin_grab_line,
+                    "skip_remote": bool(getattr(self.cfg.control, "builtin_bottle_skip_remote", True)),
                     "x": 0, "y": 0, "z": 0, "pitch": 0, "roll": 0, "claw": 0, "time_ms": 0,
                 }
                 self.run_logger.write_jsonl("arm_cmd_planned", dict(arm_planned))
@@ -4170,23 +4220,24 @@ class OrchestratorService(BaseModule):
                 self.run_logger.write_jsonl(
                     "arm_cmd_sent",
                     {
-                        "line": "POSE_BOTTLE",
+                        "line": pose_line,
                         "request_id": self.core.ctx.active_req_id or "",
-                        "source": "remote_grasp_client",
+                        "source": "builtin_bottle",
                         **arm.to_dict(),
                     },
                 )
                 self.run_logger.write_jsonl(
                     "arm_pose_send",
                     {
-                        "line": "POSE_BOTTLE",
+                        "line": pose_line,
                         "request_id": self.core.ctx.active_req_id or "",
                         "target": self.core.ctx.active_target or "",
                         **arm.to_dict(),
                     },
                 )
                 result = self.arm_bridge.send_pose_bottle_and_wait(
-                    timeout_s=float(getattr(getattr(self.cfg, "arm_serial", None), "response_timeout_s", 10.0) or 10.0),
+                    line=pose_line,
+                    timeout_s=float(getattr(self.cfg.control, "builtin_bottle_pose_timeout_s", 15.0) or 15.0),
                 )
                 resp = result.get("response") if isinstance(result, dict) else None
                 if resp is None:
@@ -4205,7 +4256,21 @@ class OrchestratorService(BaseModule):
                     )
                 if resp is not None:
                     parsed_status = str(getattr(resp, "parsed_status", "") or resp.message or "").strip().upper()
-                    if parsed_status == "OK_POSE" and bool(resp.ok):
+                    received_lines = list((result or {}).get("received_lines") or [])
+                    start_ack = str(getattr(self.cfg.control, "builtin_bottle_pose_start_ack", "OK POSE_BOTTLE START")).upper()
+                    start_line = next((str(line) for line in received_lines if str(line).strip().upper().startswith(start_ack)), "")
+                    if start_line:
+                        self.core._log("info", f"[GRASP][BUILTIN_POSE_START] raw={start_line!r}")
+                    if parsed_status == "OK_BUILTIN_POSE_DONE" and bool(resp.ok):
+                        self.core._log("info", f"[GRASP][BUILTIN_POSE_DONE] raw={resp.raw_line!r}")
+                        self.run_logger.write_jsonl("arm_pose_done", {
+                            "raw": resp.raw_line,
+                            "parsed_status": parsed_status,
+                            "builtin_stage": "pose_done",
+                            "ok": True,
+                            "received_lines": received_lines,
+                        })
+                    elif parsed_status == "OK_POSE" and bool(resp.ok):
                         self.run_logger.write_jsonl("arm_pose_done", {
                             "raw": resp.raw_line,
                             "parsed_status": parsed_status,
@@ -4231,6 +4296,7 @@ class OrchestratorService(BaseModule):
                     self.run_logger.write_jsonl("arm_response", {
                         "raw": resp.raw_line,
                         "parsed_status": parsed_status,
+                        "builtin_stage": "pose_done" if parsed_status == "OK_BUILTIN_POSE_DONE" else "",
                         "ok": bool(resp.ok),
                         "error": (result or {}).get("error", ""),
                         "received_lines_count": (result or {}).get("received_lines_count"),
@@ -4402,6 +4468,10 @@ class OrchestratorService(BaseModule):
             "speed_profile": speed_profile,
             "speed_limit_reason": summary.get("speed_limit_reason") or "",
             "forward_block_reason": summary.get("forward_block_reason") or "",
+            "rotate_block_reason": summary.get("rotate_block_reason") or "",
+            "return_place_phase": summary.get("return_place_phase") or "",
+            "return_place_depth_slowdown_bypassed": bool(summary.get("return_place_depth_slowdown_bypassed", False)),
+            "return_place_depth_p10_m": summary.get("return_place_depth_p10_m"),
             "table_approach_phase": summary.get("table_approach_phase") or "",
             "motion_intent_type": summary.get("motion_intent_type") or "",
             "yaw_owner": summary.get("yaw_owner") or summary.get("yaw_source") or "",

@@ -605,6 +605,16 @@ class ControlThresholds:
     yolo_approach_min_vx_mps: float = 0.02
     yolo_approach_depth_stat_for_envelope: str = "median"
     yolo_approach_use_p10_for_safety_only: bool = True
+    builtin_bottle_grasp_enable: bool = True
+    builtin_bottle_skip_remote: bool = True
+    builtin_bottle_pose_line: str = "POSE_BOTTLE"
+    builtin_bottle_pose_start_ack: str = "OK POSE_BOTTLE START"
+    builtin_bottle_pose_done_ack: str = "OK POSE_BOTTLE DONE"
+    builtin_bottle_pose_timeout_s: float = 15.0
+    builtin_bottle_grab_enable: bool = True
+    builtin_bottle_grab_line: str = "GRABBED"
+    builtin_bottle_grab_done_ack: str = "OK GRABBED DONE"
+    builtin_bottle_grab_timeout_s: float = 10.0
     bbox_track_forward_enabled: bool = True
     min_forward_vx_mps: float = 0.040
     bbox_track_forward_vx_mps: float = 0.100
