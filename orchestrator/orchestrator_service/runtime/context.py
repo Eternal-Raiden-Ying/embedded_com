@@ -225,6 +225,8 @@ class RuntimeContext:
     final_enter_depth_window: List[Dict[str, object]] = field(default_factory=list)
     final_enter_edge_seen_ts: Optional[float] = None
     final_enter_candidate_last_log_mono: float = 0.0
+    last_yolo_approach_vx_mps: float = 0.0
+    final_slow_stop_enter_mono: float = 0.0
     hard_stop_barrier_until_mono: float = 0.0
     hard_stop_barrier_reason: str = ""
     last_valid_depth_p10_m: Optional[float] = None
@@ -281,6 +283,11 @@ class RuntimeContext:
     target_lateral_stable_count: int = 0
     target_lateral_align_reason: str = ""
     target_lateral_vy_cmd: float = 0.0
+    target_lateral_last_good_obs: Optional[TargetObs] = None
+    target_lateral_last_good_obs_mono: float = 0.0
+    target_lateral_last_good_vy_mps: float = 0.0
+    target_lateral_last_err_x: Optional[float] = None
+    target_lateral_min_abs_err_x: Optional[float] = None
     target_locked: bool = False
     task_slide_entries_count: int = 0
     task_target_confirm_count: int = 0
@@ -340,6 +347,8 @@ class RuntimeContext:
         self.final_enter_depth_window.clear()
         self.final_enter_edge_seen_ts = None
         self.final_enter_candidate_last_log_mono = 0.0
+        self.last_yolo_approach_vx_mps = 0.0
+        self.final_slow_stop_enter_mono = 0.0
 
     def clear_close_final_latches(self) -> None:
         self.near_table_latched = False
@@ -508,6 +517,11 @@ class RuntimeContext:
         self.target_lateral_stable_count = 0
         self.target_lateral_align_reason = ""
         self.target_lateral_vy_cmd = 0.0
+        self.target_lateral_last_good_obs = None
+        self.target_lateral_last_good_obs_mono = 0.0
+        self.target_lateral_last_good_vy_mps = 0.0
+        self.target_lateral_last_err_x = None
+        self.target_lateral_min_abs_err_x = None
         self.target_locked = False
         self.grasp_retry_count = 0
         self.grasp_substate = ""

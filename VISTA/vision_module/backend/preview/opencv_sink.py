@@ -210,7 +210,8 @@ class OpenCVPreviewSink(PreviewSink):
         timing["preview_debug_points_enabled"] = bool(self.debug_points_enabled)
         self._timing_recent.append(timing)
         self._timing_frame = None
-        if key & 0xFF == 27:
+        key_code = key & 0xFF
+        if key_code in (27, ord("q")):
             return False
         return True
 

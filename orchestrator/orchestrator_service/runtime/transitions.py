@@ -230,7 +230,17 @@ class TransitionsMixin:
             self.ctx.resume_state = None
             return
         if state == State.AT_TABLE_EDGE:
-            duration_s = min(1.0, max(0.5, float(getattr(self.cfg, "edge_settle_s", 0.8) or 0.8)))
+            duration_s = max(
+                0.0,
+                float(
+                    getattr(
+                        self.cfg,
+                        "at_table_edge_settle_s",
+                        getattr(self.cfg, "edge_settle_s", 0.8),
+                    )
+                    or 0.0
+                ),
+            )
             self.ctx.hard_stop_barrier_until_mono = monotonic_ts() + duration_s
             self.ctx.hard_stop_barrier_reason = "at_table_edge_entry_sstop_barrier"
         if state == State.SEARCH_TARGET_INIT:

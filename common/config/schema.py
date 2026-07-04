@@ -586,6 +586,9 @@ class ControlThresholds:
     final_probe_vx_mps: float = 0.020
     final_missing_probe_vx_mps: float = 0.010
     final_missing_probe_grace_s: float = 2.0
+    final_missing_roi_continue_forward_enable: bool = True
+    final_missing_roi_probe_vx_mps: float = 0.020
+    final_entry_bridge_vx_mps: float = 0.030
     final_slow_stop_timeout_s: float = 12.0
     final_missing_reuse_s: float = 0.50
     final_missing_probe_margin_m: float = 0.04
@@ -602,7 +605,10 @@ class ControlThresholds:
     depth_envelope_mid_p10_m: float = 0.70
     depth_envelope_slow_vx_mps: float = 0.012
     depth_envelope_mid_vx_mps: float = 0.015
-    yolo_approach_min_vx_mps: float = 0.02
+    yolo_approach_min_vx_mps: float = 0.04
+    yolo_approach_far_vx_mps: float = 0.22
+    yolo_approach_mid_vx_mps: float = 0.12
+    yolo_approach_near_vx_mps: float = 0.06
     yolo_approach_depth_stat_for_envelope: str = "median"
     yolo_approach_use_p10_for_safety_only: bool = True
     builtin_bottle_grasp_enable: bool = True
@@ -718,6 +724,8 @@ class ControlThresholds:
     final_lock_enter_dist_th_m: float = 0.08
     final_lock_enter_yaw_th_rad: float = 0.10
     edge_settle_s: float = 0.80
+    at_table_edge_settle_s: float = 0.10
+    target_search_fast_start_enable: bool = True
     dock_retry_limit: int = 2
     dock_retry_backoff_s: float = 0.60
 
@@ -741,6 +749,11 @@ class ControlThresholds:
     target_lateral_align_vy_max_mps: float = 0.050
     target_lateral_align_stable_frames: int = 3
     target_lateral_align_lost_hold_s: float = 0.80
+    target_lateral_hold_enable: bool = True
+    target_lateral_hold_s: float = 0.80
+    target_lateral_coast_s: float = 0.50
+    target_lateral_lost_stop_s: float = 1.20
+    target_lateral_min_vy_mps: float = 0.016
     target_lateral_align_timeout_s: float = 12.0
     post_grasp_place_enable: bool = True
     post_grasp_turn_enable: bool = True

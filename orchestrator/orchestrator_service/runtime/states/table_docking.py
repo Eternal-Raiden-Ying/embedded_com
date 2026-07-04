@@ -1892,10 +1892,75 @@ class TableDockingMixin:
         decision = self._tick_yolo_approach_impl()
         obs = self._fresh_table_obs()
         decision = self._apply_control_authority(decision, obs)
+        decision = self._apply_yolo_approach_speed_band(decision, obs)
         final_enter_decision = self._maybe_enter_explicit_final_slow_stop(obs, decision)
         if final_enter_decision is not None:
             decision = final_enter_decision
         self._ensure_speed_profile(decision)
+        return decision
+
+    def _apply_yolo_approach_speed_band(self, decision: MotionDecision, obs: Optional[TableEdgeObs]) -> MotionDecision:
+        if self.ctx.state != State.YOLO_APPROACH:
+            return decision
+        summary = decision.control_summary if decision.control_summary is not None else {}
+        decision.control_summary = summary
+        if bool(getattr(decision.cmd, "brake", False)) or float(getattr(decision.cmd, "vx_mps", 0.0) or 0.0) <= 1e-9:
+            return decision
+        if str(summary.get("safety_action") or "").strip().lower() in {"hold", "emergency_stop"}:
+            return decision
+        if str(summary.get("speed_limit_reason") or "").strip().lower() == "stop":
+            return decision
+        depth = None
+        for value in (
+            getattr(obs, "table_roi_depth_median", None) if obs is not None else None,
+            getattr(obs, "final_fixed_roi_depth_median", None) if obs is not None else None,
+            getattr(obs, "depth_median", None) if obs is not None else None,
+            getattr(obs, "table_roi_depth_p10", None) if obs is not None else None,
+            getattr(obs, "depth_p10", None) if obs is not None else None,
+        ):
+            parsed = self._final_enter_float(value)
+            if parsed is not None and parsed > 0.0:
+                depth = float(parsed)
+                break
+        min_vx = abs(float(getattr(self.cfg, "yolo_approach_min_vx_mps", 0.04) or 0.04))
+        far_vx = abs(float(getattr(self.cfg, "yolo_approach_far_vx_mps", 0.22) or 0.22))
+        mid_vx = abs(float(getattr(self.cfg, "yolo_approach_mid_vx_mps", 0.12) or 0.12))
+        near_vx = abs(float(getattr(self.cfg, "yolo_approach_near_vx_mps", 0.06) or 0.06))
+        if depth is None:
+            band = str(summary.get("yolo_approach_speed_band") or "min")
+            selected = max(min_vx, float(getattr(decision.cmd, "vx_mps", 0.0) or 0.0))
+        elif depth > 1.20:
+            band = "far"
+            selected = far_vx
+        elif depth >= 0.90:
+            band = "mid"
+            selected = mid_vx
+        elif depth >= 0.65:
+            band = "near"
+            selected = near_vx
+        else:
+            band = "min"
+            selected = min_vx
+        cap = self._final_enter_float(summary.get("depth_speed_envelope_vx_cap"))
+        if cap is not None and cap <= 0.0:
+            return decision
+        if cap is not None and cap > 0.0:
+            selected = min(selected, float(cap))
+        selected = max(min_vx, selected)
+        decision.cmd.vx_mps = float(selected)
+        decision.cmd.vy_mps = 0.0
+        summary.update(
+            {
+                "yolo_approach_speed_band": band,
+                "yolo_approach_speed_depth": depth,
+                "yolo_approach_selected_vx": float(selected),
+                "vx_mps": float(selected),
+                "vy_mps": 0.0,
+                "final_vx": float(selected),
+                "final_vy": 0.0,
+                "allow_forward": True,
+            }
+        )
         return decision
 
     def _tick_edge_adjust(self) -> MotionDecision:
@@ -2088,6 +2153,21 @@ class TableDockingMixin:
             or 0.010
         )
         return max(0.004, min(abs(configured), 0.025))
+
+    def _final_missing_roi_probe_vx_mps(self) -> float:
+        configured = float(
+            getattr(
+                self.cfg,
+                "final_missing_roi_probe_vx_mps",
+                getattr(self.cfg, "final_slow_probe_vx_mps", getattr(self.cfg, "final_probe_vx_mps", 0.020)),
+            )
+            or 0.020
+        )
+        return max(0.004, min(abs(configured), 0.025))
+
+    def _final_entry_bridge_vx_mps(self) -> float:
+        configured = float(getattr(self.cfg, "final_entry_bridge_vx_mps", 0.030) or 0.030)
+        return max(0.0, min(abs(configured), 0.040))
 
     def _final_slow_hard_safety_active(self, summary: Dict[str, object], decision: Optional[MotionDecision] = None) -> bool:
         if decision is not None and bool(getattr(decision.cmd, "brake", False)):
@@ -2286,6 +2366,9 @@ class TableDockingMixin:
                 "reason": "fixed_roi_above_threshold",
             }
         if reason == "fixed_roi_missing_grace":
+            since = float(getattr(self.ctx, "final_fixed_roi_missing_since_mono", 0.0) or 0.0)
+            if since <= 0.0:
+                self.ctx.final_fixed_roi_missing_since_mono = monotonic_ts()
             decision.control_summary["fixed_roi_missing_age_s"] = max(
                 0.0,
                 monotonic_ts() - float(getattr(self.ctx, "final_fixed_roi_missing_since_mono", 0.0) or monotonic_ts()),
@@ -2313,7 +2396,35 @@ class TableDockingMixin:
             decision.cmd.vy_mps = 0.0
             decision.cmd.wz_radps = 0.0
         elif stop_depth is None or stop_threshold is None or str(summary.get("docking_reason") or "") in {"final_fixed_roi_invalid", "final_fixed_roi_shape_invalid", "no_recent_obs"}:
-            decision.cmd.vx_mps = 0.0
+            missing_reason = str(summary.get("docking_reason") or summary.get("reason") or "")
+            allow_missing_probe = bool(getattr(self.cfg, "final_missing_roi_continue_forward_enable", True)) and missing_reason in {
+                "fixed_roi_missing_grace",
+                "final_fixed_roi_invalid",
+                "final_fixed_roi_shape_invalid",
+                "no_recent_obs",
+                "",
+            }
+            now = monotonic_ts()
+            since = float(getattr(self.ctx, "final_fixed_roi_missing_since_mono", 0.0) or 0.0)
+            if since <= 0.0:
+                self.ctx.final_fixed_roi_missing_since_mono = now
+                since = now
+            missing_age_s = max(0.0, now - since)
+            entry_age_s = max(0.0, now - float(getattr(self.ctx, "final_slow_stop_enter_mono", now) or now))
+            grace_s = max(0.0, float(getattr(self.cfg, "final_missing_probe_grace_s", 2.0) or 2.0))
+            if allow_missing_probe and (missing_age_s <= grace_s or entry_age_s <= min(max(grace_s, 0.5), 1.0)):
+                decision.cmd.vx_mps = self._final_missing_roi_probe_vx_mps()
+                summary["docking_action"] = "FINAL_SLOW_PROBE"
+                summary["docking_reason"] = "fixed_roi_missing_grace"
+                summary["final_motion_mode"] = "slow_probe"
+                summary["fixed_roi_missing_age_s"] = float(missing_age_s)
+                summary["final_entry_age_s"] = float(entry_age_s)
+                last_log = float(getattr(self.ctx, "final_roi_missing_slow_probe_last_log_mono", 0.0) or 0.0)
+                if now - last_log >= 0.5:
+                    setattr(self.ctx, "final_roi_missing_slow_probe_last_log_mono", now)
+                    self._log("info", f"[FINAL][ROI_MISSING_SLOW_PROBE] missing_age={missing_age_s:.3f} vx={float(decision.cmd.vx_mps):.3f}")
+            else:
+                decision.cmd.vx_mps = 0.0
             decision.cmd.vy_mps = 0.0
             decision.cmd.wz_radps = 0.0
         elif stop_depth > stop_threshold:
@@ -2634,6 +2745,8 @@ class TableDockingMixin:
         status = self._final_enter_candidate_status(obs, summary)
         if not bool(status.get("allowed", False)):
             return None
+        self.ctx.last_yolo_approach_vx_mps = max(0.0, float(getattr(decision.cmd, "vx_mps", 0.0) or 0.0))
+        status["last_yolo_vx_mps"] = float(self.ctx.last_yolo_approach_vx_mps)
         return self._enter_final_slow_stop(obs, status, reason="explicit_final_enter_candidate_stable")
 
     def _enter_final_slow_stop(self, obs: Optional[TableEdgeObs], status: Dict[str, object], *, reason: str) -> MotionDecision:
@@ -2644,10 +2757,18 @@ class TableDockingMixin:
         self.ctx.final_depth_latch_reason = ""
         self.ctx.final_yaw_align_active = False
         self._transition(State.FINAL_SLOW_STOP, reason)
+        self.ctx.final_slow_stop_enter_mono = monotonic_ts()
         self._force_final_vision_req(reason="enter_final_slow_stop", operator_log=True)
         self.ctx.table_dock_phase = "APPROACH"
         self.ctx.table_dock_phase_since_mono = monotonic_ts()
         final_decision = self.controller.fov_table_approach_cmd(obs, phase="PLANE_FINAL_LOCK", mode="FINAL_SLOW_STOP")
+        bridge_vx = self._final_entry_bridge_vx_mps()
+        last_yolo_vx = max(0.0, float(status.get("last_yolo_vx_mps", getattr(self.ctx, "last_yolo_approach_vx_mps", 0.0)) or 0.0))
+        if bridge_vx > 0.0 and last_yolo_vx > 0.0 and not bool(getattr(final_decision.cmd, "brake", False)):
+            final_decision.cmd.vx_mps = min(max(bridge_vx, self._final_missing_roi_probe_vx_mps()), last_yolo_vx)
+            final_decision.cmd.vy_mps = 0.0
+            final_decision.cmd.wz_radps = 0.0
+            self._log("info", f"[FINAL][ENTRY_BRIDGE] last_yolo_vx={last_yolo_vx:.3f} final_vx={float(final_decision.cmd.vx_mps):.3f}")
         if final_decision.control_summary is not None:
             final_decision.control_summary.update(
                 {
@@ -2666,6 +2787,9 @@ class TableDockingMixin:
                     "final_depth_latched": False,
                     "final_phase_active": True,
                     "final_motion_mode": "slow_probe",
+                    "final_entry_bridge_active": bool(bridge_vx > 0.0 and last_yolo_vx > 0.0),
+                    "last_yolo_vx_mps": float(last_yolo_vx),
+                    "final_entry_bridge_vx_mps": float(getattr(final_decision.cmd, "vx_mps", 0.0) or 0.0),
                 }
             )
         return final_decision
@@ -3383,9 +3507,6 @@ class TableDockingMixin:
         return self._annotate_final_lock_decision(self._at_table_edge_hard_stop_barrier_cmd(transition_reason), status)
 
     def _tick_at_table_edge_impl(self) -> MotionDecision:
-        barrier = self._at_table_edge_hard_stop_barrier_status()
-        if bool(barrier["hard_stop_barrier_active"]):
-            return self._at_table_edge_hard_stop_barrier_cmd(str(barrier["hard_stop_barrier_reason"]))
         if bool(getattr(self.cfg, "stop_after_table_docking", True)):
             obs = self._fresh_table_obs()
             self.ctx.final_locked = True
@@ -3425,10 +3546,53 @@ class TableDockingMixin:
             self._transition(State.DONE, "table_edge_only_done")
             self._queue_tts("桌边停靠测试完成")
             return self.controller.stop_cmd("DONE")
-        if self._state_elapsed() < float(self.cfg.edge_settle_s):
+
+        fast_start = self._target_search_fast_start_decision(source_state="AT_TABLE_EDGE")
+        if fast_start is not None:
+            return fast_start
+
+        barrier = self._at_table_edge_hard_stop_barrier_status()
+        if bool(barrier["hard_stop_barrier_active"]):
+            return self._at_table_edge_hard_stop_barrier_cmd(str(barrier["hard_stop_barrier_reason"]))
+
+        settle_s = max(0.0, float(getattr(self.cfg, "at_table_edge_settle_s", getattr(self.cfg, "edge_settle_s", 0.8)) or 0.0))
+        if self._state_elapsed() < settle_s:
             return self._at_table_edge_hard_stop_barrier_cmd("at_table_edge_settle")
         self._transition(State.SEARCH_TARGET_INIT, "table_edge_settled_start_target_search")
+        skip_zero = self._target_search_fast_start_decision(source_state="SEARCH_TARGET_INIT")
+        if skip_zero is not None:
+            return skip_zero
         return self.controller.stop_cmd("AT_TABLE_EDGE")
+
+    def _target_search_fast_start_decision(self, *, source_state: str) -> Optional[MotionDecision]:
+        if not bool(getattr(self.cfg, "target_search_fast_start_enable", True)):
+            return None
+        target_obs = self._fresh_target_obs()
+        candidate_ok, candidate_reason = self._target_candidate_status(
+            target_obs,
+            self.cfg.target_confirm_conf_th,
+            min_area=self.cfg.target_confirm_min_bbox_area,
+        )
+        if not candidate_ok or target_obs is None:
+            return None
+        conf = self._target_conf_value(target_obs)
+        target_name = str(getattr(target_obs, "matched_cls", None) or getattr(target_obs, "target", "") or self.ctx.active_target or "")
+        self._log(
+            "info",
+            f"[TARGET_SEARCH][FAST_START] target={target_name} conf={conf if conf is not None else 'n/a'} reason=fresh_target_obs",
+        )
+        self._log("info", f"[TARGET_SEARCH][SKIP_ZERO] state={source_state}")
+        self._transition(State.EDGE_SLIDE_SEARCH, self._format_target_transition_reason("target_fast_start_fresh_target_obs", target_obs))
+        align_decision = self._target_lateral_align_decision(target_obs, state="EDGE_SLIDE_SEARCH")
+        if align_decision is not None:
+            return align_decision
+        return self._annotate_target_lateral_decision(
+            self.controller.stop_cmd("EDGE_SLIDE_SEARCH"),
+            target_obs,
+            active=False,
+            reason="target_fast_start_centered_wait_stable",
+            vy_cmd=0.0,
+        )
 
     def _at_table_edge_hard_stop_barrier_status(self) -> Dict[str, object]:
         now = monotonic_ts()

@@ -53,6 +53,8 @@ class PreviewManager:
         self._last_preview_emit_ts = 0.0
         self._render_times = deque(maxlen=120)
         self._last_render_error_ts = 0.0
+        self._last_keep_alive_log_ts = 0.0
+        self._last_slice_done_log_key = ""
         self._stale_warn_s = 1.0
         self._mode_layouts: Dict[str, str] = {
             "IDLE": "rgb_minimal",
@@ -269,6 +271,122 @@ class PreviewManager:
         out["fps"] = self._fps_snapshot()
         return out
 
+    @staticmethod
+    def _first_value(payloads: tuple, *names: str) -> Any:
+        for payload in payloads:
+            if not isinstance(payload, dict):
+                continue
+            for name in names:
+                if name in payload and payload.get(name) is not None:
+                    return payload.get(name)
+        return None
+
+    @staticmethod
+    def _bool_value(value: Any) -> Optional[bool]:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "on", "done", "ok"}:
+            return True
+        if text in {"0", "false", "no", "off", "none", ""}:
+            return False
+        return bool(value)
+
+    @staticmethod
+    def _fmt_bool(value: Optional[bool]) -> str:
+        if value is None:
+            return "n/a"
+        return "true" if value else "false"
+
+    @staticmethod
+    def _fmt_scalar(value: Any, default: str = "n/a") -> str:
+        if value is None:
+            return default
+        try:
+            if isinstance(value, float):
+                return f"{value:.3f}"
+            if isinstance(value, int):
+                return str(value)
+        except Exception:
+            pass
+        text = str(value).strip()
+        return text[:48] if text else default
+
+    def _append_task_overlay_lines(
+        self,
+        lines: list,
+        *,
+        status: Dict[str, Any],
+        local: Dict[str, Any],
+        table_edge: Dict[str, Any],
+        target_obs: Dict[str, Any],
+        now: float,
+    ) -> None:
+        payloads = (target_obs, local, table_edge, status)
+        target = self._first_value(payloads, "target", "target_name", "canonical_target", "class_name")
+        class_id = self._first_value(payloads, "class_id", "matched_class_id", "matched_cls_id", "target_class_id")
+        found = self._bool_value(self._first_value(payloads, "target_found", "found", "yolo_found"))
+        conf = self._first_value(payloads, "confidence", "matched_conf", "best_conf", "conf")
+        cx = self._first_value(payloads, "cx_norm", "x_norm", "target_center_x_norm", "center_x_norm")
+        cy = self._first_value(payloads, "cy_norm", "y_norm", "target_center_y_norm", "center_y_norm")
+        x_aligned = self._bool_value(self._first_value(payloads, "x_aligned", "target_x_aligned", "outer_axis_x_aligned"))
+        y_aligned = self._bool_value(self._first_value(payloads, "y_aligned", "target_y_aligned"))
+        slice_stage = self._first_value(payloads, "slice_stage", "slice_phase", "outer_axis_stage", "external_axis_stage")
+        slice_done = self._bool_value(self._first_value(payloads, "slice_done", "slice_stage_done", "outer_axis_done", "external_axis_done"))
+        grasp_triggered = self._bool_value(self._first_value(payloads, "grasp_triggered", "grasp_requested"))
+        grasp_running = self._bool_value(self._first_value(payloads, "grasp_running", "remote_grasp_active", "grasp_active"))
+        grasp_done = self._bool_value(self._first_value(payloads, "grasp_done", "grasp_success", "arm_grasp_done"))
+        remote_status = self._first_value(payloads, "remote_status", "remote_state", "remote_error", "last_action")
+        arm_status = self._first_value(payloads, "arm_status", "arm_state", "arm_response", "arm_parsed_status")
+
+        if target is not None or class_id is not None or found is not None or cx is not None or cy is not None:
+            lines.append(
+                "target="
+                f"{self._fmt_scalar(target)} class_id={self._fmt_scalar(class_id)} "
+                f"found={self._fmt_bool(found)} conf={self._fmt_scalar(conf)} "
+                f"cx={self._fmt_scalar(cx)} cy={self._fmt_scalar(cy)}"
+            )
+        if x_aligned is not None or y_aligned is not None or slice_stage is not None or slice_done is not None:
+            lines.append(
+                "slice "
+                f"stage={self._fmt_scalar(slice_stage)} "
+                f"x_aligned={self._fmt_bool(x_aligned)} y_aligned={self._fmt_bool(y_aligned)} "
+                f"slice_done={self._fmt_bool(slice_done)}"
+            )
+        if grasp_triggered is not None or grasp_running is not None or grasp_done is not None or remote_status is not None or arm_status is not None:
+            lines.append(
+                "grasp "
+                f"triggered={self._fmt_bool(grasp_triggered)} running={self._fmt_bool(grasp_running)} "
+                f"done={self._fmt_bool(grasp_done)} remote={self._fmt_scalar(remote_status)} "
+                f"arm={self._fmt_scalar(arm_status)}"
+            )
+
+        if (x_aligned is True or slice_done is True) and self.enabled:
+            stage = str(status.get("stage") or "IDLE").upper()
+            mode = str(status.get("mode") or "IDLE").upper()
+            log_key = f"{stage}:{mode}:{x_aligned}:{slice_done}:{self._fmt_scalar(slice_stage)}"
+            if log_key != self._last_slice_done_log_key:
+                self._last_slice_done_log_key = log_key
+                line = (
+                    "[PREVIEW][SLICE_DONE_KEEP_RUNNING] "
+                    f"state={stage} mode={mode} x_aligned={self._fmt_bool(x_aligned)} "
+                    f"slice_done={self._fmt_bool(slice_done)} slice_stage={self._fmt_scalar(slice_stage)}"
+                )
+                if self.logger is not None:
+                    self.logger.info(line)
+                self._emit_operator(f"preview:slice_done_keep_running:{log_key}", line)
+        if now - self._last_keep_alive_log_ts >= 1.0:
+            self._last_keep_alive_log_ts = now
+            stage = str(status.get("stage") or "IDLE").upper()
+            mode = str(status.get("mode") or "IDLE").upper()
+            reason = "slice_done_keep_running" if slice_done is True or x_aligned is True else "pipeline_running"
+            line = f"[PREVIEW][KEEP_ALIVE] state={stage} mode={mode} reason={reason}"
+            if self.logger is not None:
+                self.logger.debug(line)
+            self._emit_operator("preview:keep_alive", line)
+
     def _yolo_status_overlay(self, status: Dict[str, Any], local: Dict[str, Any], target_obs: Dict[str, Any]) -> Dict[str, Any]:
         out = self._target_overlay(status, local, target_obs)
         out.setdefault("found", False)
@@ -315,6 +433,11 @@ class PreviewManager:
         self._worker_thread.start()
 
     def stop_runtime(self) -> None:
+        if self._runtime_running:
+            line = "[PREVIEW][SHUTDOWN] reason=stop_runtime"
+            if self.logger is not None:
+                self.logger.info(line)
+            self._emit_operator("preview:shutdown", line)
         self._runtime_running = False
         self._worker_stop.set()
         thread = self._worker_thread
@@ -458,6 +581,14 @@ class PreviewManager:
                     )
             if stale_age >= self._stale_warn_s:
                 lines.append(f"frame_stale age={stale_age:.2f}s")
+            self._append_task_overlay_lines(
+                lines,
+                status=status,
+                local=local,
+                table_edge=table_edge,
+                target_obs=target_obs,
+                now=now,
+            )
             try:
                 ok = self.render(
                     PreviewFrame(
@@ -502,6 +633,10 @@ class PreviewManager:
             self._render_times.append(now)
             if not ok:
                 self._exit_requested = True
+                line = f"[PREVIEW][USER_EXIT] state={str(status.get('stage') or 'IDLE').upper()} mode={str(status.get('mode') or 'IDLE').upper()}"
+                if self.logger is not None:
+                    self.logger.info(line)
+                self._emit_operator("preview:user_exit", line)
                 self.disable()
             self._worker_stop.wait(timeout=self._worker_interval_s)
 
@@ -550,6 +685,7 @@ class PreviewManager:
         if self.enabled:
             return False
         self.enabled = True
+        self._exit_requested = False
         if self.sink is not None:
             self.sink.open()
             self._warn_if_sink_open_failed()
@@ -558,6 +694,14 @@ class PreviewManager:
                 "preview started | sink=%s",
                 getattr(self.sink, "sink_name", "unknown") if self.sink is not None else "none",
             )
+            self.logger.info(
+                "[PREVIEW][START] sink=%s",
+                getattr(self.sink, "sink_name", "unknown") if self.sink is not None else "none",
+            )
+        self._emit_operator(
+            "preview:start",
+            f"[PREVIEW][START] sink={getattr(self.sink, 'sink_name', 'unknown') if self.sink is not None else 'none'}",
+        )
         self._emit("enabled", enabled=True, sink_name=getattr(self.sink, "sink_name", "unknown"))
         return True
 
@@ -588,6 +732,10 @@ class PreviewManager:
                 "preview disabled | sink=%s",
                 getattr(self.sink, "sink_name", "unknown") if self.sink is not None else "none",
             )
+            if not self._exit_requested:
+                self.logger.info("[PREVIEW][SHUTDOWN] reason=disable")
+        if not self._exit_requested:
+            self._emit_operator("preview:shutdown:disable", "[PREVIEW][SHUTDOWN] reason=disable")
         self._emit("disabled", enabled=False, sink_name=getattr(self.sink, "sink_name", "unknown"))
         return True
 

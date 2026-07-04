@@ -638,7 +638,16 @@ class OrchestratorService(BaseModule):
     def _on_state_transition(self, old_state: str, new_state: str, reason: str) -> None:
         reason = str(reason or "state_transition").strip() or "state_transition"
         if old_state == "EDGE_SLIDE_SEARCH" and new_state in {"LEAVE_EDGE", "NEXT_TABLE"} and "未找到目标" in reason:
-            reason = f"target_not_found timeout_s={float(self.cfg.control.target_search_timeout_s):.1f}"
+            if "target_lateral_align_timeout" in reason:
+                reason = f"target_lateral_align_timeout timeout_s={float(self.cfg.control.target_search_timeout_s):.1f}"
+            elif "target_lost_timeout" in reason:
+                reason = f"target_lost_timeout timeout_s={float(self.cfg.control.target_search_timeout_s):.1f}"
+            elif "target_never_found_timeout" in reason:
+                reason = f"target_never_found_timeout timeout_s={float(self.cfg.control.target_search_timeout_s):.1f}"
+            elif "target_confirm_timeout" in reason:
+                reason = f"target_confirm_timeout timeout_s={float(self.cfg.control.target_search_timeout_s):.1f}"
+            else:
+                reason = f"target_not_found timeout_s={float(self.cfg.control.target_search_timeout_s):.1f}"
         if old_state == "EDGE_SLIDE_SEARCH" and new_state == "TARGET_CONFIRM" and "matched_cls=" not in reason:
             reason = "target_found"
         trace = dict(getattr(self.core, "last_transition_snapshot", {}) or {})
@@ -1412,7 +1421,11 @@ class OrchestratorService(BaseModule):
             edge_slide_state
             and not perception_dead
             and bool(summary.get("target_lateral_align_active", False))
-            and bool(summary.get("target_found", False))
+            and (
+                bool(summary.get("target_found", False))
+                or bool(summary.get("target_lateral_hold_active", False))
+                or str(summary.get("lateral_cmd_source") or "").strip().lower() == "hold"
+            )
             and abs(float(getattr(cmd, "vy_mps", 0.0) or 0.0)) > 1e-9
             and abs(float(getattr(cmd, "vx_mps", 0.0) or 0.0)) <= 1e-9
             and abs(float(getattr(cmd, "wz_radps", 0.0) or 0.0)) <= 1e-9
@@ -4773,6 +4786,12 @@ class OrchestratorService(BaseModule):
             "target_err_x": decision_summary.get("target_err_x"),
             "target_lateral_align_active": bool(decision_summary.get("target_lateral_align_active", False)),
             "target_lateral_vy_cmd": decision_summary.get("target_lateral_vy_cmd", float(cmd.vy_mps)),
+            "target_lateral_hold_active": bool(decision_summary.get("target_lateral_hold_active", False)),
+            "target_lateral_hold_age_s": decision_summary.get("target_lateral_hold_age_s"),
+            "last_good_target_age_s": decision_summary.get("last_good_target_age_s"),
+            "last_good_vy_mps": decision_summary.get("last_good_vy_mps"),
+            "lateral_cmd_source": decision_summary.get("lateral_cmd_source"),
+            "slice_timeout_reason": decision_summary.get("slice_timeout_reason"),
             "target_conf": (
                 getattr(target_obs, "matched_conf", None)
                 if target_obs is not None and getattr(target_obs, "matched_conf", None) is not None
