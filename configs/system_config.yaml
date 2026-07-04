@@ -476,6 +476,10 @@ orchestrator:
     edge_settle_s: 0.80 # Settle time for edge confirmation
     at_table_edge_settle_s: 0.10 # Short settle before target search fast start
     target_search_fast_start_enable: true # Skip SEARCH_TARGET_INIT zero command when target obs is already fresh
+    target_fast_start_confirm_enable: false # Fresh target may start slide, but cannot bypass slice guard
+    edge_slide_min_duration_s: 1.5 # Minimum EDGE_SLIDE_SEARCH duration before confirming target
+    edge_slide_min_lateral_distance_m: 0.08 # Minimum accumulated lateral travel before confirming target
+    edge_slide_min_frames_before_confirm: 10 # Minimum EDGE_SLIDE_SEARCH ticks before confirming target
     dock_retry_limit: 2 # Retries limit upon docking failure
     dock_retry_backoff_s: 0.60 # Wait time before backing up
     search_target_init_hold_s: 0.25 # Pause duration before target search

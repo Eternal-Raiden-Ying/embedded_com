@@ -92,6 +92,7 @@ class TargetSearchMixin:
 
     def _tick_edge_slide_search(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
+        self._update_edge_slide_progress()
         target_obs = self._fresh_target_obs()
         candidate_ok, candidate_reason = self._target_candidate_status(
             target_obs,
@@ -115,21 +116,42 @@ class TargetSearchMixin:
             centered_ok = self._target_lateral_centered(target_obs)
             stable_ok = int(self.ctx.target_lateral_stable_count) >= self._target_lateral_stable_frames()
             if (found_ratio_ok or consecutive_ok) and centered_ok and stable_ok:
-                self.ctx.target_last_transition_reason = (
-                    f"confirm_enter found_ratio={float(target_window.get('found_ratio', 0.0) or 0.0):.2f} "
-                    f"consecutive_frames={int(self.ctx.target_found_frames)} bbox_valid={int(self._target_bbox_valid(target_obs))} "
-                    f"target_lateral_stable_count={int(self.ctx.target_lateral_stable_count)}"
-                )
-                self._transition(
-                    State.TARGET_CONFIRM,
-                    self._format_target_transition_reason("target_found", target_obs),
-                )
-                return self._annotate_target_lateral_decision(
-                    self.controller.stop_cmd("TARGET_CONFIRM"),
-                    target_obs,
-                    active=False,
-                    reason="target_lateral_centered_confirm",
-                    vy_cmd=0.0,
+                confirm_allowed, confirm_block_reason, progress = self._edge_slide_confirm_guard()
+                if confirm_allowed:
+                    self._log(
+                        "info",
+                        "[SLICE][CONFIRM_ALLOWED] "
+                        f"elapsed={float(progress.get('edge_slide_elapsed_s', 0.0) or 0.0):.2f} "
+                        f"lateral_dist={float(progress.get('edge_slide_lateral_distance_m', 0.0) or 0.0):.3f} "
+                        f"frames={int(progress.get('edge_slide_frames', 0) or 0)}",
+                    )
+                    self.ctx.target_last_transition_reason = (
+                        f"confirm_enter found_ratio={float(target_window.get('found_ratio', 0.0) or 0.0):.2f} "
+                        f"consecutive_frames={int(self.ctx.target_found_frames)} bbox_valid={int(self._target_bbox_valid(target_obs))} "
+                        f"target_lateral_stable_count={int(self.ctx.target_lateral_stable_count)} "
+                        f"edge_slide_elapsed_s={float(progress.get('edge_slide_elapsed_s', 0.0) or 0.0):.2f} "
+                        f"edge_slide_lateral_distance_m={float(progress.get('edge_slide_lateral_distance_m', 0.0) or 0.0):.3f} "
+                        f"edge_slide_frames={int(progress.get('edge_slide_frames', 0) or 0)}"
+                    )
+                    self._transition(
+                        State.TARGET_CONFIRM,
+                        self._format_target_transition_reason("target_found", target_obs),
+                    )
+                    return self._annotate_target_lateral_decision(
+                        self.controller.stop_cmd("TARGET_CONFIRM"),
+                        target_obs,
+                        active=False,
+                        reason="target_lateral_centered_confirm",
+                        vy_cmd=0.0,
+                    )
+                self.ctx.edge_slide_confirm_block_reason = confirm_block_reason
+                self._log(
+                    "info",
+                    "[SLICE][MIN_GUARD] "
+                    f"elapsed={float(progress.get('edge_slide_elapsed_s', 0.0) or 0.0):.2f} "
+                    f"lateral_dist={float(progress.get('edge_slide_lateral_distance_m', 0.0) or 0.0):.3f} "
+                    f"frames={int(progress.get('edge_slide_frames', 0) or 0)} "
+                    "confirm_allowed=false",
                 )
             if timed_out:
                 return self._handle_edge_slide_target_timeout(target_obs, target_window, candidate_reason)
@@ -1062,6 +1084,7 @@ class TargetSearchMixin:
         target_x = max(0.0, min(1.0, float(getattr(self.cfg, "target_lateral_align_center_x_target", 0.5) or 0.5)))
         centered_ok = bool(self._target_lateral_centered(obs))
         last_good_age_s = self._target_lateral_last_good_age_s()
+        edge_slide_progress = self._edge_slide_progress_snapshot()
         target_found = bool(obs is not None and getattr(obs, "found", False)) if target_found_override is None else bool(target_found_override)
         summary.update(
             {
@@ -1088,6 +1111,10 @@ class TargetSearchMixin:
                 "last_good_vy_mps": float(getattr(self.ctx, "target_lateral_last_good_vy_mps", 0.0) or 0.0),
                 "lateral_cmd_source": str(lateral_cmd_source or "current"),
                 "slice_timeout_reason": str(slice_timeout_reason or ""),
+                "edge_slide_elapsed_s": float(edge_slide_progress.get("edge_slide_elapsed_s", 0.0) or 0.0),
+                "edge_slide_lateral_distance_m": float(edge_slide_progress.get("edge_slide_lateral_distance_m", 0.0) or 0.0),
+                "edge_slide_frames": int(edge_slide_progress.get("edge_slide_frames", 0) or 0),
+                "confirm_block_reason": str(getattr(self.ctx, "edge_slide_confirm_block_reason", "") or ""),
                 "target_search_reject_reason": self._target_search_reject_reason(
                     obs,
                     self._target_window_stats(),
@@ -1139,6 +1166,66 @@ class TargetSearchMixin:
                 f"target_lateral_stable_count={int(self.ctx.target_lateral_stable_count)}"
             )
         return decision
+
+    def _edge_slide_progress_snapshot(self) -> Dict[str, Any]:
+        now_m = monotonic_ts()
+        enter_m = float(getattr(self.ctx, "edge_slide_enter_mono", 0.0) or 0.0)
+        if enter_m <= 0.0:
+            enter_m = float(getattr(self.ctx, "state_enter_mono", now_m) or now_m)
+        return {
+            "edge_slide_elapsed_s": max(0.0, now_m - enter_m),
+            "edge_slide_lateral_distance_m": max(0.0, float(getattr(self.ctx, "edge_slide_lateral_distance_m", 0.0) or 0.0)),
+            "edge_slide_frames": max(0, int(getattr(self.ctx, "edge_slide_frames", 0) or 0)),
+        }
+
+    def _update_edge_slide_progress(self) -> Dict[str, Any]:
+        now_m = monotonic_ts()
+        enter_m = float(getattr(self.ctx, "edge_slide_enter_mono", 0.0) or 0.0)
+        if enter_m <= 0.0:
+            enter_m = now_m
+            self.ctx.edge_slide_enter_mono = now_m
+        last_m = float(getattr(self.ctx, "edge_slide_last_progress_mono", 0.0) or 0.0)
+        if last_m <= 0.0:
+            last_m = now_m
+        dt_s = max(0.0, now_m - last_m)
+        last_vy = abs(float(getattr(self.ctx, "target_lateral_vy_cmd", 0.0) or 0.0))
+        self.ctx.edge_slide_lateral_distance_m = max(
+            0.0,
+            float(getattr(self.ctx, "edge_slide_lateral_distance_m", 0.0) or 0.0) + last_vy * dt_s,
+        )
+        self.ctx.edge_slide_last_progress_mono = now_m
+        self.ctx.edge_slide_frames = max(0, int(getattr(self.ctx, "edge_slide_frames", 0) or 0)) + 1
+        return self._edge_slide_progress_snapshot()
+
+    def _edge_slide_confirm_guard(self) -> Tuple[bool, str, Dict[str, Any]]:
+        progress = self._edge_slide_progress_snapshot()
+        if bool(getattr(self.cfg, "target_fast_start_confirm_enable", False)):
+            self.ctx.edge_slide_confirm_block_reason = ""
+            return True, "", progress
+
+        elapsed_s = float(progress.get("edge_slide_elapsed_s", 0.0) or 0.0)
+        lateral_dist_m = float(progress.get("edge_slide_lateral_distance_m", 0.0) or 0.0)
+        frames = int(progress.get("edge_slide_frames", 0) or 0)
+        min_duration_s = max(0.0, float(getattr(self.cfg, "edge_slide_min_duration_s", 1.5) or 1.5))
+        min_distance_m = max(0.0, float(getattr(self.cfg, "edge_slide_min_lateral_distance_m", 0.08) or 0.08))
+        min_frames = max(0, int(getattr(self.cfg, "edge_slide_min_frames_before_confirm", 10) or 10))
+
+        frames_ok = frames >= min_frames
+        duration_ok = elapsed_s >= min_duration_s
+        distance_ok = lateral_dist_m >= min_distance_m
+        confirm_allowed = bool(frames_ok and (duration_ok or distance_ok))
+        if confirm_allowed:
+            self.ctx.edge_slide_confirm_block_reason = ""
+            return True, "", progress
+
+        missing = []
+        if not frames_ok:
+            missing.append(f"frames<{min_frames}")
+        if not (duration_ok or distance_ok):
+            missing.append(f"duration<{min_duration_s:.2f}_and_lateral_dist<{min_distance_m:.3f}")
+        reason = "slice_min_guard:" + ",".join(missing or ["not_ready"])
+        self.ctx.edge_slide_confirm_block_reason = reason
+        return False, reason, progress
 
     def _target_lateral_last_good_age_s(self) -> Optional[float]:
         ts = float(getattr(self.ctx, "target_lateral_last_good_obs_mono", 0.0) or 0.0)

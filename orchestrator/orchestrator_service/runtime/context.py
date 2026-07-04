@@ -288,6 +288,11 @@ class RuntimeContext:
     target_lateral_last_good_vy_mps: float = 0.0
     target_lateral_last_err_x: Optional[float] = None
     target_lateral_min_abs_err_x: Optional[float] = None
+    edge_slide_enter_mono: float = 0.0
+    edge_slide_last_progress_mono: float = 0.0
+    edge_slide_lateral_distance_m: float = 0.0
+    edge_slide_frames: int = 0
+    edge_slide_confirm_block_reason: str = ""
     target_locked: bool = False
     task_slide_entries_count: int = 0
     task_target_confirm_count: int = 0
@@ -522,6 +527,11 @@ class RuntimeContext:
         self.target_lateral_last_good_vy_mps = 0.0
         self.target_lateral_last_err_x = None
         self.target_lateral_min_abs_err_x = None
+        self.edge_slide_enter_mono = 0.0
+        self.edge_slide_last_progress_mono = 0.0
+        self.edge_slide_lateral_distance_m = 0.0
+        self.edge_slide_frames = 0
+        self.edge_slide_confirm_block_reason = ""
         self.target_locked = False
         self.grasp_retry_count = 0
         self.grasp_substate = ""

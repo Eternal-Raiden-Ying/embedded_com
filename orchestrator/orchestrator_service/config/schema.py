@@ -336,6 +336,10 @@ class ControlThresholds:
     min_progress_m: float = 0.010
     multi_table_enabled: bool = False
 
+    target_fast_start_confirm_enable: bool = False
+    edge_slide_min_duration_s: float = 1.50
+    edge_slide_min_lateral_distance_m: float = 0.08
+    edge_slide_min_frames_before_confirm: int = 10
     search_target_init_hold_s: float = 0.25
     target_found_frames_to_confirm: int = 3
     target_confirm_conf_th: float = 0.30

@@ -4792,6 +4792,10 @@ class OrchestratorService(BaseModule):
             "last_good_vy_mps": decision_summary.get("last_good_vy_mps"),
             "lateral_cmd_source": decision_summary.get("lateral_cmd_source"),
             "slice_timeout_reason": decision_summary.get("slice_timeout_reason"),
+            "edge_slide_elapsed_s": decision_summary.get("edge_slide_elapsed_s"),
+            "edge_slide_lateral_distance_m": decision_summary.get("edge_slide_lateral_distance_m"),
+            "edge_slide_frames": decision_summary.get("edge_slide_frames"),
+            "confirm_block_reason": decision_summary.get("confirm_block_reason"),
             "target_conf": (
                 getattr(target_obs, "matched_conf", None)
                 if target_obs is not None and getattr(target_obs, "matched_conf", None) is not None

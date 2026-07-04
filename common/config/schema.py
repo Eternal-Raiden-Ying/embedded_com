@@ -726,6 +726,10 @@ class ControlThresholds:
     edge_settle_s: float = 0.80
     at_table_edge_settle_s: float = 0.10
     target_search_fast_start_enable: bool = True
+    target_fast_start_confirm_enable: bool = False
+    edge_slide_min_duration_s: float = 1.50
+    edge_slide_min_lateral_distance_m: float = 0.08
+    edge_slide_min_frames_before_confirm: int = 10
     dock_retry_limit: int = 2
     dock_retry_backoff_s: float = 0.60
 

@@ -3547,10 +3547,6 @@ class TableDockingMixin:
             self._queue_tts("桌边停靠测试完成")
             return self.controller.stop_cmd("DONE")
 
-        fast_start = self._target_search_fast_start_decision(source_state="AT_TABLE_EDGE")
-        if fast_start is not None:
-            return fast_start
-
         barrier = self._at_table_edge_hard_stop_barrier_status()
         if bool(barrier["hard_stop_barrier_active"]):
             return self._at_table_edge_hard_stop_barrier_cmd(str(barrier["hard_stop_barrier_reason"]))
