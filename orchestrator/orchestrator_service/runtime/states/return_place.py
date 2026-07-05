@@ -209,15 +209,15 @@ class ReturnPlaceMixin:
         return summary
 
     def _tick_post_grasp_turn_180(self) -> MotionDecision:
-        if not bool(getattr(self.cfg, "post_grasp_turn_enable", True)):
+        if False:
             self._transition(State.SEARCH_BASKET, "post_grasp_turn_disabled")
             return self.controller.stop_cmd("SEARCH_BASKET")
-        duration = max(0.0, float(getattr(self.cfg, "post_grasp_turn_duration_s", 3.5) or 3.5))
+        duration = 3.5
         started_mono = float(getattr(self.ctx, "post_grasp_turn_started_mono", 0.0) or 0.0)
         elapsed = 0.0 if started_mono <= 0.0 else max(0.0, monotonic_ts() - started_mono)
-        direction = str(getattr(self.cfg, "post_grasp_turn_direction", "left") or "left").strip().lower()
+        direction = "left"
         sign = -1.0 if direction == "right" else 1.0
-        wz = sign * abs(float(getattr(self.cfg, "post_grasp_turn_wz_radps", 0.45) or 0.45))
+        wz = sign * 0.45
         if elapsed >= duration:
             self._transition(State.SEARCH_BASKET, "post_grasp_turn_done turn_mode=open_loop_time")
             return self.controller.stop_cmd("SEARCH_BASKET")
@@ -259,11 +259,11 @@ class ReturnPlaceMixin:
             self.ctx.basket_approach_stable_count = 0
             self._transition(State.APPROACH_BASKET, "basket_found")
             return self.controller.stop_cmd("APPROACH_BASKET")
-        timeout_s = max(0.1, float(getattr(self.cfg, "basket_search_timeout_s", 15.0) or 15.0))
+        timeout_s = 15.0
         if elapsed >= timeout_s:
             self._enter_error_recovery("basket_search_timeout")
             return self.controller.stop_cmd("ERROR_RECOVERY", brake=True)
-        wz = float(getattr(self.cfg, "basket_search_wz_radps", 0.25) or 0.25)
+        wz = 0.25
         cmd = self.controller._cmd("SEARCH_BASKET", vx=0.0, vy=0.0, wz=wz)
         return MotionDecision(
             cmd=cmd,
@@ -288,17 +288,17 @@ class ReturnPlaceMixin:
         )
         if not found:
             self.ctx.basket_approach_stable_count = 0
-            if elapsed >= float(getattr(self.cfg, "basket_approach_timeout_s", 20.0) or 20.0):
+            if elapsed >= 20.0:
                 self._enter_error_recovery("basket_approach_timeout")
                 return self.controller.stop_cmd("ERROR_RECOVERY", brake=True)
             return self.controller.stop_cmd("APPROACH_BASKET")
 
-        target_x = float(getattr(self.cfg, "basket_align_center_x_target", 0.50) or 0.50)
-        tol = abs(float(getattr(self.cfg, "basket_align_center_x_tol", 0.08) or 0.08))
+        target_x = 0.50
+        tol = 0.08
         err = None if cx is None else float(cx) - target_x
         centered = bool(err is not None and abs(err) <= tol)
-        area_stop = bool(area is not None and area >= float(getattr(self.cfg, "basket_stop_bbox_area_norm", 0.18) or 0.18))
-        height_stop = bool(h is not None and h >= float(getattr(self.cfg, "basket_stop_bbox_height_norm", 0.38) or 0.38))
+        area_stop = bool(area is not None and area >= 0.18)
+        height_stop = bool(h is not None and h >= 0.38)
         if area_stop or height_stop:
             self._log(
                 "info",
@@ -308,15 +308,15 @@ class ReturnPlaceMixin:
             return self.controller.stop_cmd("PLACE_TO_BASKET")
         self.ctx.basket_approach_stable_count = 0
 
-        if elapsed >= float(getattr(self.cfg, "basket_approach_timeout_s", 20.0) or 20.0):
+        if elapsed >= 20.0:
             self._enter_error_recovery("basket_approach_timeout")
             return self.controller.stop_cmd("ERROR_RECOVERY", brake=True)
 
         vx = 0.0
         wz = 0.0
         if centered:
-            vx = float(getattr(self.cfg, "basket_approach_vx_mps", 0.08) or 0.08)
-            if area is not None and area >= 0.5 * float(getattr(self.cfg, "basket_stop_bbox_area_norm", 0.18) or 0.18):
+            vx = 0.08
+            if area is not None and area >= 0.5 * 0.18:
                 vx = float(getattr(self.cfg, "basket_approach_vx_slow_mps", 0.035) or 0.035)
         elif err is not None:
             wz = max(-0.18, min(0.18, -float(err) * 0.45))
@@ -324,7 +324,7 @@ class ReturnPlaceMixin:
             "info",
             f"[RETURN_PLACE][BASKET_APPROACH] cx={cx} err={err} area={area} h={h} "
             f"stable={int(self.ctx.basket_approach_stable_count)} vx={vx:.3f} wz={wz:.3f} "
-            f"basket_align_center_x_target={target_x:.2f}",
+            f"basket_internal_align_center_x={target_x:.2f}",
         )
         cmd = self.controller._cmd("APPROACH_BASKET", vx=vx, vy=0.0, wz=wz)
         summary = self._return_place_summary(
@@ -340,7 +340,7 @@ class ReturnPlaceMixin:
                 "basket_found": bool(found),
                 "basket_conf": conf,
                 "basket_center_x_norm": cx,
-                "basket_align_center_x_target": target_x,
+                "basket_internal_align_center_x": target_x,
                 "basket_err_x": err,
                 "basket_centered_ok": bool(centered),
                 "basket_bbox_area_norm": area,
@@ -355,13 +355,13 @@ class ReturnPlaceMixin:
             self.ctx.basket_place_substate = "AWAITING_ARM"
             self.ctx.basket_place_timeout_mono = monotonic_ts() + 10.0
             arm_cmd = ArmCommand(
-                float(getattr(self.cfg, "place_pose_x_cm", 12.0) or 12.0),
-                float(getattr(self.cfg, "place_pose_y_cm", 0.0) or 0.0),
-                float(getattr(self.cfg, "place_pose_z_cm", 8.0) or 8.0),
+                12.0,
+                0.0,
+                8.0,
                 float(getattr(self.cfg, "place_pose_pitch_deg", 0.0) or 0.0),
                 float(getattr(self.cfg, "place_pose_roll_deg", 0.0) or 0.0),
-                float(getattr(self.cfg, "place_gripper_width", 80.0) or 80.0),
-                int(getattr(self.cfg, "place_duration_ms", 800) or 800),
+                80.0,
+                800,
                 command="POSE",
             )
             self._log("info", "[RETURN_PLACE][PLACE_SEND] source=configured_place_pose unit=cm_deg_claw line=POSE")

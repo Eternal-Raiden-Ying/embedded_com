@@ -166,11 +166,11 @@ def apply_close_range_depth_safety_gate(ctx: Any, obs: Any, result: ArbitrationR
     if not _close_range_or_final(ctx, summary):
         return result
 
-    depth_stop_p10_m = _cfg_float(cfg, "roi_final_stop_p10_m", "depth_envelope_stop_p10_m", default=0.42)
-    depth_slow_p10_m = _cfg_float(cfg, "roi_final_slow_p10_m", "depth_envelope_slow_p10_m", default=0.52)
-    depth_missing_hold_s = max(0.0, _cfg_float(cfg, "roi_final_missing_hold_s", default=0.8))
-    final_probe_vx_mps = abs(_cfg_float(cfg, "final_probe_vx_mps", "close_range_probe_vx_mps", "roi_final_probe_vx_mps", default=0.008))
-    final_missing_probe_vx_mps = abs(_cfg_float(cfg, "final_missing_probe_vx_mps", "close_range_missing_probe_vx_mps", "roi_final_missing_probe_vx_mps", default=0.004))
+    depth_stop_p10_m = _cfg_float(cfg, "depth_envelope_stop_p10_m", default=0.30)
+    depth_slow_p10_m = _cfg_float(cfg, "depth_envelope_slow_p10_m", default=0.50)
+    depth_missing_hold_s = 0.8
+    final_slow_probe_vx_mps = abs(_cfg_float(cfg, "final_slow_probe_vx_mps", default=0.050))
+    final_missing_slow_probe_vx_mps = final_slow_probe_vx_mps
     final_probe_timeout_s = max(0.0, _cfg_float(cfg, "final_probe_timeout_s", default=8.0))
     final_probe_distance_budget_m = max(0.0, _cfg_float(cfg, "final_probe_distance_budget_m", default=0.15))
 
@@ -221,7 +221,7 @@ def apply_close_range_depth_safety_gate(ctx: Any, obs: Any, result: ArbitrationR
             "final_depth_gate_reason": str(summary.get("final_depth_gate_reason") or ""),
         }
 
-    vx = _positive_cap(vx_raw, final_probe_vx_mps)
+    vx = _positive_cap(vx_raw, final_slow_probe_vx_mps)
     vy = 0.0
     wz = 0.0
     state = "pass_or_probe_cap"
@@ -266,12 +266,12 @@ def apply_close_range_depth_safety_gate(ctx: Any, obs: Any, result: ArbitrationR
             allow_forward = False
             blocked_by = reason
         elif not current_valid and last_valid_fresh:
-            vx = _positive_cap(vx_raw, final_missing_probe_vx_mps)
+            vx = _positive_cap(vx_raw, final_missing_slow_probe_vx_mps)
             state = "missing_short_probe"
             reason = "depth_missing_short_probe"
             allow_forward = bool(vx > 1e-9)
         elif best_depth is not None and best_depth <= depth_slow_p10_m:
-            vx = _positive_cap(vx_raw, final_probe_vx_mps)
+            vx = _positive_cap(vx_raw, final_slow_probe_vx_mps)
             state = "slow_cap"
             reason = "depth_slow_cap"
             action = DockingAction.FINAL_SLOW_PROBE.value

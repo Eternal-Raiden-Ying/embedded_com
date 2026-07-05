@@ -153,7 +153,7 @@ class TransitionsMixin:
             "table_stable_frames": int(getattr(self.cfg, "table_stable_frames", self.cfg.final_lock_frames_to_arrive)),
             "table_settle_ms": int(round(float(getattr(self.cfg, "table_settle_s", 0.3)) * 1000.0)),
             "table_stop_margin_m": float(getattr(self.cfg, "table_stop_margin_m", 0.05)),
-            "table_max_micro_adjust": int(getattr(self.cfg, "table_max_micro_adjust", 4)),
+            "table_internal_max_micro_adjust": 0,
             "final_lock_enabled": self._table_final_lock_enabled(),
             "micro_adjust_enabled": self._table_micro_adjust_enabled(),
             "final_lock_enter_dist_th_m": float(getattr(self.cfg, "final_lock_enter_dist_th_m", 0.08)),
@@ -230,19 +230,14 @@ class TransitionsMixin:
             self.ctx.resume_state = None
             return
         if state == State.AT_TABLE_EDGE:
-            duration_s = max(
-                0.0,
-                float(
-                    getattr(
-                        self.cfg,
-                        "at_table_edge_settle_s",
-                        getattr(self.cfg, "edge_settle_s", 0.8),
-                    )
-                    or 0.0
-                ),
+            fast_target = bool(
+                getattr(self.cfg, "target_search_fast_start_enable", True)
+                and not getattr(self.cfg, "stop_after_table_docking", False)
+                and not self._table_edge_only_test_enabled()
             )
+            duration_s = 0.0 if fast_target else min(1.0, max(0.5, float(getattr(self.cfg, "edge_settle_s", 0.8) or 0.8)))
             self.ctx.hard_stop_barrier_until_mono = monotonic_ts() + duration_s
-            self.ctx.hard_stop_barrier_reason = "at_table_edge_entry_sstop_barrier"
+            self.ctx.hard_stop_barrier_reason = "" if fast_target else "at_table_edge_entry_sstop_barrier"
         if state == State.SEARCH_TARGET_INIT:
             self._log("info", "target_search_enter")
             self._log("info", "docking_final_latch_frozen_for_target_search")

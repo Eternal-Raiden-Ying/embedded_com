@@ -903,21 +903,16 @@ class OrchestratorService(BaseModule):
                 "final_lock_dist_tol_m": self.cfg.control.final_lock_dist_tol_m,
                 "final_lock_frames_to_arrive": self.cfg.control.final_lock_frames_to_arrive,
                 "enable_final_lock": self.cfg.control.enable_final_lock,
-                "enable_micro_adjust": self.cfg.control.enable_micro_adjust,
-                "final_lock_enter_dist_th_m": self.cfg.control.final_lock_enter_dist_th_m,
-                "final_lock_enter_yaw_th_rad": self.cfg.control.final_lock_enter_yaw_th_rad,
-                "edge_slide_dist_tolerance_m": self.cfg.control.edge_slide_dist_tolerance_m,
+                "table_yolo_align_center_x_target": self.cfg.control.table_yolo_align_center_x_target,
+                "target_lateral_align_center_x_target": self.cfg.control.target_lateral_align_center_x_target,
+                "final_enter_depth_threshold_m": self.cfg.control.final_enter_depth_threshold_m,
+                "final_fixed_roi_stop_threshold_m": self.cfg.control.final_fixed_roi_stop_threshold_m,
+                "final_slow_probe_vx_mps": self.cfg.control.final_slow_probe_vx_mps,
                 "table_edge_obs_max_age_ms": self.cfg.control.table_edge_obs_max_age_ms,
-                "edge_follow_min_edge_conf": self.cfg.control.edge_follow_min_edge_conf,
-                "edge_follow_log_period_ms": self.cfg.control.edge_follow_log_period_ms,
-                "edge_follow_stale_hold_s": self.cfg.control.edge_follow_stale_hold_s,
-                "edge_follow_track_local_edge_update_hz": self.cfg.control.edge_follow_track_local_edge_update_hz,
                 "target_confirm_conf_th": self.cfg.control.target_confirm_conf_th,
                 "target_found_frames_to_confirm": self.cfg.control.target_found_frames_to_confirm,
                 "target_lock_conf_th": self.cfg.control.target_lock_conf_th,
                 "target_lock_settle_s": self.cfg.control.target_lock_settle_s,
-                "edge_relocate_enabled": self.cfg.control.edge_relocate_enabled,
-                "max_edge_transitions_per_task": self.cfg.control.max_edge_transitions_per_task,
             },
             "car_cmd": {
                 "send_period_ms": self.cfg.car.send_period_ms,
@@ -1424,7 +1419,7 @@ class OrchestratorService(BaseModule):
             and (
                 bool(summary.get("target_found", False))
                 or bool(summary.get("target_lateral_hold_active", False))
-                or str(summary.get("lateral_cmd_source") or "").strip().lower() == "hold"
+                or str(summary.get("lateral_cmd_source") or "") == "hold"
             )
             and abs(float(getattr(cmd, "vy_mps", 0.0) or 0.0)) > 1e-9
             and abs(float(getattr(cmd, "vx_mps", 0.0) or 0.0)) <= 1e-9
@@ -3646,8 +3641,6 @@ class OrchestratorService(BaseModule):
             return "target_search_hold"
         if str(self.core.ctx.confirmed_vision_mode or "").upper() == "FIND_OBJECT" and self.core.ctx.last_table_obs is None:
             return "no_table_edge_obs_in_track_local"
-        if not bool(getattr(self.cfg.control, "edge_relocate_enabled", True)):
-            return "config_disabled"
         return "target_search_hold"
 
     def _emit_target_obs_missing_warning(self) -> None:
@@ -4792,10 +4785,12 @@ class OrchestratorService(BaseModule):
             "last_good_vy_mps": decision_summary.get("last_good_vy_mps"),
             "lateral_cmd_source": decision_summary.get("lateral_cmd_source"),
             "slice_timeout_reason": decision_summary.get("slice_timeout_reason"),
-            "edge_slide_elapsed_s": decision_summary.get("edge_slide_elapsed_s"),
-            "edge_slide_lateral_distance_m": decision_summary.get("edge_slide_lateral_distance_m"),
-            "edge_slide_frames": decision_summary.get("edge_slide_frames"),
-            "confirm_block_reason": decision_summary.get("confirm_block_reason"),
+            "candidate_count": decision_summary.get("candidate_count"),
+            "selected_candidate_idx": decision_summary.get("selected_candidate_idx"),
+            "selected_candidate_score": decision_summary.get("selected_candidate_score"),
+            "selected_candidate_conf": decision_summary.get("selected_candidate_conf"),
+            "selected_candidate_cx": decision_summary.get("selected_candidate_cx"),
+            "selected_candidate_reason": decision_summary.get("selected_candidate_reason"),
             "target_conf": (
                 getattr(target_obs, "matched_conf", None)
                 if target_obs is not None and getattr(target_obs, "matched_conf", None) is not None

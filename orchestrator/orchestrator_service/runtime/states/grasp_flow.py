@@ -128,27 +128,6 @@ class GraspFlowMixin:
         self._log("info", f"grasp_flow_tick_debug {payload}")
 
     def _tick_grasp_awaiting_respond(self, now_m: float) -> MotionDecision:
-        from common.config_loader import get_config
-        pose_bottle_cfg = get_config().POSE_BOTTLE
-        is_bottle = (str(self.ctx.canonical_target or "").strip().lower() == "bottle" or
-                     str(self.ctx.active_target or "").strip().lower() == "bottle")
-        legacy_pose_bottle_fallback_enable = bool(getattr(self.cfg, "legacy_pose_bottle_fallback_enable", False))
-        if legacy_pose_bottle_fallback_enable and pose_bottle_cfg.fall_back_grasp and is_bottle:
-            obs = self.ctx.last_target_obs
-            cx = self._target_lateral_center_x(obs)
-            if cx is not None:
-                err = self._target_lateral_error_x(obs)
-                if err is not None and abs(err) <= pose_bottle_cfg.x_center_tolerance:
-                    self._log("info", f"[GRASP][FALLBACK] Triggering fallback grasp for target={self.ctx.active_target} error_x={err:.4f}")
-                    self.ctx.use_fallback_grasp = True
-                    self.ctx.grasp_substate = "PRE_ARM_STOP_SETTLE"
-                    self.ctx.pre_arm_stop_settle_start_mono = now_m
-                    return self.controller.stop_cmd("GRASP")
-                else:
-                    self._log("warn", f"[GRASP][FALLBACK] Target X center not centered: error_x={err} tolerance={pose_bottle_cfg.x_center_tolerance}")
-            else:
-                self._log("warn", "[GRASP][FALLBACK] Target X center position not available")
-
         if self._has_ready_grasp_result():
             return self._consume_ready_grasp_result(now_m, "AWAITING_RESPOND")
         if self._state_elapsed() < 0.3:
@@ -418,14 +397,6 @@ class GraspFlowMixin:
             self._transition(State.POST_GRASP_TURN_FIXED, f"arm_motion_done builtin_{target} post_grasp_fixed_flow_enable=true")
             self._queue_tts("抓取完成，开始固定放置动作")
             return self.controller.stop_cmd("POST_GRASP_TURN_FIXED")
-        if bool(getattr(self.cfg, "post_grasp_place_enable", True)):
-            self.ctx.post_grasp_place_enabled = True
-            self.ctx.basket_search_start_ts = 0.0
-            self.ctx.basket_approach_stable_count = 0
-            self.ctx.basket_place_substate = ""
-            self._transition(State.POST_GRASP_TURN_180, "arm_motion_done builtin_bottle post_grasp_place_enable=true")
-            self._queue_tts("抓取完成，开始寻找篮子")
-            return self.controller.stop_cmd("POST_GRASP_TURN_180")
         self._transition(State.DONE, "arm_motion_done builtin_bottle")
         self._queue_tts("抓取完成")
         return self.controller.stop_cmd("DONE")
@@ -771,17 +742,6 @@ class GraspFlowMixin:
             self._transition(State.POST_GRASP_TURN_FIXED, "arm_motion_done post_grasp_fixed_flow_enable=true")
             self._queue_tts("抓取完成，开始固定放置动作")
             return self.controller.stop_cmd("POST_GRASP_TURN_FIXED")
-        if bool(getattr(self.cfg, "post_grasp_place_enable", True)):
-            self.ctx.carrying_object = True
-            self.ctx.carried_target = str(self.ctx.canonical_target or self.ctx.active_target or "")
-            self.ctx.post_grasp_place_enabled = True
-            self.ctx.basket_search_start_ts = 0.0
-            self.ctx.basket_approach_stable_count = 0
-            self.ctx.basket_place_substate = ""
-            self.ctx.arm_response = None
-            self._transition(State.POST_GRASP_TURN_180, "arm_motion_done post_grasp_place_enable=true")
-            self._queue_tts("抓取完成，开始寻找篮子")
-            return self.controller.stop_cmd("POST_GRASP_TURN_180")
         self._transition(State.DONE, "arm_motion_done grasp_success_assumed_for_demo")
         self._queue_tts("抓取完成")
         return self.controller.stop_cmd("DONE")
