@@ -931,6 +931,7 @@ class TargetObs:
     matched_rank_in_all_boxes: Optional[int] = None
     num_target_candidates: Optional[int] = None
     all_candidate_classes: Optional[list] = None
+    target_candidates: Optional[list] = None
     confidence: Optional[float] = None
     x_norm: Optional[float] = None
     y_norm: Optional[float] = None
@@ -992,6 +993,7 @@ class TargetObs:
             matched_rank_in_all_boxes=_pick_optional_int(payload, "matched_rank_in_all_boxes"),
             num_target_candidates=_pick_optional_int(payload, "num_target_candidates"),
             all_candidate_classes=payload.get("all_candidate_classes"),
+            target_candidates=payload.get("target_candidates") or payload.get("candidates") or payload.get("candidate_targets"),
             confidence=_pick_optional_float(payload, "matched_conf", "confidence", "score"),
             x_norm=_pick_optional_float(payload, "x_norm"),
             y_norm=_pick_optional_float(payload, "y_norm"),

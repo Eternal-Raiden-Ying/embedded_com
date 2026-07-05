@@ -378,7 +378,12 @@ class MotionController:
             return self.search_table_cmd(turn_sign=turn_sign)
         geom = compute_bbox_control_geometry(obs)
         bbox_cx_norm_control = geom["bbox_cx_norm_control"]
-        bbox_center_error_control = geom["bbox_center_error_control"]
+        table_target_x = max(0.0, min(1.0, float(getattr(self.cfg, "table_yolo_align_center_x_target", 0.50) or 0.50)))
+        table_center_tol = abs(float(getattr(self.cfg, "table_yolo_align_center_x_tol", 0.08) or 0.08))
+        bbox_center_error_control = (
+            float(bbox_cx_norm_control) - table_target_x
+            if bbox_cx_norm_control is not None else geom["bbox_center_error_control"]
+        )
         cx_norm = bbox_cx_norm_control
         center_error = bbox_center_error_control
         view_err_norm = float(center_error * 2.0) if center_error is not None else 0.0
@@ -403,11 +408,42 @@ class MotionController:
         )
         center_good_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_good_limit", 0.06) or 0.06))
         center_hard_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.40) or 0.40))
-        forward_vx = max(
-            abs(float(getattr(self.car_cfg, "yolo_table_forward_vx_mps", 0.015) or 0.015)),
-            abs(float(getattr(self.cfg, "min_forward_vx_mps", 0.04) or 0.04)),
-        )
-        slow_vx = min(forward_vx, abs(float(getattr(self.cfg, "min_forward_vx_mps", 0.04) or 0.04)))
+        far_vx = abs(float(getattr(self.cfg, "yolo_approach_far_vx_mps", 0.50) or 0.50))
+        mid_vx = min(far_vx, abs(float(getattr(self.cfg, "yolo_approach_mid_vx_mps", 0.20) or 0.20)))
+        near_vx = min(mid_vx, abs(float(getattr(self.cfg, "yolo_approach_near_vx_mps", 0.10) or 0.10)))
+        min_vx = min(near_vx, abs(float(getattr(self.cfg, "yolo_approach_min_vx_mps", 0.05) or 0.05)))
+        depth_value = None
+        depth_source = "unknown"
+        if obs is not None:
+            for source, value in (
+                ("table_roi_depth_median", getattr(obs, "table_roi_depth_median", None)),
+                ("obs_target_dist_m", getattr(obs, "obs_target_dist_m", None)),
+                ("target_dist_m", getattr(obs, "target_dist_m", None)),
+            ):
+                try:
+                    if value is not None:
+                        depth_value = float(value)
+                        depth_source = source
+                        break
+                except (TypeError, ValueError):
+                    pass
+        obs_fresh = bool(obs is not None)
+        if depth_value is None:
+            speed_band = "unknown"
+            forward_vx = min_vx
+        elif depth_value > 1.20 and obs_fresh:
+            speed_band = "far"
+            forward_vx = far_vx
+        elif depth_value > 0.90:
+            speed_band = "mid"
+            forward_vx = mid_vx
+        elif depth_value > 0.65:
+            speed_band = "near"
+            forward_vx = near_vx
+        else:
+            speed_band = "min"
+            forward_vx = min_vx
+        slow_vx = min(forward_vx, near_vx)
         yolo_forward_allowed = bool(center_error is not None and abs(center_error) <= center_hard_limit)
         if source_name in {"yolo_forward", "yolo_track_forward"}:
             if yolo_forward_allowed:
@@ -440,11 +476,23 @@ class MotionController:
                 "control_source": source_name,
                 "approach_source": "yolo_table_bbox",
                 "bbox_cx_norm": float(cx_norm) if cx_norm is not None else None,
+                "table_yolo_align_center_x_target": float(table_target_x),
+                "table_yolo_align_center_x_tol": float(table_center_tol),
+                "table_center_x_norm": float(cx_norm) if cx_norm is not None else None,
+                "table_err_x": float(center_error) if center_error is not None else None,
                 "target_offset": float(center_error) if center_error is not None else None,
                 "center_error": float(center_error) if center_error is not None else None,
                 "yolo_forward_center_good_limit": float(center_good_limit),
                 "yolo_forward_center_hard_limit": float(center_hard_limit),
                 "yolo_forward_allowed": bool(yolo_forward_allowed),
+                "yolo_approach_speed_band": speed_band,
+                "yolo_approach_speed_depth": float(depth_value) if depth_value is not None else None,
+                "yolo_approach_selected_vx": float(assist_vx),
+                "yolo_approach_depth_source": depth_source,
+                "yolo_approach_far_vx_mps": float(far_vx),
+                "yolo_approach_mid_vx_mps": float(mid_vx),
+                "yolo_approach_near_vx_mps": float(near_vx),
+                "yolo_approach_min_vx_mps": float(min_vx),
                 "table_cx_norm_signed": float(center_error * 2.0) if center_error is not None else None,
                 "yolo_yaw_gain": float(gain),
                 "yolo_max_wz_radps": float(max_wz),
@@ -1508,7 +1556,7 @@ class MotionController:
                 "forward_allowed": bool(forward_allowed),
                 "forward_block_reason": forward_block_reason or "",
                 "final_lock_enabled": bool(getattr(self.cfg, "enable_final_lock", False)),
-                "micro_adjust_enabled": bool(getattr(self.cfg, "enable_micro_adjust", False)),
+                "micro_adjust_enabled": False,
                 "stop_ready_ignored_for_stage_transition": False,
                 "micro_adjust_skipped": False,
                 "pose_missing_duration_s": float(pose_missing_duration_s),

@@ -359,6 +359,8 @@ orchestrator:
     table_stop_margin_m: 0.05 # Stop margin offset safety factor
     table_settle_s: 0.50 # Settle time after stopping
     table_stable_frames: 5 # Number of stable frames to declare stop ready
+    table_yolo_align_center_x_target: 0.50 # Desired table bbox center x during table docking
+    table_yolo_align_center_x_tol: 0.08 # Table bbox center tolerance during table docking
     yolo_table_control_enable: true # Utilize YOLO table detections
     yolo_table_conf_min: 0.25 # Trust threshold for YOLO table bbox
     yolo_table_edge_stable_frames: 5 # Frames to confirm table edge stability
@@ -373,7 +375,6 @@ orchestrator:
     near_slow_max_vx_mps: 0.030 # Near-table forward speed cap
     near_slow_max_vy_mps: 0.040 # Near-table lateral speed cap
     near_slow_max_wz_radps: 0.04 # Near-table yaw speed cap
-    final_servo_enter_p10_m: 0.45 # ROI depth threshold to enter final servo
     final_enter_depth_threshold_m: 0.58 # Final phase handoff depth threshold
     final_enter_stable_count_required: 2 # Stable frames required to enter final
     final_handoff_on_yolo_lost_enable: true # Prefer final handoff over search when YOLO table is lost near table
@@ -381,32 +382,21 @@ orchestrator:
     final_handoff_min_recent_depth_m: 0.65 # Recent depth must be this close or closer for handoff
     final_fixed_roi_stop_threshold_m: 0.45 # Fixed ROI median stop threshold in final phase
     final_fixed_roi_stop_stable_count_required: 3 # Fixed ROI stop frames required
+    final_slow_probe_vx_mps: 0.05 # Final slow probe forward speed
     remote_init_min_interval_s: 30.0 # Minimum interval between remote init warmups
-    edge_final_enter_margin_m: 0.06 # Edge distance margin to enter final servo
-    edge_final_stop_margin_m: 0.02 # Edge distance margin for final stop confirmation
-    close_range_enter_p10_m: 0.55 # ROI depth threshold to latch close range
-    final_probe_vx_mps: 0.020 # Final slow probe forward speed
-    final_missing_probe_vx_mps: 0.010 # Final probe speed when final signal is missing
+    near_start_final_enable: true # Allow near-start handoff into final
+    near_start_final_depth_m: 0.58 # Near-start depth threshold
+    near_start_align_enable: true # Allow brief near-start yaw/table align
+    near_start_align_timeout_s: 2.0 # Near-start align timeout
     final_missing_probe_grace_s: 2.0 # Short missing-distance grace probe window
     final_slow_stop_timeout_s: 12.0 # Final slow stop timeout
-    final_missing_reuse_s: 0.50 # Reuse window for last valid final distance
-    final_missing_probe_margin_m: 0.04 # Last valid distance margin before missing probe
-    close_range_probe_vx_mps: 0.015 # Close-range probe forward speed
-    close_range_missing_probe_vx_mps: 0.008 # Close-range probe speed when depth is missing
-    roi_final_stop_p10_m: 0.42 # ROI P10 threshold for final lock stop
-    roi_final_slow_p10_m: 0.52 # ROI P10 threshold for slow final probe
-    roi_final_probe_vx_mps: 0.020 # ROI final probe forward speed
-    roi_final_missing_probe_vx_mps: 0.008 # ROI final probe speed when depth is missing
-    roi_final_missing_hold_s: 0.8 # ROI missing hold before zero forward
     depth_envelope_stop_p10_m: 0.30 # Depth envelope hard hold threshold, below final fixed ROI stop
     depth_envelope_slow_p10_m: 0.50 # Depth envelope slow threshold
     depth_emergency_stop_p10_m: 0.20 # Emergency depth stop threshold
-    depth_envelope_mid_p10_m: 0.70 # Depth envelope mid threshold
-    depth_envelope_slow_vx_mps: 0.012 # Depth envelope slow forward cap
-    depth_envelope_mid_vx_mps: 0.015 # Depth envelope mid forward cap
-    yolo_approach_min_vx_mps: 0.02 # Min forward speed for YOLO_APPROACH when forward is allowed
-    yolo_approach_depth_stat_for_envelope: "median" # Use median, not mean, for approach speed envelope
-    yolo_approach_use_p10_for_safety_only: true # Keep p10 for hard safety/hold only
+    yolo_approach_far_vx_mps: 0.50 # YOLO approach speed for depth > 1.20m
+    yolo_approach_mid_vx_mps: 0.20 # YOLO approach speed for 0.90m..1.20m
+    yolo_approach_near_vx_mps: 0.10 # YOLO approach speed for 0.65m..0.90m
+    yolo_approach_min_vx_mps: 0.05 # YOLO approach speed near final handoff
     builtin_bottle_grasp_enable: true # Use STM32 builtin bottle grasp once target is locked
     builtin_bottle_skip_remote: true # Do not send GRASP_REMOTE while builtin bottle path is active
     builtin_bottle_pose_line: "POSE_BOTTLE" # Builtin bottle pose command line
@@ -429,8 +419,8 @@ orchestrator:
     builtin_apple_grab_timeout_s: 10.0 # Timeout for builtin apple grab stage
     post_grasp_fixed_flow_enable: true # Use fixed post-grasp turn/forward/rise flow
     post_grasp_turn_direction_sign: -1 # Sign applied to fixed post-grasp turn wz
-    post_grasp_forward_vx_mps: 0.08 # Fixed post-grasp forward speed
-    post_grasp_forward_duration_s: 2.0 # Fixed post-grasp forward duration
+    post_grasp_forward_vx_mps: 0.2 # Fixed post-grasp forward speed
+    post_grasp_forward_duration_s: 5.0 # Fixed post-grasp forward duration
     post_grasp_stop_hold_s: 0.5 # Stop hold before rise pose
     post_grasp_rise_enable: true # Send POSE_RISE after fixed post-grasp stop
     post_grasp_rise_line: "POSE_RISE" # Builtin rise command line
@@ -451,23 +441,11 @@ orchestrator:
     final_lock_max_consecutive_lost: 2 # Allowed consecutive lost target frames
     final_lock_soft_stale_hold: true # Keep command active on brief loss
     final_lock_min_hold_ms: 500 # Minimum hold time before final lock
-    table_max_micro_adjust: 3 # Limit search iterations near table
     enable_final_lock: true # Enable final adjustment phase
-    enable_micro_adjust: false # Enable micro adjust search loop
-    final_lock_enter_dist_th_m: 0.08 # Distance threshold to enter final lock
-    final_lock_enter_yaw_th_rad: 0.10 # Heading threshold to enter final lock
-    final_dist_deadband_m: 0.030 # Final distance deadband
-    final_dist_kp: 0.080 # Final distance proportional gain
-    final_forward_vx_max_mps: 0.015 # Final forward speed cap
-    final_reverse_vx_max_mps: 0.004 # Final reverse speed cap
-    final_reverse_confirm_frames: 3 # Reverse confirmation frames
-    final_yaw_deadband_rad: 0.12 # Final yaw deadband
-    final_lock_yaw_rad: 0.12 # Final lock yaw tolerance
-    final_yaw_realign_rad: 0.18 # Final yaw realign threshold
-    final_yaw_stable_frames: 6 # Final yaw stable frames
-    final_yaw_align_min_duration_ms: 1000 # Minimum final yaw alignment duration
-    final_yaw_last_good_hold_s: 1.2 # Last good yaw hold time
     edge_settle_s: 0.80 # Settle time for edge confirmation
+    at_table_edge_settle_s: 0.10 # Short settle before target search fast start
+    target_search_fast_start_enable: true # Skip SEARCH_TARGET_INIT zero command when target obs is already fresh
+    target_fast_start_confirm_enable: false # Fresh target may start slide, but cannot bypass slice guard
     dock_retry_limit: 2 # Retries limit upon docking failure
     dock_retry_backoff_s: 0.60 # Wait time before backing up
     search_target_init_hold_s: 0.25 # Pause duration before target search
@@ -482,37 +460,18 @@ orchestrator:
     target_confirm_window_s: 1.50 # Sliding window size for target detection
     target_confirm_found_ratio_th: 0.50 # Ratio of successful detections in window
     target_lateral_align_enable: true # Center target bbox by lateral base motion
-    target_lateral_align_center_x_target: 0.45 # Desired target bbox center x for grasp targets
+    target_lateral_align_center_x_target: 0.40 # target_lateral_align_center_x_target=0.40
     target_lateral_align_center_x_tol: 0.06 # Center tolerance for lock
-    target_lateral_align_center_x_deadband: 0.03 # No-motion deadband
     target_lateral_align_kp_vy: 0.10 # Lateral proportional gain
     target_lateral_align_vy_min_mps: 0.016 # Minimum lateral command
     target_lateral_align_vy_max_mps: 0.050 # Maximum lateral command
     target_lateral_align_stable_frames: 3 # Consecutive centered frames
     target_lateral_align_lost_hold_s: 0.80 # Hold duration after target loss
+    target_lateral_hold_enable: true # Keep lateral motion through brief target drops
+    target_lateral_hold_s: 0.8 # Max age for using last good target lateral command
+    target_lateral_lost_stop_s: 1.2 # Stop only after target has been lost this long
+    target_lateral_min_vy_mps: 0.016 # Minimum held lateral command magnitude
     target_lateral_align_timeout_s: 12.0 # Target lateral align timeout
-    post_grasp_place_enable: true # Continue to basket place flow after successful grasp
-    post_grasp_turn_enable: true # Open-loop 180 degree turn before basket search
-    post_grasp_turn_wz_radps: 0.45 # Open-loop turn angular speed
-    post_grasp_turn_duration_s: 3.5 # Open-loop turn duration
-    post_grasp_turn_direction: "right" # left or right
-    basket_search_timeout_s: 15.0 # Basket search timeout
-    basket_search_wz_radps: 0.25 # Basket search rotation speed
-    basket_align_center_x_target: 0.50 # Basket bbox center x for placing target
-    basket_align_center_x_tol: 0.08 # Basket center tolerance
-    basket_approach_vx_mps: 0.08 # Basket approach forward speed
-    basket_approach_vx_slow_mps: 0.035 # Slow basket approach forward speed
-    basket_stop_bbox_area_norm: 0.18 # Stop when basket bbox area is large enough
-    basket_stop_bbox_height_norm: 0.38 # Stop when basket bbox height is large enough
-    basket_stop_stable_count_required: 3 # Stable stop frames for basket approach
-    basket_approach_timeout_s: 20.0 # Basket approach timeout
-    place_pose_x_cm: 12.0 # Configured place pose x in cm
-    place_pose_y_cm: 0.0 # Configured place pose y in cm
-    place_pose_z_cm: 8.0 # Configured place pose z in cm
-    place_pose_pitch_deg: 0.0 # Configured place pose pitch in degrees
-    place_pose_roll_deg: 0.0 # Configured place pose roll in degrees
-    place_gripper_width: 80.0 # Configured claw/open value for place POSE
-    place_duration_ms: 800 # Configured place POSE duration in ms
     target_lock_conf_th: 0.40 # Trust limit for locking target tag
     target_lock_found_ratio_th: 0.60 # Detections ratio required to lock tag
     target_lock_settle_s: 0.50 # Delay after locking target tag
@@ -521,16 +480,6 @@ orchestrator:
     target_lock_lost_hold_s: 1.50 # Target tag loss memory duration
     target_locked_freeze_after_s: 1.00 # Tag freeze lock delay
     freeze_settle_s: 0.60 # Delay after freezing vehicle position
-    edge_slide_pause_s: 0.20 # Settle delay between slide segments
-    edge_slide_segment_s: 1.20 # Segment time during side slide motion
-    edge_slide_dist_tolerance_m: 0.05 # Lateral alignment limit during slide
-    edge_slide_fallback_state: "FINAL_LOCK" # State to fallback on slide fail
-    edge_slide_pause_hold_s: 0.80 # Slide pause memory duration
-    edge_slide_dist_out_of_range_hold_s: 0.80 # Slide error hold duration
-    edge_slide_max_relock_attempts: 3 # Relock attempts limit
-    edge_slide_relock_failure_is_fatal: true # Fail task on relock fail
-    edge_slide_recover_timeout_s: 2.50 # Slide recover state timeout
-    edge_slide_direct_fallback_to_controlled_approach: false # Skip relock
     table_edge_obs_max_age_ms: 500 # Obs packet age timeout in ms
     table_obs_stale_soft_ms: 300 # Warning duration for packet delays
     table_obs_stale_stop_ms: 500 # Stop vehicle if packet delay is large
@@ -538,29 +487,11 @@ orchestrator:
     table_step_mode_enable: false # Move vehicle by discrete steps
     table_step_burst_ms: 150 # Duration of step velocity burst
     table_step_hold_until_new_obs: true # Wait for fresh packet to trigger step
-    edge_follow_log_period_ms: 500 # Log update rate in edge tracking
-    edge_follow_min_edge_conf: 0.60 # Edge trust limit
-    edge_follow_min_edge_conf_table_edge_perception: 0.60 # Perception trust limit
-    edge_follow_min_edge_conf_track_local: 0.20 # Tracking trust limit
-    edge_follow_weak_edge_conf_track_local: 0.15 # Minimum local tracking trust limit
-    edge_follow_strong_edge_conf_track_local: 0.35 # High confidence tracking limit
-    edge_follow_low_conf_hold_s: 2.00 # Loss memory duration
-    edge_follow_low_conf_exit_s: 3.00 # Timeout to exit tracking
-    edge_follow_recover_conf_th: 0.25 # Reacquire threshold
     edge_identity_yaw_mismatch_rad: 0.15 # Yaw change filter threshold
     edge_identity_dist_mismatch_m: 0.04 # Dist change filter threshold
-    edge_follow_stale_fallback_state: "FINAL_LOCK" # Fallback state
-    edge_follow_stale_hold_s: 1.20 # Fallback delay
-    edge_follow_track_local_edge_update_hz: 5.0 # Track local output frequency
     edge_handoff_min_s: 0.50 # Minimum handoff check duration
     edge_handoff_max_s: 1.00 # Maximum handoff check duration
     edge_handoff_samples: 3 # Sample count for handoff filter
-    edge_relocate_enabled: true # Enable table relocation search
-    max_edge_transitions_per_task: 3 # Limit relocations per task
-    leave_edge_backoff_s: 0.80 # Backup time when leaving edge
-    relocate_turn_s: 1.10 # Spin time during relocation search
-    reacquire_timeout_s: 8.0 # Reacquire edge timeout
-    next_table_dwell_s: 1.50 # Dwell time after docking
     tag_lost_frames_to_search: 4 # Tag frames dropped to trigger search
     return_lost_hold_s: 1.00 # Return tag loss memory duration
     return_min_dwell_s: 0.60 # Minimum duration in return state
@@ -978,8 +909,3 @@ online_edge:
     control_alignment_min_stable_frames: 3 # Stable frames before alignment task
     control_stop_min_stable_frames: 5 # Stable frames before stop task
     control_stop_dist_abs_max_m: 0.08 # Distance threshold to trigger stop task
-
-### === Pose Bottle Switch Configuration === ###
-POSE_BOTTLE:
-  fall_back_grasp: true # Switch to bypass cloud prediction and directly send instructions to arm
-  x_center_tolerance: 0.06 # Tolerable error in normalized coordinates for target center X alignment
