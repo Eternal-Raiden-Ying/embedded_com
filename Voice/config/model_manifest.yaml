@@ -1,0 +1,39 @@
+models:
+  asr:
+    enabled: true
+    backend: "funasr_onnx_offline"
+    model_path: "Voice/ONNX/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-onnx"
+    vad_model_path: "Voice/ONNX/speech_fsmn_vad_zh-cn-16k-common-onnx"
+    optional_files: []
+    board_required: true
+    windows_required: false
+
+  wake_kws:
+    enabled: true
+    backend: "openwakeword_onnx"
+    frontend_backend: "tflite"
+    classifier_backend: "onnx"
+    model_path: "Voice/kws/wake_nihao_xiaoche_v2.onnx"
+    frontend_melspectrogram_path: ""
+    frontend_embedding_path: ""
+    threshold: 0.60
+    board_required: true
+    windows_required: false
+
+  stop_kws:
+    enabled: true
+    backend: "openwakeword_onnx"
+    frontend_backend: "tflite"
+    classifier_backend: "onnx"
+    model_path: "Voice/kws/stop_smallcar_v1.onnx"
+    threshold: 0.58
+    board_required: true
+    windows_required: false
+
+  tts:
+    enabled: true
+    backend: "piper"
+    model_path: "Voice/tts/zh_CN-huayan-x_low/zh_CN-huayan-x_low.onnx"
+    config_path: "Voice/tts/zh_CN-huayan-x_low/zh_CN-huayan-x_low.onnx.json"
+    board_required: true
+    windows_required: false

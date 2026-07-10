@@ -62,6 +62,32 @@ class TaskRuntimeMixin:
             self._queue_tts("命令置信度过低")
             return False, "low confidence"
         if cmd.intent == "FIND":
+            import yaml
+            from pathlib import Path
+            
+            repo_root = Path(__file__).resolve().parent
+            for parent in [repo_root] + list(repo_root.parents):
+                if (parent / "configs" / "target_catalog.yaml").exists():
+                    repo_root = parent
+                    break
+            catalog_path = repo_root / "configs" / "target_catalog.yaml"
+            
+            status = "unknown"
+            if catalog_path.exists():
+                try:
+                    with open(catalog_path, "r", encoding="utf-8") as f:
+                        cat_data = yaml.safe_load(f) or {}
+                        targets = cat_data.get("targets", {})
+                        if cmd.target in targets:
+                            status = targets[cmd.target].get("status", "unknown")
+                except Exception as e:
+                    self._log("error", f"Error loading target catalog: {e}")
+                    
+            if status == "model_pending":
+                self._log("warn", f"Target recognized but model is pending: {cmd.target}")
+                self._queue_tts("该物品模型尚在开发中，无法获取")
+                return False, "target_recognized_but_not_executable"
+                
             spec = resolve_target(cmd.target or "")
             if spec is None:
                 setattr(self.ctx, "last_task_ack_extra", {

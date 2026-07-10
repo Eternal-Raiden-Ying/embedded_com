@@ -289,8 +289,29 @@ apply_profile_defaults() {
       ORCH_DRY_RUN_ECHO_STDOUT=0
       CONFIG_PROFILE_EFFECTIVE="windows_dev"
       ;;
+    windows_voice_dev)
+      ORCH_SERIAL_DRY_RUN=1
+      ORCH_TTS_EVENT_OUT_TRANSPORT="tcp"
+      ORCH_DRY_RUN_ECHO_STDOUT=0
+      CONFIG_PROFILE_EFFECTIVE="windows_voice_dev"
+      ROBOT_INPUT_MODE="voice_only"
+      ;;
+    sc171_voice_gateway)
+      ORCH_SERIAL_DRY_RUN=0
+      ORCH_TTS_EVENT_OUT_TRANSPORT="uds"
+      ORCH_DRY_RUN_ECHO_STDOUT=0
+      CONFIG_PROFILE_EFFECTIVE="sc171_voice_gateway"
+      ROBOT_INPUT_MODE="voice_only"
+      ;;
+    sc171_hybrid)
+      ORCH_SERIAL_DRY_RUN=0
+      ORCH_TTS_EVENT_OUT_TRANSPORT="uds"
+      ORCH_DRY_RUN_ECHO_STDOUT=0
+      CONFIG_PROFILE_EFFECTIVE="sc171_hybrid"
+      ROBOT_INPUT_MODE="hybrid"
+      ;;
     *)
-      die "STACK_PROFILE 只支持 dryrun/full/sc171_board/windows_dev，当前=$STACK_PROFILE"
+      die "STACK_PROFILE 只支持 dryrun/full/sc171_board/windows_dev/windows_voice_dev/sc171_voice_gateway/sc171_hybrid，当前=$STACK_PROFILE"
       ;;
   esac
 
@@ -303,7 +324,7 @@ show_banner() {
   [[ -n "${STACK_RUN_ID:-}" ]] && printf '%brun id%b         : %s\n' "$C_BOLD" "$C_RESET" "$STACK_RUN_ID"
   printf '%bprofile%b        : %s\n' "$C_BOLD" "$C_RESET" "$STACK_PROFILE"
   printf '%bconfig profile%b : %s\n' "$C_BOLD" "$C_RESET" "$SYSTEM_CONFIG_PROFILE"
-  printf '%bmobile input%b   : mobile_gateway (voice disabled)\n' "$C_BOLD" "$C_RESET"
+  printf '%binput mode%b     : %s\n' "$C_BOLD" "$C_RESET" "${ROBOT_INPUT_MODE:-mobile_only}"
   printf '%bvision root%b    : %s\n' "$C_BOLD" "$C_RESET" "$VISION_ROOT"
   printf '%bvision preload%b : %s\n' "$C_BOLD" "$C_RESET" "${VISION_LD_PRELOAD:-<none>}"
   printf '%btable bbox%b     : enable=%s model=%s mock=%s preview_rgb=%s\n' \
@@ -1076,6 +1097,26 @@ cleanup_core_sockets() {
   chmod 1777 "$STACK_SOCK_DIR" 2>/dev/null || sudo chmod 1777 "$STACK_SOCK_DIR" 2>/dev/null || true
 }
 
+voice_start() {
+  local dryrun_flag=""
+  if [[ "$STACK_PROFILE" == "windows_voice_dev" || "$STACK_PROFILE" == "windows_dev" || "$STACK_PROFILE" == "dryrun" ]]; then
+    dryrun_flag="--dry-run-text"
+  fi
+  "$STACK_ROOT/Voice/start_voice_asr.sh" start "$SYSTEM_CONFIG_PROFILE" "$dryrun_flag"
+}
+
+voice_stop() {
+  "$STACK_ROOT/Voice/start_voice_asr.sh" stop
+}
+
+voice_status() {
+  "$STACK_ROOT/Voice/start_voice_asr.sh" status
+}
+
+voice_tail() {
+  "$STACK_ROOT/Voice/start_voice_asr.sh" tail
+}
+
 stop_gateway() {
   headline "停止 mobile_gateway"
   kill_pid_group "$GATEWAY_PID_FILE" 0 "mobile_gateway"
@@ -1088,6 +1129,9 @@ stop_core() {
   headline "停止 core: VISTA + orchestrator"
   kill_pid_group "$VISION_PID_FILE" 0 "vision"
   kill_pid_group "$ORCH_PID_FILE" $([[ $(orch_use_sudo_effective; echo $?) -eq 0 ]] && echo 1 || echo 0) "orchestrator"
+  if [[ "${ROBOT_INPUT_MODE:-}" == "voice_only" || "${ROBOT_INPUT_MODE:-}" == "hybrid" ]]; then
+    voice_stop
+  fi
   cleanup_core_sockets
 }
 
@@ -1099,6 +1143,7 @@ stop_all() {
   kill_pid_group "$GATEWAY_PID_FILE" 0 "mobile_gateway"
   kill_pid_group "$VISION_PID_FILE" 0 "vision"
   kill_pid_group "$ORCH_PID_FILE" $([[ $(orch_use_sudo_effective; echo $?) -eq 0 ]] && echo 1 || echo 0) "orchestrator"
+  voice_stop
   kill_by_ports
   cleanup_sockets
 }
@@ -1141,10 +1186,30 @@ gateway_status_log_file() {
 
 status_all() {
   headline "当前状态"
-  mark note "core = vision + orchestrator/controller; gateway = mobile_gateway"
+  mark note "core = vision + orchestrator/controller; gateway = mobile_gateway; voice = voice_gateway"
+  
+  local mode="${ROBOT_INPUT_MODE:-mobile_only}"
+  log "输入模式 (ROBOT_INPUT_MODE) : $mode"
+  
+  log "IPC 端点信息 (IPC Endpoints) :"
+  if [[ "$STACK_PROFILE" == "windows_voice_dev" ]]; then
+    log "  - task_cmd  (Orchestrator IN) : 127.0.0.1:19101 (TCP)"
+    log "  - task_ack  (Voice Gateway IN): 127.0.0.1:19102 (TCP)"
+    log "  - tts_event (Voice Gateway IN): 127.0.0.1:19111 (TCP)"
+  else
+    log "  - task_cmd  (Orchestrator IN) : /tmp/robot_stack/task_cmd.sock (UDS)"
+    log "  - task_ack  (Voice/Mobile IN) : /tmp/robot_stack/task_ack.sock (UDS)"
+    if [[ "${ORCH_TTS_EVENT_OUT_TRANSPORT:-}" == "uds" ]]; then
+      log "  - tts_event (Voice Gateway IN): /tmp/robot_stack/tts_event.sock (UDS)"
+    else
+      log "  - tts_event (Voice Gateway IN): disabled"
+    fi
+  fi
+  
   status_one "vision" "$VISION_PID_FILE" 0 "$VISION_LOG_FILE"
   status_one "orchestrator/controller" "$ORCH_PID_FILE" $([[ $(orch_use_sudo_effective; echo $?) -eq 0 ]] && echo 1 || echo 0) "$ORCH_LOG_FILE"
   status_one "mobile_gateway" "$GATEWAY_PID_FILE" 0 "$(gateway_status_log_file)"
+  status_one "voice_gateway" "$STACK_ROOT/Voice/voice.pid" 0 "$STACK_ROOT/Voice/voice.out"
 }
 
 tail_stack_summary() {
@@ -1319,24 +1384,53 @@ start_core() {
 }
 
 start_stack() {
-  if ! pid_alive "$GATEWAY_PID_FILE" 0; then
-    start_gateway_only
-  else
-    prepare_latest_run_paths
-    log "mobile_gateway 已在运行, pid=$(cat "$GATEWAY_PID_FILE")"
+  ROBOT_INPUT_MODE="${ROBOT_INPUT_MODE:-mobile_only}"
+  
+  if [[ "$ROBOT_INPUT_MODE" == "mobile_only" || "$ROBOT_INPUT_MODE" == "hybrid" ]]; then
+    if ! pid_alive "$GATEWAY_PID_FILE" 0; then
+      start_gateway_only
+    else
+      prepare_latest_run_paths
+      log "mobile_gateway 已在运行, pid=$(cat "$GATEWAY_PID_FILE")"
+    fi
+  fi
+
+  if [[ "$ROBOT_INPUT_MODE" == "voice_only" || "$ROBOT_INPUT_MODE" == "hybrid" ]]; then
+    voice_start
   fi
 
   unset STACK_RUN_ID STACK_RUN_DIR
   start_core
-  check_gateway_to_orchestrator_link || { stop_core || true; exit 1; }
-  if ! wait_for_gateway_ready "$READY_TIMEOUT_S" "$GATEWAY_READY_EXTRA_S"; then
-    tail_last_logs_on_failure "mobile_gateway" "$GATEWAY_LOG_FILE"
-    stop_core || true
-    exit 1
+
+  if [[ "$ROBOT_INPUT_MODE" == "mobile_only" || "$ROBOT_INPUT_MODE" == "hybrid" ]]; then
+    check_gateway_to_orchestrator_link || { stop_core || true; exit 1; }
+    if ! wait_for_gateway_ready "$READY_TIMEOUT_S" "$GATEWAY_READY_EXTRA_S"; then
+      tail_last_logs_on_failure "mobile_gateway" "$GATEWAY_LOG_FILE"
+      stop_core || true
+      exit 1
+    fi
+  fi
+
+  if [[ "$ROBOT_INPUT_MODE" == "voice_only" || "$ROBOT_INPUT_MODE" == "hybrid" ]]; then
+    # In sc171 hardware/board modes, check that Voice Gateway sockets exist
+    if [[ "$STACK_PROFILE" != "windows_voice_dev" && "$STACK_PROFILE" != "windows_dev" && "$STACK_PROFILE" != "dryrun" ]]; then
+      log "等待 Voice Gateway socket 准备就绪..."
+      if ! wait_for_endpoint "voice_gateway" "task_ack" "$READY_TIMEOUT_S" "1"; then
+        log "Voice Gateway task_ack socket 未能在超时时间内就绪"
+        stop_core || true
+        exit 1
+      fi
+    fi
   fi
 
   headline "启动完成"
-  mark ok "vision / orchestrator(controller) / mobile_gateway 均已通过 ready-check，可以用手机端发指令。"
+  if [[ "$ROBOT_INPUT_MODE" == "hybrid" ]]; then
+    mark ok "vision / orchestrator(controller) / mobile_gateway + voice_gateway 均已通过 ready-check。"
+  elif [[ "$ROBOT_INPUT_MODE" == "voice_only" ]]; then
+    mark ok "vision / orchestrator(controller) / voice_gateway 均已通过 ready-check。"
+  else
+    mark ok "vision / orchestrator(controller) / mobile_gateway 均已通过 ready-check，可以用手机端发指令。"
+  fi
   status_all
 
   if [[ "$FOLLOW_STACK_LOGS_AFTER_START" == "1" ]]; then
@@ -1371,7 +1465,7 @@ restart_core() {
 main() {
   local action="${1:-start}"
   case "$action" in
-    dryrun|dry_run|full|sc171_board|windows_dev)
+    dryrun|dry_run|full|sc171_board|windows_dev|windows_voice_dev|sc171_voice_gateway|sc171_hybrid)
       STACK_PROFILE="$action"
       shift || true
       action="${1:-start}"
@@ -1394,6 +1488,22 @@ main() {
       prepare_latest_run_paths
       stop_gateway
       start_gateway_only
+      ;;
+    voice-start)
+      voice_start
+      ;;
+    voice-stop)
+      voice_stop
+      ;;
+    voice-restart)
+      voice_stop
+      voice_start
+      ;;
+    voice-status)
+      voice_status
+      ;;
+    voice-tail)
+      voice_tail
       ;;
     core-start)
       start_core
@@ -1419,15 +1529,21 @@ main() {
       echo "  ./start_robot_stack.sh gateway-start    # 只启动 mobile_gateway"
       echo "  ./start_robot_stack.sh gateway-stop     # 只停止 mobile_gateway"
       echo "  ./start_robot_stack.sh gateway-restart  # 重启 mobile_gateway"
-      echo "  ./start_robot_stack.sh core-start       # 启动 core: VISTA + orchestrator"
+      echo "  ./start_robot_stack.sh voice-start      # 只启动 voice_gateway"
+      echo "  ./start_robot_stack.sh voice-stop       # 只停止 voice_gateway"
+      echo "  ./start_robot_stack.sh voice-restart    # 重启 voice_gateway"
+      echo "  ./start_robot_stack.sh voice-status     # 查看 voice_gateway 运行状态"
+      echo "  ./start_robot_stack.sh voice-tail       # 追踪 voice_gateway 运行日志"
+      echo "  ./start_robot_stack.sh core-start       # 启动 core: VISTA + orchestrator (+ voice 如果已配置)"
       echo "  ./start_robot_stack.sh core-stop        # 停止 core，保留 mobile_gateway"
       echo "  ./start_robot_stack.sh core-restart     # 重启 core"
-      echo "  ./start_robot_stack.sh start            # 兼容旧习惯：gateway 不在则启动，再启动 core"
+      echo "  ./start_robot_stack.sh start            # 根据 ROBOT_INPUT_MODE 启动 gateway，再启动 core"
       echo "  ./start_robot_stack.sh stop             # 等价 core-stop，保留 mobile_gateway"
-      echo "  ./start_robot_stack.sh stop-all         # 停止 mobile_gateway + core，并完整清理"
+      echo "  ./start_robot_stack.sh stop-all         # 停止 mobile_gateway + core + voice_gateway，并完整清理"
       echo "  ./start_robot_stack.sh status           # 查看状态"
       echo "  ./start_robot_stack.sh full start       # 使用 full/sc171_board 配置启动"
       echo "  ./start_robot_stack.sh dryrun start     # 使用 dry_run 配置启动"
+      echo "  ./start_robot_stack.sh windows_voice_dev start # 使用 Windows 语音开发模式启动"
       exit 1
       ;;
   esac
