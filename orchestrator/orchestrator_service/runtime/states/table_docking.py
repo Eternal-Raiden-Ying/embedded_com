@@ -1904,42 +1904,69 @@ class TableDockingMixin:
         if str(summary.get("speed_limit_reason") or "").strip().lower() == "stop":
             return decision
         depth = None
-        for value in (
-            getattr(obs, "table_roi_depth_median", None) if obs is not None else None,
-            getattr(obs, "final_fixed_roi_depth_median", None) if obs is not None else None,
-            getattr(obs, "depth_median", None) if obs is not None else None,
-            getattr(obs, "table_roi_depth_p10", None) if obs is not None else None,
-            getattr(obs, "depth_p10", None) if obs is not None else None,
+        depth_source = "unknown"
+        for source, value in (
+            ("table_roi_median_m", getattr(obs, "table_roi_depth_median", None) if obs is not None else None),
+            ("fixed_roi_median_m", getattr(obs, "final_fixed_roi_depth_median", None) if obs is not None else None),
+            ("edge_measured_dist_m", getattr(obs, "depth_median", None) if obs is not None else None),
         ):
             parsed = self._final_enter_float(value)
             if parsed is not None and parsed > 0.0:
                 depth = float(parsed)
+                depth_source = source
                 break
         min_vx = abs(float(getattr(self.cfg, "yolo_approach_min_vx_mps", 0.04) or 0.04))
         far_vx = abs(float(getattr(self.cfg, "yolo_approach_far_vx_mps", 0.22) or 0.22))
         mid_vx = abs(float(getattr(self.cfg, "yolo_approach_mid_vx_mps", 0.12) or 0.12))
         near_vx = abs(float(getattr(self.cfg, "yolo_approach_near_vx_mps", 0.06) or 0.06))
+        obs_fresh = obs is not None
+        obs_age_ms = self._table_obs_age_ms(obs) if obs is not None else None
+        far_allowed = bool(depth is not None and depth > 1.20 and obs_fresh)
         if depth is None:
-            band = str(summary.get("yolo_approach_speed_band") or "min")
-            selected = max(min_vx, float(getattr(decision.cmd, "vx_mps", 0.0) or 0.0))
-        elif depth > 1.20:
+            band = "min"
+            selected = min_vx
+            block_reason = "depth_unknown"
+        elif far_allowed:
             band = "far"
             selected = far_vx
+            block_reason = "allowed"
         elif depth >= 0.90:
             band = "mid"
             selected = mid_vx
+            block_reason = "depth_not_far"
         elif depth >= 0.65:
             band = "near"
             selected = near_vx
+            block_reason = "depth_not_far"
         else:
             band = "min"
             selected = min_vx
+            block_reason = "depth_not_far"
         cap = self._final_enter_float(summary.get("depth_speed_envelope_vx_cap"))
         if cap is not None and cap <= 0.0:
             return decision
         if cap is not None and cap > 0.0:
             selected = min(selected, float(cap))
         selected = max(min_vx, selected)
+        if band == "far" and selected < far_vx - 1e-9:
+            far_allowed = False
+            block_reason = "depth_speed_envelope_cap"
+            if selected >= mid_vx - 1e-9:
+                band = "mid"
+            elif selected >= near_vx - 1e-9:
+                band = "near"
+            else:
+                band = "min"
+        inconsistent = bool(not far_allowed and (band == "far" or selected >= far_vx - 1e-9))
+        if inconsistent:
+            self._log(
+                "warn",
+                "[YOLO_SPEED][INCONSISTENT_DECISION] "
+                f"far_allowed=false band={band} selected_vx={selected:.3f} depth={depth} source={depth_source}",
+            )
+            band = "near" if depth is not None and depth > 0.65 else "min"
+            selected = near_vx if band == "near" else min_vx
+            block_reason = block_reason or "far_not_allowed"
         decision.cmd.vx_mps = float(selected)
         decision.cmd.vy_mps = 0.0
         summary.update(
@@ -1947,6 +1974,13 @@ class TableDockingMixin:
                 "yolo_approach_speed_band": band,
                 "yolo_approach_speed_depth": depth,
                 "yolo_approach_selected_vx": float(selected),
+                "yolo_approach_depth_source": depth_source,
+                "yolo_approach_obs_fresh": bool(obs_fresh),
+                "yolo_approach_obs_age_s": (
+                    float(obs_age_ms) / 1000.0 if obs_age_ms is not None else None
+                ),
+                "yolo_approach_far_allowed": bool(far_allowed and band == "far"),
+                "yolo_approach_speed_block_reason": "" if far_allowed and band == "far" else block_reason,
                 "vx_mps": float(selected),
                 "vy_mps": 0.0,
                 "final_vx": float(selected),

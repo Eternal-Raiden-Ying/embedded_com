@@ -24,6 +24,8 @@ vision:
     vision_params_file: "" # Path to runtime configuration file
     loaded_config_files: [] # List of loaded config paths
     stack_run_id: "" # Stack run execution ID
+    log_profile: "normal" # normal/debug/trace structured log volume profile
+    resource_sample_interval_s: 1.0
     loop_hz: 8.0 # Frequency of main perception loop
     send_hz: 5.0 # IPC send frequency
     track_local_send_hz: 8.0 # Local tracking IPC send frequency
@@ -194,6 +196,7 @@ vision:
     yolo_table_min_conf: 0.25 # YOLO table confidence minimum threshold
     edge_sync_threshold_s: 0.25 # Timestamp sync threshold between edge and local perception
   preview:
+    preview_mode: "debug" # off/light/debug/full preview rendering cost profile
     mode_layouts:
       IDLE: "rgb_minimal" # Layout for IDLE state
       FIND_EDGE: "rgb_depth_edge" # Layout for FIND_EDGE state
@@ -273,6 +276,8 @@ orchestrator:
     pid_dir: "" # Folder for pid files
     pid_file: "" # Pid path
     stack_run_id: "" # Multi process stack execution identifier
+    log_profile: "normal" # normal/debug/trace structured log volume profile
+    resource_sample_interval_s: 1.0
     tick_hz: 10.0 # Orchestrator state machine update rate
     log_mode: "concise" # Level of details in stdout/file logs
     log_enabled: true # Enable orchestrator logs output

@@ -15,7 +15,7 @@ class SystemMetricsSampler:
     def __init__(self, module: str, interval_s: float = 1.0):
         self.module = str(module or "process")
         self.interval_s = max(0.5, float(interval_s or 1.0))
-        self._last_ts = 0.0
+        self._last_mono_ns = 0
         self._last_proc_cpu = None
         self._last_total_cpu = None
         self._psutil = None
@@ -33,12 +33,20 @@ class SystemMetricsSampler:
 
     def sample_if_due(self, *, force: bool = False) -> Optional[Dict[str, Any]]:
         now = time.time()
-        if not force and now - float(self._last_ts or 0.0) < self.interval_s:
+        mono_ns = time.monotonic_ns()
+        if not force and self._last_mono_ns and (mono_ns - self._last_mono_ns) < int(self.interval_s * 1_000_000_000):
             return None
-        self._last_ts = now
+        self._last_mono_ns = mono_ns
         if self._psutil is not None and self._process is not None:
-            return self._sample_psutil(now)
-        return self._sample_proc(now)
+            out = self._sample_psutil(now)
+        else:
+            out = self._sample_proc(now)
+        out["wall_ts"] = now
+        out["mono_ns"] = mono_ns
+        out["component"] = self.module
+        out["sample_interval_s"] = self.interval_s
+        out.update(self._frequency_metrics())
+        return out
 
     def _sample_psutil(self, now: float) -> Dict[str, Any]:
         psutil = self._psutil
@@ -47,29 +55,25 @@ class SystemMetricsSampler:
         out: Dict[str, Any] = {
             "ts": now,
             "module": self.module,
-            "source": "psutil",
             "process_cpu_percent": proc.cpu_percent(None),
             "system_cpu_percent": psutil.cpu_percent(None),
             "process_rss_mb": float(getattr(mem, "rss", 0) or 0) / (1024.0 * 1024.0),
             "process_vms_mb": float(getattr(mem, "vms", 0) or 0) / (1024.0 * 1024.0),
             "system_mem_percent": float(psutil.virtual_memory().percent),
-            "thread_count": int(proc.num_threads()),
+            "system_mem_used_mb": float(psutil.virtual_memory().used) / (1024.0 * 1024.0),
+            "system_mem_total_mb": float(psutil.virtual_memory().total) / (1024.0 * 1024.0),
         }
         try:
-            out["per_cpu_percent"] = psutil.cpu_percent(None, percpu=True)
+            out["per_core_cpu_percent"] = psutil.cpu_percent(None, percpu=True)
         except Exception:
             pass
         try:
-            out["open_fds"] = int(proc.num_fds())
-        except Exception:
-            pass
-        try:
-            out["loadavg"] = list(os.getloadavg())
+            out["load_avg"] = list(os.getloadavg())
         except Exception:
             pass
         temp = self._thermal_temp_c()
         if temp is not None:
-            out["temperature_c"] = temp
+            out["soc_temp_c"] = temp
         return out
 
     def _sample_proc(self, now: float) -> Dict[str, Any]:
@@ -79,26 +83,63 @@ class SystemMetricsSampler:
         out: Dict[str, Any] = {
             "ts": now,
             "module": self.module,
-            "source": "procfs",
             "process_cpu_percent": proc_cpu,
             "system_cpu_percent": total_cpu,
             "process_rss_mb": rss_mb,
             "process_vms_mb": vms_mb,
             "system_mem_percent": mem_percent,
-            "thread_count": self._thread_count(),
+            "system_mem_used_mb": self._mem_used_mb(),
+            "system_mem_total_mb": self._mem_total_mb(),
         }
         try:
-            out["open_fds"] = len(list(Path("/proc/self/fd").iterdir()))
-        except Exception:
-            pass
-        try:
-            out["loadavg"] = list(os.getloadavg())
+            out["load_avg"] = list(os.getloadavg())
         except Exception:
             pass
         temp = self._thermal_temp_c()
         if temp is not None:
-            out["temperature_c"] = temp
+            out["soc_temp_c"] = temp
         return out
+
+    @staticmethod
+    def _mem_used_mb() -> Optional[float]:
+        try:
+            values = {}
+            for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+                key, raw = line.split(":", 1)
+                values[key] = float(raw.strip().split()[0])
+            return (values["MemTotal"] - values.get("MemAvailable", 0.0)) / 1024.0
+        except Exception:
+            return None
+
+    @staticmethod
+    def _mem_total_mb() -> Optional[float]:
+        try:
+            for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+                if line.startswith("MemTotal:"):
+                    return float(line.split(":", 1)[1].strip().split()[0]) / 1024.0
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _read_numeric_paths(paths) -> tuple[Optional[float], str]:
+        errors = []
+        for path in paths:
+            try:
+                raw = Path(path).read_text(encoding="utf-8").strip().split()[0]
+                return float(raw), ""
+            except Exception as exc:
+                errors.append(f"{path}:{exc}")
+        return None, "; ".join(errors[-3:]) or "no supported sysfs node"
+
+    def _frequency_metrics(self) -> Dict[str, Any]:
+        cpu, _ = self._read_numeric_paths([
+            "/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq",
+            "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_cur_freq",
+        ])
+        return {
+            "cpu_freq_mhz": (cpu / 1000.0) if cpu is not None else None,
+        }
 
     def _proc_mem_mb(self) -> tuple[Optional[float], Optional[float]]:
         try:

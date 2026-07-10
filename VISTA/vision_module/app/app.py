@@ -4,6 +4,7 @@
 import json
 import logging
 import os
+import signal
 import sys
 import time
 from collections import deque
@@ -44,6 +45,7 @@ class VistaApp(BaseModule):
         ensure_dir(CONFIG.runtime.log_dir)
         ensure_dir(CONFIG.runtime.runs_dir)
         ensure_dir(CONFIG.runtime.pid_dir)
+        os.environ.setdefault("ROBOT_LOG_PROFILE", str(getattr(CONFIG.runtime, "log_profile", "normal") or "normal"))
         vision_runs_root = Path(CONFIG.runtime.runs_dir)
         self.run_logger = RunLogger(
             "vision",
@@ -63,7 +65,11 @@ class VistaApp(BaseModule):
         self._vision_log_last_flush_ts = 0.0
         self._stop_reason = "normal"
         self.scheduler = Scheduler()
-        camera_manager = CameraManager(cfg=CONFIG, logger=self.child_logger("camera"))
+        camera_manager = CameraManager(
+            cfg=CONFIG,
+            logger=self.child_logger("camera"),
+            perf_marker=self._vision_perf_marker,
+        )
         predictor_manager = PredictorManager(cfg=CONFIG, logger=self.child_logger("predictor"))
         remote_manager = RemoteManager(
             client=RemoteGraspClient(logger=self.child_logger("remote")),
@@ -121,6 +127,7 @@ class VistaApp(BaseModule):
             logger=self._log_ipc_event,
             queue_size=1,
             latest_only=True,
+            perf_marker=self._vision_perf_marker,
         )
         self.diag_sender = JsonlClientSender(
             mode=CONFIG.obs_out.transport,
@@ -175,7 +182,8 @@ class VistaApp(BaseModule):
         self._last_rate_edge_key = None
         self._last_request_trace_ts = 0.0
         self._last_periodic_log_ts: Dict[str, float] = {}
-        self._system_metrics = SystemMetricsSampler("vision", interval_s=float(os.getenv("VISION_SYSTEM_METRICS_INTERVAL_S", "1.0") or 1.0))
+        resource_interval = float(getattr(CONFIG.runtime, "resource_sample_interval_s", 1.0) or 1.0)
+        self._system_metrics = SystemMetricsSampler("vision", interval_s=resource_interval)
         self._last_preview_timing_log_ts = 0.0
         self._last_main_loop_ms = 0.0
         self.obs_skip_count = 0
@@ -245,6 +253,7 @@ class VistaApp(BaseModule):
             "size_bytes": stdout_size,
             "first_write_ts": float(self._vision_log_first_write_ts or 0.0),
             "last_flush_ts": float(self._vision_log_last_flush_ts or 0.0),
+            "flushed": bool(self._stopped),
             "logger_handlers": self._logger_handlers_snapshot(),
         }
         self._vision_log_health_file.parent.mkdir(parents=True, exist_ok=True)
@@ -295,6 +304,7 @@ class VistaApp(BaseModule):
             "camera_publish_hz": CONFIG.camera.max_fps,
             "hot_standby_s": CONFIG.runtime.hot_standby_s,
             "keep_preview_after_stop": CONFIG.runtime.keep_preview_after_stop,
+            "preview_mode": getattr(CONFIG.preview, "preview_mode", "light"),
             "keep_model_hot_in_standby": CONFIG.runtime.keep_model_hot_in_standby,
             "enable_infer_during_hot_standby": CONFIG.runtime.enable_infer_during_hot_standby,
             "capability_placeholder": CONFIG.runtime.capability_placeholder,
@@ -567,11 +577,44 @@ class VistaApp(BaseModule):
         )
         send_hz = 1000.0 / float(send_interval_ms) if send_interval_ms and send_interval_ms > 0.0 else 0.0
         perception = out_payload.get("perception") if isinstance(out_payload, dict) else None
+        try:
+            frame_meta = self.scheduler.read_result("frame_meta", default=None)
+        except Exception:
+            frame_meta = None
+        frame_meta = frame_meta if isinstance(frame_meta, dict) else {}
         if isinstance(perception, dict):
             for obs_key in ("table_edge_obs", "target_obs", "home_tag_obs"):
                 obs = perception.get(obs_key)
                 if isinstance(obs, dict):
+                    send_mono_ns = time.monotonic_ns()
+                    frame_id = obs.get("frame_id") or obs.get("camera_frame_seq") or frame_meta.get("frame_seq")
+                    same_meta_frame = str(frame_meta.get("frame_seq")) == str(frame_id)
+                    trace_id = obs.get("trace_id") or (
+                        frame_meta.get("trace_id") if same_meta_frame else None
+                    ) or (f"vision:{frame_id}" if frame_id is not None else None)
+                    capture_mono_ns = obs.get("capture_mono_ns") or (
+                        frame_meta.get("capture_mono_ns") if same_meta_frame else None
+                    )
+                    capture_done_mono_ns = obs.get("camera_capture_done_mono_ns") or (
+                        frame_meta.get("camera_capture_done_mono_ns") if same_meta_frame else None
+                    )
+                    obs["frame_id"] = frame_id
+                    obs["trace_id"] = trace_id
+                    obs["capture_mono_ns"] = capture_mono_ns
+                    obs["frame_capture_mono_ns"] = capture_mono_ns
+                    obs["camera_capture_done_mono_ns"] = capture_done_mono_ns
                     obs["obs_out_send_ts_ms"] = int(round(now * 1000.0))
+                    obs["obs_publish_mono_ns"] = send_mono_ns
+                    if capture_mono_ns is None:
+                        capture_ts = obs.get("frame_capture_ts") or obs.get("obs_ts")
+                        try:
+                            capture_mono_ns = send_mono_ns - int(
+                                max(0.0, now - float(capture_ts)) * 1_000_000_000.0
+                            )
+                        except (TypeError, ValueError):
+                            capture_mono_ns = None
+                        obs["capture_mono_ns"] = capture_mono_ns
+                        obs["frame_capture_mono_ns"] = capture_mono_ns
                     obs["obs_out_send_interval_ms"] = send_interval_ms
                     obs["obs_out_send_hz"] = float(send_hz)
                     obs["obs_out_drop_or_skip_count"] = int(self._obs_out_drop_or_skip_count)
@@ -579,6 +622,27 @@ class VistaApp(BaseModule):
                     obs["send_hz_config"] = float(CONFIG.runtime.send_hz)
                     obs["track_local_send_hz_config"] = float(CONFIG.runtime.track_local_send_hz)
                     obs["min_send_interval_ms"] = float(min_send_interval_ms)
+        if isinstance(out_payload, dict):
+            primary = None
+            if isinstance(perception, dict):
+                primary = next(
+                    (
+                        perception.get(key)
+                        for key in ("table_edge_obs", "target_obs", "home_tag_obs")
+                        if isinstance(perception.get(key), dict)
+                    ),
+                    None,
+                )
+            if isinstance(primary, dict):
+                for key in (
+                    "frame_id",
+                    "obs_seq",
+                    "trace_id",
+                    "capture_mono_ns",
+                    "camera_capture_done_mono_ns",
+                    "obs_publish_mono_ns",
+                ):
+                    out_payload[key] = primary.get(key)
         queued = sender.send(out_payload)
         if not queued:
             self._obs_out_drop_or_skip_count += 1
@@ -663,7 +727,8 @@ class VistaApp(BaseModule):
 
     def _preview_fps_snapshot(self) -> Optional[float]:
         try:
-            preview = dict(self.mode_controller.runtime_snapshot().get("capabilities", {}).get("preview") or {})
+            runtime = dict(self.mode_controller.runtime_snapshot() or {})
+            preview = dict((runtime.get("runtime_supervisor") or {}).get("preview") or {})
             value = preview.get("preview_fps")
             return float(value) if value is not None else None
         except Exception:
@@ -671,8 +736,15 @@ class VistaApp(BaseModule):
 
     def _preview_timing_snapshot(self) -> Dict[str, Any]:
         try:
-            preview = dict(self.mode_controller.runtime_snapshot().get("capabilities", {}).get("preview") or {})
+            runtime = dict(self.mode_controller.runtime_snapshot() or {})
+            preview = dict((runtime.get("runtime_supervisor") or {}).get("preview") or {})
             timing = dict(preview.get("preview_timing") or {})
+            timing.setdefault("preview_enabled", bool(preview.get("enabled", False)))
+            timing.setdefault("preview_mode", preview.get("preview_mode"))
+            timing.setdefault("preview_fps", preview.get("preview_fps"))
+            for key in ("preview_frame_age_ms", "preview_queue_depth", "preview_dropped_frames", "preview_last_frame_id"):
+                if key in preview:
+                    timing[key] = preview.get(key)
             return timing
         except Exception:
             return {}
@@ -849,7 +921,10 @@ class VistaApp(BaseModule):
         preview_timing = self._preview_timing_snapshot()
 
         yolo_infer_ms = self._float_or_none(local.get("yolo_infer_ms"))
+        yolo_preprocess_ms = self._float_or_none(local.get("yolo_preprocess_ms"))
+        yolo_postprocess_ms = self._float_or_none(local.get("yolo_postprocess_ms"))
         yolo_roi_ms = self._float_or_none(local.get("yolo_roi_ms"))
+        camera_capture_ms = self._float_or_none(local.get("camera_capture_ms"))
         edge_process_ms = self._float_or_none((edge_obs or {}).get("vision_process_ms")) if isinstance(edge_obs, dict) else None
         obs_total_age_ms = self._float_or_none((edge_obs or {}).get("obs_total_age_ms")) if isinstance(edge_obs, dict) else None
         edge_profile = (edge_obs or {}).get("edge_profile") if isinstance(edge_obs, dict) else None
@@ -862,9 +937,16 @@ class VistaApp(BaseModule):
             }
         obs_enqueue_ms = max(0.0, (now - float(sent_ts)) * 1000.0)
         preview_total_ms = self._float_or_none(preview_timing.get("preview_total_ms_avg"))
+        preview_compose_ms = self._float_or_none(preview_timing.get("preview_compose_ms_avg"))
+        preview_imshow_ms = self._float_or_none(preview_timing.get("preview_imshow_ms_avg"))
+        preview_waitkey_ms = self._float_or_none(preview_timing.get("preview_waitkey_ms_avg"))
+        preview_substages = self._preview_substage_values(preview_timing)
+        preview_overlay_ms = preview_substages.get("preview_overlay_ms")
         main_loop_ms = self._float_or_none(getattr(self, "_last_main_loop_ms", None))
         edge_frame_seq = (edge_obs or {}).get("camera_frame_seq") if isinstance(edge_obs, dict) else None
         frame_seq = local.get("frame_seq") or edge_frame_seq
+        obs_seq = (edge_obs or {}).get("obs_seq") if isinstance(edge_obs, dict) else None
+        trace_id = f"vision:{frame_seq}" if frame_seq is not None else None
 
         slow_threshold = self._perf_slow_threshold_ms()
         slow = any(
@@ -885,18 +967,25 @@ class VistaApp(BaseModule):
             "session_id": out_payload.get("session_id"),
             "epoch": out_payload.get("epoch"),
             "frame_seq": frame_seq,
+            "frame_id": frame_seq,
+            "obs_seq": obs_seq,
+            "trace_id": trace_id,
             "yolo": {
                 "enabled": bool(local.get("yolo_infer_running") or local.get("yolo_has_infer")),
                 "has_infer": bool(local.get("has_infer")),
                 "model_name": local.get("model_name"),
                 "predictor_type": local.get("predictor_type"),
                 "box_count": local.get("box_count"),
+                "preprocess_ms": yolo_preprocess_ms,
                 "infer_ms": yolo_infer_ms,
+                "postprocess_ms": yolo_postprocess_ms,
                 "roi_ms": yolo_roi_ms,
                 "infer_error": local.get("infer_error"),
             },
             "table_edge": {
                 "process_ms": edge_process_ms,
+                "height_filter_ms": (edge_obs or {}).get("height_filter_ms") if isinstance(edge_obs, dict) else None,
+                "plane_fit_ms": (edge_obs or {}).get("plane_fit_ms") if isinstance(edge_obs, dict) else None,
                 "table_bbox_xyxy": (edge_obs or {}).get("table_bbox_xyxy") if isinstance(edge_obs, dict) else None,
                 "yolo_table_visible": (edge_obs or {}).get("yolo_table_visible") if isinstance(edge_obs, dict) else None,
                 "yolo_table_fresh": (edge_obs or {}).get("yolo_table_fresh") if isinstance(edge_obs, dict) else None,
@@ -913,6 +1002,8 @@ class VistaApp(BaseModule):
             },
             "ipc": {
                 "obs_enqueue_ms": obs_enqueue_ms,
+                "obs_publish_ms": (edge_obs or {}).get("publish_delay_ms") if isinstance(edge_obs, dict) else None,
+                "ipc_send_ms": obs_enqueue_ms,
                 "obs_out_send_interval_ms": (edge_obs or {}).get("obs_out_send_interval_ms") if isinstance(edge_obs, dict) else None,
                 "obs_out_send_hz": (edge_obs or {}).get("obs_out_send_hz") if isinstance(edge_obs, dict) else None,
                 "obs_out_drop_or_skip_count": int(self._obs_out_drop_or_skip_count),
@@ -923,15 +1014,168 @@ class VistaApp(BaseModule):
             },
             "preview": {
                 "enabled": preview_timing.get("preview_enabled"),
+                "mode": preview_timing.get("preview_mode"),
                 "layout": preview_timing.get("preview_layout"),
                 "fps": preview_timing.get("preview_fps"),
                 "total_ms_avg": preview_total_ms,
+                "total_ms": preview_total_ms,
+                "compose_ms": preview_compose_ms,
+                "overlay_ms": preview_overlay_ms,
+                "imshow_ms": preview_imshow_ms,
+                "waitkey_ms": preview_waitkey_ms,
+                "frame_age_ms": self._float_or_none(preview_timing.get("preview_frame_age_ms")),
+                "queue_depth": preview_timing.get("preview_queue_depth"),
+                "dropped_frames": preview_timing.get("preview_dropped_frames"),
                 "total_ms_p95": preview_timing.get("preview_total_ms_p95"),
                 "sample_count": preview_timing.get("sample_count"),
             },
+            "camera_capture_interval_ms": (edge_obs or {}).get("camera_frame_interval_ms") if isinstance(edge_obs, dict) else None,
+            "camera_capture_ms": camera_capture_ms,
+            "camera_frame_age_ms": (edge_obs or {}).get("frame_age_ms") if isinstance(edge_obs, dict) else None,
+            "vision_publish_interval_ms": (edge_obs or {}).get("vision_publish_interval_ms") if isinstance(edge_obs, dict) else None,
+            "yolo_preprocess_ms": yolo_preprocess_ms,
+            "yolo_infer_ms": yolo_infer_ms,
+            "yolo_postprocess_ms": yolo_postprocess_ms,
+            "table_edge_process_ms": edge_process_ms,
+            "candidate_select_ms": (perception.get("target_obs") or {}).get("candidate_select_ms") if isinstance(perception, dict) and isinstance(perception.get("target_obs"), dict) else None,
+            "height_filter_ms": (edge_obs or {}).get("height_filter_ms") if isinstance(edge_obs, dict) else None,
+            "plane_fit_ms": (edge_obs or {}).get("plane_fit_ms") if isinstance(edge_obs, dict) else None,
+            "obs_publish_ms": (edge_obs or {}).get("publish_delay_ms") if isinstance(edge_obs, dict) else None,
+            "ipc_send_ms": obs_enqueue_ms,
             "main_loop_ms": main_loop_ms,
+            "vision_process_total_ms": edge_process_ms if edge_process_ms is not None else main_loop_ms,
+            "vision_fps": self._hz_for_samples(getattr(self, "_rate_edge_ts", ()), now),
+            "obs_publish_hz": self._hz_for_samples(getattr(self, "_rate_obs_out_send_ts", ()), now),
+            "frame_drop_count": int(self.obs_drop_count),
+            "preview_fps": preview_timing.get("preview_fps"),
+            "preview_mode": preview_timing.get("preview_mode"),
+            "preview_total_ms": preview_total_ms,
+            "preview_compose_ms": preview_compose_ms,
+            "preview_overlay_ms": preview_overlay_ms,
+            "preview_imshow_ms": preview_imshow_ms,
+            "preview_waitkey_ms": preview_waitkey_ms,
+            **preview_substages,
+            "preview_last_frame_id": preview_timing.get("preview_last_frame_id"),
+            "not_executed_reasons": {
+                "yolo": None if yolo_infer_ms is not None else str(local.get("infer_error") or "yolo_not_executed"),
+                "table_edge": None if edge_process_ms is not None else "table_edge_not_executed",
+                "candidate_select": None
+                if isinstance(perception.get("target_obs"), dict) and (perception.get("target_obs") or {}).get("candidate_select_ms") is not None
+                else "target_select_not_executed",
+                "preview": None if preview_timing.get("preview_enabled") else "preview_disabled",
+            },
+            "unavailable_reasons": {
+                "camera_capture_ms": None if camera_capture_ms is not None else "capture_duration_unavailable",
+                "yolo_preprocess_ms": None if yolo_preprocess_ms is not None else "predictor_did_not_emit_preprocess_timing",
+                "yolo_postprocess_ms": None if yolo_postprocess_ms is not None else "predictor_did_not_emit_postprocess_timing",
+                "candidate_select_ms": (
+                    None if isinstance(perception.get("target_obs"), dict)
+                    and (perception.get("target_obs") or {}).get("candidate_select_ms") is not None
+                    else "target_select_not_executed"
+                ),
+                "obs_publish_ms": (
+                    None if isinstance(edge_obs, dict) and edge_obs.get("publish_delay_ms") is not None
+                    else "vision_publisher_did_not_emit_duration"
+                ),
+                "preview_timing": None if preview_timing.get("preview_enabled") else "preview_disabled",
+            },
         }
         self.run_logger.write_jsonl("perf_timing", record)
+        self.run_logger.write_jsonl(
+            "preview_timing",
+            {
+                "preview_enabled": bool(preview_timing.get("preview_enabled")),
+                "preview_mode": preview_timing.get("preview_mode"),
+                "preview_fps": preview_timing.get("preview_fps"),
+                "preview_total_ms": preview_total_ms,
+                "preview_compose_ms": preview_compose_ms,
+                "preview_imshow_ms": preview_imshow_ms,
+                "preview_waitkey_ms": preview_waitkey_ms,
+                "preview_frame_age_ms": preview_timing.get("preview_frame_age_ms"),
+                "preview_last_frame_id": preview_timing.get("preview_last_frame_id"),
+                **preview_substages,
+            },
+        )
+        self._write_vision_perf_timeline(
+            frame_id=frame_seq,
+            obs_seq=obs_seq,
+            trace_id=trace_id,
+            timings={
+                "camera_capture": camera_capture_ms,
+                "frame_preprocess": yolo_preprocess_ms,
+                "yolo_infer": yolo_infer_ms,
+                "yolo_postprocess": yolo_postprocess_ms,
+                "table_edge": edge_process_ms,
+                "target_select": record["candidate_select_ms"],
+                "obs_publish": record["obs_publish_ms"],
+                "preview_compose": preview_compose_ms,
+                "preview_imshow": preview_imshow_ms,
+                "preview_waitkey": preview_waitkey_ms,
+            },
+            preview_enabled=bool(preview_timing.get("preview_enabled")),
+        )
+
+    def _write_vision_perf_timeline(
+        self, *, frame_id, obs_seq, trace_id, timings, preview_enabled: bool
+    ) -> None:
+        for stage, duration in timings.items():
+            executed = duration is not None
+            reason = None if executed else ("preview_disabled" if stage.startswith("preview_") and not preview_enabled else "stage_not_executed")
+            done_ns = time.monotonic_ns()
+            start_ns = done_ns - int(max(0.0, float(duration or 0.0)) * 1_000_000.0)
+            self.run_logger.write_perf_marker(
+                f"{stage}_start",
+                frame_id=frame_id,
+                obs_seq=obs_seq,
+                trace_id=trace_id,
+                executed=executed,
+                reason=reason,
+                mono_ns=start_ns,
+            )
+            self.run_logger.write_perf_marker(
+                f"{stage}_done",
+                frame_id=frame_id,
+                obs_seq=obs_seq,
+                trace_id=trace_id,
+                executed=executed,
+                reason=reason,
+                duration_ms=duration,
+                mono_ns=done_ns,
+            )
+
+    def _vision_perf_marker(self, event: str, **fields: Any) -> None:
+        self.run_logger.write_perf_marker(event, **fields)
+
+    def _preview_substage_values(self, timing: Dict[str, Any]) -> Dict[str, Optional[float]]:
+        keys = (
+            "preview_resize_ms",
+            "preview_colormap_ms",
+            "preview_concat_ms",
+            "preview_overlay_ms",
+            "preview_text_draw_ms",
+            "preview_panel_draw_ms",
+            "preview_legend_draw_ms",
+            "preview_points_draw_ms",
+            "preview_bbox_draw_ms",
+            "preview_copy_ms",
+            "preview_numpy_copy_ms",
+            "preview_encode_or_convert_ms",
+            "preview_canvas_alloc_ms",
+            "preview_canvas_clear_ms",
+            "preview_rgb_prepare_ms",
+            "preview_depth_prepare_ms",
+            "preview_edge_prepare_ms",
+            "preview_panel_layout_ms",
+            "preview_metric_collect_ms",
+            "preview_lock_wait_ms",
+            "preview_ascontiguous_ms",
+            "preview_throttle_sleep_ms",
+            "preview_compose_other_ms",
+        )
+        return {
+            key: self._float_or_none(timing.get(f"{key}_avg"))
+            for key in keys
+        }
 
     def _emit_rate_summary_if_needed(self, force: bool = False) -> None:
         mode = self._safe_mode_text(self._ctx().current_mode)
@@ -951,6 +1195,12 @@ class VistaApp(BaseModule):
         p95 = self._percentile(ages, 0.95)
         preview_fps = self._preview_fps_snapshot()
         preview_timing = self._preview_timing_snapshot()
+        preview_total_ms = self._float_or_none(preview_timing.get("preview_total_ms_avg"))
+        preview_compose_ms = self._float_or_none(preview_timing.get("preview_compose_ms_avg"))
+        preview_substages = self._preview_substage_values(preview_timing)
+        preview_overlay_ms = preview_substages.get("preview_overlay_ms")
+        preview_imshow_ms = self._float_or_none(preview_timing.get("preview_imshow_ms_avg"))
+        preview_waitkey_ms = self._float_or_none(preview_timing.get("preview_waitkey_ms_avg"))
         request_hz = self._hz_for_samples(self._rate_request_ts, now)
         mode_request_hz = self._hz_for_samples(self._rate_mode_request_ts, now)
         target_update_hz = self._hz_for_samples(self._rate_target_update_ts, now)
@@ -970,16 +1220,23 @@ class VistaApp(BaseModule):
             "edge_update_hz": float(edge_hz),
             "preview_fps": preview_fps,
             "preview_enabled": preview_timing.get("preview_enabled"),
+            "preview_mode": preview_timing.get("preview_mode"),
             "preview_layout": preview_timing.get("preview_layout"),
             "preview_text_level": preview_timing.get("preview_text_level"),
             "preview_debug_points_enabled": preview_timing.get("preview_debug_points_enabled"),
+            "preview_total_ms": preview_total_ms,
+            "preview_compose_ms": preview_compose_ms,
+            "preview_overlay_ms": preview_overlay_ms,
+            "preview_imshow_ms": preview_imshow_ms,
+            "preview_waitkey_ms": preview_waitkey_ms,
+            **preview_substages,
+            "preview_frame_age_ms": self._float_or_none(preview_timing.get("preview_frame_age_ms")),
+            "preview_queue_depth": preview_timing.get("preview_queue_depth"),
+            "preview_dropped_frames": preview_timing.get("preview_dropped_frames"),
             "preview_total_ms_avg": preview_timing.get("preview_total_ms_avg"),
             "preview_total_ms_p95": preview_timing.get("preview_total_ms_p95"),
             "preview_total_ms_max": preview_timing.get("preview_total_ms_max"),
             "preview_compose_ms_avg": preview_timing.get("preview_compose_ms_avg"),
-            "preview_draw_points_ms_avg": preview_timing.get("preview_draw_points_ms_avg"),
-            "preview_draw_text_ms_avg": preview_timing.get("preview_draw_text_ms_avg"),
-            "preview_draw_legend_ms_avg": preview_timing.get("preview_draw_legend_ms_avg"),
             "preview_imshow_ms_avg": preview_timing.get("preview_imshow_ms_avg"),
             "preview_waitkey_ms_avg": preview_timing.get("preview_waitkey_ms_avg"),
             "edge_age_p50": p50,
@@ -1586,6 +1843,8 @@ class VistaApp(BaseModule):
             self.log_info("runtime", "SERVICE_STOPPED")
         self._emit_log_lifecycle("stop", reason=reason)
         self.run_logger.close()
+        self._flush_log_outputs()
+        self._write_log_health()
 
     def run(self):
         self.start()
@@ -1636,10 +1895,21 @@ class VistaApp(BaseModule):
         sample = self._system_metrics.sample_if_due(force=force)
         if sample is not None:
             self.run_logger.write_jsonl("system_metrics", sample)
+            self.run_logger.write_jsonl("system_resource", sample)
+            self.run_logger.write_runtime_summaries()
+            if not self._stopped:
+                self._flush_log_outputs()
+                self._write_log_health()
 
 
 def main():
     app = VistaApp()
+    def _handle_signal(signum, _frame):
+        app._stop_reason = f"signal_{int(signum)}"
+        app._running = False
+
+    signal.signal(signal.SIGINT, _handle_signal)
+    signal.signal(signal.SIGTERM, _handle_signal)
     app.run()
 
 

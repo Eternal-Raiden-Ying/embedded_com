@@ -25,6 +25,8 @@ class RuntimeConfig:
     vision_params_file: str = ""
     loaded_config_files: list = field(default_factory=list)
     stack_run_id: str = ""
+    log_profile: str = "normal"
+    resource_sample_interval_s: float = 1.0
     loop_hz: float = 8.0
     send_hz: float = 5.0
     track_local_send_hz: float = 8.0
@@ -247,6 +249,7 @@ class TableEdgeConfig:
 
 @dataclass
 class PreviewConfig:
+    preview_mode: str = "light"
     mode_layouts: Dict[str, str] = field(default_factory=lambda: {
         "IDLE": "rgb_minimal",
         "FIND_EDGE": "rgb_depth_edge",

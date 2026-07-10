@@ -36,7 +36,7 @@ VISTA_MOCK_TABLE_BBOX="${VISTA_MOCK_TABLE_BBOX:-}"
 # dryrun：不连接小车，只打印将要发送到 UART 的实际控制信号。
 # full：连接小车串口，真实下发控制。
 # STACK_PROFILE="full"
-STACK_PROFILE="${STACK_PROFILE:-full}"
+STACK_PROFILE="${STACK_PROFILE:-dryrun}"
 
 # orchestrator 是否使用 sudo：auto / 0 / 1
 # full 模式通常需要 sudo 访问串口；dryrun 一般不需要。
@@ -52,6 +52,7 @@ READY_TIMEOUT_S="${READY_TIMEOUT_S:-35}"
 # STOP 后按 Ctrl+C 只退出当前日志显示，不停止服务
 FOLLOW_STACK_LOGS_AFTER_START="${FOLLOW_STACK_LOGS_AFTER_START:-1}"
 ROBOT_CONSOLE_LEVEL="${ROBOT_CONSOLE_LEVEL:-normal}"
+ROBOT_LOG_PROFILE="${ROBOT_LOG_PROFILE:-normal}"
 ENABLE_GATEWAY_LOGS="${ENABLE_GATEWAY_LOGS:-true}"
 
 # 当前终端显示的状态摘要和手机链路关键字
@@ -84,6 +85,7 @@ RUN_SUMMARY_NO_PLOTS="${RUN_SUMMARY_NO_PLOTS:-0}"
 # =========================
 STACK_RUNS_ROOT="$STACK_ROOT/logs/runs"
 LATEST_RUN_ID_FILE="$STACK_RUNS_ROOT/latest_run_id"
+ACTIVE_RUN_ID_FILE="$STACK_RUNS_ROOT/active_run_id"
 GATEWAY_STANDALONE_LOG_DIR="${GATEWAY_STANDALONE_LOG_DIR:-$STACK_ROOT/logs/mobile_gateway}"
 GATEWAY_STANDALONE_LOG_FILE="$GATEWAY_STANDALONE_LOG_DIR/mobile_gateway.out"
 GATEWAY_CORE_CONTROL_LOG_DIR="$GATEWAY_STANDALONE_LOG_DIR/core_control"
@@ -314,6 +316,7 @@ show_banner() {
   printf '%bsudo%b           : requested=%s effective=%s\n' "$C_BOLD" "$C_RESET" "$ORCH_USE_SUDO" "$([[ $(orch_use_sudo_effective; echo $?) -eq 0 ]] && echo 1 || echo 0)"
   printf '%bdry-run%b        : ORCH_SERIAL_DRY_RUN=%s  ORCH_DRY_RUN_ECHO_STDOUT=%s\n' "$C_BOLD" "$C_RESET" "$ORCH_SERIAL_DRY_RUN" "$ORCH_DRY_RUN_ECHO_STDOUT"
   printf '%bconsole%b        : ROBOT_CONSOLE_LEVEL=%s  ROBOT_CONSOLE_COLOR=%s\n' "$C_BOLD" "$C_RESET" "$ROBOT_CONSOLE_LEVEL" "${ROBOT_CONSOLE_COLOR:-auto}"
+  printf '%blog profile%b    : %s\n' "$C_BOLD" "$C_RESET" "$ROBOT_LOG_PROFILE"
   printf '%bgateway logs%b   : enabled=%s\n' "$C_BOLD" "$C_RESET" "$ENABLE_GATEWAY_LOGS"
   printf '%bports%b          : %s\n' "$C_BOLD" "$C_RESET" "$STACK_PORTS"
 }
@@ -347,8 +350,49 @@ prepare_start_run_paths() {
   local run_id="${STACK_RUN_ID:-}"
   [[ -n "$run_id" ]] || run_id="$(make_run_id)"
   apply_run_log_paths "$run_id"
+  log "[CORE_START][NEW_RUN_CREATED] run_id=$run_id"
+}
+
+promote_latest_run_id() {
+  local run_id="${STACK_RUN_ID:-}"
+  [[ -n "$run_id" ]] || return 1
+  mkdir -p "$STACK_RUNS_ROOT"
   printf '%s\n' "$run_id" > "$LATEST_RUN_ID_FILE"
+  printf '%s\n' "$run_id" > "$ACTIVE_RUN_ID_FILE"
   ln -sfn "$run_id" "$STACK_RUNS_ROOT/latest" 2>/dev/null || true
+  log "[CORE_START][LATEST_PROMOTED] run_id=$run_id"
+}
+
+active_run_id() {
+  local run_id=""
+  if [[ -f "$ACTIVE_RUN_ID_FILE" ]]; then
+    run_id="$(cat "$ACTIVE_RUN_ID_FILE" 2>/dev/null || true)"
+  fi
+  if [[ -z "$run_id" && -f "$LATEST_RUN_ID_FILE" ]]; then
+    run_id="$(cat "$LATEST_RUN_ID_FILE" 2>/dev/null || true)"
+  fi
+  printf '%s\n' "$run_id"
+}
+
+core_any_running() {
+  local sudo_flag=0
+  if orch_use_sudo_effective; then
+    sudo_flag=1
+  fi
+  pid_alive "$VISION_PID_FILE" 0 || pid_alive "$ORCH_PID_FILE" "$sudo_flag"
+}
+
+cleanup_unused_run_dir() {
+  local run_id="$1"
+  local status="${2:-aborted}"
+  [[ -n "$run_id" ]] || return 0
+  local run_dir="$STACK_RUNS_ROOT/$run_id"
+  [[ -d "$run_dir" ]] || return 0
+  rmdir "$run_dir/vision" "$run_dir/orchestrator" "$run_dir" 2>/dev/null && {
+    log "[CORE_START][EMPTY_RUN_CLEANED] run_id=$run_id"
+    return 0
+  }
+  printf 'run_status=%s\n' "$status" > "$run_dir/run_status" 2>/dev/null || true
 }
 
 prepare_latest_run_paths() {
@@ -491,6 +535,7 @@ export PYTHONUNBUFFERED="$PYTHONUNBUFFERED"
 export VISION_LOG_FILE="$VISION_LOG_FILE"
 export ROBOT_CONSOLE_COLOR=never
 export ROBOT_CONSOLE_LEVEL="$ROBOT_CONSOLE_LEVEL"
+export ROBOT_LOG_PROFILE="$ROBOT_LOG_PROFILE"
 export ROBOT_RUN_MODULE_SUBDIRS=1
 export STACK_RUN_ID="$STACK_RUN_ID"
 export VISION_LOG_DIR="$VISION_LOG_DIR"
@@ -536,6 +581,7 @@ export SYSTEM_CONFIG_PROFILE="$SYSTEM_CONFIG_PROFILE"
 export PYTHONUNBUFFERED="$PYTHONUNBUFFERED"
 export ROBOT_CONSOLE_COLOR=never
 export ROBOT_RUN_MODULE_SUBDIRS=1
+export ROBOT_LOG_PROFILE="$ROBOT_LOG_PROFILE"
 export STACK_RUN_ID="$STACK_RUN_ID"
 export ORCH_LOG_DIR="$ORCH_LOG_DIR"
 export ORCH_RUNS_DIR="$STACK_RUNS_ROOT"
@@ -586,6 +632,7 @@ export SYSTEM_CONFIG_PROFILE="$SYSTEM_CONFIG_PROFILE"
 export PYTHONUNBUFFERED="$PYTHONUNBUFFERED"
 export ROBOT_CONSOLE_COLOR=never
 export ROBOT_RUN_MODULE_SUBDIRS=1
+export ROBOT_LOG_PROFILE="$ROBOT_LOG_PROFILE"
 export STACK_RUN_ID="$STACK_RUN_ID"
 unset FORCE_COLOR
 export ROBOT_CONSOLE_LEVEL="$ROBOT_CONSOLE_LEVEL"
@@ -1232,11 +1279,27 @@ start_gateway_only() {
 }
 
 start_core() {
+  if core_any_running; then
+    local current_run
+    current_run="$(active_run_id)"
+    if [[ -n "$current_run" ]]; then
+      STACK_RUN_ID="$current_run"
+      apply_run_log_paths "$STACK_RUN_ID"
+    else
+      prepare_latest_run_paths
+      current_run="${STACK_RUN_ID:-}"
+    fi
+    log "[CORE_START][ALREADY_RUNNING] active_run_id=${current_run:-unknown}"
+    show_banner
+    status_all
+    return 0
+  fi
   prepare_start_run_paths
   show_banner
   start_vision_bg
   if ! wait_for_endpoint "vision" "vision_req" "$READY_TIMEOUT_S" "$VISION_READY_EXTRA_S"; then
     tail_last_logs_on_failure "vision" "$VISION_LOG_FILE"
+    cleanup_unused_run_dir "$STACK_RUN_ID" "aborted"
     stop_core || true
     exit 1
   fi
@@ -1244,10 +1307,12 @@ start_core() {
   start_orch_bg
   if ! wait_for_endpoint_group "orchestrator" "$READY_TIMEOUT_S" "$ORCH_READY_EXTRA_S" "orchestrator_task_cmd" "orchestrator_vision_obs"; then
     tail_last_logs_on_failure "orchestrator" "$ORCH_LOG_FILE"
+    cleanup_unused_run_dir "$STACK_RUN_ID" "aborted"
     stop_core || true
     exit 1
   fi
 
+  promote_latest_run_id
   headline "core 启动完成"
   mark ok "vision / orchestrator(controller) 已通过 ready-check。"
   status_all

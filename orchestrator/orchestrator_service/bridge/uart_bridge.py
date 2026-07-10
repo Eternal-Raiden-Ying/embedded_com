@@ -399,6 +399,7 @@ class UartBridge:
             })
             ok = False
             error = ""
+            write_start_ns = time.monotonic_ns()
             if self.dry_run:
                 ok = True
                 if self.dry_run_echo_stdout:
@@ -416,6 +417,8 @@ class UartBridge:
                     except Exception as exc:
                         error = str(exc)
                         self._log("warn", f"UART send failed: {exc}")
+            write_done_ns = time.monotonic_ns()
+            write_ms = max(0.0, (write_done_ns - write_start_ns) / 1_000_000.0)
             if ok:
                 self.sent_count += 1
                 self.last_tx_error = ""
@@ -424,6 +427,11 @@ class UartBridge:
                 self.last_tx_error = error or "unknown error"
             meta["uart_tx_ok"] = ok
             meta["serial_write_ok"] = ok
+            meta["uart_mode"] = "dry_run" if self.dry_run else "full"
+            meta["write_start_mono_ns"] = write_start_ns
+            meta["write_done_mono_ns"] = write_done_ns
+            meta["dryrun_write_ms" if self.dry_run else "uart_write_ms"] = write_ms
+            meta["uart_write_ms" if self.dry_run else "dryrun_write_ms"] = None
             if error:
                 meta["uart_tx_error"] = error
             self._emit_tx_callback(wire_line, self.dry_run, meta)

@@ -516,6 +516,12 @@ class TableEdgeObs:
     vision_start_ts: Optional[float] = None
     vision_done_ts: Optional[float] = None
     obs_publish_ts: Optional[float] = None
+    frame_capture_mono_ns: Optional[int] = None
+    capture_mono_ns: Optional[int] = None
+    camera_capture_done_mono_ns: Optional[int] = None
+    obs_publish_mono_ns: Optional[int] = None
+    obs_recv_mono_ns: Optional[int] = None
+    trace_id: Optional[str] = None
     obs_recv_ts: Optional[float] = None
     control_ts: Optional[float] = None
     obs_seq: Optional[int] = None
@@ -737,6 +743,11 @@ class TableEdgeObs:
             vision_start_ts=_pick_optional_float(payload, "vision_start_ts"),
             vision_done_ts=_pick_optional_float(payload, "vision_done_ts"),
             obs_publish_ts=_pick_optional_float(payload, "obs_publish_ts", "publish_ts"),
+            frame_capture_mono_ns=_pick_optional_int(payload, "frame_capture_mono_ns"),
+            capture_mono_ns=_pick_optional_int(payload, "capture_mono_ns", "frame_capture_mono_ns"),
+            camera_capture_done_mono_ns=_pick_optional_int(payload, "camera_capture_done_mono_ns"),
+            obs_publish_mono_ns=_pick_optional_int(payload, "obs_publish_mono_ns"),
+            trace_id=_pick_optional_str(payload, "trace_id"),
             obs_recv_ts=_pick_optional_float(payload, "obs_recv_ts"),
             control_ts=_pick_optional_float(payload, "control_ts"),
             obs_seq=_pick_optional_int(payload, "obs_seq"),
@@ -962,6 +973,13 @@ class TargetObs:
     obstacle_distance_m: Optional[float] = None
     vision_status: Optional[str] = None
     source: Optional[str] = None
+    frame_id: Optional[int] = None
+    obs_seq: Optional[int] = None
+    trace_id: Optional[str] = None
+    capture_mono_ns: Optional[int] = None
+    camera_capture_done_mono_ns: Optional[int] = None
+    obs_publish_mono_ns: Optional[int] = None
+    obs_recv_mono_ns: Optional[int] = None
     type: str = "target_obs"
 
     @classmethod
@@ -1024,6 +1042,12 @@ class TargetObs:
             obstacle_distance_m=_pick_optional_float(payload, "obstacle_distance_m", "obstacle_distance", "front_obstacle_m"),
             vision_status=payload.get("vision_status", payload.get("status")),
             source=_pick_optional_str(payload, "source"),
+            frame_id=_pick_optional_int(payload, "frame_id", "camera_frame_seq"),
+            obs_seq=_pick_optional_int(payload, "obs_seq", "seq"),
+            trace_id=_pick_optional_str(payload, "trace_id"),
+            capture_mono_ns=_pick_optional_int(payload, "capture_mono_ns", "frame_capture_mono_ns"),
+            camera_capture_done_mono_ns=_pick_optional_int(payload, "camera_capture_done_mono_ns"),
+            obs_publish_mono_ns=_pick_optional_int(payload, "obs_publish_mono_ns"),
             type=str(payload.get("type", "target_obs") or "target_obs"),
         )
 

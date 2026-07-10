@@ -135,6 +135,14 @@ _CONTROL_SUMMARY_KEYS = (
     "depth_speed_envelope_stat_value",
     "depth_speed_envelope_vx_cap",
     "yolo_approach_min_vx_mps",
+    "yolo_approach_speed_band",
+    "yolo_approach_speed_depth",
+    "yolo_approach_selected_vx",
+    "yolo_approach_depth_source",
+    "yolo_approach_obs_fresh",
+    "yolo_approach_obs_age_s",
+    "yolo_approach_far_allowed",
+    "yolo_approach_speed_block_reason",
     "safety_source",
     "safety_value",
     "safety_slow_threshold",
@@ -201,6 +209,7 @@ class OrchestratorService(BaseModule):
         ensure_dir(cfg.runtime.log_dir)
         ensure_dir(cfg.runtime.runs_dir)
         ensure_dir(cfg.runtime.pid_dir)
+        os.environ.setdefault("ROBOT_LOG_PROFILE", str(getattr(cfg.runtime, "log_profile", "normal") or "normal"))
         self.run_logger = RunLogger("orch", cfg.runtime.runs_dir, cfg.runtime.stack_run_id)
         self.core = OrchestratorCore(cfg.control, cfg.car, cfg.docking, logger=self.log)
         self.core.transition_observer = self._on_state_transition
@@ -215,7 +224,8 @@ class OrchestratorService(BaseModule):
         self._uart_full_log = self._env_bool("ORCH_UART_FULL_LOG", False)
         self._vision_full_obs_log = self._env_bool("VISION_LOG_FULL_OBS", False) or self._env_bool("VISION_DEBUG_FULL_LOG", False)
         self._state_blocks_full_log = self._env_bool("ORCH_STATE_BLOCKS_FULL_LOG", False) or self._env_bool("VISION_DEBUG_FULL_LOG", False)
-        self._system_metrics = SystemMetricsSampler("orchestrator", interval_s=self._env_float("ORCH_SYSTEM_METRICS_INTERVAL_S", 1.0))
+        resource_interval = float(getattr(cfg.runtime, "resource_sample_interval_s", 1.0) or 1.0)
+        self._system_metrics = SystemMetricsSampler("orchestrator", interval_s=resource_interval)
         self._mobile_status_console_mode = self._env_choice("ORCH_MOBILE_STATUS_CONSOLE", "change", {"change", "full", "silent"})
         self._last_obs_flags = {"table_edge": False, "target": False}
         self._last_target_obs_console_payload: Dict[str, Any] = {}
@@ -250,6 +260,13 @@ class OrchestratorService(BaseModule):
             "obs_age_at_consume_ms": deque(maxlen=512),
             "vision_publish_to_orch_recv_ms": deque(maxlen=512),
             "orch_recv_to_state_consume_ms": deque(maxlen=512),
+            "tick_process_ms": deque(maxlen=512),
+            "state_decision_ms": deque(maxlen=512),
+            "motion_arbitration_ms": deque(maxlen=512),
+            "uart_write_ms": deque(maxlen=512),
+            "dryrun_write_ms": deque(maxlen=512),
+            "car_cmd_map_ms": deque(maxlen=512),
+            "state_transition_latency_ms": deque(maxlen=512),
         }
         self._last_table_edge_recv_ts = 0.0
         self._last_state_machine_tick_ts = 0.0
@@ -257,6 +274,18 @@ class OrchestratorService(BaseModule):
         self._last_consumed_table_obs_key = None
         self._last_consumed_obs_seq: Optional[int] = None
         self._same_obs_reuse_count = 0
+        self._last_tick_process_ms: Optional[float] = None
+        self._last_state_decision_ms: Optional[float] = None
+        self._last_motion_arbitration_ms: Optional[float] = None
+        self._last_uart_write_ms: Optional[float] = None
+        self._last_dryrun_write_ms: Optional[float] = None
+        self._last_ack_wait_ms: Optional[float] = None
+        self._latest_obs_trace: Dict[str, Dict[str, Any]] = {}
+        self._current_tick_obs_trace: Dict[str, Any] = {}
+        self._last_missing_obs_trace_warn_ts = 0.0
+        self._last_cmd_emit_mono_ns: Optional[int] = None
+        self._state_enter_mono_ns = time.monotonic_ns()
+        self._transition_pending_state = self.core.ctx.state.value
         self._last_tx_summary: Dict[str, float] = {
             "task_ack_out": 0.0,
             "vision_req_out": 0.0,
@@ -661,6 +690,8 @@ class OrchestratorService(BaseModule):
             "state",
             f"[ORCH] STATE {old_state} -> {new_state} reason={reason}",
         )
+        self._state_enter_mono_ns = time.monotonic_ns()
+        self._transition_pending_state = str(new_state)
         if old_state == "FINAL_SLOW_STOP" and new_state not in {"FINAL_SLOW_STOP", "AT_TABLE_EDGE", "DONE"}:
             self.core.ctx.clear_close_final_latches()
             self.core.ctx.clear_final_enter_candidate()
@@ -685,6 +716,70 @@ class OrchestratorService(BaseModule):
         if old_state == "ERROR_RECOVERY" and new_state == "IDLE":
             self.core.ctx.clear_final_enter_candidate()
             self._emit_demo_idle_hot()
+
+    def _perf_trace_context(self) -> Dict[str, Any]:
+        state = str(getattr(self.core.ctx.state, "value", self.core.ctx.state) or "")
+        if self._current_tick_obs_trace:
+            context = dict(self._current_tick_obs_trace)
+            context.setdefault("state", state)
+            return context
+        return {
+            "frame_id": None,
+            "obs_seq": None,
+            "trace_id": None,
+            "capture_mono_ns": None,
+            "obs_publish_mono_ns": None,
+            "obs_recv_mono_ns": None,
+            "state": state,
+            "trace_reason": "no_active_obs_trace",
+        }
+
+    def _lock_current_tick_obs_trace(self) -> None:
+        state = str(self.core.ctx.state.value or "")
+        use_target = state in {"SEARCH_TARGET_INIT", "EDGE_SLIDE_SEARCH", "TARGET_CONFIRM", "TARGET_LOCKED"}
+        key = "target" if use_target else "table"
+        trace = dict(self._latest_obs_trace.get(key) or {})
+        if not trace and use_target:
+            trace = dict(self._latest_obs_trace.get("table") or {})
+        self._current_tick_obs_trace = trace
+        active_obs = self.core.ctx.last_target_obs if use_target else self.core.ctx.last_table_obs
+        if active_obs is not None and any(trace.get(name) is None for name in ("frame_id", "obs_seq", "trace_id")):
+            now = time.time()
+            if now - self._last_missing_obs_trace_warn_ts >= 1.0:
+                self._last_missing_obs_trace_warn_ts = now
+                self.log(
+                    "warn",
+                    "perf",
+                    "[PERF_TRACE][MISSING_ACTIVE_OBS_TRACE]",
+                    {"state": state, "trace": trace},
+                )
+
+    @staticmethod
+    def _obs_trace_from_parsed(obs: Any, recv_mono_ns: int) -> Dict[str, Any]:
+        frame_id = getattr(obs, "frame_id", None)
+        obs_seq = getattr(obs, "obs_seq", None)
+        trace_id = getattr(obs, "trace_id", None) or (
+            f"vision:{frame_id}" if frame_id is not None else None
+        )
+        capture_mono_ns = (
+            getattr(obs, "capture_mono_ns", None)
+            or getattr(obs, "frame_capture_mono_ns", None)
+        )
+        return {
+            "frame_id": frame_id,
+            "obs_seq": obs_seq,
+            "trace_id": trace_id,
+            "capture_mono_ns": capture_mono_ns,
+            "frame_capture_mono_ns": capture_mono_ns,
+            "camera_capture_done_mono_ns": getattr(obs, "camera_capture_done_mono_ns", None),
+            "obs_publish_mono_ns": getattr(obs, "obs_publish_mono_ns", None),
+            "obs_recv_mono_ns": int(recv_mono_ns),
+        }
+
+    def _perf_marker(self, event: str, **fields: Any) -> None:
+        context = self._perf_trace_context()
+        context.update(fields)
+        self.run_logger.write_perf_marker(event, **context)
 
     def _emit_demo_phase(self, old_state: str, new_state: str, reason: str) -> None:
         target = getattr(self.core.ctx, "active_target", "") or "target"
@@ -1179,6 +1274,15 @@ class OrchestratorService(BaseModule):
             "service_override_reason",
             "effective_cmd_before_service",
             "effective_cmd_after_service",
+            "frame_id",
+            "obs_seq",
+            "trace_id",
+            "capture_mono_ns",
+            "frame_capture_mono_ns",
+            "camera_capture_done_mono_ns",
+            "obs_publish_mono_ns",
+            "obs_recv_mono_ns",
+            "trace_reason",
         ):
             if context.get(key) is not None:
                 meta[key] = context.get(key)
@@ -1967,6 +2071,74 @@ class OrchestratorService(BaseModule):
         }
         if tx_meta:
             payload.update({k: v for k, v in tx_meta.items() if v not in (None, "")})
+        actual_write_ms = payload.get("dryrun_write_ms" if dry_run else "uart_write_ms")
+        if dry_run:
+            self._last_dryrun_write_ms = float(actual_write_ms) if actual_write_ms is not None else None
+            self._observe_trace_sample("dryrun_write_ms", self._last_dryrun_write_ms)
+            self._last_uart_write_ms = None
+            event = "dryrun_write_done"
+        else:
+            self._last_uart_write_ms = float(actual_write_ms) if actual_write_ms is not None else None
+            self._observe_trace_sample("uart_write_ms", self._last_uart_write_ms)
+            self._last_dryrun_write_ms = None
+            event = "uart_write_done"
+        self._last_uart_write_done_mono_ns = int(payload.get("write_done_mono_ns") or time.monotonic_ns())
+        write_start_mono_ns = int(payload.get("write_start_mono_ns") or self._last_uart_write_done_mono_ns)
+        capture_mono_ns = payload.get("frame_capture_mono_ns")
+        critical_path_latency_ms = (
+            max(0.0, (self._last_uart_write_done_mono_ns - int(capture_mono_ns)) / 1_000_000.0)
+            if capture_mono_ns is not None else None
+        )
+        marker_context = {
+            "frame_id": payload.get("frame_id"),
+            "obs_seq": payload.get("obs_seq"),
+            "trace_id": payload.get("trace_id"),
+            "state": payload.get("state") or str(self.core.ctx.state.value or ""),
+            "uart_mode": "dry_run" if dry_run else "full",
+            "serial_write_ok": payload.get("serial_write_ok"),
+        }
+        if any(marker_context.get(name) is None for name in ("frame_id", "obs_seq", "trace_id")):
+            fallback = dict(getattr(self, "_last_motion_tx_context", {}) or self._perf_trace_context())
+            for name in ("frame_id", "obs_seq", "trace_id", "capture_mono_ns", "obs_publish_mono_ns", "obs_recv_mono_ns"):
+                if marker_context.get(name) is None and fallback.get(name) is not None:
+                    marker_context[name] = fallback.get(name)
+        self.run_logger.write_perf_marker(
+            "dryrun_write_start" if dry_run else "uart_write_start",
+            mono_ns=write_start_mono_ns,
+            **marker_context,
+        )
+        self._last_uart_trace_context = dict(marker_context)
+        if dry_run:
+            self.run_logger.write_perf_marker(
+                "ack_wait_start",
+                executed=False,
+                reason="dry_run",
+                mono_ns=self._last_uart_write_done_mono_ns,
+                **marker_context,
+            )
+            self.run_logger.write_perf_marker(
+                "ack_wait_done",
+                executed=False,
+                reason="dry_run",
+                duration_ms=None,
+                mono_ns=self._last_uart_write_done_mono_ns,
+                **marker_context,
+            )
+        else:
+            self.run_logger.write_perf_marker(
+                "ack_wait_start",
+                mono_ns=self._last_uart_write_done_mono_ns,
+                **marker_context,
+            )
+        self.run_logger.write_perf_marker(
+            event,
+            duration_ms=actual_write_ms,
+            mono_ns=self._last_uart_write_done_mono_ns,
+            critical_path_latency_ms=critical_path_latency_ms,
+            overlapped=True,
+            overlap_note="Measured wall path; stage durations may overlap.",
+            **marker_context,
+        )
         state = str(payload.get("state") or self.core.ctx.state.value or "").strip().upper()
         wz = float(payload.get("wz_radps", 0.0) or 0.0)
         raw_upper = str(raw_line or "").strip().upper()
@@ -2113,6 +2285,7 @@ class OrchestratorService(BaseModule):
         try:
             while self._running:
                 loop_start = time.time()
+                loop_start_ns = time.monotonic_ns()
                 self._drain_async_tx_results()
                 self._drain_uart_feedback()
                 self._drain_task_cmds()
@@ -2124,8 +2297,16 @@ class OrchestratorService(BaseModule):
                     elapsed = time.time() - loop_start
                     time.sleep(max(0.0, period_s - elapsed))
                     continue
+                self._lock_current_tick_obs_trace()
                 self._mark_state_machine_consume(loop_start)
+                self._perf_marker("state_tick_start", mono_ns=time.monotonic_ns())
+                self._perf_marker("motion_decision_start", mono_ns=time.monotonic_ns())
+                decision_start_ns = time.monotonic_ns()
                 decision = self.core.tick()
+                state_decision_ms = max(0.0, (time.monotonic_ns() - decision_start_ns) / 1_000_000.0)
+                self._last_state_decision_ms = state_decision_ms
+                self._observe_trace_sample("state_decision_ms", state_decision_ms)
+                self._perf_marker("motion_decision_done", duration_ms=state_decision_ms)
                 self._mark_cmd_publish(decision)
                 self._flush_pending_msgs()
                 self._emit_motion(decision)
@@ -2134,6 +2315,63 @@ class OrchestratorService(BaseModule):
                 self._emit_heartbeat_if_needed()
                 self._emit_system_metrics_if_needed()
                 elapsed = time.time() - loop_start
+                tick_process_ms = max(0.0, (time.monotonic_ns() - loop_start_ns) / 1_000_000.0)
+                self._last_tick_process_ms = tick_process_ms
+                self._observe_trace_sample("tick_process_ms", tick_process_ms)
+                self._perf_marker("state_tick_done", duration_ms=tick_process_ms)
+                obs = self.core.ctx.last_table_obs
+                control_summary = dict(getattr(decision, "control_summary", None) or {})
+                perf_record = {
+                    **self._perf_trace_context(),
+                    "tick_interval_ms": getattr(obs, "state_machine_tick_interval_ms", None) if obs is not None else None,
+                    "tick_process_ms": tick_process_ms,
+                    "state_decision_ms": state_decision_ms,
+                    "motion_decision_ms": state_decision_ms,
+                    "motion_arbitration_ms": self._last_motion_arbitration_ms,
+                    "car_cmd_map_ms": control_summary.get("car_cmd_map_ms"),
+                    "uart_write_ms": self._last_uart_write_ms,
+                    "dryrun_write_ms": self._last_dryrun_write_ms,
+                    "ack_wait_ms": self._last_ack_wait_ms if not self.cfg.serial.dry_run else None,
+                    "ack_wait_reason": (
+                        None if self._last_ack_wait_ms is not None and not self.cfg.serial.dry_run
+                        else ("dry_run" if self.cfg.serial.dry_run else "awaiting_ack")
+                    ),
+                    "vision_obs_age_ms": getattr(obs, "obs_age_at_consume_ms", None) if obs is not None else None,
+                    "vision_publish_to_orch_recv_ms": (
+                        getattr(obs, "vision_publish_to_orch_recv_ms", None) if obs is not None else None
+                    ),
+                    "orch_recv_to_state_consume_ms": (
+                        getattr(obs, "orch_recv_to_state_consume_ms", None) if obs is not None else None
+                    ),
+                    "same_obs_reuse_count": int(self._same_obs_reuse_count),
+                    "cmd_emit_interval_ms": control_summary.get("cmd_emit_interval_ms"),
+                    "state_transition_latency_ms": control_summary.get("state_transition_latency_ms"),
+                    "unavailable_reasons": {
+                        "uart_write_ms": "dry_run" if self.cfg.serial.dry_run else None,
+                        "dryrun_write_ms": None if self.cfg.serial.dry_run else "full_mode",
+                        "ack_wait_ms": "dry_run" if self.cfg.serial.dry_run else (
+                            None if self._last_ack_wait_ms is not None else "awaiting_ack"
+                        ),
+                        "state_transition_latency_ms": (
+                            None if control_summary.get("state_transition_latency_ms") is not None
+                            else "no_transition_followed_by_nonzero_command"
+                        ),
+                        "vision_obs_age_ms": None if obs is not None else "no_vision_observation",
+                    },
+                }
+                if self.core.ctx.state.value == "YOLO_APPROACH":
+                    for key in (
+                        "yolo_approach_speed_band",
+                        "yolo_approach_speed_depth",
+                        "yolo_approach_selected_vx",
+                        "yolo_approach_depth_source",
+                        "yolo_approach_obs_fresh",
+                        "yolo_approach_obs_age_s",
+                        "yolo_approach_far_allowed",
+                        "yolo_approach_speed_block_reason",
+                    ):
+                        perf_record[key] = control_summary.get(key)
+                self.run_logger.write_jsonl("perf_timing", perf_record)
                 time.sleep(max(0.0, period_s - elapsed))
         finally:
             self.stop()
@@ -2198,6 +2436,28 @@ class OrchestratorService(BaseModule):
 
     def _drain_uart_feedback(self):
         for raw in self.uart.drain_rx_lines():
+            ack_mono_ns = time.monotonic_ns()
+            ack_wait_ms = (
+                max(0.0, (ack_mono_ns - int(getattr(self, "_last_uart_write_done_mono_ns", ack_mono_ns))) / 1_000_000.0)
+                if getattr(self, "_last_uart_write_done_mono_ns", None)
+                else None
+            )
+            self._last_ack_wait_ms = ack_wait_ms
+            ack_context = dict(getattr(self, "_last_uart_trace_context", {}) or {})
+            self.run_logger.write_perf_marker(
+                "ack_wait_done",
+                duration_ms=ack_wait_ms,
+                mono_ns=ack_mono_ns,
+                raw=str(raw),
+                **ack_context,
+            )
+            self.run_logger.write_perf_marker(
+                "ack_recv",
+                duration_ms=ack_wait_ms,
+                mono_ns=ack_mono_ns,
+                raw=str(raw),
+                **ack_context,
+            )
             state = parse_car_state_line(raw)
             if state is not None:
                 self._update_stm32_motion_status(state)
@@ -3026,6 +3286,15 @@ class OrchestratorService(BaseModule):
                 try:
                     if msg_type == "table_edge_obs":
                         parsed = TableEdgeObs.from_dict(payload)
+                        recv_mono_ns = time.monotonic_ns()
+                        parsed.obs_recv_mono_ns = recv_mono_ns
+                        table_trace = self._obs_trace_from_parsed(parsed, recv_mono_ns)
+                        table_trace["state"] = str(self.core.ctx.state.value or "")
+                        self._latest_obs_trace["table"] = table_trace
+                        self.run_logger.write_perf_marker(
+                            "obs_recv",
+                            **table_trace,
+                        )
                         parsed.obs_recv_ts = recv_ts
                         parsed.orchestrator_recv_ts_ms = self._epoch_ms(recv_ts)
                         recv_interval_ms = (
@@ -3137,6 +3406,12 @@ class OrchestratorService(BaseModule):
                         )
                     elif msg_type == "target_obs":
                         parsed = TargetObs.from_dict(payload)
+                        recv_mono_ns = time.monotonic_ns()
+                        parsed.obs_recv_mono_ns = recv_mono_ns
+                        target_trace = self._obs_trace_from_parsed(parsed, recv_mono_ns)
+                        target_trace["state"] = str(self.core.ctx.state.value or "")
+                        self._latest_obs_trace["target"] = target_trace
+                        self.run_logger.write_perf_marker("obs_recv", **target_trace)
                         self._target_obs_rate_ts.append(recv_ts)
                         if priority >= latest_target_priority:
                             latest_target = parsed
@@ -3849,6 +4124,14 @@ class OrchestratorService(BaseModule):
             "search_latch_age_ms": summary.get("search_latch_age_ms", 0.0),
             "search_latch_reason": summary.get("search_latch_reason", ""),
             "wz_sign_final": summary.get("wz_sign_final", 0),
+            "yolo_approach_speed_band": summary.get("yolo_approach_speed_band"),
+            "yolo_approach_speed_depth": summary.get("yolo_approach_speed_depth"),
+            "yolo_approach_selected_vx": summary.get("yolo_approach_selected_vx"),
+            "yolo_approach_depth_source": summary.get("yolo_approach_depth_source"),
+            "yolo_approach_obs_fresh": summary.get("yolo_approach_obs_fresh"),
+            "yolo_approach_obs_age_s": summary.get("yolo_approach_obs_age_s"),
+            "yolo_approach_far_allowed": summary.get("yolo_approach_far_allowed"),
+            "yolo_approach_speed_block_reason": summary.get("yolo_approach_speed_block_reason"),
         }
         self.run_logger.write_jsonl("motion_gate_trace", trace)
         is_docking = trace["state"] in {"SEARCH_TABLE", "YOLO_ACQUIRE_ALIGN", "YOLO_APPROACH", "EDGE_ADJUST", "FINAL_SLOW_STOP", "AT_TABLE_EDGE"}
@@ -4072,6 +4355,12 @@ class OrchestratorService(BaseModule):
             "tick_hz_config": float(self.cfg.runtime.tick_hz),
             "receiver_poll_interval_ms_config": int(round((1.0 / max(1.0, float(self.cfg.runtime.tick_hz))) * 1000.0)),
             "status_publish_hz_config": 1.0 / max(1e-6, float(self.cfg.runtime.state_block_period_s or 1.0)),
+            "tick_interval_ms": getattr(obs, "state_machine_tick_interval_ms", None) if obs is not None else None,
+            "tick_process_ms": self._last_tick_process_ms,
+            "state_decision_ms": self._last_state_decision_ms,
+            "motion_arbitration_ms": self._last_motion_arbitration_ms,
+            "uart_write_ms": self._last_uart_write_ms,
+            "vision_obs_age_ms": getattr(obs, "obs_age_at_consume_ms", None) if obs is not None else None,
         }
         for key in self._obs_trace_samples:
             record[key] = self._trace_stats(key)
@@ -4455,6 +4744,8 @@ class OrchestratorService(BaseModule):
         cmd = decision.cmd
         summary = dict(getattr(decision, "control_summary", None) or {})
 
+        motion_arbitration_start_ns = time.monotonic_ns()
+        self._perf_marker("motion_arbiter_start")
         effective_cmd, uart_arbitration = self._arbitrate_uart_motion_cmd(cmd, summary)
         summary.update(uart_arbitration)
         allow_send = bool(summary.get("allow_uart_send", True))
@@ -4469,11 +4760,23 @@ class OrchestratorService(BaseModule):
         effective_cmd, final_clamp_meta = self._apply_final_forward_only_clamp(effective_cmd, summary)
         if final_clamp_meta:
             summary.update(final_clamp_meta)
+        motion_arbitration_ms = max(0.0, (time.monotonic_ns() - motion_arbitration_start_ns) / 1_000_000.0)
+        self._perf_marker("motion_arbiter_done", duration_ms=motion_arbitration_ms)
+        self._last_motion_arbitration_ms = motion_arbitration_ms
+        self._observe_trace_sample("motion_arbitration_ms", motion_arbitration_ms)
         self._sync_last_valid_motion_after_smoothing(effective_cmd, time.time())
         summary["last_valid_motion_cmd"] = dict(self._last_valid_motion_cmd or {})
         summary["last_valid_motion_age_ms"] = self._last_valid_motion_age_ms(time.time())
         summary["effective_cmd"] = self._cmd_dict(effective_cmd)
         summary["effective_cmd_after_service"] = self._cmd_dict(effective_cmd)
+        obs = self.core.ctx.last_table_obs
+        summary["tick_interval_ms"] = getattr(obs, "state_machine_tick_interval_ms", None) if obs is not None else None
+        summary["tick_process_ms"] = self._last_tick_process_ms
+        summary["state_decision_ms"] = self._last_state_decision_ms
+        summary["motion_arbitration_ms"] = motion_arbitration_ms
+        summary["uart_write_ms"] = self._last_uart_write_ms
+        summary["vision_obs_age_ms"] = getattr(obs, "obs_age_at_consume_ms", None) if obs is not None else None
+        summary["same_obs_reuse_count"] = int(self._same_obs_reuse_count)
         uart_arbitration.update(
             {
                 "last_valid_motion_cmd": summary.get("last_valid_motion_cmd"),
@@ -4501,7 +4804,12 @@ class OrchestratorService(BaseModule):
 
         self._emit_operator_control(decision)
         self._flush_state_traces(decision)
+        map_start_ns = time.monotonic_ns()
+        self._perf_marker("car_cmd_map_start", mono_ns=map_start_ns)
         car_cmd = self.mapper.from_cmd_vel(effective_cmd, cx_norm_abs=decision.cx_norm_abs, distance_ratio=decision.distance_ratio)
+        car_cmd_map_ms = max(0.0, (time.monotonic_ns() - map_start_ns) / 1_000_000.0)
+        self._observe_trace_sample("car_cmd_map_ms", car_cmd_map_ms)
+        self._perf_marker("car_cmd_map_done", duration_ms=car_cmd_map_ms)
         tx_meta = self._build_uart_tx_meta(car_cmd)
         stop_class = str(uart_arbitration.get("stop_class") or "").strip()
         reason = (stop_class if stop_class and stop_class != "none" else "") or str(tx_meta.get("reason") or car_cmd.kind or "").strip()
@@ -4559,6 +4867,7 @@ class OrchestratorService(BaseModule):
             "wz_radps": float(velocity[2]),
         }
         self._last_motion_tx_context.update(uart_arbitration)
+        self._last_motion_tx_context.update(self._perf_trace_context())
         tx_meta.update({
             "docking_stage": summary.get("docking_stage") or "",
             "docking_action": summary.get("docking_action") or "",
@@ -4568,7 +4877,27 @@ class OrchestratorService(BaseModule):
             "uart_tx_ok": bool(getattr(self, "_last_uart_tx_ok", True)),
         })
         tx_meta.update(uart_arbitration)
+        tx_meta.update(self._perf_trace_context())
+        self._perf_marker("cmd_vel_emit")
         seq = self.motion_adapter.send_cmd_vel(effective_cmd, reason=reason)
+        summary["car_cmd_map_ms"] = car_cmd_map_ms
+        summary["uart_write_ms"] = self._last_uart_write_ms
+        summary["dryrun_write_ms"] = self._last_dryrun_write_ms
+        now_ns = time.monotonic_ns()
+        summary["cmd_emit_interval_ms"] = (
+            max(0.0, (now_ns - self._last_cmd_emit_mono_ns) / 1_000_000.0)
+            if self._last_cmd_emit_mono_ns is not None else None
+        )
+        self._last_cmd_emit_mono_ns = now_ns
+        nonzero = any(abs(float(v or 0.0)) > 1e-9 for v in (effective_cmd.vx_mps, effective_cmd.vy_mps, effective_cmd.wz_radps))
+        if nonzero and self._transition_pending_state == self.core.ctx.state.value:
+            transition_ms = max(0.0, (now_ns - self._state_enter_mono_ns) / 1_000_000.0)
+            summary["state_transition_latency_ms"] = transition_ms
+            self._observe_trace_sample("state_transition_latency_ms", transition_ms)
+            self._transition_pending_state = ""
+        else:
+            summary["state_transition_latency_ms"] = None
+        decision.control_summary = summary
         self.motion_status["last_seq"] = seq
         self.motion_status["jog_running"] = False
         car_record = {
@@ -5131,6 +5460,8 @@ class OrchestratorService(BaseModule):
         sample = self._system_metrics.sample_if_due(force=force)
         if sample is not None:
             self.run_logger.write_jsonl("system_metrics", sample)
+            self.run_logger.write_jsonl("system_resource", sample)
+            self.run_logger.write_runtime_summaries()
 
 
 def run_orchestrator_service(cfg: OrchestratorConfig):

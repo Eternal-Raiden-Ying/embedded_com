@@ -488,6 +488,11 @@ class RunLogger:
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.max_jsonl_bytes = self._env_int("ROBOT_JSONL_MAX_BYTES", 64 * 1024 * 1024)
         self.rotate_backups = self._env_int("ROBOT_JSONL_ROTATE_BACKUPS", 3)
+        self.log_profile = str(os.getenv("ROBOT_LOG_PROFILE", "normal") or "normal").strip().lower()
+        if self.log_profile not in {"normal", "debug", "trace"}:
+            self.log_profile = "normal"
+        self._profile_last_write_ts: Dict[str, float] = {}
+        self._profile_sample_counts: Dict[str, int] = {}
         self._event_fp = None
         if enable_text_events:
             self._event_fp = open(self.run_dir / "events.log", "a", encoding="utf-8")
@@ -504,6 +509,13 @@ class RunLogger:
         self._drop_counts: Dict[str, int] = {}
         self._last_drop_summary_ts = 0.0
         self._summary_start_wall = time.time()
+        self._summary_start_mono_ns = time.monotonic_ns()
+        self._perf_stats: Dict[str, list] = {}
+        self._perf_counts: Counter = Counter()
+        self._resource_stats: Dict[str, list] = {}
+        self._critical_path_start_ns: Dict[str, int] = {}
+        self._timeline_start_ns: Dict[tuple, int] = {}
+        self._trace_events: Dict[str, Dict[str, int]] = {}
         self._summary_stats: Dict[str, Any] = {
             "table_edge_count": 0,
             "table_edge_found": 0,
@@ -565,10 +577,29 @@ class RunLogger:
 
     def _with_common_fields(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         out = dict(payload)
+        wall_ts = float(out.get("wall_ts", out.get("ts", time.time())) or time.time())
+        mono_ns = int(out.get("mono_ns", time.monotonic_ns()) or time.monotonic_ns())
         out.setdefault("module", self.module_name)
         out.setdefault("stack_run_id", self.stack_run_id)
-        out.setdefault("ts", time.time())
+        out.setdefault("ts", wall_ts)
+        out.setdefault("wall_ts", wall_ts)
+        out.setdefault("mono_ns", mono_ns)
+        out.setdefault("run_id", self.stack_run_id)
+        out.setdefault("mode", self._runtime_mode())
+        out.setdefault("component", "orchestrator" if self.module_name == "orch" else self.module_name)
+        out.setdefault("event", None)
+        out.setdefault("frame_id", None)
+        out.setdefault("obs_seq", None)
+        out.setdefault("trace_id", None)
         return out
+
+    @staticmethod
+    def _runtime_mode() -> str:
+        value = str(os.getenv("ROBOT_RUN_MODE", "") or "").strip().lower()
+        if value in {"dry_run", "full"}:
+            return value
+        dry = str(os.getenv("ORCH_SERIAL_DRY_RUN", os.getenv("SERIAL_DRY_RUN", ""))).strip().lower()
+        return "dry_run" if dry in {"1", "true", "yes", "on"} else "full"
 
     def _path_for(self, name: str) -> Path:
         filename = str(name).strip()
@@ -712,8 +743,9 @@ class RunLogger:
             return
         priority = self._log_priority_for(name, payload)
         record = dict(payload)
-        record.setdefault("channel", name)
-        record.setdefault("priority", priority)
+        if name != "system_resource":
+            record.setdefault("channel", name)
+            record.setdefault("priority", priority)
         item = {"name": name, "path": self._path_for(f"{name}.jsonl"), "payload": record, "priority": priority}
         try:
             self._log_queue.put_nowait(item)
@@ -823,9 +855,143 @@ class RunLogger:
 
     def write_jsonl(self, name: str, payload: Dict[str, Any]) -> None:
         log_name = str(name).strip()
-        record = self._with_common_fields(payload)
+        normalized = dict(payload)
+        if log_name in {"perf_timing", "perf_timeline", "system_resource"}:
+            existing_mode = normalized.get("mode")
+            if existing_mode not in {None, "dry_run", "full"}:
+                normalized.setdefault("operation_mode", existing_mode)
+            normalized["mode"] = self._runtime_mode()
+        record = self._with_common_fields(normalized)
+        if log_name == "system_resource":
+            for key in ("ts", "module", "stack_run_id", "event", "frame_id", "obs_seq", "trace_id"):
+                record.pop(key, None)
+        if log_name == "perf_timing" and "state" not in record:
+            record["state"] = record.get("stage")
         self._observe_summary(log_name, record)
+        if not self._should_write_for_profile(log_name, record):
+            return
         self._enqueue_json_line(log_name, record)
+
+    def write_perf_marker(
+        self,
+        event: str,
+        *,
+        frame_id: Any = None,
+        obs_seq: Any = None,
+        trace_id: Any = None,
+        executed: bool = True,
+        reason: Optional[str] = None,
+        duration_ms: Optional[float] = None,
+        **fields: Any,
+    ) -> None:
+        marker_ns = int(fields.get("mono_ns") or time.monotonic_ns())
+        event_name = str(event)
+        stage = event_name[:-6] if event_name.endswith("_start") else (
+            event_name[:-5] if event_name.endswith("_done") else event_name
+        )
+        marker_key = (str(trace_id or ""), frame_id, obs_seq, stage)
+        if event_name.endswith("_start") and executed:
+            self._timeline_start_ns[marker_key] = marker_ns
+        elif event_name.endswith("_done") and not executed:
+            self._timeline_start_ns.pop(marker_key, None)
+        elif event_name.endswith("_done") and executed:
+            start_ns = self._timeline_start_ns.pop(marker_key, None)
+            if duration_ms is None and start_ns is not None:
+                duration_ms = max(0.0, (marker_ns - int(start_ns)) / 1_000_000.0)
+            elif duration_ms is None:
+                fields.setdefault("duration_reason", "missing_start_event")
+        record = {
+            "event": event_name,
+            "frame_id": frame_id,
+            "obs_seq": obs_seq,
+            "trace_id": trace_id,
+            "executed": bool(executed),
+            "mono_ns": marker_ns,
+        }
+        if reason is not None:
+            record["reason"] = reason
+        if event_name.endswith("_done"):
+            record["duration_ms"] = duration_ms
+        record.update(fields)
+        self.write_jsonl("perf_timeline", record)
+
+    def _should_write_for_profile(self, name: str, record: Dict[str, Any]) -> bool:
+        profile = self.log_profile
+        if profile == "trace":
+            return True
+        always = {
+            "summary",
+            "run_summary",
+            "state_trace",
+            "cmd_vel",
+            "car_cmd",
+            "vision_req",
+            "rate",
+            "perf_timing",
+            "system_resource",
+            "event",
+            "preview_timing",
+            "log_writer_summary",
+            "task_cmd",
+            "task_ack",
+            "grasp_trace",
+        }
+        if name in always:
+            return True
+        if profile == "debug":
+            return True
+        if name == "perf_timeline":
+            return False
+        if name in {"heartbeat", "system_metrics", "obs_frequency_summary", "uart_keepalive_summary", "timeline", "state_blocks", "state_blocks_lite"}:
+            return False
+        if name == "ipc":
+            level = str(record.get("level") or "").strip().lower()
+            event = str(record.get("event") or "").strip().lower()
+            ok = record.get("ok")
+            return level in {"warn", "warning", "error", "fatal"} or ok is False or any(
+                token in event for token in ("fail", "error", "reconnect", "disconnect", "timeout")
+            )
+        if name in {
+            "control_summary",
+            "motion_gate_trace",
+            "vision_obs",
+            "table_edge_obs",
+            "table_edge_obs_lite",
+            "edge_profile",
+            "frame_timing",
+            "uart_tx_lowfreq",
+            "log_timing",
+            "final_forward_only_clamp",
+            "motion_forward_block_bug",
+        }:
+            level = str(record.get("level") or "").strip().lower()
+            return level in {"warn", "warning", "error", "fatal"} or bool(record.get("slow")) or bool(record.get("clamp_active"))
+        now = time.time()
+        sampled_period_s = {
+            "control_summary": 1.0,
+            "motion_gate_trace": 1.0,
+            "table_edge_obs": 2.0,
+            "table_edge_obs_lite": 1.0,
+            "vision_obs": 1.0,
+            "edge_profile": 2.0,
+        }
+        period_s = sampled_period_s.get(name)
+        if period_s is None:
+            return True
+        key = str(name)
+        self._profile_sample_counts[key] = int(self._profile_sample_counts.get(key, 0)) + 1
+        level = str(record.get("level") or "").strip().lower()
+        if level in {"warn", "warning", "error", "fatal"} or bool(record.get("slow")):
+            self._profile_last_write_ts[key] = now
+            return True
+        last = float(self._profile_last_write_ts.get(key, 0.0) or 0.0)
+        if now - last >= float(period_s):
+            self._profile_last_write_ts[key] = now
+            record.setdefault("log_profile", profile)
+            record.setdefault("sampled_count", int(self._profile_sample_counts.get(key, 0)))
+            self._profile_sample_counts[key] = 0
+            return True
+        return False
 
     @staticmethod
     def _finite_float(value: Any) -> Optional[float]:
@@ -929,6 +1095,141 @@ class RunLogger:
             channel = str(payload.get("channel") or "unknown")
             event = str(payload.get("event") or "event")
             stats["ipc"][f"{channel}:{event}"] += 1
+        if name == "perf_timing":
+            self._observe_numeric_fields(payload, self._perf_stats)
+            self._perf_counts["perf_timing"] += 1
+            perf_to_run = {
+                "vision_process_total_ms": "vision_process_ms",
+                "camera_capture_interval_ms": "camera_frame_interval_ms",
+                "vision_publish_interval_ms": "vision_publish_interval_ms",
+                "tick_interval_ms": "state_machine_tick_interval_ms",
+                "vision_obs_age_ms": "obs_total_age_ms",
+                "same_obs_reuse_count": "same_obs_reuse_count",
+                "vision_publish_to_orch_recv_ms": "vision_publish_to_orch_recv_ms",
+                "orch_recv_to_state_consume_ms": "orch_recv_to_state_consume_ms",
+            }
+            for source_key, stat_key in perf_to_run.items():
+                value = self._finite_float(payload.get(source_key))
+                if value is not None and stat_key in stats:
+                    stats[stat_key].append(value)
+            preview = stats["preview"]
+            for key in (
+                "preview_enabled",
+                "preview_mode",
+                "preview_fps",
+                "preview_total_ms",
+                "preview_compose_ms",
+                "preview_overlay_ms",
+                "preview_imshow_ms",
+                "preview_waitkey_ms",
+                "preview_resize_ms",
+                "preview_colormap_ms",
+                "preview_concat_ms",
+                "preview_overlay_ms",
+                "preview_text_draw_ms",
+                "preview_panel_draw_ms",
+                "preview_legend_draw_ms",
+                "preview_points_draw_ms",
+                "preview_bbox_draw_ms",
+                "preview_copy_ms",
+                "preview_numpy_copy_ms",
+                "preview_encode_or_convert_ms",
+                "preview_canvas_alloc_ms",
+                "preview_canvas_clear_ms",
+                "preview_rgb_prepare_ms",
+                "preview_depth_prepare_ms",
+                "preview_edge_prepare_ms",
+                "preview_panel_layout_ms",
+                "preview_metric_collect_ms",
+                "preview_lock_wait_ms",
+                "preview_ascontiguous_ms",
+                "preview_throttle_sleep_ms",
+                "preview_compose_other_ms",
+                "preview_frame_age_ms",
+            ):
+                if payload.get(key) is not None:
+                    preview[key] = payload.get(key)
+        elif name == "perf_timeline":
+            self._observe_numeric_fields(payload, self._perf_stats)
+            duration = self._finite_float(payload.get("duration_ms"))
+            event = str(payload.get("event") or "")
+            if duration is not None and event:
+                stage = event[:-5] if event.endswith("_done") else event
+                self._perf_stats.setdefault(stage + "_ms", []).append(duration)
+            trace_id = str(
+                payload.get("trace_id")
+                or (f"obs:{payload.get('obs_seq')}" if payload.get("obs_seq") is not None else "")
+                or (f"frame:{payload.get('frame_id')}" if payload.get("frame_id") is not None else "")
+            )
+            mono_ns = payload.get("mono_ns")
+            if trace_id and mono_ns is not None:
+                events = self._trace_events.setdefault(trace_id, {})
+                events[event] = int(mono_ns)
+                if payload.get("state") is not None:
+                    events["state"] = str(payload.get("state") or "")
+                if event == "obs_recv":
+                    capture_done_ns = payload.get("camera_capture_done_mono_ns")
+                    publish_ns = payload.get("obs_publish_mono_ns")
+                    if capture_done_ns is not None:
+                        events["camera_capture_done"] = int(capture_done_ns)
+                    if publish_ns is not None:
+                        events["obs_publish_done"] = int(publish_ns)
+                if len(self._trace_events) > 4096:
+                    self._trace_events.pop(next(iter(self._trace_events)), None)
+                if event == "camera_capture_start":
+                    self._critical_path_start_ns[trace_id] = int(mono_ns)
+                elif event in {"uart_write_done", "dryrun_write_done", "ack_wait_done", "ack_recv"}:
+                    start_ns = self._critical_path_start_ns.pop(trace_id, None)
+                    if start_ns is not None:
+                        self._perf_stats.setdefault("critical_path_latency_ms", []).append(
+                            max(0.0, (int(mono_ns) - start_ns) / 1_000_000.0)
+                        )
+        elif name in {"system_metrics", "system_resource"}:
+            self._observe_numeric_fields(payload, self._resource_stats)
+
+    def _observe_numeric_fields(self, payload: Dict[str, Any], target: Dict[str, list], prefix: str = "") -> None:
+        for key, value in payload.items():
+            name = f"{prefix}{key}" if prefix else str(key)
+            if isinstance(value, dict):
+                self._observe_numeric_fields(value, target, prefix=f"{name}.")
+                continue
+            number = self._finite_float(value)
+            if number is not None and not isinstance(value, bool):
+                target.setdefault(name, []).append(number)
+
+    def _stats_or_reason(self, values: Iterable[Any], reason: str) -> Dict[str, Any]:
+        stats = self._summary_percentiles(values)
+        if stats.get("avg") is None:
+            return {"value": None, "reason": str(reason)}
+        return stats
+
+    def _preview_run_summary(self, preview: Dict[str, Any]) -> Dict[str, Any]:
+        if not preview:
+            return {"value": None, "reason": "preview_disabled_or_no_preview_samples"}
+        out: Dict[str, Any] = {
+            "preview_enabled": bool(preview.get("preview_enabled", False)),
+            "preview_mode": preview.get("preview_mode"),
+            "preview_layout": preview.get("preview_layout"),
+            "preview_dropped_frames": preview.get("preview_dropped_frames"),
+            "displayed_frame_count": preview.get("sample_count"),
+        }
+        for key in (
+            "preview_fps",
+            "preview_total_ms",
+            "preview_compose_ms",
+            "preview_colormap_ms",
+            "preview_overlay_ms",
+            "preview_waitkey_ms",
+        ):
+            if preview.get(f"{key}_avg") is not None or preview.get(f"{key}_p95") is not None:
+                out[key] = {
+                    "avg": preview.get(f"{key}_avg"),
+                    "p95": preview.get(f"{key}_p95"),
+                    "max": preview.get(f"{key}_max"),
+                }
+            elif preview.get(key) is not None:
+                out[key] = preview.get(key)
+        return {key: value for key, value in out.items() if value is not None}
 
     def write_run_summary(self) -> None:
         stats = self._summary_stats
@@ -950,24 +1251,54 @@ class RunLogger:
             "calib": dict(stats["calib"]),
             "table_edge_obs": {
                 "count": count,
-                "found_rate": (float(stats["table_edge_found"]) / float(count)) if count else None,
-                "valid_for_control_rate": (float(stats["table_edge_valid"]) / float(count)) if count else None,
-                "avg_hz": hz,
+                "found_rate": (
+                    float(stats["table_edge_found"]) / float(count)
+                    if count else {"value": None, "reason": "no_table_edge_obs"}
+                ),
+                "valid_for_control_rate": (
+                    float(stats["table_edge_valid"]) / float(count)
+                    if count else {"value": None, "reason": "no_table_edge_obs"}
+                ),
+                "avg_hz": hz if hz is not None else {
+                    "value": None,
+                    "reason": "no_table_edge_obs" if count == 0 else "insufficient_table_edge_timestamps",
+                },
             },
-            "vision_process_ms": self._summary_percentiles(stats["vision_process_ms"]),
-            "camera_frame_interval_ms": self._summary_percentiles(stats["camera_frame_interval_ms"]),
-            "vision_process_interval_ms": self._summary_percentiles(stats["vision_process_interval_ms"]),
-            "vision_publish_interval_ms": self._summary_percentiles(stats["vision_publish_interval_ms"]),
-            "obs_out_send_interval_ms": self._summary_percentiles(stats["obs_out_send_interval_ms"]),
-            "orchestrator_recv_interval_ms": self._summary_percentiles(stats["orchestrator_recv_interval_ms"]),
-            "state_machine_tick_interval_ms": self._summary_percentiles(stats["state_machine_tick_interval_ms"]),
-            "obs_total_age_ms": self._summary_percentiles(stats["obs_total_age_ms"]),
-            "vision_publish_to_orch_recv_ms": self._summary_percentiles(stats["vision_publish_to_orch_recv_ms"]),
-            "orch_recv_to_state_consume_ms": self._summary_percentiles(stats["orch_recv_to_state_consume_ms"]),
-            "same_obs_reuse_count": self._summary_percentiles(stats["same_obs_reuse_count"]),
+            "vision_process_ms": self._stats_or_reason(stats["vision_process_ms"], "no_vision_process_samples"),
+            "camera_frame_interval_ms": self._stats_or_reason(
+                stats["camera_frame_interval_ms"], "no_camera_interval_samples"
+            ),
+            "vision_process_interval_ms": self._stats_or_reason(
+                stats["vision_process_interval_ms"], "no_vision_process_interval_samples"
+            ),
+            "vision_publish_interval_ms": self._stats_or_reason(
+                stats["vision_publish_interval_ms"], "metric_not_emitted_by_vision"
+            ),
+            "obs_out_send_interval_ms": self._stats_or_reason(
+                stats["obs_out_send_interval_ms"], "no_obs_send_interval_samples"
+            ),
+            "orchestrator_recv_interval_ms": self._stats_or_reason(
+                stats["orchestrator_recv_interval_ms"], "no_orchestrator_receive_samples"
+            ),
+            "state_machine_tick_interval_ms": self._stats_or_reason(
+                stats["state_machine_tick_interval_ms"], "no_state_tick_samples"
+            ),
+            "obs_total_age_ms": self._stats_or_reason(stats["obs_total_age_ms"], "no_observation_age_samples"),
+            "vision_publish_to_orch_recv_ms": self._stats_or_reason(
+                stats["vision_publish_to_orch_recv_ms"], "missing_cross_process_trace_id"
+            ),
+            "orch_recv_to_state_consume_ms": self._stats_or_reason(
+                stats["orch_recv_to_state_consume_ms"], "missing_obs_recv_or_consume_timestamp"
+            ),
+            "same_obs_reuse_count": self._stats_or_reason(
+                stats["same_obs_reuse_count"], "no_observation_reuse_samples"
+            ),
             "ipc_summary": dict(stats["ipc"].most_common(32)),
-            "preview_summary": dict(stats["preview"]),
-            "cpu_summary": {key: self._summary_percentiles(values) for key, values in stats["cpu"].items()},
+            "preview_summary": self._preview_run_summary(stats["preview"]),
+            "cpu_summary": {
+                key: self._stats_or_reason(values, "no_resource_samples")
+                for key, values in stats["cpu"].items()
+            },
             "main_warnings_reject_reasons": dict(stats["reject_reasons"].most_common(32)),
         }
         with open(self._path_for("run_summary.json"), "w", encoding="utf-8") as fp:
@@ -975,6 +1306,271 @@ class RunLogger:
             fp.write("\n")
         with open(self._path_for("metrics_summary.json"), "w", encoding="utf-8") as fp:
             json.dump(summary, fp, ensure_ascii=False, indent=2, sort_keys=True)
+            fp.write("\n")
+
+    def write_perf_summary(self) -> None:
+        duration_s = max(0.0, (time.monotonic_ns() - self._summary_start_mono_ns) / 1_000_000_000.0)
+        if self.module_name == "vision":
+            metric_keys = (
+                "vision_fps",
+                "preview_fps",
+                "camera_capture_interval_ms",
+                "yolo_preprocess_ms",
+                "yolo_infer_ms",
+                "yolo_postprocess_ms",
+                "table_edge_process_ms",
+                "obs_publish_ms",
+                "ipc_send_ms",
+                "preview_total_ms",
+                "preview_compose_ms",
+                "preview_imshow_ms",
+                "preview_waitkey_ms",
+                "preview_resize_ms",
+                "preview_colormap_ms",
+                "preview_concat_ms",
+                "preview_overlay_ms",
+                "preview_text_draw_ms",
+                "preview_panel_draw_ms",
+                "preview_legend_draw_ms",
+                "preview_points_draw_ms",
+                "preview_bbox_draw_ms",
+                "preview_copy_ms",
+                "preview_numpy_copy_ms",
+                "preview_encode_or_convert_ms",
+                "preview_canvas_alloc_ms",
+                "preview_canvas_clear_ms",
+                "preview_rgb_prepare_ms",
+                "preview_depth_prepare_ms",
+                "preview_edge_prepare_ms",
+                "preview_panel_layout_ms",
+                "preview_metric_collect_ms",
+                "preview_lock_wait_ms",
+                "preview_ascontiguous_ms",
+                "preview_throttle_sleep_ms",
+                "preview_compose_other_ms",
+            )
+        else:
+            metric_keys = (
+                "tick_interval_ms",
+                "tick_process_ms",
+                "state_decision_ms",
+                "motion_decision_ms",
+                "motion_arbitration_ms",
+                "car_cmd_map_ms",
+                "dryrun_write_ms",
+                "uart_write_ms",
+                "ack_wait_ms",
+                "vision_obs_age_ms",
+                "same_obs_reuse_count",
+                "state_transition_latency_ms",
+            )
+        summary = {
+            "run_id": self.stack_run_id,
+            "mode": self._runtime_mode(),
+            "component": "orchestrator" if self.module_name == "orch" else self.module_name,
+            "duration_s": duration_s,
+            "frame_count": int(self._perf_counts.get("perf_timing", 0)),
+            "per_stage_duration_ms": {
+                key: self._summary_percentiles(values)
+                for key, values in sorted(self._perf_stats.items())
+                if self._is_duration_metric(key) and values
+            },
+            "overlapped": True,
+            "overlap_note": "Stage durations may overlap; critical path uses trace marker timestamps.",
+            "slow_stage_filter_version": "duration_v2",
+        }
+        for key in metric_keys:
+            reason = self._unavailable_metric_reason(key)
+            summary[key] = self._stats_or_reason(self._perf_stats.get(key, []), reason)
+        if self.module_name == "vision":
+            summary["preview_summary"] = {
+                key: summary[key]
+                for key in metric_keys
+                if key.startswith("preview_")
+            }
+        slow = sorted(
+            (
+                (key, self._summary_percentiles(values).get("p95"))
+                for key, values in self._perf_stats.items()
+                if self._is_duration_metric(key) and values
+            ),
+            key=lambda item: float(item[1] or 0.0),
+            reverse=True,
+        )
+        summary["top_slow_stages"] = [{"stage": key, "p95_ms": value} for key, value in slow[:10]]
+        if self.module_name == "orch":
+            summary["critical_path"] = self._critical_path_summary()
+        self._write_json_file("perf_summary.json", summary)
+
+    @staticmethod
+    def _is_duration_metric(key: str) -> bool:
+        name = str(key or "").lower()
+        excluded = ("timestamp", "wall_ts", "mono_ns", "frame_ts", "start_ts", "end_ts", "_ts_ms", ".ts")
+        if any(part in name for part in excluded):
+            return False
+        explicit = {
+            "yolo_infer_ms",
+            "table_edge_process_ms",
+            "vision_process_total_ms",
+            "tick_process_ms",
+            "state_decision_ms",
+            "motion_decision_ms",
+            "motion_arbitration_ms",
+            "car_cmd_map_ms",
+            "dryrun_write_ms",
+            "uart_write_ms",
+            "ack_wait_ms",
+            "vision_obs_age_ms",
+            "state_transition_latency_ms",
+            "critical_path_latency_ms",
+            "ipc_send_ms",
+            "obs_publish_ms",
+            "preview_total_ms",
+            "preview_throttle_sleep_ms",
+        }
+        suffixes = (
+            "_duration_ms",
+            "_process_ms",
+            "_infer_ms",
+            "_preprocess_ms",
+            "_postprocess_ms",
+            "_compose_ms",
+            "_imshow_ms",
+            "_waitkey_ms",
+            "_overlay_ms",
+            "_draw_ms",
+            "_resize_ms",
+            "_colormap_ms",
+            "_concat_ms",
+            "_copy_ms",
+            "_convert_ms",
+            "_other_ms",
+            "_sleep_ms",
+        )
+        return name in explicit or name.endswith(suffixes)
+
+    def _unavailable_metric_reason(self, key: str) -> str:
+        if self._runtime_mode() == "dry_run" and key in {"uart_write_ms", "ack_wait_ms"}:
+            return "dry_run"
+        if key == "state_transition_latency_ms":
+            return "no_transition_followed_by_nonzero_command"
+        if key.startswith("preview_"):
+            return "preview_disabled_or_no_preview_samples"
+        return "metric_not_emitted"
+
+    def _critical_path_summary(self) -> Dict[str, Any]:
+        complete = []
+        partial = []
+        endpoint_count = 0
+        missing = set()
+        endpoints = Counter()
+        runtime_mode = self._runtime_mode()
+        endpoint_candidates = (
+            ("dryrun_write_done",)
+            if runtime_mode == "dry_run"
+            else ("ack_recv", "uart_write_done", "ack_wait_done")
+        )
+        active_states = {
+            "SEARCH_TABLE",
+            "YOLO_ACQUIRE_ALIGN",
+            "YOLO_APPROACH",
+            "FINAL_SLOW_STOP",
+            "AT_TABLE_EDGE",
+            "SEARCH_TARGET_INIT",
+            "EDGE_SLIDE_SEARCH",
+            "TARGET_CONFIRM",
+            "GRASP",
+            "RETURN_PLACE",
+        }
+        considered = 0
+        for _trace_id, events in self._trace_events.items():
+            state = str(events.get("state") or "").strip().upper()
+            if state and state not in active_states:
+                continue
+            considered += 1
+            endpoint_name = next(
+                (name for name in endpoint_candidates if events.get(name)),
+                None,
+            )
+            endpoint = events.get(endpoint_name) if endpoint_name else None
+            if endpoint is None:
+                missing.add("missing_dryrun_write_done" if runtime_mode == "dry_run" else "missing_uart_write_done")
+                continue
+            endpoints[endpoint_name] += 1
+            endpoint_count += 1
+            required = (
+                "camera_capture_done",
+                "obs_publish_done",
+                "obs_recv",
+                "state_tick_start",
+                "state_tick_done",
+                "motion_decision_done",
+                "car_cmd_map_done",
+            )
+            missing_required = [name for name in required if events.get(name) is None]
+            if not missing_required:
+                start = events["camera_capture_done"]
+                if endpoint >= start:
+                    complete.append((endpoint - start) / 1_000_000.0)
+            else:
+                if "obs_publish_done" in missing_required:
+                    missing.add("missing_obs_publish_done")
+                if events.get("camera_capture_done") is None and events.get("obs_recv") is not None:
+                    missing.add("missing_cross_process_trace_linkage")
+                if events.get("obs_recv") is None:
+                    missing.add("missing_active_obs_trace")
+            start = events.get("camera_capture_done") or events.get("obs_recv") or events.get("state_tick_start")
+            if start is not None and endpoint >= start:
+                partial.append((endpoint - start) / 1_000_000.0)
+        denominator = max(1, considered)
+        return {
+            "complete_available": bool(complete),
+            "complete_latency_ms": self._stats_or_reason(complete, "complete_camera_to_output_trace_unavailable"),
+            "partial_available": bool(partial),
+            "partial_latency_ms": self._stats_or_reason(partial, "no_partial_trace_segments"),
+            "available_ratio": float(endpoint_count) / float(denominator),
+            "missing_segments": sorted(missing),
+            "endpoint": endpoints.most_common(1)[0][0] if endpoints else (
+                "dryrun_write_done" if runtime_mode == "dry_run" else "uart_write_done"
+            ),
+            "mode": runtime_mode,
+            "note": "Complete uses propagated camera monotonic time; partial starts at obs_recv or state_tick.",
+        }
+
+    def write_system_resource_summary(self) -> None:
+        summary = {
+            "run_id": self.stack_run_id,
+            "mode": self._runtime_mode(),
+            "component": "orchestrator" if self.module_name == "orch" else self.module_name,
+        }
+        for key in (
+            "system_cpu_percent",
+            "system_mem_percent",
+            "process_rss_mb",
+            "process_vms_mb",
+            "system_mem_used_mb",
+            "system_mem_total_mb",
+            "cpu_freq_mhz",
+            "soc_temp_c",
+        ):
+            summary[key] = self._stats_or_reason(self._resource_stats.get(key, []), "metric_unavailable_on_platform")
+        process_key = "vision_process_cpu" if self.module_name == "vision" else "orchestrator_process_cpu"
+        summary[process_key] = self._stats_or_reason(
+            self._resource_stats.get("process_cpu_percent", []), "process_cpu_sample_unavailable"
+        )
+        self._write_json_file("system_resource_summary.json", summary)
+
+    def write_runtime_summaries(self) -> None:
+        try:
+            self.write_run_summary()
+            self.write_perf_summary()
+            self.write_system_resource_summary()
+        except Exception:
+            pass
+
+    def _write_json_file(self, name: str, payload: Dict[str, Any]) -> None:
+        with open(self._path_for(name), "w", encoding="utf-8") as fp:
+            json.dump(dict(payload), fp, ensure_ascii=False, indent=2, sort_keys=True)
             fp.write("\n")
 
     def write_event_record(
@@ -1131,6 +1727,11 @@ class RunLogger:
     def close(self) -> None:
         try:
             self.write_run_summary()
+        except Exception:
+            pass
+        try:
+            self.write_perf_summary()
+            self.write_system_resource_summary()
         except Exception:
             pass
         if self._async_enabled and self._log_thread is not None:

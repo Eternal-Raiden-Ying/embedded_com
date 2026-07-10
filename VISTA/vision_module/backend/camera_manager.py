@@ -334,10 +334,12 @@ class CameraManager:
         cfg: VisionServiceConfig,
         logger: Optional[logging.Logger] = None,
         capability_sink: CapabilitySink = None,
+        perf_marker: Optional[Callable[..., None]] = None,
     ):
         self.cfg = cfg
         self.log = logger or logging.getLogger("vision.camera_manager")
         self._capability_sink = capability_sink
+        self._perf_marker = perf_marker
         self._lock = RLock()
         self.cams: Dict[str, Any] = {}
         self._specs: Dict[str, CameraSpec] = {}
@@ -530,6 +532,16 @@ class CameraManager:
                 self._worker_stop.wait(timeout=0.1)
                 continue
             frame_bundle: Dict[str, Any] = {}
+            next_frame_id = int(self._last_frame_seq) + 1
+            capture_start_ns = time.monotonic_ns()
+            trace_id = f"vision:{next_frame_id}"
+            if self._perf_marker is not None:
+                self._perf_marker(
+                    "camera_capture_start",
+                    frame_id=next_frame_id,
+                    trace_id=trace_id,
+                    mono_ns=capture_start_ns,
+                )
             for name, cam in active:
                 try:
                     frame = cam.read_frame()
@@ -552,13 +564,29 @@ class CameraManager:
                         if depth_intrinsics:
                             frame_bundle["depth_intrinsics"] = depth_intrinsics
             if not frame_bundle:
+                if self._perf_marker is not None:
+                    self._perf_marker(
+                        "camera_capture_done",
+                        frame_id=next_frame_id,
+                        trace_id=trace_id,
+                        mono_ns=time.monotonic_ns(),
+                        executed=False,
+                        reason="no_camera_frame",
+                    )
                 self._publish_result("frame_meta", {"has_frames": False, "cameras": []})
                 self._worker_stop.wait(timeout=self._worker_interval_s)
                 continue
             self._last_frame_seq += 1
+            capture_done_ns = time.monotonic_ns()
+            capture_ms = max(0.0, (capture_done_ns - capture_start_ns) / 1_000_000.0)
             camera_names = sorted(frame_bundle.keys())
             frame_capture_ts = time.time()
             frame_bundle["camera_frame_seq"] = int(self._last_frame_seq)
+            frame_bundle["frame_id"] = int(self._last_frame_seq)
+            frame_bundle["trace_id"] = trace_id
+            frame_bundle["capture_mono_ns"] = int(capture_start_ns)
+            frame_bundle["camera_capture_done_mono_ns"] = int(capture_done_ns)
+            frame_bundle["camera_capture_ms"] = float(capture_ms)
             frame_bundle["frame_capture_ts"] = float(frame_capture_ts)
             frame_bundle["camera_frame_ts_ms"] = int(round(frame_capture_ts * 1000.0))
             rgb_shape = None
@@ -612,8 +640,20 @@ class CameraManager:
                     "frame_seq": int(self._last_frame_seq),
                     "camera_frame_seq": int(self._last_frame_seq),
                     "camera_frame_ts_ms": int(round(frame_capture_ts * 1000.0)),
+                    "trace_id": trace_id,
+                    "capture_mono_ns": int(capture_start_ns),
+                    "camera_capture_done_mono_ns": int(capture_done_ns),
+                    "camera_capture_ms": float(capture_ms),
                 },
             )
+            if self._perf_marker is not None:
+                self._perf_marker(
+                    "camera_capture_done",
+                    frame_id=int(self._last_frame_seq),
+                    trace_id=trace_id,
+                    mono_ns=capture_done_ns,
+                    duration_ms=capture_ms,
+                )
             self._worker_stop.wait(timeout=self._worker_interval_s)
             self._shared_rgbd_cycle_bundle = None
 

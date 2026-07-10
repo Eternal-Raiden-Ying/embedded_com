@@ -107,6 +107,7 @@ def apply_env_overrides(config: SystemGlobalConfig) -> None:
     _set_from_env(config.vision.runtime, "project_root", "VISION_PROJECT_ROOT", str)
     _set_from_env(config.vision.runtime, "runs_dir", "VISION_RUNS_DIR", str)
     _set_from_env(config.vision.runtime, "stack_run_id", "STACK_RUN_ID", str)
+    _set_from_env(config.vision.runtime, "log_profile", "ROBOT_LOG_PROFILE", str)
 
     # Vision Model
     _set_from_env(config.vision.model, "active_model", "VISTA_TABLE_MODEL", str)
@@ -133,6 +134,7 @@ def apply_env_overrides(config: SystemGlobalConfig) -> None:
     _set_from_env(config.orchestrator.runtime, "pid_file", "ORCH_PID_FILE", str)
     _set_from_env(config.orchestrator.runtime, "stack_run_id", "STACK_RUN_ID", str)
     _set_from_env(config.orchestrator.runtime, "tick_hz", "ORCH_TICK_HZ", float)
+    _set_from_env(config.orchestrator.runtime, "log_profile", "ROBOT_LOG_PROFILE", str)
     _set_from_env(config.orchestrator.runtime, "log_mode", "ORCH_LOG_MODE", str)
     _set_from_env(config.orchestrator.runtime, "log_enabled", "ORCH_LOG_ENABLED", bool)
     _set_from_env(config.orchestrator.runtime, "debug", "ORCH_DEBUG", bool)

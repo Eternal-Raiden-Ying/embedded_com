@@ -47,11 +47,14 @@ class PreviewManager:
         self._worker_interval_s = 0.02
         self._last_frame_generation = 0
         self._last_frame_seq = 0
+        self._last_frame_age_ms: Optional[float] = None
+        self._preview_queue_depth = 0
+        self._preview_dropped_frames = 0
         self._exit_requested = False
         self._last_source_key = ""
         self._last_preview_seq = 0
         self._last_preview_emit_ts = 0.0
-        self._render_times = deque(maxlen=120)
+        self._render_times = deque(maxlen=240)
         self._last_render_error_ts = 0.0
         self._last_keep_alive_log_ts = 0.0
         self._last_slice_done_log_key = ""
@@ -72,6 +75,7 @@ class PreviewManager:
         self._clear_overlay_on_mode_switch = True
         self._current_mode = "IDLE"
         self._current_layout = self._mode_layouts["IDLE"]
+        self._preview_mode = "light"
 
     @staticmethod
     def _display_mode(mode: Any) -> str:
@@ -125,11 +129,24 @@ class PreviewManager:
         self._show_edge_overlay_in_track_local = bool(cfg.get("show_edge_overlay_in_track_local", self._show_edge_overlay_in_track_local))
         self._show_age_ms = bool(cfg.get("show_age_ms", self._show_age_ms))
         self._clear_overlay_on_mode_switch = bool(cfg.get("clear_overlay_on_mode_switch", self._clear_overlay_on_mode_switch))
+        default_preview_mode = self._preview_mode
+        try:
+            default_preview_mode = str(getattr(self.cfg.preview, "preview_mode", default_preview_mode) or default_preview_mode)
+        except Exception:
+            pass
+        preview_mode = str(cfg.get("preview_mode", default_preview_mode) or default_preview_mode).strip().lower()
+        if preview_mode not in {"off", "light", "debug", "full"}:
+            preview_mode = "light"
+        self._preview_mode = preview_mode
 
         old_mode = self._current_mode
         old_layout = self._current_layout
         new_layout = self._resolve_layout(mode_name)
-        if mode_name == "FIND_OBJECT" and self._debug_four_panel_in_track_local:
+        if self._preview_mode == "off":
+            new_layout = "rgb_minimal"
+        elif self._preview_mode == "light":
+            new_layout = "rgb_minimal"
+        elif mode_name == "FIND_OBJECT" and self._debug_four_panel_in_track_local:
             new_layout = "rgb_depth_edge"
         if new_layout not in self._supported_layouts:
             self._warn_operator(
@@ -143,11 +160,12 @@ class PreviewManager:
         if mode_changed or layout_changed:
             if self.logger is not None:
                 self.logger.info(
-                    "preview layout switch | old_mode=%s new_mode=%s old_layout=%s new_layout=%s reason=%s",
+                    "preview layout switch | old_mode=%s new_mode=%s old_layout=%s new_layout=%s preview_mode=%s reason=%s",
                     old_mode,
                     mode_name,
                     old_layout,
                     new_layout,
+                    self._preview_mode,
                     reason,
                 )
             self._emit_operator(
@@ -155,7 +173,7 @@ class PreviewManager:
                 (
                     "[VISTA] PREVIEW_LAYOUT_SWITCH "
                     f"old_mode={self._display_mode(old_mode)} new_mode={self._display_mode(mode_name)} "
-                    f"old_layout={old_layout} new_layout={new_layout} reason={reason}"
+                    f"old_layout={old_layout} new_layout={new_layout} preview_mode={self._preview_mode} reason={reason}"
                 ),
             )
             if self._clear_overlay_on_mode_switch:
@@ -450,6 +468,9 @@ class PreviewManager:
             if not self.enabled or self.sink is None:
                 self._worker_stop.wait(timeout=0.05)
                 continue
+            if self._preview_mode == "off":
+                self._worker_stop.wait(timeout=0.10)
+                continue
             scheduler = self._scheduler
             if scheduler is None:
                 self._worker_stop.wait(timeout=self._worker_interval_s)
@@ -466,14 +487,20 @@ class PreviewManager:
                 self._last_frame_seq = 0
                 self._last_preview_seq = 0
                 self._last_preview_emit_ts = 0.0
+                self._preview_queue_depth = 0
             if not isinstance(frames, dict):
                 self._worker_stop.wait(timeout=self._worker_interval_s)
                 continue
             now = time.time()
             stale_age = max(0.0, now - float(frame_slot.get("ts", now) or now))
+            self._last_frame_age_ms = stale_age * 1000.0
+            if self._last_frame_seq > 0 and seq > self._last_frame_seq + 1:
+                self._preview_dropped_frames += max(0, seq - self._last_frame_seq - 1)
+            self._preview_queue_depth = max(0, seq - self._last_preview_seq)
             is_stale_repeat = seq <= self._last_frame_seq
             if is_stale_repeat:
                 if stale_age < self._stale_warn_s or now - self._last_preview_emit_ts < 0.5:
+                    self._preview_dropped_frames += 1
                     self._worker_stop.wait(timeout=self._worker_interval_s)
                     continue
             else:
@@ -493,7 +520,9 @@ class PreviewManager:
             target_obs = dict(scheduler.read_result("target_obs", default={}) or {})
             mode = str(status.get("mode") or "IDLE").upper()
             preview_layout = self._resolve_layout(mode)
-            if mode == "FIND_OBJECT" and self._debug_four_panel_in_track_local:
+            if self._preview_mode == "light":
+                preview_layout = "rgb_minimal"
+            elif mode == "FIND_OBJECT" and self._debug_four_panel_in_track_local:
                 preview_layout = "rgb_depth_edge"
             if preview_layout not in self._supported_layouts:
                 preview_layout = "rgb_minimal"
@@ -520,16 +549,20 @@ class PreviewManager:
             lines = [
                 f"stage={str(status.get('stage') or 'IDLE').upper()}",
                 f"mode={str(status.get('mode') or 'IDLE').upper()}",
-                f"epoch={int(status.get('epoch', 0) or 0)}",
-                f"boxes={int(local.get('box_count', 0) or 0)}",
+                f"preview_mode={self._preview_mode}",
             ]
+            if self._preview_mode != "light":
+                lines.extend([
+                    f"epoch={int(status.get('epoch', 0) or 0)}",
+                    f"boxes={int(local.get('box_count', 0) or 0)}",
+                ])
             session_id = status.get("session_id")
             if session_id:
                 lines.append(f"session={session_id}")
             req_id = status.get("req_id")
             if req_id:
                 lines.append(f"req={req_id}")
-            if table_edge:
+            if table_edge and self._preview_mode != "light":
                 found = bool(table_edge.get("table_found", table_edge.get("found", False)))
                 edge_found = bool(table_edge.get("edge_found", False))
                 conf = float(table_edge.get("confidence", 0.0) or 0.0)
@@ -550,7 +583,7 @@ class PreviewManager:
                     "preview:target_class_not_supported",
                     f"[VISTA] WARN TARGET class_not_supported target={target_obs.get('target') or status.get('target') or 'target'} available={available or 'n/a'}",
                 )
-            if target_obs:
+            if target_obs and self._preview_mode != "light":
                 self._emit_operator("preview:target_obs", self._target_summary_line(status, target_obs))
             if not target_obs:
                 lines.append("target_obs=unavailable")
@@ -612,6 +645,7 @@ class PreviewManager:
                                 "infer_age_s": infer_age,
                                 "target": target_obs.get("target") or status.get("target"),
                                 "preview_layout": preview_layout,
+                                "preview_mode": self._preview_mode,
                                 "show_edge_overlay_in_track_local": bool(self._show_edge_overlay_in_track_local),
                                 "show_age_ms": bool(self._show_age_ms),
                             },
@@ -630,7 +664,8 @@ class PreviewManager:
                     )
             self._last_preview_seq = seq
             self._last_preview_emit_ts = now
-            self._render_times.append(now)
+            self._preview_queue_depth = 0
+            self._render_times.append(time.monotonic_ns())
             if not ok:
                 self._exit_requested = True
                 line = f"[PREVIEW][USER_EXIT] state={str(status.get('stage') or 'IDLE').upper()} mode={str(status.get('mode') or 'IDLE').upper()}"
@@ -674,6 +709,7 @@ class PreviewManager:
                 show_depth=bool(getattr(preview_cfg, "show_depth", True)),
                 show_edge=bool(getattr(preview_cfg, "show_edge", True)),
                 destroy_all_on_close=bool(getattr(preview_cfg, "destroy_all_on_close", True)),
+                preview_mode=str(getattr(preview_cfg, "preview_mode", "light") or "light"),
                 table_bbox_enabled=bool(getattr(debug_cfg, "table_bbox_enabled", True)),
                 mock_table_bbox=str(getattr(debug_cfg, "mock_table_bbox", "") or "").strip() or None,
             )
@@ -687,6 +723,11 @@ class PreviewManager:
         self.enabled = True
         self._exit_requested = False
         if self.sink is not None:
+            if self._preview_mode == "off":
+                if self.logger is not None:
+                    self.logger.info("[PREVIEW][START] skipped preview_mode=off")
+                self._emit("enabled", enabled=False, sink_name=getattr(self.sink, "sink_name", "unknown"), preview_mode=self._preview_mode)
+                return False
             self.sink.open()
             self._warn_if_sink_open_failed()
         if self.logger is not None:
@@ -747,9 +788,10 @@ class PreviewManager:
 
     def snapshot(self) -> Dict[str, Any]:
         """Expose preview manager and sink state for diagnostics."""
-        now = time.time()
-        recent = [float(ts) for ts in self._render_times if now - float(ts) <= 5.0]
-        preview_fps = (len(recent) / 5.0) if recent else 0.0
+        now_ns = time.monotonic_ns()
+        window_ns = 2_000_000_000
+        recent = [int(ts) for ts in self._render_times if now_ns - int(ts) <= window_ns]
+        preview_fps = (len(recent) / 2.0) if recent else 0.0
         sink_snapshot = self.sink.snapshot() if self.sink is not None else None
         timing = dict((sink_snapshot or {}).get("timing") or {})
         return {
@@ -761,7 +803,12 @@ class PreviewManager:
             "exit_requested": bool(self._exit_requested),
             "current_mode": self._current_mode,
             "current_layout": self._current_layout,
+            "preview_mode": self._preview_mode,
             "mode_layouts": dict(self._mode_layouts),
             "preview_fps": float(preview_fps),
             "preview_timing": timing,
+            "preview_frame_age_ms": self._last_frame_age_ms,
+            "preview_queue_depth": int(self._preview_queue_depth),
+            "preview_dropped_frames": int(self._preview_dropped_frames),
+            "preview_last_frame_id": int(self._last_frame_seq) if self._last_frame_seq >= 0 else None,
         }

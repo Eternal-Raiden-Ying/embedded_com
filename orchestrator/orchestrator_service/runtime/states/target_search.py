@@ -1496,13 +1496,23 @@ class TargetSearchMixin:
             if previous is None or abs_err < float(previous):
                 self.ctx.target_lateral_min_abs_err_x = abs_err
 
-    def _target_lateral_hold_decision(self, candidate_reason: str, *, lost_s: float) -> Optional[MotionDecision]:
+    def _target_lateral_hold_decision(
+        self,
+        candidate_reason: Optional[str] = None,
+        *,
+        lost_s: Optional[float] = None,
+        state: str = "EDGE_SLIDE_SEARCH",
+        reason: Optional[str] = None,
+    ) -> Optional[MotionDecision]:
         if not bool(getattr(self.cfg, "target_lateral_hold_enable", True)):
             return None
+        candidate_reason = str(candidate_reason or reason or "target_missing")
         last_obs = getattr(self.ctx, "target_lateral_last_good_obs", None)
         age_s = self._target_lateral_last_good_age_s()
         last_vy = float(getattr(self.ctx, "target_lateral_last_good_vy_mps", 0.0) or 0.0)
         lost_stop_s = max(0.0, float(getattr(self.cfg, "target_lateral_lost_stop_s", 1.2) or 1.2))
+        if lost_s is None:
+            lost_s = age_s if age_s is not None else 0.0
         if last_obs is None or age_s is None or abs(last_vy) <= 1e-9:
             return None
         if lost_s >= lost_stop_s:
@@ -1527,12 +1537,13 @@ class TargetSearchMixin:
         self.ctx.target_lateral_vy_cmd = float(vy_cmd)
         self._log(
             "info",
-            f"[SLICE][TARGET_HOLD] age={age_s:.2f} last_vy={last_vy:.3f} reason={candidate_reason or 'target_missing'}",
+            f"[SLICE][TARGET_HOLD] state={state or 'EDGE_SLIDE_SEARCH'} age={age_s:.2f} last_vy={last_vy:.3f} reason={candidate_reason}",
         )
-        cmd = self.controller._cmd("EDGE_SLIDE_SEARCH", vx=0.0, vy=vy_cmd, wz=0.0)
+        state_name = str(state or "EDGE_SLIDE_SEARCH")
+        cmd = self.controller._cmd(state_name, vx=0.0, vy=vy_cmd, wz=0.0)
         decision = MotionDecision(
             cmd=cmd,
-            control_summary=self.controller._summary("EDGE_SLIDE_SEARCH", cmd, reason="target_lateral_hold"),
+            control_summary=self.controller._summary(state_name, cmd, reason="target_lateral_hold"),
         )
         return self._annotate_target_lateral_decision(
             decision,

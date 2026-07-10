@@ -106,6 +106,8 @@ class VisionRuntimeConfig:
     vision_params_file: str = ""
     loaded_config_files: List[str] = field(default_factory=list)
     stack_run_id: str = ""
+    log_profile: str = "normal"
+    resource_sample_interval_s: float = 1.0
     loop_hz: float = 8.0
     send_hz: float = 5.0
     track_local_send_hz: float = 8.0
@@ -400,6 +402,7 @@ class TableEdgeConfig:
 
 @dataclass
 class PreviewConfig:
+    preview_mode: str = "light"
     mode_layouts: Dict[str, str] = field(
         default_factory=lambda: {
             "IDLE": "rgb_minimal",
@@ -452,6 +455,8 @@ class OrchestratorRuntimeConfig:
     pid_file: str = field(default_factory=lambda: str(_ORCH_ROOT / "pids" / "orchestrator.pid"))
     stack_run_id: str = ""
     tick_hz: float = 10.0
+    log_profile: str = "normal"
+    resource_sample_interval_s: float = 1.0
     log_mode: str = "concise"
     log_enabled: bool = True
     debug: bool = False

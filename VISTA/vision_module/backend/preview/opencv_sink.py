@@ -33,6 +33,7 @@ class OpenCVPreviewSink(PreviewSink):
     sink_name = "opencv"
 
     def __init__(self, window_name: str = "VISTA Preview"):
+        self.logger = None
         self.window_name = window_name
         self.window_id = f"{id(self):x}"
         self.layout = "rgb_depth_edge"
@@ -48,12 +49,17 @@ class OpenCVPreviewSink(PreviewSink):
         self.text_level = "compact"
         self.debug_points_enabled = False
         self.legend_level = "compact"
+        self.preview_mode = "light"
+        self._last_displayed_frame_id: Optional[int] = None
+        self._depth_colormap_cache: Optional[np.ndarray] = None
+        self._depth_colormap_cache_key: Optional[Tuple[int, Tuple[int, int]]] = None
+        self._depth_colormap_update_stride = 4
         self._supported_layouts = {"rgb_minimal", "rgb_depth_edge", "rgb_yolo_edge_overlay", "rgb_yolo_overlay", "rgb_hot_preview"}
         self._opened = False
         self._open_failed = False
         self._open_error = ""
         self._last_frame_ts = 0.0
-        self._last_render_ts = 0.0
+        self._last_render_mono_ns = 0
         self._fps = 0.0
         self._frame_count = 0
         self._timing_frame: Optional[Dict[str, float]] = None
@@ -72,9 +78,15 @@ class OpenCVPreviewSink(PreviewSink):
             "destroy_all_on_close",
             "table_bbox_enabled",
             "mock_table_bbox",
+            "preview_mode",
         ):
             if key in kwargs:
-                setattr(self, key, kwargs[key])
+                value = kwargs[key]
+                if key == "preview_mode":
+                    value = str(value or "light").strip().lower()
+                    if value not in {"off", "light", "debug", "full"}:
+                        value = "light"
+                setattr(self, key, value)
 
     @staticmethod
     def _env_choice(name: str, default: str, allowed: set) -> str:
@@ -82,6 +94,12 @@ class OpenCVPreviewSink(PreviewSink):
         return value if value in allowed else default
 
     def _add_timing(self, key: str, ms: float) -> None:
+        aliases = {
+            "preview_draw_text_ms": "preview_text_draw_ms",
+            "preview_draw_legend_ms": "preview_legend_draw_ms",
+            "preview_draw_points_ms": "preview_points_draw_ms",
+        }
+        key = aliases.get(key, key)
         if self._timing_frame is not None:
             self._timing_frame[key] = float(self._timing_frame.get(key, 0.0) or 0.0) + float(ms)
 
@@ -116,12 +134,32 @@ class OpenCVPreviewSink(PreviewSink):
 
     def render(self, frame: PreviewFrame) -> bool:
         """Render one frame bundle and return False when the user asks to exit."""
-        total_start = time.perf_counter()
+        total_start_ns = time.monotonic_ns()
         self._timing_frame = {
             "preview_compose_ms": 0.0,
-            "preview_draw_points_ms": 0.0,
-            "preview_draw_text_ms": 0.0,
-            "preview_draw_legend_ms": 0.0,
+            "preview_resize_ms": 0.0,
+            "preview_colormap_ms": 0.0,
+            "preview_concat_ms": 0.0,
+            "preview_overlay_ms": 0.0,
+            "preview_text_draw_ms": 0.0,
+            "preview_panel_draw_ms": 0.0,
+            "preview_legend_draw_ms": 0.0,
+            "preview_points_draw_ms": 0.0,
+            "preview_bbox_draw_ms": 0.0,
+            "preview_copy_ms": 0.0,
+            "preview_numpy_copy_ms": 0.0,
+            "preview_encode_or_convert_ms": 0.0,
+            "preview_canvas_alloc_ms": 0.0,
+            "preview_canvas_clear_ms": 0.0,
+            "preview_rgb_prepare_ms": 0.0,
+            "preview_depth_prepare_ms": 0.0,
+            "preview_edge_prepare_ms": 0.0,
+            "preview_panel_layout_ms": 0.0,
+            "preview_metric_collect_ms": 0.0,
+            "preview_lock_wait_ms": 0.0,
+            "preview_ascontiguous_ms": 0.0,
+            "preview_throttle_sleep_ms": 0.0,
+            "preview_compose_other_ms": 0.0,
             "preview_imshow_ms": 0.0,
             "preview_waitkey_ms": 0.0,
         }
@@ -131,9 +169,15 @@ class OpenCVPreviewSink(PreviewSink):
             self._timing_frame = None
             return True
 
-        compose_start = time.perf_counter()
+        compose_start_ns = time.monotonic_ns()
         frames = frame.image if isinstance(frame.image, dict) else {}
         metadata = dict(getattr(frame.overlay, "metadata", {}) or {})
+        self.preview_mode = str(metadata.get("preview_mode") or self.preview_mode or "light").strip().lower()
+        if self.preview_mode not in {"off", "light", "debug", "full"}:
+            self.preview_mode = "light"
+        if self.preview_mode == "off":
+            self._timing_frame = None
+            return True
         mode = str(dict(metadata.get("runtime_status") or {}).get("mode") or frame.mode or "").upper()
         table_edge = metadata.get("table_edge_obs") or {}
         target_obs = metadata.get("target_obs") or {}
@@ -142,6 +186,8 @@ class OpenCVPreviewSink(PreviewSink):
         self.debug_points_enabled = False
         self.legend_level = "compact"
         if layout not in self._supported_layouts:
+            layout = "rgb_minimal"
+        if self.preview_mode == "light":
             layout = "rgb_minimal"
         self.layout = layout
 
@@ -154,7 +200,9 @@ class OpenCVPreviewSink(PreviewSink):
             rgb_panel = self._make_rgb_panel(frames.get("rgb") if frames else frame.image, target_metadata, (rgb_w, self.canvas_h))
             info_table_edge = table_edge if bool(metadata.get("show_edge_overlay_in_track_local", True)) else {}
             info_panel = self._make_info_panel(frame, target_metadata, info_table_edge, target_obs, (info_w, self.canvas_h))
+            concat_start_ns = time.monotonic_ns()
             canvas = np.hstack([rgb_panel, info_panel])
+            self._add_timing("preview_concat_ms", (time.monotonic_ns() - concat_start_ns) / 1_000_000.0)
         elif layout == "rgb_yolo_overlay":
             table_metadata = dict(metadata)
             table_metadata["preview_layout"] = layout
@@ -176,9 +224,11 @@ class OpenCVPreviewSink(PreviewSink):
             edge_panel = self._make_edge_panel(frames.get("depth") if frames else None, table_edge, panel_size)
             info_panel = self._make_info_panel(frame, edge_metadata, table_edge, target_obs, panel_size)
 
+            concat_start_ns = time.monotonic_ns()
             top = np.hstack([rgb_panel, depth_panel])
             bottom = np.hstack([edge_panel, info_panel])
             canvas = np.vstack([top, bottom])
+            self._add_timing("preview_concat_ms", (time.monotonic_ns() - concat_start_ns) / 1_000_000.0)
         else:
             minimal_metadata = dict(metadata)
             minimal_metadata["preview_layout"] = layout
@@ -187,27 +237,77 @@ class OpenCVPreviewSink(PreviewSink):
             canvas = self._make_minimal_rgb_panel(frames.get("rgb") if frames else frame.image, minimal_metadata, (self.canvas_w, self.canvas_h), title=title)
 
         if self.canvas_w > 0 and self.canvas_h > 0 and canvas.shape[:2] != (self.canvas_h, self.canvas_w):
+            resize_start_ns = time.monotonic_ns()
             canvas = cv2.resize(canvas, (self.canvas_w, self.canvas_h), interpolation=cv2.INTER_AREA)
+            self._add_timing("preview_resize_ms", (time.monotonic_ns() - resize_start_ns) / 1_000_000.0)
         if self.scale > 0 and abs(self.scale - 1.0) > 1e-3:
+            resize_start_ns = time.monotonic_ns()
             canvas = cv2.resize(canvas, None, fx=self.scale, fy=self.scale, interpolation=cv2.INTER_AREA)
-        self._add_timing("preview_compose_ms", (time.perf_counter() - compose_start) * 1000.0)
+            self._add_timing("preview_resize_ms", (time.monotonic_ns() - resize_start_ns) / 1_000_000.0)
+        compose_ms = (time.monotonic_ns() - compose_start_ns) / 1_000_000.0
+        overlay_ms = sum(
+            float((self._timing_frame or {}).get(key, 0.0) or 0.0)
+            for key in (
+                "preview_text_draw_ms",
+                "preview_panel_draw_ms",
+                "preview_legend_draw_ms",
+                "preview_points_draw_ms",
+                "preview_bbox_draw_ms",
+            )
+        )
+        self._timing_frame["preview_overlay_ms"] = overlay_ms
+        accounted_ms = overlay_ms + sum(
+            float((self._timing_frame or {}).get(key, 0.0) or 0.0)
+            for key in (
+                "preview_resize_ms",
+                "preview_colormap_ms",
+                "preview_concat_ms",
+                "preview_copy_ms",
+                "preview_numpy_copy_ms",
+                "preview_encode_or_convert_ms",
+                "preview_canvas_alloc_ms",
+                "preview_canvas_clear_ms",
+                "preview_rgb_prepare_ms",
+                "preview_depth_prepare_ms",
+                "preview_edge_prepare_ms",
+                "preview_panel_layout_ms",
+                "preview_metric_collect_ms",
+                "preview_lock_wait_ms",
+                "preview_ascontiguous_ms",
+                "preview_throttle_sleep_ms",
+            )
+        )
+        other_ms = compose_ms - accounted_ms
+        logger = getattr(self, "logger", None)
+        if other_ms < -0.05 and logger is not None:
+            logger.warning(
+                "preview compose timing overlap | compose_ms=%.3f accounted_ms=%.3f",
+                compose_ms,
+                accounted_ms,
+            )
+        self._timing_frame["preview_compose_other_ms"] = max(0.0, other_ms)
+        self._timing_frame["preview_compose_ms"] = compose_ms
 
-        imshow_start = time.perf_counter()
+        imshow_start_ns = time.monotonic_ns()
         cv2.imshow(self.window_name, canvas)
-        self._add_timing("preview_imshow_ms", (time.perf_counter() - imshow_start) * 1000.0)
+        self._add_timing("preview_imshow_ms", (time.monotonic_ns() - imshow_start_ns) / 1_000_000.0)
         self._last_frame_ts = float(frame.ts or 0.0)
         self._update_fps()
-        wait_start = time.perf_counter()
+        wait_start_ns = time.monotonic_ns()
         key = cv2.waitKey(1)
-        self._add_timing("preview_waitkey_ms", (time.perf_counter() - wait_start) * 1000.0)
+        self._add_timing("preview_waitkey_ms", (time.monotonic_ns() - wait_start_ns) / 1_000_000.0)
         timing = dict(self._timing_frame or {})
-        timing["preview_total_ms"] = (time.perf_counter() - total_start) * 1000.0
+        timing["preview_total_ms"] = (time.monotonic_ns() - total_start_ns) / 1_000_000.0
         timing["preview_fps"] = float(self._fps)
         timing["ts"] = time.time()
+        timing["mono_ns"] = time.monotonic_ns()
         timing["preview_layout"] = self.layout
+        timing["preview_mode"] = self.preview_mode
         timing["preview_text_level"] = self.text_level
         timing["preview_legend_level"] = self.legend_level
         timing["preview_debug_points_enabled"] = bool(self.debug_points_enabled)
+        timing["preview_last_frame_id"] = metadata.get("frame_seq")
+        self._last_displayed_frame_id = metadata.get("frame_seq")
         self._timing_recent.append(timing)
         self._timing_frame = None
         key_code = key & 0xFF
@@ -216,17 +316,18 @@ class OpenCVPreviewSink(PreviewSink):
         return True
 
     def _update_fps(self) -> None:
-        now = time.time()
+        now_ns = time.monotonic_ns()
         self._frame_count += 1
-        if self._last_render_ts <= 0.0:
-            self._last_render_ts = now
+        if self._last_render_mono_ns <= 0:
+            self._last_render_mono_ns = now_ns
             return
-        dt = max(1e-6, now - self._last_render_ts)
+        dt = max(1e-6, (now_ns - self._last_render_mono_ns) / 1_000_000_000.0)
         instant = 1.0 / dt
         self._fps = instant if self._fps <= 0.0 else (0.85 * self._fps + 0.15 * instant)
-        self._last_render_ts = now
+        self._last_render_mono_ns = now_ns
 
     def _make_rgb_panel(self, image: Any, metadata: Dict[str, Any], size: Tuple[int, int]) -> np.ndarray:
+        prepare_start_ns = time.monotonic_ns()
         if not self.show_rgb:
             return self._blank(size, "RGB", "RGB panel disabled")
         if not isinstance(image, np.ndarray) or image.size == 0:
@@ -238,7 +339,9 @@ class OpenCVPreviewSink(PreviewSink):
         mode = str(status.get("mode") or "").upper()
         target_name = str(target_obs.get("target") or metadata.get("target") or status.get("target") or "").strip()
         panel, scale, offset = self._fit_with_transform(self._to_bgr(image, prefer_rgb=False), size)
+        self._add_timing("preview_rgb_prepare_ms", (time.monotonic_ns() - prepare_start_ns) / 1_000_000.0)
         self._title(panel, "RGB")
+        light = self.preview_mode == "light"
         if mode in {"FIND_OBJECT", "FIND_TABLE"} or bool(metadata.get("show_yolo_boxes", False)):
             self._draw_detection_boxes(panel, local, scale, offset, target_name)
         else:
@@ -247,9 +350,13 @@ class OpenCVPreviewSink(PreviewSink):
                 self._corner_note(panel, "table_bbox unavailable", fg=YELLOW)
             else:
                 self._draw_roi(panel, table_bbox, scale, offset, "table_bbox", YELLOW, dashed=False)
-                table_quadrant = self._table_quadrant(local, metadata)
+                table_quadrant = None if light else self._table_quadrant(local, metadata)
                 if table_quadrant:
                     self._corner_note(panel, f"table_quadrant={table_quadrant}", fg=YELLOW)
+            if light:
+                if isinstance(target_obs.get("bbox"), (list, tuple)):
+                    self._draw_roi(panel, target_obs.get("bbox"), scale, offset, "target", (0, 255, 80), dashed=False)
+                return panel
             search_roi = local.get("rgb_search_roi") or local.get("search_roi") or metadata.get("rgb_search_roi") or metadata.get("search_roi")
             object_roi = local.get("object_search_roi") or metadata.get("object_search_roi")
             quadrant_roi = local.get("quadrant_roi") or metadata.get("quadrant_roi") or self._quadrant_roi(table_bbox, local, metadata)
@@ -264,7 +371,8 @@ class OpenCVPreviewSink(PreviewSink):
                 self._draw_roi(panel, target_obs.get("bbox"), scale, offset, f"target:{target_name or 'target'}", (0, 255, 80), dashed=False)
             else:
                 self._draw_roi(panel, target_obs.get("bbox"), scale, offset, "target_bbox", (90, 180, 255), dashed=False)
-        self._draw_table_edge_line_overlay(panel, dict(metadata.get("table_edge_obs") or {}), scale, offset)
+        if not light:
+            self._draw_table_edge_line_overlay(panel, dict(metadata.get("table_edge_obs") or {}), scale, offset)
         if metadata.get("frame_stale"):
             self._text_block(panel, [f"frame_stale age={float(metadata.get('frame_age_s') or 0.0):.2f}s"], (16, panel.shape[0] - 24), fg=(80, 210, 255))
         return panel
@@ -278,8 +386,11 @@ class OpenCVPreviewSink(PreviewSink):
         lines = [
             f"stage={status.get('stage', 'IDLE')}",
             f"mode={status.get('mode', 'IDLE')}",
-            f"preview_layout={metadata.get('preview_layout') or self.layout}",
+            f"preview_mode={metadata.get('preview_mode') or self.preview_mode}",
         ]
+        cmd = status.get("last_cmd") or status.get("cmd") or metadata.get("last_cmd")
+        if cmd is not None:
+            lines.append(f"last_cmd={str(cmd)[:32]}")
         frame_age = metadata.get("frame_age_s")
         if frame_age is not None and bool(metadata.get("show_age_ms", True)):
             lines.append(f"frame_age_ms={int(float(frame_age or 0.0) * 1000.0)}")
@@ -289,11 +400,13 @@ class OpenCVPreviewSink(PreviewSink):
         return panel
 
     def _make_depth_panel(self, image: Any, table_edge: Dict[str, Any], size: Tuple[int, int]) -> np.ndarray:
+        depth_start_ns = time.monotonic_ns()
         if not self.show_depth:
             return self._blank(size, "DEPTH", "depth panel disabled")
         if not isinstance(image, np.ndarray) or image.size == 0:
             return self._blank(size, "DEPTH", "depth stale/null")
-        panel, scale, offset = self._fit_with_transform(self._depth_colormap(image), size)
+        panel, scale, offset = self._fit_with_transform(self._depth_colormap(image, size=size), size)
+        self._add_timing("preview_depth_prepare_ms", (time.monotonic_ns() - depth_start_ns) / 1_000_000.0)
         self._title(panel, "DEPTH COLORMAP")
         for name, color in (
             ("depth_edge_roi", (80, 255, 255)),
@@ -334,6 +447,7 @@ class OpenCVPreviewSink(PreviewSink):
         return panel
 
     def _make_edge_panel(self, depth: Any, table_edge: Dict[str, Any], size: Tuple[int, int]) -> np.ndarray:
+        edge_start_ns = time.monotonic_ns()
         if not self.show_edge:
             return self._blank(size, "EDGE / TOP VIEW", "edge panel disabled")
         if isinstance(depth, np.ndarray) and depth.size:
@@ -341,6 +455,7 @@ class OpenCVPreviewSink(PreviewSink):
         else:
             panel = self._blank(size, "EDGE / TOP VIEW", "depth stale/null")
             scale, offset = 1.0, (0, 0)
+        self._add_timing("preview_edge_prepare_ms", (time.monotonic_ns() - edge_start_ns) / 1_000_000.0)
         self._title(panel, "GEOMETRY / PLANE")
         if not table_edge:
             self._corner_note(panel, "table_edge_obs unavailable", fg=(40, 220, 255))
@@ -435,8 +550,16 @@ class OpenCVPreviewSink(PreviewSink):
         size: Tuple[int, int],
     ) -> np.ndarray:
         w, h = size
+        layout_start_ns = time.monotonic_ns()
+        alloc_start_ns = time.monotonic_ns()
         panel = np.zeros((h, w, 3), dtype=np.uint8)
+        self._add_timing("preview_canvas_alloc_ms", (time.monotonic_ns() - alloc_start_ns) / 1_000_000.0)
+        panel_start_ns = time.monotonic_ns()
         panel[:] = (24, 28, 34)
+        clear_ms = (time.monotonic_ns() - panel_start_ns) / 1_000_000.0
+        self._add_timing("preview_canvas_clear_ms", clear_ms)
+        self._add_timing("preview_panel_draw_ms", clear_ms)
+        self._add_timing("preview_panel_layout_ms", (time.monotonic_ns() - layout_start_ns) / 1_000_000.0)
         now = time.time()
         frame_age = now - float(frame.ts or now)
         target_name = target_obs.get("target") or metadata.get("target") or "unavailable"
@@ -452,23 +575,49 @@ class OpenCVPreviewSink(PreviewSink):
     def _to_bgr(self, image: np.ndarray, prefer_rgb: bool = False) -> np.ndarray:
         arr = np.asarray(image)
         if arr.ndim == 2:
-            return cv2.cvtColor(self._normalize_gray(arr), cv2.COLOR_GRAY2BGR)
+            convert_start_ns = time.monotonic_ns()
+            out = cv2.cvtColor(self._normalize_gray(arr), cv2.COLOR_GRAY2BGR)
+            self._add_timing("preview_encode_or_convert_ms", (time.monotonic_ns() - convert_start_ns) / 1_000_000.0)
+            return out
         if arr.ndim == 3 and arr.shape[2] >= 3:
+            copy_start_ns = time.monotonic_ns()
             out = arr[:, :, :3].copy()
+            copy_ms = (time.monotonic_ns() - copy_start_ns) / 1_000_000.0
+            self._add_timing("preview_copy_ms", copy_ms)
+            self._add_timing("preview_numpy_copy_ms", copy_ms)
             if out.dtype != np.uint8:
+                convert_start_ns = time.monotonic_ns()
                 out = self._normalize_gray(out)
+                self._add_timing("preview_encode_or_convert_ms", (time.monotonic_ns() - convert_start_ns) / 1_000_000.0)
             if prefer_rgb:
+                convert_start_ns = time.monotonic_ns()
                 try:
                     out = cv2.cvtColor(out, cv2.COLOR_RGB2BGR)
                 except Exception:
                     out = out[:, :, ::-1]
+                self._add_timing("preview_encode_or_convert_ms", (time.monotonic_ns() - convert_start_ns) / 1_000_000.0)
             return out
         return np.zeros((1, 1, 3), dtype=np.uint8)
 
-    def _depth_colormap(self, image: np.ndarray) -> np.ndarray:
+    def _depth_colormap(self, image: np.ndarray, size: Optional[Tuple[int, int]] = None) -> np.ndarray:
+        colormap_start_ns = time.monotonic_ns()
         arr = np.asarray(image)
         if arr.ndim == 3:
             arr = arr[:, :, 0]
+        target_size = None
+        if size is not None:
+            try:
+                target_size = (max(1, int(size[0])), max(1, int(size[1])))
+            except Exception:
+                target_size = None
+        frame_key = int(self._last_displayed_frame_id or 0)
+        if target_size is not None:
+            cache_key = (frame_key // max(1, int(self._depth_colormap_update_stride)), target_size)
+            if self.preview_mode == "debug" and self._depth_colormap_cache_key == cache_key and self._depth_colormap_cache is not None:
+                return self._depth_colormap_cache.copy()
+            resize_start_ns = time.monotonic_ns()
+            arr = cv2.resize(arr, target_size, interpolation=cv2.INTER_NEAREST)
+            self._add_timing("preview_resize_ms", (time.monotonic_ns() - resize_start_ns) / 1_000_000.0)
         gray = self._normalize_depth(arr)
         try:
             colored = cv2.applyColorMap(gray, cv2.COLORMAP_TURBO)
@@ -477,6 +626,10 @@ class OpenCVPreviewSink(PreviewSink):
         invalid = ~self._valid_depth(arr)
         if invalid.shape == colored.shape[:2]:
             colored[invalid] = (20, 20, 20)
+        self._add_timing("preview_colormap_ms", (time.monotonic_ns() - colormap_start_ns) / 1_000_000.0)
+        if target_size is not None and self.preview_mode == "debug":
+            self._depth_colormap_cache_key = cache_key
+            self._depth_colormap_cache = colored.copy()
         return colored
 
     def _normalize_depth(self, image: np.ndarray) -> np.ndarray:
@@ -485,6 +638,9 @@ class OpenCVPreviewSink(PreviewSink):
         if not np.any(valid):
             return np.zeros(arr.shape[:2], dtype=np.uint8)
         vals = arr[valid]
+        if vals.size > 4096:
+            stride = max(1, int(vals.size // 4096))
+            vals = vals[::stride]
         lo, hi = np.percentile(vals, [2, 98])
         if hi <= lo:
             hi = lo + 1.0
@@ -508,8 +664,14 @@ class OpenCVPreviewSink(PreviewSink):
 
     def _blank(self, size: Tuple[int, int], title: str, message: str) -> np.ndarray:
         w, h = size
+        alloc_start_ns = time.monotonic_ns()
         panel = np.zeros((h, w, 3), dtype=np.uint8)
+        self._add_timing("preview_canvas_alloc_ms", (time.monotonic_ns() - alloc_start_ns) / 1_000_000.0)
+        panel_start_ns = time.monotonic_ns()
         panel[:] = (18, 22, 28)
+        clear_ms = (time.monotonic_ns() - panel_start_ns) / 1_000_000.0
+        self._add_timing("preview_canvas_clear_ms", clear_ms)
+        self._add_timing("preview_panel_draw_ms", clear_ms)
         self._title(panel, title)
         self._text_block(panel, [message], (16, 70), fg=(80, 210, 255))
         return panel
@@ -525,11 +687,19 @@ class OpenCVPreviewSink(PreviewSink):
             return np.zeros((h, w, 3), dtype=np.uint8), 1.0, (0, 0)
         scale = min(w / float(iw), h / float(ih))
         nw, nh = max(1, int(iw * scale)), max(1, int(ih * scale))
+        resize_start_ns = time.monotonic_ns()
         resized = cv2.resize(bgr, (nw, nh), interpolation=cv2.INTER_AREA)
+        self._add_timing("preview_resize_ms", (time.monotonic_ns() - resize_start_ns) / 1_000_000.0)
+        alloc_start_ns = time.monotonic_ns()
         panel = np.zeros((h, w, 3), dtype=np.uint8)
+        self._add_timing("preview_canvas_alloc_ms", (time.monotonic_ns() - alloc_start_ns) / 1_000_000.0)
+        panel_start_ns = time.monotonic_ns()
         panel[:] = (12, 14, 18)
         x0, y0 = (w - nw) // 2, (h - nh) // 2
         panel[y0 : y0 + nh, x0 : x0 + nw] = resized
+        panel_ms = (time.monotonic_ns() - panel_start_ns) / 1_000_000.0
+        self._add_timing("preview_canvas_clear_ms", panel_ms)
+        self._add_timing("preview_panel_draw_ms", panel_ms)
         return panel, float(scale), (int(x0), int(y0))
 
     def _edge_debug_image(self, depth: np.ndarray, table_edge: Dict[str, Any]) -> np.ndarray:
@@ -654,7 +824,7 @@ class OpenCVPreviewSink(PreviewSink):
         panel[mask] = cv2.addWeighted(panel, 1.0 - float(alpha), overlay, float(alpha), 0)[mask]
 
     def _draw_fast_legend(self, panel: np.ndarray) -> None:
-        start = time.perf_counter()
+        start = time.monotonic_ns()
         items = [
             ("sampled", (80, 80, 120), "circle"),
             ("height_candidate", (0, 220, 255), "circle"),
@@ -681,10 +851,10 @@ class OpenCVPreviewSink(PreviewSink):
             else:
                 cv2.circle(panel, (x + 5, yy - 4), 2, color, -1, lineType=cv2.LINE_AA)
             cv2.putText(panel, label, (x + 15, yy), cv2.FONT_HERSHEY_SIMPLEX, 0.30, (230, 230, 230), 1, cv2.LINE_AA)
-        self._add_timing("preview_draw_legend_ms", (time.perf_counter() - start) * 1000.0)
+        self._add_timing("preview_draw_legend_ms", (time.monotonic_ns() - start) / 1_000_000.0)
 
     def _draw_pixel_points(self, panel: np.ndarray, points: Any, color: Tuple[int, int, int], radius: int = 1, alpha: float = 1.0, marker: str = "circle") -> None:
-        start = time.perf_counter()
+        start = time.monotonic_ns()
         if not isinstance(points, (list, tuple)):
             return
         h, w = panel.shape[:2]
@@ -704,7 +874,7 @@ class OpenCVPreviewSink(PreviewSink):
                     cv2.circle(target, (x, y), int(radius), color, -1, lineType=cv2.LINE_AA)
         if alpha < 1.0:
             cv2.addWeighted(target, float(alpha), panel, 1.0 - float(alpha), 0, dst=panel)
-        self._add_timing("preview_draw_points_ms", (time.perf_counter() - start) * 1000.0)
+        self._add_timing("preview_draw_points_ms", (time.monotonic_ns() - start) / 1_000_000.0)
 
     def _draw_pixel_points_transformed(
         self,
@@ -717,7 +887,7 @@ class OpenCVPreviewSink(PreviewSink):
         alpha: float = 1.0,
         marker: str = "circle",
     ) -> None:
-        start = time.perf_counter()
+        start = time.monotonic_ns()
         if not isinstance(points, (list, tuple)):
             return
         h, w = panel.shape[:2]
@@ -738,7 +908,7 @@ class OpenCVPreviewSink(PreviewSink):
                     cv2.circle(target, (x, y), int(radius), color, -1, lineType=cv2.LINE_AA)
         if alpha < 1.0:
             cv2.addWeighted(target, float(alpha), panel, 1.0 - float(alpha), 0, dst=panel)
-        self._add_timing("preview_draw_points_ms", (time.perf_counter() - start) * 1000.0)
+        self._add_timing("preview_draw_points_ms", (time.monotonic_ns() - start) / 1_000_000.0)
 
     def _find_table_bbox(self, local: Dict[str, Any], rgb_shape: Any = None) -> Optional[List[int]]:
         if not self.table_bbox_enabled:
@@ -853,8 +1023,10 @@ class OpenCVPreviewSink(PreviewSink):
         color: Tuple[int, int, int],
         dashed: bool = False,
     ) -> None:
+        bbox_start_ns = time.monotonic_ns()
         parsed = self._parse_roi(roi)
         if parsed is None:
+            self._add_timing("preview_bbox_draw_ms", (time.monotonic_ns() - bbox_start_ns) / 1_000_000.0)
             return
         x1, y1, x2, y2 = parsed
         ox, oy = offset
@@ -865,6 +1037,7 @@ class OpenCVPreviewSink(PreviewSink):
         else:
             cv2.rectangle(panel, p1, p2, color, 2)
         self._label(panel, label, (p1[0], max(42, p1[1] - 6)), color)
+        self._add_timing("preview_bbox_draw_ms", (time.monotonic_ns() - bbox_start_ns) / 1_000_000.0)
 
     def _draw_detection_boxes(
         self,
@@ -1059,7 +1232,7 @@ class OpenCVPreviewSink(PreviewSink):
         font_scale: float = 0.55,
         line_h: int = 24,
     ) -> None:
-        start = time.perf_counter()
+        start = time.monotonic_ns()
         clean = [str(line) for line in lines if line is not None]
         if not clean:
             return
@@ -1080,7 +1253,7 @@ class OpenCVPreviewSink(PreviewSink):
             if yy > panel.shape[0] - 12:
                 break
             cv2.putText(panel, line[:max_chars], (x, yy), cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness)
-        self._add_timing("preview_draw_text_ms", (time.perf_counter() - start) * 1000.0)
+        self._add_timing("preview_draw_text_ms", (time.monotonic_ns() - start) / 1_000_000.0)
 
     def _rect(
         self,
@@ -1238,6 +1411,7 @@ class OpenCVPreviewSink(PreviewSink):
                 "show_edge": self.show_edge,
                 "preview_text_level": self.text_level,
                 "preview_legend_level": self.legend_level,
+                "preview_mode": self.preview_mode,
                 "preview_debug_points_enabled": bool(self.debug_points_enabled),
                 "opened": self._opened,
                 "open_failed": self._open_failed,
@@ -1251,16 +1425,46 @@ class OpenCVPreviewSink(PreviewSink):
 
     def _timing_summary(self) -> Dict[str, Any]:
         now = time.time()
-        recent = [item for item in self._timing_recent if now - float(item.get("ts", now) or now) <= 5.0]
+        recent = [item for item in self._timing_recent if now - float(item.get("ts", now) or now) <= 2.0]
         if not recent:
             return {
                 "preview_enabled": bool(self._opened),
                 "preview_layout": self.layout,
+                "preview_mode": self.preview_mode,
                 "preview_fps": float(self._fps),
                 "preview_text_level": self.text_level,
                 "preview_legend_level": self.legend_level,
                 "preview_debug_points_enabled": bool(self.debug_points_enabled),
                 "sample_count": 0,
+                "preview_compose_ms_avg": 0.0,
+                "preview_resize_ms_avg": 0.0,
+                "preview_colormap_ms_avg": 0.0,
+                "preview_concat_ms_avg": 0.0,
+                "preview_overlay_ms_avg": 0.0,
+                "preview_text_draw_ms_avg": 0.0,
+                "preview_panel_draw_ms_avg": 0.0,
+                "preview_legend_draw_ms_avg": 0.0,
+                "preview_points_draw_ms_avg": 0.0,
+                "preview_bbox_draw_ms_avg": 0.0,
+                "preview_copy_ms_avg": 0.0,
+                "preview_numpy_copy_ms_avg": 0.0,
+                "preview_encode_or_convert_ms_avg": 0.0,
+                "preview_canvas_alloc_ms_avg": 0.0,
+                "preview_canvas_clear_ms_avg": 0.0,
+                "preview_rgb_prepare_ms_avg": 0.0,
+                "preview_depth_prepare_ms_avg": 0.0,
+                "preview_edge_prepare_ms_avg": 0.0,
+                "preview_panel_layout_ms_avg": 0.0,
+                "preview_metric_collect_ms_avg": 0.0,
+                "preview_lock_wait_ms_avg": 0.0,
+                "preview_ascontiguous_ms_avg": 0.0,
+                "preview_throttle_sleep_ms_avg": 0.0,
+                "preview_compose_other_ms_avg": 0.0,
+                "preview_imshow_ms_avg": 0.0,
+                "preview_waitkey_ms_avg": 0.0,
+                "preview_total_ms_avg": 0.0,
+                "preview_total_ms_p95": 0.0,
+                "preview_total_ms_max": 0.0,
             }
 
         def stats(key: str) -> Dict[str, float]:
@@ -1273,6 +1477,7 @@ class OpenCVPreviewSink(PreviewSink):
         out: Dict[str, Any] = {
             "preview_enabled": bool(self._opened),
             "preview_layout": self.layout,
+            "preview_mode": self.preview_mode,
             "preview_fps": float(self._fps),
             "preview_text_level": self.text_level,
             "preview_legend_level": self.legend_level,
@@ -1281,9 +1486,29 @@ class OpenCVPreviewSink(PreviewSink):
         }
         for key in (
             "preview_compose_ms",
-            "preview_draw_points_ms",
-            "preview_draw_text_ms",
-            "preview_draw_legend_ms",
+            "preview_resize_ms",
+            "preview_colormap_ms",
+            "preview_concat_ms",
+            "preview_overlay_ms",
+            "preview_text_draw_ms",
+            "preview_panel_draw_ms",
+            "preview_legend_draw_ms",
+            "preview_points_draw_ms",
+            "preview_bbox_draw_ms",
+            "preview_copy_ms",
+            "preview_numpy_copy_ms",
+            "preview_encode_or_convert_ms",
+            "preview_canvas_alloc_ms",
+            "preview_canvas_clear_ms",
+            "preview_rgb_prepare_ms",
+            "preview_depth_prepare_ms",
+            "preview_edge_prepare_ms",
+            "preview_panel_layout_ms",
+            "preview_metric_collect_ms",
+            "preview_lock_wait_ms",
+            "preview_ascontiguous_ms",
+            "preview_throttle_sleep_ms",
+            "preview_compose_other_ms",
             "preview_imshow_ms",
             "preview_waitkey_ms",
             "preview_total_ms",

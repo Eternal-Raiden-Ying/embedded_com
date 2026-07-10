@@ -20,7 +20,7 @@ class JsonlClientSender:
     def __init__(self, mode: str = "disabled", tcp_host: str = "127.0.0.1", tcp_port: int = 0,
                  uds_path: str = "", reconnect_interval: float = 1.0, send_timeout: float = 1.0,
                  name: str = "jsonl_sender", logger: Logger = None, queue_size: int = 5,
-                 latest_only: bool = False):
+                 latest_only: bool = False, perf_marker: Optional[Callable[..., None]] = None):
         self.mode = mode
         self.tcp_host = tcp_host
         self.tcp_port = int(tcp_port)
@@ -29,6 +29,7 @@ class JsonlClientSender:
         self.send_timeout = max(0.05, float(send_timeout))
         self.name = name
         self.logger = logger
+        self.perf_marker = perf_marker
         self._sock: Optional[socket.socket] = None
         self._lock = threading.Lock()
         self._last_warn_ts = 0.0
@@ -181,7 +182,11 @@ class JsonlClientSender:
             except queue.Empty:
                 continue
 
-            send_total_start = time.perf_counter()
+            send_total_start_ns = time.monotonic_ns()
+            self._set_publish_mono(payload, send_total_start_ns)
+            trace = self._trace_fields(payload)
+            if self.perf_marker is not None:
+                self.perf_marker("obs_publish_start", mono_ns=send_total_start_ns, **trace)
             enqueue_ts = 0.0
             if isinstance(payload, dict):
                 try:
@@ -204,6 +209,8 @@ class JsonlClientSender:
                 queue_delay_ms=queue_delay_ms,
             )
 
+            sent = False
+            last_error = ""
             for _ in range(2):
                 if self._stop_event.is_set():
                     break
@@ -218,7 +225,8 @@ class JsonlClientSender:
                         write_start = time.perf_counter()
                         self._sock.sendall(data)
                         send_ms = max(0.0, (time.perf_counter() - write_start) * 1000.0)
-                        total_ms = max(0.0, (time.perf_counter() - send_total_start) * 1000.0)
+                        send_done_ns = time.monotonic_ns()
+                        total_ms = max(0.0, (send_done_ns - send_total_start_ns) / 1_000_000.0)
                         self._last_send_total_ms = total_ms
                         self.fail_count = 0
                         self.last_send_ok_ts = time.time()
@@ -234,14 +242,63 @@ class JsonlClientSender:
                             connect_ms=float(getattr(self, "_last_connect_ms", 0.0) or 0.0),
                         )
                         self._emit_summary_if_needed()
+                        sent = True
+                        if self.perf_marker is not None:
+                            self.perf_marker(
+                                "obs_publish_done",
+                                mono_ns=send_done_ns,
+                                duration_ms=total_ms,
+                                **trace,
+                            )
                         break
                     except OSError as exc:
+                        last_error = str(exc)
                         self.fail_count += 1
                         self.last_send_fail_ts = time.time()
                         self.link_state = "DEGRADED"
                         self._log("warn", "send_failed", error=str(exc), fail_count=self.fail_count)
                         self._close()
                 time.sleep(self.reconnect_interval)
+            if not sent and self.perf_marker is not None:
+                self.perf_marker(
+                    "obs_publish_done",
+                    mono_ns=time.monotonic_ns(),
+                    executed=False,
+                    reason=last_error or "publisher_not_connected",
+                    **trace,
+                )
+
+    @staticmethod
+    def _trace_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
+        perception = payload.get("perception") if isinstance(payload, dict) else None
+        candidates = []
+        if isinstance(perception, dict):
+            candidates.extend(
+                perception.get(key)
+                for key in ("table_edge_obs", "target_obs", "home_tag_obs")
+                if isinstance(perception.get(key), dict)
+            )
+        candidates.append(payload if isinstance(payload, dict) else {})
+        for item in candidates:
+            frame_id = item.get("frame_id") or item.get("camera_frame_seq")
+            obs_seq = item.get("obs_seq")
+            trace_id = item.get("trace_id") or (f"vision:{frame_id}" if frame_id is not None else None)
+            if frame_id is not None or obs_seq is not None or trace_id is not None:
+                return {"frame_id": frame_id, "obs_seq": obs_seq, "trace_id": trace_id}
+        return {"frame_id": None, "obs_seq": None, "trace_id": None}
+
+    @staticmethod
+    def _set_publish_mono(payload: Dict[str, Any], mono_ns: int) -> None:
+        if not isinstance(payload, dict):
+            return
+        payload["obs_publish_mono_ns"] = int(mono_ns)
+        perception = payload.get("perception")
+        if not isinstance(perception, dict):
+            return
+        for key in ("table_edge_obs", "target_obs", "home_tag_obs"):
+            obs = perception.get(key)
+            if isinstance(obs, dict):
+                obs["obs_publish_mono_ns"] = int(mono_ns)
 
     def snapshot(self) -> Dict[str, Any]:
         return {

@@ -416,9 +416,9 @@ class MotionController:
         depth_source = "unknown"
         if obs is not None:
             for source, value in (
-                ("table_roi_depth_median", getattr(obs, "table_roi_depth_median", None)),
-                ("obs_target_dist_m", getattr(obs, "obs_target_dist_m", None)),
-                ("target_dist_m", getattr(obs, "target_dist_m", None)),
+                ("table_roi_median_m", getattr(obs, "table_roi_depth_median", None)),
+                ("edge_measured_dist_m", getattr(obs, "obs_target_dist_m", None)),
+                ("table_edge_dist_m", getattr(obs, "target_dist_m", None)),
             ):
                 try:
                     if value is not None:
@@ -427,11 +427,24 @@ class MotionController:
                         break
                 except (TypeError, ValueError):
                     pass
-        obs_fresh = bool(obs is not None)
+        stale = self._stale_guard(obs)
+        obs_fresh = stale.get("stale_level") == "fresh"
+        obs_age_ms = stale.get("obs_total_age_ms")
+        trusted_depth_source = depth_source in {"table_roi_median_m", "edge_measured_dist_m", "table_edge_dist_m"}
+        far_allowed = bool(depth_value is not None and depth_value > 1.20 and obs_fresh and trusted_depth_source)
+        far_block_reason = ""
+        if depth_value is None:
+            far_block_reason = "depth_unknown"
+        elif depth_value <= 1.20:
+            far_block_reason = "depth_not_far"
+        elif not obs_fresh:
+            far_block_reason = f"obs_{stale.get('stale_level') or 'stale'}"
+        elif not trusted_depth_source:
+            far_block_reason = "depth_source_untrusted"
         if depth_value is None:
             speed_band = "unknown"
             forward_vx = min_vx
-        elif depth_value > 1.20 and obs_fresh:
+        elif far_allowed:
             speed_band = "far"
             forward_vx = far_vx
         elif depth_value > 0.90:
@@ -489,6 +502,10 @@ class MotionController:
                 "yolo_approach_speed_depth": float(depth_value) if depth_value is not None else None,
                 "yolo_approach_selected_vx": float(assist_vx),
                 "yolo_approach_depth_source": depth_source,
+                "yolo_approach_obs_fresh": bool(obs_fresh),
+                "yolo_approach_obs_age_s": (float(obs_age_ms) / 1000.0) if obs_age_ms is not None else None,
+                "yolo_approach_far_allowed": bool(far_allowed),
+                "yolo_approach_speed_block_reason": far_block_reason,
                 "yolo_approach_far_vx_mps": float(far_vx),
                 "yolo_approach_mid_vx_mps": float(mid_vx),
                 "yolo_approach_near_vx_mps": float(near_vx),
@@ -519,7 +536,7 @@ class MotionController:
                 "no_table_bbox_timeout": False,
                 "table_lost_search_timeout": False,
                 "yolo_approach_speed_band": speed_band,
-                "yolo_approach_speed_depth": speed_depth,
+                "yolo_approach_speed_depth": float(depth_value) if depth_value is not None else None,
                 "yolo_approach_selected_vx": float(assist_vx),
                 "yolo_view_err_norm": view_err_norm,
                 "edge_yaw_err_rad": float(getattr(obs, "yaw_err_rad", 0.0) or 0.0) if obs is not None else 0.0,

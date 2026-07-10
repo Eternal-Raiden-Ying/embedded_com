@@ -844,14 +844,22 @@ class MobileGatewayService(BaseModule):
     def _handle_core_status_payload(self, payload: Dict[str, Any], raw_cmd: str) -> Dict[str, Any]:
         repo_root = Path(str(self.cfg.runtime.repo_root or "")).expanduser()
         latest_run_file = repo_root / "logs" / "runs" / "latest_run_id"
+        active_run_file = repo_root / "logs" / "runs" / "active_run_id"
         latest_run_id = ""
+        active_run_id = ""
+        try:
+            active_run_id = active_run_file.read_text(encoding="utf-8").strip()
+        except Exception:
+            active_run_id = ""
         try:
             latest_run_id = latest_run_file.read_text(encoding="utf-8").strip()
         except Exception:
             latest_run_id = ""
-        latest_run_dir = str(repo_root / "logs" / "runs" / latest_run_id) if latest_run_id else ""
         vision_running, vision_pid = self._pid_status(repo_root / "VISTA" / "pids" / "vision.pid")
         orchestrator_running, orchestrator_pid = self._pid_status(repo_root / "orchestrator" / "pids" / "orchestrator.pid")
+        core_running = bool(vision_running and orchestrator_running)
+        resolved_run_id = (active_run_id or latest_run_id) if core_running else ""
+        latest_run_dir = str(repo_root / "logs" / "runs" / (resolved_run_id or latest_run_id)) if (resolved_run_id or latest_run_id) else ""
         status = {
             "ok": True,
             "accepted": True,
@@ -859,13 +867,14 @@ class MobileGatewayService(BaseModule):
             "gateway_running": True,
             "vision_running": bool(vision_running),
             "orchestrator_running": bool(orchestrator_running),
-            "core_running": bool(vision_running and orchestrator_running),
+            "core_running": core_running,
             "vision_pid": vision_pid,
             "orchestrator_pid": orchestrator_pid,
             "task_cmd_socket": Path("/tmp/robot_stack/task_cmd.sock").exists(),
             "vision_obs_socket": Path("/tmp/robot_stack/vision_obs.sock").exists(),
             "vision_req_socket": Path("/tmp/robot_stack/vision_req.sock").exists(),
             "latest_run_id": latest_run_id,
+            "active_run_id": resolved_run_id,
             "latest_run_dir": latest_run_dir,
             "message": "core running" if (vision_running and orchestrator_running) else "core stopped",
         }
@@ -885,6 +894,7 @@ class MobileGatewayService(BaseModule):
             "orchestrator_running": status["orchestrator_running"],
             "task_cmd_socket": status["task_cmd_socket"],
             "latest_run_id": latest_run_id,
+            "active_run_id": resolved_run_id,
             "cmd_id": payload.get("cmd_id"),
             "session_id": payload.get("session_id"),
         }
@@ -897,11 +907,14 @@ class MobileGatewayService(BaseModule):
         return Path(str(self.cfg.runtime.repo_root or "")).expanduser() / "logs" / "runs"
 
     def _latest_run_id(self) -> str:
-        latest_run_file = self._runs_root() / "latest_run_id"
-        try:
-            return latest_run_file.read_text(encoding="utf-8").strip()
-        except Exception:
-            return ""
+        for name in ("active_run_id", "latest_run_id"):
+            try:
+                value = (self._runs_root() / name).read_text(encoding="utf-8").strip()
+                if value:
+                    return value
+            except Exception:
+                pass
+        return ""
 
     def _latest_orchestrator_log_dir(self) -> Tuple[Path, str]:
         runs_root = self._runs_root()
@@ -1088,6 +1101,7 @@ class MobileGatewayService(BaseModule):
         env["ORCH_USE_SUDO"] = str(orch_use_sudo)
         env["FOLLOW_STACK_LOGS_AFTER_START"] = "0"
         env["ROBOT_CONSOLE_COLOR"] = "never"
+        env["ROBOT_LOG_PROFILE"] = os.environ.get("ROBOT_LOG_PROFILE", "normal")
         env["ENABLE_GATEWAY_LOGS"] = os.environ.get("ENABLE_GATEWAY_LOGS", "true")
         env["MOBILE_GATEWAY_STACK_SCRIPT_PATH"] = str(script_path)
         env["MOBILE_GATEWAY_CORE_CONTROL_LOG_DIR"] = str(control_log_path.parent)
@@ -1193,6 +1207,49 @@ class MobileGatewayService(BaseModule):
                 "orchestrator_use_sudo": orch_use_sudo,
                 "error": error,
             }
+
+        if action == "core_start":
+            repo_root = Path(str(self.cfg.runtime.repo_root or "")).expanduser()
+            vision_running, vision_pid = self._pid_status(repo_root / "VISTA" / "pids" / "vision.pid")
+            orchestrator_running, orchestrator_pid = self._pid_status(repo_root / "orchestrator" / "pids" / "orchestrator.pid")
+            if vision_running or orchestrator_running:
+                active_run_id = self._latest_run_id()
+                already_payload = self._core_control_log_payload(
+                    payload,
+                    action=action,
+                    raw_cmd=raw_cmd,
+                    script_path=script_path,
+                    script_action=script_action,
+                    control_log_path=control_log_path,
+                    orch_use_sudo=orch_use_sudo,
+                )
+                already_payload.update(
+                    {
+                        "active_run_id": active_run_id,
+                        "vision_running": bool(vision_running),
+                        "orchestrator_running": bool(orchestrator_running),
+                        "vision_pid": vision_pid,
+                        "orchestrator_pid": orchestrator_pid,
+                    }
+                )
+                self.log_info("protocol", "[CORE_START][ALREADY_RUNNING]", already_payload)
+                self.run_logger.write_jsonl("gateway_core_control_already_running", already_payload)
+                return {
+                    "ok": True,
+                    "accepted": True,
+                    "action": action,
+                    "script_action": script_action,
+                    "message": "core already running",
+                    "active_run_id": active_run_id,
+                    "latest_run_id": active_run_id,
+                    "vision_running": bool(vision_running),
+                    "orchestrator_running": bool(orchestrator_running),
+                    "vision_pid": vision_pid,
+                    "orchestrator_pid": orchestrator_pid,
+                    "script_path": str(script_path),
+                    "control_log_path": str(control_log_path),
+                    "orchestrator_use_sudo": orch_use_sudo,
+                }
 
         start_payload = dict(log_payload)
         self.log_info("protocol", "gateway_core_control_start", start_payload)

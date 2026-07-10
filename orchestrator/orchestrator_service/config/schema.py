@@ -112,6 +112,8 @@ class RuntimeConfig:
     pid_file: str = field(default_factory=lambda: str(_DEFAULT_PID_DIR / "orchestrator.pid"))
     stack_run_id: str = ""
     tick_hz: float = 10.0
+    log_profile: str = "normal"
+    resource_sample_interval_s: float = 1.0
     log_mode: str = "concise"
     log_enabled: bool = True
     debug: bool = False
