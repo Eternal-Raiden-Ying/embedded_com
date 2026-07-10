@@ -96,8 +96,9 @@ class RealSenseDepthCamera(ICamera):
             if not frame:
                 return np.array([])
             
-            # asanyarray 可以实现近乎零拷贝的内存映射，CPU 开销极低
-            depth_image = np.asanyarray(frame.get_data())
+            # RealSense owns the frame buffer; keep exactly one copy so the
+            # published read-only FrameBundle remains valid after this call.
+            depth_image = np.asanyarray(frame.get_data()).copy()
             return depth_image
             
         except RuntimeError:

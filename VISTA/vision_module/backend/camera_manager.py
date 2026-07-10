@@ -72,6 +72,7 @@ class _SharedRealSenseRgbdSession:
         self.color_w = 0
         self.color_h = 0
         self.output_format = str(self.rgb_params.get("format") or "BGR").strip().upper()
+        self._control_status: Dict[str, Any] = {}
 
         ctx = rs.context()
         devices = ctx.query_devices()
@@ -190,6 +191,7 @@ class _SharedRealSenseRgbdSession:
                 "gain": self._get_option_best_effort(self.color_sensor, "gain"),
                 "brightness": self._get_option_best_effort(self.color_sensor, "brightness"),
             }
+            self._control_status = dict(controls)
             self.log.info("realsense_color_controls_applied %s", controls)
         except Exception as exc:
             self.log.warning("failed to apply realsense color controls defensively: %s", exc)
@@ -249,21 +251,10 @@ class _SharedRealSenseRgbdSession:
             color_frame = None
         depth = np.asanyarray(depth_frame.get_data()).copy() if depth_frame is not None else np.array([])
         color = self._convert_color(color_frame) if color_frame is not None else np.array([])
-        # Query auto controls defensively
-        camera_auto_exposure = None
-        camera_auto_white_balance = None
-        try:
-            ae = self._get_option_best_effort(self.color_sensor, "enable_auto_exposure")
-            if ae is not None:
-                camera_auto_exposure = bool(ae)
-        except Exception:
-            pass
-        try:
-            awb = self._get_option_best_effort(self.color_sensor, "enable_auto_white_balance")
-            if awb is not None:
-                camera_auto_white_balance = bool(awb)
-        except Exception:
-            pass
+        # Sensor controls are configuration state, not per-frame data.  The
+        # cached values are refreshed when controls are applied/reconfigured.
+        camera_auto_exposure = self._control_status.get("auto_exposure_enabled")
+        camera_auto_white_balance = self._control_status.get("auto_white_balance_enabled")
 
         return {
             "depth": depth,
@@ -350,6 +341,8 @@ class CameraManager:
         self._worker_stop = threading.Event()
         max_fps = int(getattr(getattr(self.cfg, "camera", None), "max_fps", 30) or 30)
         self._worker_interval_s = 1.0 / max(1, max_fps)
+        self._software_limit_fps = max_fps
+        self._last_publish_mono = 0.0
         self._last_frame_seq = 0
         self._backend_status = camera_backend_status()
         self._active_implementation = str(self._backend_status.get("resolved_backend") or "mock")
@@ -524,6 +517,10 @@ class CameraManager:
 
     def _worker_loop(self) -> None:
         while self._runtime_running and not self._worker_stop.is_set():
+            if self._software_limit_fps > 0 and self._last_publish_mono > 0.0:
+                remaining_s = self._worker_interval_s - (time.monotonic() - self._last_publish_mono)
+                if remaining_s > 0.0 and self._worker_stop.wait(timeout=remaining_s):
+                    break
             self._ensure_shared_rgbd_if_needed()
             self._shared_rgbd_cycle_bundle = None
             active = self.iter_cameras()
@@ -550,10 +547,10 @@ class CameraManager:
                     frame = None
                 if frame is None or getattr(frame, "size", 0) <= 0:
                     continue
-                try:
-                    frame_bundle[name] = frame.copy()
-                except Exception:
-                    frame_bundle[name] = frame
+                # FrameBundle is immutable-by-contract after publication.
+                # Color conversion already owns its output; RealSense depth
+                # performed its one required lifetime copy in read_bundle().
+                frame_bundle[name] = frame
                 if name == "depth":
                     getter = getattr(cam, "get_depth_intrinsics", None)
                     if callable(getter):
@@ -603,9 +600,22 @@ class CameraManager:
             rgb_meta = self._rgb_config_meta(self._params.get("rgb") or {})
             frame_bundle.update(rgb_meta)
             if self._shared_rgbd is not None and self._shared_rgbd_cycle_bundle:
-                for key in ("camera_auto_exposure", "camera_auto_white_balance"):
+                for key in (
+                    "camera_auto_exposure",
+                    "camera_auto_white_balance",
+                    "depth_scale",
+                    "depth_unit",
+                    "depth_aligned_to_color",
+                    "color_intrinsics",
+                ):
                     if key in self._shared_rgbd_cycle_bundle:
                         frame_bundle[key] = self._shared_rgbd_cycle_bundle[key]
+            if "depth_scale" not in frame_bundle:
+                intrinsics = frame_bundle.get("depth_intrinsics")
+                if isinstance(intrinsics, dict) and intrinsics.get("depth_scale") is not None:
+                    frame_bundle["depth_scale"] = intrinsics.get("depth_scale")
+            frame_bundle.setdefault("depth_scale", 0.001 if frame_bundle.get("depth") is not None else None)
+            frame_bundle.setdefault("depth_unit", "m")
             frame_bundle.setdefault("camera_auto_exposure", None)
             frame_bundle.setdefault("camera_auto_white_balance", None)
             frame_bundle["rgb_output_shape_actual"] = rgb_shape_actual
@@ -627,6 +637,7 @@ class CameraManager:
                     rgb_meta.get("rgb_config_source"),
                 )
             self._publish_result("camera_frames", frame_bundle)
+            self._last_publish_mono = time.monotonic()
             self._publish_result(
                 "frame_meta",
                 {
@@ -642,6 +653,9 @@ class CameraManager:
                     "camera_frame_ts_ms": int(round(frame_capture_ts * 1000.0)),
                     "trace_id": trace_id,
                     "capture_mono_ns": int(capture_start_ns),
+                    "frame_id": int(self._last_frame_seq),
+                    "frame_capture_ts": float(frame_capture_ts),
+                    "depth_scale": frame_bundle.get("depth_scale"),
                     "camera_capture_done_mono_ns": int(capture_done_ns),
                     "camera_capture_ms": float(capture_ms),
                 },
@@ -654,7 +668,6 @@ class CameraManager:
                     mono_ns=capture_done_ns,
                     duration_ms=capture_ms,
                 )
-            self._worker_stop.wait(timeout=self._worker_interval_s)
             self._shared_rgbd_cycle_bundle = None
 
     def active_names(self) -> set:

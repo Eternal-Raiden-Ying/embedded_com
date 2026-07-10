@@ -1030,8 +1030,9 @@ class OpenCVPreviewSink(PreviewSink):
             return
         x1, y1, x2, y2 = parsed
         ox, oy = offset
-        p1 = (int(ox + x1 * scale), int(oy + y1 * scale))
-        p2 = (int(ox + x2 * scale), int(oy + y2 * scale))
+        panel_h, panel_w = panel.shape[:2]
+        p1 = (max(0, min(panel_w - 1, int(ox + x1 * scale))), max(0, min(panel_h - 1, int(oy + y1 * scale))))
+        p2 = (max(0, min(panel_w - 1, int(ox + x2 * scale))), max(0, min(panel_h - 1, int(oy + y2 * scale))))
         if dashed:
             self._dashed_rect(panel, p1, p2, color, 2)
         else:

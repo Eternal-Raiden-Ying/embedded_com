@@ -277,6 +277,12 @@ class RuntimeContext:
     dist_missing_started_mono: float = 0.0
     target_center_history: List[Dict[str, float]] = field(default_factory=list)
     target_obs_window: List[Dict[str, object]] = field(default_factory=list)
+    target_prewarm_last_obs_key: object = None
+    target_prewarm_stable_count: int = 0
+    target_prewarm_last_log_key: object = None
+    target_control_last_obs_key: object = None
+    target_control_stable_count: int = 0
+    final_to_lateral_fast_start_ready: Optional[bool] = None
     target_last_center_jitter: float = 0.0
     target_last_lost_reason: str = ""
     target_last_transition_reason: str = ""
@@ -617,6 +623,12 @@ class RuntimeContext:
         self.final_vision_req_enter_logged = False
         self.final_fixed_roi_missing_since_mono = 0.0
         self.final_fixed_roi_missing_grace_until_mono = 0.0
+        self.target_prewarm_last_obs_key = None
+        self.target_prewarm_stable_count = 0
+        self.target_prewarm_last_log_key = None
+        self.target_control_last_obs_key = None
+        self.target_control_stable_count = 0
+        self.final_to_lateral_fast_start_ready = None
         self.desired_vision_stage = ""
         self.desired_vision_mode = ""
         self.confirmed_vision_stage = ""

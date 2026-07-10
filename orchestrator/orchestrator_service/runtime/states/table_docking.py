@@ -2002,6 +2002,7 @@ class TableDockingMixin:
         if timeout_decision is not None:
             return timeout_decision
         self._maybe_force_final_vision_req(reason="final_slow_stop_periodic")
+        self._target_prewarm_status(update=True)
         decision = self._tick_final_slow_stop_impl()
         obs = self._fresh_table_obs()
         decision = self._apply_control_authority(decision, obs)
@@ -2024,7 +2025,7 @@ class TableDockingMixin:
 
     def _final_vision_req_payload(self, *, reason: str) -> Dict[str, object]:
         return make_vision_req(
-            target=None,
+            target=self.ctx.class_name or self.ctx.canonical_target or self.ctx.active_target,
             session_id=self.ctx.active_session_id,
             epoch=self.ctx.active_epoch,
             op="UPDATE",
@@ -2032,7 +2033,7 @@ class TableDockingMixin:
             mode_hint="FIND_EDGE",
             req_type="target_update",
             payload={
-                "search_kind": "TABLE_EDGE",
+                "search_kind": "EDGE_FOLLOW_TARGET",
                 "need_depth": True,
                 "current_edge_id": self.ctx.current_edge_id,
                 "orchestrator_state": "FINAL_SLOW_STOP",
@@ -2049,6 +2050,83 @@ class TableDockingMixin:
                 "epoch": self.ctx.active_epoch,
             },
         )
+
+    def _target_prewarm_status(self, *, update: bool) -> Dict[str, object]:
+        obs = self.ctx.last_target_obs
+        age_ms = None
+        if obs is not None and getattr(obs, "capture_mono_ns", None) is not None:
+            try:
+                age_ms = max(0.0, (time.monotonic_ns() - int(obs.capture_mono_ns)) / 1_000_000.0)
+            except (TypeError, ValueError):
+                age_ms = None
+        if age_ms is None and obs is not None:
+            age_ms = max(0.0, (time.time() - float(obs.ts)) * 1000.0)
+        max_age_ms = max(1, int(getattr(self.cfg, "target_prewarm_max_age_ms", 180) or 180))
+        fresh = bool(obs is not None and age_ms is not None and age_ms <= max_age_ms)
+        candidate_ok = False
+        candidate_reason = "target_missing"
+        if fresh and obs is not None:
+            candidate_ok, candidate_reason = self._target_candidate_status(
+                obs,
+                self.cfg.target_confirm_conf_th,
+                min_area=self.cfg.target_confirm_min_bbox_area,
+            )
+        elif obs is not None:
+            candidate_reason = "target_prewarm_stale"
+        key = None
+        if obs is not None:
+            key = (
+                getattr(obs, "obs_seq", None),
+                getattr(obs, "frame_id", None),
+                getattr(obs, "capture_mono_ns", None),
+            )
+        if update and key != getattr(self.ctx, "target_prewarm_last_obs_key", None):
+            self.ctx.target_prewarm_last_obs_key = key
+            if candidate_ok:
+                self.ctx.target_prewarm_stable_count = int(getattr(self.ctx, "target_prewarm_stable_count", 0) or 0) + 1
+            else:
+                self.ctx.target_prewarm_stable_count = 0
+        elif update and not candidate_ok and int(getattr(self.ctx, "target_prewarm_stable_count", 0) or 0) > 0:
+            self.ctx.target_prewarm_stable_count = 0
+        stable_count = int(getattr(self.ctx, "target_prewarm_stable_count", 0) or 0)
+        required = max(1, int(getattr(self.cfg, "target_prewarm_stable_obs", 2) or 2))
+        status = {
+            "target_prewarm_active": True,
+            "target_prewarm_found": bool(candidate_ok),
+            "target_prewarm_age_ms": age_ms,
+            "target_prewarm_stable_count": stable_count,
+            "target_prewarm_required": required,
+            "target_prewarm_ready": bool(candidate_ok and stable_count >= required),
+            "fast_start_block_reason": "" if candidate_ok and stable_count >= required else candidate_reason,
+        }
+        log_key = (bool(candidate_ok), stable_count, str(candidate_reason))
+        if update and log_key != getattr(self.ctx, "target_prewarm_last_log_key", None):
+            self.ctx.target_prewarm_last_log_key = log_key
+            self._log(
+                "info",
+                "target_prewarm_active=true "
+                f"target_prewarm_found={str(bool(candidate_ok)).lower()} "
+                f"target_prewarm_age_ms={age_ms if age_ms is not None else 'n/a'} "
+                f"target_prewarm_stable_count={stable_count}/{required} "
+                f"fast_start_block_reason={status['fast_start_block_reason'] or 'none'}",
+            )
+        return status
+
+    def _final_forward_speed_near_zero(self) -> bool:
+        limit = abs(float(getattr(self.cfg, "final_to_lateral_max_vx_mps", 0.02) or 0.02))
+        car_state = getattr(self.ctx, "last_car_state", None)
+        car_vx = getattr(car_state, "vx", None) if car_state is not None else None
+        if car_vx is not None:
+            try:
+                return abs(float(car_vx)) <= limit
+            except (TypeError, ValueError):
+                pass
+        last_decision = getattr(self, "last_decision", None)
+        last_cmd = getattr(last_decision, "cmd", None)
+        try:
+            return abs(float(getattr(last_cmd, "vx_mps", 0.0) or 0.0)) <= limit
+        except (TypeError, ValueError):
+            return False
 
     def _force_final_vision_req(self, *, reason: str, operator_log: bool = False) -> None:
         self._queue_vision_req(self._final_vision_req_payload(reason=reason), force=True)
@@ -3633,6 +3711,17 @@ class TableDockingMixin:
         self._transition(State.AT_TABLE_EDGE, transition_reason)
         self._queue_tts("已完成桌边停靠")
         if bool(getattr(self.cfg, "target_search_fast_start_enable", True)) and not bool(getattr(self.cfg, "stop_after_table_docking", True)):
+            prewarm = self._target_prewarm_status(update=False)
+            speed_ready = self._final_forward_speed_near_zero()
+            fast_ready = bool(prewarm.get("target_prewarm_ready", False) and speed_ready)
+            self.ctx.final_to_lateral_fast_start_ready = fast_ready
+            block_reason = "" if fast_ready else (
+                "forward_speed_not_zero" if not speed_ready else str(prewarm.get("fast_start_block_reason") or "target_prewarm_not_ready")
+            )
+            self._log(
+                "info",
+                f"final_to_lateral_fast_start={str(fast_ready).lower()} fast_start_block_reason={block_reason or 'none'}",
+            )
             self._log("info", "[FLOW][NO_ZERO_BRIDGE] from=FINAL_SLOW_STOP to=SEARCH_TARGET_INIT")
             decision = self._tick_at_table_edge_impl()
             if decision.control_summary is not None:
@@ -3683,6 +3772,8 @@ class TableDockingMixin:
         if bool(getattr(self.cfg, "target_search_fast_start_enable", True)):
             self._transition(State.SEARCH_TARGET_INIT, "table_edge_fast_start_target_search")
             self._log("info", "[TARGET_SEARCH][FAST_TO_SLICE] from=AT_TABLE_EDGE")
+            if getattr(self.ctx, "final_to_lateral_fast_start_ready", None) is False:
+                return self.controller.stop_cmd("SEARCH_TARGET_INIT")
             return self._tick_search_target_init()
         if self._state_elapsed() < float(self.cfg.edge_settle_s):
             return self._at_table_edge_hard_stop_barrier_cmd("at_table_edge_settle")

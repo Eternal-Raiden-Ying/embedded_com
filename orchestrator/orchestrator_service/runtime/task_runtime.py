@@ -565,7 +565,11 @@ class TaskRuntimeMixin:
 
     def _fresh_target_obs(self) -> Optional[TargetObs]:
         obs = self.ctx.last_target_obs
-        if obs is None or time.time() - obs.ts > self.cfg.target_obs_max_age_s:
+        max_age_s = min(
+            float(self.cfg.target_obs_max_age_s),
+            max(0.001, float(getattr(self.cfg, "target_prewarm_max_age_ms", 180) or 180) / 1000.0),
+        )
+        if obs is None or time.time() - obs.ts > max_age_s:
             return None
         if self.ctx.task_start_wall_ts > 0 and obs.ts < self.ctx.task_start_wall_ts:
             return None

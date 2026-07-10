@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import dataclasses
+from collections import deque
 import logging
 import math
 import queue
@@ -22,7 +23,7 @@ from .math_utils import finite_percentiles, camera_points_to_robot, weighted_lin
 from .docking_strategy import TableDockingStrategy
 from common.config_loader import get_config
 from ..config.schema import VisionServiceConfig
-from ..utils.table_roi import table_detection_debug
+from ..utils.table_roi import find_table_bbox, table_detection_debug
 
 
 CapabilitySink = Optional[Callable[[str, Dict[str, Any]], None]]
@@ -72,6 +73,10 @@ class TableEdgeManager:
         self._default_interval_s = self._worker_interval_s
         self._fast_plane_stride = table_edge_cfg.fast_plane_stride
         self._depth_stride = table_edge_cfg.depth_stride
+        self._adaptive_sampling_enable = bool(getattr(table_edge_cfg, "adaptive_sampling_enable", True))
+        self._adaptive_target_sample_count = max(1, int(getattr(table_edge_cfg, "adaptive_target_sample_count", 1200)))
+        self._adaptive_min_stride = max(1, int(getattr(table_edge_cfg, "adaptive_min_stride", 4)))
+        self._adaptive_max_stride = max(self._adaptive_min_stride, int(getattr(table_edge_cfg, "adaptive_max_stride", 16)))
         self._require_yolo_confirm = table_edge_cfg.require_yolo_confirm
         self._static_roi_enabled = table_edge_cfg.static_roi_enabled
         self._camera_pitch_deg = table_edge_cfg.camera_pitch_deg
@@ -103,6 +108,7 @@ class TableEdgeManager:
         self._last_worker_loop_ts = 0.0
         self._last_worker_interval_ms: Optional[float] = None
         self._last_process_start_ts = 0.0
+        self._profile_samples = deque(maxlen=120)
         self._last_table_edge_process_interval_ms: Optional[float] = None
         self._last_publish_interval_ms: Optional[float] = None
         self._last_scheduler_read_ms = 0.0
@@ -141,6 +147,14 @@ class TableEdgeManager:
         self._last_valid_table_roi_ts = 0.0
         self._last_valid_table_roi_source = ""
         self._last_valid_table_bbox_hold_frames = 0
+        self._perception_sync_max_delta_ms = max(
+            0.0, float(getattr(table_edge_cfg, "perception_sync_max_delta_ms", 100.0) or 100.0)
+        )
+        self._matched_roi_hold_ttl_ms = max(
+            0.0, float(getattr(table_edge_cfg, "matched_roi_hold_ttl_ms", 200.0) or 200.0)
+        )
+        self._last_matched_local_perception: Optional[Dict[str, Any]] = None
+        self._last_matched_local_mono_ns = 0
         self._force_depth_roi_once: Optional[list[int]] = None
         self._force_depth_roi_reason_once = ""
         self._yolo_table_roi_center_x_ema: Optional[float] = None
@@ -151,7 +165,7 @@ class TableEdgeManager:
         self._load_detector()
         self._precompute_rays()
         self.docking_strategy = TableDockingStrategy()
-        self._queue = queue.Queue(maxsize=2)
+        self._queue = queue.Queue(maxsize=1)
         self._consumer_thread: Optional[threading.Thread] = None
 
     @staticmethod
@@ -259,6 +273,7 @@ class TableEdgeManager:
         while not self._queue.empty():
             try:
                 self._queue.get_nowait()
+                self._queue.task_done()
             except Exception:
                 break
         self._worker_thread = threading.Thread(target=self._worker_loop, name="table_edge_manager.loop", daemon=True)
@@ -275,8 +290,13 @@ class TableEdgeManager:
         self._worker_thread = None
         try:
             self._queue.put_nowait(None)
-        except Exception:
-            pass
+        except queue.Full:
+            try:
+                self._queue.get_nowait()
+                self._queue.task_done()
+                self._queue.put_nowait(None)
+            except (queue.Empty, queue.Full):
+                pass
         consumer = getattr(self, "_consumer_thread", None)
         if consumer is not None and consumer.is_alive():
             consumer.join(timeout=1.0)
@@ -284,6 +304,7 @@ class TableEdgeManager:
         while not self._queue.empty():
             try:
                 self._queue.get_nowait()
+                self._queue.task_done()
             except Exception:
                 break
 
@@ -365,6 +386,14 @@ class TableEdgeManager:
             self._fast_plane_stride = max(1, int(payload.get("fast_plane_stride")))
         if "depth_stride" in payload:
             self._depth_stride = max(1, int(payload.get("depth_stride")))
+        if "adaptive_sampling_enable" in payload:
+            self._adaptive_sampling_enable = bool(payload.get("adaptive_sampling_enable"))
+        if "adaptive_target_sample_count" in payload:
+            self._adaptive_target_sample_count = max(1, int(payload.get("adaptive_target_sample_count")))
+        if "adaptive_min_stride" in payload:
+            self._adaptive_min_stride = max(1, int(payload.get("adaptive_min_stride")))
+        if "adaptive_max_stride" in payload:
+            self._adaptive_max_stride = max(self._adaptive_min_stride, int(payload.get("adaptive_max_stride")))
         if "require_yolo_confirm" in payload:
             self._require_yolo_confirm = bool(payload.get("require_yolo_confirm"))
         if "static_roi_enabled" in payload:
@@ -410,6 +439,91 @@ class TableEdgeManager:
             self._fast_front_edge_col_step = max(1, int(payload.get("fast_front_edge_col_step") or 1))
         if "fast_front_edge_row_step" in payload:
             self._fast_front_edge_row_step = max(1, int(payload.get("fast_front_edge_row_step") or 1))
+        if "perception_sync_max_delta_ms" in payload:
+            self._perception_sync_max_delta_ms = max(0.0, float(payload.get("perception_sync_max_delta_ms") or 0.0))
+        if "matched_roi_hold_ttl_ms" in payload:
+            self._matched_roi_hold_ttl_ms = max(0.0, float(payload.get("matched_roi_hold_ttl_ms") or 0.0))
+
+    @staticmethod
+    def _payload_frame_id(payload: Any) -> Optional[int]:
+        if not isinstance(payload, dict):
+            return None
+        for key in ("frame_id", "frame_seq", "camera_frame_seq", "yolo_frame_seq"):
+            try:
+                value = payload.get(key)
+                if value is not None:
+                    return int(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    @staticmethod
+    def _payload_capture_mono_ns(payload: Any) -> Optional[int]:
+        if not isinstance(payload, dict):
+            return None
+        try:
+            value = payload.get("capture_mono_ns")
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _select_synced_local_perception(self, frames: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        source_frame_id = self._payload_frame_id(frames)
+        source_capture_ns = self._payload_capture_mono_ns(frames)
+        scheduler = self._scheduler
+        local = None
+        sync_status = "unavailable"
+        exact_reader = getattr(scheduler, "read_result_by_frame_id", None) if scheduler is not None else None
+        nearest_reader = getattr(scheduler, "read_result_nearest_capture", None) if scheduler is not None else None
+        if callable(exact_reader) and source_frame_id is not None:
+            local = exact_reader("local_perception", source_frame_id, default=None)
+            if isinstance(local, dict):
+                sync_status = "exact"
+        if not isinstance(local, dict) and callable(nearest_reader) and source_capture_ns is not None:
+            local = nearest_reader(
+                "local_perception",
+                source_capture_ns,
+                self._perception_sync_max_delta_ms,
+                default=None,
+            )
+            if isinstance(local, dict):
+                sync_status = "nearest"
+
+        now_ns = time.monotonic_ns()
+        if isinstance(local, dict):
+            local_out = dict(local)
+            if find_table_bbox(local_out) is not None:
+                self._last_matched_local_perception = local_out
+                self._last_matched_local_mono_ns = now_ns
+        else:
+            hold_age_ms = (
+                (now_ns - self._last_matched_local_mono_ns) / 1_000_000.0
+                if self._last_matched_local_perception is not None and self._last_matched_local_mono_ns > 0
+                else None
+            )
+            if hold_age_ms is not None and hold_age_ms <= self._matched_roi_hold_ttl_ms:
+                local_out = dict(self._last_matched_local_perception or {})
+                sync_status = "matched_hold"
+            else:
+                local_out = {}
+
+        perception_frame_id = self._payload_frame_id(local_out)
+        perception_capture_ns = self._payload_capture_mono_ns(local_out)
+        sync_delta_ms = None
+        if source_capture_ns is not None and perception_capture_ns is not None:
+            sync_delta_ms = abs(source_capture_ns - perception_capture_ns) / 1_000_000.0
+        frame_delta = None
+        if source_frame_id is not None and perception_frame_id is not None:
+            frame_delta = int(perception_frame_id - source_frame_id)
+        sync_meta = {
+            "source_frame_id": source_frame_id,
+            "perception_frame_id": perception_frame_id,
+            "frame_delta": frame_delta,
+            "sync_delta_ms": sync_delta_ms,
+            "sync_status": sync_status,
+        }
+        local_out["_table_edge_sync"] = sync_meta
+        return local_out, sync_meta
 
     @staticmethod
     def _pick_frame_capture_ts(frame_slot: Dict[str, Any], frames: Dict[str, Any]) -> float:
@@ -567,6 +681,10 @@ class TableEdgeManager:
         return out
 
     def _log_profile_if_due(self, payload: Dict[str, Any]) -> None:
+        if self._profile_samples:
+            # ROI safety statistics are attached after the detector payload, so
+            # fold their timings into the current frame before aggregation.
+            self._profile_samples[-1]["roi_depth_stats_ms"] = float(payload.get("roi_depth_stats_ms", 0.0) or 0.0)
         interval_s = float(self._profile_log_interval_s)
         if interval_s <= 0.0:
             return
@@ -591,6 +709,22 @@ class TableEdgeManager:
             payload.get("calib_source"),
             payload.get("calib_mismatch_warning") or "none",
         )
+        samples = list(self._profile_samples)
+        if samples:
+            metrics = ("table_edge_process_ms", "primary_or_single_pass_ms", "front_edge_scan_ms", "representative_group_ms", "roi_depth_stats_ms", "sampled_point_count", "candidate_point_count", "adaptive_stride", "roi_width_px", "roi_height_px", "roi_area_px", "sample_reduction_ratio")
+            summary = {}
+            for key in metrics:
+                values = np.asarray([sample.get(key, 0.0) for sample in samples], dtype=np.float32)
+                summary[key] = {name: round(float(np.percentile(values, q)), 2) for name, q in (("avg", 50), ("p50", 50), ("p90", 90), ("p95", 95), ("max", 100))}
+                summary[key]["avg"] = round(float(np.mean(values)), 2)
+            roi_sources = {}
+            extension_reasons = {}
+            reasons = {}
+            for sample in samples:
+                roi_sources[sample.get("roi_source", "unknown")] = roi_sources.get(sample.get("roi_source", "unknown"), 0) + 1
+                extension_reasons[sample.get("roi_extension_reason", "")] = extension_reasons.get(sample.get("roi_extension_reason", ""), 0) + 1
+                reasons[sample.get("reason", "")] = reasons.get(sample.get("reason", ""), 0) + 1
+            self.log.info("[TABLE_EDGE_PROFILE_SUMMARY] samples=%d edge_valid_rate=%.3f edge_trusted_rate=%.3f adaptive_budget_active_rate=%.3f roi_source_counts=%s roi_extension_reason_counts=%s reason_counts=%s metrics=%s", len(samples), float(np.mean([bool(s.get("edge_valid")) for s in samples])), float(np.mean([bool(s.get("edge_trusted")) for s in samples])), float(np.mean([bool(s.get("adaptive_budget_active")) for s in samples])), roi_sources, extension_reasons, reasons, summary)
 
     @staticmethod
     def _ms_since(start_ts: float) -> float:
@@ -855,6 +989,15 @@ class TableEdgeManager:
             "fast_control_gate_ms": 0.0,
             "fast_debug_payload_ms": 0.0,
             "fast_total_ms": 0.0,
+            "front_edge_prepare_ms": 0.0,
+            "front_edge_scan_ms": 0.0,
+            "front_edge_select_ms": 0.0,
+            "representative_sort_ms": 0.0,
+            "representative_group_ms": 0.0,
+            "representative_build_ms": 0.0,
+            "roi_depth_stats_ms": 0.0,
+            "fixed_roi_stats_ms": 0.0,
+            "mapped_roi_stats_ms": 0.0,
         }
 
     def _detector_mode_payload(self) -> Dict[str, Any]:
@@ -862,6 +1005,10 @@ class TableEdgeManager:
             "detector_mode": str(self._detector_mode),
             "fast_plane_stride": int(self._fast_plane_stride),
             "depth_stride": int(self._depth_stride),
+            "adaptive_sampling_enable": bool(self._adaptive_sampling_enable),
+            "adaptive_target_sample_count": int(self._adaptive_target_sample_count),
+            "adaptive_min_stride": int(self._adaptive_min_stride),
+            "adaptive_max_stride": int(self._adaptive_max_stride),
         }
 
     @staticmethod
@@ -1098,6 +1245,7 @@ class TableEdgeManager:
         y_cluster_bin_m: float,
         min_support_points: int,
         min_z_span_m: float,
+        include_support_arrays: bool = False,
     ) -> Dict[str, Any]:
         x_arr = np.asarray(x_robot, dtype=np.float32)
         y_arr = np.asarray(y_robot, dtype=np.float32)
@@ -1112,7 +1260,8 @@ class TableEdgeManager:
         x_bins = np.floor(x_arr / max(1e-6, float(x_bin_width_m))).astype(np.int32)
         y_bins = np.floor(y_arr / max(1e-6, float(y_cluster_bin_m))).astype(np.int32)
 
-        # Sort points by x_bins and y_bins using np.lexsort
+        sort_start = time.perf_counter()
+        # One cell-key ordering is reused for all coordinate arrays.
         sort_idx = np.lexsort((y_bins, x_bins))
         x_sorted = x_arr[sort_idx]
         y_sorted = y_arr[sort_idx]
@@ -1121,6 +1270,7 @@ class TableEdgeManager:
         py_sorted = py_arr[sort_idx]
         xb_sorted = x_bins[sort_idx]
         yb_sorted = y_bins[sort_idx]
+        representative_sort_ms = self._ms_since(sort_start)
 
         # Find unique cells (xb, yb)
         cell_changes = np.flatnonzero((xb_sorted[:-1] != xb_sorted[1:]) | (yb_sorted[:-1] != yb_sorted[1:]))
@@ -1203,7 +1353,10 @@ class TableEdgeManager:
         px_flat = px_sorted[pt_indices]
         py_flat = py_sorted[pt_indices]
 
-        # Compute medians of x, y, z, px, py
+        group_start = time.perf_counter()
+        # Grouped medians retain the selection semantics.  The five value sorts
+        # are unavoidable for exact independent medians, but all cell grouping
+        # and offsets above are shared rather than rebuilt for each field.
         def compute_grouped_median(flat_val):
             sort_idx = np.lexsort((flat_val, cell_ids))
             sorted_val = flat_val[sort_idx]
@@ -1220,6 +1373,7 @@ class TableEdgeManager:
         medians_z = compute_grouped_median(z_flat)
         medians_px = compute_grouped_median(px_flat).astype(np.int32)
         medians_py = compute_grouped_median(py_flat).astype(np.int32)
+        representative_group_ms = self._ms_since(group_start)
 
         # Compute scores
         score = support.astype(np.float32) * z_span / np.maximum(0.04, y_spread + 0.02)
@@ -1245,13 +1399,22 @@ class TableEdgeManager:
         out_z_span = z_span[final_cell_indices]
         out_y_spread = y_spread[final_cell_indices]
 
-        # Regenerate flattened indices for final selected cells to build support arrays
-        final_left_idxs = left_idxs[final_cell_indices]
-        final_support = support[final_cell_indices]
-        final_cell_ids = np.repeat(np.arange(len(final_support)), final_support)
-        final_starts = np.cumsum(np.concatenate(([0], final_support[:-1])))
-        final_pt_indices = np.repeat(final_left_idxs, final_support) + (np.arange(len(final_cell_ids)) - np.repeat(final_starts, final_support))
-
+        build_start = time.perf_counter()
+        support_payload: Dict[str, Any] = {}
+        if include_support_arrays:
+            final_left_idxs = left_idxs[final_cell_indices]
+            final_support = support[final_cell_indices]
+            final_cell_ids = np.repeat(np.arange(len(final_support)), final_support)
+            final_starts = np.cumsum(np.concatenate(([0], final_support[:-1])))
+            final_pt_indices = np.repeat(final_left_idxs, final_support) + (np.arange(len(final_cell_ids)) - np.repeat(final_starts, final_support))
+            support_payload = {
+                "support_px": px_sorted[final_pt_indices].astype(np.int32, copy=False),
+                "support_py": py_sorted[final_pt_indices].astype(np.int32, copy=False),
+                "support_x": x_sorted[final_pt_indices].astype(np.float32, copy=False),
+                "support_y": y_sorted[final_pt_indices].astype(np.float32, copy=False),
+                "support_z": z_sorted[final_pt_indices].astype(np.float32, copy=False),
+                "support_rep_index": final_cell_ids.astype(np.int32, copy=False),
+            }
         return {
             "count": int(len(final_cell_indices)),
             "x": out_x.astype(np.float32, copy=False),
@@ -1263,12 +1426,10 @@ class TableEdgeManager:
             "z_span": out_z_span.astype(np.float32, copy=False),
             "y_spread": out_y_spread.astype(np.float32, copy=False),
             "support_total": int(np.sum(out_support)),
-            "support_px": px_sorted[final_pt_indices].astype(np.int32, copy=False),
-            "support_py": py_sorted[final_pt_indices].astype(np.int32, copy=False),
-            "support_x": x_sorted[final_pt_indices].astype(np.float32, copy=False),
-            "support_y": y_sorted[final_pt_indices].astype(np.float32, copy=False),
-            "support_z": z_sorted[final_pt_indices].astype(np.float32, copy=False),
-            "support_rep_index": final_cell_ids.astype(np.int32, copy=False),
+            "representative_sort_ms": float(representative_sort_ms),
+            "representative_group_ms": float(representative_group_ms),
+            "representative_build_ms": float(self._ms_since(build_start)),
+            **support_payload,
         }
 
 
@@ -1302,51 +1463,50 @@ class TableEdgeManager:
         min_x_span_m: float,
         max_yaw: float,
     ) -> Dict[str, Any]:
-        # Current implementation intentionally keeps the legacy column/row scan
-        # semantics. This method is the replacement point for a future vectorized
-        # NumPy/OpenCV front-edge cue; keep callers and output keys stable.
+        prepare_start = time.perf_counter()
         arr = np.asarray(depth_m, dtype=np.float32)
         if arr.ndim != 2 or arr.size <= 0:
             return {"count": 0, "inlier_count": 0, "score": 0.0}
         h, w = int(arr.shape[0]), int(arr.shape[1])
         if h < 7 or w < 4:
             return {"count": 0, "inlier_count": 0, "score": 0.0}
-        candidates = []
         col_step = max(1, int(self._fast_front_edge_col_step or 1))
         row_step = max(1, int(self._fast_front_edge_row_step or 1))
-        for col in range(0, w, col_step):
-            prof = arr[:, col]
-            valid = np.isfinite(prof) & (prof > float(z_min)) & (prof < float(z_max))
-            if int(valid.sum()) < 7:
-                continue
-            filled = prof.astype(np.float32, copy=True)
-            finite_idx = np.flatnonzero(valid)
-            if finite_idx.size < 7:
-                continue
-            filled[~valid] = np.interp(np.flatnonzero(~valid), finite_idx, prof[finite_idx]).astype(np.float32) if int((~valid).sum()) else filled[~valid]
-            smooth = np.convolve(filled, np.asarray([0.25, 0.50, 0.25], dtype=np.float32), mode="same")
-            best = None
-            for row in range(3, h - 3, row_step):
-                if not bool(valid[row]):
-                    continue
-                if not (smooth[row] < smooth[row - 1] and smooth[row] <= smooth[row + 1]):
-                    continue
-                before = float(np.percentile(smooth[max(0, row - 6):row], 70))
-                after = float(np.percentile(smooth[row + 1:min(h, row + 7)], 70))
-                valley = float(smooth[row])
-                # A front edge in pitched camera depth often appears as far -> near -> far along image v.
-                prominence = min(before - valley, after - valley)
-                if prominence < 0.025:
-                    continue
-                if row < 4 or row > h - 5:
-                    continue
-                item = (float(prominence), int(col), int(row), float(prof[row]))
-                if best is None or item[0] > best[0]:
-                    best = item
-            if best is not None:
-                candidates.append(best)
+        cols_i = np.arange(0, w, col_step, dtype=np.int32)
+        prof = arr[:, cols_i]
+        valid = np.isfinite(prof) & (prof > float(z_min)) & (prof < float(z_max))
+        # A cheap, deterministic fill avoids per-column interpolation. Invalid
+        # entries are excluded from candidate rows, so this only supports blur.
+        col_median = np.nanmedian(np.where(valid, prof, np.nan), axis=0)
+        col_median = np.where(np.isfinite(col_median), col_median, 0.0).astype(np.float32)
+        filled = np.where(valid, prof, col_median[None, :]).astype(np.float32, copy=False)
+        smooth = (np.vstack((filled[:1], filled[:-1])) + 2.0 * filled + np.vstack((filled[1:], filled[-1:]))) * 0.25
+        # Window means are a bounded-cost approximation of the former repeated
+        # local p70 calls; both preserve far -> near -> far prominence ordering.
+        cs = np.vstack((np.zeros((1, smooth.shape[1]), dtype=np.float32), np.cumsum(smooth, axis=0, dtype=np.float32)))
+        rows_i = np.arange(3, h - 3, row_step, dtype=np.int32)
+        before = (cs[rows_i] - cs[np.maximum(0, rows_i - 6)]) / np.maximum(1, rows_i - np.maximum(0, rows_i - 6))[:, None]
+        after_end = np.minimum(h, rows_i + 7)
+        after = (cs[after_end] - cs[rows_i + 1]) / np.maximum(1, after_end - (rows_i + 1))[:, None]
+        valley = smooth[rows_i]
+        prominence = np.minimum(before - valley, after - valley)
+        local_min = (valley < smooth[rows_i - 1]) & (valley <= smooth[rows_i + 1])
+        candidate_mask = local_min & valid[rows_i] & (prominence >= 0.025)
+        candidate_mask &= (valid.sum(axis=0)[None, :] >= 7)
+        profile_prepare_ms = self._ms_since(prepare_start)
+        scan_start = time.perf_counter()
+        masked_prominence = np.where(candidate_mask, prominence, -np.inf)
+        best_row_idx = np.argmax(masked_prominence, axis=0)
+        best_score = masked_prominence[best_row_idx, np.arange(len(cols_i))]
+        keep = np.isfinite(best_score)
+        kept_col_indices = np.flatnonzero(keep)
+        candidates = [
+            (float(score), int(col), int(rows_i[row_idx]), float(prof[row_idx, col_idx]))
+            for col_idx, score, col, row_idx in zip(kept_col_indices, best_score[keep], cols_i[keep], best_row_idx[keep])
+        ]
+        profile_scan_ms = self._ms_since(scan_start)
         if len(candidates) < 3:
-            return {"count": int(len(candidates)), "inlier_count": 0, "score": 0.0}
+            return {"count": int(len(candidates)), "inlier_count": 0, "score": 0.0, "front_edge_prepare_ms": profile_prepare_ms, "front_edge_scan_ms": profile_scan_ms, "front_edge_select_ms": 0.0}
 
         candidates.sort(key=lambda item: item[1])
         groups = []
@@ -1360,7 +1520,7 @@ class TableEdgeManager:
         groups.append(current)
         group = max(groups, key=lambda g: (len(g), sum(float(v[0]) for v in g)))
         if len(group) < 3:
-            return {"count": int(len(candidates)), "inlier_count": 0, "score": 0.0}
+            return {"count": int(len(candidates)), "inlier_count": 0, "score": 0.0, "front_edge_prepare_ms": profile_prepare_ms, "front_edge_scan_ms": profile_scan_ms, "front_edge_select_ms": 0.0}
 
         cols = np.asarray([g[1] for g in group], dtype=np.float32)
         rows = np.asarray([g[2] for g in group], dtype=np.float32)
@@ -1398,7 +1558,7 @@ class TableEdgeManager:
             residual = np.zeros(len(px), dtype=np.float32)
             inlier = np.zeros(len(px), dtype=bool)
             inlier_count, x_span, residual_mean, score = 0, 0.0, 0.0, 0.0
-        return {
+        result = {
             "count": int(len(candidates)),
             "inlier_count": int(inlier_count),
             "x_span_m": float(x_span),
@@ -1419,6 +1579,10 @@ class TableEdgeManager:
             "col_step": int(col_step),
             "row_step": int(row_step),
         }
+        result["front_edge_prepare_ms"] = float(profile_prepare_ms)
+        result["front_edge_scan_ms"] = float(profile_scan_ms)
+        result["front_edge_select_ms"] = float(self._ms_since(scan_start) - profile_scan_ms)
+        return result
 
     @staticmethod
     def _fast_local_band_stats(x_values: Any, y_values: Any, edge_x: Any, edge_y: Any, *, k: float, b: float, band_m: float) -> Dict[str, Any]:
@@ -1810,6 +1974,12 @@ class TableEdgeManager:
             if key in out:
                 out["edge_profile"][key] = out.get(key)
         out["edge_process_path"] = str(path or "")
+        out["table_edge_process_ms"] = float(prof.get("total_edge_process_ms", 0.0) or 0.0)
+        out["primary_or_single_pass_ms"] = float(prof.get("total_edge_process_ms", 0.0) or 0.0)
+        roi_observability = {key: out.get(key) for key in (
+            "roi_source", "roi_extension_reason", "rgb_fov_depth_xyxy", "table_bbox_rgb_xyxy",
+            "mapped_depth_bbox_xyxy", "primary_depth_edge_roi", "depth_edge_roi", "table_edge_roi", "edge_roi",
+        ) if key in out}
         out = self._edge_publish_consistency_fields(out)
         cfg = self.cfg.table_edge
         max_residual = float(cfg.edge_trusted_max_residual or 0.0)
@@ -1824,6 +1994,29 @@ class TableEdgeManager:
             edge_trusted_max_background_penalty=(float(cfg.edge_trusted_max_background_penalty) if float(cfg.edge_trusted_max_background_penalty or 0.0) > 0.0 else None),
         )
         out = self._edge_publish_consistency_fields(standardized.to_dict())
+        out.update(roi_observability)
+        # Standardization may intentionally drop non-control fields; restore the
+        # compact hot-path accounting fields used by the periodic summary.
+        out["table_edge_process_ms"] = float(prof.get("total_edge_process_ms", 0.0) or 0.0)
+        out["primary_or_single_pass_ms"] = float(prof.get("total_edge_process_ms", 0.0) or 0.0)
+        for key in ("front_edge_prepare_ms", "front_edge_scan_ms", "front_edge_select_ms", "representative_sort_ms", "representative_group_ms", "representative_build_ms", "roi_width_px", "roi_height_px", "roi_area_px", "adaptive_stride", "base_stride", "budget_stride", "effective_stride", "adaptive_budget_active", "base_sampled_point_count", "final_sampled_point_count", "sample_reduction_ratio", "sample_budget", "sampled_grid_width", "sampled_grid_height", "sampled_point_count", "valid_point_count", "candidate_point_count"):
+            if key in prof:
+                out[key] = prof[key]
+        self._profile_samples.append({
+            "table_edge_process_ms": out.get("table_edge_process_ms", 0.0),
+            "primary_or_single_pass_ms": out.get("primary_or_single_pass_ms", 0.0),
+            "front_edge_scan_ms": out.get("front_edge_scan_ms", 0.0),
+            "representative_group_ms": out.get("representative_group_ms", 0.0),
+            "roi_depth_stats_ms": out.get("roi_depth_stats_ms", 0.0),
+            "sampled_point_count": out.get("sampled_point_count", 0),
+            "candidate_point_count": out.get("candidate_point_count", out.get("candidate_count", 0)),
+            "adaptive_stride": out.get("adaptive_stride", 0), "roi_area_px": out.get("roi_area_px", 0),
+            "roi_width_px": out.get("roi_width_px", 0), "roi_height_px": out.get("roi_height_px", 0),
+            "sample_reduction_ratio": out.get("sample_reduction_ratio", 0.0), "adaptive_budget_active": bool(out.get("adaptive_budget_active")),
+            "roi_extension_reason": str(out.get("roi_extension_reason") or ""),
+            "roi_source": str(out.get("roi_source") or "unknown"), "reason": str(out.get("reason") or out.get("reject_reason") or ""),
+            "edge_valid": bool(out.get("edge_valid")), "edge_trusted": bool(out.get("edge_trusted")),
+        })
         self._emit_edge_publish_summary(out)
         return out
 
@@ -2149,35 +2342,51 @@ class TableEdgeManager:
             rgb_depth_center_offset_y=float(table_edge_cfg.rgb_depth_center_offset_y),
             yolo_table_roi_boundary_extend_enable=bool(table_edge_cfg.yolo_table_roi_boundary_extend_enable),
             yolo_table_roi_boundary_margin_norm=float(table_edge_cfg.yolo_table_roi_boundary_margin_norm),
+            boundary_extend_mode=str(getattr(table_edge_cfg, "boundary_extend_mode", "fov_aligned_bounded")),
+            extended_roi_scale_x=float(getattr(table_edge_cfg, "extended_roi_scale_x", 1.25)),
+            extended_roi_scale_y=float(getattr(table_edge_cfg, "extended_roi_scale_y", 1.25)),
+            extended_roi_lower_band_center_ratio=float(getattr(table_edge_cfg, "extended_roi_lower_band_center_ratio", 0.75)),
+            extended_roi_bottom_margin_px=int(getattr(table_edge_cfg, "extended_roi_bottom_margin_px", 8)),
+            extended_roi_max_width_px=int(getattr(table_edge_cfg, "extended_roi_max_width_px", 200)),
+            extended_roi_max_height_px=int(getattr(table_edge_cfg, "extended_roi_max_height_px", 120)),
+            extended_roi_max_area_px=int(getattr(table_edge_cfg, "extended_roi_max_area_px", 24000)),
             last_valid_depth_roi=self._last_valid_depth_roi,
             yolo_table_bbox_hold_enable=bool(table_edge_cfg.yolo_table_bbox_hold_enable),
             yolo_table_bbox_hold_frames=int(table_edge_cfg.yolo_table_bbox_hold_frames),
             table_bbox_hold_age_frames=int(self._last_valid_table_bbox_hold_frames or 0),
             yolo_table_roi_hold_enable=bool(table_edge_cfg.yolo_table_roi_hold_enable),
         )
-        force_roi = getattr(self, "_force_depth_roi_once", None)
-        if force_roi is not None:
-            try:
-                force_roi_list = [int(v) for v in force_roi[:4]]
-                primary_roi = roi_meta.get("depth_edge_roi") or roi_meta.get("table_edge_roi") or roi_meta.get("edge_roi")
-                roi_meta["primary_depth_edge_roi"] = primary_roi
-                roi_meta["depth_edge_roi"] = force_roi_list
-                roi_meta["table_edge_roi"] = force_roi_list
-                roi_meta["edge_roi"] = force_roi_list
-                roi_meta["dynamic_roi"] = force_roi_list
-                roi_meta["roi_source"] = "yolo_table_bbox_boundary_extend"
-                roi_meta["roi_reason"] = str(getattr(self, "_force_depth_roi_reason_once", "") or "boundary_extend_after_primary_edge_missing")
-                roi_meta["boundary_extend_active"] = True
-                roi_meta["boundary_extend_retry_used"] = True
-            except Exception:
-                pass
+        # Boundary extension is an ROI selection policy, not a detector retry.
+        # The ROI helper has already clipped it to the depth frame, so choose it
+        # before any depth conversion or point-cloud work begins.
+        ext_roi = roi_meta.get("boundary_extended_roi")
+        use_extended_roi = bool(
+            roi_meta.get("boundary_extend_candidate")
+            and isinstance(ext_roi, (list, tuple)) and len(ext_roi) >= 4
+        )
+        primary_roi = roi_meta.get("depth_edge_roi") or roi_meta.get("table_edge_roi") or roi_meta.get("edge_roi")
+        if use_extended_roi:
+            ext_roi = [int(v) for v in ext_roi[:4]]
+            roi_meta["primary_depth_edge_roi"] = primary_roi
+            roi_meta["depth_edge_roi"] = ext_roi
+            roi_meta["table_edge_roi"] = ext_roi
+            roi_meta["edge_roi"] = ext_roi
+            roi_meta["dynamic_roi"] = ext_roi
+            roi_meta["roi_source"] = "extended"
+            roi_meta["roi_reason"] = "boundary_extend_selected_before_detection"
+        else:
+            roi_meta["roi_source"] = "primary"
+        roi_meta["boundary_extend_active"] = bool(use_extended_roi)
+        # Compatibility field: complete boundary retries no longer exist.
+        roi_meta["boundary_extend_retry_used"] = False
+        roi_meta["extended_roi_selected"] = bool(use_extended_roi)
 
         quadrant = roi_meta.get("table_quadrant")
         table_bbox = roi_meta.get("table_bbox")
         roi_source_text = str(roi_meta.get("roi_source") or "")
         current_table_bbox_found = bool(roi_meta.get("table_bbox_current_found", False))
         if not current_table_bbox_found and table_bbox is not None and roi_source_text != "yolo_table_bbox_hold":
-            current_table_bbox_found = roi_source_text in {"local_perception_table_bbox", "yolo_table_bbox", "yolo_table_mapped_center", "yolo_table_bbox_mapped", "yolo_table_bbox_boundary_extend"}
+            current_table_bbox_found = roi_source_text in {"primary", "extended", "local_perception_table_bbox", "yolo_table_bbox", "yolo_table_mapped_center", "yolo_table_bbox_mapped"}
         now_s = time.time()
         latch_age_s = None
         if self._last_valid_table_roi_ts:
@@ -2199,7 +2408,7 @@ class TableEdgeManager:
             roi_meta["roi_source"] = "latched_table_roi"
             roi_meta["roi_reason"] = "table_bbox_lost_close_final_latched_roi"
             roi_source_text = "latched_table_roi"
-        if current_table_bbox_found and roi_source_text in {"local_perception_table_bbox", "yolo_table_bbox", "yolo_table_mapped_center", "yolo_table_bbox_mapped", "yolo_table_bbox_boundary_extend"}:
+        if current_table_bbox_found and roi_source_text in {"primary", "extended", "local_perception_table_bbox", "yolo_table_bbox", "yolo_table_mapped_center", "yolo_table_bbox_mapped"}:
             self._last_valid_quadrant = str(quadrant).strip().upper() if quadrant else self._last_valid_quadrant
             self._last_valid_quadrant_ts = now_s
             self._last_valid_table_bbox = table_bbox
@@ -2345,6 +2554,7 @@ class TableEdgeManager:
             "mapped_depth_center",
             "mapped_depth_bbox_unclipped_xyxy",
             "mapped_depth_bbox_xyxy",
+            "rgb_fov_depth_xyxy",
             "yolo_table_roi_mode",
             "roi_scale_x",
             "roi_scale_y",
@@ -2359,8 +2569,11 @@ class TableEdgeManager:
             "boundary_extend_candidate",
             "boundary_extended_roi",
             "boundary_extend_touch_axes",
+            "roi_extension_reason",
+            "boundary_extend_mode",
             "boundary_extend_active",
             "boundary_extend_retry_used",
+            "extended_roi_selected",
             "boundary_margin_norm",
             "yolo_table_roi_boundary_extend_enable",
             "yolo_table_roi_boundary_margin_norm",
@@ -2388,44 +2601,11 @@ class TableEdgeManager:
         return self._process_depth_fast_plane_only(depth_frame, frame_seq)
 
     def _process_depth_fast_plane_only(self, depth_frame: np.ndarray, frame_seq: int) -> Dict[str, Any]:
-        """Run fast-plane detector, then retry once with boundary-extended ROI if needed.
-
-        The normal path uses the small bbox-scaled ROI.  If that path fails to
-        find edge geometry and the YOLO table bbox touches RGB left/right/bottom,
-        the ROI helper provides a boundary-extended ROI.  Only then do we pay for
-        a second fast pass.
-        """
-        self._force_depth_roi_once = None
-        self._force_depth_roi_reason_once = ""
-        primary = self._process_depth_fast_plane_only_once(depth_frame, frame_seq)
-        primary_edge_ok = bool(primary.get("edge_found") or primary.get("edge_geometry_valid") or primary.get("edge_valid"))
-        ext_roi = primary.get("boundary_extended_roi")
-        can_retry = (
-            not primary_edge_ok
-            and bool(primary.get("boundary_extend_candidate"))
-            and isinstance(ext_roi, (list, tuple))
-            and len(ext_roi) >= 4
-        )
-        if not can_retry:
-            primary["boundary_extend_retry_used"] = False
-            return primary
-
-        try:
-            self._force_depth_roi_once = [int(v) for v in ext_roi[:4]]
-            self._force_depth_roi_reason_once = "boundary_extend_after_primary_edge_missing"
-            retry = self._process_depth_fast_plane_only_once(depth_frame, frame_seq)
-        finally:
-            self._force_depth_roi_once = None
-            self._force_depth_roi_reason_once = ""
-
-        retry.update({
-            "boundary_extend_retry_used": True,
-            "boundary_extend_retry_selected": True,
-            "boundary_extend_primary_edge_found": bool(primary_edge_ok),
-            "boundary_extend_primary_reason": primary.get("reject_reason") or primary.get("reason") or primary.get("fast_gate_reject_reason"),
-            "boundary_extend_primary_roi": primary.get("depth_edge_roi") or primary.get("table_edge_roi") or primary.get("edge_roi"),
-        })
-        return retry
+        """Run exactly one fast-plane pass using the preselected primary/extended ROI."""
+        result = self._process_depth_fast_plane_only_once(depth_frame, frame_seq)
+        # Preserve the old public field without implying a second detector pass.
+        result["boundary_extend_retry_used"] = False
+        return result
 
     def _process_depth_fast_plane_only_once(self, depth_frame: np.ndarray, frame_seq: int) -> Dict[str, Any]:
         total_start = time.perf_counter()
@@ -2481,14 +2661,33 @@ class TableEdgeManager:
         if not hasattr(self, "_ray_x") or self._ray_x.shape != (h_frame, w_frame):
             self._precompute_rays(force_h=h_frame, force_w=w_frame)
 
-        stride = max(1, int(self._fast_plane_stride))
+        # Use one regular grid.  The old two-stage stride made coordinate
+        # recovery opaque and allowed a large dynamic ROI to grow unbounded.
+        base_stride = max(1, int(self._fast_plane_stride)) * max(1, int(self._depth_stride))
+        roi_w, roi_h = max(0, x1 - x0), max(0, y1 - y0)
+        roi_area = int(roi_w * roi_h)
+        budget_stride = int(math.ceil(math.sqrt(float(roi_area) / float(max(1, self._adaptive_target_sample_count)))))
+        if self._adaptive_sampling_enable:
+            stride = max(base_stride, budget_stride)
+            stride = max(int(self._adaptive_min_stride), min(int(self._adaptive_max_stride), stride))
+        else:
+            stride = base_stride
         depth_roi = depth_frame[y0:y1:stride, x0:x1:stride]
-        depth_stride = max(1, int(self._depth_stride))
-        depth_roi = depth_roi[::depth_stride, ::depth_stride]
-        stride = stride * depth_stride
+        base_sampled_count = int(math.ceil(float(roi_w) / float(base_stride))) * int(math.ceil(float(roi_h) / float(base_stride)))
+        final_sampled_count = int(depth_roi.size)
         profile["fast_roi_extract_ms"] = self._ms_since(roi_start)
         profile["roi_extract_ms"] = float(profile["fast_roi_extract_ms"])
         profile["roi_crop_ms"] = float(profile["fast_roi_extract_ms"])
+        profile.update({
+            "roi_width_px": int(roi_w), "roi_height_px": int(roi_h), "roi_area_px": int(roi_area),
+            "adaptive_stride": int(stride), "sample_budget": int(self._adaptive_target_sample_count),
+            "base_stride": int(base_stride), "budget_stride": int(budget_stride), "effective_stride": int(stride),
+            "adaptive_budget_active": bool(stride > base_stride), "base_sampled_point_count": int(base_sampled_count),
+            "final_sampled_point_count": int(final_sampled_count),
+            "sample_reduction_ratio": float(1.0 - (float(final_sampled_count) / float(max(1, base_sampled_count)))),
+            "sampled_grid_width": int(depth_roi.shape[1]) if depth_roi.ndim == 2 else 0,
+            "sampled_grid_height": int(depth_roi.shape[0]) if depth_roi.ndim == 2 else 0,
+        })
         roi_payload = self._roi_payload(roi_box, roi_meta)
         fast_debug_base: Dict[str, Any] = {
             "fast_debug_pixels_enabled": bool(debug_pixels_enabled),
@@ -2568,11 +2767,15 @@ class TableEdgeManager:
         yy, xx = np.nonzero(valid_mask)
         sampled_count = int(depth_roi.size)
         point_count = int(len(xx))
+        profile["sampled_point_count"] = int(sampled_count)
+        profile["valid_point_count"] = int(point_count)
         profile["fast_depth_valid_ms"] = self._ms_since(point_start)
         profile["point_build_ms"] = float(profile["fast_depth_valid_ms"])
 
-        min_all = max(60, int(cfg.min_all_points if cfg is not None else 1000) // max(1, stride * stride))
-        min_table = max(45, int(cfg.plane_min_inliers if cfg is not None else 220) // max(1, stride))
+        # Keep absolute floors but make the gate proportional to the actual
+        # sampled grid, rather than a fixed-stride division.
+        min_all = max(60, int(math.ceil(sampled_count * 0.03)))
+        min_table = max(45, int(math.ceil(sampled_count * 0.02)))
         if self._detector is None or point_count < min_all:
             payload = self._default_result(
                 depth_valid=True,
@@ -2640,6 +2843,7 @@ class TableEdgeManager:
             candidate_count = int(candidate_cap)
         profile["fast_candidate_raw_count"] = int(raw_candidate_count)
         profile["fast_candidate_fit_count"] = int(candidate_count)
+        profile["candidate_point_count"] = int(candidate_count)
         profile["fast_candidate_point_cap"] = int(candidate_cap)
         candidate_z_pct = finite_percentiles(height_z)
         candidate_x_span = float(np.max(height_x) - np.min(height_x)) if len(height_x) > 1 else 0.0
@@ -2730,8 +2934,11 @@ class TableEdgeManager:
             y_cluster_bin_m=y_cluster_bin_m,
             min_support_points=min_vertical_support,
             min_z_span_m=min_vertical_z_span,
+            include_support_arrays=bool(debug_pixels_enabled),
         )
         profile["fast_rep_select_ms"] = self._ms_since(fit_start)
+        for key in ("representative_sort_ms", "representative_group_ms", "representative_build_ms"):
+            profile[key] = float(reps.get(key, 0.0) or 0.0)
         rep_count = int(reps.get("count", 0) or 0)
         support_total = int(reps.get("support_total", 0) or 0)
         z_span_arr = np.asarray(reps.get("z_span", []), dtype=np.float32)
@@ -2758,6 +2965,8 @@ class TableEdgeManager:
                 max_yaw=float(max_yaw_cfg),
             )
             profile["fast_front_edge_ms"] = self._ms_since(front_edge_start)
+            for key in ("front_edge_prepare_ms", "front_edge_scan_ms", "front_edge_select_ms"):
+                profile[key] = float(edge_cue.get(key, 0.0) or 0.0)
             edge_debug_payload = self._fast_edge_debug_payload(
                 edge_cue,
                 debug_pixels_enabled=debug_pixels_enabled,
@@ -3239,6 +3448,8 @@ class TableEdgeManager:
                 max_yaw=float(max_yaw_cfg),
             )
             profile["fast_front_edge_ms"] = self._ms_since(front_edge_start)
+            for key in ("front_edge_prepare_ms", "front_edge_scan_ms", "front_edge_select_ms"):
+                profile[key] = float(edge_cue.get(key, 0.0) or 0.0)
             edge_debug_payload = self._fast_edge_debug_payload(
                 edge_cue,
                 debug_pixels_enabled=debug_pixels_enabled,
@@ -3668,6 +3879,8 @@ class TableEdgeManager:
         except queue.Full:
             try:
                 self._queue.get_nowait()
+                self._queue.task_done()
+                self._dropped_frame_count += 1
             except queue.Empty:
                 pass
             try:
@@ -3764,8 +3977,18 @@ class TableEdgeManager:
                 close_depth_ratio = float(np.sum(valid_depths < 0.40) / valid_depths.size)
 
         if isinstance(payload, dict):
+            sync_meta = dict((local_perception or {}).get("_table_edge_sync") or {})
+            payload.update(sync_meta)
+            if sync_meta.get("sync_status") == "matched_hold":
+                payload["roi_source"] = "matched_hold"
+                payload["table_roi_source"] = "matched_hold"
+            elif sync_meta.get("sync_status") == "unavailable":
+                payload.setdefault("roi_source", "unavailable")
             payload["obs_seq"] = int(self._last_obs_seq)
             payload["camera_frame_seq"] = int(seq)
+            payload["capture_mono_ns"] = frames.get("capture_mono_ns")
+            payload["camera_capture_done_mono_ns"] = frames.get("camera_capture_done_mono_ns")
+            payload["trace_id"] = frames.get("trace_id")
             payload["depth_p10"] = depth_p10
             payload["close_depth_ratio"] = close_depth_ratio
             runtime_status = self._runtime_status()
@@ -3810,6 +4033,7 @@ class TableEdgeManager:
             payload["final_fixed_roi_source"] = "fixed_center_low_roi" if fixed_roi_enabled and fixed_roi_xyxy is not None else ""
             fixed_stats = {}
             if fixed_roi_enabled and fixed_roi_xyxy is not None:
+                fixed_stats_start = time.perf_counter()
                 fixed_stats = table_roi_depth_statistics(
                     depth,
                     depth_scale,
@@ -3819,7 +4043,9 @@ class TableEdgeManager:
                     roi_is_latched=True,
                     min_valid_ratio=float(getattr(self.cfg.table_edge, "final_fixed_roi_min_valid_ratio", 0.03)),
                     min_sample_count=int(getattr(self.cfg.table_edge, "final_fixed_roi_min_sample_count", 32)),
+                    target_sample_count=int(getattr(self.cfg.table_edge, "adaptive_target_sample_count", 1200)),
                 )
+                payload["fixed_roi_stats_ms"] = self._ms_since(fixed_stats_start)
             fixed_valid = bool(fixed_stats.get("table_roi_depth_valid", False))
             fixed_mean = fixed_stats.get("table_roi_depth_mean") if fixed_roi_enabled else None
             fixed_median = fixed_stats.get("table_roi_depth_median") if fixed_roi_enabled else None
@@ -3853,6 +4079,7 @@ class TableEdgeManager:
                         payload["final_fixed_roi_depth_debug_" + key[len("table_roi_depth_"):]] = value
             mapped_roi = payload.get("table_edge_roi") or payload.get("depth_edge_roi") or payload.get("dynamic_roi")
             roi_latched = bool(payload.get("table_roi_latched", False))
+            roi_stats_start = time.perf_counter()
             roi_stats = table_roi_depth_statistics(
                 depth, depth_scale, mapped_roi,
                 current_table_bbox_found=bool(
@@ -3875,7 +4102,10 @@ class TableEdgeManager:
                         32 if roi_latched else 64,
                     )
                 ),
+                target_sample_count=int(getattr(self.cfg.table_edge, "adaptive_target_sample_count", 1200)),
             )
+            payload["mapped_roi_stats_ms"] = self._ms_since(roi_stats_start)
+            payload["roi_depth_stats_ms"] = float(payload.get("fixed_roi_stats_ms", 0.0) or 0.0) + float(payload["mapped_roi_stats_ms"])
             roi_stats["table_roi_depth_mapping_source"] = str(payload.get("roi_source") or "")
             roi_stats["table_roi_source"] = str(payload.get("table_roi_source") or payload.get("roi_source") or "")
             roi_stats["table_roi_latched"] = bool(payload.get("table_roi_latched", False))
@@ -3983,12 +4213,14 @@ class TableEdgeManager:
                 self._dropped_frame_count += int(seq - self._last_camera_seq - 1)
             self._last_camera_seq = seq
             runtime_status = self._runtime_status()
+            local_perception, _sync_meta = self._select_synced_local_perception(frames)
             runtime_mode = str(runtime_status.get("mode") or "").strip().upper()
             try:
                 self.process_camera_frame(
                     frames,
                     frame_seq=seq,
                     frame_slot=frame_slot,
+                    local_perception=local_perception,
                     runtime_status=runtime_status,
                     source_mode=runtime_mode if runtime_mode else None,
                     depth_frame_fetch_ms=self._last_depth_frame_fetch_ms,
@@ -4006,6 +4238,7 @@ class TableEdgeManager:
             except queue.Empty:
                 continue
             if item is None:
+                self._queue.task_done()
                 break
             try:
                 payload = self._process_camera_frame_sync(

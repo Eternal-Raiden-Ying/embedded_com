@@ -22,6 +22,7 @@ def table_roi_depth_statistics(
     min_sample_count: Optional[int] = None,
     min_depth_m: float = 0.05,
     max_depth_m: float = 5.0,
+    target_sample_count: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Return robust depth statistics for the lower, inner part of table ROI."""
     del current_table_bbox_found, allow_without_table_bbox
@@ -49,6 +50,7 @@ def table_roi_depth_statistics(
         "table_roi_depth_sampler_level": None,
         "table_roi_depth_sampler_name": "",
         "table_roi_depth_invalid_reason": "",
+        "table_roi_depth_stride": 1,
     }
     if not isinstance(depth_frame, np.ndarray) or depth_frame.ndim != 2 or depth_frame.size == 0:
         out["table_roi_depth_invalid_reason"] = "depth_frame_invalid"
@@ -75,6 +77,11 @@ def table_roi_depth_statistics(
         (3, "full_roi_safe", 0.00, 1.00, 0.25, 0.98),
     )
     best = None
+    min_raw = float(min_depth_m) / max(float(depth_scale), 1e-12)
+    max_raw = float(max_depth_m) / max(float(depth_scale), 1e-12)
+    # Do not make the safety sampler's work proportional to an enlarged ROI.
+    # Regular index slicing preserves raw depth values (no interpolation).
+    sample_budget = max(1, int(target_sample_count or 1200))
     for level, name, fx0, fx1, fy0, fy1 in samplers:
         sx0, sx1 = x0 + int(round(bw * fx0)), x0 + int(round(bw * fx1))
         sy0, sy1 = y0 + int(round(bh * fy0)), y0 + int(round(bh * fy1))
@@ -82,9 +89,11 @@ def table_roi_depth_statistics(
         sy0, sy1 = max(0, min(h, sy0)), max(0, min(h, sy1))
         if sx1 <= sx0 or sy1 <= sy0:
             continue
-        roi = depth_frame[sy0:sy1, sx0:sx1].astype(np.float32) * float(depth_scale)
+        area = max(1, (sx1 - sx0) * (sy1 - sy0))
+        stride = max(1, int(np.ceil(np.sqrt(float(area) / float(sample_budget)))))
+        roi = depth_frame[sy0:sy1:stride, sx0:sx1:stride]
         finite = np.isfinite(roi)
-        valid = finite & (roi >= float(min_depth_m)) & (roi <= float(max_depth_m))
+        valid = finite & (roi >= min_raw) & (roi <= max_raw)
         total = int(roi.size)
         values = roi[valid]
         sample_count = int(values.size)
@@ -98,6 +107,7 @@ def table_roi_depth_statistics(
             "table_roi_depth_bbox_norm": [sx0 / w, sy0 / h, sx1 / w, sy1 / h],
             "table_roi_depth_sampler_level": int(level),
             "table_roi_depth_sampler_name": str(name),
+            "table_roi_depth_stride": int(stride),
         }
         if best is None or sample_count > int(best.get("table_roi_depth_sample_count", 0) or 0):
             best = dict(stats)
@@ -111,9 +121,9 @@ def table_roi_depth_statistics(
             out.update(stats)
             out.update({
                 "table_roi_depth_valid": True,
-                "table_roi_depth_p10": float(np.percentile(values, 10)),
-                "table_roi_depth_median": float(np.median(values)),
-                "table_roi_depth_mean": float(np.mean(values)),
+                "table_roi_depth_p10": float(np.percentile(values, 10) * float(depth_scale)),
+                "table_roi_depth_median": float(np.median(values) * float(depth_scale)),
+                "table_roi_depth_mean": float(np.mean(values) * float(depth_scale)),
                 "table_roi_depth_invalid_reason": "",
             })
             return out

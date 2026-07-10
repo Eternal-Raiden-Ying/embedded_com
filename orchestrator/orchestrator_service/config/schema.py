@@ -202,6 +202,10 @@ class ControlThresholds:
     edge_settle_s: float = 0.80
     at_table_edge_settle_s: float = 0.10
     target_search_fast_start_enable: bool = True
+    target_fast_start_confirm_enable: bool = False
+    target_prewarm_max_age_ms: int = 180
+    target_prewarm_stable_obs: int = 2
+    final_to_lateral_max_vx_mps: float = 0.02
     dock_retry_limit: int = 2
     dock_retry_backoff_s: float = 0.60
 

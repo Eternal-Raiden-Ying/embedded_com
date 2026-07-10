@@ -4,9 +4,9 @@
 
 runtime:
   # 主循环和观测发送频率。
-  loop_hz: 8.0
-  send_hz: 5.0
-  track_local_send_hz: 8.0
+  loop_hz: 12.0
+  send_hz: 10.0
+  track_local_send_hz: 10.0
 
   # 请求过期和热待机。
   stale_req_s: 3.0
@@ -155,6 +155,8 @@ table_edge:
   rgb_depth_center_offset_y: 0.0
   yolo_table_bbox_hold_enable: true
   yolo_table_bbox_hold_frames: 8
+  perception_sync_max_delta_ms: 100.0
+  matched_roi_hold_ttl_ms: 200.0
   yolo_table_roi_hold_enable: true
   final_fixed_roi_enable: true
   final_fixed_roi_x0_norm: 0.40
@@ -163,9 +165,21 @@ table_edge:
   final_fixed_roi_y1_norm: 0.62
   final_fixed_roi_min_valid_ratio: 0.03
   final_fixed_roi_min_sample_count: 32
-  # 当前小ROI未检测到edge且bbox贴RGB左/右/下边界时，第二次尝试把对应ROI边向depth边界延伸。
+  # bbox贴RGB左/右/下边界时，直接选择扩展ROI；每帧仍只运行一次检测。
   yolo_table_roi_boundary_extend_enable: true
   yolo_table_roi_boundary_margin_norm: 0.03
+  boundary_extend_mode: fov_aligned_bounded
+  extended_roi_scale_x: 1.25
+  extended_roi_scale_y: 1.25
+  extended_roi_lower_band_center_ratio: 0.75
+  extended_roi_bottom_margin_px: 8
+  extended_roi_max_width_px: 200
+  extended_roi_max_height_px: 120
+  extended_roi_max_area_px: 24000
+  adaptive_sampling_enable: true
+  adaptive_target_sample_count: 300
+  adaptive_min_stride: 4
+  adaptive_max_stride: 16
   yolo_table_edge_stable_frames: 5
   edge_trusted_min_conf: 0.60
   edge_trusted_max_residual: 0.0  # <=0 disables residual gate

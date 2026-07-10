@@ -1405,9 +1405,7 @@ class VistaApp(BaseModule):
         send_hz = float(CONFIG.runtime.send_hz)
         if self._safe_mode_text(self._ctx().current_mode) in {"FIND_OBJECT", "FIND_EDGE"}:
             send_hz = max(send_hz, float(getattr(CONFIG.runtime, "track_local_send_hz", send_hz) or send_hz))
-        # Ensure the control send interval is at most 0.10 to support 8-10 Hz control loop
-        send_hz = max(10.0, send_hz)
-        return 1.0 / send_hz
+        return 1.0 / max(0.5, send_hz)
 
     def _should_force_send_stage_output(self, output) -> bool:
         if output is None or not isinstance(getattr(output, "vision_obs", None), dict):

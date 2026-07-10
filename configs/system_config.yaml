@@ -26,9 +26,9 @@ vision:
     stack_run_id: "" # Stack run execution ID
     log_profile: "normal" # normal/debug/trace structured log volume profile
     resource_sample_interval_s: 1.0
-    loop_hz: 8.0 # Frequency of main perception loop
-    send_hz: 5.0 # IPC send frequency
-    track_local_send_hz: 8.0 # Local tracking IPC send frequency
+    loop_hz: 12.0 # Frequency of main perception loop
+    send_hz: 10.0 # IPC send frequency
+    track_local_send_hz: 10.0 # Local tracking IPC send frequency
     stale_req_s: 3.0 # Duration to consider incoming request stale
     hot_standby_s: 30.0 # Hot standby timeout duration
     keep_preview_after_stop: true # Keep debug preview active after stop
@@ -134,6 +134,8 @@ vision:
     rgb_depth_center_offset_y: 0.0 # Center offset correction in pixels
     yolo_table_bbox_hold_enable: true # Hold previous bbox upon detection loss
     yolo_table_bbox_hold_frames: 8 # Number of frames to hold bbox history
+    perception_sync_max_delta_ms: 100.0 # Max RGB/YOLO capture-time delta for table ROI matching
+    matched_roi_hold_ttl_ms: 200.0 # Reuse only the last successfully matched ROI for this long
     yolo_table_roi_hold_enable: true # Persist ROI to avoid frame gaps
     final_roi_latch_enable: true # Reuse last valid table ROI during close/final bbox gaps
     final_roi_latch_max_age_s: 2.0 # Maximum age for close/final ROI latch
@@ -151,6 +153,18 @@ vision:
     final_depth_debug_enable: false # Keep low-level ROI sampler diagnostics out of main payload/logs
     yolo_table_roi_boundary_extend_enable: true # Extend ROI to edge if boundary is reached
     yolo_table_roi_boundary_margin_norm: 0.03 # Margin to trigger extension
+    boundary_extend_mode: fov_aligned_bounded # Bounded extension inside RGB-covered depth FOV
+    extended_roi_scale_x: 1.25
+    extended_roi_scale_y: 1.25
+    extended_roi_lower_band_center_ratio: 0.75
+    extended_roi_bottom_margin_px: 8
+    extended_roi_max_width_px: 200
+    extended_roi_max_height_px: 120
+    extended_roi_max_area_px: 24000
+    adaptive_sampling_enable: true # Bound dynamic ROI sampling work per frame
+    adaptive_target_sample_count: 300 # Maximum regular-grid samples before candidate cap
+    adaptive_min_stride: 4 # Minimum effective regular-grid stride
+    adaptive_max_stride: 16 # Maximum effective regular-grid stride
     yolo_table_edge_stable_frames: 5 # Frames to confirm stable edge detection
     edge_trusted_min_conf: 0.60 # Minimum confidence for control alignment
     edge_trusted_max_residual: 0.0 # Residual threshold (0 to disable)
@@ -196,7 +210,7 @@ vision:
     yolo_table_min_conf: 0.25 # YOLO table confidence minimum threshold
     edge_sync_threshold_s: 0.25 # Timestamp sync threshold between edge and local perception
   preview:
-    preview_mode: "debug" # off/light/debug/full preview rendering cost profile
+    preview_mode: "light" # off/light/debug/full preview rendering cost profile
     mode_layouts:
       IDLE: "rgb_minimal" # Layout for IDLE state
       FIND_EDGE: "rgb_depth_edge" # Layout for FIND_EDGE state
@@ -454,6 +468,9 @@ orchestrator:
     at_table_edge_settle_s: 0.10 # Short settle before target search fast start
     target_search_fast_start_enable: true # Skip SEARCH_TARGET_INIT zero command when target obs is already fresh
     target_fast_start_confirm_enable: false # Fresh target may start slide, but cannot bypass slice guard
+    target_prewarm_max_age_ms: 180 # Maximum capture age for FINAL target candidate handoff
+    target_prewarm_stable_obs: 2 # Distinct consecutive target observations required before lateral motion
+    final_to_lateral_max_vx_mps: 0.02 # Forward speed must be near zero before same-tick lateral start
     dock_retry_limit: 2 # Retries limit upon docking failure
     dock_retry_backoff_s: 0.60 # Wait time before backing up
     search_target_init_hold_s: 0.25 # Pause duration before target search

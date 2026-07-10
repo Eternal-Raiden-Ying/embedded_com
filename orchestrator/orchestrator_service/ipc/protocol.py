@@ -977,6 +977,10 @@ class TargetObs:
     obs_seq: Optional[int] = None
     trace_id: Optional[str] = None
     capture_mono_ns: Optional[int] = None
+    frame_capture_ts: Optional[float] = None
+    target_done_mono_ns: Optional[int] = None
+    freshness_ms: Optional[float] = None
+    freshness: Optional[str] = None
     camera_capture_done_mono_ns: Optional[int] = None
     obs_publish_mono_ns: Optional[int] = None
     obs_recv_mono_ns: Optional[int] = None
@@ -992,7 +996,7 @@ class TargetObs:
         if cy_value is None and isinstance(matched_center_full_norm, dict):
             cy_value = matched_center_full_norm.get("cy")
         return cls(
-            ts=_payload_ts(payload),
+            ts=float(_pick_optional_float(payload, "frame_capture_ts", "capture_ts", "obs_ts", "ts") or _payload_ts(payload)),
             found=bool(payload.get("target_found", payload.get("found", False))),
             target=(str(payload.get("target")).strip() if payload.get("target") is not None else None),
             raw_target=_pick_optional_str(payload, "raw_target"),
@@ -1046,6 +1050,10 @@ class TargetObs:
             obs_seq=_pick_optional_int(payload, "obs_seq", "seq"),
             trace_id=_pick_optional_str(payload, "trace_id"),
             capture_mono_ns=_pick_optional_int(payload, "capture_mono_ns", "frame_capture_mono_ns"),
+            frame_capture_ts=_pick_optional_float(payload, "frame_capture_ts", "capture_ts"),
+            target_done_mono_ns=_pick_optional_int(payload, "target_done_mono_ns", "inference_done_mono_ns"),
+            freshness_ms=_pick_optional_float(payload, "freshness_ms", "age_ms"),
+            freshness=_pick_optional_str(payload, "freshness"),
             camera_capture_done_mono_ns=_pick_optional_int(payload, "camera_capture_done_mono_ns"),
             obs_publish_mono_ns=_pick_optional_int(payload, "obs_publish_mono_ns"),
             type=str(payload.get("type", "target_obs") or "target_obs"),

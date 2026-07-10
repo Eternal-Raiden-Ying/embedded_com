@@ -306,12 +306,16 @@ class SearchStagePlan(BaseStagePlan):
         if local_ts_val is None:
             local_ts_val = tick_input.ts
 
-        is_current_frame, _ = check_edge_current_enough(
-            edge_frame_id=edge_frame_id,
-            local_frame_id=local_frame_id,
-            edge_ts=edge_ts_val,
-            local_ts=local_ts_val,
-        )
+        sync_status = str(table_edge_obs.get("sync_status") or "").strip().lower()
+        if sync_status in {"exact", "nearest", "matched_hold", "unavailable"}:
+            is_current_frame = sync_status in {"exact", "nearest", "matched_hold"}
+        else:
+            is_current_frame, _ = check_edge_current_enough(
+                edge_frame_id=edge_frame_id,
+                local_frame_id=local_frame_id,
+                edge_ts=edge_ts_val,
+                local_ts=local_ts_val,
+            )
 
         logger.info(
             "[EDGE_SELECTION_TRACE] results_present=%s results_frame_id=%s results_edge_found=%s "
@@ -484,6 +488,7 @@ class SearchStagePlan(BaseStagePlan):
                     result_factory=lambda payload: target_obs_from_results(payload, ctx.target_name),
                 )
                 target_obs = _annotate_target_obs(target_obs, ctx)
+                target_obs["target_prewarm_active"] = True
                 ctx.stage_state["target_obs"] = dict(target_obs)
             
             table_edge_obs, table_edge_source, force_send = self._process_table_edge_obs(

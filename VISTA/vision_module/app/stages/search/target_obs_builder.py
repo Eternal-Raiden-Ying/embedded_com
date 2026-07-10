@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import time
 from typing import Dict, Optional
 
 from ....config.data import normalize_class_name
@@ -74,8 +75,12 @@ def target_obs_from_results(results: Dict[str, object], target: Optional[str]) -
         merged.update(target_obs)
         merged.setdefault("target", target)
         merged.setdefault("obs_ts", local.get("obs_ts"))
-        merged.setdefault("frame_id", local.get("frame_seq"))
-        merged.setdefault("seq", local.get("frame_seq"))
+        merged.setdefault("frame_id", local.get("frame_id", local.get("frame_seq")))
+        merged.setdefault("seq", local.get("obs_seq", local.get("frame_seq")))
+        merged.setdefault("obs_seq", local.get("obs_seq", local.get("frame_seq")))
+        merged.setdefault("capture_mono_ns", local.get("capture_mono_ns"))
+        merged.setdefault("frame_capture_ts", local.get("frame_capture_ts"))
+        merged.setdefault("target_done_mono_ns", local.get("inference_done_mono_ns"))
         merged.setdefault("age_ms", local.get("age_ms"))
         if contract_error:
             merged.setdefault("contract_error", contract_error)
@@ -95,8 +100,12 @@ def target_obs_from_results(results: Dict[str, object], target: Optional[str]) -
         "expected_class_name": target,
         "expected_class_id": None,
         "obs_ts": local.get("obs_ts"),
-        "frame_id": local.get("frame_seq"),
-        "seq": local.get("frame_seq"),
+        "frame_id": local.get("frame_id", local.get("frame_seq")),
+        "seq": local.get("obs_seq", local.get("frame_seq")),
+        "obs_seq": local.get("obs_seq", local.get("frame_seq")),
+        "capture_mono_ns": local.get("capture_mono_ns"),
+        "frame_capture_ts": local.get("frame_capture_ts"),
+        "target_done_mono_ns": local.get("inference_done_mono_ns"),
         "age_ms": local.get("age_ms"),
         "boxes_count": int(local.get("box_count", 0) or 0),
         "best_cls": "n/a",
@@ -177,9 +186,15 @@ def target_obs_from_results(results: Dict[str, object], target: Optional[str]) -
     payload = {"found": True, "target_found": True, "target": target}
     payload.update(obs)
     payload.update({k: v for k, v in weak_payload.items() if k in {"boxes_count"}})
-    for key in ("obs_ts", "frame_id", "seq", "age_ms"):
+    for key in ("obs_ts", "frame_capture_ts", "frame_id", "seq", "obs_seq", "age_ms", "capture_mono_ns", "target_done_mono_ns"):
         if weak_payload.get(key) is not None:
             payload[key] = weak_payload.get(key)
+    if payload.get("capture_mono_ns") is not None:
+        try:
+            payload["freshness_ms"] = max(0.0, (time.monotonic_ns() - int(payload["capture_mono_ns"])) / 1_000_000.0)
+            payload["freshness"] = "fresh"
+        except (TypeError, ValueError):
+            payload["freshness"] = "unknown"
     payload["found"] = bool(payload.get("target_found", payload.get("found", True)))
     try:
         if payload.get("bbox") and rgb_shape:

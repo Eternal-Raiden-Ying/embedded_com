@@ -21,6 +21,7 @@ class Scheduler:
         self.active_plan: Optional[Dict[str, Any]] = None
         self.routes: Dict[str, Any] = {}
         self.result_slots: Dict[str, Dict[str, Any]] = {}
+        self.result_history: Dict[str, Deque[Dict[str, Any]]] = {}
         self.event_latches: Dict[str, Deque[Dict[str, Any]]] = {}
         self.pending_signals: Dict[str, Any] = {}
         self.last_snapshot: Dict[str, Any] = {}
@@ -64,6 +65,7 @@ class Scheduler:
             self.active_plan = None
             self.routes.clear()
             self.result_slots.clear()
+            self.result_history.clear()
             self.event_latches.clear()
             self.pending_signals.clear()
             self.last_snapshot["runtime_stopped_ts"] = time.time()
@@ -75,6 +77,7 @@ class Scheduler:
             self._debug_trace_enable = bool((self.active_plan or {}).get("vision_debug_trace_enable", False))
             self.routes = dict((self.active_plan or {}).get("routes") or {})
             self.result_slots.clear()
+            self.result_history.clear()
             self.event_latches.clear()
             self.last_snapshot.update(
                 {
@@ -164,6 +167,16 @@ class Scheduler:
                     "payload": payload,
                 }
             )
+            if route_name == "local_perception":
+                history = self.result_history.setdefault(route_name, deque(maxlen=4))
+                history.append(
+                    {
+                        "generation": result_generation,
+                        "ts": now,
+                        "seq": next_seq,
+                        "payload": payload,
+                    }
+                )
             self.last_snapshot["last_result_ts"] = now
             self._log_publish_result_trace(
                 route_name=route_name,
@@ -277,6 +290,52 @@ class Scheduler:
         if slot is None:
             return default
         return slot.get("payload", default)
+
+    def read_result_by_frame_id(self, route: str, frame_id: Any, default=None):
+        """Return a recent result for exactly ``frame_id`` without copying image data."""
+        try:
+            wanted = int(frame_id)
+        except (TypeError, ValueError):
+            return default
+        with self._lock:
+            for item in reversed(self.result_history.get(str(route or "").strip(), ())):
+                if not self._slot_visible(item):
+                    continue
+                payload = item.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                value = payload.get("frame_id", payload.get("frame_seq", payload.get("camera_frame_seq")))
+                try:
+                    if int(value) == wanted:
+                        return payload
+                except (TypeError, ValueError):
+                    continue
+        return default
+
+    def read_result_nearest_capture(self, route: str, capture_mono_ns: Any, max_delta_ms: float, default=None):
+        """Return the closest recent result within a monotonic capture-time bound."""
+        try:
+            wanted = int(capture_mono_ns)
+            max_delta_ns = max(0, int(float(max_delta_ms) * 1_000_000.0))
+        except (TypeError, ValueError):
+            return default
+        best = None
+        best_delta = None
+        with self._lock:
+            for item in self.result_history.get(str(route or "").strip(), ()):
+                if not self._slot_visible(item):
+                    continue
+                payload = item.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                try:
+                    candidate = int(payload.get("capture_mono_ns"))
+                except (TypeError, ValueError):
+                    continue
+                delta = abs(candidate - wanted)
+                if delta <= max_delta_ns and (best_delta is None or delta < best_delta):
+                    best, best_delta = payload, delta
+        return best if best is not None else default
 
     def consume_event(self, route: str):
         route_name = str(route or "").strip()

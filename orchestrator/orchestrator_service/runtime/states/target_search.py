@@ -46,15 +46,44 @@ from ..core_types import (
 
 
 class TargetSearchMixin:
+    def _target_control_observation_update(self, obs: Optional[TargetObs], candidate_ok: bool) -> Tuple[int, bool]:
+        key = None
+        if obs is not None:
+            key = (
+                getattr(obs, "obs_seq", None),
+                getattr(obs, "frame_id", None),
+                getattr(obs, "capture_mono_ns", None),
+            )
+        if (
+            getattr(self.ctx, "target_control_last_obs_key", None) is None
+            and getattr(self.ctx, "target_prewarm_last_obs_key", None) is not None
+        ):
+            self.ctx.target_control_stable_count = int(getattr(self.ctx, "target_prewarm_stable_count", 0) or 0)
+            self.ctx.target_control_last_obs_key = getattr(self.ctx, "target_prewarm_last_obs_key", None)
+        is_new = key is not None and key != getattr(self.ctx, "target_control_last_obs_key", None)
+        if is_new:
+            self.ctx.target_control_last_obs_key = key
+            if candidate_ok:
+                self.ctx.target_control_stable_count = int(self.ctx.target_control_stable_count or 0) + 1
+            else:
+                self.ctx.target_control_stable_count = 0
+        return int(self.ctx.target_control_stable_count or 0), bool(is_new)
+
     def _tick_search_target_init(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
+        if getattr(self.ctx, "final_to_lateral_fast_start_ready", None) is False:
+            if not self._final_forward_speed_near_zero():
+                return self.controller.stop_cmd("SEARCH_TARGET_INIT")
+            self.ctx.final_to_lateral_fast_start_ready = True
         target_obs, candidate_reason = self._select_active_target_obs(self._fresh_target_obs())
         candidate_ok, candidate_reason = self._target_candidate_status(
             target_obs,
             self.cfg.target_confirm_conf_th,
             min_area=self.cfg.target_confirm_min_bbox_area,
         )
-        if candidate_ok and target_obs is not None:
+        stable_count, _is_new_obs = self._target_control_observation_update(target_obs, candidate_ok)
+        stable_required = max(1, int(getattr(self.cfg, "target_prewarm_stable_obs", 2) or 2))
+        if candidate_ok and target_obs is not None and stable_count >= stable_required:
             self._log("info", "target_search_start_slide")
             conf = self._target_conf_value(target_obs)
             target_name = str(getattr(target_obs, "matched_cls", None) or getattr(target_obs, "target", "") or self.ctx.active_target or "")
@@ -80,14 +109,30 @@ class TargetSearchMixin:
         )
         if select_reason and select_reason != "single_candidate":
             candidate_reason = select_reason if not candidate_ok else candidate_reason
-        target_window = self._record_target_window_sample(target_obs, candidate_reason)
+        stable_count, is_new_obs = self._target_control_observation_update(target_obs, candidate_ok)
+        stable_required = max(1, int(getattr(self.cfg, "target_prewarm_stable_obs", 2) or 2))
+        target_window = (
+            self._record_target_window_sample(target_obs, candidate_reason)
+            if is_new_obs
+            else self._target_window_stats()
+        )
         timed_out = self._state_elapsed() >= float(self.cfg.target_search_timeout_s)
         if candidate_ok and target_obs is not None:
-            self.ctx.target_found_frames += 1
+            if is_new_obs:
+                self.ctx.target_found_frames += 1
             self.ctx.target_lost_frames = 0
             self._remember_good_target(target_obs, self.ctx.target_lateral_vy_cmd)
-            self._update_target_stability(target_obs)
+            if is_new_obs:
+                self._update_target_stability(target_obs)
             self._record_target_lateral_good(target_obs, None)
+            if stable_count < stable_required:
+                return self._annotate_target_lateral_decision(
+                    self.controller.stop_cmd("EDGE_SLIDE_SEARCH"),
+                    target_obs,
+                    active=False,
+                    reason="target_prewarm_confirming",
+                    vy_cmd=0.0,
+                )
             found_ratio_ok = (
                 float(target_window.get("found_ratio", 0.0) or 0.0)
                 >= float(getattr(self.cfg, "target_confirm_found_ratio_th", 0.5) or 0.5)

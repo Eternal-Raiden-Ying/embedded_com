@@ -27,9 +27,9 @@ class RuntimeConfig:
     stack_run_id: str = ""
     log_profile: str = "normal"
     resource_sample_interval_s: float = 1.0
-    loop_hz: float = 8.0
-    send_hz: float = 5.0
-    track_local_send_hz: float = 8.0
+    loop_hz: float = 12.0
+    send_hz: float = 10.0
+    track_local_send_hz: float = 10.0
     stale_req_s: float = 3.0
     hot_standby_s: float = 30.0
     keep_preview_after_stop: bool = True
@@ -184,6 +184,8 @@ class TableEdgeConfig:
     rgb_depth_center_offset_y: float = 0.0
     yolo_table_bbox_hold_enable: bool = True
     yolo_table_bbox_hold_frames: int = 8
+    perception_sync_max_delta_ms: float = 100.0
+    matched_roi_hold_ttl_ms: float = 200.0
     yolo_table_roi_hold_enable: bool = True
     final_roi_latch_enable: bool = True
     final_roi_latch_max_age_s: float = 2.0
@@ -195,11 +197,22 @@ class TableEdgeConfig:
     final_fixed_roi_min_valid_ratio: float = 0.03
     final_fixed_roi_min_sample_count: int = 32
     final_depth_debug_enable: bool = False
-    # Boundary extension is a second-pass ROI fallback: when the normal small
-    # YOLO ROI fails to find an edge and the RGB bbox touches left/right/bottom,
-    # extend only the touched ROI side to the depth-frame boundary.
+    # Select the boundary-extended ROI up front when the YOLO bbox touches an
+    # allowed boundary; the detector still performs exactly one pass per frame.
     yolo_table_roi_boundary_extend_enable: bool = True
     yolo_table_roi_boundary_margin_norm: float = 0.03
+    boundary_extend_mode: str = "fov_aligned_bounded"
+    extended_roi_scale_x: float = 1.25
+    extended_roi_scale_y: float = 1.25
+    extended_roi_lower_band_center_ratio: float = 0.75
+    extended_roi_bottom_margin_px: int = 8
+    extended_roi_max_width_px: int = 200
+    extended_roi_max_height_px: int = 120
+    extended_roi_max_area_px: int = 24000
+    adaptive_sampling_enable: bool = True
+    adaptive_target_sample_count: int = 300
+    adaptive_min_stride: int = 4
+    adaptive_max_stride: int = 16
     yolo_table_edge_stable_frames: int = 5
     edge_trusted_min_conf: float = 0.60
     edge_trusted_max_residual: float = 0.0  # <=0 disables residual gate
