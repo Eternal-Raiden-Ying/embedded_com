@@ -1,0 +1,19 @@
+# Scoped gitignore for Voice module
+__pycache__/
+*.pyc
+
+# Ignore model directories and binaries
+ONNX/
+kws/*.onnx
+kws/*.tflite
+tts/*/*.onnx
+tts/*/*.json
+
+# Ignore local runtime outputs
+runs/
+logs/
+pids/
+tts_cache/
+tts_out/
+voice.pid
+voice.out

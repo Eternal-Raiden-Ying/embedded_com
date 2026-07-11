@@ -1,0 +1,33 @@
+{
+  "stop": [
+    "小车停止",
+    "小车停下",
+    "停止",
+    "停下",
+    "别动",
+    "取消",
+    "危险",
+    "紧急停止",
+    "马上停下",
+    "stop",
+    "停"
+  ],
+  "return": [
+    "回来",
+    "返回",
+    "回去",
+    "return"
+  ],
+  "find": {
+    "bottle": ["瓶子", "水瓶", "饮料瓶", "bottle"],
+    "key": ["钥匙", "钥匙串", "keys", "key"],
+    "apple": ["苹果", "apple"],
+    "banana": ["香蕉", "banana"],
+    "mouse": ["鼠标", "mouse"],
+    "remote": ["遥控器", "电视遥控器", "remote"],
+    "medicine_box": ["药盒", "药品盒", "medicine_box"],
+    "eye_drops": ["眼药水", "眼药", "eye_drops"],
+    "nail_clipper": ["指甲刀", "指甲剪", "nail_clipper"],
+    "battery": ["电池", "五号电池", "5号电池", "battery"]
+  }
+}

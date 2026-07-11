@@ -1,0 +1,40 @@
+targets:
+  apple:
+    status: "executable"
+  banana:
+    status: "executable"
+  basket:
+    status: "executable"
+  bottle:
+    status: "executable"
+  grape:
+    status: "executable"
+  key:
+    status: "executable"
+  kiwi_fruit:
+    status: "executable"
+  lemon:
+    status: "executable"
+  mango:
+    status: "executable"
+  mouse:
+    status: "executable"
+  orange:
+    status: "executable"
+  peach:
+    status: "executable"
+  star_fruit:
+    status: "executable"
+  strawberry:
+    status: "executable"
+
+  remote:
+    status: "model_pending"
+  medicine_box:
+    status: "model_pending"
+  eye_drops:
+    status: "model_pending"
+  nail_clipper:
+    status: "model_pending"
+  battery:
+    status: "model_pending"

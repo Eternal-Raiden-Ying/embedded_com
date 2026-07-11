@@ -1,0 +1,42 @@
+profile: "sc171_voice_gateway"
+runtime_overrides:
+  orchestrator:
+    runtime:
+      config_profile: "sc171_voice_gateway"
+    task_cmd_in:
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/task_cmd.sock"
+    task_ack_out:
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/task_ack.sock"
+    tts_event_out:
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/tts_event.sock"
+  gateway:
+    command_in:
+      transport: "disabled"
+    status_out:
+      transport: "disabled"
+    orchestrator_task_cmd_out:
+      transport: "disabled"
+    orchestrator_task_ack_in:
+      transport: "disabled"
+
+# Independent top-level voice_gateway configuration loaded by Voice Gateway explicitly
+voice_gateway:
+  runtime:
+    input_mode: voice_only
+    dry_run_text: false
+  kws:
+    frontend_backend: tflite
+    classifier_backend: onnx
+  ipc:
+    task_cmd_out:
+      transport: uds
+      ipc_socket_path: /tmp/robot_stack/task_cmd.sock
+    task_ack_in:
+      transport: uds
+      ipc_socket_path: /tmp/robot_stack/task_ack.sock
+    tts_event_in:
+      transport: uds
+      ipc_socket_path: /tmp/robot_stack/tts_event.sock

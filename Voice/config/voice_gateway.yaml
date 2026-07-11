@@ -1,0 +1,67 @@
+# Default Voice Gateway Configuration
+audio:
+  backend: arecord
+  input_device: plughw:1,0
+  sample_rate: 16000
+  channels: 1
+  frame_ms: 80
+
+kws:
+  enabled: true
+  model_path: Voice/kws/wake_nihao_xiaoche_v2.onnx
+  threshold: 0.60
+  cooldown_s: 1.0
+  wake_word: wake_nihao_xiaoche_v2
+
+stop_kws:
+  enabled: true
+  model_path: Voice/kws/stop_smallcar_v1.onnx
+  threshold: 0.58
+  always_on: true
+
+vad:
+  enabled: true
+  model_path: Voice/thirdparty/fsmn_vad
+  energy_threshold: 450
+  start_frames: 2
+  end_frames: 4
+  pre_frames: 3
+  max_frames: 80
+
+asr:
+  enabled: true
+  backend: funasr_onnx
+  model_path: Voice/thirdparty/paraformer_asr_online
+  mode: online
+  quantized: false
+  chunk_frames: 6
+  chunk_size: [0, 8, 4]
+  timeout_s: 8.0
+
+commands:
+  config_path: Voice/config/commands.json
+
+tts:
+  enabled: true
+  backend: piper
+  model_path: Voice/tts/zh_CN-huayan-x_low/zh_CN-huayan-x_low.onnx
+  playback_device: default
+  half_duplex: true
+
+ipc:
+  task_cmd_out:
+    transport: uds
+    ipc_socket_path: /tmp/robot_stack/task_cmd.sock
+    send_mode: persistent
+  task_ack_in:
+    transport: uds
+    ipc_socket_path: /tmp/robot_stack/task_ack.sock
+  tts_event_in:
+    transport: uds
+    ipc_socket_path: /tmp/robot_stack/tts_event.sock
+
+runtime:
+  input_mode: voice_only
+  dry_run_text: false
+  runs_dir: Voice/runs
+  logs_dir: Voice/logs
