@@ -674,6 +674,15 @@ class MobileGatewayService(BaseModule):
         self.ack_server = None
         if self.backend_mode in ACK_REQUIRED_MODES and str(cfg.orchestrator_task_ack_in.transport).strip().lower() != "disabled":
             self.ack_server = self._build_optional_server(cfg.orchestrator_task_ack_in, "orchestrator_task_ack_in")
+        self.tts_event_server = self._build_optional_server(cfg.tts_event_in, "mobile_tts_event_in")
+        self.tts_playback_sender = JsonlClientSender(
+            mode=cfg.tts_playback_out.transport,
+            tcp_host=getattr(cfg.tts_playback_out, "host", "127.0.0.1"),
+            tcp_port=getattr(cfg.tts_playback_out, "port", 0),
+            uds_path=getattr(cfg.tts_playback_out, "uds_path", "") or getattr(cfg.tts_playback_out, "ipc_socket_path", ""),
+            name="tts_playback_out",
+            send_mode=cfg.tts_playback_out.send_mode,
+        )
         if self.backend_mode in REAL_ORCHESTRATOR_BACKEND_MODES:
             self.backend: Any = TcpTaskCmdBackend(cfg.orchestrator_task_cmd_out)
         else:
@@ -690,6 +699,7 @@ class MobileGatewayService(BaseModule):
                 cfg.mqtt,
                 self.handle_mobile_command_payload,
                 logger=self._log_mqtt_event,
+                tts_ack_handler=self._handle_tts_ack,
                 enable_raw_debug=cfg.runtime.enable_raw_mqtt_debug,
                 suppress_heartbeat_success_log=cfg.runtime.suppress_heartbeat_success_log,
             )
@@ -729,6 +739,8 @@ class MobileGatewayService(BaseModule):
         self._pending_after_stop_deadline_mono = 0.0
         self._recent_cmd_ids: Deque[str] = deque(maxlen=max(1, int(cfg.runtime.cmd_dedup_cache_size or 64)))
         self._recent_cmd_id_set: Set[str] = set()
+        self._recent_tts_event_ids: Deque[str] = deque(maxlen=max(1, int(cfg.runtime.cmd_dedup_cache_size or 64)))
+        self._recent_tts_event_id_set: Set[str] = set()
         self._snapshot: Dict[str, Any] = MobileStatus(
             robot_id=ROBOT_ID,
             session_id="",
@@ -757,7 +769,7 @@ class MobileGatewayService(BaseModule):
         if event == "mqtt_publish" and not self._is_debug_mode():
             return
         if event == "mqtt_message" and not self.cfg.runtime.enable_raw_mqtt_debug and not self._is_debug_mode():
-            self.log("info", "mqtt", "cmd received via mqtt", {"topic": data.get("topic")})
+            self.log("info", "mqtt", "message received via mqtt", {"topic": data.get("topic")})
             return
         msg = {
             "mqtt_starting": "mqtt starting",
@@ -768,6 +780,9 @@ class MobileGatewayService(BaseModule):
             "mqtt_publish": "mqtt publish",
             "mqtt_disabled": "mqtt disabled",
             "mqtt_stopped": "mqtt stopped",
+            "mqtt_command_ignored": "mqtt command ignored",
+            "mqtt_tts_ack_unhandled": "mqtt TTS acknowledgement unhandled",
+            "mqtt_unexpected_topic": "mqtt unexpected topic",
         }.get(event, event)
         self.log(level, "mqtt", msg, data or None)
 
@@ -1591,11 +1606,16 @@ class MobileGatewayService(BaseModule):
                 "host": getattr(self.cfg.orchestrator_task_ack_in, "host", ""),
                 "port": getattr(self.cfg.orchestrator_task_ack_in, "port", 0),
             },
+            "tts_event_in": self._endpoint_log_payload(self.cfg.tts_event_in),
+            "tts_playback_out": self._endpoint_log_payload(self.cfg.tts_playback_out),
             "mqtt": {
                 "enabled": bool(self.cfg.mqtt.enabled),
                 "broker_host": self.cfg.mqtt.broker_host,
                 "broker_port": self.cfg.mqtt.broker_port,
                 "topic_cmd": self.cfg.mqtt.topics.cmd,
+                "topic_tts": self.cfg.mqtt.topics.tts,
+                "topic_tts_ack": self.cfg.mqtt.topics.tts_ack,
+                "accept_commands": bool(self.cfg.mqtt.accept_commands),
             },
         })
         self.command_server.start()
@@ -1603,6 +1623,8 @@ class MobileGatewayService(BaseModule):
             self.http_server.start()
         if self.ack_server is not None:
             self.ack_server.start()
+        if self.tts_event_server is not None:
+            self.tts_event_server.start()
         if self.backend_mode == "mock":
             self.backend.start(self._handle_backend_event)
         else:
@@ -1623,6 +1645,8 @@ class MobileGatewayService(BaseModule):
             "orchestrator_task_cmd_out": self._endpoint_log_payload(self.cfg.orchestrator_task_cmd_out),
             "status_out_enabled": str(self.cfg.status_out.transport).strip().lower() != "disabled",
             "ack_in_enabled": self.ack_server is not None,
+            "tts_event_in": self._endpoint_log_payload(self.cfg.tts_event_in),
+            "tts_playback_out": self._endpoint_log_payload(self.cfg.tts_playback_out),
         })
         self._publish_status(dict(self._snapshot), force=True)
 
@@ -1645,8 +1669,17 @@ class MobileGatewayService(BaseModule):
                 self.ack_server.close()
             except Exception:
                 pass
+        if self.tts_event_server is not None:
+            try:
+                self.tts_event_server.close()
+            except Exception:
+                pass
         try:
             self.status_sender.close()
+        except Exception:
+            pass
+        try:
+            self.tts_playback_sender.close()
         except Exception:
             pass
         if self.mqtt_adapter is not None:
@@ -1670,6 +1703,7 @@ class MobileGatewayService(BaseModule):
                 self._drain_inbound_commands()
                 self._drain_pending_after_stop()
                 self._drain_ack_messages()
+                self._drain_tts_events()
                 self._drain_orchestrator_observer()
                 self._emit_heartbeat_if_needed()
                 elapsed = time.time() - loop_start
@@ -1721,6 +1755,61 @@ class MobileGatewayService(BaseModule):
         for item in self.ack_server.drain():
             payload = dict(item.get("payload") or {})
             self._handle_task_ack(payload)
+
+    def _drain_tts_events(self) -> None:
+        if self.tts_event_server is None:
+            return
+        for item in self.tts_event_server.drain():
+            payload = dict(item.get("payload") or {})
+            self._handle_tts_event(payload)
+
+    def _handle_tts_event(self, payload: Dict[str, Any]) -> None:
+        """Bridge a local framed-msgpack TTS event to the mini-program MQTT topic."""
+        event = dict(payload or {})
+        event_id = str(event.get("event_id") or "").strip() or new_id("tts")
+        event["event_id"] = event_id
+        event.setdefault("type", "tts_event")
+        event.setdefault("ts", now_ts())
+        if event_id in self._recent_tts_event_id_set:
+            self.run_logger.write_ipc_record(
+                "RX", "tts_event_in", "duplicate_event_id", msg_type="tts_event",
+                data={"event_id": event_id}, ok=True,
+            )
+            self.log_info("tts", "duplicate TTS event ignored", {"event_id": event_id})
+            return
+        if len(self._recent_tts_event_ids) >= self._recent_tts_event_ids.maxlen:
+            expired = self._recent_tts_event_ids.popleft()
+            self._recent_tts_event_id_set.discard(expired)
+        self._recent_tts_event_ids.append(event_id)
+        self._recent_tts_event_id_set.add(event_id)
+        self.run_logger.write_ipc_record(
+            "RX", "tts_event_in", "received", msg_type="tts_event",
+            data={"event_id": event_id, "payload": event}, ok=True,
+        )
+        if self.mqtt_adapter is None:
+            self.log_warn("tts", "TTS event received while MQTT is disabled", {"event_id": event_id})
+            return
+        self.mqtt_adapter.publish_tts(event)
+        self.run_logger.write_ipc_record(
+            "TX", "mqtt_tts", "published", msg_type="tts_event",
+            data={"event_id": event_id, "payload": event}, ok=True,
+        )
+        self.log_info("tts", "TTS event published", {"event_id": event_id})
+
+    def _handle_tts_ack(self, payload: Dict[str, Any]) -> None:
+        """Forward mini-program playback state to the local framed-msgpack endpoint."""
+        playback = dict(payload or {})
+        playback.setdefault("kind", "tts_playback")
+        ok = self.tts_playback_sender.send(playback)
+        self.run_logger.write_ipc_record(
+            "TX", "tts_playback_out", "forwarded" if ok else "forward_failed",
+            msg_type=str(playback.get("type") or "tts_ack"),
+            data={"event_id": playback.get("event_id"), "payload": playback}, ok=ok,
+        )
+        if ok:
+            self.log_info("tts", "TTS playback state forwarded", {"event_id": playback.get("event_id")})
+        else:
+            self.log_warn("tts", "TTS playback state forward failed", {"event_id": playback.get("event_id")})
 
     def _drain_orchestrator_observer(self) -> None:
         if self.observer is None:

@@ -22,11 +22,13 @@ class MqttAdapter:
         command_handler: Callable[[Dict[str, Any]], None],
         logger: Optional[Callable[[str, str, Dict[str, Any]], None]] = None,
         *,
+        tts_ack_handler: Optional[Callable[[Dict[str, Any]], None]] = None,
         enable_raw_debug: bool = False,
         suppress_heartbeat_success_log: bool = True,
     ):
         self.cfg = cfg
         self.command_handler = command_handler
+        self.tts_ack_handler = tts_ack_handler
         self.logger = logger
         self.enable_raw_debug = bool(enable_raw_debug)
         self.suppress_heartbeat_success_log = bool(suppress_heartbeat_success_log)
@@ -37,6 +39,8 @@ class MqttAdapter:
         self._ack_topic = self._render_topic(self.cfg.topics.ack)
         self._heartbeat_topic = self._render_topic(self.cfg.topics.heartbeat)
         self._cmd_topic = self._render_topic(self.cfg.topics.cmd)
+        self._tts_topic = self._render_topic(self.cfg.topics.tts)
+        self._tts_ack_topic = self._render_topic(self.cfg.topics.tts_ack)
 
     def _log(self, level: str, event: str, **data: Any) -> None:
         if self.logger is not None:
@@ -93,6 +97,9 @@ class MqttAdapter:
             broker_port=self.cfg.broker_port,
             transport=self.cfg.transport,
             cmd_topic=self._cmd_topic,
+            tts_topic=self._tts_topic,
+            tts_ack_topic=self._tts_ack_topic,
+            accept_commands=bool(self.cfg.accept_commands),
         )
 
     def stop(self) -> None:
@@ -120,6 +127,10 @@ class MqttAdapter:
     def publish_heartbeat(self, payload: Dict[str, Any]) -> None:
         self._publish(self._heartbeat_topic, payload, qos=self.cfg.heartbeat_qos, retain=self.cfg.retain_heartbeat)
 
+    def publish_tts(self, payload: Dict[str, Any]) -> None:
+        """Publish a TTS event without triggering any local audio playback."""
+        self._publish(self._tts_topic, payload, qos=self.cfg.ack_qos, retain=False)
+
     def _publish(self, topic: str, payload: Dict[str, Any], qos: int, retain: bool) -> None:
         client = self._client
         if not self._started or client is None:
@@ -139,8 +150,13 @@ class MqttAdapter:
         self._log("info", "mqtt_publish", **event)
 
     def _on_connect(self, client, userdata, flags, reason_code, properties=None) -> None:
-        client.subscribe(self._cmd_topic, qos=int(self.cfg.cmd_qos))
-        self._log("info", "mqtt_connected", topic=self._cmd_topic, qos=int(self.cfg.cmd_qos), reason_code=int(reason_code))
+        subscriptions = []
+        if bool(self.cfg.accept_commands):
+            client.subscribe(self._cmd_topic, qos=int(self.cfg.cmd_qos))
+            subscriptions.append({"topic": self._cmd_topic, "qos": int(self.cfg.cmd_qos)})
+        client.subscribe(self._tts_ack_topic, qos=int(self.cfg.ack_qos))
+        subscriptions.append({"topic": self._tts_ack_topic, "qos": int(self.cfg.ack_qos)})
+        self._log("info", "mqtt_connected", subscriptions=subscriptions, reason_code=int(reason_code))
 
     def _on_disconnect(self, client, userdata, disconnect_flags, reason_code, properties=None) -> None:
         self._log("warn", "mqtt_disconnected", reason_code=int(reason_code))
@@ -157,4 +173,16 @@ class MqttAdapter:
             event["raw_payload"] = raw_payload
             event["payload"] = dict(payload)
         self._log("info", "mqtt_message", **event)
-        self.command_handler(payload)
+        if msg.topic == self._cmd_topic:
+            if not bool(self.cfg.accept_commands):
+                self._log("info", "mqtt_command_ignored", topic=msg.topic, reason="accept_commands=false")
+                return
+            self.command_handler(payload)
+            return
+        if msg.topic == self._tts_ack_topic:
+            if self.tts_ack_handler is None:
+                self._log("warn", "mqtt_tts_ack_unhandled", topic=msg.topic)
+                return
+            self.tts_ack_handler(payload)
+            return
+        self._log("warn", "mqtt_unexpected_topic", topic=msg.topic)

@@ -11,6 +11,8 @@ MQTT_TOPIC_CMD = "robot/v1/SC171/mobile/cmd"
 MQTT_TOPIC_ACK = "robot/v1/SC171/mobile/ack"
 MQTT_TOPIC_STATUS = "robot/v1/SC171/mobile/status"
 MQTT_TOPIC_HEARTBEAT = "robot/v1/SC171/heartbeat"
+MQTT_TOPIC_TTS = "robot/v1/SC171/mobile/tts"
+MQTT_TOPIC_TTS_ACK = "robot/v1/SC171/mobile/tts_ack"
 
 SUPPORTED_COMMANDS: Set[str] = {
     "fetch_object",

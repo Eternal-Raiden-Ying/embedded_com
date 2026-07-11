@@ -1224,6 +1224,8 @@ class MqttTopicConfig:
     ack: str = "robot/sc171_car_01/ack"
     status: str = "robot/sc171_car_01/status"
     heartbeat: str = "robot/sc171_car_01/heartbeat"
+    tts: str = "robot/v1/SC171/mobile/tts"
+    tts_ack: str = "robot/v1/SC171/mobile/tts_ack"
 
 
 @dataclass
@@ -1246,6 +1248,9 @@ class MqttAdapterConfig:
     retain_heartbeat: bool = False
     keepalive_s: int = 60
     connect_timeout_s: float = 5.0
+    # Lets a playback-only gateway receive mini-program TTS acknowledgements
+    # without exposing the normal task-command ingress.
+    accept_commands: bool = True
     topics: MqttTopicConfig = field(default_factory=MqttTopicConfig)
 
 
@@ -1267,6 +1272,12 @@ class MobileGatewayConfig:
     ))
     orchestrator_task_ack_in: GatewayEndpoint = field(default_factory=lambda: GatewayEndpoint(
         transport="disabled", ipc_socket_path="/tmp/robot_stack/mobile_gateway_ack.sock",
+    ))
+    tts_event_in: GatewayEndpoint = field(default_factory=lambda: GatewayEndpoint(
+        transport="uds", ipc_socket_path="/tmp/robot_stack/mobile_tts_event.sock",
+    ))
+    tts_playback_out: GatewayEndpoint = field(default_factory=lambda: GatewayEndpoint(
+        transport="uds", ipc_socket_path="/tmp/robot_stack/tts_playback.sock", send_mode="oneshot",
     ))
 
 
