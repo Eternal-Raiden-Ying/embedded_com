@@ -178,10 +178,14 @@ class TableRoiTest(unittest.TestCase):
         self.assertTrue(roi["yolo_table_roi_valid"])
         self.assertTrue(roi["table_bbox_touch_bottom"])
         self.assertTrue(roi["table_bbox_boundary_allowed"])
-        self.assertEqual(roi["roi_source"], "yolo_table_lower_band")
+        self.assertEqual(roi["roi_source"], "yolo_table_bbox_mapped")
         self.assertEqual(roi["roi_phase"], "near_yolo_assist")
         self.assertNotEqual(roi["depth_edge_roi"], [160, 240, 480, 408])
         self.assertGreaterEqual(roi["depth_edge_roi"][1], 300)
+        self.assertEqual(roi["rgb_fov_depth_xyxy"], [80, 60, 560, 420])
+        self.assertLessEqual(roi["depth_edge_roi"][3], 420)
+        self.assertLessEqual(roi["boundary_extended_roi"][2] - roi["boundary_extended_roi"][0], 200)
+        self.assertLessEqual(roi["boundary_extended_roi"][3] - roi["boundary_extended_roi"][1], 120)
 
     def test_table_bbox_touch_boundary_remains_reliable_for_yolo_control(self):
         metrics = TableEdgeManager._bbox_view_metrics([0, 380, 640, 640], (640, 640, 3))
@@ -244,9 +248,12 @@ class TableEdgeManagerDynamicRoiTest(unittest.TestCase):
         self.assertEqual(roi["table_bbox"], [400, 380, 620, 620])
         self.assertEqual(roi["table_center_norm"], [0.796875, 0.78125])
         self.assertEqual(roi["table_quadrant"], "RB")
-        self.assertEqual(roi["depth_edge_roi"], [460, 20, 560, 120])
-        self.assertEqual(roi["roi_source"], "yolo_table_bbox")
-        self.assertEqual(roi["roi_reason"], "table_bbox_center_follow")
+        self.assertEqual(roi["roi_source"], "primary")
+        self.assertEqual(roi["rgb_fov_depth_xyxy"], [80, 60, 560, 420])
+        self.assertGreaterEqual(roi["depth_edge_roi"][0], 80)
+        self.assertLessEqual(roi["depth_edge_roi"][2], 560)
+        self.assertGreaterEqual(roi["depth_edge_roi"][1], 60)
+        self.assertLessEqual(roi["depth_edge_roi"][3], 420)
         self.assertTrue(roi["bbox_valid"])
         self.assertTrue(roi["yolo_table_roi_valid"])
 
@@ -260,18 +267,16 @@ class TableEdgeManagerDynamicRoiTest(unittest.TestCase):
         self.scheduler.local = {"rgb_shape": (640, 640, 3), "infer_boxes": []}
         roi = self.manager._select_roi(self.depth)
         self.assertEqual(roi["table_quadrant"], "LB")
-        self.assertEqual(roi["depth_edge_roi"], [0, 240, 320, 480])
-        self.assertEqual(roi["roi_source"], "last_valid_table_bbox")
-        self.assertEqual(roi["roi_reason"], "table_bbox_lost_using_history")
+        self.assertEqual(roi["depth_edge_roi"], first["depth_edge_roi"])
+        self.assertEqual(roi["roi_source"], "latched_table_roi")
 
     def test_no_bbox_and_no_history_falls_back_to_static_roi(self):
         self.scheduler.local = {"rgb_shape": (640, 640, 3), "infer_boxes": []}
         roi = self.manager._select_roi(self.depth)
         self.assertIsNone(roi["table_bbox"])
         self.assertIsNone(roi["table_quadrant"])
-        self.assertEqual(roi["depth_edge_roi"], [10, 20, 110, 120])
-        self.assertEqual(roi["roi_source"], "static_fallback")
-        self.assertEqual(roi["roi_reason"], "table_bbox_unavailable")
+        self.assertEqual(roi["roi_source"], "fallback_fov_lower_band")
+        self.assertEqual(roi["depth_edge_roi"], [240, 285, 400, 375])
 
     def test_file_config_roi_preset_overrides_dynamic_roi_selection(self):
         cfg = VisionServiceConfig()
@@ -288,6 +293,7 @@ class TableEdgeManagerDynamicRoiTest(unittest.TestCase):
     def test_process_camera_frame_emits_unified_timing_and_plane_aliases(self):
         cfg = VisionServiceConfig()
         cfg.table_edge.roi_preset = "center_lower"
+        cfg.table_edge.yolo_table_roi_enable = False
         manager = TableEdgeManager(cfg=cfg)
         manager._detector_cfg = SimpleNamespace(
             roi_x0=10,
@@ -311,7 +317,14 @@ class TableEdgeManagerDynamicRoiTest(unittest.TestCase):
         self.assertIn("obs_total_age_ms", obs)
         self.assertIn("update_interval_ms", obs)
         self.assertEqual(obs["plane_roi"], obs["depth_edge_roi"])
-        self.assertEqual(obs["roi_source"], "preset:center_lower")
+        self.assertEqual(obs["roi_source"], "disabled_no_table_bbox")
+
+    def test_fast_plane_wrapper_runs_one_pass_only(self):
+        calls = []
+        self.manager._process_depth_fast_plane_only_once = lambda depth, seq: calls.append((depth, seq)) or {"roi_source": "extended"}
+        result = self.manager._process_depth_fast_plane_only(np.zeros((8, 8), dtype=np.uint16), 9)
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(result["boundary_extend_retry_used"])
 
 
 if __name__ == "__main__":

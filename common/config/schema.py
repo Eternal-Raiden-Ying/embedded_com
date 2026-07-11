@@ -106,9 +106,11 @@ class VisionRuntimeConfig:
     vision_params_file: str = ""
     loaded_config_files: List[str] = field(default_factory=list)
     stack_run_id: str = ""
-    loop_hz: float = 8.0
-    send_hz: float = 5.0
-    track_local_send_hz: float = 8.0
+    log_profile: str = "normal"
+    resource_sample_interval_s: float = 1.0
+    loop_hz: float = 12.0
+    send_hz: float = 10.0
+    track_local_send_hz: float = 10.0
     stale_req_s: float = 3.0
     hot_standby_s: float = 30.0
     keep_preview_after_stop: bool = True
@@ -117,6 +119,21 @@ class VisionRuntimeConfig:
     release_model_on_idle: bool = False
     keep_model_hot_in_standby: bool = True
     enable_infer_during_hot_standby: bool = False
+    remote_payload_archive_enable: bool = True
+    remote_payload_archive_max_keep: int = 20
+    remote_rgb_correction_enable: bool = False
+    remote_rgb_correction_mode: str = "none"
+    remote_rgb_white_balance_enable: bool = True
+    remote_rgb_exposure_target_mean: float = 90.0
+    remote_rgb_max_gain: float = 4.0
+    remote_rgb_gamma: float = 1.4
+    remote_rgb_saturation_scale: float = 1.25
+    remote_rgb_save_raw: bool = False
+    remote_rgb_jpeg_quality: int = 95
+    remote_rgb_capture_warmup_frames: int = 10
+    remote_rgb_capture_wait_timeout_s: float = 2.0
+    remote_rgb_min_luma_mean: float = 40.0
+    remote_rgb_require_fresh_after_mode_enter: bool = True
     capability_placeholder: bool = False
     heartbeat_enabled: bool = False
     heartbeat_interval_s: float = 5.0
@@ -317,9 +334,47 @@ class TableEdgeConfig:
     rgb_depth_center_offset_y: float = 0.0
     yolo_table_bbox_hold_enable: bool = True
     yolo_table_bbox_hold_frames: int = 8
+    perception_sync_max_delta_ms: float = 100.0
+    matched_roi_hold_ttl_ms: float = 200.0
     yolo_table_roi_hold_enable: bool = True
+    final_roi_latch_enable: bool = True
+    final_roi_latch_max_age_s: float = 2.0
+    table_roi_depth_latched_min_valid_ratio: float = 0.03
+    table_roi_depth_latched_min_sample_count: int = 32
+    table_roi_depth_current_min_valid_ratio: float = 0.08
+    table_roi_depth_current_min_sample_count: int = 64
+    final_fixed_roi_enable: bool = True
+    final_fixed_roi_x0_norm: float = 0.42
+    final_fixed_roi_x1_norm: float = 0.58
+    final_fixed_roi_y0_norm: float = 0.69
+    final_fixed_roi_y1_norm: float = 0.90
+    final_fixed_roi_min_valid_ratio: float = 0.03
+    final_fixed_roi_min_sample_count: int = 32
+    final_depth_debug_enable: bool = False
     yolo_table_roi_boundary_extend_enable: bool = True
     yolo_table_roi_boundary_margin_norm: float = 0.03
+    boundary_extend_mode: str = "fov_aligned_bounded"
+    extended_roi_scale_x: float = 1.25
+    extended_roi_scale_y: float = 1.25
+    extended_roi_lower_band_center_ratio: float = 0.75
+    extended_roi_bottom_margin_px: int = 8
+    extended_roi_max_width_px: int = 200
+    extended_roi_max_height_px: int = 120
+    extended_roi_max_area_px: int = 24000
+    fallback_roi_lower_band_center_ratio: float = 0.75
+    fallback_roi_width_px: int = 160
+    fallback_roi_height_px: int = 90
+    depth_margin_extension_enable: bool = True
+    bbox_center_edge_band_x_ratio: float = 0.12
+    bbox_center_edge_band_y_ratio: float = 0.12
+    depth_margin_max_extend_left_px: int = 40
+    depth_margin_max_extend_right_px: int = 40
+    depth_margin_max_extend_bottom_px: int = 28
+    depth_margin_max_extend_top_px: int = 0
+    adaptive_sampling_enable: bool = True
+    adaptive_target_sample_count: int = 300
+    adaptive_min_stride: int = 4
+    adaptive_max_stride: int = 16
     yolo_table_edge_stable_frames: int = 5
     edge_trusted_min_conf: float = 0.60
     edge_trusted_max_residual: float = 0.0
@@ -341,12 +396,15 @@ class TableEdgeConfig:
     fast_candidate_point_cap: int = 1800
     fast_front_edge_col_step: int = 2
     fast_front_edge_row_step: int = 2
+    plane_fit_fast_path_enable: bool = True
+    plane_fit_fast_accept_inlier_ratio: float = 0.75
+    plane_fit_fast_accept_residual_scale: float = 1.0
+    plane_fit_ransac_max_iterations: int = 20
     depth_stride: int = 2
 
     # Previously hardcoded configurations inside table_edge_manager.py business layer
-    detector_mode: str = "lightweight"
+    detector_mode: str = "fast_plane_only"
     update_hz: float = 5.0
-    light_stride: int = 4
     fast_plane_stride: int = 4
     require_yolo_confirm: bool = True
     static_roi_enabled: bool = False
@@ -372,6 +430,7 @@ class TableEdgeConfig:
 
 @dataclass
 class PreviewConfig:
+    preview_mode: str = "light"
     mode_layouts: Dict[str, str] = field(
         default_factory=lambda: {
             "IDLE": "rgb_minimal",
@@ -393,6 +452,10 @@ class PreviewConfig:
     show_depth: bool = True
     show_edge: bool = True
     destroy_all_on_close: bool = True
+    light_depth_min_m: float = 0.20
+    light_depth_max_m: float = 2.00
+    light_output_width: int = 848
+    light_output_height: int = 480
 
 
 @dataclass
@@ -424,13 +487,13 @@ class OrchestratorRuntimeConfig:
     pid_file: str = field(default_factory=lambda: str(_ORCH_ROOT / "pids" / "orchestrator.pid"))
     stack_run_id: str = ""
     tick_hz: float = 10.0
+    log_profile: str = "normal"
+    resource_sample_interval_s: float = 1.0
     log_mode: str = "concise"
     log_enabled: bool = True
     debug: bool = False
     state_block_period_s: float = 1.0
     heartbeat_period_s: float = 1.0
-    stage_params_file: str = ""
-    car_cmd_params_file: str = ""
     config_profile: str = ""
     loaded_config_files: List[str] = field(default_factory=list)
 
@@ -453,6 +516,42 @@ class SerialConfig:
 
 
 @dataclass
+class ArmSerialConfig:
+    enabled: bool = True
+    dry_run: bool = False
+    port: str = "/dev/ttyUSB0"
+    baudrate: int = 9600
+    timeout_s: float = 0.10
+    open_settle_s: float = 3.0
+    bytesize: int = 8
+    parity: str = "N"
+    stopbits: int = 1
+    rtscts: bool = False
+    dsrdtr: bool = False
+    set_dtr: bool = False
+    set_rts: bool = False
+    readback_enabled: bool = True
+    response_timeout_s: float = 10.0
+
+
+@dataclass
+class MotionSmoothingConfig:
+    enabled: bool = True
+    bypass_on_safety_stop: bool = True
+    vx_accel_mps2: float = 0.35
+    vx_decel_mps2: float = 0.70
+    vy_accel_mps2: float = 0.20
+    vy_decel_mps2: float = 0.35
+    wz_accel_radps2: float = 0.90
+    wz_decel_radps2: float = 1.40
+    urgent_wz_accel_radps2: float = 2.20
+    urgent_wz_decel_radps2: float = 2.80
+    dt_min_s: float = 0.02
+    dt_max_s: float = 0.20
+    reset_gap_s: float = 0.50
+
+
+@dataclass
 class ControlThresholds:
     """Control and timing thresholds for the vehicle/perception state machine."""
     cmd_confidence_th: float = 0.60
@@ -465,6 +564,7 @@ class ControlThresholds:
     target_search_timeout_s: float = 10.0
     return_search_timeout_s: float = 15.0
     req_resend_period_s: float = 1.0
+    stop_after_table_docking: bool = False
 
     table_found_frames_to_approach: int = 2
     table_lost_frames_to_reacquire: int = 4
@@ -492,6 +592,8 @@ class ControlThresholds:
     table_stop_margin_m: float = 0.05  # Safety stop margin added to target distance in stop conditions checking
     table_settle_s: float = 0.50
     table_stable_frames: int = 5
+    table_yolo_align_center_x_target: float = 0.50
+    table_yolo_align_center_x_tol: float = 0.08
     yolo_table_control_enable: bool = True
     yolo_table_conf_min: float = 0.25
     yolo_table_edge_stable_frames: int = 5
@@ -509,23 +611,81 @@ class ControlThresholds:
     near_slow_max_vy_mps: float = 0.040
     near_slow_max_wz_radps: float = 0.04
     final_servo_enter_p10_m: float = 0.45
+    final_enter_depth_threshold_m: float = 0.58
+    final_enter_stable_count_required: int = 2
+    final_handoff_on_yolo_lost_enable: bool = True
+    final_handoff_recent_obs_max_age_s: float = 1.0
+    final_handoff_min_recent_depth_m: float = 0.65
+    final_fixed_roi_stop_threshold_m: float = 0.45
+    final_fixed_roi_stop_stable_count_required: int = 3
+    final_slow_probe_vx_mps: float = 0.05
+    near_start_final_enable: bool = True
+    near_start_final_depth_m: float = 0.58
+    near_start_align_enable: bool = True
+    near_start_align_timeout_s: float = 2.0
+    remote_init_min_interval_s: float = 30.0
+    remote_init_auto_enabled: bool = False
     edge_final_enter_margin_m: float = 0.06
     edge_final_stop_margin_m: float = 0.02
     close_range_enter_p10_m: float = 0.55
-    final_probe_vx_mps: float = 0.008
-    final_missing_probe_vx_mps: float = 0.004
-    close_range_probe_vx_mps: float = 0.008
-    close_range_missing_probe_vx_mps: float = 0.004
+    final_probe_vx_mps: float = 0.020
+    final_missing_probe_vx_mps: float = 0.010
+    final_missing_probe_grace_s: float = 2.0
+    final_missing_roi_continue_forward_enable: bool = True
+    final_missing_roi_probe_vx_mps: float = 0.020
+    final_entry_bridge_vx_mps: float = 0.030
+    final_slow_stop_timeout_s: float = 12.0
+    final_missing_reuse_s: float = 0.50
+    final_missing_probe_margin_m: float = 0.04
+    close_range_probe_vx_mps: float = 0.015
+    close_range_missing_probe_vx_mps: float = 0.008
     roi_final_stop_p10_m: float = 0.42
     roi_final_slow_p10_m: float = 0.52
-    roi_final_probe_vx_mps: float = 0.008
-    roi_final_missing_probe_vx_mps: float = 0.004
+    roi_final_probe_vx_mps: float = 0.020
+    roi_final_missing_probe_vx_mps: float = 0.008
     roi_final_missing_hold_s: float = 0.8
-    depth_envelope_stop_p10_m: float = 0.35
+    depth_envelope_stop_p10_m: float = 0.30
     depth_envelope_slow_p10_m: float = 0.50
+    depth_emergency_stop_p10_m: float = 0.20
     depth_envelope_mid_p10_m: float = 0.70
-    depth_envelope_slow_vx_mps: float = 0.006
+    depth_envelope_slow_vx_mps: float = 0.012
     depth_envelope_mid_vx_mps: float = 0.015
+    yolo_approach_far_vx_mps: float = 0.50
+    yolo_approach_mid_vx_mps: float = 0.20
+    yolo_approach_near_vx_mps: float = 0.10
+    yolo_approach_min_vx_mps: float = 0.05
+    yolo_approach_depth_stat_for_envelope: str = "median"
+    yolo_approach_use_p10_for_safety_only: bool = True
+    builtin_bottle_grasp_enable: bool = True
+    builtin_bottle_skip_remote: bool = True
+    builtin_bottle_pose_line: str = "POSE_BOTTLE"
+    builtin_bottle_pose_start_ack: str = "OK POSE_BOTTLE START"
+    builtin_bottle_pose_done_ack: str = "OK POSE_BOTTLE DONE"
+    builtin_bottle_pose_timeout_s: float = 15.0
+    builtin_bottle_grab_enable: bool = True
+    builtin_bottle_grab_line: str = "GRABBED"
+    builtin_bottle_grab_done_ack: str = "OK GRABBED DONE"
+    builtin_bottle_grab_timeout_s: float = 10.0
+    builtin_apple_grasp_enable: bool = True
+    builtin_apple_skip_remote: bool = True
+    builtin_apple_pose_line: str = "POSE_APPLE"
+    builtin_apple_pose_start_ack: str = "OK POSE_APPLE START"
+    builtin_apple_pose_done_ack: str = "OK POSE_APPLE DONE"
+    builtin_apple_pose_timeout_s: float = 15.0
+    builtin_apple_grab_enable: bool = True
+    builtin_apple_grab_line: str = "GRABBED"
+    builtin_apple_grab_done_ack: str = "OK GRABBED DONE"
+    builtin_apple_grab_timeout_s: float = 10.0
+    post_grasp_fixed_flow_enable: bool = True
+    post_grasp_turn_direction_sign: int = -1
+    post_grasp_forward_vx_mps: float = 0.08
+    post_grasp_forward_duration_s: float = 5.0
+    post_grasp_stop_hold_s: float = 0.5
+    post_grasp_rise_enable: bool = True
+    post_grasp_rise_line: str = "POSE_RISE"
+    post_grasp_rise_start_ack: str = "OK POSE_RISE START"
+    post_grasp_rise_done_ack: str = "OK POSE_RISE DONE"
+    post_grasp_rise_timeout_s: float = 10.0
     bbox_track_forward_enabled: bool = True
     min_forward_vx_mps: float = 0.040
     bbox_track_forward_vx_mps: float = 0.100
@@ -545,7 +705,6 @@ class ControlThresholds:
     edge_handoff_forward_vx_mps: float = 0.080
     forward_commit_min_s: float = 1.8
     far_forward_commit_min_s: float = 2.0
-    stop_after_table_docking: bool = True
     lateral_enabled: bool = True
     lateral_vy_max_mps: float = 0.180
     lateral_deadband_norm: float = 0.020
@@ -577,7 +736,7 @@ class ControlThresholds:
     edge_yaw_max_wz_radps: float = 0.18
     final_dist_deadband_m: float = 0.030
     final_dist_kp: float = 0.080
-    final_forward_vx_max_mps: float = 0.006
+    final_forward_vx_max_mps: float = 0.015
     final_reverse_vx_max_mps: float = 0.004
     final_reverse_confirm_frames: int = 3
     final_yaw_deadband_rad: float = 0.12
@@ -610,6 +769,15 @@ class ControlThresholds:
     final_lock_enter_dist_th_m: float = 0.08
     final_lock_enter_yaw_th_rad: float = 0.10
     edge_settle_s: float = 0.80
+    at_table_edge_settle_s: float = 0.10
+    target_search_fast_start_enable: bool = True
+    target_fast_start_confirm_enable: bool = False
+    target_prewarm_max_age_ms: int = 180
+    target_prewarm_stable_obs: int = 2
+    final_to_lateral_max_vx_mps: float = 0.02
+    edge_slide_min_duration_s: float = 1.50
+    edge_slide_min_lateral_distance_m: float = 0.08
+    edge_slide_min_frames_before_confirm: int = 10
     dock_retry_limit: int = 2
     dock_retry_backoff_s: float = 0.60
 
@@ -624,6 +792,43 @@ class ControlThresholds:
     target_confirm_min_bbox_area: float = 0.0
     target_confirm_window_s: float = 1.50
     target_confirm_found_ratio_th: float = 0.50
+    target_lateral_align_enable: bool = True
+    target_lateral_align_center_x_target: float = 0.40
+    target_lateral_align_center_x_tol: float = 0.06
+    # Legacy compatibility only; runtime derives deadband from 0.5 * target_lateral_align_center_x_tol.
+    target_lateral_align_center_x_deadband: float = 0.03
+    target_lateral_align_kp_vy: float = 0.10
+    target_lateral_align_vy_min_mps: float = 0.016
+    target_lateral_align_vy_max_mps: float = 0.050
+    target_lateral_align_stable_frames: int = 3
+    target_lateral_align_lost_hold_s: float = 0.80
+    target_lateral_hold_enable: bool = True
+    target_lateral_hold_s: float = 0.8
+    target_lateral_lost_stop_s: float = 1.2
+    target_lateral_min_vy_mps: float = 0.016
+    target_lateral_align_timeout_s: float = 12.0
+    post_grasp_place_enable: bool = True
+    post_grasp_turn_enable: bool = True
+    post_grasp_turn_wz_radps: float = 0.45
+    post_grasp_turn_duration_s: float = 3.5
+    post_grasp_turn_direction: str = "left"
+    basket_search_timeout_s: float = 15.0
+    basket_search_wz_radps: float = 0.25
+    basket_align_center_x_target: float = 0.50
+    basket_align_center_x_tol: float = 0.08
+    basket_approach_vx_mps: float = 0.08
+    basket_approach_vx_slow_mps: float = 0.035
+    basket_stop_bbox_area_norm: float = 0.18
+    basket_stop_bbox_height_norm: float = 0.38
+    basket_stop_stable_count_required: int = 3
+    basket_approach_timeout_s: float = 20.0
+    place_pose_x_cm: float = 12.0
+    place_pose_y_cm: float = 0.0
+    place_pose_z_cm: float = 8.0
+    place_pose_pitch_deg: float = 0.0
+    place_pose_roll_deg: float = 0.0
+    place_gripper_width: float = 80.0
+    place_duration_ms: int = 800
     target_lock_conf_th: float = 0.40
     target_lock_found_ratio_th: float = 0.60
     target_lock_settle_s: float = 0.50
@@ -697,11 +902,22 @@ class ControlThresholds:
     task_done_shutdown_vision: bool = False
     enable_pick_pipeline: bool = False
     assume_grasp_success_for_test: bool = False
+    target_gripper_widths: Dict[str, float] = field(default_factory=lambda: {
+        "苹果": 50.0,
+        "猕猴桃": 65.0,
+        "瓶子": 70.0,
+        "apple": 80.0,
+        "bottle": 80.0,
+        "kiwi_fruit": 70.0,
+    })
 
 
 @dataclass
 class CarMotionConfig:
     """PID, limits, and behavior variables for actual motion control."""
+    grasp_reposition_speed_cm_s: float = 10.0
+    pre_arm_stop_settle_ms: int = 150
+    grasp_pose_time_ms: int = 800
     search_table_wz_radps: float = 0.10
     fallback_align_turn_wz_min_radps: float = 0.10
     fallback_align_turn_wz_max_radps: float = 0.45
@@ -738,7 +954,7 @@ class CarMotionConfig:
     table_pose_missing_safe_vx_mps: float = 0.040
     table_pose_missing_max_hold_s: float = 3.0
     table_final_lock_vx_min_mps: float = 0.000
-    table_final_lock_vx_max_mps: float = 0.008
+    table_final_lock_vx_max_mps: float = 0.015
     table_final_lock_vy_min_mps: float = 0.006
     table_final_lock_vy_max_mps: float = 0.012
     table_final_lock_wz_min_radps: float = 0.010
@@ -843,7 +1059,7 @@ class DockingControlConfig:
     spin_only_yaw_rad: float = 0.18
 
     precise_yaw_tol_rad: float = 0.025
-    precise_dist_tol_m: float = 0.015  # Distance error stopping tolerance/threshold for precise approach (mapped from controlled_approach.target_dist_m in stage_params.yaml)
+    precise_dist_tol_m: float = 0.015  # Distance error stopping tolerance/threshold for precise approach
     precise_lateral_tol_m: float = 0.015
     precise_stable_s: float = 0.50
 
@@ -880,6 +1096,8 @@ class OrchestratorConfig:
     """Configuration structure representing the Orchestrator service."""
     runtime: OrchestratorRuntimeConfig = field(default_factory=OrchestratorRuntimeConfig)
     serial: SerialConfig = field(default_factory=SerialConfig)
+    arm_serial: ArmSerialConfig = field(default_factory=ArmSerialConfig)
+    motion_smoothing: MotionSmoothingConfig = field(default_factory=MotionSmoothingConfig)
     control: ControlThresholds = field(default_factory=ControlThresholds)
     car: CarMotionConfig = field(default_factory=CarMotionConfig)
     docking: DockingControlConfig = field(default_factory=DockingControlConfig)
@@ -904,7 +1122,7 @@ class OrchestratorConfig:
         "keys": ["钥匙", "钥匙串"],
         "apple": ["苹果"],
         "banana": ["香蕉"],
-        "basket": ["篮子"],
+        "basket": ["篮子", "筐", "收纳篮"],
         "grape": ["葡萄"],
         "kiwi fruit": ["猕猴桃", "奇异果"],
         "kiwi": ["猕猴桃", "奇异果"],
@@ -1173,6 +1391,12 @@ class DetectorConfig:
 
 
 @dataclass
+class PoseBottleConfig:
+    fall_back_grasp: bool = False
+    x_center_tolerance: float = 0.06
+
+
+@dataclass
 class OnlineEdgeConfig:
     """Configuration structure representing the Online Edge Detector service."""
     runtime: OnlineEdgeRuntimeConfig = field(default_factory=OnlineEdgeRuntimeConfig)
@@ -1193,3 +1417,4 @@ class SystemGlobalConfig:
     orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
     gateway: MobileGatewayConfig = field(default_factory=MobileGatewayConfig)
     online_edge: OnlineEdgeConfig = field(default_factory=OnlineEdgeConfig)
+    POSE_BOTTLE: PoseBottleConfig = field(default_factory=PoseBottleConfig)

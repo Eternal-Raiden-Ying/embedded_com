@@ -64,6 +64,17 @@ def _current_obs_depth(obs: Any) -> Tuple[Optional[float], str]:
     return None, ""
 
 
+def _safety_source_from_depth_source(source: str) -> str:
+    text = str(source or "").lower()
+    if "final_fixed_roi" in text or "fixed_roi" in text:
+        return "final_fixed_roi"
+    if "table_roi_depth_p10" in text or "roi_final_p10" in text:
+        return "table_roi_p10"
+    if "depth_p10" in text:
+        return "edge_depth"
+    return "unknown"
+
+
 def resolve_best_depth_p10(ctx: Any, obs: Any, summary: Dict[str, Any], now_mono: float, depth_missing_hold_s: float) -> Dict[str, Any]:
     current_depth, current_source = _current_obs_depth(obs)
     current_valid = current_depth is not None
@@ -155,11 +166,11 @@ def apply_close_range_depth_safety_gate(ctx: Any, obs: Any, result: ArbitrationR
     if not _close_range_or_final(ctx, summary):
         return result
 
-    depth_stop_p10_m = _cfg_float(cfg, "roi_final_stop_p10_m", "depth_envelope_stop_p10_m", default=0.42)
-    depth_slow_p10_m = _cfg_float(cfg, "roi_final_slow_p10_m", "depth_envelope_slow_p10_m", default=0.52)
-    depth_missing_hold_s = max(0.0, _cfg_float(cfg, "roi_final_missing_hold_s", default=0.8))
-    final_probe_vx_mps = abs(_cfg_float(cfg, "final_probe_vx_mps", "close_range_probe_vx_mps", "roi_final_probe_vx_mps", default=0.008))
-    final_missing_probe_vx_mps = abs(_cfg_float(cfg, "final_missing_probe_vx_mps", "close_range_missing_probe_vx_mps", "roi_final_missing_probe_vx_mps", default=0.004))
+    depth_stop_p10_m = _cfg_float(cfg, "depth_envelope_stop_p10_m", default=0.30)
+    depth_slow_p10_m = _cfg_float(cfg, "depth_envelope_slow_p10_m", default=0.50)
+    depth_missing_hold_s = 0.8
+    final_slow_probe_vx_mps = abs(_cfg_float(cfg, "final_slow_probe_vx_mps", default=0.050))
+    final_missing_slow_probe_vx_mps = final_slow_probe_vx_mps
     final_probe_timeout_s = max(0.0, _cfg_float(cfg, "final_probe_timeout_s", default=8.0))
     final_probe_distance_budget_m = max(0.0, _cfg_float(cfg, "final_probe_distance_budget_m", default=0.15))
 
@@ -192,14 +203,32 @@ def apply_close_range_depth_safety_gate(ctx: Any, obs: Any, result: ArbitrationR
     depth_missing_age_s = float(depth_info.get("depth_missing_age_s") or 0.0)
     last_valid_age = _as_float(depth_info.get("last_valid_depth_p10_age_s"))
     last_valid_fresh = bool(last_valid_age is not None and last_valid_age <= depth_missing_hold_s)
-    already_locked = bool(summary.get("final_locked", False) or getattr(ctx, "final_locked", False))
+    state_value = _state_value(ctx)
+    fixed_roi_lock_ok = bool(summary.get("final_fixed_roi_stop_stable", False))
+    already_locked = bool(fixed_roi_lock_ok and (summary.get("final_locked", False) or getattr(ctx, "final_locked", False)))
+    if not fixed_roi_lock_ok and bool(summary.get("final_locked", False) or getattr(ctx, "final_locked", False)):
+        try:
+            ctx.final_locked = False
+            ctx.final_lock_reason = ""
+        except Exception:
+            pass
+        summary["final_locked"] = False
+        summary["final_lock_reason"] = ""
+        summary["final_lock_rejected"] = {
+            "state": state_value,
+            "reason": "depth_safety_final_lock_not_allowed",
+            "final_depth_usable_for_control": bool(summary.get("final_depth_usable_for_control", False)),
+            "final_depth_gate_reason": str(summary.get("final_depth_gate_reason") or ""),
+        }
 
-    vx = _positive_cap(vx_raw, final_probe_vx_mps)
+    vx = _positive_cap(vx_raw, final_slow_probe_vx_mps)
     vy = 0.0
     wz = 0.0
     state = "pass_or_probe_cap"
     reason = "depth_probe_cap"
     action = str(summary.get("docking_action") or "")
+    if action == DockingAction.FINAL_LOCKED_STOP.value and not already_locked:
+        action = DockingAction.FINAL_SLOW_PROBE.value if bool(summary.get("final_distance_servo_active", False)) else DockingAction.CLOSE_RANGE_PROBE.value
     blocked_by = ""
     final_locked = False
     allow_forward = bool(vx > 1e-9)
@@ -218,25 +247,12 @@ def apply_close_range_depth_safety_gate(ctx: Any, obs: Any, result: ArbitrationR
             ctx.depth_stop_stable_count = int(getattr(ctx, "depth_stop_stable_count", 0) or 0) + 1
         except Exception:
             pass
-        if int(getattr(ctx, "depth_stop_stable_count", 0) or 0) >= 2:
-            state = "hard_stop_locked"
-            reason = "depth_hard_stop"
-            action = DockingAction.FINAL_LOCKED_STOP.value
-            final_locked = True
-            allow_forward = False
-            blocked_by = reason
-            try:
-                ctx.final_locked = True
-                ctx.final_lock_reason = reason
-            except Exception:
-                pass
-        else:
-            state = "hard_stop_confirming"
-            reason = "depth_hard_stop_confirming"
-            action = DockingAction.DEPTH_SAFETY_HOLD.value
-            final_locked = False
-            allow_forward = False
-            blocked_by = reason
+        state = "hard_stop_hold"
+        reason = "depth_safety_hold"
+        action = DockingAction.DEPTH_SAFETY_HOLD.value
+        final_locked = False
+        allow_forward = False
+        blocked_by = reason
     else:
         try:
             ctx.depth_stop_stable_count = 0
@@ -250,14 +266,15 @@ def apply_close_range_depth_safety_gate(ctx: Any, obs: Any, result: ArbitrationR
             allow_forward = False
             blocked_by = reason
         elif not current_valid and last_valid_fresh:
-            vx = _positive_cap(vx_raw, final_missing_probe_vx_mps)
+            vx = _positive_cap(vx_raw, final_missing_slow_probe_vx_mps)
             state = "missing_short_probe"
             reason = "depth_missing_short_probe"
             allow_forward = bool(vx > 1e-9)
         elif best_depth is not None and best_depth <= depth_slow_p10_m:
-            vx = _positive_cap(vx_raw, final_probe_vx_mps)
+            vx = _positive_cap(vx_raw, final_slow_probe_vx_mps)
             state = "slow_cap"
             reason = "depth_slow_cap"
+            action = DockingAction.FINAL_SLOW_PROBE.value
             allow_forward = bool(vx > 1e-9)
         elif final_probe_elapsed_s > final_probe_timeout_s:
             vx = 0.0
@@ -275,11 +292,13 @@ def apply_close_range_depth_safety_gate(ctx: Any, obs: Any, result: ArbitrationR
             blocked_by = reason
 
     summary.update(depth_info)
+    safety_source = _safety_source_from_depth_source(str(depth_info.get("best_depth_source") or ""))
     summary.update(
         {
             "depth_safety_applied": True,
             "depth_safety_state": state,
             "depth_safety_reason": reason,
+            "safety_source": safety_source,
             "vx_before_depth_gate": vx_raw,
             "vx_after_depth_gate": float(vx),
             "vy_before_depth_gate": vy_raw,

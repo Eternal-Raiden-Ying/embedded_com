@@ -883,6 +883,47 @@ class TableEdgeSemanticsPublishTest(unittest.TestCase):
 
 
 class RuntimeSupervisorModeApplyTest(unittest.TestCase):
+    def test_disabled_remote_is_successful_noop_with_configured_url(self):
+        class _RemoteManager:
+            def __init__(self):
+                self.configure_calls = []
+                self.enable_calls = 0
+                self.start_calls = 0
+                self.stop_calls = 0
+                self.disable_calls = 0
+
+            def configure_runtime(self, payload):
+                self.configure_calls.append(dict(payload))
+
+            def enable(self):
+                self.enable_calls += 1
+
+            def start_runtime(self):
+                self.start_calls += 1
+
+            def stop_runtime(self):
+                self.stop_calls += 1
+                return None
+
+            def disable(self):
+                self.disable_calls += 1
+                return False
+
+        manager = _RemoteManager()
+        supervisor = RuntimeSupervisor(scheduler=Scheduler(), remote_manager=manager)
+
+        self.assertTrue(
+            supervisor._configure_remote(
+                {"enabled": False, "base_url": "http://configured-but-disabled"}
+            )
+        )
+        self.assertEqual(manager.enable_calls, 0)
+        self.assertEqual(manager.start_calls, 0)
+        self.assertEqual(manager.stop_calls, 1)
+        self.assertEqual(manager.disable_calls, 1)
+
+        self.assertFalse(supervisor._configure_remote({"enabled": True, "base_url": ""}))
+
     def test_idle_hot_uses_keep_model_hot_config(self):
         args = SimpleNamespace(
             rgb_device="mock_rgb",

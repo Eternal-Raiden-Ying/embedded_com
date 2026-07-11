@@ -5,7 +5,7 @@
 统一串口文本协议:
 
 - 主控 -> STM32
-    MODE SEARCH\r\n
+    MODE SEARCH 0\r\n
     MODE RETURN\r\n
     V <vx_mps> <vy_mps> <wz_radps>\r\n
     STOP\r\n
@@ -51,6 +51,8 @@ def encode_mode(mode: str) -> str:
     wire_mode = normalize_wire_mode(mode)
     if wire_mode == "STOP":
         return "STOP"
+    if wire_mode == "SEARCH":
+        return "MODE SEARCH 0"
     return f"MODE {wire_mode}"
 
 
@@ -229,7 +231,7 @@ def _parse_stm32_feedback(raw: str, upper: str) -> Optional[CarState]:
         ok = True
         message = echoed
         echoed_upper = echoed.upper()
-        mode_match = re.match(r"^MODE\s+([A-Z_]+)$", echoed_upper)
+        mode_match = re.match(r"^MODE\s+([A-Z_]+)(?:\s+\S+)?$", echoed_upper)
         if mode_match:
             mode = mode_match.group(1)
         v_match = re.match(

@@ -90,26 +90,38 @@ def weighted_line_fit(
     """
     x_arr = np.asarray(x, dtype=np.float32)
     y_arr = np.asarray(y, dtype=np.float32)
+    n_xy = int(min(len(x_arr), len(y_arr)))
+    if n_xy < 2:
+        return 0.0, float(y_arr[0]) if n_xy else 0.0
+    x_arr, y_arr = x_arr[:n_xy], y_arr[:n_xy]
     if weights is None:
-        k, b = np.polyfit(x_arr, y_arr, 1)
-        return float(k), float(b)
+        xm, ym = float(np.mean(x_arr)), float(np.mean(y_arr))
+        denom = float(np.sum((x_arr - xm) ** 2))
+        if not np.isfinite(denom) or denom <= 1e-10:
+            return 0.0, ym
+        k = float(np.sum((x_arr - xm) * (y_arr - ym)) / denom)
+        return (k if np.isfinite(k) else 0.0), float(ym - k * xm)
     w_arr = np.asarray(weights, dtype=np.float32)
     n = int(min(len(x_arr), len(y_arr), len(w_arr)))
-    if n <= 0:
-        k, b = np.polyfit(x_arr, y_arr, 1)
-        return float(k), float(b)
+    if n < 2:
+        return 0.0, float(y_arr[0]) if n else 0.0
     w_arr = np.clip(w_arr[:n], 0.2, 3.0)
-    if not np.all(np.isfinite(w_arr)) or float(np.max(w_arr)) <= 0.0:
-        k, b = np.polyfit(x_arr[:n], y_arr[:n], 1)
-    else:
-        k, b = np.polyfit(x_arr[:n], y_arr[:n], 1, w=w_arr)
-    return float(k), float(b)
+    if not np.all(np.isfinite(w_arr)) or float(np.sum(w_arr)) <= 1e-10:
+        return weighted_line_fit(x_arr[:n], y_arr[:n])
+    xx, yy = x_arr[:n], y_arr[:n]
+    total_w = float(np.sum(w_arr))
+    xm, ym = float(np.sum(w_arr * xx) / total_w), float(np.sum(w_arr * yy) / total_w)
+    denom = float(np.sum(w_arr * (xx - xm) ** 2))
+    if not np.isfinite(denom) or denom <= 1e-10:
+        return 0.0, ym
+    k = float(np.sum(w_arr * (xx - xm) * (yy - ym)) / denom)
+    return (k if np.isfinite(k) else 0.0), float(ym - k * xm)
 
 
 def ransac_line_fit(
     x: Any,
     y: Any,
-    max_iterations: int = 50,
+    max_iterations: int = 20,
     inlier_threshold: float = 0.05,
 ) -> Tuple[Tuple[float, float], np.ndarray]:
     """Fit a line to 2D points using the RANSAC algorithm.
@@ -135,10 +147,13 @@ def ransac_line_fit(
     best_inliers = np.zeros(n, dtype=bool)
     max_inliers_count = -1
 
-    rng = np.random.default_rng(seed=42)
-
-    for _ in range(max_iterations):
-        indices = rng.choice(n, size=2, replace=False)
+    # Deterministic spread pairs avoid per-call RNG construction and duplicate
+    # random samples for the small representative clusters used here.
+    iterations = max(1, min(int(max_iterations), n * (n - 1) // 2))
+    pair_i = np.linspace(0, n - 2, iterations, dtype=np.int32)
+    pair_j = np.maximum(pair_i + 1, np.linspace(1, n - 1, iterations, dtype=np.int32))
+    for i, j in zip(pair_i, pair_j):
+        indices = (int(i), int(j))
         p1_x, p1_y = x_arr[indices[0]], y_arr[indices[0]]
         p2_x, p2_y = x_arr[indices[1]], y_arr[indices[1]]
 
@@ -160,6 +175,8 @@ def ransac_line_fit(
             best_inliers = inliers
             best_k = k
             best_b = b
+            if inlier_count >= n:
+                break
 
     if max_inliers_count <= 0:
         p1_x, p1_y = x_arr[0], y_arr[0]
@@ -172,11 +189,10 @@ def ransac_line_fit(
     # Refit using all inliers to improve precision
     if int(best_inliers.sum()) >= 2:
         try:
-            k_refined, b_refined = np.polyfit(x_arr[best_inliers], y_arr[best_inliers], 1)
+            k_refined, b_refined = weighted_line_fit(x_arr[best_inliers], y_arr[best_inliers])
             best_k = float(k_refined)
             best_b = float(b_refined)
         except Exception:
             pass
 
     return (best_k, best_b), best_inliers
-

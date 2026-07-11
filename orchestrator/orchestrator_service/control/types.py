@@ -29,7 +29,7 @@ class DockingControlConfig:
     spin_only_yaw_rad: float = 0.18
 
     precise_yaw_tol_rad: float = 0.025
-    precise_dist_tol_m: float = 0.015  # Distance error stopping tolerance/threshold for precise approach (mapped from controlled_approach.target_dist_m in stage_params.yaml)
+    precise_dist_tol_m: float = 0.015  # Distance error stopping tolerance/threshold for precise approach
     precise_lateral_tol_m: float = 0.015
     precise_stable_s: float = 0.50
 

@@ -432,7 +432,6 @@ def _configure_offline_table_edge(edge_processor: Any, vision_cfg: Any) -> Dict[
     keys = (
         "detector_mode",
         "update_hz",
-        "light_stride",
         "fast_plane_stride",
         "require_yolo_confirm",
         "static_roi_enabled",

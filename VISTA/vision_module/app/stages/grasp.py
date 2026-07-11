@@ -2,12 +2,16 @@
 # -*- coding: utf-8 -*-
 
 from copy import deepcopy
+import logging
 import time
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from ...ipc.protocol import VisionReq
 from ...utils.detect import compute_target_obs
 from .base import BaseStagePlan, StageContext, StageOutput, StageTickInput, next_interaction_id, normalize_upper
+
+
+_LOG = logging.getLogger("vision.grasp_stage")
 
 
 def _coerce_optional_int(value) -> Optional[int]:
@@ -44,6 +48,52 @@ def _default_result(target: Optional[str]) -> Dict[str, object]:
     }
 
 
+_GRASP_FIELD_ALIASES = {
+    "x_cm": ("x_cm", "x"),
+    "y_cm": ("y_cm", "y"),
+    "z_cm": ("z_cm", "z"),
+    "pitch_deg": ("pitch_deg", "pitch"),
+    "roll_deg": ("roll_deg", "roll"),
+    "gripper_width_cm": ("gripper_width_cm", "width"),
+    "approach_depth_cm": ("approach_depth_cm", "depth"),
+    "score": ("score",),
+    "dist_cm": ("dist_cm", "dist"),
+}
+_REQUIRED_GRASP_FIELDS = ("x_cm", "y_cm", "z_cm", "pitch_deg", "roll_deg", "gripper_width_cm")
+
+
+def _pick_float(payload: Dict[str, Any], aliases: Tuple[str, ...]) -> Optional[float]:
+    for key in aliases:
+        if key not in payload or payload.get(key) is None:
+            continue
+        try:
+            return float(payload.get(key))
+        except Exception:
+            return None
+    return None
+
+
+def canonicalize_remote_grasp_target(raw_target: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    raw = dict(raw_target or {}) if isinstance(raw_target, dict) else {}
+    canonical: Dict[str, Any] = {"source_schema": "cloud_protocol_target_v1"}
+    missing = []
+    for field, aliases in _GRASP_FIELD_ALIASES.items():
+        value = _pick_float(raw, aliases)
+        if value is None:
+            if field in _REQUIRED_GRASP_FIELDS:
+                missing.append(field)
+            continue
+        canonical[field] = value
+    if missing:
+        return None, {
+            "reason": "grasp_pose_schema_invalid",
+            "remote_error": "grasp_pose_schema_invalid",
+            "missing_fields": missing,
+            "raw_target_keys": sorted(str(key) for key in raw.keys()),
+        }
+    return canonical, None
+
+
 def _next_remote_request_id() -> str:
     return f"rr_{int(time.time() * 1000)}"
 
@@ -58,6 +108,25 @@ def _required_remote_cameras(need_depth: bool) -> list:
 def _grasp_state_from_req(req: VisionReq, target: Optional[str]) -> Dict[str, object]:
     payload = req.payload if isinstance(req.payload, dict) else {}
     need_depth = bool(payload.get("need_depth", True))
+    remote_request_id = str(payload.get("request_id") or payload.get("req_id") or "").strip() or _next_remote_request_id()
+    session_id = str(req.session_id or payload.get("session_id") or "")
+    remote_metadata = dict(payload.get("remote_metadata") or {}) if isinstance(payload.get("remote_metadata"), dict) else {}
+    remote_metadata.setdefault("target", target)
+    remote_metadata.setdefault("request_id", remote_request_id)
+    remote_metadata.setdefault("session_id", session_id)
+    for key in (
+        "task_id",
+        "raw_target",
+        "canonical_target",
+        "class_name",
+        "class_id",
+        "local_target_bbox_xyxy",
+        "local_target_conf",
+        "local_target_frame_id",
+        "epoch",
+    ):
+        if payload.get(key) is not None:
+            remote_metadata.setdefault(key, payload.get(key))
     return {
         "target_obs": dict(payload.get("target_obs") or payload.get("mock_target_obs") or _default_target_obs(target)),
         "result": dict(payload.get("result") or _default_result(target)),
@@ -66,7 +135,7 @@ def _grasp_state_from_req(req: VisionReq, target: Optional[str]) -> Dict[str, ob
         "adjust_round": 0,
         "last_response": None,
         "last_feedback": None,
-        "remote_request_id": None,
+        "remote_request_id": remote_request_id,
         "remote_predict_sent": False,
         "remote_result_sent": False,
         "remote_ready_frame_seq": 0,
@@ -74,10 +143,10 @@ def _grasp_state_from_req(req: VisionReq, target: Optional[str]) -> Dict[str, ob
         "remote_init_retry_limit": 3,
         "remote_init_retry_inflight": False,
         "remote_init_retry_target_attempt": 0,
-        "remote_robot_id": str(payload.get("robot_id") or "arm_001"),
+        "remote_robot_id": str(payload.get("robot_id") or "sc171_car_01"),
         "remote_timeout_s": float(payload.get("remote_timeout_s", 10.0) or 10.0),
-        "remote_class_id": _coerce_optional_int(payload.get("class_id")),
-        "remote_metadata": dict(payload.get("remote_metadata") or {}) if isinstance(payload.get("remote_metadata"), dict) else {},
+            "remote_class_id": _coerce_optional_int(payload.get("class_id")),
+        "remote_metadata": remote_metadata,
         "remote_required_cameras": _required_remote_cameras(need_depth),
     }
 
@@ -275,10 +344,28 @@ class GraspStagePlan(BaseStagePlan):
                     snapshot=snapshot,
                 )
             if ctx.server_status == "error":
+                remote = dict(results.get("remote_init_status") or results.get("remote_result") or {})
+                remote_error = str(
+                    remote.get("error_message")
+                    or remote.get("service_init_last_error")
+                    or remote.get("last_error")
+                    or remote.get("reason")
+                    or "init_failed"
+                )
                 return StageOutput(
                     vision_obs=self.build_obs(ctx, status="FAILED",
                                                perception={"target_obs": target_obs},
-                                               result={"reason": "init_failed", "server_status": ctx.server_status}),
+                                               result={
+                                                   "reason": "remote_init_failed",
+                                                   "server_status": ctx.server_status,
+                                                   "remote_error": remote_error,
+                                                   "error": remote_error,
+                                                   "base_url": remote.get("base_url"),
+                                                   "endpoint": remote.get("endpoint", "/api/v1/init"),
+                                                   "status_code": remote.get("status_code"),
+                                                   "elapsed_ms": remote.get("elapsed_ms"),
+                                                   "error_message": remote_error,
+                                               }),
                     snapshot=snapshot,
                 )
             return StageOutput(
@@ -310,13 +397,38 @@ class GraspStagePlan(BaseStagePlan):
             stage_state["remote_result_sent"] = True
 
             if not bool(remote.get("last_ok", False)):
+                remote_error_norm = remote_error or "predict_failed"
+                if remote_error_norm == "timeout":
+                    remote_error_norm = "predict_timeout"
+                try:
+                    status_code = int(remote.get("status_code")) if remote.get("status_code") is not None else None
+                except (TypeError, ValueError):
+                    status_code = None
+                if status_code is not None and status_code >= 400:
+                    remote_error_norm = f"predict_http_{status_code}"
+                remote_detail = remote.get("result") if isinstance(remote.get("result"), dict) else {}
+                result = {
+                    "reason": "remote_predict_failed",
+                    "request_id": request_id,
+                    "remote_error": remote_error_norm,
+                    "error": remote_error_norm,
+                    "status_code": status_code if status_code is not None else remote.get("status_code"),
+                }
+                if remote_error_norm == "capture_shape_mismatch" and remote_detail:
+                    result.update(
+                        {
+                            "remote_error": "capture_shape_mismatch",
+                            "expected_rgb_shape": remote_detail.get("expected_rgb_shape"),
+                            "actual_rgb_shape": remote_detail.get("actual_rgb_shape"),
+                            "expected_depth_shape": remote_detail.get("expected_depth_shape"),
+                            "actual_depth_shape": remote_detail.get("actual_depth_shape"),
+                        }
+                    )
                 return StageOutput(
                     vision_obs=self.build_obs(
                         ctx, status="FAILED",
                         perception={"target_obs": target_obs},
-                        result={"reason": "remote_predict_failed", "request_id": request_id,
-                                "remote_error": remote_error or "predict_failed",
-                                "status_code": remote.get("status_code")},
+                        result=result,
                     ),
                     snapshot=snapshot,
                 )
@@ -337,12 +449,51 @@ class GraspStagePlan(BaseStagePlan):
             if server_status == "success" or "grasps" in server_response:
                 targets = server_response.get("targets") or server_response.get("grasps")
                 first_target = dict(targets[0]) if isinstance(targets, (list, tuple)) and targets else {}
+                canonical_grasp, schema_error = canonicalize_remote_grasp_target(first_target)
+                if canonical_grasp is not None and stage_state.get("remote_class_id") is not None:
+                    canonical_grasp["class_id"] = stage_state.get("remote_class_id")
+                if schema_error is not None:
+                    result = {
+                        **schema_error,
+                        "request_id": request_id,
+                        "server_status": server_status or "success",
+                        "raw_target": first_target,
+                        "detection": dict(server_detection),
+                        "source": "remote_grasp_client",
+                    }
+                    return StageOutput(
+                        vision_obs=self.build_obs(ctx, status="FAILED",
+                                                   perception={"target_obs": target_obs},
+                                                   result=result),
+                        snapshot=snapshot,
+                    )
+                snapshot.setdefault("remote_grasp_canonicalized", {
+                    "canonical_grasp": dict(canonical_grasp or {}),
+                    "raw_target_keys": sorted(str(key) for key in first_target.keys()),
+                })
+                _LOG.info(
+                    "remote_grasp_canonicalized | canonical_grasp=%s raw_target_keys=%s",
+                    canonical_grasp,
+                    sorted(str(key) for key in first_target.keys()),
+                )
                 result = {
-                    "grasp": first_target,
+                    "grasp": canonical_grasp,
+                    "raw_target": first_target,
                     "detection": dict(server_detection),
                     "source": "remote_grasp_client",
                     "request_id": request_id,
+                    "server_status": "success",
                 }
+                grasp_keys = sorted(str(key) for key in canonical_grasp.keys()) if isinstance(canonical_grasp, dict) else []
+                _LOG.info(
+                    "grasp_stage_result_ready_built | status=%s has_result=%s result_keys=%s has_grasp=%s grasp_keys=%s request_id=%s",
+                    "RESULT_READY",
+                    True,
+                    sorted(str(key) for key in result.keys()),
+                    isinstance(canonical_grasp, dict),
+                    grasp_keys,
+                    request_id,
+                )
                 return StageOutput(
                     vision_obs=self.build_obs(ctx, status="RESULT_READY",
                                                perception={"target_obs": target_obs},
@@ -367,12 +518,18 @@ class GraspStagePlan(BaseStagePlan):
                 )
 
             # Unknown status → FAILED
+            remote_reason = server_reason or str(server_response.get("message") or "") or server_status or "predict_failed"
             return StageOutput(
                 vision_obs=self.build_obs(
                     ctx, status="FAILED",
                     perception={"target_obs": target_obs},
                     result={
-                        "reason": server_reason or server_status or "grasp_failed",
+                        "reason": "remote_predict_failed",
+                        "remote_error": remote_reason,
+                        "remote_reason": remote_reason,
+                        "remote_no_detection_but_local_target_present": bool(server_response.get("remote_no_detection_but_local_target_present", False)),
+                        "local_target_bbox_xyxy": server_response.get("local_target_bbox_xyxy"),
+                        "local_target_conf": server_response.get("local_target_conf"),
                         "message": str(server_response.get("message") or ""),
                         "detection": dict(server_detection),
                         "source": "remote_grasp_client",

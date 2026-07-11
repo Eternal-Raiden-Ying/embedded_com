@@ -72,6 +72,7 @@ class _SharedRealSenseRgbdSession:
         self.color_w = 0
         self.color_h = 0
         self.output_format = str(self.rgb_params.get("format") or "BGR").strip().upper()
+        self._control_status: Dict[str, Any] = {}
 
         ctx = rs.context()
         devices = ctx.query_devices()
@@ -106,9 +107,11 @@ class _SharedRealSenseRgbdSession:
         vp = self.color_profile.as_video_stream_profile()
         self.color_w = int(vp.width())
         self.color_h = int(vp.height())
+        self.color_intrinsics = self._intrinsics_dict(vp, source="realsense_color_profile")
 
         self.depth_sensor.open(self.depth_profile)
         self.color_sensor.open(self.color_profile)
+        self._apply_color_controls()
         self.depth_sensor.start(self.depth_queue)
         self.color_sensor.start(self.color_queue)
         self.log.info(
@@ -126,6 +129,90 @@ class _SharedRealSenseRgbdSession:
             float(getattr(self.depth_intrinsics, "cy", 0.0) or 0.0),
             self.depth_scale,
         )
+
+    def _rs_option(self, name: str):
+        return getattr(getattr(self.rs, "option", None), name, None)
+
+    def _get_option_best_effort(self, sensor, option_name: str):
+        option = self._rs_option(option_name)
+        if sensor is None or option is None:
+            return None
+        try:
+            if not sensor.supports(option):
+                return None
+        except Exception:
+            return None
+        try:
+            return sensor.get_option(option)
+        except Exception:
+            return None
+
+    def _set_option_best_effort(self, sensor, option_name: str, value: float) -> bool:
+        option = self._rs_option(option_name)
+        if sensor is None or option is None:
+            return False
+        try:
+            if not sensor.supports(option):
+                return False
+        except Exception:
+            return False
+        try:
+            sensor.set_option(option, float(value))
+            return True
+        except Exception as exc:
+            self.log.warning("realsense color option set failed: option=%s value=%s error=%s", option_name, value, exc)
+            return False
+
+    def _apply_color_controls(self) -> None:
+        try:
+            ae_requested = bool(self.rgb_params.get("auto_exposure", True))
+            ae_applied = self._set_option_best_effort(self.color_sensor, "enable_auto_exposure", 1.0 if ae_requested else 0.0)
+            if not ae_requested:
+                exposure = self.rgb_params.get("exposure")
+                if exposure is not None:
+                    self._set_option_best_effort(self.color_sensor, "exposure", float(exposure))
+
+            # Auto White Balance
+            awb_requested = bool(self.rgb_params.get("auto_white_balance", True))
+            awb_applied = self._set_option_best_effort(self.color_sensor, "enable_auto_white_balance", 1.0 if awb_requested else 0.0)
+
+            brightness = self.rgb_params.get("brightness")
+            if brightness is not None:
+                self._set_option_best_effort(self.color_sensor, "brightness", float(brightness))
+
+            controls = {
+                "auto_exposure_requested": ae_requested,
+                "auto_exposure_applied": bool(ae_applied),
+                "auto_exposure_enabled": self._get_option_best_effort(self.color_sensor, "enable_auto_exposure"),
+                "auto_white_balance_requested": awb_requested,
+                "auto_white_balance_applied": bool(awb_applied),
+                "auto_white_balance_enabled": self._get_option_best_effort(self.color_sensor, "enable_auto_white_balance"),
+                "exposure": self._get_option_best_effort(self.color_sensor, "exposure"),
+                "gain": self._get_option_best_effort(self.color_sensor, "gain"),
+                "brightness": self._get_option_best_effort(self.color_sensor, "brightness"),
+            }
+            self._control_status = dict(controls)
+            self.log.info("realsense_color_controls_applied %s", controls)
+        except Exception as exc:
+            self.log.warning("failed to apply realsense color controls defensively: %s", exc)
+
+    @staticmethod
+    def _intrinsics_dict(video_profile, *, source: str) -> Optional[Dict[str, Any]]:
+        try:
+            intr = video_profile.get_intrinsics()
+        except Exception:
+            return None
+        return {
+            "width": int(getattr(intr, "width", 0) or 0),
+            "height": int(getattr(intr, "height", 0) or 0),
+            "fx": float(getattr(intr, "fx", 0.0) or 0.0),
+            "fy": float(getattr(intr, "fy", 0.0) or 0.0),
+            "cx": float(getattr(intr, "ppx", 0.0) or 0.0),
+            "cy": float(getattr(intr, "ppy", 0.0) or 0.0),
+            "model": str(getattr(intr, "model", "") or ""),
+            "coeffs": [float(v) for v in list(getattr(intr, "coeffs", []) or [])],
+            "source": str(source or ""),
+        }
 
     def _find_profile(self, sensor, stream, fmt, width: int, height: int, fps: int):
         for profile in sensor.get_stream_profiles():
@@ -164,14 +251,28 @@ class _SharedRealSenseRgbdSession:
             color_frame = None
         depth = np.asanyarray(depth_frame.get_data()).copy() if depth_frame is not None else np.array([])
         color = self._convert_color(color_frame) if color_frame is not None else np.array([])
+        # Sensor controls are configuration state, not per-frame data.  The
+        # cached values are refreshed when controls are applied/reconfigured.
+        camera_auto_exposure = self._control_status.get("auto_exposure_enabled")
+        camera_auto_white_balance = self._control_status.get("auto_white_balance_enabled")
+
         return {
             "depth": depth,
             "rgb": color,
             "depth_intrinsics": self.get_depth_intrinsics(),
+            "color_intrinsics": self.get_color_intrinsics(),
+            "depth_scale": self.depth_scale,
+            "depth_unit": "m",
+            "depth_aligned_to_color": "not_aligned",
+            "camera_auto_exposure": camera_auto_exposure,
+            "camera_auto_white_balance": camera_auto_white_balance,
         }
 
     def get_depth_intrinsics(self):
         return self.depth_intrinsics.to_dict() if self.depth_intrinsics is not None else None
+
+    def get_color_intrinsics(self):
+        return dict(self.color_intrinsics or {}) if self.color_intrinsics is not None else None
 
     def _convert_color(self, color_frame) -> np.ndarray:
         raw = np.asanyarray(color_frame.get_data())
@@ -224,10 +325,12 @@ class CameraManager:
         cfg: VisionServiceConfig,
         logger: Optional[logging.Logger] = None,
         capability_sink: CapabilitySink = None,
+        perf_marker: Optional[Callable[..., None]] = None,
     ):
         self.cfg = cfg
         self.log = logger or logging.getLogger("vision.camera_manager")
         self._capability_sink = capability_sink
+        self._perf_marker = perf_marker
         self._lock = RLock()
         self.cams: Dict[str, Any] = {}
         self._specs: Dict[str, CameraSpec] = {}
@@ -238,6 +341,8 @@ class CameraManager:
         self._worker_stop = threading.Event()
         max_fps = int(getattr(getattr(self.cfg, "camera", None), "max_fps", 30) or 30)
         self._worker_interval_s = 1.0 / max(1, max_fps)
+        self._software_limit_fps = max_fps
+        self._last_publish_mono = 0.0
         self._last_frame_seq = 0
         self._backend_status = camera_backend_status()
         self._active_implementation = str(self._backend_status.get("resolved_backend") or "mock")
@@ -246,6 +351,7 @@ class CameraManager:
         self._shared_rgbd_signature = None
         self._shared_rgbd_cycle_bundle: Optional[Dict[str, Any]] = None
         self._last_shape_log_key = ""
+        self._intrinsics_saved = False
 
     @staticmethod
     def _shared_rgbd_enabled() -> bool:
@@ -372,6 +478,7 @@ class CameraManager:
             "rgb_crop_rect": [crop_x, crop_y, crop_w, crop_h],
             "rgb_output_shape_config": [out_h, out_w] if out_w > 0 and out_h > 0 else None,
             "rgb_config_source": "vision_params.yaml+mode_profile" if values else "default",
+            "camera_color_frame_format": str(values.get("format") or "BGR").upper(),
         }
 
     def bind_runtime(self, scheduler, generation_getter=None) -> None:
@@ -410,6 +517,10 @@ class CameraManager:
 
     def _worker_loop(self) -> None:
         while self._runtime_running and not self._worker_stop.is_set():
+            if self._software_limit_fps > 0 and self._last_publish_mono > 0.0:
+                remaining_s = self._worker_interval_s - (time.monotonic() - self._last_publish_mono)
+                if remaining_s > 0.0 and self._worker_stop.wait(timeout=remaining_s):
+                    break
             self._ensure_shared_rgbd_if_needed()
             self._shared_rgbd_cycle_bundle = None
             active = self.iter_cameras()
@@ -418,6 +529,16 @@ class CameraManager:
                 self._worker_stop.wait(timeout=0.1)
                 continue
             frame_bundle: Dict[str, Any] = {}
+            next_frame_id = int(self._last_frame_seq) + 1
+            capture_start_ns = time.monotonic_ns()
+            trace_id = f"vision:{next_frame_id}"
+            if self._perf_marker is not None:
+                self._perf_marker(
+                    "camera_capture_start",
+                    frame_id=next_frame_id,
+                    trace_id=trace_id,
+                    mono_ns=capture_start_ns,
+                )
             for name, cam in active:
                 try:
                     frame = cam.read_frame()
@@ -426,10 +547,10 @@ class CameraManager:
                     frame = None
                 if frame is None or getattr(frame, "size", 0) <= 0:
                     continue
-                try:
-                    frame_bundle[name] = frame.copy()
-                except Exception:
-                    frame_bundle[name] = frame
+                # FrameBundle is immutable-by-contract after publication.
+                # Color conversion already owns its output; RealSense depth
+                # performed its one required lifetime copy in read_bundle().
+                frame_bundle[name] = frame
                 if name == "depth":
                     getter = getattr(cam, "get_depth_intrinsics", None)
                     if callable(getter):
@@ -440,13 +561,29 @@ class CameraManager:
                         if depth_intrinsics:
                             frame_bundle["depth_intrinsics"] = depth_intrinsics
             if not frame_bundle:
+                if self._perf_marker is not None:
+                    self._perf_marker(
+                        "camera_capture_done",
+                        frame_id=next_frame_id,
+                        trace_id=trace_id,
+                        mono_ns=time.monotonic_ns(),
+                        executed=False,
+                        reason="no_camera_frame",
+                    )
                 self._publish_result("frame_meta", {"has_frames": False, "cameras": []})
                 self._worker_stop.wait(timeout=self._worker_interval_s)
                 continue
             self._last_frame_seq += 1
+            capture_done_ns = time.monotonic_ns()
+            capture_ms = max(0.0, (capture_done_ns - capture_start_ns) / 1_000_000.0)
             camera_names = sorted(frame_bundle.keys())
             frame_capture_ts = time.time()
             frame_bundle["camera_frame_seq"] = int(self._last_frame_seq)
+            frame_bundle["frame_id"] = int(self._last_frame_seq)
+            frame_bundle["trace_id"] = trace_id
+            frame_bundle["capture_mono_ns"] = int(capture_start_ns)
+            frame_bundle["camera_capture_done_mono_ns"] = int(capture_done_ns)
+            frame_bundle["camera_capture_ms"] = float(capture_ms)
             frame_bundle["frame_capture_ts"] = float(frame_capture_ts)
             frame_bundle["camera_frame_ts_ms"] = int(round(frame_capture_ts * 1000.0))
             rgb_shape = None
@@ -457,9 +594,30 @@ class CameraManager:
                 except Exception:
                     rgb_shape = None
             depth_shape_actual = self._shape_hw_from_frame(frame_bundle.get("depth"))
+            if not getattr(self, "_intrinsics_saved", False) and rgb is not None and frame_bundle.get("depth") is not None:
+                self._save_intrinsics_and_images(frame_bundle)
             rgb_shape_actual = list(rgb_shape[:2]) if isinstance(rgb_shape, tuple) and len(rgb_shape) >= 2 else None
             rgb_meta = self._rgb_config_meta(self._params.get("rgb") or {})
             frame_bundle.update(rgb_meta)
+            if self._shared_rgbd is not None and self._shared_rgbd_cycle_bundle:
+                for key in (
+                    "camera_auto_exposure",
+                    "camera_auto_white_balance",
+                    "depth_scale",
+                    "depth_unit",
+                    "depth_aligned_to_color",
+                    "color_intrinsics",
+                ):
+                    if key in self._shared_rgbd_cycle_bundle:
+                        frame_bundle[key] = self._shared_rgbd_cycle_bundle[key]
+            if "depth_scale" not in frame_bundle:
+                intrinsics = frame_bundle.get("depth_intrinsics")
+                if isinstance(intrinsics, dict) and intrinsics.get("depth_scale") is not None:
+                    frame_bundle["depth_scale"] = intrinsics.get("depth_scale")
+            frame_bundle.setdefault("depth_scale", 0.001 if frame_bundle.get("depth") is not None else None)
+            frame_bundle.setdefault("depth_unit", "m")
+            frame_bundle.setdefault("camera_auto_exposure", None)
+            frame_bundle.setdefault("camera_auto_white_balance", None)
             frame_bundle["rgb_output_shape_actual"] = rgb_shape_actual
             frame_bundle["depth_shape_actual"] = depth_shape_actual
             log_key = (
@@ -479,6 +637,7 @@ class CameraManager:
                     rgb_meta.get("rgb_config_source"),
                 )
             self._publish_result("camera_frames", frame_bundle)
+            self._last_publish_mono = time.monotonic()
             self._publish_result(
                 "frame_meta",
                 {
@@ -492,9 +651,23 @@ class CameraManager:
                     "frame_seq": int(self._last_frame_seq),
                     "camera_frame_seq": int(self._last_frame_seq),
                     "camera_frame_ts_ms": int(round(frame_capture_ts * 1000.0)),
+                    "trace_id": trace_id,
+                    "capture_mono_ns": int(capture_start_ns),
+                    "frame_id": int(self._last_frame_seq),
+                    "frame_capture_ts": float(frame_capture_ts),
+                    "depth_scale": frame_bundle.get("depth_scale"),
+                    "camera_capture_done_mono_ns": int(capture_done_ns),
+                    "camera_capture_ms": float(capture_ms),
                 },
             )
-            self._worker_stop.wait(timeout=self._worker_interval_s)
+            if self._perf_marker is not None:
+                self._perf_marker(
+                    "camera_capture_done",
+                    frame_id=int(self._last_frame_seq),
+                    trace_id=trace_id,
+                    mono_ns=capture_done_ns,
+                    duration_ms=capture_ms,
+                )
             self._shared_rgbd_cycle_bundle = None
 
     def active_names(self) -> set:
@@ -656,7 +829,22 @@ class CameraManager:
         try:
             session = _SharedRealSenseRgbdSession(depth_params=depth_params, rgb_params=rgb_params, logger=self.log)
         except Exception as exc:
-            self.log.warning("shared realsense rgbd unavailable: %s", exc)
+            high_res_depth_requested = bool(
+                int(depth_params.get("width") or 0) >= 1280 and int(depth_params.get("height") or 0) >= 720
+            )
+            if high_res_depth_requested:
+                self.log.error(
+                    "shared realsense rgbd unavailable for requested high-res depth profile: depth=%sx%s@%s color=%sx%s@%s error=%s",
+                    depth_params.get("width"),
+                    depth_params.get("height"),
+                    depth_params.get("fps"),
+                    rgb_params.get("in_w"),
+                    rgb_params.get("in_h"),
+                    rgb_params.get("fps"),
+                    exc,
+                )
+            else:
+                self.log.warning("shared realsense rgbd unavailable: %s", exc)
             restored = {}
             for stream_name, stream_params in (("depth", depth_params), ("rgb", rgb_params)):
                 try:
@@ -739,3 +927,82 @@ class CameraManager:
                 "backend_status": dict(self._backend_status or {}),
                 "shared_rgbd_running": bool(self._shared_rgbd is not None),
             }
+
+    def _save_intrinsics_and_images(self, frame_bundle: Dict[str, Any]) -> None:
+        import json
+        from pathlib import Path
+        try:
+            log_dir = getattr(getattr(self.cfg, "runtime", None), "log_dir", "") if self.cfg is not None else ""
+            if not log_dir:
+                log_dir = "logs"
+            vista_dir = Path(log_dir) / "vista"
+            intrinsics_dir = vista_dir / "camera_intrinsics"
+            intrinsics_dir.mkdir(parents=True, exist_ok=True)
+
+            color_intr = None
+            session = getattr(self, "_shared_rgbd", None)
+            if session is not None and getattr(session, "color_intrinsics", None):
+                color_intr = session.color_intrinsics
+
+            depth_intr = frame_bundle.get("depth_intrinsics")
+            if depth_intr is None and session is not None and getattr(session, "depth_intrinsics", None):
+                depth_intr = session.depth_intrinsics
+            if depth_intr is None:
+                depth_cam = self.cams.get("depth")
+                if depth_cam is not None:
+                    getter = getattr(depth_cam, "get_depth_intrinsics", None)
+                    if callable(getter):
+                        try:
+                            depth_intr = getter()
+                        except Exception:
+                            pass
+
+            if color_intr:
+                color_dict = color_intr.to_dict() if hasattr(color_intr, "to_dict") else color_intr
+                if isinstance(color_dict, dict):
+                    color_json_path = intrinsics_dir / "color_intrinsics.json"
+                    with open(color_json_path, "w", encoding="utf-8") as f:
+                        json.dump(color_dict, f, indent=4, ensure_ascii=False)
+
+            if depth_intr:
+                depth_dict = depth_intr.to_dict() if hasattr(depth_intr, "to_dict") else depth_intr
+                if isinstance(depth_dict, dict):
+                    depth_json_path = intrinsics_dir / "depth_intrinsics.json"
+                    with open(depth_json_path, "w", encoding="utf-8") as f:
+                        json.dump(depth_dict, f, indent=4, ensure_ascii=False)
+
+            rgb = frame_bundle.get("rgb")
+            depth = frame_bundle.get("depth")
+
+            if isinstance(rgb, np.ndarray) and rgb.size > 0:
+                color_res = rgb.copy()
+                if color_res.shape[1] != 1280 or color_res.shape[0] != 720:
+                    color_res = cv2.resize(color_res, (1280, 720), interpolation=cv2.INTER_LINEAR)
+
+                is_rgb = False
+                if session is not None and getattr(session, "output_format", "BGR") == "RGB":
+                    is_rgb = True
+
+                if is_rgb:
+                    color_bgr = cv2.cvtColor(color_res, cv2.COLOR_RGB2BGR)
+                else:
+                    color_bgr = color_res
+
+                color_img_path = intrinsics_dir / "color.jpg"
+                cv2.imwrite(str(color_img_path), color_bgr)
+
+            if isinstance(depth, np.ndarray) and depth.size > 0:
+                depth_res = depth.copy()
+                if depth_res.shape[1] != 1280 or depth_res.shape[0] != 720:
+                    depth_res = cv2.resize(depth_res, (1280, 720), interpolation=cv2.INTER_NEAREST)
+                depth_img_path = intrinsics_dir / "depth.png"
+                cv2.imwrite(str(depth_img_path), depth_res)
+
+            self._intrinsics_saved = True
+            self.log.info(
+                "[CAMERA][CALIB_EXPORT] Successfully exported camera intrinsics and 1280x720 color/depth images to %s",
+                intrinsics_dir
+            )
+        except Exception as exc:
+            self._intrinsics_saved = True
+            self.log.error("[CAMERA][CALIB_EXPORT] Failed to export camera intrinsics/images: %s", exc)

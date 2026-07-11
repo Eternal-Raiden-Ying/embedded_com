@@ -310,16 +310,6 @@ class PredictorManager:
                 continue
             frame_slot = scheduler.read_slot("camera_frames")
             if not isinstance(frame_slot, dict):
-                payload = self._build_local_perception_payload(None, [], [], False)
-                payload.update(
-                    {
-                        "table_bbox": None,
-                        "table_quadrant": None,
-                        "rgb_search_roi": None,
-                        "table_roi_source": "yolo_unavailable",
-                    }
-                )
-                self._publish_result("local_perception", payload)
                 self._worker_stop.wait(timeout=self._worker_interval_s)
                 continue
 
@@ -352,8 +342,15 @@ class PredictorManager:
                 infer_ms = max(0.0, (time.perf_counter() - infer_start) * 1000.0)
 
             payload = self._build_local_perception_payload(rgb_shape, boxes, masks, has_infer)
+            inference_done_mono_ns = time.monotonic_ns()
             payload["obs_ts"] = time.time()
             payload["frame_seq"] = int(seq)
+            payload["frame_id"] = frames.get("frame_id", seq)
+            payload["obs_seq"] = frames.get("frame_id", seq)
+            payload["capture_mono_ns"] = frames.get("capture_mono_ns")
+            payload["frame_capture_ts"] = frames.get("frame_capture_ts")
+            payload["inference_done_mono_ns"] = int(inference_done_mono_ns)
+            payload["trace_id"] = frames.get("trace_id")
             payload["age_ms"] = 0.0
             payload["yolo_infer_ms"] = infer_ms
             payload["yolo_has_infer"] = bool(has_infer)
@@ -448,7 +445,6 @@ class PredictorManager:
             )
             self._log_table_detection_debug(payload)
             self._publish_result("local_perception", payload)
-            self._worker_stop.wait(timeout=self._worker_interval_s)
 
     def _log_local_summary(
         self,

@@ -36,11 +36,11 @@ VISTA_MOCK_TABLE_BBOX="${VISTA_MOCK_TABLE_BBOX:-}"
 # dryrun：不连接小车，只打印将要发送到 UART 的实际控制信号。
 # full：连接小车串口，真实下发控制。
 # STACK_PROFILE="full"
-STACK_PROFILE="${STACK_PROFILE:-full}"
+STACK_PROFILE="${STACK_PROFILE:-dryrun}"
 
 # orchestrator 是否使用 sudo：auto / 0 / 1
 # full 模式通常需要 sudo 访问串口；dryrun 一般不需要。
-ORCH_USE_SUDO="${ORCH_USE_SUDO:-auto}"
+ORCH_USE_SUDO="${ORCH_USE_SUDO:-0}"
 
 # 串口设备（正式接车时用）
 UART_DEV="${UART_DEV:-/dev/ttyHS1}"
@@ -52,8 +52,8 @@ READY_TIMEOUT_S="${READY_TIMEOUT_S:-35}"
 # STOP 后按 Ctrl+C 只退出当前日志显示，不停止服务
 FOLLOW_STACK_LOGS_AFTER_START="${FOLLOW_STACK_LOGS_AFTER_START:-1}"
 ROBOT_CONSOLE_LEVEL="${ROBOT_CONSOLE_LEVEL:-normal}"
+ROBOT_LOG_PROFILE="${ROBOT_LOG_PROFILE:-normal}"
 ENABLE_GATEWAY_LOGS="${ENABLE_GATEWAY_LOGS:-true}"
-COLLECT_GATEWAY_LOGS="${COLLECT_GATEWAY_LOGS:-true}"
 
 # 当前终端显示的状态摘要和手机链路关键字
 ORCH_SUMMARY_PATTERN='状态切换|MODE |DRY_RUN|UART|stop_class=|搜索超时|已发现目标|目标丢失|开始寻找|AUTOEXPLORE|AUTOSEARCH|SEARCH|RETURN|收到 STOP 命令|热待机|重新发现目标|自动搜索超时|TASK_CMD|task_cmd|vision_req|TASK_DONE|DEMO|IDLE_HOT|preview kept alive|waiting for next command|target        :|session_id    :|result        :|final_state   :|reason        :|total_time_s  :|next_state    :|preview       :|waiting       :|━━━━━━━━'
@@ -74,14 +74,21 @@ ORCH_READY_EXTRA_S="${ORCH_READY_EXTRA_S:-1}"
 GATEWAY_READY_EXTRA_S="${GATEWAY_READY_EXTRA_S:-1}"
 STOP_GRACE_S="${STOP_GRACE_S:-3}"
 
+# Stop 后自动生成本次 run summary。
+# 关闭：RUN_SUMMARY_ENABLE=0 ./start_robot_stack.sh stop
+RUN_SUMMARY_ENABLE="${RUN_SUMMARY_ENABLE:-0}"
+RUN_SUMMARY_SCRIPT="${RUN_SUMMARY_SCRIPT:-$STACK_ROOT/tools/run_summary.py}"
+RUN_SUMMARY_NO_PLOTS="${RUN_SUMMARY_NO_PLOTS:-0}"
+
 # =========================
 # 以下一般不用改
 # =========================
-VISION_LOG_DIR="$VISION_ROOT/logs"
-ORCH_LOG_DIR="$ORCH_ROOT/logs"
-GATEWAY_LOG_DIR="$STACK_ROOT/logs"
 STACK_RUNS_ROOT="$STACK_ROOT/logs/runs"
 LATEST_RUN_ID_FILE="$STACK_RUNS_ROOT/latest_run_id"
+ACTIVE_RUN_ID_FILE="$STACK_RUNS_ROOT/active_run_id"
+GATEWAY_STANDALONE_LOG_DIR="${GATEWAY_STANDALONE_LOG_DIR:-$STACK_ROOT/logs/mobile_gateway}"
+GATEWAY_STANDALONE_LOG_FILE="$GATEWAY_STANDALONE_LOG_DIR/mobile_gateway.out"
+GATEWAY_CORE_CONTROL_LOG_DIR="$GATEWAY_STANDALONE_LOG_DIR/core_control"
 VISION_PID_DIR="$VISION_ROOT/pids"
 ORCH_PID_DIR="$ORCH_ROOT/pids"
 GATEWAY_PID_DIR="$STACK_ROOT/pids"
@@ -89,22 +96,23 @@ GATEWAY_PID_DIR="$STACK_ROOT/pids"
 VISION_PID_FILE="$VISION_PID_DIR/vision.pid"
 ORCH_PID_FILE="$ORCH_PID_DIR/orchestrator.pid"
 GATEWAY_PID_FILE="$GATEWAY_PID_DIR/mobile_gateway.pid"
+GATEWAY_LOGPATH_FILE="$GATEWAY_PID_DIR/mobile_gateway.logpath"
 
-VISION_LOG_FILE="$VISION_LOG_DIR/vision.out"
-ORCH_LOG_FILE="$ORCH_LOG_DIR/orchestrator.out"
-GATEWAY_LOG_FILE="$GATEWAY_LOG_DIR/mobile_gateway.out"
+VISION_LOG_DIR=""
+ORCH_LOG_DIR=""
+GATEWAY_LOG_DIR=""
+VISION_LOG_FILE=""
+ORCH_LOG_FILE=""
+GATEWAY_LOG_FILE=""
 
 gateway_logs_enabled() {
-  case "${ENABLE_GATEWAY_LOGS:-false}:${COLLECT_GATEWAY_LOGS:-false}" in
+  case "${ENABLE_GATEWAY_LOGS:-false}" in
     *1*|*true*|*yes*|*on*) return 0 ;;
     *) return 1 ;;
   esac
 }
 
-mkdir -p "$VISION_LOG_DIR" "$ORCH_LOG_DIR" "$STACK_RUNS_ROOT" "$VISION_PID_DIR" "$ORCH_PID_DIR" "$GATEWAY_PID_DIR" "$STACK_SOCK_DIR"
-if gateway_logs_enabled; then
-  mkdir -p "$GATEWAY_LOG_DIR"
-fi
+mkdir -p "$STACK_RUNS_ROOT" "$VISION_PID_DIR" "$ORCH_PID_DIR" "$GATEWAY_PID_DIR" "$STACK_SOCK_DIR" "$GATEWAY_STANDALONE_LOG_DIR" "$GATEWAY_CORE_CONTROL_LOG_DIR"
 
 # ---------- pretty output ----------
 if [[ -t 1 ]]; then
@@ -308,7 +316,8 @@ show_banner() {
   printf '%bsudo%b           : requested=%s effective=%s\n' "$C_BOLD" "$C_RESET" "$ORCH_USE_SUDO" "$([[ $(orch_use_sudo_effective; echo $?) -eq 0 ]] && echo 1 || echo 0)"
   printf '%bdry-run%b        : ORCH_SERIAL_DRY_RUN=%s  ORCH_DRY_RUN_ECHO_STDOUT=%s\n' "$C_BOLD" "$C_RESET" "$ORCH_SERIAL_DRY_RUN" "$ORCH_DRY_RUN_ECHO_STDOUT"
   printf '%bconsole%b        : ROBOT_CONSOLE_LEVEL=%s  ROBOT_CONSOLE_COLOR=%s\n' "$C_BOLD" "$C_RESET" "$ROBOT_CONSOLE_LEVEL" "${ROBOT_CONSOLE_COLOR:-auto}"
-  printf '%bgateway logs%b   : enabled=%s  collect=%s\n' "$C_BOLD" "$C_RESET" "$ENABLE_GATEWAY_LOGS" "$COLLECT_GATEWAY_LOGS"
+  printf '%blog profile%b    : %s\n' "$C_BOLD" "$C_RESET" "$ROBOT_LOG_PROFILE"
+  printf '%bgateway logs%b   : enabled=%s\n' "$C_BOLD" "$C_RESET" "$ENABLE_GATEWAY_LOGS"
   printf '%bports%b          : %s\n' "$C_BOLD" "$C_RESET" "$STACK_PORTS"
 }
 
@@ -323,11 +332,11 @@ apply_run_log_paths() {
   STACK_RUN_DIR="$run_dir"
   VISION_LOG_DIR="$run_dir/vision"
   ORCH_LOG_DIR="$run_dir/orchestrator"
-  GATEWAY_LOG_DIR="$run_dir/mobile_gateway"
+  GATEWAY_LOG_DIR="$GATEWAY_STANDALONE_LOG_DIR"
   VISION_LOG_FILE="$VISION_LOG_DIR/vision.out"
   ORCH_LOG_FILE="$ORCH_LOG_DIR/orchestrator.out"
   if gateway_logs_enabled; then
-    GATEWAY_LOG_FILE="$GATEWAY_LOG_DIR/mobile_gateway.out"
+    GATEWAY_LOG_FILE="$GATEWAY_STANDALONE_LOG_FILE"
   else
     GATEWAY_LOG_FILE="/dev/null"
   fi
@@ -341,8 +350,49 @@ prepare_start_run_paths() {
   local run_id="${STACK_RUN_ID:-}"
   [[ -n "$run_id" ]] || run_id="$(make_run_id)"
   apply_run_log_paths "$run_id"
+  log "[CORE_START][NEW_RUN_CREATED] run_id=$run_id"
+}
+
+promote_latest_run_id() {
+  local run_id="${STACK_RUN_ID:-}"
+  [[ -n "$run_id" ]] || return 1
+  mkdir -p "$STACK_RUNS_ROOT"
   printf '%s\n' "$run_id" > "$LATEST_RUN_ID_FILE"
+  printf '%s\n' "$run_id" > "$ACTIVE_RUN_ID_FILE"
   ln -sfn "$run_id" "$STACK_RUNS_ROOT/latest" 2>/dev/null || true
+  log "[CORE_START][LATEST_PROMOTED] run_id=$run_id"
+}
+
+active_run_id() {
+  local run_id=""
+  if [[ -f "$ACTIVE_RUN_ID_FILE" ]]; then
+    run_id="$(cat "$ACTIVE_RUN_ID_FILE" 2>/dev/null || true)"
+  fi
+  if [[ -z "$run_id" && -f "$LATEST_RUN_ID_FILE" ]]; then
+    run_id="$(cat "$LATEST_RUN_ID_FILE" 2>/dev/null || true)"
+  fi
+  printf '%s\n' "$run_id"
+}
+
+core_any_running() {
+  local sudo_flag=0
+  if orch_use_sudo_effective; then
+    sudo_flag=1
+  fi
+  pid_alive "$VISION_PID_FILE" 0 || pid_alive "$ORCH_PID_FILE" "$sudo_flag"
+}
+
+cleanup_unused_run_dir() {
+  local run_id="$1"
+  local status="${2:-aborted}"
+  [[ -n "$run_id" ]] || return 0
+  local run_dir="$STACK_RUNS_ROOT/$run_id"
+  [[ -d "$run_dir" ]] || return 0
+  rmdir "$run_dir/vision" "$run_dir/orchestrator" "$run_dir" 2>/dev/null && {
+    log "[CORE_START][EMPTY_RUN_CLEANED] run_id=$run_id"
+    return 0
+  }
+  printf 'run_status=%s\n' "$status" > "$run_dir/run_status" 2>/dev/null || true
 }
 
 prepare_latest_run_paths() {
@@ -352,6 +402,14 @@ prepare_latest_run_paths() {
   if [[ -n "${STACK_RUN_ID:-}" && -d "$STACK_RUNS_ROOT/$STACK_RUN_ID" ]]; then
     apply_run_log_paths "$STACK_RUN_ID"
   fi
+}
+
+prepare_gateway_paths() {
+  STACK_RUN_ID="${STACK_RUN_ID:-gateway_$(date +%Y%m%d_%H%M%S)}"
+  STACK_RUN_DIR="$GATEWAY_STANDALONE_LOG_DIR"
+  GATEWAY_LOG_DIR="$GATEWAY_STANDALONE_LOG_DIR"
+  GATEWAY_LOG_FILE="$GATEWAY_STANDALONE_LOG_FILE"
+  mkdir -p "$GATEWAY_STANDALONE_LOG_DIR" "$GATEWAY_CORE_CONTROL_LOG_DIR"
 }
 
 path_user_writable_or_creatable() {
@@ -474,8 +532,10 @@ export PYTHONPATH="$STACK_ROOT:$VISION_ROOT\${PYTHONPATH:+:\$PYTHONPATH}"
 export SYSTEM_CONFIG_FILE="$SYSTEM_CONFIG_FILE"
 export SYSTEM_CONFIG_PROFILE="$SYSTEM_CONFIG_PROFILE"
 export PYTHONUNBUFFERED="$PYTHONUNBUFFERED"
+export VISION_LOG_FILE="$VISION_LOG_FILE"
 export ROBOT_CONSOLE_COLOR=never
 export ROBOT_CONSOLE_LEVEL="$ROBOT_CONSOLE_LEVEL"
+export ROBOT_LOG_PROFILE="$ROBOT_LOG_PROFILE"
 export ROBOT_RUN_MODULE_SUBDIRS=1
 export STACK_RUN_ID="$STACK_RUN_ID"
 export VISION_LOG_DIR="$VISION_LOG_DIR"
@@ -488,7 +548,7 @@ export VISTA_MOCK_TABLE_BBOX="$VISTA_MOCK_TABLE_BBOX"
 if [[ -n "$VISION_LD_PRELOAD" && -e "$VISION_LD_PRELOAD" ]]; then
   export LD_PRELOAD="$VISION_LD_PRELOAD\${LD_PRELOAD:+:\$LD_PRELOAD}"
 fi
-exec stdbuf -oL -eL /usr/bin/python3 -m vision_module.app.app
+exec stdbuf -oL -eL /usr/bin/python3 -u -m vision_module.app.app
 CMD
 )
   launch_bg_user "vision" "$VISION_PID_FILE" "$VISION_LOG_FILE" "$cmd"
@@ -521,6 +581,7 @@ export SYSTEM_CONFIG_PROFILE="$SYSTEM_CONFIG_PROFILE"
 export PYTHONUNBUFFERED="$PYTHONUNBUFFERED"
 export ROBOT_CONSOLE_COLOR=never
 export ROBOT_RUN_MODULE_SUBDIRS=1
+export ROBOT_LOG_PROFILE="$ROBOT_LOG_PROFILE"
 export STACK_RUN_ID="$STACK_RUN_ID"
 export ORCH_LOG_DIR="$ORCH_LOG_DIR"
 export ORCH_RUNS_DIR="$STACK_RUNS_ROOT"
@@ -558,6 +619,9 @@ start_gateway_bg() {
   fi
   headline "启动 mobile gateway"
   mark run "gateway config=$GATEWAY_CONFIG"
+  GATEWAY_LOG_DIR="$GATEWAY_STANDALONE_LOG_DIR"
+  GATEWAY_LOG_FILE="$GATEWAY_STANDALONE_LOG_FILE"
+  mkdir -p "$GATEWAY_STANDALONE_LOG_DIR" "$GATEWAY_CORE_CONTROL_LOG_DIR"
   local cmd
   cmd=$(cat <<CMD
 set -euo pipefail
@@ -568,16 +632,21 @@ export SYSTEM_CONFIG_PROFILE="$SYSTEM_CONFIG_PROFILE"
 export PYTHONUNBUFFERED="$PYTHONUNBUFFERED"
 export ROBOT_CONSOLE_COLOR=never
 export ROBOT_RUN_MODULE_SUBDIRS=1
+export ROBOT_LOG_PROFILE="$ROBOT_LOG_PROFILE"
 export STACK_RUN_ID="$STACK_RUN_ID"
 unset FORCE_COLOR
 export ROBOT_CONSOLE_LEVEL="$ROBOT_CONSOLE_LEVEL"
+export ORCH_USE_SUDO="${ORCH_USE_SUDO:-0}"
+export MOBILE_GATEWAY_CORE_ORCH_USE_SUDO="\${MOBILE_GATEWAY_CORE_ORCH_USE_SUDO:-${ORCH_USE_SUDO:-0}}"
+export MOBILE_GATEWAY_STACK_SCRIPT_PATH="\${MOBILE_GATEWAY_STACK_SCRIPT_PATH:-$STACK_ROOT/start_robot_stack.sh}"
+export MOBILE_GATEWAY_CORE_CONTROL_LOG_DIR="\${MOBILE_GATEWAY_CORE_CONTROL_LOG_DIR:-$GATEWAY_CORE_CONTROL_LOG_DIR}"
 export MOBILE_GATEWAY_LOG_ENABLED="$(gateway_logs_enabled && echo 1 || echo 0)"
 export MOBILE_GATEWAY_STATUS_STDOUT="$(gateway_logs_enabled && echo 1 || echo 0)"
 export MOBILE_GATEWAY_LOG_DIR="$GATEWAY_LOG_DIR"
 export MOBILE_GATEWAY_LOG_FILE="$(gateway_logs_enabled && echo "$GATEWAY_LOG_DIR/mobile_gateway.log" || echo "/dev/null")"
 export MOBILE_GATEWAY_RUNS_DIR="$STACK_RUNS_ROOT"
 export MOBILE_GATEWAY_ORCH_RUNS_DIR="$STACK_RUNS_ROOT"
-export MOBILE_GATEWAY_ORCH_STATE_BLOCKS_PATH="$STACK_RUN_DIR/orchestrator/state_blocks.jsonl"
+export MOBILE_GATEWAY_ORCH_STATE_BLOCKS_PATH="$STACK_RUNS_ROOT/latest/orchestrator/state_blocks.jsonl"
 export MOBILE_GATEWAY_BACKEND="\${MOBILE_GATEWAY_BACKEND:-tcp_no_ack}"
 export MOBILE_GATEWAY_COMMAND_IN_TRANSPORT="\${MOBILE_GATEWAY_COMMAND_IN_TRANSPORT:-http}"
 export MOBILE_GATEWAY_COMMAND_IN_HOST="\${MOBILE_GATEWAY_COMMAND_IN_HOST:-0.0.0.0}"
@@ -592,6 +661,7 @@ exec stdbuf -oL -eL /usr/bin/python3 -m orchestrator_service.mobile_gateway.runt
 CMD
 )
   launch_bg_user "mobile_gateway" "$GATEWAY_PID_FILE" "$GATEWAY_LOG_FILE" "$cmd"
+  printf '%s\n' "$GATEWAY_LOG_FILE" > "$GATEWAY_LOGPATH_FILE"
 }
 
 is_port_listening() {
@@ -758,184 +828,6 @@ wait_for_endpoint_group() {
   done
 }
 
-wait_for_sockets() {
-  local name="$1" sockets_str="$2" timeout_s="$3" extra_s="$4"
-  local start_ts now_ts all_ok s pid_file use_sudo log_file ready_pattern
-  start_ts=$(date +%s)
-  local last_err=""
-  
-  pid_file=""
-  use_sudo=0
-  log_file=""
-  ready_pattern=""
-  case "$name" in
-    vision)
-      pid_file="$VISION_PID_FILE"
-      log_file="$VISION_LOG_FILE"
-      ready_pattern="\[VISTA\] READY|SERVICE_READY"
-      ;;
-    orchestrator)
-      pid_file="$ORCH_PID_FILE"
-      log_file="$ORCH_LOG_FILE"
-      ready_pattern="\[ORCH\] READY"
-      if orch_use_sudo_effective; then
-        use_sudo=1
-      fi
-      ;;
-    mobile_gateway)
-      pid_file="$GATEWAY_PID_FILE"
-      log_file="$GATEWAY_LOG_FILE"
-      ready_pattern="gateway online|SERVICE_READY"
-      ;;
-  esac
-
-  while true; do
-    if [[ -n "$pid_file" ]] && ! pid_alive "$pid_file" "$use_sudo"; then
-      mark err "$name ready-check 失败：进程已退出"
-      if [[ -n "$log_file" ]]; then
-        tail_last_logs_on_failure "$name" "$log_file"
-      fi
-      return 1
-    fi
-
-    all_ok=1
-    for s in $sockets_str; do
-      if [[ ! -S "$s" ]]; then
-        all_ok=0
-        last_err="FileNotFoundError: [Errno 2] No such file or directory: '$s' (or not a UDS socket)"
-        break
-      fi
-      
-      err_msg=$(/usr/bin/python3 -c "
-import socket, sys
-try:
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(1.0)
-    s.connect('$s')
-    s.close()
-except Exception as e:
-    print(f'{type(e).__name__}: {e}', end='')
-    sys.exit(1)
-" 2>&1 || true)
-      
-      if [[ -n "$err_msg" ]]; then
-        all_ok=0
-        last_err="$err_msg"
-        break
-      fi
-    done
-
-    if [[ "$all_ok" == "1" ]]; then
-      [[ "$extra_s" -gt 0 ]] && sleep "$extra_s"
-      if [[ -n "$pid_file" ]] && ! pid_alive "$pid_file" "$use_sudo"; then
-        mark err "$name ready-check 失败：进程已退出"
-        if [[ -n "$log_file" ]]; then
-          tail_last_logs_on_failure "$name" "$log_file"
-        fi
-        return 1
-      fi
-      mark ok "$name ready  sockets=[$sockets_str]"
-      return 0
-    fi
-
-    now_ts=$(date +%s)
-    if (( now_ts - start_ts >= timeout_s )); then
-      mark err "$name ready-check 超时  sockets=[$sockets_str]"
-      mark err "---------------- ready-check Timeout Details ----------------"
-      mark err "  Endpoint Name: $name"
-      mark err "  Mode: uds"
-      mark err "  Path: $sockets_str"
-      mark err "  ls -l /tmp/robot_stack:"
-      ls -l /tmp/robot_stack 2>&1 | while read -r line; do mark err "    $line"; done || true
-      for s in $sockets_str; do
-        mark err "  stat $s:"
-        stat "$s" 2>&1 | while read -r line; do mark err "    $line"; done || true
-      done
-      mark err "  Last Connect Exception: $last_err"
-      
-      local log_has_ready="no"
-      if [[ -n "$log_file" && -f "$log_file" ]]; then
-        if grep -qE "$ready_pattern" "$log_file" 2>/dev/null; then
-          log_has_ready="yes"
-        fi
-      fi
-      mark err "  Service Log Reports READY: $log_has_ready"
-      
-      if [[ "$name" == "orchestrator" && "$log_has_ready" == "yes" ]]; then
-        mark err "process reports READY but UDS socket is not connectable; likely permission or stale socket issue"
-      fi
-      mark err "-------------------------------------------------------------"
-      return 1
-    fi
-    sleep 0.5
-  done
-}
-
-wait_for_ports() {
-  local name="$1" ports_str="$2" timeout_s="$3" extra_s="$4"
-  local start_ts now_ts all_ok p pid_file use_sudo
-  start_ts=$(date +%s)
-  while true; do
-    all_ok=1
-    for p in $ports_str; do
-      if ! is_port_listening "$p"; then
-        all_ok=0
-        break
-      fi
-    done
-    if [[ "$all_ok" == "1" ]]; then
-      [[ "$extra_s" -gt 0 ]] && sleep "$extra_s"
-      pid_file=""
-      use_sudo=0
-      case "$name" in
-        vision)
-          pid_file="$VISION_PID_FILE"
-          ;;
-        orchestrator)
-          pid_file="$ORCH_PID_FILE"
-          if orch_use_sudo_effective; then
-            use_sudo=1
-          fi
-          ;;
-        mobile_gateway)
-          pid_file="$GATEWAY_PID_FILE"
-          ;;
-      esac
-      if [[ -n "$pid_file" ]] && ! pid_alive "$pid_file" "$use_sudo"; then
-        mark err "$name ready-check 失败：端口曾经可用，但进程已退出"
-        return 1
-      fi
-      mark ok "$name ready  ports=[$ports_str]"
-      return 0
-    fi
-    now_ts=$(date +%s)
-    if (( now_ts - start_ts >= timeout_s )); then
-      mark err "$name ready-check 超时  ports=[$ports_str]"
-      return 1
-    fi
-    sleep 0.5
-  done
-}
-
-wait_for_log_pattern() {
-  local name="$1" file="$2" pattern="$3" timeout_s="$4" extra_s="$5"
-  local start_ts now_ts
-  start_ts=$(date +%s)
-  while true; do
-    if [[ -f "$file" ]] && grep -qE "$pattern" "$file" 2>/dev/null; then
-      [[ "$extra_s" -gt 0 ]] && sleep "$extra_s"
-      mark ok "$name ready  pattern=/$pattern/"
-      return 0
-    fi
-    now_ts=$(date +%s)
-    if (( now_ts - start_ts >= timeout_s )); then
-      mark err "$name ready-check 超时  pattern=/$pattern/"
-      return 1
-    fi
-    sleep 0.5
-  done
-}
-
 gateway_spec() {
   SYSTEM_CONFIG_FILE="$SYSTEM_CONFIG_FILE" SYSTEM_CONFIG_PROFILE="$SYSTEM_CONFIG_PROFILE" PYTHONPATH="$STACK_ROOT:${PYTHONPATH:-}" \
     MOBILE_GATEWAY_BACKEND="${MOBILE_GATEWAY_BACKEND:-tcp_no_ack}" \
@@ -1042,6 +934,56 @@ wait_for_gateway_ready() {
   done
 }
 
+wait_for_gateway_self_ready() {
+  local timeout_s="$1" extra_s="$2"
+  local spec backend cmd_mode cmd_host cmd_port cmd_path mqtt_enabled orch_mode orch_path orch_host orch_port
+  spec="$(gateway_spec)" || return 1
+  IFS='|' read -r backend cmd_mode cmd_host cmd_port cmd_path mqtt_enabled orch_mode orch_path orch_host orch_port <<< "$spec"
+  backend="$(printf '%s' "$backend" | tr '[:upper:]' '[:lower:]')"
+  cmd_mode="$(printf '%s' "$cmd_mode" | tr '[:upper:]' '[:lower:]')"
+
+  mark note "[READY_CHECK] gateway-only backend=$backend command_in=$cmd_mode host=$cmd_host port=$cmd_port path=$cmd_path"
+
+  if [[ "$backend" == "mock" && "${MOBILE_GATEWAY_ALLOW_MOCK:-0}" != "1" ]]; then
+    mark err "mobile_gateway backend_mode=mock；dry_run/full 默认禁止 mock，请显式 MOBILE_GATEWAY_ALLOW_MOCK=1 才能调试使用"
+    return 1
+  fi
+
+  local start_ts now_ts
+  start_ts=$(date +%s)
+  while true; do
+    if ready_pid_alive "mobile_gateway"; then
+      if [[ "$cmd_mode" == "http" ]]; then
+        if gateway_http_health_ok "$cmd_host" "$cmd_port" 2>/dev/null; then
+          [[ "$extra_s" -gt 0 ]] && sleep "$extra_s"
+          mark ok "mobile_gateway ready  http=${cmd_host}:${cmd_port}"
+          return 0
+        fi
+      elif [[ "$mqtt_enabled" == "1" ]]; then
+        if [[ -f "$GATEWAY_LOG_FILE" ]] && grep -qE "gateway online|mqtt connected|http listening" "$GATEWAY_LOG_FILE" 2>/dev/null; then
+          [[ "$extra_s" -gt 0 ]] && sleep "$extra_s"
+          mark ok "mobile_gateway ready  mqtt/log matched"
+          return 0
+        fi
+        [[ "$extra_s" -gt 0 ]] && sleep "$extra_s"
+        mark ok "mobile_gateway ready  pid=$(cat "$GATEWAY_PID_FILE") command_in=$cmd_mode"
+        return 0
+      else
+        [[ "$extra_s" -gt 0 ]] && sleep "$extra_s"
+        mark ok "mobile_gateway ready  pid=$(cat "$GATEWAY_PID_FILE") command_in=$cmd_mode"
+        return 0
+      fi
+    fi
+
+    now_ts=$(date +%s)
+    if (( now_ts - start_ts >= timeout_s )); then
+      mark err "mobile_gateway gateway-only ready-check 超时 command_in=$cmd_mode http=${cmd_host}:${cmd_port}"
+      return 1
+    fi
+    sleep 0.5
+  done
+}
+
 tail_last_logs_on_failure() {
   local name="$1" file="$2"
   headline "$name 启动失败"
@@ -1119,6 +1061,36 @@ cleanup_sockets() {
   chmod 1777 "$STACK_SOCK_DIR" 2>/dev/null || sudo chmod 1777 "$STACK_SOCK_DIR" 2>/dev/null || true
 }
 
+cleanup_core_sockets() {
+  mkdir -p "$STACK_SOCK_DIR"
+  rm -f \
+    "$STACK_SOCK_DIR/vision_req.sock" \
+    "$STACK_SOCK_DIR/vision_obs.sock" \
+    "$STACK_SOCK_DIR/task_cmd.sock" \
+    "$STACK_SOCK_DIR/task_ack.sock" 2>/dev/null || \
+  sudo rm -f \
+    "$STACK_SOCK_DIR/vision_req.sock" \
+    "$STACK_SOCK_DIR/vision_obs.sock" \
+    "$STACK_SOCK_DIR/task_cmd.sock" \
+    "$STACK_SOCK_DIR/task_ack.sock" 2>/dev/null || true
+  chmod 1777 "$STACK_SOCK_DIR" 2>/dev/null || sudo chmod 1777 "$STACK_SOCK_DIR" 2>/dev/null || true
+}
+
+stop_gateway() {
+  headline "停止 mobile_gateway"
+  kill_pid_group "$GATEWAY_PID_FILE" 0 "mobile_gateway"
+}
+
+stop_core() {
+  if need_sudo; then
+    ensure_sudo_ready
+  fi
+  headline "停止 core: VISTA + orchestrator"
+  kill_pid_group "$VISION_PID_FILE" 0 "vision"
+  kill_pid_group "$ORCH_PID_FILE" $([[ $(orch_use_sudo_effective; echo $?) -eq 0 ]] && echo 1 || echo 0) "orchestrator"
+  cleanup_core_sockets
+}
+
 stop_all() {
   if need_sudo; then
     ensure_sudo_ready
@@ -1131,6 +1103,21 @@ stop_all() {
   cleanup_sockets
 }
 
+run_latest_summary() {
+  [[ "${RUN_SUMMARY_ENABLE:-0}" == "1" ]] || return 0
+  [[ -n "${STACK_RUN_DIR:-}" && -d "$STACK_RUN_DIR" ]] || { mark warn "run summary skipped: STACK_RUN_DIR not found"; return 0; }
+  [[ -f "$RUN_SUMMARY_SCRIPT" ]] || { mark warn "run summary skipped: script not found: $RUN_SUMMARY_SCRIPT"; return 0; }
+
+  headline "生成 run summary"
+  local plot_flag=""
+  [[ "${RUN_SUMMARY_NO_PLOTS:-0}" == "1" ]] && plot_flag="--no-plots"
+  if /usr/bin/python3 "$RUN_SUMMARY_SCRIPT" "$STACK_RUN_DIR" $plot_flag; then
+    mark ok "run summary 已生成: $STACK_RUN_DIR/summary/run_summary_auto.md"
+  else
+    mark warn "run summary 生成失败，但 stop 流程继续"
+  fi
+}
+
 status_one() {
   local name="$1" pid_file="$2" use_sudo="$3" log_file="$4"
   if pid_alive "$pid_file" "$use_sudo"; then
@@ -1140,11 +1127,24 @@ status_one() {
   fi
 }
 
+gateway_status_log_file() {
+  if [[ -f "$GATEWAY_LOGPATH_FILE" ]]; then
+    local saved
+    saved="$(cat "$GATEWAY_LOGPATH_FILE" 2>/dev/null || true)"
+    if [[ -n "$saved" ]]; then
+      printf '%s\n' "$saved"
+      return 0
+    fi
+  fi
+  printf '%s\n' "${GATEWAY_LOG_FILE:-$GATEWAY_STANDALONE_LOG_FILE}"
+}
+
 status_all() {
   headline "当前状态"
+  mark note "core = vision + orchestrator/controller; gateway = mobile_gateway"
   status_one "vision" "$VISION_PID_FILE" 0 "$VISION_LOG_FILE"
   status_one "orchestrator/controller" "$ORCH_PID_FILE" $([[ $(orch_use_sudo_effective; echo $?) -eq 0 ]] && echo 1 || echo 0) "$ORCH_LOG_FILE"
-  status_one "mobile_gateway" "$GATEWAY_PID_FILE" 0 "$GATEWAY_LOG_FILE"
+  status_one "mobile_gateway" "$GATEWAY_PID_FILE" 0 "$(gateway_status_log_file)"
 }
 
 tail_stack_summary() {
@@ -1220,38 +1220,20 @@ tail_stack_summary() {
   done
 }
 
-start_stack() {
-  prepare_start_run_paths
-  show_banner
-  stop_all || true
+check_gateway_to_orchestrator_link() {
+  [[ "$STACK_PROFILE" == "full" ]] || return 0
 
-  start_vision_bg
-  if ! wait_for_endpoint "vision" "vision_req" "$READY_TIMEOUT_S" "$VISION_READY_EXTRA_S"; then
-    tail_last_logs_on_failure "vision" "$VISION_LOG_FILE"
-    stop_all || true
-    exit 1
-  fi
+  local gateway_task_cmd_socket="/tmp/robot_stack/task_cmd.sock"
+  headline "mobile_gateway 启动前连接检查"
+  mark wait "检查普通用户连接 orchestrator task_cmd UDS 能力..."
 
-  start_orch_bg
-  if ! wait_for_endpoint_group "orchestrator" "$READY_TIMEOUT_S" "$ORCH_READY_EXTRA_S" "orchestrator_task_cmd" "orchestrator_vision_obs"; then
-    tail_last_logs_on_failure "orchestrator" "$ORCH_LOG_FILE"
-    stop_all || true
-    exit 1
-  fi
-
-  # Check connection to orchestrator task_cmd socket for mobile_gateway (normal user check)
-  if [[ "$STACK_PROFILE" == "full" ]]; then
-    local gateway_task_cmd_socket="/tmp/robot_stack/task_cmd.sock"
-    headline "mobile_gateway 启动前连接检查"
-    mark wait "检查普通用户连接 orchestrator task_cmd UDS 能力..."
-    
-    if [[ -S "$gateway_task_cmd_socket" ]]; then
-      local cmd_user=""
-      if [[ "$(id -u)" -eq 0 ]]; then
-        cmd_user="sudo -u aidlux "
-      fi
-      local conn_err
-      conn_err=$(${cmd_user}/usr/bin/python3 -c "
+  if [[ -S "$gateway_task_cmd_socket" ]]; then
+    local cmd_user=""
+    if [[ "$(id -u)" -eq 0 ]]; then
+      cmd_user="sudo -u aidlux "
+    fi
+    local conn_err
+    conn_err=$(${cmd_user}/usr/bin/python3 -c "
 import socket, sys
 try:
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -1263,31 +1245,93 @@ except Exception as e:
     print(f'{type(e).__name__}: {e}', end='')
     sys.exit(1)
 " 2>&1 || true)
-      
-      if [[ -n "$conn_err" ]]; then
-        mark err "连接检查失败："
-        mark err "  socket path: $gateway_task_cmd_socket"
-        mark err "  ls -l parent: $(ls -l \"$(dirname "$gateway_task_cmd_socket")\" 2>&1 || true)"
-        mark err "  stat socket: $(stat "$gateway_task_cmd_socket" 2>&1 || true)"
-        mark err "  connect error: $conn_err"
-        mark err "  提示：请检查 UDS socket 文件拥有者及权限是否正确（当前由 sudo 启动可能导致普通用户无权访问）"
-        stop_all || true
-        exit 1
-      else
-        mark ok "普通用户连接 orchestrator task_cmd 成功！"
-      fi
-    else
-      mark err "UDS socket 文件不存在或不是 socket: $gateway_task_cmd_socket"
+
+    if [[ -n "$conn_err" ]]; then
+      mark err "连接检查失败："
+      mark err "  socket path: $gateway_task_cmd_socket"
       mark err "  ls -l parent: $(ls -l \"$(dirname "$gateway_task_cmd_socket")\" 2>&1 || true)"
-      stop_all || true
-      exit 1
+      mark err "  stat socket: $(stat "$gateway_task_cmd_socket" 2>&1 || true)"
+      mark err "  connect error: $conn_err"
+      mark err "  提示：请检查 UDS socket 文件拥有者及权限是否正确（当前由 sudo 启动可能导致普通用户无权访问）"
+      return 1
     fi
+    mark ok "普通用户连接 orchestrator task_cmd 成功！"
+    return 0
   fi
 
+  mark err "UDS socket 文件不存在或不是 socket: $gateway_task_cmd_socket"
+  mark err "  ls -l parent: $(ls -l \"$(dirname "$gateway_task_cmd_socket")\" 2>&1 || true)"
+  return 1
+}
+
+start_gateway_only() {
+  prepare_gateway_paths
+  show_banner
+
   start_gateway_bg
+  if ! wait_for_gateway_self_ready "$READY_TIMEOUT_S" "$GATEWAY_READY_EXTRA_S"; then
+    tail_last_logs_on_failure "mobile_gateway" "$GATEWAY_LOG_FILE"
+    exit 1
+  fi
+
+  headline "mobile_gateway 启动完成"
+  status_all
+}
+
+start_core() {
+  if core_any_running; then
+    local current_run
+    current_run="$(active_run_id)"
+    if [[ -n "$current_run" ]]; then
+      STACK_RUN_ID="$current_run"
+      apply_run_log_paths "$STACK_RUN_ID"
+    else
+      prepare_latest_run_paths
+      current_run="${STACK_RUN_ID:-}"
+    fi
+    log "[CORE_START][ALREADY_RUNNING] active_run_id=${current_run:-unknown}"
+    show_banner
+    status_all
+    return 0
+  fi
+  prepare_start_run_paths
+  show_banner
+  start_vision_bg
+  if ! wait_for_endpoint "vision" "vision_req" "$READY_TIMEOUT_S" "$VISION_READY_EXTRA_S"; then
+    tail_last_logs_on_failure "vision" "$VISION_LOG_FILE"
+    cleanup_unused_run_dir "$STACK_RUN_ID" "aborted"
+    stop_core || true
+    exit 1
+  fi
+
+  start_orch_bg
+  if ! wait_for_endpoint_group "orchestrator" "$READY_TIMEOUT_S" "$ORCH_READY_EXTRA_S" "orchestrator_task_cmd" "orchestrator_vision_obs"; then
+    tail_last_logs_on_failure "orchestrator" "$ORCH_LOG_FILE"
+    cleanup_unused_run_dir "$STACK_RUN_ID" "aborted"
+    stop_core || true
+    exit 1
+  fi
+
+  promote_latest_run_id
+  headline "core 启动完成"
+  mark ok "vision / orchestrator(controller) 已通过 ready-check。"
+  status_all
+}
+
+start_stack() {
+  if ! pid_alive "$GATEWAY_PID_FILE" 0; then
+    start_gateway_only
+  else
+    prepare_latest_run_paths
+    log "mobile_gateway 已在运行, pid=$(cat "$GATEWAY_PID_FILE")"
+  fi
+
+  unset STACK_RUN_ID STACK_RUN_DIR
+  start_core
+  check_gateway_to_orchestrator_link || { stop_core || true; exit 1; }
   if ! wait_for_gateway_ready "$READY_TIMEOUT_S" "$GATEWAY_READY_EXTRA_S"; then
     tail_last_logs_on_failure "mobile_gateway" "$GATEWAY_LOG_FILE"
-    stop_all || true
+    stop_core || true
     exit 1
   fi
 
@@ -1304,8 +1348,24 @@ except Exception as e:
 stop_stack() {
   prepare_latest_run_paths
   show_banner
+  stop_core
+  status_all
+  run_latest_summary
+}
+
+stop_all_stack() {
+  prepare_latest_run_paths
+  show_banner
   stop_all
   status_all
+  run_latest_summary
+}
+
+restart_core() {
+  prepare_latest_run_paths
+  stop_core
+  unset STACK_RUN_ID STACK_RUN_DIR
+  start_core
 }
 
 main() {
@@ -1322,8 +1382,33 @@ main() {
     start|on|up|run|开启|开)
       start_stack
       ;;
+    gateway-start)
+      start_gateway_only
+      ;;
+    gateway-stop)
+      prepare_latest_run_paths
+      stop_gateway
+      status_all
+      ;;
+    gateway-restart)
+      prepare_latest_run_paths
+      stop_gateway
+      start_gateway_only
+      ;;
+    core-start)
+      start_core
+      ;;
+    core-stop)
+      stop_stack
+      ;;
+    core-restart)
+      restart_core
+      ;;
     stop|off|down|结束|关)
       stop_stack
+      ;;
+    stop-all)
+      stop_all_stack
       ;;
     status|状态)
       prepare_latest_run_paths
@@ -1331,11 +1416,18 @@ main() {
       ;;
     *)
       echo "用法："
-      echo "  ./start_robot_stack.sh        # 开启（默认）"
-      echo "  ./start_robot_stack.sh full   # 使用 full/sc171_board 配置开启"
-      echo "  ./start_robot_stack.sh dryrun # 使用 dry_run 配置开启"
-      echo "  ./start_robot_stack.sh stop   # 结束"
-      echo "  ./start_robot_stack.sh status # 查看状态"
+      echo "  ./start_robot_stack.sh gateway-start    # 只启动 mobile_gateway"
+      echo "  ./start_robot_stack.sh gateway-stop     # 只停止 mobile_gateway"
+      echo "  ./start_robot_stack.sh gateway-restart  # 重启 mobile_gateway"
+      echo "  ./start_robot_stack.sh core-start       # 启动 core: VISTA + orchestrator"
+      echo "  ./start_robot_stack.sh core-stop        # 停止 core，保留 mobile_gateway"
+      echo "  ./start_robot_stack.sh core-restart     # 重启 core"
+      echo "  ./start_robot_stack.sh start            # 兼容旧习惯：gateway 不在则启动，再启动 core"
+      echo "  ./start_robot_stack.sh stop             # 等价 core-stop，保留 mobile_gateway"
+      echo "  ./start_robot_stack.sh stop-all         # 停止 mobile_gateway + core，并完整清理"
+      echo "  ./start_robot_stack.sh status           # 查看状态"
+      echo "  ./start_robot_stack.sh full start       # 使用 full/sc171_board 配置启动"
+      echo "  ./start_robot_stack.sh dryrun start     # 使用 dry_run 配置启动"
       exit 1
       ;;
   esac

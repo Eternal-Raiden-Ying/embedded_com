@@ -69,8 +69,7 @@ def validate_config(config: SystemGlobalConfig, force_production: bool = False) 
     if float(car.edge_slide_vy_mps) == 0.14:
         msg = (
             "edge_slide_vy_mps is still 0.14 m/s. This is a schema fallback, "
-            "not an accepted runtime value; load orchestrator/configs/stage_params.yaml "
-            "or an explicit profile override."
+            "not an accepted runtime value; set the canonical orchestrator.car.edge_slide_vy_mps."
         )
         if production_path or not dry_run:
             raise ValueError(f"CRITICAL CONFIG ERROR: {msg}")

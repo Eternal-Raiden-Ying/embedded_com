@@ -321,7 +321,7 @@ class EmergencyStopTest(unittest.TestCase):
 
         # The written commands should contain the initial motion and the STOP from adapter.stop,
         # but NOT the final STOP command from the cancelled jog worker.
-        self.assertIn("MODE SEARCH\r\nV 0.020 0.000 0.000\r\n", uart.written)
+        self.assertIn("MODE SEARCH 0\r\nV 0.020 0.000 0.000\r\n", uart.written)
         self.assertIn("STOP\r\n", uart.written)
         # Check that we only have 2 commands (initial motion + manual stop)
         self.assertEqual(len(uart.written), 2)

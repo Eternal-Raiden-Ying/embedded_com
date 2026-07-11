@@ -75,6 +75,7 @@ class TransitionsMixin:
             self.ctx.task_target_confirm_count += 1
         elif new_state == State.TARGET_LOCKED:
             self.ctx.task_target_locked_count += 1
+            self._log("info", "target_locked_enter")
         if new_state == State.DONE and self.ctx.last_fail_reason:
             warning = str(self.ctx.last_fail_reason).strip()
             if warning and warning not in self.ctx.task_warning_history:
@@ -152,7 +153,7 @@ class TransitionsMixin:
             "table_stable_frames": int(getattr(self.cfg, "table_stable_frames", self.cfg.final_lock_frames_to_arrive)),
             "table_settle_ms": int(round(float(getattr(self.cfg, "table_settle_s", 0.3)) * 1000.0)),
             "table_stop_margin_m": float(getattr(self.cfg, "table_stop_margin_m", 0.05)),
-            "table_max_micro_adjust": int(getattr(self.cfg, "table_max_micro_adjust", 4)),
+            "table_internal_max_micro_adjust": 0,
             "final_lock_enabled": self._table_final_lock_enabled(),
             "micro_adjust_enabled": self._table_micro_adjust_enabled(),
             "final_lock_enter_dist_th_m": float(getattr(self.cfg, "final_lock_enter_dist_th_m", 0.08)),
@@ -196,6 +197,27 @@ class TransitionsMixin:
             "next_state": new_state.value,
             "reason": str(reason or ""),
             "transition_reason": str(reason or ""),
+            "target_found": bool(getattr(self.ctx.last_target_obs, "found", False)),
+            "target_cls": str(getattr(self.ctx.last_target_obs, "matched_cls", None) or getattr(self.ctx.last_target_obs, "target", "") or "") if self.ctx.last_target_obs is not None else "",
+            "target_conf": self._target_conf_value(self.ctx.last_target_obs) if self.ctx.last_target_obs is not None else None,
+            "target_center_x_norm": self._target_lateral_center_x(self.ctx.last_target_obs) if hasattr(self, "_target_lateral_center_x") else None,
+            "target_err_x": self._target_lateral_error_x(self.ctx.last_target_obs) if hasattr(self, "_target_lateral_error_x") else None,
+            "target_lateral_align_active": False,
+            "target_lateral_align_reason": str(getattr(self.ctx, "target_lateral_align_reason", "") or ""),
+            "target_lateral_vy_cmd": float(getattr(self.ctx, "target_lateral_vy_cmd", 0.0) or 0.0),
+            "target_lateral_stable_count": int(getattr(self.ctx, "target_lateral_stable_count", 0) or 0),
+            "target_locked": bool(getattr(self.ctx, "target_locked", False)),
+            "grasp_request_sent": bool(new_state == State.GRASP),
+            "grasp_dry_run": bool(new_state == State.DONE and str(reason or "").strip() == "grasp_request_dry_run"),
+            "hard_stop_barrier_active": bool(
+                new_state == State.AT_TABLE_EDGE
+                and float(getattr(self.ctx, "hard_stop_barrier_until_mono", 0.0) or 0.0) > monotonic_ts()
+            ),
+            "hard_stop_barrier_reason": str(getattr(self.ctx, "hard_stop_barrier_reason", "") or ""),
+            "hard_stop_barrier_left_ms": max(
+                0,
+                int(round((float(getattr(self.ctx, "hard_stop_barrier_until_mono", 0.0) or 0.0) - monotonic_ts()) * 1000.0)),
+            ),
         }
 
     def _on_enter_state(self, state: State):
@@ -207,18 +229,56 @@ class TransitionsMixin:
             self.ctx.confirmed_vision_mode = ""
             self.ctx.resume_state = None
             return
+        if state == State.AT_TABLE_EDGE:
+            fast_target = bool(
+                getattr(self.cfg, "target_search_fast_start_enable", True)
+                and not getattr(self.cfg, "stop_after_table_docking", False)
+                and not self._table_edge_only_test_enabled()
+            )
+            duration_s = 0.0 if fast_target else min(1.0, max(0.5, float(getattr(self.cfg, "edge_settle_s", 0.8) or 0.8)))
+            self.ctx.hard_stop_barrier_until_mono = monotonic_ts() + duration_s
+            self.ctx.hard_stop_barrier_reason = "" if fast_target else "at_table_edge_entry_sstop_barrier"
         if state == State.SEARCH_TARGET_INIT:
+            self._log("info", "target_search_enter")
+            self._log("info", "docking_final_latch_frozen_for_target_search")
+            self._log("info", f"[TARGET_SEARCH][VISION_REQ] mode=FIND_OBJECT target={self.ctx.active_target or ''}")
+            req_payload = self._active_req_payload()
+            if req_payload is not None:
+                self._queue_vision_req(req_payload, force=True)
+            self.ctx.final_locked = False
+            self.ctx.final_depth_latched = False
+            self.ctx.final_roi_mode_latched = False
+            self.ctx.final_edge_mode_latched = False
+            self.ctx.close_range_latched = False
+            self.ctx.final_yaw_align_active = False
+            self.ctx.final_lock_reason = ""
+            self.ctx.final_lock_last_transition_reason = ""
             self._reset_slide_ref_handoff()
+        if state == State.EDGE_SLIDE_SEARCH:
+            now_m = monotonic_ts()
+            self.ctx.edge_slide_enter_mono = now_m
+            self.ctx.edge_slide_last_progress_mono = now_m
+            self.ctx.edge_slide_lateral_distance_m = 0.0
+            self.ctx.edge_slide_frames = 0
+            self.ctx.edge_slide_confirm_block_reason = ""
+        if state == State.POST_GRASP_TURN_180:
+            self.ctx.post_grasp_turn_started_mono = 0.0
+            self.ctx.post_grasp_turn_cmd_accepted = False
+        elif state != State.POST_GRASP_TURN_180:
+            self.ctx.post_grasp_turn_started_mono = 0.0
+            self.ctx.post_grasp_turn_cmd_accepted = False
         if state == State.SEARCH_TABLE:
             self.reset_edge_tracking("enter_search_table")
             self.reset_target_tracking("enter_search_table")
+        elif state == State.FREEZE_BASE:
+            self._log("info", "freeze_base_enter")
         elif state in {State.NO_PROGRESS_RECOVERY, State.LEAVE_EDGE, State.NEXT_TABLE}:
             reason = f"enter_{state.value.lower()}"
             self.reset_edge_tracking(reason)
             self.reset_target_tracking(reason)
             self.reset_slide_reference(reason)
         elif state == State.GRASP:
-            self.ctx.grasp_substate = "AWAITING_RESPOND"
+            self._log("info", "grasp_enter")
             self.ctx.grasp_result = None
             self.ctx.grasp_status = ""
             self.ctx.grasp_reason = ""
@@ -226,8 +286,32 @@ class TransitionsMixin:
             self.ctx.grasp_reposition_start_mono = 0.0
             self.ctx.grasp_retry_count = 0
             self.ctx.arm_response = None
-            self.ctx.grasp_timeout_mono = monotonic_ts() + _GRASP_RESPOND_TIMEOUT_S
             self.ctx.grasp_verify_reported = False
+            self.ctx.remote_result_ignored = False
+            if self._builtin_bottle_target_active():
+                builtin_target = self._builtin_grasp_target()
+                pose_line = self._builtin_bottle_pose_line()
+                self.ctx.grasp_source = "builtin"
+                self.ctx.remote_grasp_active = False
+                self.ctx.builtin_bottle_active = True
+                self.ctx.builtin_grasp_active = True
+                self.ctx.builtin_grasp_target = builtin_target
+                self.ctx.builtin_bottle_pose_started = False
+                self.ctx.grasp_substate = "BUILTIN_BOTTLE_SEND_POSE"
+                self.ctx.grasp_timeout_mono = monotonic_ts() + float(self._builtin_grasp_cfg("pose_timeout_s", 15.0) or 15.0)
+                self._log("info", f"[GRASP][BUILTIN_SELECTED] target={builtin_target} line={pose_line} reason=grasp_enter_target_builtin")
+                if bool(self._builtin_grasp_cfg("skip_remote", True)):
+                    self._log("info", f"[GRASP][REMOTE_SKIPPED] reason=builtin_grasp_active target={builtin_target}")
+            else:
+                self.ctx.grasp_source = "remote"
+                self.ctx.remote_grasp_active = True
+                self.ctx.builtin_bottle_active = False
+                self.ctx.builtin_grasp_active = False
+                self.ctx.builtin_grasp_target = ""
+                self.ctx.builtin_bottle_pose_started = False
+                self.ctx.grasp_substate = "AWAITING_RESPOND"
+                self.ctx.grasp_timeout_mono = monotonic_ts() + _GRASP_RESPOND_TIMEOUT_S
+                self._log("info", "grasp_remote_request_sent")
         elif state == State.DONE:
             if self.ctx.last_fail_reason:
                 warning = str(self.ctx.last_fail_reason).strip()

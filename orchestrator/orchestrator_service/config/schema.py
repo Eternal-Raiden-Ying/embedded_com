@@ -67,6 +67,42 @@ class SerialConfig:
 
 
 @dataclass
+class ArmSerialConfig:
+    enabled: bool = True
+    dry_run: bool = False
+    port: str = "/dev/ttyUSB0"
+    baudrate: int = 9600
+    timeout_s: float = 0.10
+    open_settle_s: float = 3.0
+    bytesize: int = 8
+    parity: str = "N"
+    stopbits: int = 1
+    rtscts: bool = False
+    dsrdtr: bool = False
+    set_dtr: bool = False
+    set_rts: bool = False
+    readback_enabled: bool = True
+    response_timeout_s: float = 10.0
+
+
+@dataclass
+class MotionSmoothingConfig:
+    enabled: bool = True
+    bypass_on_safety_stop: bool = True
+    vx_accel_mps2: float = 0.35
+    vx_decel_mps2: float = 0.70
+    vy_accel_mps2: float = 0.20
+    vy_decel_mps2: float = 0.35
+    wz_accel_radps2: float = 0.90
+    wz_decel_radps2: float = 1.40
+    urgent_wz_accel_radps2: float = 2.20
+    urgent_wz_decel_radps2: float = 2.80
+    dt_min_s: float = 0.02
+    dt_max_s: float = 0.20
+    reset_gap_s: float = 0.50
+
+
+@dataclass
 class RuntimeConfig:
     project_root: str = field(default_factory=lambda: str(_DEFAULT_PROJECT_ROOT))
     log_dir: str = field(default_factory=lambda: str(_DEFAULT_LOG_DIR))
@@ -76,13 +112,13 @@ class RuntimeConfig:
     pid_file: str = field(default_factory=lambda: str(_DEFAULT_PID_DIR / "orchestrator.pid"))
     stack_run_id: str = ""
     tick_hz: float = 10.0
+    log_profile: str = "normal"
+    resource_sample_interval_s: float = 1.0
     log_mode: str = "concise"
     log_enabled: bool = True
     debug: bool = False
     state_block_period_s: float = 1.0
     heartbeat_period_s: float = 1.0
-    stage_params_file: str = ""
-    car_cmd_params_file: str = ""
     loaded_config_files: List[str] = field(default_factory=list)
 
 
@@ -98,6 +134,7 @@ class ControlThresholds:
     target_search_timeout_s: float = 10.0
     return_search_timeout_s: float = 15.0
     req_resend_period_s: float = 1.0
+    stop_after_table_docking: bool = False
 
     table_found_frames_to_approach: int = 2
     table_lost_frames_to_reacquire: int = 4
@@ -125,6 +162,8 @@ class ControlThresholds:
     table_stop_margin_m: float = 0.05  # Safety stop margin added to target distance in stop conditions checking
     table_settle_s: float = 0.50
     table_stable_frames: int = 5
+    table_yolo_align_center_x_target: float = 0.50
+    table_yolo_align_center_x_tol: float = 0.08
     yolo_table_control_enable: bool = True
     yolo_table_conf_min: float = 0.25
     yolo_table_edge_stable_frames: int = 5
@@ -161,6 +200,12 @@ class ControlThresholds:
     final_yaw_align_min_duration_ms: int = 1000
     final_yaw_last_good_hold_s: float = 1.2
     edge_settle_s: float = 0.80
+    at_table_edge_settle_s: float = 0.10
+    target_search_fast_start_enable: bool = True
+    target_fast_start_confirm_enable: bool = False
+    target_prewarm_max_age_ms: int = 180
+    target_prewarm_stable_obs: int = 2
+    final_to_lateral_max_vx_mps: float = 0.02
     dock_retry_limit: int = 2
     dock_retry_backoff_s: float = 0.60
 
@@ -171,23 +216,79 @@ class ControlThresholds:
     near_slow_max_vy_mps: float = 0.040
     near_slow_max_wz_radps: float = 0.04
     final_servo_enter_p10_m: float = 0.45
+    final_enter_depth_threshold_m: float = 0.58
+    final_enter_stable_count_required: int = 2
+    final_handoff_on_yolo_lost_enable: bool = True
+    final_handoff_recent_obs_max_age_s: float = 1.0
+    final_handoff_min_recent_depth_m: float = 0.65
+    final_fixed_roi_stop_threshold_m: float = 0.45
+    final_fixed_roi_stop_stable_count_required: int = 3
+    final_slow_probe_vx_mps: float = 0.05
+    near_start_final_enable: bool = True
+    near_start_final_depth_m: float = 0.58
+    near_start_align_enable: bool = True
+    near_start_align_timeout_s: float = 2.0
+    remote_init_min_interval_s: float = 30.0
+    remote_init_auto_enabled: bool = False
     edge_final_enter_margin_m: float = 0.06
     edge_final_stop_margin_m: float = 0.02
     close_range_enter_p10_m: float = 0.55
-    final_probe_vx_mps: float = 0.008
+    final_probe_vx_mps: float = 0.020
     final_missing_probe_vx_mps: float = 0.004
+    final_missing_probe_grace_s: float = 2.0
+    final_missing_roi_continue_forward_enable: bool = True
+    final_missing_roi_probe_vx_mps: float = 0.020
+    final_entry_bridge_vx_mps: float = 0.030
+    final_slow_stop_timeout_s: float = 12.0
     close_range_probe_vx_mps: float = 0.008
     close_range_missing_probe_vx_mps: float = 0.004
     roi_final_stop_p10_m: float = 0.42
     roi_final_slow_p10_m: float = 0.52
-    roi_final_probe_vx_mps: float = 0.008
+    roi_final_probe_vx_mps: float = 0.020
     roi_final_missing_probe_vx_mps: float = 0.004
     roi_final_missing_hold_s: float = 0.8
-    depth_envelope_stop_p10_m: float = 0.35
+    depth_envelope_stop_p10_m: float = 0.30
     depth_envelope_slow_p10_m: float = 0.50
+    depth_emergency_stop_p10_m: float = 0.20
     depth_envelope_mid_p10_m: float = 0.70
     depth_envelope_slow_vx_mps: float = 0.006
     depth_envelope_mid_vx_mps: float = 0.015
+    yolo_approach_far_vx_mps: float = 0.50
+    yolo_approach_mid_vx_mps: float = 0.20
+    yolo_approach_near_vx_mps: float = 0.10
+    yolo_approach_min_vx_mps: float = 0.05
+    yolo_approach_depth_stat_for_envelope: str = "median"
+    yolo_approach_use_p10_for_safety_only: bool = True
+    builtin_bottle_grasp_enable: bool = True
+    builtin_bottle_skip_remote: bool = True
+    builtin_bottle_pose_line: str = "POSE_BOTTLE"
+    builtin_bottle_pose_start_ack: str = "OK POSE_BOTTLE START"
+    builtin_bottle_pose_done_ack: str = "OK POSE_BOTTLE DONE"
+    builtin_bottle_pose_timeout_s: float = 15.0
+    builtin_bottle_grab_enable: bool = True
+    builtin_bottle_grab_line: str = "GRABBED"
+    builtin_bottle_grab_done_ack: str = "OK GRABBED DONE"
+    builtin_bottle_grab_timeout_s: float = 10.0
+    builtin_apple_grasp_enable: bool = True
+    builtin_apple_skip_remote: bool = True
+    builtin_apple_pose_line: str = "POSE_APPLE"
+    builtin_apple_pose_start_ack: str = "OK POSE_APPLE START"
+    builtin_apple_pose_done_ack: str = "OK POSE_APPLE DONE"
+    builtin_apple_pose_timeout_s: float = 15.0
+    builtin_apple_grab_enable: bool = True
+    builtin_apple_grab_line: str = "GRABBED"
+    builtin_apple_grab_done_ack: str = "OK GRABBED DONE"
+    builtin_apple_grab_timeout_s: float = 10.0
+    post_grasp_fixed_flow_enable: bool = True
+    post_grasp_turn_direction_sign: int = -1
+    post_grasp_forward_vx_mps: float = 0.08
+    post_grasp_forward_duration_s: float = 2.0
+    post_grasp_stop_hold_s: float = 0.5
+    post_grasp_rise_enable: bool = True
+    post_grasp_rise_line: str = "POSE_RISE"
+    post_grasp_rise_start_ack: str = "OK POSE_RISE START"
+    post_grasp_rise_done_ack: str = "OK POSE_RISE DONE"
+    post_grasp_rise_timeout_s: float = 10.0
     bbox_track_forward_enabled: bool = True
     min_forward_vx_mps: float = 0.040
     bbox_track_forward_vx_mps: float = 0.100
@@ -207,7 +308,6 @@ class ControlThresholds:
     edge_handoff_forward_vx_mps: float = 0.080
     forward_commit_min_s: float = 1.8
     far_forward_commit_min_s: float = 2.0
-    stop_after_table_docking: bool = True
     lateral_enabled: bool = True
     lateral_vy_max_mps: float = 0.180
     lateral_deadband_norm: float = 0.020
@@ -250,6 +350,10 @@ class ControlThresholds:
     min_progress_m: float = 0.010
     multi_table_enabled: bool = False
 
+    target_fast_start_confirm_enable: bool = False
+    edge_slide_min_duration_s: float = 1.50
+    edge_slide_min_lateral_distance_m: float = 0.08
+    edge_slide_min_frames_before_confirm: int = 10
     search_target_init_hold_s: float = 0.25
     target_found_frames_to_confirm: int = 3
     target_confirm_conf_th: float = 0.30
@@ -261,6 +365,43 @@ class ControlThresholds:
     target_confirm_min_bbox_area: float = 0.0
     target_confirm_window_s: float = 1.50
     target_confirm_found_ratio_th: float = 0.50
+    target_lateral_align_enable: bool = True
+    target_lateral_align_center_x_target: float = 0.40
+    target_lateral_align_center_x_tol: float = 0.06
+    # Legacy compatibility only; runtime derives deadband from 0.5 * target_lateral_align_center_x_tol.
+    target_lateral_align_center_x_deadband: float = 0.03
+    target_lateral_align_kp_vy: float = 0.05
+    target_lateral_align_vy_min_mps: float = 0.008
+    target_lateral_align_vy_max_mps: float = 0.025
+    target_lateral_align_stable_frames: int = 3
+    target_lateral_align_lost_hold_s: float = 0.80
+    target_lateral_hold_enable: bool = True
+    target_lateral_hold_s: float = 0.8
+    target_lateral_lost_stop_s: float = 1.2
+    target_lateral_min_vy_mps: float = 0.016
+    target_lateral_align_timeout_s: float = 12.0
+    post_grasp_place_enable: bool = True
+    post_grasp_turn_enable: bool = True
+    post_grasp_turn_wz_radps: float = 0.45
+    post_grasp_turn_duration_s: float = 3.5
+    post_grasp_turn_direction: str = "left"
+    basket_search_timeout_s: float = 15.0
+    basket_search_wz_radps: float = 0.25
+    basket_align_center_x_target: float = 0.50
+    basket_align_center_x_tol: float = 0.08
+    basket_approach_vx_mps: float = 0.08
+    basket_approach_vx_slow_mps: float = 0.035
+    basket_stop_bbox_area_norm: float = 0.18
+    basket_stop_bbox_height_norm: float = 0.38
+    basket_stop_stable_count_required: int = 3
+    basket_approach_timeout_s: float = 20.0
+    place_pose_x_cm: float = 12.0
+    place_pose_y_cm: float = 0.0
+    place_pose_z_cm: float = 8.0
+    place_pose_pitch_deg: float = 0.0
+    place_pose_roll_deg: float = 0.0
+    place_gripper_width: float = 80.0
+    place_duration_ms: int = 800
     target_lock_conf_th: float = 0.40
     target_lock_found_ratio_th: float = 0.60
     target_lock_settle_s: float = 0.50
@@ -334,12 +475,21 @@ class ControlThresholds:
     task_done_shutdown_vision: bool = False
     enable_pick_pipeline: bool = False
     assume_grasp_success_for_test: bool = False
+    target_gripper_widths: Dict[str, float] = field(default_factory=lambda: {
+        "苹果": 50.0,
+        "猕猴桃": 65.0,
+        "瓶子": 70.0,
+        "apple": 80.0,
+        "bottle": 80.0,
+        "kiwi_fruit": 70.0,
+    })
 
 
 @dataclass
 class CarMotionConfig:
     grasp_reposition_speed_cm_s: float = 10.0
     pre_arm_stop_settle_ms: int = 150
+    grasp_pose_time_ms: int = 800
     search_table_wz_radps: float = 0.10
     fallback_align_turn_wz_min_radps: float = 0.10
     fallback_align_turn_wz_max_radps: float = 0.45
@@ -457,6 +607,8 @@ class CarMotionConfig:
 class OrchestratorConfig:
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     serial: SerialConfig = field(default_factory=SerialConfig)
+    arm_serial: ArmSerialConfig = field(default_factory=ArmSerialConfig)
+    motion_smoothing: MotionSmoothingConfig = field(default_factory=MotionSmoothingConfig)
     control: ControlThresholds = field(default_factory=ControlThresholds)
     car: CarMotionConfig = field(default_factory=CarMotionConfig)
     docking: DockingControlConfig = field(default_factory=DockingControlConfig)
@@ -494,7 +646,7 @@ class OrchestratorConfig:
         "keys": ["钥匙", "钥匙串"],
         "apple": ["苹果"],
         "banana": ["香蕉"],
-        "basket": ["篮子"],
+        "basket": ["篮子", "筐", "收纳篮"],
         "grape": ["葡萄"],
         "kiwi fruit": ["猕猴桃", "奇异果"],
         "kiwi": ["猕猴桃", "奇异果"],

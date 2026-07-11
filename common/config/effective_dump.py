@@ -70,8 +70,6 @@ def format_effective_config(config: Any, effective_dry_run: Optional[bool] = Non
         "=" * 80,
         f"  config profile       : {profile}",
         f"  loaded config files  : {_fmt_loaded(_loaded_files(config, orch))}",
-        f"  loaded stage_params  : {runtime.stage_params_file or '<none>'}",
-        f"  loaded car_cmd_params: {runtime.car_cmd_params_file or '<none>'}",
         f"  UART port / dry_run  : {uart_port} / {int(dry_run)}",
         f"  tick_hz              : {_safe_float(runtime.tick_hz):.2f}",
         f"  near_stop_depth_m    : {_safe_float(getattr(control, 'near_stop_depth_m', 0.0)):.3f}",

@@ -123,9 +123,30 @@ def _sync_edge_follow_payload(req: VisionReq, ctx: StageContext) -> None:
         "locked_edge_conf",
         "locked_obs_seq",
         "current_edge_id",
+        "orchestrator_state",
+        "final_phase_active",
+        "final_roi_mode_latched",
+        "final_distance_servo_active",
     ):
         if key in payload:
             ctx.stage_state[key] = payload.get(key)
+
+
+def _sync_target_payload(req: VisionReq, ctx: StageContext) -> None:
+    payload = req.payload if isinstance(req.payload, dict) else {}
+    for key in ("task_id", "raw_target", "canonical_target", "class_name", "class_id", "session_id", "epoch"):
+        if key in payload:
+            ctx.stage_state[key] = payload.get(key)
+
+
+def _annotate_target_obs(target_obs: dict, ctx: StageContext) -> dict:
+    out = dict(target_obs or {})
+    out.setdefault("raw_target", ctx.stage_state.get("raw_target") or ctx.target_name)
+    out.setdefault("canonical_target", ctx.stage_state.get("canonical_target") or ctx.target_name)
+    out.setdefault("expected_class_name", ctx.stage_state.get("class_name") or ctx.stage_state.get("canonical_target") or ctx.target_name)
+    out.setdefault("expected_class_id", ctx.stage_state.get("class_id"))
+    out.setdefault("task_id", ctx.stage_state.get("task_id"))
+    return out
 
 
 class SearchStagePlan(BaseStagePlan):
@@ -163,6 +184,7 @@ class SearchStagePlan(BaseStagePlan):
             )
         ctx.current_mode = self._mode_for_request(req, search_kind, self.default_mode)
         ctx.stage_state["search_kind"] = search_kind
+        _sync_target_payload(req, ctx)
         ctx.stage_state["target_obs"] = target_obs_from_payload(payload, ctx.target_name)
         ctx.stage_state["table_edge_obs"] = table_edge_obs_from_payload(payload)
         _sync_edge_follow_payload(req, ctx)
@@ -186,6 +208,7 @@ class SearchStagePlan(BaseStagePlan):
                 )
             ctx.current_mode = self._mode_for_request(req, search_kind, self.default_mode)
             ctx.stage_state["search_kind"] = search_kind
+            _sync_target_payload(req, ctx)
             _sync_edge_follow_payload(req, ctx)
             if payload_has_target_obs(req.payload):
                 ctx.stage_state["target_obs"] = target_obs_from_payload(req.payload, ctx.target_name)
@@ -283,12 +306,16 @@ class SearchStagePlan(BaseStagePlan):
         if local_ts_val is None:
             local_ts_val = tick_input.ts
 
-        is_current_frame, _ = check_edge_current_enough(
-            edge_frame_id=edge_frame_id,
-            local_frame_id=local_frame_id,
-            edge_ts=edge_ts_val,
-            local_ts=local_ts_val,
-        )
+        sync_status = str(table_edge_obs.get("sync_status") or "").strip().lower()
+        if sync_status in {"exact", "nearest", "matched_hold", "unavailable"}:
+            is_current_frame = sync_status in {"exact", "nearest", "matched_hold"}
+        else:
+            is_current_frame, _ = check_edge_current_enough(
+                edge_frame_id=edge_frame_id,
+                local_frame_id=local_frame_id,
+                edge_ts=edge_ts_val,
+                local_ts=local_ts_val,
+            )
 
         logger.info(
             "[EDGE_SELECTION_TRACE] results_present=%s results_frame_id=%s results_edge_found=%s "
@@ -424,11 +451,17 @@ class SearchStagePlan(BaseStagePlan):
             ctx.stage_state["_table_edge_obs_cache"] = dict(table_edge_obs)
         
         status_changed = (after_edge_found != prev_found) or (after_edge_valid != prev_valid) or (after_edge_trusted != prev_trusted)
-        force_send = False
-        if table_edge_source == "results" and is_current_frame:
-            force_send = True
-        elif status_changed:
-            force_send = True
+        obs_seq = table_edge_obs.get("obs_seq")
+        obs_identity = (obs_seq,) if obs_seq is not None else (edge_frame_id, table_edge_obs.get("trace_id"))
+        previous_identity = ctx.stage_state.get("last_seen_table_edge_identity")
+        is_new_identity = obs_identity != previous_identity
+        if is_new_identity:
+            ctx.stage_state["last_seen_table_edge_identity"] = obs_identity
+            ctx.stage_state["last_seen_table_edge_obs_seq"] = obs_seq
+            ctx.stage_state["last_seen_table_edge_frame_id"] = edge_frame_id
+        # A result is urgent only on first arrival; repeated scheduler reads are
+        # retained as latest state but do not refresh observation freshness.
+        force_send = bool((table_edge_source == "results" and is_current_frame and is_new_identity) or status_changed)
 
         return table_edge_obs, table_edge_source, force_send
 
@@ -460,6 +493,8 @@ class SearchStagePlan(BaseStagePlan):
                     default_factory=lambda: target_obs_from_payload(None, ctx.target_name),
                     result_factory=lambda payload: target_obs_from_results(payload, ctx.target_name),
                 )
+                target_obs = _annotate_target_obs(target_obs, ctx)
+                target_obs["target_prewarm_active"] = True
                 ctx.stage_state["target_obs"] = dict(target_obs)
             
             table_edge_obs, table_edge_source, force_send = self._process_table_edge_obs(
@@ -502,6 +537,7 @@ class SearchStagePlan(BaseStagePlan):
                 default_factory=lambda: target_obs_from_payload(None, ctx.target_name),
                 result_factory=lambda payload: target_obs_from_results(payload, ctx.target_name),
             )
+            target_obs = _annotate_target_obs(target_obs, ctx)
             return StageOutput(
                 vision_obs=self.build_obs(
                     ctx,
@@ -524,6 +560,7 @@ class SearchStagePlan(BaseStagePlan):
                 default_factory=lambda: target_obs_from_payload(None, ctx.target_name),
                 result_factory=lambda payload: target_obs_from_results(payload, ctx.target_name),
             )
+            target_obs = _annotate_target_obs(target_obs, ctx)
             
             table_edge_obs, table_edge_source, force_send = self._process_table_edge_obs(
                 results, ctx, tick_input, results.get("local_perception")

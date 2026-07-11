@@ -304,28 +304,89 @@ def _docking_result(
     final_locked = _bool_field("final_locked")
     final_roi_mode_latched = _bool_field("final_roi_mode_latched")
     near_table_latched = _bool_field("near_table_latched")
-    depth_p10 = _optional_field_float("table_roi_depth_p10")
-    if depth_p10 is None:
+    state_name = str(_field("state", "") or "").strip().upper()
+    final_phase_state = state_name == "FINAL_SLOW_STOP"
+    final_parking_depth_phase = bool(
+        _bool_field("close_range_latched")
+        or _bool_field("near_table_latched")
+        or final_roi_mode_latched
+        or _bool_field("final_edge_mode_latched")
+        or final_depth_latched
+        or _bool_field("final_distance_servo_active")
+        or state_name in {"FINAL_SLOW_STOP", "AT_TABLE_EDGE"}
+    )
+    depth_p10 = _optional_field_float("final_depth_m")
+    depth_stat_used = "final_depth_m" if depth_p10 is not None else "missing"
+    depth_stat_value = depth_p10
+    safety_p10 = None
+    if not final_parking_depth_phase:
+        safety_p10 = _optional_field_float("table_roi_depth_p10")
+        if safety_p10 is None:
+            safety_p10 = _optional_field_float("depth_p10")
+        if state_name == "YOLO_APPROACH":
+            median_value = _optional_field_float("table_roi_depth_median")
+            if median_value is not None:
+                depth_p10 = median_value
+                depth_stat_value = median_value
+                depth_stat_used = "table_roi_depth_median"
+            else:
+                depth_p10 = None
+                depth_stat_value = None
+                depth_stat_used = "missing"
+        elif depth_p10 is None:
+            depth_p10 = safety_p10
+            depth_stat_value = depth_p10
+            depth_stat_used = "table_roi_depth_p10" if depth_p10 is not None else "missing"
+    if depth_p10 is None and state_name != "YOLO_APPROACH":
         depth_p10 = _optional_field_float("depth_p10")
+        depth_stat_value = depth_p10
+        depth_stat_used = "depth_p10" if depth_p10 is not None else "missing"
     vx_cap: Optional[float] = None
     envelope_reason = ""
     final_distance_servo_active = bool(safe_summary.get("final_distance_servo_active", False))
     if (final_locked or final_depth_latched) and not final_distance_servo_active:
         vx_cap = 0.0
         envelope_reason = "final_locked" if final_locked else "final_depth_latched"
+    elif state_name == "YOLO_APPROACH" and safety_p10 is not None and safety_p10 <= _float(safe_summary, "depth_envelope_stop_p10_m", 0.30):
+        vx_cap = 0.0
+        envelope_reason = "depth_p10_stop"
+        safe_summary["safety_source"] = "table_roi_p10"
+        safe_summary["safety_value"] = float(safety_p10)
+        safe_summary["safety_hard_hold_threshold"] = float(_float(safe_summary, "depth_envelope_stop_p10_m", 0.30))
+        safe_summary["safety_emergency_threshold"] = float(_float(safe_summary, "depth_emergency_stop_p10_m", 0.20))
+        safe_summary["safety_action"] = "emergency_stop" if float(safety_p10) <= float(_float(safe_summary, "depth_emergency_stop_p10_m", 0.20)) else "hold"
+        safe_summary["safety_blocks_forward"] = True
+        safe_summary["safety_blocks_arrival_transition"] = bool(float(safety_p10) <= float(_float(safe_summary, "depth_emergency_stop_p10_m", 0.20)))
+        depth_stat_used = "table_roi_depth_p10"
+        depth_stat_value = safety_p10
     elif depth_p10 is not None:
-        stop_p10 = _float(safe_summary, "depth_envelope_stop_p10_m", 0.35)
+        stop_p10 = _float(safe_summary, "depth_envelope_stop_p10_m", 0.30)
         slow_p10 = _float(safe_summary, "depth_envelope_slow_p10_m", 0.50)
+        emergency_p10 = _float(safe_summary, "depth_emergency_stop_p10_m", 0.20)
         mid_p10 = _float(safe_summary, "depth_envelope_mid_p10_m", 0.70)
         if depth_p10 <= stop_p10:
             vx_cap = 0.0
-            envelope_reason = "depth_p10_stop"
+            envelope_reason = "depth_median_stop" if state_name == "YOLO_APPROACH" else "depth_p10_stop"
+            safe_summary.setdefault("safety_value", float(depth_p10))
+            safe_summary.setdefault("safety_hard_hold_threshold", float(stop_p10))
+            safe_summary.setdefault("safety_emergency_threshold", float(emergency_p10))
+            safe_summary["safety_action"] = "emergency_stop" if float(depth_p10) <= float(emergency_p10) else "hold"
+            safe_summary["safety_blocks_forward"] = True
+            safe_summary["safety_blocks_arrival_transition"] = bool(float(depth_p10) <= float(emergency_p10))
         elif depth_p10 <= slow_p10:
             vx_cap = abs(_float(safe_summary, "depth_envelope_slow_vx_mps", 0.006))
-            envelope_reason = "depth_p10_slow"
+            envelope_reason = "depth_median_slow" if state_name == "YOLO_APPROACH" else "depth_p10_slow"
+            safe_summary.setdefault("safety_value", float(depth_p10))
+            safe_summary["safety_action"] = "slow"
+            safe_summary["safety_blocks_forward"] = False
+            safe_summary["safety_blocks_arrival_transition"] = False
         elif depth_p10 <= mid_p10:
             vx_cap = abs(_float(safe_summary, "depth_envelope_mid_vx_mps", 0.015))
-            envelope_reason = "depth_p10_mid"
+            envelope_reason = "depth_median_mid" if state_name == "YOLO_APPROACH" else "depth_p10_mid"
+            safe_summary.setdefault("safety_value", float(depth_p10))
+            safe_summary["safety_action"] = "slow"
+            safe_summary["safety_blocks_forward"] = False
+            safe_summary["safety_blocks_arrival_transition"] = False
     if vx_cap is None and near_table_latched:
         vx_cap = abs(_float(safe_summary, "near_slow_max_vx_mps", _float(safe_summary, "depth_envelope_slow_vx_mps", 0.030)))
         envelope_reason = "near_table_latched"
@@ -339,10 +400,29 @@ def _docking_result(
         or final_locked
         or final_depth_latched
     )
-    if depth_p10 is not None and depth_p10 <= _float(safe_summary, "final_servo_enter_p10_m", 0.45):
+    if depth_p10 is not None and depth_p10 <= _float(safe_summary, "final_enter_depth_threshold_m", 0.58):
         final_no_yaw = True
     if vx_cap is not None and abs(final_vx) > vx_cap:
         final_vx = max(-vx_cap, min(vx_cap, final_vx))
+    yolo_min_vx = abs(_float(safe_summary, "yolo_approach_min_vx_mps", 0.02))
+    yolo_min_allowed = bool(
+        state_name == "YOLO_APPROACH"
+        and final_vx > 1e-9
+        and yolo_min_vx > 0.0
+        and stop_class == StopClass.NONE
+        and not bool(safe_summary.get("emergency_stop_active", False))
+        and not bool(safe_summary.get("obstacle_active", False))
+        and not bool(safe_summary.get("obstacle_stop_active", False))
+        and not bool(safe_summary.get("base_depth_hard_safety", False))
+        and not bool(safe_summary.get("base_depth_stop_active", False))
+        and not bool(safe_summary.get("depth_hard_stop_active", False))
+        and not bool(safe_summary.get("safety_stop_active", False))
+        and str(safe_summary.get("stale_level") or "").strip().lower() not in {"hard_stale", "dead"}
+        and str(safe_summary.get("stop_class") or "").strip().lower() not in {"emergency", "safety", "stale_recovery"}
+    )
+    if yolo_min_allowed and final_vx < yolo_min_vx:
+        final_vx = yolo_min_vx
+        safe_summary["speed_limit_reason"] = str(safe_summary.get("speed_limit_reason") or "yolo_approach_min_vx")
     if final_no_yaw:
         final_vy = 0.0
         final_wz = 0.0
@@ -356,20 +436,35 @@ def _docking_result(
         stage = DockingStage.NEAR_EDGE_APPROACH
         forward_owner = str(forward_owner or "near_depth")
         safe_summary["docking_reason"] = str(safe_summary.get("docking_reason") or "near_table_latched")
-    if final_depth_latched and not final_distance_servo_active and action not in {DockingAction.FINAL_LOCKED_STOP, DockingAction.FINAL_YAW_ALIGN}:
-        action = DockingAction.FINAL_LOCKED_STOP
+    if final_depth_latched and not final_locked and not final_distance_servo_active and action not in {DockingAction.FINAL_YAW_ALIGN}:
+        action = DockingAction.FINAL_SLOW_PROBE
         stage = DockingStage.FINAL_DISTANCE_HOLD
-        forward_owner = "none"
+        forward_owner = str(forward_owner or "final_depth_hold")
         if str(safe_summary.get("docking_reason") or "") in {"", "near_table_latched", "near_edge_forward", "near_hold"}:
             safe_summary["docking_reason"] = "final_depth_latched"
     if envelope_reason:
         safe_summary["depth_speed_envelope_reason"] = envelope_reason
+        safe_summary["depth_speed_envelope_stat_used"] = str(depth_stat_used)
+        safe_summary["depth_speed_envelope_stat_value"] = depth_stat_value
         safe_summary["depth_speed_envelope_vx_cap"] = float(vx_cap if vx_cap is not None else 0.0)
+    if state_name == "YOLO_APPROACH":
+        safe_summary["yolo_approach_min_vx_mps"] = float(yolo_min_vx)
+        safe_summary.setdefault("depth_speed_envelope_stat_used", str(depth_stat_used))
+        safe_summary.setdefault("depth_speed_envelope_stat_value", depth_stat_value)
+        safe_summary.setdefault("safety_source", "")
+        safe_summary.setdefault("speed_limit_reason", str(envelope_reason or ""))
     edge_score = _float(safe_summary, "edge_readiness_score", 0.0)
     edge_enter = _float(safe_summary, "edge_readiness_enter_score", 0.65)
     edge_ready_for_approach = bool(_bool_field("edge_trusted") or bool(safe_summary.get("edge_handoff_complete", False)) or edge_score >= edge_enter)
     safe_summary.setdefault("edge_ready_for_approach", edge_ready_for_approach)
-    safe_summary.setdefault("edge_ready_for_final", bool(_bool_field("edge_valid") or _bool_field("edge_trusted")))
+    safe_summary.setdefault(
+        "edge_ready_for_final",
+        bool(
+            _bool_field("edge_trusted")
+            or bool(safe_summary.get("edge_handoff_complete", False))
+            or edge_score >= edge_enter
+        ),
+    )
     actual_block = str(blocked_by or safe_summary.get("effective_block_reason") or safe_summary.get("forward_block_reason") or safe_summary.get("effective_forward_block_reason") or "")
     moving = bool(abs(float(final_vx)) > 1e-9 or abs(float(final_vy)) > 1e-9 or abs(float(final_wz)) > 1e-9)
     safe_summary["effective_block_reason"] = "" if moving else actual_block
@@ -389,6 +484,15 @@ def _docking_result(
         "yolo_bbox_touch_left",
         "yolo_bbox_touch_right",
         "yolo_bbox_touch_bottom",
+        "table_roi_depth_mean",
+        "table_roi_depth_median",
+        "table_roi_depth_total_count",
+        "table_roi_depth_valid_ratio",
+        "table_roi_depth_sampler_level",
+        "table_roi_depth_sampler_name",
+        "table_roi_depth_bbox_norm",
+        "table_roi_depth_invalid_reason",
+        "final_fixed_roi_depth_valid_ratio",
     ):
         safe_summary.pop(key, None)
 
@@ -396,27 +500,45 @@ def _docking_result(
     is_final_servo = bool(safe_summary.get("final_distance_servo_active", False) or final_distance_servo_active or final_depth_latched)
     is_close_range = bool(safe_summary.get("close_range_latched", False) or _bool_field("close_range_latched"))
 
-    if action in {DockingAction.FINAL_LOCKED_STOP, DockingAction.CLOSE_RANGE_PROBE, DockingAction.FINAL_SLOW_PROBE}:
-        if is_locked:
-            action = DockingAction.FINAL_LOCKED_STOP
-            final_vx = 0.0
-            final_vy = 0.0
-            final_wz = 0.0
-            stage = DockingStage.FINAL_LOCKED
-        else:
-            final_vy = 0.0
-            final_wz = 0.0
-            if is_final_servo:
-                action = DockingAction.FINAL_SLOW_PROBE
-                stage = DockingStage.FINAL_DISTANCE_HOLD
-            else:
-                action = DockingAction.CLOSE_RANGE_PROBE
-                stage = DockingStage.FINAL_DISTANCE_HOLD
-
     safe_summary["final_locked"] = is_locked
     safe_summary["close_range_latched"] = is_close_range
     safe_summary["final_distance_servo_active"] = is_final_servo
+    safe_summary["final_phase_active"] = bool(final_phase_state)
+    safe_summary["legacy_edge_stop_threshold_m"] = float(_float(safe_summary, "depth_envelope_stop_p10_m", 0.30))
+    safe_summary.setdefault("safety_slow_threshold", float(_float(safe_summary, "depth_envelope_slow_p10_m", 0.50)))
+    safe_summary.setdefault("safety_hard_hold_threshold", float(_float(safe_summary, "depth_envelope_stop_p10_m", 0.30)))
+    safe_summary.setdefault("safety_emergency_threshold", float(_float(safe_summary, "depth_emergency_stop_p10_m", 0.20)))
+    safe_summary.setdefault("safety_action", "none")
+    safe_summary.setdefault("safety_blocks_forward", False)
+    safe_summary.setdefault("safety_blocks_arrival_transition", False)
     safe_summary["docking_action"] = action.value
+    if action == DockingAction.DEPTH_SAFETY_HOLD:
+        depth_source = str(safe_summary.get("best_depth_source") or safe_summary.get("measured_dist_source") or "")
+        safety_value = safe_summary.get("best_depth_value", safe_summary.get("measured_dist_m"))
+        if "final_fixed_roi" in depth_source or "fixed_roi" in depth_source:
+            safe_summary["safety_source"] = "final_fixed_roi"
+            safety_value = safe_summary.get("final_fixed_roi_stop_stat", safety_value)
+        elif "table_roi_depth_p10" in depth_source or "roi_final_p10" in depth_source:
+            safe_summary["safety_source"] = "table_roi_p10"
+            safety_value = safe_summary.get("table_roi_depth_p10", safety_value)
+        elif "depth_p10" in depth_source or "edge" in depth_source:
+            safe_summary["safety_source"] = "edge_depth"
+            safety_value = safe_summary.get("edge_depth_p10", safe_summary.get("depth_p10", safety_value))
+        else:
+            safe_summary.setdefault("safety_source", "unknown")
+        safe_summary.setdefault("safety_value", safety_value)
+        safe_summary.setdefault("safety_hard_hold_threshold", float(_float(safe_summary, "depth_envelope_stop_p10_m", 0.30)))
+        safe_summary.setdefault("safety_emergency_threshold", float(_float(safe_summary, "depth_emergency_stop_p10_m", 0.20)))
+        emergency = False
+        try:
+            emergency = safety_value is not None and float(safety_value) <= float(safe_summary.get("safety_emergency_threshold"))
+        except Exception:
+            emergency = False
+        safe_summary["safety_action"] = "emergency_stop" if emergency else "hold"
+        safe_summary["safety_blocks_forward"] = True
+        safe_summary["safety_blocks_arrival_transition"] = bool(emergency)
+        if safe_summary.get("final_fixed_roi_stop_stat") is None and safe_summary.get("roi_depth_stat") is None:
+            safe_summary.setdefault("fixed_roi_status", "missing")
 
     return _from_docking_result(
         DockingMotionResult(
@@ -458,9 +580,14 @@ def arbitrate_table_docking_motion(
         {
             "docking_stage": docking_stage.value,
             "docking_observation": docking_obs.to_dict(),
+            "table_roi_source": docking_obs.table_roi_source,
+            "table_roi_latched": bool(docking_obs.table_roi_latched),
+            "table_roi_latch_age_s": docking_obs.table_roi_latch_age_s,
+            "table_roi_xyxy": docking_obs.table_roi_xyxy,
         }
     )
     state = _state_value(ctx)
+    summary.setdefault("state", state)
     if state in {"IDLE", "AT_TABLE_EDGE"}:
         try:
             ctx.final_roi_mode_latched = False
@@ -500,6 +627,41 @@ def arbitrate_table_docking_motion(
         or edge_readiness_level in {"ready", "trusted", "handoff_ready", "approach_ready"}
     )
     now_mono = time.monotonic()
+    state = str(getattr(ctx.state, "value", ctx.state) or "").strip().upper()
+    edge_ready_for_final_strong = bool(edge_approach_gate_ready)
+    edge_slope_latch_reason = ""
+    edge_slope_latch_source = ""
+    if docking_obs.edge_trusted:
+        edge_slope_latch_reason = "edge_trusted"
+        edge_slope_latch_source = "edge_trusted"
+    elif edge_handoff_complete:
+        edge_slope_latch_reason = "edge_handoff_complete"
+        edge_slope_latch_source = "edge_handoff"
+    elif edge_readiness_ready:
+        edge_slope_latch_reason = "edge_readiness_score"
+        edge_slope_latch_source = "readiness_score"
+    elif edge_readiness_level in {"ready", "trusted", "handoff_ready", "approach_ready"}:
+        edge_slope_latch_reason = f"edge_readiness_level:{edge_readiness_level}"
+        edge_slope_latch_source = "readiness_level"
+    edge_slope_latch_new = False
+    if edge_ready_for_final_strong and not bool(getattr(ctx, "edge_slope_final_ready_latched", False)):
+        try:
+            ctx.edge_slope_final_ready_latched = True
+            ctx.edge_slope_final_ready_ts = now_mono
+            ctx.edge_slope_final_ready_state = state
+            ctx.edge_slope_final_ready_reason = edge_slope_latch_reason or "edge_ready_for_final_strong"
+            ctx.edge_slope_final_ready_value = float(edge_readiness_score)
+            ctx.edge_slope_final_ready_source = edge_slope_latch_source or "edge_readiness"
+            edge_slope_latch_new = True
+        except Exception:
+            pass
+    edge_slope_final_ready_latched = bool(getattr(ctx, "edge_slope_final_ready_latched", False))
+    edge_slope_latch_age_s = None
+    if edge_slope_final_ready_latched and getattr(ctx, "edge_slope_final_ready_ts", None) is not None:
+        try:
+            edge_slope_latch_age_s = max(0.0, now_mono - float(ctx.edge_slope_final_ready_ts))
+        except Exception:
+            edge_slope_latch_age_s = None
     forward_commit_active = bool(
         float(getattr(ctx, "forward_commit_until_mono", 0.0) or 0.0) > now_mono
         and not bool(summary.get("near_table_latched", False))
@@ -518,6 +680,8 @@ def arbitrate_table_docking_motion(
         edge_lost_age_s = max(0.0, now_mono - float(getattr(ctx, "last_good_edge_yaw_mono", 0.0) or 0.0))
     elif float(getattr(ctx, "last_edge_good_mono", 0.0) or 0.0) > 0.0:
         edge_lost_age_s = max(0.0, now_mono - float(getattr(ctx, "last_edge_good_mono", 0.0) or 0.0))
+    edge_ready_for_final = bool(edge_ready_for_final_strong)
+    close_range_enter_p10 = _float(summary, "final_enter_depth_threshold_m", 0.58)
     roi_depth_valid = bool(summary.get("table_roi_depth_valid", getattr(obs, "table_roi_depth_valid", False) if obs is not None else False))
     roi_depth_value = summary.get("table_roi_depth_p10", getattr(obs, "table_roi_depth_p10", None) if obs is not None else None)
     if roi_depth_value is None:
@@ -526,7 +690,255 @@ def arbitrate_table_docking_motion(
         roi_depth_m = float(roi_depth_value) if roi_depth_value is not None else None
     except (TypeError, ValueError):
         roi_depth_m = None
-    final_servo_enter_p10 = _float(summary, "final_servo_enter_p10_m", 0.45)
+    legacy_roi_depth_valid = bool(roi_depth_valid and roi_depth_m is not None)
+    legacy_roi_depth_m = roi_depth_m if legacy_roi_depth_valid else None
+    fixed_roi_active = bool(summary.get("final_fixed_roi_active", getattr(obs, "final_fixed_roi_active", False) if obs is not None else False))
+    fixed_roi_valid = bool(summary.get("final_fixed_roi_depth_valid", getattr(obs, "final_fixed_roi_depth_valid", False) if obs is not None else False))
+    fixed_roi_mean_value = summary.get("final_fixed_roi_depth_mean", getattr(obs, "final_fixed_roi_depth_mean", None) if obs is not None else None)
+    fixed_roi_median_value = summary.get("final_fixed_roi_depth_median", getattr(obs, "final_fixed_roi_depth_median", None) if obs is not None else None)
+    fixed_roi_p10_value = summary.get("final_fixed_roi_depth_p10", getattr(obs, "final_fixed_roi_depth_p10", None) if obs is not None else None)
+    fixed_roi_xyxy_value = summary.get("final_fixed_roi_xyxy", getattr(obs, "final_fixed_roi_xyxy", None) if obs is not None else None)
+    fixed_roi_xyxy = list(fixed_roi_xyxy_value) if isinstance(fixed_roi_xyxy_value, (list, tuple)) and len(fixed_roi_xyxy_value) >= 4 else None
+    fixed_roi_width_px = None
+    fixed_roi_height_px = None
+    if fixed_roi_xyxy is not None:
+        try:
+            fixed_roi_width_px = max(0.0, float(fixed_roi_xyxy[2]) - float(fixed_roi_xyxy[0]))
+            fixed_roi_height_px = max(0.0, float(fixed_roi_xyxy[3]) - float(fixed_roi_xyxy[1]))
+        except (TypeError, ValueError):
+            fixed_roi_width_px = None
+            fixed_roi_height_px = None
+    fixed_roi_aspect = (
+        float(fixed_roi_width_px) / max(1e-6, float(fixed_roi_height_px))
+        if fixed_roi_width_px is not None and fixed_roi_height_px is not None
+        else None
+    )
+    fixed_roi_shape_invalid = bool(
+        fixed_roi_xyxy is not None
+        and (
+            fixed_roi_height_px is None
+            or fixed_roi_height_px < 25.0
+            or fixed_roi_width_px is None
+            or fixed_roi_width_px / max(1e-6, fixed_roi_height_px) > 4.0
+        )
+    )
+    fixed_roi_value = fixed_roi_median_value if fixed_roi_median_value is not None else fixed_roi_mean_value
+    fixed_roi_stat_used = "median" if fixed_roi_median_value is not None else ("mean" if fixed_roi_mean_value is not None else "missing")
+    try:
+        fixed_roi_depth_m = float(fixed_roi_value) if fixed_roi_value is not None else None
+    except (TypeError, ValueError):
+        fixed_roi_depth_m = None
+    try:
+        fixed_roi_mean_m = float(fixed_roi_mean_value) if fixed_roi_mean_value is not None else None
+    except (TypeError, ValueError):
+        fixed_roi_mean_m = None
+    try:
+        fixed_roi_median_m = float(fixed_roi_median_value) if fixed_roi_median_value is not None else None
+    except (TypeError, ValueError):
+        fixed_roi_median_m = None
+    try:
+        fixed_roi_p10_m = float(fixed_roi_p10_value) if fixed_roi_p10_value is not None else None
+    except (TypeError, ValueError):
+        fixed_roi_p10_m = None
+    final_phase_state = state == "FINAL_SLOW_STOP"
+    already_in_final_phase = bool(
+        final_phase_state
+        or state == "AT_TABLE_EDGE"
+        or summary.get("final_roi_mode_latched", False)
+        or summary.get("final_edge_mode_latched", False)
+        or summary.get("final_depth_latched", False)
+        or summary.get("final_distance_servo_active", False)
+        or getattr(ctx, "final_roi_mode_latched", False)
+        or getattr(ctx, "final_edge_mode_latched", False)
+        or getattr(ctx, "final_depth_latched", False)
+    )
+    fixed_roi_enabled_for_control = bool(state in {"FINAL_SLOW_STOP", "AT_TABLE_EDGE"})
+    final_gate_allowed = bool(fixed_roi_enabled_for_control)
+    final_gate_block_reason = "" if final_gate_allowed else "fixed_roi_not_final_phase"
+    final_parking_phase = bool(
+        summary.get("close_range_latched", False)
+        or summary.get("near_table_latched", False)
+        or summary.get("final_roi_mode_latched", False)
+        or summary.get("final_edge_mode_latched", False)
+        or summary.get("final_depth_latched", False)
+        or summary.get("final_distance_servo_active", False)
+        or getattr(ctx, "close_range_latched", False)
+        or getattr(ctx, "near_table_latched", False)
+        or getattr(ctx, "final_roi_mode_latched", False)
+        or getattr(ctx, "final_edge_mode_latched", False)
+        or getattr(ctx, "final_depth_latched", False)
+        or state in {"FINAL_SLOW_STOP", "AT_TABLE_EDGE"}
+    )
+    fixed_roi_context_active = bool(
+        summary.get("close_range_latched", False)
+        or summary.get("final_roi_mode_latched", False)
+        or summary.get("final_edge_mode_latched", False)
+        or summary.get("final_depth_latched", False)
+        or summary.get("final_distance_servo_active", False)
+        or final_parking_phase
+        or getattr(ctx, "close_range_latched", False)
+        or getattr(ctx, "final_roi_mode_latched", False)
+        or getattr(ctx, "final_edge_mode_latched", False)
+        or getattr(ctx, "final_depth_latched", False)
+    )
+    fixed_roi_valid_for_control = bool(fixed_roi_valid and not fixed_roi_shape_invalid)
+    fixed_roi_depth_close_enough = bool(
+        fixed_roi_valid_for_control
+        and fixed_roi_depth_m is not None
+        and fixed_roi_depth_m <= close_range_enter_p10
+    )
+    fixed_roi_close_context = bool(
+        fixed_roi_context_active
+        or bool(summary.get("near_table_latched", False))
+        or bool(getattr(ctx, "near_table_latched", False))
+        or edge_ready_for_final
+        or (fixed_roi_depth_close_enough and final_gate_allowed)
+    )
+    fixed_roi_selected = bool(final_gate_allowed and fixed_roi_close_context and fixed_roi_valid_for_control and fixed_roi_depth_m is not None)
+    fixed_roi_only_blocked = bool(fixed_roi_depth_close_enough and not final_gate_allowed)
+    legacy_depth_allowed_for_control = bool(not final_gate_allowed and ((not final_parking_phase) or already_in_final_phase))
+    final_depth_valid = bool(legacy_depth_allowed_for_control and legacy_roi_depth_valid)
+    final_depth_m = legacy_roi_depth_m if final_depth_valid else None
+    final_depth_source = "table_roi_or_latched_roi" if final_depth_valid else "missing"
+    if fixed_roi_selected:
+        final_depth_valid = True
+        final_depth_m = fixed_roi_depth_m
+        final_depth_source = "fixed_center_low_roi"
+    elif legacy_depth_allowed_for_control and legacy_roi_depth_valid and legacy_roi_depth_m is not None:
+        final_depth_valid = True
+        final_depth_m = legacy_roi_depth_m
+        final_depth_source = "table_roi_or_latched_roi"
+    else:
+        final_depth_valid = False
+        final_depth_m = None
+        final_depth_source = "missing"
+    roi_depth_valid = bool(final_depth_valid and final_depth_m is not None)
+    roi_depth_m = float(final_depth_m) if final_depth_m is not None else None
+    summary.update(
+        {
+            "final_fixed_roi_active": bool(fixed_roi_active),
+            "final_fixed_roi_depth_valid": bool(fixed_roi_valid),
+            "final_fixed_roi_depth_mean": fixed_roi_mean_m,
+            "final_fixed_roi_depth_median": fixed_roi_median_m,
+            "final_fixed_roi_depth_p10": fixed_roi_p10_m,
+            "final_fixed_roi_depth_sample_count": summary.get(
+                "final_fixed_roi_depth_sample_count",
+                getattr(obs, "final_fixed_roi_depth_sample_count", None) if obs is not None else None,
+            ),
+            "final_fixed_roi_depth_valid_ratio": summary.get(
+                "final_fixed_roi_depth_valid_ratio",
+                getattr(obs, "final_fixed_roi_depth_valid_ratio", None) if obs is not None else None,
+            ),
+            "final_fixed_roi_depth_invalid_reason": summary.get(
+                "final_fixed_roi_depth_invalid_reason",
+                getattr(obs, "final_fixed_roi_depth_invalid_reason", "") if obs is not None else "",
+            ),
+            "final_depth_candidate_source": "fixed_center_low_roi" if fixed_roi_valid and fixed_roi_depth_m is not None else "",
+            "final_depth_candidate_m": float(fixed_roi_depth_m) if fixed_roi_valid and fixed_roi_depth_m is not None else None,
+            "final_depth_usable_for_control": bool(fixed_roi_selected),
+            "final_depth_gate_reason": "gate_open" if fixed_roi_selected else ("final_fixed_roi_shape_invalid" if fixed_roi_shape_invalid else (final_gate_block_reason if fixed_roi_only_blocked else ("not_close_enough" if fixed_roi_valid and fixed_roi_depth_m is not None else "missing_fixed_roi"))),
+            "final_depth_valid": bool(final_depth_valid),
+            "final_depth_m": float(final_depth_m) if final_depth_m is not None else None,
+            "final_depth_source": final_depth_source,
+            "final_gate_allowed": bool(final_gate_allowed),
+            "final_gate_block_reason": str(final_gate_block_reason),
+            "final_gate_state_allowed": bool(fixed_roi_enabled_for_control),
+            "final_gate_edge_slope_latched": bool(edge_slope_final_ready_latched),
+            "final_gate_edge_slope_latch_age_s": edge_slope_latch_age_s,
+            "final_gate_fixed_roi_only_blocked": bool(fixed_roi_only_blocked),
+            "final_depth_source_candidate": "fixed_center_low_roi" if fixed_roi_valid and fixed_roi_depth_m is not None else "",
+            "final_depth_source_selected": final_depth_source,
+            "fixed_roi_depth_m": float(fixed_roi_depth_m) if fixed_roi_depth_m is not None else None,
+            "fixed_roi_depth_stat_used": fixed_roi_stat_used,
+            "fixed_roi_depth_mean": fixed_roi_mean_m,
+            "fixed_roi_depth_median": fixed_roi_median_m,
+            "fixed_roi_depth_p10": fixed_roi_p10_m,
+            "fixed_roi_depth_valid": bool(fixed_roi_valid),
+            "fixed_roi_depth_valid_for_control": bool(fixed_roi_valid_for_control),
+            "fixed_roi_depth_close_enough": bool(fixed_roi_depth_close_enough),
+            "final_fixed_roi_xyxy": fixed_roi_xyxy,
+            "final_fixed_roi_width_px": fixed_roi_width_px,
+            "final_fixed_roi_height_px": fixed_roi_height_px,
+            "final_fixed_roi_aspect": fixed_roi_aspect,
+            "final_fixed_roi_shape_valid": not bool(fixed_roi_shape_invalid),
+            "final_fixed_roi_shape_invalid": bool(fixed_roi_shape_invalid),
+            "final_fixed_roi_status": {
+                "active": bool(fixed_roi_active),
+                "mean": fixed_roi_mean_m,
+                "median": fixed_roi_median_m,
+                "p10": fixed_roi_p10_m,
+                "stat_used": fixed_roi_stat_used,
+                "threshold": float(close_range_enter_p10),
+                "xyxy": fixed_roi_xyxy,
+                "width_px": fixed_roi_width_px,
+                "height_px": fixed_roi_height_px,
+                "shape_valid": not bool(fixed_roi_shape_invalid),
+                "valid_ratio": summary.get(
+                    "final_fixed_roi_depth_valid_ratio",
+                    getattr(obs, "final_fixed_roi_depth_valid_ratio", None) if obs is not None else None,
+                ),
+            },
+            "edge_ready_for_final_strong": bool(edge_ready_for_final_strong),
+            "edge_slope_final_ready_latched": bool(edge_slope_final_ready_latched),
+            "edge_slope_final_ready_reason": str(getattr(ctx, "edge_slope_final_ready_reason", "") or ""),
+            "edge_slope_final_ready_source": str(getattr(ctx, "edge_slope_final_ready_source", "") or ""),
+            "edge_slope_final_ready_latch_event": bool(edge_slope_latch_new),
+            "edge_slope_final_ready_state": str(getattr(ctx, "edge_slope_final_ready_state", "") or ""),
+            "edge_slope_final_ready_value": getattr(ctx, "edge_slope_final_ready_value", None),
+            "edge_slope_final_ready_reset_reason": str(getattr(ctx, "edge_slope_final_ready_reset_reason", "") or ""),
+            "legacy_table_roi_depth_valid": bool(legacy_roi_depth_valid),
+            "legacy_table_roi_depth_p10": float(legacy_roi_depth_m) if legacy_roi_depth_m is not None else None,
+        }
+    )
+    fixed_roi_final_stop_threshold = _float(summary, "final_fixed_roi_stop_threshold_m", 0.45)
+    fixed_roi_stop_stable_required = max(1, int(_float(summary, "final_fixed_roi_stop_stable_count_required", 3)))
+    fixed_roi_final_stop_reached = bool(
+        final_phase_state
+        and fixed_roi_selected
+        and fixed_roi_depth_m is not None
+        and fixed_roi_depth_m <= fixed_roi_final_stop_threshold
+    )
+    try:
+        if fixed_roi_final_stop_reached:
+            ctx.fixed_roi_final_stop_stable_count = int(getattr(ctx, "fixed_roi_final_stop_stable_count", 0) or 0) + 1
+        else:
+            ctx.fixed_roi_final_stop_stable_count = 0
+        if fixed_roi_depth_m is not None:
+            prev_min = getattr(ctx, "final_fixed_roi_min_stat_m", None)
+            if prev_min is None or float(fixed_roi_depth_m) < float(prev_min):
+                ctx.final_fixed_roi_min_stat_m = float(fixed_roi_depth_m)
+    except Exception:
+        pass
+    fixed_roi_final_stop_stable = bool(
+        fixed_roi_final_stop_reached
+        and int(getattr(ctx, "fixed_roi_final_stop_stable_count", 0) or 0) >= fixed_roi_stop_stable_required
+    )
+    summary.update(
+        {
+            "final_fixed_roi_stop_threshold": float(fixed_roi_final_stop_threshold),
+            "final_fixed_roi_stop_threshold_m": float(fixed_roi_final_stop_threshold),
+            "final_fixed_roi_stop_stat": float(fixed_roi_depth_m) if fixed_roi_depth_m is not None else None,
+            "final_fixed_roi_stop_stat_used": fixed_roi_stat_used,
+            "final_arrival_source": f"fixed_roi_{fixed_roi_stat_used}" if fixed_roi_stat_used in {"median", "mean"} else "missing",
+            "final_fixed_roi_stop_reached": bool(fixed_roi_final_stop_reached),
+            "final_fixed_roi_stop_stable_count": int(getattr(ctx, "fixed_roi_final_stop_stable_count", 0) or 0),
+            "final_fixed_roi_stop_stable_count_required": int(fixed_roi_stop_stable_required),
+            "final_fixed_roi_stop_stable": bool(fixed_roi_final_stop_stable),
+            "final_fixed_roi_min_stat_m": getattr(ctx, "final_fixed_roi_min_stat_m", None),
+        }
+    )
+    fixed_status = summary.get("final_fixed_roi_status")
+    if isinstance(fixed_status, dict):
+        fixed_status.update(
+            {
+                "threshold": float(fixed_roi_final_stop_threshold),
+                "stop_reached": bool(fixed_roi_final_stop_reached),
+                "stable_count": int(getattr(ctx, "fixed_roi_final_stop_stable_count", 0) or 0),
+                "min_observed_stat": getattr(ctx, "final_fixed_roi_min_stat_m", None),
+            }
+        )
+    final_lock_allowed = bool(state == "AT_TABLE_EDGE" or fixed_roi_final_stop_stable)
+    final_servo_enter_p10 = _float(summary, "final_enter_depth_threshold_m", 0.58)
     final_roi_enter_candidate = bool(
         bool(summary.get("near_table_latched", False) or getattr(ctx, "near_table_latched", False))
         and roi_depth_valid
@@ -547,12 +959,12 @@ def arbitrate_table_docking_motion(
         return max(0.0, ctrl_target)
 
     def table_measured_dist_m() -> tuple[Optional[float], str]:
+        if final_depth_valid and final_depth_m is not None and str(final_depth_source) == "fixed_center_low_roi":
+            return float(final_depth_m), "fixed_center_low_roi"
         if docking_obs.dist_err_m is not None:
             return obs_target_dist_m() + float(docking_obs.dist_err_m), "edge"
-        if roi_depth_valid and docking_obs.table_roi_depth_p10 is not None:
-            return float(docking_obs.table_roi_depth_p10), "roi_p10"
-        if roi_depth_valid and docking_obs.table_roi_depth_median is not None:
-            return float(docking_obs.table_roi_depth_median), "roi_median"
+        if final_depth_valid and final_depth_m is not None:
+            return float(final_depth_m), str(final_depth_source or "table_roi_or_latched_roi")
         return None, "fallback"
 
     def table_final_dist_err_m() -> tuple[Optional[float], Optional[float], str]:
@@ -563,12 +975,7 @@ def arbitrate_table_docking_motion(
         return float(measured) - float(target), float(measured), source
 
     edge_final_dist_err, edge_measured_dist, edge_measured_source = table_final_dist_err_m()
-    edge_ready_for_final = bool(
-        summary.get("edge_ready_for_final", False)
-        or docking_obs.edge_valid
-        or docking_obs.edge_trusted
-    )
-    final_roi_enter = bool(final_roi_enter_candidate and not edge_ready_for_final)
+    final_roi_enter = bool(final_gate_allowed and final_roi_enter_candidate and not edge_ready_for_final)
     final_roi_mode_latched = bool(summary.get("final_roi_mode_latched", False) or getattr(ctx, "final_roi_mode_latched", False) or final_roi_enter)
     if final_roi_mode_latched:
         try:
@@ -580,8 +987,8 @@ def arbitrate_table_docking_motion(
         except Exception:
             pass
     summary["final_roi_mode_latched"] = bool(final_roi_mode_latched)
-    edge_final_enter_margin = _float(summary, "edge_final_enter_margin_m", 0.06)
-    edge_final_stop_margin = _float(summary, "edge_final_stop_margin_m", 0.02)
+    edge_final_enter_margin = 0.06
+    edge_final_stop_margin = 0.02
     edge_final_dist_reached = bool(
         edge_ready_for_final
         and edge_measured_source == "edge"
@@ -603,14 +1010,15 @@ def arbitrate_table_docking_motion(
         pass
     edge_final_stop_stable = bool(edge_final_stop_reached and int(getattr(ctx, "edge_final_stop_stable_count", 0) or 0) >= 2)
     final_edge_mode_latched = bool(summary.get("final_edge_mode_latched", False) or getattr(ctx, "final_edge_mode_latched", False) or edge_final_dist_reached)
-    close_range_enter_p10 = _float(summary, "close_range_enter_p10_m", 0.55)
     close_range_depth_reached = bool(roi_depth_valid and roi_depth_m is not None and roi_depth_m <= close_range_enter_p10)
+    fixed_close_range_depth_reached = bool(final_gate_allowed and fixed_roi_depth_close_enough)
     close_range_latched = bool(
         summary.get("close_range_latched", False)
         or getattr(ctx, "close_range_latched", False)
         or final_edge_mode_latched
         or final_roi_mode_latched
-        or close_range_depth_reached
+        or (final_gate_allowed and close_range_depth_reached)
+        or fixed_close_range_depth_reached
         or edge_final_dist_reached
     )
     if final_edge_mode_latched:
@@ -635,6 +1043,8 @@ def arbitrate_table_docking_motion(
             "measured_dist_m": float(edge_measured_dist) if edge_measured_dist is not None else None,
             "measured_dist_source": edge_measured_source,
             "final_dist_err_m": float(edge_final_dist_err) if edge_final_dist_err is not None else None,
+            "final_depth_err_m": float(edge_final_dist_err) if edge_final_dist_err is not None else None,
+            "final_phase_active": bool(final_phase_state),
             "table_target_dist_m": float(_float(summary, "table_target_dist_m", 0.30)),
             "obs_target_dist_m": float(obs_target_dist_m()),
             "obs_dist_err_m": float(docking_obs.dist_err_m) if docking_obs.dist_err_m is not None else None,
@@ -839,7 +1249,7 @@ def arbitrate_table_docking_motion(
                     break
         # 2. Fall back to last_good_edge only if it is fresh
         last_good_age_ms = summary.get("last_good_edge_yaw_age_ms")
-        hold_timeout_ms = float(summary.get("final_yaw_last_good_hold_s") or getattr(getattr(ctx, "cfg", None), "final_yaw_last_good_hold_s", 1.2) or 1.2) * 1000.0
+        hold_timeout_ms = 1200.0
         last_good_fresh = bool(last_good_age_ms is not None and float(last_good_age_ms) <= hold_timeout_ms)
         if abs(edge_wz) <= 1e-9 and last_good_fresh and abs(float(getattr(ctx, "last_good_edge_yaw_cmd", 0.0) or 0.0)) > 1e-9:
             edge_wz = float(getattr(ctx, "last_good_edge_yaw_cmd", 0.0) or 0.0)
@@ -906,9 +1316,53 @@ def arbitrate_table_docking_motion(
                 ctx.final_reverse_too_close_count = 0
             except Exception:
                 pass
-            return 0.0, "final_distance_servo_hold_no_distance", {
+            missing_since = float(getattr(ctx, "final_servo_missing_since_mono", 0.0) or 0.0)
+            if missing_since <= 0.0:
+                missing_since = now_mono
+                try:
+                    ctx.final_servo_missing_since_mono = missing_since
+                except Exception:
+                    pass
+            missing_age_s = max(0.0, now_mono - missing_since)
+            last_valid_dist = getattr(ctx, "final_servo_last_valid_dist_m", None)
+            last_valid_mono = float(getattr(ctx, "final_servo_last_valid_mono", 0.0) or 0.0)
+            last_valid_age_s = max(0.0, now_mono - last_valid_mono) if last_valid_mono > 0.0 else None
+            try:
+                last_valid_dist_m = float(last_valid_dist) if last_valid_dist is not None else None
+            except (TypeError, ValueError):
+                last_valid_dist_m = None
+            global_depth_p10 = summary.get("depth_p10", getattr(obs, "depth_p10", None) if obs is not None else None)
+            try:
+                global_depth_p10_m = float(global_depth_p10) if global_depth_p10 is not None else None
+            except (TypeError, ValueError):
+                global_depth_p10_m = None
+            stop_p10 = _float(summary, "depth_envelope_stop_p10_m", 0.30)
+            missing_probe_cap = abs(_float(summary, "final_slow_probe_vx_mps", 0.050))
+            missing_probe_vx = missing_probe_cap
+            reuse_s = 0.50
+            grace_s = max(0.0, _float(summary, "final_missing_probe_grace_s", 0.80))
+            margin_m = 0.04
+            reason = "final_distance_servo_hold_no_distance"
+            vx = 0.0
+            probe_active = False
+            if global_depth_p10_m is not None and global_depth_p10_m <= stop_p10:
+                reason = "final_distance_servo_global_depth_stop_no_roi"
+            elif (
+                last_valid_dist_m is not None
+                and last_valid_age_s is not None
+                and last_valid_age_s <= reuse_s
+                and last_valid_dist_m > target + margin_m
+            ):
+                vx = missing_probe_vx
+                probe_active = bool(vx > 1e-9)
+                reason = "final_distance_servo_missing_probe_last_valid"
+            elif missing_age_s <= grace_s:
+                vx = missing_probe_vx
+                probe_active = bool(vx > 1e-9)
+                reason = "final_distance_servo_missing_probe_grace"
+            return vx, reason, {
                 "final_distance_servo_active": True,
-                "final_distance_servo_reason": "final_distance_servo_hold_no_distance",
+                "final_distance_servo_reason": reason,
                 "final_dist_err_m": None,
                 "final_reverse_confirm_count": 0,
                 "final_reverse_confirm_frames": int(max(1, _float(summary, "final_reverse_confirm_frames", 3))),
@@ -916,12 +1370,27 @@ def arbitrate_table_docking_motion(
                 "measured_dist_source": measured_source,
                 "table_target_dist_m": float(target),
                 "obs_target_dist_m": float(obs_target_dist_m()),
+                "final_missing_probe_active": bool(probe_active),
+                "final_slow_probe_vx_mps": float(missing_probe_vx),
+                "final_missing_probe_age_s": float(missing_age_s),
+                "final_missing_probe_grace_s": float(grace_s),
+                "final_missing_internal_reuse_s": float(reuse_s),
+                "final_missing_internal_probe_margin_m": float(margin_m),
+                "final_servo_last_valid_dist_m": last_valid_dist_m,
+                "final_servo_last_valid_age_s": last_valid_age_s,
+                "global_depth_p10_m": global_depth_p10_m,
             }
         dist_err = float(dist_err)
-        deadband = abs(_float(summary, "final_dist_deadband_m", _float(summary, "final_lock_dist_tol_m", 0.03)))
-        kp = max(0.0, _float(summary, "final_dist_kp", 0.08))
-        fwd_cap = abs(_float(summary, "final_forward_vx_max_mps", 0.006))
-        rev_cap = abs(_float(summary, "final_reverse_vx_max_mps", 0.004))
+        try:
+            ctx.final_servo_last_valid_dist_m = float(measured_dist) if measured_dist is not None else None
+            ctx.final_servo_last_valid_mono = now_mono
+            ctx.final_servo_missing_since_mono = 0.0
+        except Exception:
+            pass
+        deadband = abs(_float(summary, "final_lock_dist_tol_m", 0.03))
+        kp = 0.08
+        fwd_cap = abs(_float(summary, "final_slow_probe_vx_mps", 0.050))
+        rev_cap = 0.004
         confirm_frames = max(1, int(_float(summary, "final_reverse_confirm_frames", 3)))
         too_close_count = int(getattr(ctx, "final_reverse_too_close_count", 0) or 0)
         vx = 0.0
@@ -953,14 +1422,21 @@ def arbitrate_table_docking_motion(
             "measured_dist_source": measured_source,
             "table_target_dist_m": float(target),
             "obs_target_dist_m": float(obs_target_dist_m()),
+            "final_missing_probe_active": False,
+            "final_slow_probe_vx_mps": abs(_float(summary, "final_slow_probe_vx_mps", 0.050)),
+            "final_missing_probe_age_s": 0.0,
+            "final_servo_last_valid_dist_m": float(measured_dist) if measured_dist is not None else None,
+            "final_servo_last_valid_age_s": 0.0,
         }
 
     def final_roi_mode_result() -> ArbitrationResult:
-        stop_p10 = _float(summary, "roi_final_stop_p10_m", 0.42)
-        slow_p10 = _float(summary, "roi_final_slow_p10_m", 0.52)
-        probe_vx = abs(_float(summary, "roi_final_probe_vx_mps", 0.008))
-        missing_probe_vx = abs(_float(summary, "roi_final_missing_probe_vx_mps", 0.004))
-        missing_hold_s = max(0.0, _float(summary, "roi_final_missing_hold_s", 0.8))
+        stop_p10 = _float(summary, "depth_envelope_stop_p10_m", 0.30)
+        slow_p10 = _float(summary, "depth_envelope_slow_p10_m", 0.50)
+        probe_vx = abs(_float(summary, "final_slow_probe_vx_mps", 0.050))
+        missing_probe_vx = probe_vx
+        missing_hold_s = 0.8
+        legacy_safety_p10 = _float(summary, "legacy_roi_emergency_depth_m", _float(summary, "depth_envelope_stop_p10_m", 0.30))
+        legacy_safety_hold = bool(legacy_roi_depth_valid and legacy_roi_depth_m is not None and legacy_roi_depth_m <= legacy_safety_p10)
         last_valid = float(getattr(ctx, "final_roi_last_valid_mono", 0.0) or 0.0)
         since = float(getattr(ctx, "final_roi_mode_since_mono", now_mono) or now_mono)
         if roi_depth_valid and roi_depth_m is not None:
@@ -974,9 +1450,9 @@ def arbitrate_table_docking_motion(
                     ctx.roi_final_stop_stable_count = int(getattr(ctx, "roi_final_stop_stable_count", 0) or 0) + 1
                 except Exception:
                     pass
-                if int(getattr(ctx, "roi_final_stop_stable_count", 0) or 0) >= 2:
+                if final_lock_allowed and int(getattr(ctx, "roi_final_stop_stable_count", 0) or 0) >= 2:
                     vx = 0.0
-                    reason = "roi_p10_stop"
+                    reason = "final_depth_stop"
                     stage = DockingStage.FINAL_LOCKED
                     try:
                         ctx.final_locked = True
@@ -984,7 +1460,7 @@ def arbitrate_table_docking_motion(
                         pass
                 else:
                     vx = 0.0
-                    reason = "roi_p10_stop_confirming"
+                    reason = "final_depth_stop_confirming"
                     stage = DockingStage.FINAL_DISTANCE_HOLD
             elif roi_depth_m <= slow_p10:
                 try:
@@ -992,7 +1468,7 @@ def arbitrate_table_docking_motion(
                 except Exception:
                     pass
                 vx = probe_vx
-                reason = "roi_p10_slow_probe"
+                reason = "final_depth_slow_probe"
                 stage = DockingStage.FINAL_DISTANCE_HOLD
             else:
                 try:
@@ -1000,7 +1476,7 @@ def arbitrate_table_docking_motion(
                 except Exception:
                     pass
                 vx = probe_vx
-                reason = "roi_p10_probe"
+                reason = "final_depth_probe"
                 stage = DockingStage.FINAL_DISTANCE_HOLD
         else:
             try:
@@ -1008,34 +1484,48 @@ def arbitrate_table_docking_motion(
             except Exception:
                 pass
             roi_missing_age_s = max(0.0, now_mono - (last_valid if last_valid > 0.0 else since))
-            if roi_missing_age_s <= missing_hold_s:
+            if legacy_safety_hold:
+                vx = 0.0
+                reason = "legacy_roi_safety_hold"
+            elif roi_missing_age_s <= missing_hold_s:
                 vx = missing_probe_vx
                 reason = "roi_missing_slow_probe"
             else:
                 vx = 0.0
                 reason = "roi_missing_hold"
             stage = DockingStage.FINAL_DISTANCE_HOLD
-        final_locked_summary = bool(reason == "roi_p10_stop" or summary.get("final_locked", False) or getattr(ctx, "final_locked", False))
+        final_locked_summary = bool(final_lock_allowed and (reason == "final_depth_stop" or summary.get("final_locked", False) or getattr(ctx, "final_locked", False)))
+        if final_locked_summary:
+            roi_action = DockingAction.FINAL_LOCKED_STOP
+        elif reason == "legacy_roi_safety_hold":
+            roi_action = DockingAction.DEPTH_SAFETY_HOLD
+        elif abs(vx) > 1e-9:
+            roi_action = DockingAction.FINAL_SLOW_PROBE
+        else:
+            roi_action = DockingAction.CLOSE_RANGE_PROBE
         return _docking_result(
-            action=DockingAction.FINAL_LOCKED_STOP,
+            action=roi_action,
             stage=stage,
             summary=with_common(
                 {
                     "final_roi_mode_latched": True,
                     "final_roi_reason": reason,
                     "roi_final_p10_m": float(roi_depth_m) if roi_depth_valid and roi_depth_m is not None else None,
-                    "roi_final_stop_p10_m": float(stop_p10),
-                    "roi_final_slow_p10_m": float(slow_p10),
+                    "final_fixed_roi_stop_threshold_m": float(summary.get("final_fixed_roi_stop_threshold_m", 0.45) or 0.45),
+                    "depth_envelope_slow_p10_m": float(slow_p10),
+                    "legacy_table_roi_p10_m": float(legacy_roi_depth_m) if legacy_roi_depth_m is not None else None,
+                    "legacy_roi_safety_hold": bool(legacy_safety_hold),
                     "roi_missing_age_s": float(roi_missing_age_s),
                     "final_locked": final_locked_summary,
+                    "final_lock_reason": "final_depth_stop" if final_locked_summary else "",
                     "final_depth_latched": bool(summary.get("final_depth_latched", False)),
                     "final_distance_servo_active": False,
                     "measured_dist_m": None,
-                    "measured_dist_source": "roi_p10" if roi_depth_valid and roi_depth_m is not None else "roi_missing",
+                    "measured_dist_source": str(final_depth_source) if roi_depth_valid and roi_depth_m is not None else ("legacy_roi_safety" if legacy_safety_hold else "roi_missing"),
                     "final_dist_err_m": None,
                     "table_target_dist_m": float(_float(summary, "table_target_dist_m", 0.30)),
                     "obs_target_dist_m": float(obs_target_dist_m()),
-                    "forward_block_reason": "roi_p10_stop" if abs(vx) <= 1e-9 else "",
+                    "forward_block_reason": reason if abs(vx) <= 1e-9 else "",
                     "yaw_owner": "none",
                     "lateral_owner": "none",
                 }
@@ -1046,12 +1536,12 @@ def arbitrate_table_docking_motion(
             yaw_owner="none",
             forward_owner="final_roi_probe" if abs(vx) > 1e-9 else "none",
             lateral_owner="none",
-            blocked_by="roi_p10_stop" if abs(vx) <= 1e-9 else "",
+            blocked_by=reason if abs(vx) <= 1e-9 else "",
             reason=reason,
         )
 
     def final_edge_mode_result() -> ArbitrationResult:
-        if edge_final_stop_stable:
+        if final_phase_state and fixed_roi_final_stop_stable:
             try:
                 ctx.final_locked = True
             except Exception:
@@ -1063,9 +1553,9 @@ def arbitrate_table_docking_motion(
                     {
                         "final_edge_mode_latched": True,
                         "close_range_latched": True,
-                        "edge_final_dist_reached": True,
+                        "edge_final_dist_reached": bool(edge_final_dist_reached),
                         "final_locked": True,
-                        "final_lock_reason": "edge_final_dist_stop",
+                        "final_lock_reason": "fixed_roi_final_stop",
                         "measured_dist_m": float(edge_measured_dist) if edge_measured_dist is not None else None,
                         "measured_dist_source": edge_measured_source,
                         "final_dist_err_m": float(edge_final_dist_err) if edge_final_dist_err is not None else None,
@@ -1073,7 +1563,7 @@ def arbitrate_table_docking_motion(
                         "obs_target_dist_m": float(obs_target_dist_m()),
                         "yaw_owner": "none",
                         "lateral_owner": "none",
-                        "forward_block_reason": "edge_final_dist_stop",
+                        "forward_block_reason": "fixed_roi_final_stop",
                     }
                 ),
                 vx=0.0,
@@ -1081,12 +1571,12 @@ def arbitrate_table_docking_motion(
                 wz=0.0,
                 yaw_owner="none",
                 lateral_owner="none",
-                blocked_by="edge_final_dist_stop",
-                reason="edge_final_dist_stop",
+                blocked_by="fixed_roi_final_stop",
+                reason="fixed_roi_final_stop",
             )
         if edge_final_stop_reached:
             return _docking_result(
-                action=DockingAction.FINAL_LOCKED_STOP,
+                action=DockingAction.DEPTH_SAFETY_HOLD,
                 stage=DockingStage.FINAL_DISTANCE_HOLD,
                 summary=with_common(
                     {
@@ -1121,7 +1611,7 @@ def arbitrate_table_docking_motion(
                 ctx.final_servo_hold_stable_count = 0
         except Exception:
             pass
-        if servo_reason == "final_distance_servo_hold" and int(getattr(ctx, "final_servo_hold_stable_count", 0) or 0) >= 2:
+        if final_lock_allowed and servo_reason == "final_distance_servo_hold" and int(getattr(ctx, "final_servo_hold_stable_count", 0) or 0) >= 2:
             try:
                 ctx.final_locked = True
             except Exception:
@@ -1151,7 +1641,7 @@ def arbitrate_table_docking_motion(
                 reason="final_distance_servo_hold_stable",
             )
         return _docking_result(
-            action=DockingAction.FINAL_LOCKED_STOP,
+            action=DockingAction.FINAL_SLOW_PROBE if abs(servo_vx) > 1e-9 else DockingAction.CLOSE_RANGE_PROBE,
             stage=DockingStage.FINAL_DISTANCE_HOLD,
             summary=with_common(
                 {
@@ -1179,26 +1669,28 @@ def arbitrate_table_docking_motion(
     def close_range_mode_result() -> ArbitrationResult:
         if edge_ready_for_final and edge_measured_source == "edge" and edge_final_dist_err is not None:
             return final_edge_mode_result()
-        stop_p10 = _float(summary, "roi_final_stop_p10_m", 0.42)
-        probe_vx = abs(_float(summary, "close_range_probe_vx_mps", 0.008))
-        missing_probe_vx = abs(_float(summary, "close_range_missing_probe_vx_mps", 0.004))
+        stop_p10 = _float(summary, "depth_envelope_stop_p10_m", 0.30)
+        probe_vx = abs(_float(summary, "final_slow_probe_vx_mps", 0.050))
+        missing_probe_vx = probe_vx
+        legacy_safety_p10 = _float(summary, "legacy_roi_emergency_depth_m", _float(summary, "depth_envelope_stop_p10_m", 0.30))
+        legacy_safety_hold = bool(legacy_roi_depth_valid and legacy_roi_depth_m is not None and legacy_roi_depth_m <= legacy_safety_p10)
         if roi_depth_valid and roi_depth_m is not None and roi_depth_m <= stop_p10:
             try:
                 ctx.roi_final_stop_stable_count = int(getattr(ctx, "roi_final_stop_stable_count", 0) or 0) + 1
             except Exception:
                 pass
-            if int(getattr(ctx, "roi_final_stop_stable_count", 0) or 0) >= 2:
+            if final_lock_allowed and int(getattr(ctx, "roi_final_stop_stable_count", 0) or 0) >= 2:
                 try:
                     ctx.final_locked = True
                 except Exception:
                     pass
                 vx = 0.0
-                reason = "roi_p10_stop"
+                reason = "final_depth_stop"
                 stage = DockingStage.FINAL_LOCKED
                 final_locked_summary = True
             else:
                 vx = 0.0
-                reason = "roi_p10_stop_confirming"
+                reason = "final_depth_stop_confirming"
                 stage = DockingStage.FINAL_DISTANCE_HOLD
                 final_locked_summary = False
         elif roi_depth_valid and roi_depth_m is not None:
@@ -1215,12 +1707,24 @@ def arbitrate_table_docking_motion(
                 ctx.roi_final_stop_stable_count = 0
             except Exception:
                 pass
-            vx = missing_probe_vx
-            reason = "close_range_missing_probe"
+            if legacy_safety_hold:
+                vx = 0.0
+                reason = "legacy_roi_safety_hold"
+            else:
+                vx = missing_probe_vx
+                reason = "close_range_missing_probe"
             stage = DockingStage.FINAL_DISTANCE_HOLD
             final_locked_summary = False
+        if final_locked_summary:
+            close_range_action = DockingAction.FINAL_LOCKED_STOP
+        elif reason == "legacy_roi_safety_hold":
+            close_range_action = DockingAction.DEPTH_SAFETY_HOLD
+        elif abs(vx) > 1e-9:
+            close_range_action = DockingAction.CLOSE_RANGE_PROBE
+        else:
+            close_range_action = DockingAction.DEPTH_SAFETY_HOLD
         return _docking_result(
-            action=DockingAction.FINAL_LOCKED_STOP,
+            action=close_range_action,
             stage=stage,
             summary=with_common(
                 {
@@ -1231,7 +1735,9 @@ def arbitrate_table_docking_motion(
                     "final_locked": final_locked_summary,
                     "final_lock_reason": reason if final_locked_summary else "",
                     "roi_final_p10_m": float(roi_depth_m) if roi_depth_valid and roi_depth_m is not None else None,
-                    "roi_final_stop_p10_m": float(stop_p10),
+                    "legacy_table_roi_p10_m": float(legacy_roi_depth_m) if legacy_roi_depth_m is not None else None,
+                    "legacy_roi_safety_hold": bool(legacy_safety_hold),
+                    "depth_envelope_stop_p10_m": float(stop_p10),
                     "measured_dist_m": float(edge_measured_dist) if edge_measured_dist is not None else None,
                     "measured_dist_source": edge_measured_source,
                     "final_dist_err_m": float(edge_final_dist_err) if edge_final_dist_err is not None else None,
@@ -1276,6 +1782,21 @@ def arbitrate_table_docking_motion(
             reason="hard_safety",
             service_may_override=True,
         )
+
+    if bool(summary.get("final_locked", False) or getattr(ctx, "final_locked", False)) and not final_lock_allowed:
+        summary["final_locked"] = False
+        summary["final_lock_reason"] = ""
+        summary["final_lock_rejected"] = {
+            "state": state,
+            "reason": "not_final_phase_or_depth_not_usable",
+            "final_depth_usable_for_control": bool(summary.get("final_depth_usable_for_control", False)),
+            "final_depth_gate_reason": str(summary.get("final_depth_gate_reason") or ""),
+        }
+        try:
+            ctx.final_locked = False
+            ctx.final_lock_reason = ""
+        except Exception:
+            pass
 
     if bool(summary.get("final_locked", False) or getattr(ctx, "final_locked", False)):
         return _docking_result(
@@ -1340,7 +1861,7 @@ def arbitrate_table_docking_motion(
             )
         servo_vx, servo_reason, servo_summary = final_distance_servo()
         return _docking_result(
-            action=DockingAction.FINAL_LOCKED_STOP,
+            action=DockingAction.FINAL_SLOW_PROBE if abs(servo_vx) > 1e-9 else DockingAction.CLOSE_RANGE_PROBE,
             stage=DockingStage.FINAL_DISTANCE_HOLD,
             summary=with_common(
                 {
@@ -1380,13 +1901,25 @@ def arbitrate_table_docking_motion(
             return _docking_result(
                 action=DockingAction.FINAL_LOCKED_STOP,
                 stage=DockingStage.FINAL_LOCKED,
-                summary=with_common({"final_locked": True, "final_depth_latched": True, "final_yaw_align_active": False}),
+                summary=with_common(
+                    {
+                        "final_locked": True,
+                        "final_depth_latched": False,
+                        "final_distance_servo_active": False,
+                        "final_yaw_align_active": False,
+                        "final_lock_reason": str(summary.get("final_lock_reason") or "at_table_edge_settle"),
+                        "forward_block_reason": "at_table_edge_settle",
+                    }
+                ),
+                vx=0.0,
+                vy=0.0,
+                wz=0.0,
                 blocked_by="final_locked",
-                reason=str(summary.get("final_lock_reason") or "at_table_edge"),
+                reason="at_table_edge_settle",
             )
         servo_vx, servo_reason, servo_summary = final_distance_servo()
         return _docking_result(
-            action=DockingAction.FINAL_LOCKED_STOP,
+            action=DockingAction.FINAL_SLOW_PROBE if abs(servo_vx) > 1e-9 else DockingAction.CLOSE_RANGE_PROBE,
             stage=DockingStage.FINAL_DISTANCE_HOLD,
             summary=with_common(
                 {
@@ -1474,7 +2007,7 @@ def arbitrate_table_docking_motion(
         if bool(summary.get("final_depth_latched", False)):
             edge_wz, yaw_source = edge_final_wz()
             return _docking_result(
-                action=DockingAction.FINAL_LOCKED_STOP,
+                action=DockingAction.DEPTH_SAFETY_HOLD,
                 stage=DockingStage.FINAL_DISTANCE_HOLD,
                 summary=with_common({
                     "forward_block_reason": "stale_dead_no_last_good",
@@ -1575,7 +2108,7 @@ def arbitrate_table_docking_motion(
         )
     if edge_block == "depth_final_stop":
         return _docking_result(
-            action=DockingAction.FINAL_LOCKED_STOP,
+            action=DockingAction.DEPTH_SAFETY_HOLD,
             stage=DockingStage.FINAL_DISTANCE_HOLD,
             summary=with_common({"forward_block_reason": "final_depth_latched"}),
             blocked_by=edge_block,
@@ -1598,7 +2131,7 @@ def arbitrate_table_docking_motion(
             reason=edge_block,
         )
 
-    final_servo_enter_p10 = _float(summary, "final_servo_enter_p10_m", 0.45)
+    final_servo_enter_p10 = _float(summary, "final_enter_depth_threshold_m", 0.58)
     near_final_servo_ready = bool(
         summary.get("near_table_latched", False)
         and roi_depth_valid
@@ -1608,13 +2141,13 @@ def arbitrate_table_docking_motion(
     if near_final_servo_ready:
         servo_vx, servo_reason, servo_summary = final_distance_servo()
         return _docking_result(
-            action=DockingAction.FINAL_LOCKED_STOP,
+            action=DockingAction.FINAL_SLOW_PROBE if abs(servo_vx) > 1e-9 else DockingAction.CLOSE_RANGE_PROBE,
             stage=DockingStage.FINAL_DISTANCE_HOLD,
             summary=with_common(
                 {
                     **servo_summary,
                     "final_distance_servo_reason": f"near_p10_enter:{servo_reason}",
-                    "near_final_servo_enter_p10_m": float(final_servo_enter_p10),
+                    "near_final_enter_depth_threshold_m": float(final_servo_enter_p10),
                     "forward_block_reason": "" if abs(servo_vx) > 1e-9 else "final_distance_servo",
                     "lateral_owner": "none",
                 }

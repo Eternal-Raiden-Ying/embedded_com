@@ -287,6 +287,7 @@ class RemoteManagerContractTest(unittest.TestCase):
         self.manager.configure_runtime(
             {
                 "enabled": True,
+                "remote_init_auto_enabled": True,
                 "base_url": "http://127.0.0.1:6006",
                 "command": "predict",
                 "require_depth": True,

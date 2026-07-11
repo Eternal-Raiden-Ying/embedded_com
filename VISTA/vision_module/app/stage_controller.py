@@ -16,13 +16,14 @@ class StageController:
     and handoff between stage logic and the mode/capability layer.
     """
 
-    def __init__(self, logger=None, event_sink=None, mode_controller=None, scheduler=None):
+    def __init__(self, logger=None, event_sink=None, mode_controller=None, scheduler=None, remote_manager=None):
         self._plans: Dict[str, BaseStagePlan] = {}
         self._ctx = StageContext()
         self.logger = logger
         self._event_sink = event_sink
         self._mode_controller = mode_controller
         self.scheduler = scheduler
+        self.remote_manager = remote_manager
         self._last_applied_mode = "SILENT"
         self._last_interaction_state_key = None
         self._last_request_signature = None
@@ -121,6 +122,7 @@ class StageController:
             "mode": self._ctx.current_mode,
             "session_id": self._ctx.session_id,
             "req_id": self._ctx.req_id,
+            "request_id": self._ctx.req_id,
             "epoch": int(self._ctx.epoch),
             "interaction_id": self._ctx.interaction_id,
             "target": self._ctx.target_name,
@@ -279,6 +281,7 @@ class StageController:
             "mode": normalize_upper(self._ctx.current_mode, "IDLE"),
             "session_id": self._ctx.session_id,
             "req_id": self._ctx.req_id,
+            "request_id": self._ctx.req_id,
             "epoch": int(self._ctx.epoch),
             "interaction_id": self._ctx.interaction_id,
             "target": self._ctx.target_name,
@@ -292,9 +295,28 @@ class StageController:
             "locked_edge_conf",
             "locked_obs_seq",
             "current_edge_id",
+            "orchestrator_state",
+            "final_phase_active",
+            "final_roi_mode_latched",
+            "final_distance_servo_active",
+            "remote_class_id",
+            "remote_robot_id",
+            "remote_timeout_s",
+            "remote_metadata",
+            "remote_request_id",
+            "remote_init_warmup",
+            "remote_init_min_interval_s",
         ):
             if key in self._ctx.stage_state:
                 payload[key] = self._ctx.stage_state.get(key)
+        if payload.get("remote_request_id"):
+            payload["request_id"] = payload.get("remote_request_id")
+        if payload.get("remote_class_id") is not None:
+            payload["class_id"] = payload.get("remote_class_id")
+        if payload.get("remote_robot_id"):
+            payload["robot_id"] = payload.get("remote_robot_id")
+        if payload.get("remote_timeout_s") is not None:
+            payload["timeout_s"] = payload.get("remote_timeout_s")
         return payload
 
     def _publish_runtime_status(self) -> None:
@@ -388,6 +410,9 @@ class StageController:
         """
         req_type = self._request_type(req)
         self._sync_request_context(req)
+        payload = req.payload if isinstance(req.payload, dict) else {}
+        if bool(payload.get("remote_init_warmup")):
+            return self._handle_remote_init_warmup(req, payload)
         stage = normalize_upper(req.stage, "IDLE")
         op = normalize_upper(req.op, "START")
         current = self.current_plan()
@@ -472,8 +497,13 @@ class StageController:
             if stage == "GRASP" and self.scheduler is not None:
                 try:
                     remote = self.scheduler.read_result("remote_init_status", default={})
+                    if not isinstance(remote, dict) or not remote:
+                        fallback = self.scheduler.read_result("remote_result", default={})
+                        if isinstance(fallback, dict) and bool(fallback.get("route_missing")):
+                            remote = fallback
                     if isinstance(remote, dict):
-                        self._ctx.server_status = str(remote.get("service_init_state") or remote.get("server_status") or "unknown")
+                        server_status = str(remote.get("service_init_state") or remote.get("server_status") or "unknown")
+                        self._ctx.server_status = "error" if server_status.lower() in {"failed", "init_failed", "error"} else server_status
                 except Exception:
                     pass
             output = plan.on_respond(req, self._ctx)
@@ -610,15 +640,60 @@ class StageController:
             reason="update",
         )
 
+    def _handle_remote_init_warmup(self, req: VisionReq, payload: Dict[str, Any]) -> Optional[StageOutput]:
+        if not bool(getattr(self.cfg.runtime, "remote_init_auto_enabled", False)):
+            return StageOutput(signals={"remote_init_warmup": False, "remote_init_result": {"ok": True, "skipped": True, "reason": "remote_init_auto_disabled"}})
+        min_interval_s = float(payload.get("remote_init_min_interval_s", 30.0) or 30.0)
+        remote_payload: Dict[str, Any] = {}
+        if self._mode_controller is not None:
+            resolver = getattr(self._mode_controller, "resolve_profile", None)
+            if callable(resolver):
+                profile = resolver("GRASP_REMOTE_INIT") or resolver("GRASP_REMOTE")
+                remote = getattr(profile, "remote", None) if profile is not None else None
+                if remote is not None:
+                    try:
+                        remote_payload = asdict(remote)
+                    except Exception:
+                        remote_payload = dict(getattr(remote, "__dict__", {}) or {})
+        if remote_payload:
+            remote_payload["enabled"] = True
+            remote_payload["kind"] = "task"
+            remote_payload["action"] = "init"
+        if self.remote_manager is not None:
+            configurator = getattr(self.remote_manager, "configure_runtime", None)
+            if callable(configurator) and remote_payload:
+                configurator(remote_payload)
+            enabler = getattr(self.remote_manager, "enable", None)
+            if callable(enabler):
+                enabler()
+            starter = getattr(self.remote_manager, "start_init_warmup", None)
+            if callable(starter):
+                result = starter(min_interval_s=min_interval_s, source="orchestrator_task_start")
+            else:
+                result = {"ok": False, "reason": "remote_manager_no_warmup"}
+        else:
+            result = {"ok": False, "reason": "remote_manager_missing"}
+        self._ctx.stage_state["remote_init_warmup"] = True
+        self._ctx.stage_state["remote_init_min_interval_s"] = min_interval_s
+        self._publish_runtime_status()
+        self._store_request_trace(req, self._clone_context(), req_type="target_update", idempotent=False, reason="remote_init_warmup")
+        return StageOutput(signals={"remote_init_warmup": True, "remote_init_result": result})
+
     def tick(self, tick_input: StageTickInput) -> Optional[StageOutput]:
         """Execute one stage tick and return the stage-level output envelope."""
         plan = self.current_plan()
         if plan is None:
             return None
         # Sync server_status from remote_init_status (tick-level cache, no need for ctx persistence)
-        remote = dict(getattr(tick_input, "results", {}) or {}).get("remote_init_status")
+        results = dict(getattr(tick_input, "results", {}) or {})
+        remote = results.get("remote_init_status")
+        if not isinstance(remote, dict) or not remote:
+            fallback = results.get("remote_result")
+            if isinstance(fallback, dict) and bool(fallback.get("route_missing")):
+                remote = fallback
         if isinstance(remote, dict):
-            self._ctx.server_status = str(remote.get("service_init_state") or remote.get("server_status") or "unknown")
+            server_status = str(remote.get("service_init_state") or remote.get("server_status") or "unknown")
+            self._ctx.server_status = "error" if server_status.lower() in {"failed", "init_failed", "error"} else server_status
         ctx_before = self._clone_context()
         output = plan.tick(tick_input, self._ctx)
         requested_mode = normalize_upper(self._ctx.current_mode, "IDLE")

@@ -3,10 +3,11 @@
 # 如果终端里设置了对应环境变量，环境变量仍会临时覆盖这里的值。
 
 runtime:
+  remote_init_auto_enabled: false
   # 主循环和观测发送频率。
-  loop_hz: 8.0
-  send_hz: 5.0
-  track_local_send_hz: 8.0
+  loop_hz: 12.0
+  send_hz: 10.0
+  track_local_send_hz: 10.0
 
   # 请求过期和热待机。
   stale_req_s: 3.0
@@ -155,10 +156,41 @@ table_edge:
   rgb_depth_center_offset_y: 0.0
   yolo_table_bbox_hold_enable: true
   yolo_table_bbox_hold_frames: 8
+  perception_sync_max_delta_ms: 100.0
+  matched_roi_hold_ttl_ms: 200.0
   yolo_table_roi_hold_enable: true
-  # 当前小ROI未检测到edge且bbox贴RGB左/右/下边界时，第二次尝试把对应ROI边向depth边界延伸。
+  final_fixed_roi_enable: true
+  final_fixed_roi_x0_norm: 0.40
+  final_fixed_roi_x1_norm: 0.60
+  final_fixed_roi_y0_norm: 0.45
+  final_fixed_roi_y1_norm: 0.62
+  final_fixed_roi_min_valid_ratio: 0.03
+  final_fixed_roi_min_sample_count: 32
+  # bbox贴RGB左/右/下边界时，直接选择扩展ROI；每帧仍只运行一次检测。
   yolo_table_roi_boundary_extend_enable: true
   yolo_table_roi_boundary_margin_norm: 0.03
+  boundary_extend_mode: fov_aligned_bounded
+  extended_roi_scale_x: 1.25
+  extended_roi_scale_y: 1.25
+  extended_roi_lower_band_center_ratio: 0.75
+  extended_roi_bottom_margin_px: 8
+  extended_roi_max_width_px: 200
+  extended_roi_max_height_px: 120
+  extended_roi_max_area_px: 24000
+  fallback_roi_lower_band_center_ratio: 0.75
+  fallback_roi_width_px: 160
+  fallback_roi_height_px: 90
+  depth_margin_extension_enable: true
+  bbox_center_edge_band_x_ratio: 0.12
+  bbox_center_edge_band_y_ratio: 0.12
+  depth_margin_max_extend_left_px: 40
+  depth_margin_max_extend_right_px: 40
+  depth_margin_max_extend_bottom_px: 28
+  depth_margin_max_extend_top_px: 0
+  adaptive_sampling_enable: true
+  adaptive_target_sample_count: 300
+  adaptive_min_stride: 4
+  adaptive_max_stride: 16
   yolo_table_edge_stable_frames: 5
   edge_trusted_min_conf: 0.60
   edge_trusted_max_residual: 0.0  # <=0 disables residual gate
@@ -174,9 +206,17 @@ table_edge:
   fast_candidate_point_cap: 1800
   fast_front_edge_col_step: 2
   fast_front_edge_row_step: 2
+  plane_fit_fast_path_enable: true
+  plane_fit_fast_accept_inlier_ratio: 0.75
+  plane_fit_fast_accept_residual_scale: 1.0
+  plane_fit_ransac_max_iterations: 20
   depth_stride: 2
 
 preview:
+  light_depth_min_m: 0.20
+  light_depth_max_m: 2.00
+  light_output_width: 848
+  light_output_height: 480
   # 可选 layout 见 preview/manager 和 opencv_sink 支持项。
   mode_layouts:
     INIT: rgb_minimal
@@ -296,6 +336,10 @@ mode_profiles:
       preview_layout: rgb_depth_edge
       release_cooldown_s: 3.0
       rgb:
+        fps: 15
+      depth:
+        width: 424
+        height: 240
         fps: 15
 
     IDLE_HOT:

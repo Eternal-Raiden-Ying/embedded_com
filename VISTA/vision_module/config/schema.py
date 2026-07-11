@@ -25,9 +25,12 @@ class RuntimeConfig:
     vision_params_file: str = ""
     loaded_config_files: list = field(default_factory=list)
     stack_run_id: str = ""
-    loop_hz: float = 8.0
-    send_hz: float = 5.0
-    track_local_send_hz: float = 8.0
+    log_profile: str = "normal"
+    resource_sample_interval_s: float = 1.0
+    loop_hz: float = 12.0
+    send_hz: float = 10.0
+    track_local_send_hz: float = 10.0
+    remote_init_auto_enabled: bool = False
     stale_req_s: float = 3.0
     hot_standby_s: float = 30.0
     keep_preview_after_stop: bool = True
@@ -36,6 +39,21 @@ class RuntimeConfig:
     release_model_on_idle: bool = False
     keep_model_hot_in_standby: bool = True
     enable_infer_during_hot_standby: bool = False
+    remote_payload_archive_enable: bool = True
+    remote_payload_archive_max_keep: int = 20
+    remote_rgb_correction_enable: bool = False
+    remote_rgb_correction_mode: str = "none"
+    remote_rgb_white_balance_enable: bool = True
+    remote_rgb_exposure_target_mean: float = 90.0
+    remote_rgb_max_gain: float = 4.0
+    remote_rgb_gamma: float = 1.4
+    remote_rgb_saturation_scale: float = 1.25
+    remote_rgb_save_raw: bool = False
+    remote_rgb_jpeg_quality: int = 95
+    remote_rgb_capture_warmup_frames: int = 10
+    remote_rgb_capture_wait_timeout_s: float = 2.0
+    remote_rgb_min_luma_mean: float = 40.0
+    remote_rgb_require_fresh_after_mode_enter: bool = True
     capability_placeholder: bool = False
     heartbeat_enabled: bool = False
     heartbeat_interval_s: float = 5.0
@@ -167,12 +185,45 @@ class TableEdgeConfig:
     rgb_depth_center_offset_y: float = 0.0
     yolo_table_bbox_hold_enable: bool = True
     yolo_table_bbox_hold_frames: int = 8
+    perception_sync_max_delta_ms: float = 100.0
+    matched_roi_hold_ttl_ms: float = 200.0
     yolo_table_roi_hold_enable: bool = True
-    # Boundary extension is a second-pass ROI fallback: when the normal small
-    # YOLO ROI fails to find an edge and the RGB bbox touches left/right/bottom,
-    # extend only the touched ROI side to the depth-frame boundary.
+    final_roi_latch_enable: bool = True
+    final_roi_latch_max_age_s: float = 2.0
+    final_fixed_roi_enable: bool = True
+    final_fixed_roi_x0_norm: float = 0.42
+    final_fixed_roi_x1_norm: float = 0.58
+    final_fixed_roi_y0_norm: float = 0.69
+    final_fixed_roi_y1_norm: float = 0.90
+    final_fixed_roi_min_valid_ratio: float = 0.03
+    final_fixed_roi_min_sample_count: int = 32
+    final_depth_debug_enable: bool = False
+    # Select the boundary-extended ROI up front when the YOLO bbox touches an
+    # allowed boundary; the detector still performs exactly one pass per frame.
     yolo_table_roi_boundary_extend_enable: bool = True
     yolo_table_roi_boundary_margin_norm: float = 0.03
+    boundary_extend_mode: str = "fov_aligned_bounded"
+    extended_roi_scale_x: float = 1.25
+    extended_roi_scale_y: float = 1.25
+    extended_roi_lower_band_center_ratio: float = 0.75
+    extended_roi_bottom_margin_px: int = 8
+    extended_roi_max_width_px: int = 200
+    extended_roi_max_height_px: int = 120
+    extended_roi_max_area_px: int = 24000
+    fallback_roi_lower_band_center_ratio: float = 0.75
+    fallback_roi_width_px: int = 160
+    fallback_roi_height_px: int = 90
+    depth_margin_extension_enable: bool = True
+    bbox_center_edge_band_x_ratio: float = 0.12
+    bbox_center_edge_band_y_ratio: float = 0.12
+    depth_margin_max_extend_left_px: int = 40
+    depth_margin_max_extend_right_px: int = 40
+    depth_margin_max_extend_bottom_px: int = 28
+    depth_margin_max_extend_top_px: int = 0
+    adaptive_sampling_enable: bool = True
+    adaptive_target_sample_count: int = 300
+    adaptive_min_stride: int = 4
+    adaptive_max_stride: int = 16
     yolo_table_edge_stable_frames: int = 5
     edge_trusted_min_conf: float = 0.60
     edge_trusted_max_residual: float = 0.0  # <=0 disables residual gate
@@ -194,10 +245,13 @@ class TableEdgeConfig:
     fast_candidate_point_cap: int = 1800
     fast_front_edge_col_step: int = 2
     fast_front_edge_row_step: int = 2
+    plane_fit_fast_path_enable: bool = True
+    plane_fit_fast_accept_inlier_ratio: float = 0.75
+    plane_fit_fast_accept_residual_scale: float = 1.0
+    plane_fit_ransac_max_iterations: int = 20
     depth_stride: int = 2
-    detector_mode: str = "lightweight"
+    detector_mode: str = "fast_plane_only"
     update_hz: float = 10.0
-    light_stride: int = 4
     fast_plane_stride: int = 4
     require_yolo_confirm: bool = True
     static_roi_enabled: bool = False
@@ -223,6 +277,7 @@ class TableEdgeConfig:
 
 @dataclass
 class PreviewConfig:
+    preview_mode: str = "light"
     mode_layouts: Dict[str, str] = field(default_factory=lambda: {
         "IDLE": "rgb_minimal",
         "FIND_EDGE": "rgb_depth_edge",
@@ -242,6 +297,10 @@ class PreviewConfig:
     show_depth: bool = True
     show_edge: bool = True
     destroy_all_on_close: bool = True
+    light_depth_min_m: float = 0.20
+    light_depth_max_m: float = 2.00
+    light_output_width: int = 848
+    light_output_height: int = 480
 
 
 @dataclass

@@ -160,8 +160,13 @@ class MotionController:
         if obs is not None:
             obs_target_dist = getattr(obs, "obs_target_dist_m", None) or getattr(obs, "target_dist_m", None)
         obs_target_dist_val = float(obs_target_dist) if obs_target_dist is not None else table_target_dist
-        if obs is not None and obs.dist_err_m is not None:
-            measured_distance = obs_target_dist_val + float(obs.dist_err_m)
+        obs_dist_err = getattr(obs, "dist_err_m", None) if obs is not None else None
+        obs_yaw_err = getattr(obs, "yaw_err_rad", None) if obs is not None else None
+        obs_edge_found = getattr(obs, "edge_found", False) if obs is not None else False
+        obs_confidence = getattr(obs, "confidence", None) if obs is not None else None
+        obs_edge_conf = getattr(obs, "edge_conf", obs_confidence) if obs is not None else None
+        if obs is not None and obs_dist_err is not None:
+            measured_distance = obs_target_dist_val + float(obs_dist_err)
             final_dist_err_m = measured_distance - table_target_dist
         timing = self._stale_guard(obs, cmd.ts)
         stale_level = str(timing.get("stale_level") or "")
@@ -174,7 +179,16 @@ class MotionController:
             if yolo_table_fresh_raw is None
             else bool(yolo_table_fresh_raw)
         )
-        semantic_fields = self._semantic_summary_fields(obs) if obs is not None else {
+        table_like_obs = bool(
+            obs is not None
+            and (
+                hasattr(obs, "edge_found")
+                or hasattr(obs, "table_bbox_found")
+                or hasattr(obs, "dist_err_m")
+                or hasattr(obs, "yaw_err_rad")
+            )
+        )
+        semantic_fields = self._semantic_summary_fields(obs) if table_like_obs else {
             "table_bbox_current_found": False,
             "table_bbox_control_valid": False,
             "table_bbox_hold_active": False,
@@ -209,12 +223,12 @@ class MotionController:
         }
         return {
             "state": mode,
-            "edge_found": bool(edge_found if edge_found is not None else (obs.edge_found if obs is not None else False)),
-            "edge_valid": bool(getattr(obs, "edge_valid", obs.edge_found) if obs is not None else False),
-            "confidence": (float(obs.confidence) if obs is not None and obs.confidence is not None else None),
-            "edge_conf": (float(getattr(obs, "edge_conf", obs.confidence)) if obs is not None and getattr(obs, "edge_conf", obs.confidence) is not None else None),
-            "yaw_err_rad": (float(obs.yaw_err_rad) if obs is not None and obs.yaw_err_rad is not None else None),
-            "dist_err_m": (float(obs.dist_err_m) if obs is not None and obs.dist_err_m is not None else None),
+            "edge_found": bool(edge_found if edge_found is not None else obs_edge_found),
+            "edge_valid": bool(getattr(obs, "edge_valid", obs_edge_found) if obs is not None else False),
+            "confidence": (float(obs_confidence) if obs_confidence is not None else None),
+            "edge_conf": (float(obs_edge_conf) if obs_edge_conf is not None else None),
+            "yaw_err_rad": (float(obs_yaw_err) if obs_yaw_err is not None else None),
+            "dist_err_m": (float(obs_dist_err) if obs_dist_err is not None else None),
             "target_dist_m": table_target_dist,
             "measured_distance_m": measured_distance,
             "measured_dist_m": measured_distance,
@@ -233,7 +247,7 @@ class MotionController:
             "fov_guard_reason": str(getattr(obs, "fov_guard_reason", "") or "") if obs is not None else "",
             "stale_source": (
                 "edge"
-                if obs is not None and stale_level and stale_level != "fresh" and self._yolo_reliable(obs)
+                if table_like_obs and stale_level and stale_level != "fresh" and self._yolo_reliable(obs)
                 else ("table" if obs is not None and stale_level and stale_level != "fresh" else "")
             ),
             **timing,
@@ -364,7 +378,12 @@ class MotionController:
             return self.search_table_cmd(turn_sign=turn_sign)
         geom = compute_bbox_control_geometry(obs)
         bbox_cx_norm_control = geom["bbox_cx_norm_control"]
-        bbox_center_error_control = geom["bbox_center_error_control"]
+        table_target_x = max(0.0, min(1.0, float(getattr(self.cfg, "table_yolo_align_center_x_target", 0.50) or 0.50)))
+        table_center_tol = abs(float(getattr(self.cfg, "table_yolo_align_center_x_tol", 0.08) or 0.08))
+        bbox_center_error_control = (
+            float(bbox_cx_norm_control) - table_target_x
+            if bbox_cx_norm_control is not None else geom["bbox_center_error_control"]
+        )
         cx_norm = bbox_cx_norm_control
         center_error = bbox_center_error_control
         view_err_norm = float(center_error * 2.0) if center_error is not None else 0.0
@@ -389,15 +408,59 @@ class MotionController:
         )
         center_good_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_good_limit", 0.06) or 0.06))
         center_hard_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.40) or 0.40))
-        forward_vx = max(
-            abs(float(getattr(self.car_cfg, "yolo_table_forward_vx_mps", 0.015) or 0.015)),
-            abs(float(getattr(self.cfg, "min_forward_vx_mps", 0.04) or 0.04)),
-        )
-        slow_vx = min(forward_vx, abs(float(getattr(self.cfg, "min_forward_vx_mps", 0.04) or 0.04)))
+        far_vx = abs(float(getattr(self.cfg, "yolo_approach_far_vx_mps", 0.50) or 0.50))
+        mid_vx = min(far_vx, abs(float(getattr(self.cfg, "yolo_approach_mid_vx_mps", 0.20) or 0.20)))
+        near_vx = min(mid_vx, abs(float(getattr(self.cfg, "yolo_approach_near_vx_mps", 0.10) or 0.10)))
+        min_vx = min(near_vx, abs(float(getattr(self.cfg, "yolo_approach_min_vx_mps", 0.05) or 0.05)))
+        depth_value = None
+        depth_source = "unknown"
+        if obs is not None:
+            for source, value in (
+                ("table_roi_median_m", getattr(obs, "table_roi_depth_median", None)),
+                ("edge_measured_dist_m", getattr(obs, "obs_target_dist_m", None)),
+                ("table_edge_dist_m", getattr(obs, "target_dist_m", None)),
+            ):
+                try:
+                    if value is not None:
+                        depth_value = float(value)
+                        depth_source = source
+                        break
+                except (TypeError, ValueError):
+                    pass
+        stale = self._stale_guard(obs)
+        obs_fresh = stale.get("stale_level") == "fresh"
+        obs_age_ms = stale.get("obs_total_age_ms")
+        trusted_depth_source = depth_source in {"table_roi_median_m", "edge_measured_dist_m", "table_edge_dist_m"}
+        far_allowed = bool(depth_value is not None and depth_value > 1.20 and obs_fresh and trusted_depth_source)
+        far_block_reason = ""
+        if depth_value is None:
+            far_block_reason = "depth_unknown"
+        elif depth_value <= 1.20:
+            far_block_reason = "depth_not_far"
+        elif not obs_fresh:
+            far_block_reason = f"obs_{stale.get('stale_level') or 'stale'}"
+        elif not trusted_depth_source:
+            far_block_reason = "depth_source_untrusted"
+        if depth_value is None:
+            speed_band = "unknown"
+            forward_vx = min_vx
+        elif far_allowed:
+            speed_band = "far"
+            forward_vx = far_vx
+        elif depth_value > 0.90:
+            speed_band = "mid"
+            forward_vx = mid_vx
+        elif depth_value > 0.65:
+            speed_band = "near"
+            forward_vx = near_vx
+        else:
+            speed_band = "min"
+            forward_vx = min_vx
+        slow_vx = min(forward_vx, near_vx)
         yolo_forward_allowed = bool(center_error is not None and abs(center_error) <= center_hard_limit)
         if source_name in {"yolo_forward", "yolo_track_forward"}:
             if yolo_forward_allowed:
-                assist_vx = forward_vx if abs(center_error) <= center_good_limit else slow_vx
+                assist_vx = forward_vx if mode_name == "YOLO_APPROACH" else (forward_vx if abs(center_error) <= center_good_limit else slow_vx)
                 source_name = "yolo_track_forward"
             else:
                 assist_vx = 0.0
@@ -407,7 +470,7 @@ class MotionController:
             # edge_adjust is generated by edge/docking paths, not by pure YOLO.
             # Fall back to forward-safe semantics if called here accidentally.
             if yolo_forward_allowed:
-                assist_vx = forward_vx if abs(center_error) <= center_good_limit else slow_vx
+                assist_vx = forward_vx if mode_name == "YOLO_APPROACH" else (forward_vx if abs(center_error) <= center_good_limit else slow_vx)
                 source_name = "yolo_track_forward"
             else:
                 assist_vx = 0.0
@@ -426,11 +489,27 @@ class MotionController:
                 "control_source": source_name,
                 "approach_source": "yolo_table_bbox",
                 "bbox_cx_norm": float(cx_norm) if cx_norm is not None else None,
+                "table_yolo_align_center_x_target": float(table_target_x),
+                "table_yolo_align_center_x_tol": float(table_center_tol),
+                "table_center_x_norm": float(cx_norm) if cx_norm is not None else None,
+                "table_err_x": float(center_error) if center_error is not None else None,
                 "target_offset": float(center_error) if center_error is not None else None,
                 "center_error": float(center_error) if center_error is not None else None,
                 "yolo_forward_center_good_limit": float(center_good_limit),
                 "yolo_forward_center_hard_limit": float(center_hard_limit),
                 "yolo_forward_allowed": bool(yolo_forward_allowed),
+                "yolo_approach_speed_band": speed_band,
+                "yolo_approach_speed_depth": float(depth_value) if depth_value is not None else None,
+                "yolo_approach_selected_vx": float(assist_vx),
+                "yolo_approach_depth_source": depth_source,
+                "yolo_approach_obs_fresh": bool(obs_fresh),
+                "yolo_approach_obs_age_s": (float(obs_age_ms) / 1000.0) if obs_age_ms is not None else None,
+                "yolo_approach_far_allowed": bool(far_allowed),
+                "yolo_approach_speed_block_reason": far_block_reason,
+                "yolo_approach_far_vx_mps": float(far_vx),
+                "yolo_approach_mid_vx_mps": float(mid_vx),
+                "yolo_approach_near_vx_mps": float(near_vx),
+                "yolo_approach_min_vx_mps": float(min_vx),
                 "table_cx_norm_signed": float(center_error * 2.0) if center_error is not None else None,
                 "yolo_yaw_gain": float(gain),
                 "yolo_max_wz_radps": float(max_wz),
@@ -456,6 +535,9 @@ class MotionController:
                 "edge_geometry_timeout": False,
                 "no_table_bbox_timeout": False,
                 "table_lost_search_timeout": False,
+                "yolo_approach_speed_band": speed_band,
+                "yolo_approach_speed_depth": float(depth_value) if depth_value is not None else None,
+                "yolo_approach_selected_vx": float(assist_vx),
                 "yolo_view_err_norm": view_err_norm,
                 "edge_yaw_err_rad": float(getattr(obs, "yaw_err_rad", 0.0) or 0.0) if obs is not None else 0.0,
                 "yolo_edge_yaw_conflict": False,
@@ -1494,7 +1576,7 @@ class MotionController:
                 "forward_allowed": bool(forward_allowed),
                 "forward_block_reason": forward_block_reason or "",
                 "final_lock_enabled": bool(getattr(self.cfg, "enable_final_lock", False)),
-                "micro_adjust_enabled": bool(getattr(self.cfg, "enable_micro_adjust", False)),
+                "micro_adjust_enabled": False,
                 "stop_ready_ignored_for_stage_transition": False,
                 "micro_adjust_skipped": False,
                 "pose_missing_duration_s": float(pose_missing_duration_s),

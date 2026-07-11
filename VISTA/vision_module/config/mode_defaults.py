@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from ..backend.mode_profiles import ModeProfile, PreviewProfile, RemoteProfile, TableEdgeProfile
 
@@ -82,17 +82,84 @@ def _camera_override_with_updates(cfg, camera_name: str, **updates: Any) -> Dict
 
 def _default_remote_profile(*, enabled: bool, require_depth: bool = False,
                              kind: str = "loop", action: str = "",
-                             max_retries: int = 1) -> RemoteProfile:
+                             max_retries: int = 1, init_reason: str = "") -> RemoteProfile:
     return RemoteProfile(
         enabled=bool(enabled),
         kind=str(kind or "loop").strip().lower() or "loop",
         action=str(action or "").strip().lower(),
         max_retries=int(max_retries),
         require_depth=bool(require_depth),
+        init_reason=str(init_reason or "").strip().lower(),
     )
 
 
+def _apply_remote_overrides(profile: RemoteProfile, section: Dict[str, Any]) -> None:
+    remote = section.get("remote")
+    if not isinstance(remote, dict):
+        return
+    if "enabled" in remote:
+        profile.enabled = bool(remote.get("enabled"))
+    for key in ("base_url", "kind", "action", "command", "rgb_encoding", "depth_encoding", "init_reason"):
+        if key in remote and remote.get(key) is not None:
+            setattr(profile, key, str(remote.get(key)).strip())
+    for key in ("require_depth",):
+        if key in remote:
+            setattr(profile, key, bool(remote.get(key)))
+    for key in ("timeout_s",):
+        if key in remote and remote.get(key) is not None:
+            setattr(profile, key, float(remote.get(key)))
+    for key in ("max_retries", "rgb_quality", "depth_compression", "capture_warmup_frames"):
+        if key in remote and remote.get(key) is not None:
+            setattr(profile, key, int(remote.get(key)))
+    for key in ("capture_warmup_timeout_s",):
+        if key in remote and remote.get(key) is not None:
+            setattr(profile, key, float(remote.get(key)))
+    for key in ("expected_rgb_shape", "expected_depth_shape"):
+        if key in remote and remote.get(key) is not None:
+            shape = _shape_hw_tuple(remote.get(key))
+            if shape is not None:
+                setattr(profile, key, shape)
+    if "robot_id" in remote and remote.get("robot_id") is not None:
+        merged = dict(profile.metadata or {})
+        merged["robot_id"] = str(remote.get("robot_id")).strip()
+        profile.metadata = merged
+    if isinstance(remote.get("metadata"), dict):
+        merged = dict(profile.metadata or {})
+        merged.update(dict(remote.get("metadata") or {}))
+        profile.metadata = merged
+
+
+def _shape_hw_tuple(value: Any) -> Optional[Tuple[int, int]]:
+    if isinstance(value, str):
+        parts = [part.strip() for part in value.replace("x", ",").replace("X", ",").split(",") if part.strip()]
+    elif isinstance(value, (list, tuple)):
+        parts = list(value)
+    else:
+        return None
+    if len(parts) < 2:
+        return None
+    try:
+        h = int(parts[0])
+        w = int(parts[1])
+    except Exception:
+        return None
+    if h <= 0 or w <= 0:
+        return None
+    return (h, w)
+
+
+def _apply_camera_override_section(profile: ModeProfile, section: Dict[str, Any]) -> None:
+    for camera_name in ("rgb", "depth", "grey", "ir"):
+        camera_section = section.get(camera_name)
+        if isinstance(camera_section, dict):
+            merged = dict(profile.camera_overrides.get(camera_name) or {})
+            merged.update(dict(camera_section))
+            profile.camera_overrides[camera_name] = merged
+
+
 def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) -> Dict[str, ModeProfile]:
+    runtime_cfg = getattr(cfg, "runtime", None)
+    remote_init_auto_enabled = bool(getattr(runtime_cfg, "remote_init_auto_enabled", False))
     """Build the initial mode profile set for VISTA."""
     mode_cfg = dict(getattr(cfg, "mode_profiles", {}) or {})
     model_cfg = getattr(cfg, "model", None)
@@ -119,6 +186,14 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
         "rgb",
         format="BGR",
         fps=15,
+        in_w=1280,
+        in_h=720,
+        out_w=1280,
+        out_h=720,
+        crop_x=0,
+        crop_y=0,
+        crop_w=1280,
+        crop_h=720,
     )
     idle_hot_rgb = _camera_override_with_updates(
         cfg,
@@ -127,9 +202,15 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
         fps=10,
     )
     depth_overrides = _camera_overrides_for(cfg, ("depth",))
+    grasp_remote_depth = _camera_override_with_updates(
+        cfg,
+        "depth",
+        fps=15,
+    )
     grasp_remote_cameras = {
         "rgb": grasp_remote_rgb,
         **depth_overrides,
+        "depth": grasp_remote_depth,
     }
     preview_layout_defaults = {
         "INIT": "rgb_minimal",
@@ -180,11 +261,11 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             camera_overrides={},
             predictor_enabled=False,
             predictor_model=None,
-            remote=_default_remote_profile(enabled=True, require_depth=False,
-                                             kind="task", action="init", max_retries=3),
+            remote=_default_remote_profile(enabled=remote_init_auto_enabled, require_depth=False,
+                                             kind="task", action="init", max_retries=3, init_reason="startup_auto"),
             preview=preview_profile("INIT", enabled=False, sink_name="null"),
             release_cooldown_s=0.0,
-            metadata={"contract": {"stage": "INIT", "remote": "required"}},
+            metadata={"contract": {"stage": "INIT", "remote": "required" if remote_init_auto_enabled else "disabled"}},
         ),
         "SILENT": ModeProfile(
             name="SILENT",
@@ -209,7 +290,6 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
                 enabled=True,
                 detector_mode="fast_plane_only",
                 update_hz=5.0,
-                light_stride=4,
                 fast_plane_stride=4,
                 depth_stride=2,
                 require_yolo_confirm=True,
@@ -255,7 +335,6 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
                 enabled=True,
                 detector_mode="fast_plane_only",
                 update_hz=10.0,
-                light_stride=4,
                 fast_plane_stride=4,
                 depth_stride=2,
                 require_yolo_confirm=True,
@@ -330,7 +409,7 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             predictor_enabled=False,
             predictor_model=None,
             remote=_default_remote_profile(enabled=True, require_depth=False,
-                                             kind="task", action="init", max_retries=3),
+                                             kind="task", action="init", max_retries=3, init_reason="explicit_grasp"),
             preview=preview_profile("GRASP_REMOTE_INIT", enabled=True),
             release_cooldown_s=3.0,
             metadata={
@@ -348,8 +427,15 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             camera_overrides=grasp_remote_cameras,
             predictor_enabled=False,
             predictor_model=None,
-            remote=_default_remote_profile(enabled=True, require_depth=True,
-                                             kind="task", action="predict", max_retries=1),
+            remote=RemoteProfile(
+                enabled=True,
+                require_depth=True,
+                kind="task",
+                action="predict",
+                max_retries=1,
+                capture_warmup_frames=5,
+                capture_warmup_timeout_s=0.5,
+            ),
             preview=preview_profile("GRASP_REMOTE", enabled=True),
             release_cooldown_s=3.0,
             metadata={
@@ -401,6 +487,9 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
         if "preview_layout" in section and section.get("preview_layout"):
             profile.preview.metadata["layout"] = str(section.get("preview_layout")).strip()
 
+        _apply_remote_overrides(profile.remote, section)
+        _apply_camera_override_section(profile, section)
+
         table_edge_section = section.get("table_edge")
         if isinstance(table_edge_section, dict):
             te = dict(table_edge_section)
@@ -410,8 +499,6 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
                 profile.table_edge.detector_mode = str(te.get("detector_mode"))
             if "update_hz" in te and te.get("update_hz") is not None:
                 profile.table_edge.update_hz = float(te.get("update_hz"))
-            if "light_stride" in te and te.get("light_stride") is not None:
-                profile.table_edge.light_stride = int(te.get("light_stride"))
             if "fast_plane_stride" in te and te.get("fast_plane_stride") is not None:
                 profile.table_edge.fast_plane_stride = int(te.get("fast_plane_stride"))
             if "depth_stride" in te and te.get("depth_stride") is not None:
@@ -466,5 +553,13 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             current = dict(profile.camera_overrides.get(str(camera_name), {}))
             current.update({str(k): v for k, v in updates.items() if v is not None})
             profile.camera_overrides[str(camera_name)] = current
+
+    # ModeController is intentionally config-free.  Carry the canonical
+    # runtime auto-init switch with every remote capability so local profile
+    # transitions cannot overwrite RemoteManager's configured value.
+    for profile in profiles.values():
+        remote_metadata = dict(profile.remote.metadata or {})
+        remote_metadata["remote_init_auto_enabled"] = bool(remote_init_auto_enabled)
+        profile.remote.metadata = remote_metadata
 
     return profiles

@@ -78,6 +78,10 @@ class ExportStateMixin:
             "confirmed_vision_mode": self.ctx.confirmed_vision_mode,
             "vision_stage": self.ctx.confirmed_vision_stage,
             "vision_mode": self.ctx.confirmed_vision_mode,
+            "carrying_object": bool(getattr(self.ctx, "carrying_object", False)),
+            "carried_target": str(getattr(self.ctx, "carried_target", "") or ""),
+            "post_grasp_place_enabled": bool(getattr(self.ctx, "post_grasp_place_enabled", False)),
+            "basket_approach_stable_count": int(getattr(self.ctx, "basket_approach_stable_count", 0) or 0),
             # Backwards compatibility fields for unit tests
             "edge_valid": bool(sem.edge_geometry_valid),
             "confidence": float(table_obs.confidence) if table_obs is not None else None,
@@ -166,4 +170,3 @@ class ExportStateMixin:
             "dx": dx,
             "dy": dy,
         }
-

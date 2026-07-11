@@ -77,6 +77,14 @@ def apply_base_motion_safety(decision: Any, *, ctx: Any, cfg: Any, log_fn: Optio
         State.NEXT_TABLE,
         State.RETURN_HOME,
         State.AVOID_OBSTACLE,
+        State.POST_GRASP_TURN_180,
+        State.POST_GRASP_TURN_FIXED,
+        State.POST_GRASP_FORWARD_FIXED,
+        State.POST_GRASP_STOP,
+        State.POST_GRASP_POSE_RISE,
+        State.SEARCH_BASKET,
+        State.APPROACH_BASKET,
+        State.PLACE_TO_BASKET,
     }
 
     state_allows_motion = False
@@ -152,6 +160,20 @@ def apply_base_motion_safety(decision: Any, *, ctx: Any, cfg: Any, log_fn: Optio
     if obs is not None and obs.depth_p10 is not None:
         depth_p10 = obs.depth_p10
         near_stop_depth_m = getattr(cfg, "near_stop_depth_m", 0.25)
+        return_place_depth_bypass = bool(
+            state
+            in {
+                State.POST_GRASP_TURN_180,
+                State.POST_GRASP_TURN_FIXED,
+                State.POST_GRASP_FORWARD_FIXED,
+                State.POST_GRASP_STOP,
+                State.POST_GRASP_POSE_RISE,
+                State.SEARCH_BASKET,
+                State.APPROACH_BASKET,
+                State.PLACE_TO_BASKET,
+            }
+            and bool(summary.get("return_place_ignores_table_stale", False))
+        )
         if depth_p10 < near_stop_depth_m:
             if decision.cmd.vx_mps != 0.0 or decision.cmd.vy_mps != 0.0 or decision.cmd.wz_radps != 0.0:
                 decision.cmd.vx_mps = 0.0
@@ -170,7 +192,7 @@ def apply_base_motion_safety(decision: Any, *, ctx: Any, cfg: Any, log_fn: Optio
             allow_rotate = False
             allow_lateral = False
 
-        elif depth_p10 < getattr(cfg, "near_slow_depth_m", 0.40):
+        elif depth_p10 < getattr(cfg, "near_slow_depth_m", 0.40) and not return_place_depth_bypass:
             max_vx = getattr(cfg, "near_slow_max_vx_mps", 0.020)
             max_wz = getattr(cfg, "near_slow_max_wz_radps", 0.04)
             max_vy = getattr(cfg, "near_slow_max_vy_mps", 0.0)
@@ -192,6 +214,9 @@ def apply_base_motion_safety(decision: Any, *, ctx: Any, cfg: Any, log_fn: Optio
                     log_fn("info", f"Depth safety slowdown active: depth_p10={depth_p10:.3f}m. Limited to vx={decision.cmd.vx_mps:.3f}, vy={decision.cmd.vy_mps:.3f}, wz={decision.cmd.wz_radps:.3f}")
                 except Exception:
                     pass
+        elif return_place_depth_bypass:
+            summary["return_place_depth_slowdown_bypassed"] = True
+            summary["return_place_depth_p10_m"] = depth_p10
 
     summary["allow_forward"] = bool(allow_forward)
     summary["allow_rotate"] = bool(allow_rotate)

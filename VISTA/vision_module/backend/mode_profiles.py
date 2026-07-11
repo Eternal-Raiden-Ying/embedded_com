@@ -10,17 +10,22 @@ class RemoteProfile:
     """Capability requirements for remote inference or grasp cooperation."""
 
     enabled: bool = False
-    base_url: Optional[str] = "192.168.6.43"    # required to be updated
+    base_url: Optional[str] = "http://10.11.36.181:6006"
     command: str = "predict"
     require_depth: bool = False
     kind: str = "loop"       # "loop" | "task"
     action: str = ""         # task only: "init" | "predict" | "release"
     max_retries: int = 1     # task only
+    init_reason: str = ""
     timeout_s: float = 10.0
-    rgb_encoding: str = "jpeg"
+    rgb_encoding: str = "png"
     depth_encoding: str = "png"
     rgb_quality: int = 90
     depth_compression: int = 3
+    capture_warmup_frames: int = 5
+    capture_warmup_timeout_s: float = 1.0
+    expected_rgb_shape: Tuple[int, int] = (720, 1280)
+    expected_depth_shape: Tuple[int, int] = (720, 1280)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -40,9 +45,8 @@ class TableEdgeProfile:
     """Capability requirements for table-edge depth perception."""
 
     enabled: bool = False
-    detector_mode: str = "lightweight"  # "lightweight" | "full" | "fast_plane_only"
+    detector_mode: str = "fast_plane_only"
     update_hz: float = 5.0
-    light_stride: int = 4
     fast_plane_stride: int = 4
     depth_stride: int = 2
     require_yolo_confirm: bool = True

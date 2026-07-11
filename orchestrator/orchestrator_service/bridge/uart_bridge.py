@@ -136,6 +136,11 @@ class UartBridge:
         self._tx_event.set()
         return True
 
+    def send_motion_line_now(self, command_line: str, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
+        if not str(command_line or "").strip():
+            return False
+        return bool(self._write_line(str(command_line).strip(), tx_meta=tx_meta, publish_mono=time.monotonic()))
+
     def send_stm32_vel(self, vx_mps, vy_mps, wz_radps, _unused=None, seq=None, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
         del _unused, seq
         return self.send_motion_line(encode_vel(vx_mps, vy_mps, wz_radps), tx_meta=tx_meta)
@@ -199,8 +204,6 @@ class UartBridge:
     def _writer_discard_reason(self, item: Dict[str, Any]) -> str:
         line = item.get("line", "")
         tx_meta = item.get("tx_meta")
-        if str(line or "").strip().upper() == "MODE SEARCH":
-            return "non_velocity_line"
         if not self.is_velocity_command(line, tx_meta):
             return ""
         now_mono = time.monotonic()
@@ -369,9 +372,9 @@ class UartBridge:
             except Exception:
                 pass
 
-    def _write_line(self, line: str, tx_meta: Optional[Dict[str, Any]] = None, publish_mono: Optional[float] = None):
+    def _write_line(self, line: str, tx_meta: Optional[Dict[str, Any]] = None, publish_mono: Optional[float] = None) -> bool:
         if not line:
-            return
+            return False
         with self._write_lock:
             if publish_mono is not None or tx_meta is not None:
                 item_to_check = {
@@ -383,7 +386,7 @@ class UartBridge:
                 if discard_reason:
                     self._log("warn", f"Discarding velocity command under write lock: {line}")
                     self._emit_writer_discard(item_to_check, discard_reason)
-                    return
+                    return False
             raw_line = str(line).rstrip("\r\n")
             wire_line = raw_line.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r\n") + "\r\n"
             self._last_line = raw_line
@@ -396,6 +399,7 @@ class UartBridge:
             })
             ok = False
             error = ""
+            write_start_ns = time.monotonic_ns()
             if self.dry_run:
                 ok = True
                 if self.dry_run_echo_stdout:
@@ -413,6 +417,8 @@ class UartBridge:
                     except Exception as exc:
                         error = str(exc)
                         self._log("warn", f"UART send failed: {exc}")
+            write_done_ns = time.monotonic_ns()
+            write_ms = max(0.0, (write_done_ns - write_start_ns) / 1_000_000.0)
             if ok:
                 self.sent_count += 1
                 self.last_tx_error = ""
@@ -421,6 +427,12 @@ class UartBridge:
                 self.last_tx_error = error or "unknown error"
             meta["uart_tx_ok"] = ok
             meta["serial_write_ok"] = ok
+            meta["uart_mode"] = "dry_run" if self.dry_run else "full"
+            meta["write_start_mono_ns"] = write_start_ns
+            meta["write_done_mono_ns"] = write_done_ns
+            meta["dryrun_write_ms" if self.dry_run else "uart_write_ms"] = write_ms
+            meta["uart_write_ms" if self.dry_run else "dryrun_write_ms"] = None
             if error:
                 meta["uart_tx_error"] = error
             self._emit_tx_callback(wire_line, self.dry_run, meta)
+            return bool(ok)

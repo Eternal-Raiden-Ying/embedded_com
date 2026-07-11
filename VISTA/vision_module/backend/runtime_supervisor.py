@@ -287,19 +287,23 @@ class RuntimeSupervisor:
             except Exception:
                 ok = False
         service_available = bool(base_url)
-        if service_available:
-            try:
-                self.remote_manager.enable()
-                self.remote_manager.start_runtime()
-            except Exception:
-                ok = False
-        else:
+        should_run_remote = bool(enabled and service_available)
+        if not enabled:
+            # A configured URL is harmless when the capability is disabled.
+            # Lifecycle cleanup is best-effort and must not fail local modes.
             try:
                 self.remote_manager.stop_runtime()
             except Exception:
-                ok = False
+                pass
             try:
                 self.remote_manager.disable()
+            except Exception:
+                pass
+            return True
+        if should_run_remote:
+            try:
+                self.remote_manager.enable()
+                self.remote_manager.start_runtime()
             except Exception:
                 ok = False
         if enabled and not service_available:
@@ -389,17 +393,60 @@ class RuntimeSupervisor:
     def _apply_plan(self, plan: Dict[str, Any], generation: int) -> bool:
         mode_name = str((plan or {}).get("mode") or "IDLE").strip().upper() or "IDLE"
         capabilities = dict((plan or {}).get("capabilities") or {})
-        ok = True
-        ok = self._configure_camera(dict(capabilities.get("camera") or {})) and ok
-        ok = self._configure_predictor(dict(capabilities.get("predictor") or {})) and ok
-        ok = self._configure_remote(dict(capabilities.get("remote") or {})) and ok
-        ok = self._configure_table_edge(dict(capabilities.get("table_edge") or {})) and ok
-        ok = self._configure_preview(dict(capabilities.get("preview") or {}), mode_name=mode_name) and ok
+        camera_payload = dict(capabilities.get("camera") or {})
+        predictor_payload = dict(capabilities.get("predictor") or {})
+        remote_payload = dict(capabilities.get("remote") or {})
+        table_edge_payload = dict(capabilities.get("table_edge") or {})
+        preview_payload = dict(capabilities.get("preview") or {})
+
+        # Optional capabilities are successful no-ops when disabled.  Preserve
+        # individual outcomes so a failed mode transition identifies the real
+        # component rather than treating a disabled remote capability as a
+        # generic apply failure.
+        camera_ok = bool(self._configure_camera(camera_payload))
+        predictor_ok = bool(self._configure_predictor(predictor_payload))
+        remote_ok = bool(self._configure_remote(remote_payload))
+        table_edge_ok = bool(self._configure_table_edge(table_edge_payload))
+        preview_ok = bool(self._configure_preview(preview_payload, mode_name=mode_name))
+        apply_results = {
+            "camera": {
+                "ok": camera_ok,
+                "enabled": bool(camera_payload.get("enabled_cameras") or camera_payload.get("enabled", False)),
+                "reason": "" if camera_ok else "camera_apply_failed",
+            },
+            "model": {
+                "ok": predictor_ok,
+                "enabled": bool(predictor_payload.get("enabled", False)),
+                "reason": "" if predictor_ok else "model_apply_failed",
+            },
+            "remote": {
+                "ok": remote_ok,
+                "enabled": bool(remote_payload.get("enabled", False)),
+                "skipped": not bool(remote_payload.get("enabled", False)),
+                "reason": (
+                    "remote_capability_disabled"
+                    if not bool(remote_payload.get("enabled", False))
+                    else ("" if remote_ok else "remote_apply_failed")
+                ),
+            },
+            "table_edge": {
+                "ok": table_edge_ok,
+                "enabled": bool(table_edge_payload.get("enabled", False)),
+                "reason": "" if table_edge_ok else "table_edge_apply_failed",
+            },
+            "preview": {
+                "ok": preview_ok,
+                "enabled": bool(preview_payload.get("enabled", False)),
+                "reason": "" if preview_ok else "preview_apply_failed",
+            },
+        }
+        ok = camera_ok and predictor_ok and remote_ok and table_edge_ok and preview_ok
         self._last_apply_result = {
             "ok": bool(ok),
             "reason": "reconciled" if ok else "apply_failed",
             "mode": mode_name,
             "generation": int(generation),
+            "apply_results": apply_results,
         }
         level = "info" if ok else "error"
         self._emit_backend_event(
@@ -417,6 +464,7 @@ class RuntimeSupervisor:
                 (((capabilities.get("preview") or {}).get("metadata") or {}).get("layout") or "")
             ),
             request_source="state_machine",
+            apply_results=apply_results,
         )
         if not ok:
             self._log("runtime supervisor apply failed", mode=mode_name, generation=int(generation))

@@ -310,8 +310,12 @@ def merge_table_bbox_from_local_perception(
     """
     if not isinstance(local_perception, dict):
         return obs
-    bbox = _local_current_table_bbox(local_perception)
     out = dict(obs or default_table_edge_obs())
+    if out.get("sync_status") in {"exact", "nearest", "matched_hold", "unavailable"} and out.get("source_frame_id") is not None:
+        # The producer already bound YOLO to the depth FrameBundle before edge
+        # computation.  Never overwrite that decision with the stage's latest slot.
+        return out
+    bbox = _local_current_table_bbox(local_perception)
     protected_edge = bool(
         str(out.get("selected_source") or out.get("source") or "").strip().lower() == "results"
         and _edge_semantic_present(out)

@@ -52,9 +52,8 @@ class RecoveryMixin:
         return not bool(getattr(self.cfg, "keep_vision_alive_after_task", True))
 
     def _finish_task_to_idle(self, reason: str) -> None:
-        if self._should_send_vision_idle_after_task():
-            self._queue_vision_req(make_vision_idle(session_id=self.ctx.active_session_id, epoch=self.ctx.active_epoch), force=True)
-        else:
+        self._queue_vision_req(make_vision_idle(session_id=self.ctx.active_session_id, epoch=self.ctx.active_epoch), force=True)
+        if not self._should_send_vision_idle_after_task():
             self._log(
                 "info",
                 "task reached idle; keep vision hot "

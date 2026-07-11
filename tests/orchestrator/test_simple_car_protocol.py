@@ -36,9 +36,9 @@ from orchestrator_service.runtime.service import OrchestratorService  # noqa: E4
 
 class SimpleCarProtocolTest(unittest.TestCase):
     def test_stm32_command_encoding(self) -> None:
-        self.assertEqual(encode_mode("SEARCH_TABLE"), "MODE SEARCH")
+        self.assertEqual(encode_mode("SEARCH_TABLE"), "MODE SEARCH 0")
         self.assertEqual(encode_mode("RETURN_HOME"), "MODE RETURN")
-        self.assertEqual(encode_mode("AUTOSEARCH"), "MODE SEARCH")
+        self.assertEqual(encode_mode("AUTOSEARCH"), "MODE SEARCH 0")
         self.assertEqual(encode_vel(0.1, 0, 0.5), "V 0.100 0.000 0.500")
         self.assertEqual(encode_stop(13), "STOP")
         self.assertEqual(encode_jog(0.02, 0, 0), "V 0.020 0.000 0.000")
@@ -263,11 +263,11 @@ class SimpleCarProtocolTest(unittest.TestCase):
         time.sleep(0.15)
 
         self.assertEqual(uart.calls[0][0], "line")
-        self.assertEqual(uart.calls[0][1][0], "MODE SEARCH\r\nV 0.100 -0.100 0.500\r\n")
+        self.assertEqual(uart.calls[0][1][0], "MODE SEARCH 0\r\nV 0.100 -0.100 0.500\r\n")
         self.assertEqual(uart.calls[1][0], "emergency_stop")
         self.assertEqual(uart.calls[2][0], "soft_stop")
         self.assertEqual(uart.calls[3][0], "line")
-        self.assertEqual(uart.calls[3][1][0], "MODE SEARCH\r\nV 0.020 0.000 0.000\r\n")
+        self.assertEqual(uart.calls[3][1][0], "MODE SEARCH 0\r\nV 0.020 0.000 0.000\r\n")
         self.assertEqual(uart.calls[4][0], "line")
         self.assertEqual(uart.calls[4][1][0], "STOP\r\n")
 
@@ -314,7 +314,7 @@ class SimpleCarProtocolTest(unittest.TestCase):
         self.assertEqual(adapter.send_cmd_vel(cmd, reason="track"), 1)
         self.assertFalse(any(call[0] == "vel" for call in uart.calls))
         self.assertEqual(uart.calls[-1][0], "line")
-        self.assertEqual(uart.calls[-1][1][0], "MODE SEARCH\r\nV 0.200 0.100 0.050\r\n")
+        self.assertEqual(uart.calls[-1][1][0], "MODE SEARCH 0\r\nV 0.200 0.100 0.050\r\n")
 
         stop_cmd = CmdVel(ts=0.0, mode="STOP", vx_mps=0.0, vy_mps=0.0, wz_radps=0.0)
         self.assertEqual(adapter.send_cmd_vel(stop_cmd, reason="stop"), 2)
@@ -322,7 +322,7 @@ class SimpleCarProtocolTest(unittest.TestCase):
 
         soft_stop_cmd = CmdVel(ts=0.0, mode="IDLE", vx_mps=0.0, vy_mps=0.0, wz_radps=0.0)
         self.assertEqual(adapter.send_cmd_vel(soft_stop_cmd, reason="stop"), 3)
-        self.assertEqual(uart.calls[-1][0], "soft_stop")
+        self.assertEqual(uart.calls[-1][0], "emergency_stop")
 
         limited = Stm32MotionAdapter(uart, logger=lambda _line: None, max_vx_mps=1.0, max_vy_mps=1.0, max_wz_radps=1.0)
         fast_cmd = CmdVel(ts=0.0, mode="TRACK", vx_mps=1.0, vy_mps=1.0, wz_radps=1.0)
@@ -357,21 +357,21 @@ class SimpleCarProtocolTest(unittest.TestCase):
 
         self.assertEqual(adapter.jog_forward_small(reason="final_forward"), 1)
         time.sleep(0.15)
-        self.assertEqual(uart.calls[-2][1][0], "MODE SEARCH\r\nV 0.030 0.000 0.000\r\n")
+        self.assertEqual(uart.calls[-2][1][0], "MODE SEARCH 0\r\nV 0.030 0.000 0.000\r\n")
         self.assertEqual(uart.calls[-1][1][0], "STOP\r\n")
         self.assertEqual(logs[-1], "[MOTION][PULSE] seq=1 mode=SEARCH vx_mps=0.030 vy_mps=0.000 wz_radps=0.000 duration_ms=100 reason=final_forward")
 
         self.assertEqual(adapter.jog_backward_small(reason="final_back"), 2)
         time.sleep(0.15)
-        self.assertEqual(uart.calls[-2][1][0], "MODE SEARCH\r\nV -0.030 0.000 0.000\r\n")
+        self.assertEqual(uart.calls[-2][1][0], "MODE SEARCH 0\r\nV -0.030 0.000 0.000\r\n")
 
         self.assertEqual(adapter.jog_turn_left_small(reason="align_left"), 3)
         time.sleep(0.15)
-        self.assertEqual(uart.calls[-2][1][0], "MODE SEARCH\r\nV 0.000 0.000 0.020\r\n")
+        self.assertEqual(uart.calls[-2][1][0], "MODE SEARCH 0\r\nV 0.000 0.000 0.020\r\n")
 
         self.assertEqual(adapter.jog_turn_right_small(reason="align_right"), 4)
         time.sleep(0.15)
-        self.assertEqual(uart.calls[-2][1][0], "MODE SEARCH\r\nV 0.000 0.000 -0.020\r\n")
+        self.assertEqual(uart.calls[-2][1][0], "MODE SEARCH 0\r\nV 0.000 0.000 -0.020\r\n")
 
 
 if __name__ == "__main__":

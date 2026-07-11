@@ -24,6 +24,14 @@ class State(str, Enum):
     TARGET_LOCKED = "TARGET_LOCKED"
     FREEZE_BASE = "FREEZE_BASE"
     GRASP = "GRASP"
+    POST_GRASP_TURN_180 = "POST_GRASP_TURN_180"
+    POST_GRASP_TURN_FIXED = "POST_GRASP_TURN_FIXED"
+    POST_GRASP_FORWARD_FIXED = "POST_GRASP_FORWARD_FIXED"
+    POST_GRASP_STOP = "POST_GRASP_STOP"
+    POST_GRASP_POSE_RISE = "POST_GRASP_POSE_RISE"
+    SEARCH_BASKET = "SEARCH_BASKET"
+    APPROACH_BASKET = "APPROACH_BASKET"
+    PLACE_TO_BASKET = "PLACE_TO_BASKET"
     LEAVE_EDGE = "LEAVE_EDGE"
     RELOCATE_TO_EDGE = "RELOCATE_TO_EDGE"
     REACQUIRE_TABLE = "REACQUIRE_TABLE"
@@ -43,6 +51,11 @@ class RuntimeContext:
 
     task_intent: str = ""
     active_target: Optional[str] = None
+    raw_target: str = ""
+    canonical_target: str = ""
+    class_name: str = ""
+    class_id: Optional[int] = None
+    active_task_id: str = ""
     active_session_id: str = ""
     active_epoch: int = 0
     active_req_id: str = ""
@@ -81,6 +94,16 @@ class RuntimeContext:
     last_target_obs: Optional[TargetObs] = None
     last_home_obs: Optional[HomeTagObs] = None
     last_car_state: Optional[CarState] = None
+
+    manual_drive_active: bool = False
+    manual_drive_until_ts: float = 0.0
+    manual_drive_vx_mps: float = 0.0
+    manual_drive_vy_mps: float = 0.0
+    manual_drive_wz_radps: float = 0.0
+    manual_drive_last_cmd_id: Optional[str] = None
+    manual_drive_source: Optional[str] = None
+    manual_drive_generation: int = 0
+    manual_stop_seq: int = 0
 
     last_table_bbox_xyxy: Optional[List[float]] = None
     last_table_center_x_norm: Optional[float] = None
@@ -129,6 +152,8 @@ class RuntimeContext:
     align_hysteresis_last_obs_key: str = ""
     approach_hysteresis_last_obs_key: str = ""
     table_motion_pending_transition_reason: str = ""
+    post_grasp_turn_started_mono: float = 0.0
+    post_grasp_turn_cmd_accepted: bool = False
     edge_hard_yaw_frames: int = 0
     edge_hard_yaw_since_mono: float = 0.0
     control_phase: str = "SEARCH_SCAN"
@@ -153,6 +178,16 @@ class RuntimeContext:
     edge_readiness_score: float = 0.0
     edge_readiness_last_update_mono: float = 0.0
     edge_readiness_level: str = ""
+    edge_slope_final_ready_latched: bool = False
+    edge_slope_final_ready_ts: Optional[float] = None
+    edge_slope_final_ready_state: Optional[str] = None
+    edge_slope_final_ready_reason: Optional[str] = None
+    edge_slope_final_ready_value: Optional[float] = None
+    edge_slope_final_ready_source: Optional[str] = None
+    edge_slope_final_ready_reset_reason: str = ""
+    edge_slope_final_ready_reset_state: str = ""
+    edge_slope_final_ready_reset_epoch: int = 0
+    edge_slope_final_ready_reset_edge_id: str = ""
     edge_handoff_entered_mono: float = 0.0
     last_good_table_obs_mono: float = 0.0
     last_good_table_obs_summary: Dict[str, object] = field(default_factory=dict)
@@ -174,8 +209,26 @@ class RuntimeContext:
     near_table_latched_mono: float = 0.0
     final_depth_latched: bool = False
     final_depth_latched_mono: float = 0.0
+    final_arrival_reached: bool = False
+    final_arrival_ts: float = 0.0
+    final_arrival_source: str = ""
+    final_arrival_value: Optional[float] = None
+    final_arrival_threshold: Optional[float] = None
+    final_arrival_stable_count: int = 0
     final_yaw_align_active: bool = False
     final_locked: bool = False
+    final_edge_seen_after_find: bool = False
+    final_descending_seen_after_find: bool = False
+    final_enter_candidate_stable_count: int = 0
+    final_enter_candidate_first_ts: Optional[float] = None
+    final_enter_candidate_last_reason: Optional[str] = None
+    final_enter_depth_window: List[Dict[str, object]] = field(default_factory=list)
+    final_enter_edge_seen_ts: Optional[float] = None
+    final_enter_candidate_last_log_mono: float = 0.0
+    last_yolo_approach_vx_mps: float = 0.0
+    final_slow_stop_enter_mono: float = 0.0
+    hard_stop_barrier_until_mono: float = 0.0
+    hard_stop_barrier_reason: str = ""
     last_valid_depth_p10_m: Optional[float] = None
     last_valid_depth_p10_source: str = ""
     last_valid_depth_p10_mono: float = 0.0
@@ -224,9 +277,32 @@ class RuntimeContext:
     dist_missing_started_mono: float = 0.0
     target_center_history: List[Dict[str, float]] = field(default_factory=list)
     target_obs_window: List[Dict[str, object]] = field(default_factory=list)
+    target_prewarm_last_obs_key: object = None
+    target_prewarm_stable_count: int = 0
+    target_prewarm_last_log_key: object = None
+    target_control_last_obs_key: object = None
+    target_control_stable_count: int = 0
+    final_to_lateral_fast_start_ready: Optional[bool] = None
     target_last_center_jitter: float = 0.0
     target_last_lost_reason: str = ""
     target_last_transition_reason: str = ""
+    target_lateral_stable_count: int = 0
+    target_lateral_align_reason: str = ""
+    target_lateral_vy_cmd: float = 0.0
+    last_good_target_obs: Optional[TargetObs] = None
+    last_good_target_mono: float = 0.0
+    last_good_vy_mps: float = 0.0
+    target_lateral_hold_active: bool = False
+    target_lateral_hold_source: str = ""
+    selected_candidate_idx: Optional[int] = None
+    selected_candidate_score: Optional[float] = None
+    selected_candidate_reason: str = ""
+    target_locked: bool = False
+    start_distance_band: str = "unknown"
+    start_depth_source: str = ""
+    start_depth_value: Optional[float] = None
+    selected_initial_state: str = ""
+    selected_initial_vx: float = 0.0
     task_slide_entries_count: int = 0
     task_target_confirm_count: int = 0
     task_target_locked_count: int = 0
@@ -244,6 +320,100 @@ class RuntimeContext:
     arm_response: Optional[object] = None
     grasp_timeout_mono: float = 0.0
     grasp_verify_reported: bool = False
+    grasp_source: str = ""
+    remote_grasp_active: bool = False
+    builtin_bottle_active: bool = False
+    builtin_grasp_active: bool = False
+    builtin_grasp_target: str = ""
+    builtin_bottle_pose_started: bool = False
+    remote_result_ignored: bool = False
+    carrying_object: bool = False
+    carried_target: str = ""
+    post_grasp_place_enabled: bool = False
+    basket_search_start_ts: float = 0.0
+    basket_approach_stable_count: int = 0
+    basket_last_seen_mono: float = 0.0
+    basket_place_substate: str = ""
+    basket_place_timeout_mono: float = 0.0
+    post_grasp_fixed_entry_logged: bool = False
+    post_grasp_rise_substate: str = ""
+    post_grasp_rise_timeout_mono: float = 0.0
+
+    def clear_carrying_object(self) -> None:
+        self.carrying_object = False
+        self.carried_target = ""
+        self.post_grasp_place_enabled = False
+        self.basket_search_start_ts = 0.0
+        self.basket_approach_stable_count = 0
+        self.basket_last_seen_mono = 0.0
+        self.basket_place_substate = ""
+        self.basket_place_timeout_mono = 0.0
+        self.post_grasp_fixed_entry_logged = False
+        self.post_grasp_rise_substate = ""
+        self.post_grasp_rise_timeout_mono = 0.0
+
+    def clear_final_enter_candidate(self) -> None:
+        self.final_edge_seen_after_find = False
+        self.final_descending_seen_after_find = False
+        self.final_enter_candidate_stable_count = 0
+        self.final_enter_candidate_first_ts = None
+        self.final_enter_candidate_last_reason = None
+        self.final_enter_depth_window.clear()
+        self.final_enter_edge_seen_ts = None
+        self.final_enter_candidate_last_log_mono = 0.0
+        self.last_yolo_approach_vx_mps = 0.0
+        self.final_slow_stop_enter_mono = 0.0
+
+    def clear_close_final_latches(self) -> None:
+        self.near_table_latched = False
+        self.near_table_latched_mono = 0.0
+        self.final_depth_latched = False
+        self.final_depth_latched_mono = 0.0
+        self.final_arrival_reached = False
+        self.final_arrival_ts = 0.0
+        self.final_arrival_source = ""
+        self.final_arrival_value = None
+        self.final_arrival_threshold = None
+        self.final_arrival_stable_count = 0
+        self.final_yaw_align_active = False
+        self.final_locked = False
+        self.final_lock_reason = ""
+        self.final_depth_latch_reason = ""
+        self.near_table_latch_reason = ""
+        self.depth_stop_stable_count = 0
+        self.depth_missing_started_mono = 0.0
+        self.depth_safety_state = ""
+        self.depth_safety_reason = ""
+        self.close_range_probe_start_mono = 0.0
+        self.close_range_probe_last_mono = 0.0
+        self.close_range_probe_distance_used_m = 0.0
+        self.last_valid_depth_p10_m = None
+        self.last_valid_depth_p10_source = ""
+        self.last_valid_depth_p10_mono = 0.0
+        for name in (
+            "close_range_latched",
+            "close_range_since_mono",
+            "final_roi_mode_latched",
+            "final_roi_mode_since_mono",
+            "final_roi_last_valid_mono",
+            "final_edge_mode_latched",
+            "final_edge_mode_since_mono",
+            "final_distance_servo_active",
+            "edge_final_stop_stable_count",
+            "roi_final_stop_stable_count",
+            "fixed_roi_final_stop_stable_count",
+            "final_fixed_roi_min_stat_m",
+            "final_reverse_too_close_count",
+            "final_fixed_roi_status_last_log_mono",
+            "final_motion_policy_last_log_mono",
+            "final_stop_observation_last_log_mono",
+            "final_stop_continue_forward_last_log_mono",
+        ):
+            if hasattr(self, name):
+                try:
+                    delattr(self, name)
+                except Exception:
+                    setattr(self, name, False if name.endswith("_latched") or name.endswith("_active") else 0.0)
 
     def clear_motion_counters(self):
         self.table_found_frames = 0
@@ -272,6 +442,19 @@ class RuntimeContext:
         self.control_phase = "SEARCH_SCAN"
         self.control_phase_since_mono = 0.0
         self.bbox_valid_streak = 0
+        self.reset_edge_slope_final_ready("clear_motion_counters")
+
+    def reset_edge_slope_final_ready(self, reason: str) -> None:
+        self.edge_slope_final_ready_latched = False
+        self.edge_slope_final_ready_ts = None
+        self.edge_slope_final_ready_state = None
+        self.edge_slope_final_ready_reason = None
+        self.edge_slope_final_ready_value = None
+        self.edge_slope_final_ready_source = None
+        self.edge_slope_final_ready_reset_reason = str(reason or "")
+        self.edge_slope_final_ready_reset_state = str(getattr(self.state, "value", self.state) or "")
+        self.edge_slope_final_ready_reset_epoch = int(self.active_epoch or 0)
+        self.edge_slope_final_ready_reset_edge_id = str(self.current_edge_id or "")
         self.bbox_centered_streak = 0
         self.edge_trusted_streak = 0
         self.edge_yaw_ema = None
@@ -308,28 +491,12 @@ class RuntimeContext:
         self.fov_guard_level = "none"
         self.fov_guard_reason = ""
         self.zero_escape_reason = ""
-        self.near_table_latched = False
-        self.near_table_latched_mono = 0.0
-        self.final_depth_latched = False
-        self.final_depth_latched_mono = 0.0
-        self.final_yaw_align_active = False
-        self.final_locked = False
-        self.last_valid_depth_p10_m = None
-        self.last_valid_depth_p10_source = ""
-        self.last_valid_depth_p10_mono = 0.0
-        self.close_range_probe_start_mono = 0.0
-        self.close_range_probe_last_mono = 0.0
-        self.close_range_probe_distance_used_m = 0.0
-        self.depth_stop_stable_count = 0
-        self.depth_missing_started_mono = 0.0
-        self.depth_safety_state = ""
-        self.depth_safety_reason = ""
+        self.clear_close_final_latches()
+        self.hard_stop_barrier_until_mono = 0.0
+        self.hard_stop_barrier_reason = ""
         self.last_good_edge_yaw_cmd = 0.0
         self.last_good_edge_yaw_mono = 0.0
         self.last_good_near_depth_mono = 0.0
-        self.near_table_latch_reason = ""
-        self.final_depth_latch_reason = ""
-        self.final_lock_reason = ""
         self.near_depth_stable_frames = 0
         self.near_dist_stable_frames = 0
         self.final_depth_stable_frames = 0
@@ -361,9 +528,28 @@ class RuntimeContext:
         self.target_last_center_jitter = 0.0
         self.target_last_lost_reason = ""
         self.target_last_transition_reason = ""
+        self.target_lateral_stable_count = 0
+        self.target_lateral_align_reason = ""
+        self.target_lateral_vy_cmd = 0.0
+        self.last_good_target_obs = None
+        self.last_good_target_mono = 0.0
+        self.last_good_vy_mps = 0.0
+        self.target_lateral_hold_active = False
+        self.target_lateral_hold_source = ""
+        self.selected_candidate_idx = None
+        self.selected_candidate_score = None
+        self.selected_candidate_reason = ""
+        self.target_locked = False
         self.grasp_retry_count = 0
         self.grasp_substate = ""
         self.grasp_verify_reported = False
+        self.grasp_source = ""
+        self.remote_grasp_active = False
+        self.builtin_bottle_active = False
+        self.builtin_grasp_active = False
+        self.builtin_grasp_target = ""
+        self.builtin_bottle_pose_started = False
+        self.remote_result_ignored = False
 
     def clear_perception_cache(self):
         self.last_table_obs = None
@@ -402,6 +588,7 @@ class RuntimeContext:
         self.slide_ref_last_sample_key = ""
         self.handoff_state = ""
         self.last_edge_quality.clear()
+        self.reset_edge_slope_final_ready("reset_edge_plan")
 
     def advance_edge(self) -> bool:
         if not self.edge_visit_order:
@@ -413,14 +600,35 @@ class RuntimeContext:
         self.edge_transition_count += 1
         self.relocate_turn_sign *= -1
         self.slide_direction_sign = 1
+        self.reset_edge_slope_final_ready("advance_edge")
         return True
 
     def clear_task_context(self):
         self.task_intent = ""
         self.active_target = None
+        self.raw_target = ""
+        self.canonical_target = ""
+        self.class_name = ""
+        self.class_id = None
+        self.active_task_id = ""
         self.active_session_id = ""
         self.active_epoch = 0
         self.active_req_id = ""
+        self.last_vision_req_final_phase_active = False
+        self.last_vision_req_state = ""
+        self.last_vision_req_mono = 0.0
+        self.last_final_vision_req_mono = 0.0
+        self.last_final_vision_req_final_phase_active = False
+        self.last_final_vision_req_state = ""
+        self.final_vision_req_enter_logged = False
+        self.final_fixed_roi_missing_since_mono = 0.0
+        self.final_fixed_roi_missing_grace_until_mono = 0.0
+        self.target_prewarm_last_obs_key = None
+        self.target_prewarm_stable_count = 0
+        self.target_prewarm_last_log_key = None
+        self.target_control_last_obs_key = None
+        self.target_control_stable_count = 0
+        self.final_to_lateral_fast_start_ready = None
         self.desired_vision_stage = ""
         self.desired_vision_mode = ""
         self.confirmed_vision_stage = ""
@@ -452,6 +660,16 @@ class RuntimeContext:
         self.arm_response = None
         self.grasp_timeout_mono = 0.0
         self.grasp_verify_reported = False
+        self.grasp_source = ""
+        self.remote_grasp_active = False
+        self.builtin_bottle_active = False
+        self.builtin_grasp_active = False
+        self.builtin_grasp_target = ""
+        self.builtin_bottle_pose_started = False
+        self.remote_result_ignored = False
+        self.clear_carrying_object()
+        self.clear_final_enter_candidate()
+        self.reset_edge_slope_final_ready("clear_task_context")
         self.reset_edge_plan()
         self.clear_perception_cache()
         self.clear_motion_counters()

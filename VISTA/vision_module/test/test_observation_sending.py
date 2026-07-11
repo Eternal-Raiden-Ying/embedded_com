@@ -147,7 +147,8 @@ class TestObservationSending(unittest.TestCase):
 
         # 二次发送 (相同帧 ID)
         self.app._apply_stage_output(output, now=time.time(), force_send=True)
-        self.assertEqual(self.app.same_frame_reuse_count, 1)
+        self.assertEqual(self.app.same_frame_reuse_count, 0)
+        self.assertEqual(len(self.app.obs_sender.sent_payloads), 1)
 
     def test_rate_limiting_diagnostics(self):
         table_edge_obs = {"type": "table_edge_obs", "frame_id": 200, "obs_ts": time.time()}
@@ -168,7 +169,7 @@ class TestObservationSending(unittest.TestCase):
         # 但诊断观测严格受 1.0 秒间隔限制
         self.app.obs_router.metrics.last_control_send_ts = 0.0  # 绕过控制发送间隔限制
         self.app._apply_stage_output(output, now=time.time(), force_send=False)
-        self.assertEqual(len(self.app.obs_sender.sent_payloads), 2)
+        self.assertEqual(len(self.app.obs_sender.sent_payloads), 1)
         # 诊断观测不应再次发送，因为 1.0 秒的间隔尚未过去
         self.assertEqual(len(self.app.diag_sender.sent_payloads), 1)
 

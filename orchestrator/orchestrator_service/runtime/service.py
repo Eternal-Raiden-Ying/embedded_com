@@ -6,10 +6,12 @@ import re
 import signal
 import time
 import os
+import math
 from collections import deque
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..bridge.arm_protocol import encode_pose, parse_arm_response
+from ..bridge.arm_serial_bridge import ArmSerialBridge
 from common.console_presenter import DemoConsolePresenter
 from common.base_module import BaseModule
 from common.runtime_logging import OperatorConsole
@@ -19,7 +21,9 @@ from ..bridge.uart_bridge import UartBridge
 from ..config.schema import OrchestratorConfig, SocketEndpoint
 from ..control.motion_adapter import Stm32MotionAdapter
 from ..control.motion.velocity_limits import SimpleCarMapper
+from ..control.velocity_smoother import VelocitySmoother
 from ..ipc.protocol import (
+    ArmResponse,
     HomeTagObs,
     TableEdgeObs,
     TargetObs,
@@ -30,8 +34,18 @@ from ..ipc.protocol import (
     make_task_ack,
 )
 from ..ipc.transport import AsyncJsonlClientSender, JsonlClientSender, JsonlInboundServer
-from .common import RunLogger, ensure_dir, safe_dump
+from ..utils.target_utils import supported_targets
+from .common import RunLogger, ensure_dir, monotonic_ts, safe_dump
+from .context import State
 from .state_machine import OrchestratorCore
+
+MANUAL_DRIVE_ALLOWED_STATES = {"IDLE"}
+MANUAL_DRIVE_MAX_ABS_VX_MPS = 0.06
+MANUAL_DRIVE_MAX_ABS_VY_MPS = 0.06
+MANUAL_DRIVE_MAX_ABS_WZ_RADPS = 0.30
+MANUAL_DRIVE_MIN_DURATION_MS = 100
+MANUAL_DRIVE_MAX_DURATION_MS = 1000
+MANUAL_DRIVE_DEFAULT_DURATION_MS = 400
 
 
 _CONTROL_SUMMARY_KEYS = (
@@ -51,17 +65,111 @@ _CONTROL_SUMMARY_KEYS = (
     "table_roi_depth_valid",
     "table_roi_depth_p10",
     "table_roi_depth_median",
+    "table_roi_source",
+    "table_roi_latched",
+    "table_roi_latch_age_s",
+    "table_roi_xyxy",
     "edge_valid",
     "edge_ready_for_approach",
     "edge_ready_for_final",
     "edge_lost_age_s",
     "yaw_err_rad",
+    "edge_yaw_abs_rad",
     "near_table_latched",
+    "final_phase_active",
+    "final_depth_valid",
+    "final_depth_m",
+    "final_depth_source",
+    "final_depth_err_m",
+    "final_depth_candidate_source",
+    "final_depth_candidate_m",
+    "final_depth_usable_for_control",
+    "final_depth_gate_reason",
+    "table_target_dist_m",
     "final_depth_latched",
+    "final_edge_seen_after_find",
+    "final_descending_seen_after_find",
+    "final_enter_candidate_status",
+    "final_enter_stat_used",
+    "final_enter_stat_value",
+    "final_enter_threshold",
+    "final_enter_stable_count",
+    "final_enter_allowed",
+    "final_enter_reject_reason",
+    "final_enter_edge_seen",
+    "final_enter_descending_seen",
+    "final_enter_transition_reason",
+    "final_enter_rejected",
+    "final_lock_rejected",
+    "final_fixed_roi_status",
+    "final_fixed_roi_xyxy",
+    "final_fixed_roi_shape_valid",
+    "final_fixed_roi_shape_invalid",
+    "final_fixed_roi_stop_stat",
+    "final_fixed_roi_stop_stat_used",
+    "final_fixed_roi_stop_threshold",
+    "final_fixed_roi_stop_stable_count",
+    "final_fixed_roi_min_stat_m",
+    "fixed_roi_valid",
+    "fixed_roi_missing_age_s",
+    "final_motion_mode",
+    "final_transition_reason",
+    "final_motion_policy",
+    "final_stop_observation",
+    "final_stop_continue_forward",
+    "final_stop_depth_source",
+    "final_arrival_source",
+    "final_arrival_value",
+    "final_arrival_threshold",
+    "final_arrival_stable_count",
+    "final_arrival_reached",
+    "final_arrival_latched",
+    "final_stop_depth_m",
+    "final_stop_reached",
+    "final_exit",
+    "final_distance_servo_reason",
     "final_locked",
     "final_lock_reason",
     "depth_speed_envelope_reason",
+    "depth_speed_envelope_stat_used",
+    "depth_speed_envelope_stat_value",
     "depth_speed_envelope_vx_cap",
+    "yolo_approach_min_vx_mps",
+    "yolo_approach_speed_band",
+    "yolo_approach_speed_depth",
+    "yolo_approach_selected_vx",
+    "yolo_approach_depth_source",
+    "yolo_approach_obs_fresh",
+    "yolo_approach_obs_age_s",
+    "yolo_approach_far_allowed",
+    "yolo_approach_speed_block_reason",
+    "safety_source",
+    "safety_value",
+    "safety_slow_threshold",
+    "safety_hard_hold_threshold",
+    "safety_emergency_threshold",
+    "safety_action",
+    "safety_blocks_forward",
+    "safety_blocks_arrival_transition",
+    "speed_limit_reason",
+    "smoothing_enabled",
+    "smoothing_applied",
+    "smoothing_bypassed",
+    "smoothing_bypass_reason",
+    "smoothing_profile",
+    "smoothing_urgent",
+    "smoothing_dt_s",
+    "cmd_before_smoothing",
+    "cmd_after_smoothing",
+    "vx_before_smoothing",
+    "vy_before_smoothing",
+    "wz_before_smoothing",
+    "vx_smoothed",
+    "vy_smoothed",
+    "wz_smoothed",
+    "smoothing_delta_vx",
+    "smoothing_delta_vy",
+    "smoothing_delta_wz",
 )
 
 
@@ -101,6 +209,7 @@ class OrchestratorService(BaseModule):
         ensure_dir(cfg.runtime.log_dir)
         ensure_dir(cfg.runtime.runs_dir)
         ensure_dir(cfg.runtime.pid_dir)
+        os.environ.setdefault("ROBOT_LOG_PROFILE", str(getattr(cfg.runtime, "log_profile", "normal") or "normal"))
         self.run_logger = RunLogger("orch", cfg.runtime.runs_dir, cfg.runtime.stack_run_id)
         self.core = OrchestratorCore(cfg.control, cfg.car, cfg.docking, logger=self.log)
         self.core.transition_observer = self._on_state_transition
@@ -115,7 +224,8 @@ class OrchestratorService(BaseModule):
         self._uart_full_log = self._env_bool("ORCH_UART_FULL_LOG", False)
         self._vision_full_obs_log = self._env_bool("VISION_LOG_FULL_OBS", False) or self._env_bool("VISION_DEBUG_FULL_LOG", False)
         self._state_blocks_full_log = self._env_bool("ORCH_STATE_BLOCKS_FULL_LOG", False) or self._env_bool("VISION_DEBUG_FULL_LOG", False)
-        self._system_metrics = SystemMetricsSampler("orchestrator", interval_s=self._env_float("ORCH_SYSTEM_METRICS_INTERVAL_S", 1.0))
+        resource_interval = float(getattr(cfg.runtime, "resource_sample_interval_s", 1.0) or 1.0)
+        self._system_metrics = SystemMetricsSampler("orchestrator", interval_s=resource_interval)
         self._mobile_status_console_mode = self._env_choice("ORCH_MOBILE_STATUS_CONSOLE", "change", {"change", "full", "silent"})
         self._last_obs_flags = {"table_edge": False, "target": False}
         self._last_target_obs_console_payload: Dict[str, Any] = {}
@@ -128,6 +238,8 @@ class OrchestratorService(BaseModule):
         self._last_edge_slide_obs_ts = None
         self._last_edge_slide_obs_period_ms = None
         self.mapper = SimpleCarMapper(cfg.car)
+        self.velocity_smoother = VelocitySmoother(getattr(cfg, "motion_smoothing", None))
+        self.arm_bridge = ArmSerialBridge(getattr(cfg, "arm_serial", None), logger=self.log)
         self._async_result_queue: "queue.Queue[Dict[str, Any]]" = queue.Queue()
         self._boot_ts = time.time()
         self._last_state_block_ts = 0.0
@@ -146,8 +258,17 @@ class OrchestratorService(BaseModule):
             "state_machine_tick_interval_ms": deque(maxlen=512),
             "state_machine_consume_interval_ms": deque(maxlen=512),
             "obs_age_at_consume_ms": deque(maxlen=512),
+            "vision_obs_age_at_first_consume_ms": deque(maxlen=512),
+            "vision_obs_reuse_age_ms": deque(maxlen=512),
             "vision_publish_to_orch_recv_ms": deque(maxlen=512),
             "orch_recv_to_state_consume_ms": deque(maxlen=512),
+            "tick_process_ms": deque(maxlen=512),
+            "state_decision_ms": deque(maxlen=512),
+            "motion_arbitration_ms": deque(maxlen=512),
+            "uart_write_ms": deque(maxlen=512),
+            "dryrun_write_ms": deque(maxlen=512),
+            "car_cmd_map_ms": deque(maxlen=512),
+            "state_transition_latency_ms": deque(maxlen=512),
         }
         self._last_table_edge_recv_ts = 0.0
         self._last_state_machine_tick_ts = 0.0
@@ -155,11 +276,28 @@ class OrchestratorService(BaseModule):
         self._last_consumed_table_obs_key = None
         self._last_consumed_obs_seq: Optional[int] = None
         self._same_obs_reuse_count = 0
+        self._fresh_obs_consumed = 0
+        self._reused_obs_consumed = 0
+        self._last_tick_process_ms: Optional[float] = None
+        self._last_state_decision_ms: Optional[float] = None
+        self._last_motion_arbitration_ms: Optional[float] = None
+        self._last_uart_write_ms: Optional[float] = None
+        self._last_dryrun_write_ms: Optional[float] = None
+        self._last_ack_wait_ms: Optional[float] = None
+        self._latest_obs_trace: Dict[str, Dict[str, Any]] = {}
+        self._current_tick_obs_trace: Dict[str, Any] = {}
+        self._last_missing_obs_trace_warn_ts = 0.0
+        self._last_cmd_emit_mono_ns: Optional[int] = None
+        self._state_enter_mono_ns = time.monotonic_ns()
+        self._transition_pending_state = self.core.ctx.state.value
         self._last_tx_summary: Dict[str, float] = {
             "task_ack_out": 0.0,
             "vision_req_out": 0.0,
             "tts_event_out": 0.0,
         }
+        self._task_ack_skip_until_ts = 0.0
+        self._task_ack_missing_warned = False
+        self._task_ack_last_fail_log_ts = 0.0
         self._uart_console_key = ""
         self._uart_console_last_emit_ts = 0.0
         self._uart_console_repeat_count = 0
@@ -181,6 +319,7 @@ class OrchestratorService(BaseModule):
         self._last_motion_log_signature = None
         self._last_motion_adapter_log_key = ""
         self._last_motion_adapter_log_emit_ts = 0.0
+        self._last_final_forward_only_state = ""
         self._last_motion_tx_context: Dict[str, Any] = {}
         self._last_valid_motion_cmd: Optional[Dict[str, Any]] = None
         self._last_valid_motion_ts = 0.0
@@ -295,7 +434,7 @@ class OrchestratorService(BaseModule):
                 for key in ("ts", "seq", "frame_id", "found", "target_found", "target", "confidence", "best_cls", "matched_cls")
                 if target.get(key) is not None
             }
-        return {
+        out = {
             "ts": env.ts,
             "stage": env.stage,
             "mode": env.mode,
@@ -308,6 +447,9 @@ class OrchestratorService(BaseModule):
             "perception": lite_perception,
             "type": "vision_obs",
         }
+        if env.stage == "GRASP" and env.status in {"RESULT_READY", "FAILED"} and isinstance(env.result, dict):
+            out["result"] = dict(env.result)
+        return out
 
     @staticmethod
     def _env_bool(name: str, default: bool) -> bool:
@@ -400,6 +542,12 @@ class OrchestratorService(BaseModule):
         text = str(line or "")
         if not text.startswith("[MOTION]"):
             return self._operator_emit(text)
+        if (
+            text.startswith("[MOTION][STOP]")
+            and "reason=safety" in text
+            and str(getattr(self.core.ctx.state, "value", self.core.ctx.state) or "") == "IDLE"
+        ):
+            return self.operator_console.emit_rate_limited("motion_stop_idle_safety", text, 1.0)
         key = re.sub(r"\bseq=\d+\b", "seq=*", text)
         now = time.time()
         if key == self._last_motion_adapter_log_key and (now - self._last_motion_adapter_log_emit_ts) < 5.0:
@@ -523,7 +671,16 @@ class OrchestratorService(BaseModule):
     def _on_state_transition(self, old_state: str, new_state: str, reason: str) -> None:
         reason = str(reason or "state_transition").strip() or "state_transition"
         if old_state == "EDGE_SLIDE_SEARCH" and new_state in {"LEAVE_EDGE", "NEXT_TABLE"} and "未找到目标" in reason:
-            reason = f"target_not_found timeout_s={float(self.cfg.control.target_search_timeout_s):.1f}"
+            if "target_lateral_align_timeout" in reason:
+                reason = f"target_lateral_align_timeout timeout_s={float(self.cfg.control.target_search_timeout_s):.1f}"
+            elif "target_lost_timeout" in reason:
+                reason = f"target_lost_timeout timeout_s={float(self.cfg.control.target_search_timeout_s):.1f}"
+            elif "target_never_found_timeout" in reason:
+                reason = f"target_never_found_timeout timeout_s={float(self.cfg.control.target_search_timeout_s):.1f}"
+            elif "target_confirm_timeout" in reason:
+                reason = f"target_confirm_timeout timeout_s={float(self.cfg.control.target_search_timeout_s):.1f}"
+            else:
+                reason = f"target_not_found timeout_s={float(self.cfg.control.target_search_timeout_s):.1f}"
         if old_state == "EDGE_SLIDE_SEARCH" and new_state == "TARGET_CONFIRM" and "matched_cls=" not in reason:
             reason = "target_found"
         trace = dict(getattr(self.core, "last_transition_snapshot", {}) or {})
@@ -537,6 +694,12 @@ class OrchestratorService(BaseModule):
             "state",
             f"[ORCH] STATE {old_state} -> {new_state} reason={reason}",
         )
+        self._state_enter_mono_ns = time.monotonic_ns()
+        self._transition_pending_state = str(new_state)
+        if old_state == "FINAL_SLOW_STOP" and new_state not in {"FINAL_SLOW_STOP", "AT_TABLE_EDGE", "DONE"}:
+            self.core.ctx.clear_close_final_latches()
+            self.core.ctx.clear_final_enter_candidate()
+            self.log("warn", "service", f"final_exit latch cleanup old={old_state} new={new_state} reason={reason}")
         if self._demo_start_pending_target and new_state in {"SEARCH_TABLE", "RETURN_HOME"}:
             self._demo_deferred_phases.append((old_state, new_state, reason))
         else:
@@ -545,15 +708,82 @@ class OrchestratorService(BaseModule):
             self.operator_console.emit_change("task_done", self._task_done_summary_line(reason))
             self._emit_demo_task_finished(success=True, reason=reason)
         if new_state == "ERROR_RECOVERY":
+            self.core.ctx.clear_final_enter_candidate()
             self.log("warn", "service", f"Immediate transition to ERROR_RECOVERY due to: {reason}, triggering emergency stop")
             self.uart.send_emergency_stop()
             self.motion_adapter.cancel_active_jogs()
             self._emit_demo_task_finished(success=False, reason=reason)
         if old_state == "DONE" and new_state == "IDLE":
+            self.core.ctx.clear_final_enter_candidate()
             self.operator_console.emit_change("idle_after_done", "[ORCH][IDLE] task finished, waiting for next command")
             self._emit_demo_idle_hot()
         if old_state == "ERROR_RECOVERY" and new_state == "IDLE":
+            self.core.ctx.clear_final_enter_candidate()
             self._emit_demo_idle_hot()
+
+    def _perf_trace_context(self) -> Dict[str, Any]:
+        state = str(getattr(self.core.ctx.state, "value", self.core.ctx.state) or "")
+        if self._current_tick_obs_trace:
+            context = dict(self._current_tick_obs_trace)
+            context.setdefault("state", state)
+            return context
+        return {
+            "frame_id": None,
+            "obs_seq": None,
+            "trace_id": None,
+            "capture_mono_ns": None,
+            "obs_publish_mono_ns": None,
+            "obs_recv_mono_ns": None,
+            "state": state,
+            "trace_reason": "no_active_obs_trace",
+        }
+
+    def _lock_current_tick_obs_trace(self) -> None:
+        state = str(self.core.ctx.state.value or "")
+        use_target = state in {"SEARCH_TARGET_INIT", "EDGE_SLIDE_SEARCH", "TARGET_CONFIRM", "TARGET_LOCKED"}
+        key = "target" if use_target else "table"
+        trace = dict(self._latest_obs_trace.get(key) or {})
+        if not trace and use_target:
+            trace = dict(self._latest_obs_trace.get("table") or {})
+        self._current_tick_obs_trace = trace
+        active_obs = self.core.ctx.last_target_obs if use_target else self.core.ctx.last_table_obs
+        if active_obs is not None and any(trace.get(name) is None for name in ("frame_id", "obs_seq", "trace_id")):
+            now = time.time()
+            if now - self._last_missing_obs_trace_warn_ts >= 1.0:
+                self._last_missing_obs_trace_warn_ts = now
+                self.log(
+                    "warn",
+                    "perf",
+                    "[PERF_TRACE][MISSING_ACTIVE_OBS_TRACE]",
+                    {"state": state, "trace": trace},
+                )
+
+    @staticmethod
+    def _obs_trace_from_parsed(obs: Any, recv_mono_ns: int) -> Dict[str, Any]:
+        frame_id = getattr(obs, "frame_id", None)
+        obs_seq = getattr(obs, "obs_seq", None)
+        trace_id = getattr(obs, "trace_id", None) or (
+            f"vision:{frame_id}" if frame_id is not None else None
+        )
+        capture_mono_ns = (
+            getattr(obs, "capture_mono_ns", None)
+            or getattr(obs, "frame_capture_mono_ns", None)
+        )
+        return {
+            "frame_id": frame_id,
+            "obs_seq": obs_seq,
+            "trace_id": trace_id,
+            "capture_mono_ns": capture_mono_ns,
+            "frame_capture_mono_ns": capture_mono_ns,
+            "camera_capture_done_mono_ns": getattr(obs, "camera_capture_done_mono_ns", None),
+            "obs_publish_mono_ns": getattr(obs, "obs_publish_mono_ns", None),
+            "obs_recv_mono_ns": int(recv_mono_ns),
+        }
+
+    def _perf_marker(self, event: str, **fields: Any) -> None:
+        context = self._perf_trace_context()
+        context.update(fields)
+        self.run_logger.write_perf_marker(event, **context)
 
     def _emit_demo_phase(self, old_state: str, new_state: str, reason: str) -> None:
         target = getattr(self.core.ctx, "active_target", "") or "target"
@@ -750,11 +980,7 @@ class OrchestratorService(BaseModule):
             "runs_dir": self.cfg.runtime.runs_dir,
             "pid_dir": self.cfg.runtime.pid_dir,
             "pid_file": self.cfg.runtime.pid_file,
-            "config_files": {
-                "stage_params": self.cfg.runtime.stage_params_file,
-                "car_cmd_params": self.cfg.runtime.car_cmd_params_file,
-                "loaded": list(self.cfg.runtime.loaded_config_files),
-            },
+            "config_files": list(self.cfg.runtime.loaded_config_files),
             "serial": {
                 "port": self.cfg.serial.port,
                 "baudrate": self.cfg.serial.baudrate,
@@ -776,21 +1002,16 @@ class OrchestratorService(BaseModule):
                 "final_lock_dist_tol_m": self.cfg.control.final_lock_dist_tol_m,
                 "final_lock_frames_to_arrive": self.cfg.control.final_lock_frames_to_arrive,
                 "enable_final_lock": self.cfg.control.enable_final_lock,
-                "enable_micro_adjust": self.cfg.control.enable_micro_adjust,
-                "final_lock_enter_dist_th_m": self.cfg.control.final_lock_enter_dist_th_m,
-                "final_lock_enter_yaw_th_rad": self.cfg.control.final_lock_enter_yaw_th_rad,
-                "edge_slide_dist_tolerance_m": self.cfg.control.edge_slide_dist_tolerance_m,
+                "table_yolo_align_center_x_target": self.cfg.control.table_yolo_align_center_x_target,
+                "target_lateral_align_center_x_target": self.cfg.control.target_lateral_align_center_x_target,
+                "final_enter_depth_threshold_m": self.cfg.control.final_enter_depth_threshold_m,
+                "final_fixed_roi_stop_threshold_m": self.cfg.control.final_fixed_roi_stop_threshold_m,
+                "final_slow_probe_vx_mps": self.cfg.control.final_slow_probe_vx_mps,
                 "table_edge_obs_max_age_ms": self.cfg.control.table_edge_obs_max_age_ms,
-                "edge_follow_min_edge_conf": self.cfg.control.edge_follow_min_edge_conf,
-                "edge_follow_log_period_ms": self.cfg.control.edge_follow_log_period_ms,
-                "edge_follow_stale_hold_s": self.cfg.control.edge_follow_stale_hold_s,
-                "edge_follow_track_local_edge_update_hz": self.cfg.control.edge_follow_track_local_edge_update_hz,
                 "target_confirm_conf_th": self.cfg.control.target_confirm_conf_th,
                 "target_found_frames_to_confirm": self.cfg.control.target_found_frames_to_confirm,
                 "target_lock_conf_th": self.cfg.control.target_lock_conf_th,
                 "target_lock_settle_s": self.cfg.control.target_lock_settle_s,
-                "edge_relocate_enabled": self.cfg.control.edge_relocate_enabled,
-                "max_edge_transitions_per_task": self.cfg.control.max_edge_transitions_per_task,
             },
             "car_cmd": {
                 "send_period_ms": self.cfg.car.send_period_ms,
@@ -971,6 +1192,10 @@ class OrchestratorService(BaseModule):
             "speed_profile",
             "speed_limit_reason",
             "forward_block_reason",
+            "rotate_block_reason",
+            "return_place_phase",
+            "return_place_depth_slowdown_bypassed",
+            "return_place_depth_p10_m",
             "vx_mps",
             "vy_mps",
             "wz_radps",
@@ -1001,6 +1226,24 @@ class OrchestratorService(BaseModule):
             "zero_cmd_reason",
             "original_cmd",
             "effective_cmd",
+            "cmd_before_smoothing",
+            "cmd_after_smoothing",
+            "smoothing_enabled",
+            "smoothing_applied",
+            "smoothing_bypassed",
+            "smoothing_bypass_reason",
+            "smoothing_profile",
+            "smoothing_urgent",
+            "smoothing_dt_s",
+            "vx_before_smoothing",
+            "vy_before_smoothing",
+            "wz_before_smoothing",
+            "vx_smoothed",
+            "vy_smoothed",
+            "wz_smoothed",
+            "smoothing_delta_vx",
+            "smoothing_delta_vy",
+            "smoothing_delta_wz",
             "stop_class",
             "motion_class",
             "motion_intent_type",
@@ -1035,9 +1278,25 @@ class OrchestratorService(BaseModule):
             "service_override_reason",
             "effective_cmd_before_service",
             "effective_cmd_after_service",
+            "frame_id",
+            "obs_seq",
+            "trace_id",
+            "capture_mono_ns",
+            "frame_capture_mono_ns",
+            "camera_capture_done_mono_ns",
+            "obs_publish_mono_ns",
+            "obs_recv_mono_ns",
+            "trace_reason",
         ):
             if context.get(key) is not None:
                 meta[key] = context.get(key)
+        if str(reason or "").strip() == "manual_drive":
+            meta.update({
+                "control_source": "manual_drive",
+                "motion_intent_type": "manual_drive",
+                "estop_cooldown_applied": False,
+                "estop_cooldown_reason": "manual_drive_idle_control",
+            })
         return meta
 
     @staticmethod
@@ -1090,10 +1349,74 @@ class OrchestratorService(BaseModule):
             brake=False,
         )
 
+    def _sync_last_valid_motion_after_smoothing(self, cmd: CmdVel, now: float) -> None:
+        if self._cmd_has_motion(cmd):
+            self._last_valid_motion_cmd = self._cmd_dict(cmd)
+            self._last_valid_motion_ts = float(now)
+        elif bool(getattr(cmd, "brake", False)) or str(getattr(cmd, "mode", "") or "").strip().upper() in {
+            "STOP",
+            "IDLE",
+            "DONE",
+            "ERROR",
+            "ERROR_RECOVERY",
+        }:
+            self._last_valid_motion_cmd = None
+            self._last_valid_motion_ts = 0.0
+
     def _arbitrate_uart_motion_cmd(self, cmd: CmdVel, summary: Dict[str, Any]) -> Tuple[CmdVel, Dict[str, Any]]:
         now = time.time()
         state = str(getattr(self.core.ctx.state, "value", self.core.ctx.state) or "").strip().upper()
         mode = str(getattr(cmd, "mode", "") or "").strip().upper()
+        target_flow_states = {
+            "AT_TABLE_EDGE",
+            "SEARCH_TARGET_INIT",
+            "EDGE_SLIDE_SEARCH",
+            "TARGET_CONFIRM",
+            "TARGET_LOCKED",
+            "FREEZE_BASE",
+            "GRASP",
+        }
+        target_flow_state = bool(state in target_flow_states or mode in target_flow_states)
+        edge_slide_state = bool(state == "EDGE_SLIDE_SEARCH" or mode == "EDGE_SLIDE_SEARCH")
+        return_place_states = {
+            "POST_GRASP_TURN_180",
+            "POST_GRASP_TURN_FIXED",
+            "POST_GRASP_FORWARD_FIXED",
+            "POST_GRASP_STOP",
+            "POST_GRASP_POSE_RISE",
+            "SEARCH_BASKET",
+            "APPROACH_BASKET",
+            "PLACE_TO_BASKET",
+        }
+        return_place_state = bool(state in return_place_states or mode in return_place_states)
+        if state == "EDGE_SLIDE_SEARCH" or mode == "EDGE_SLIDE_SEARCH":
+            vy_max = abs(float(getattr(self.cfg.control, "target_lateral_align_vy_max_mps", 0.025) or 0.025))
+            vy = max(-vy_max, min(vy_max, float(getattr(cmd, "vy_mps", 0.0) or 0.0)))
+            cmd = CmdVel(
+                ts=float(getattr(cmd, "ts", now) or now),
+                mode=str(getattr(cmd, "mode", "") or "EDGE_SLIDE_SEARCH"),
+                vx_mps=0.0,
+                vy_mps=vy,
+                wz_radps=0.0,
+                hold_ms=int(getattr(cmd, "hold_ms", self.cfg.car.cmd_hold_ms) or self.cfg.car.cmd_hold_ms),
+                brake=bool(getattr(cmd, "brake", False)),
+            )
+            summary.update(
+                {
+                    "allow_lateral": True,
+                    "allow_forward": False,
+                    "allow_rotate": False,
+                    "forward_block_reason": "edge_slide_target_lateral_only",
+                    "rotate_block_reason": "edge_slide_target_lateral_only",
+                    "target_lateral_vy_cmd": float(vy),
+                    "vx_mps": 0.0,
+                    "vy_mps": float(vy),
+                    "wz_radps": 0.0,
+                    "final_vx": 0.0,
+                    "final_vy": float(vy),
+                    "final_wz": 0.0,
+                }
+            )
         arbiter_applied = bool(summary.get("arbiter_applied", False))
         arbiter_stop_class = str(summary.get("stop_class") or "none").strip().lower()
         arbiter_motion_class = str(summary.get("motion_class") or "").strip().lower()
@@ -1111,14 +1434,17 @@ class OrchestratorService(BaseModule):
             effective = cmd
             emit_reason = "arbiter_direct"
             stop_class = "none" if arbiter_stop_class in {"", "none"} else arbiter_stop_class
-            if emergency_or_safety or explicit_idle_shutdown:
+            target_flow_motion_blocked = bool(target_flow_state and not edge_slide_state and self._cmd_has_motion(cmd))
+            if emergency_or_safety or explicit_idle_shutdown or target_flow_motion_blocked:
                 emit_reason = "arbiter_hard_stop" if emergency_or_safety else "explicit_idle_shutdown"
+                if target_flow_motion_blocked:
+                    emit_reason = "target_flow_recovery_motion_blocked"
                 effective = self._make_stop_cmd(now, hold_ms=int(getattr(cmd, "hold_ms", self.cfg.car.cmd_hold_ms) or self.cfg.car.cmd_hold_ms))
                 self._last_valid_motion_cmd = None
                 self._last_valid_motion_ts = 0.0
                 last_age_ms = None
                 if not stop_class:
-                    stop_class = "emergency" if arbiter_motion_class == "emergency_stop" else "safety"
+                    stop_class = "control_recovery" if target_flow_motion_blocked else ("emergency" if arbiter_motion_class == "emergency_stop" else "safety")
             elif self._cmd_has_motion(cmd):
                 self._last_valid_motion_cmd = self._cmd_dict(cmd)
                 self._last_valid_motion_ts = now
@@ -1156,13 +1482,15 @@ class OrchestratorService(BaseModule):
                 ),
                 "estop_cooldown_reason": "hard_stop" if (stop_class or "").lower() in {"emergency", "safety"} else "",
                 "service_override": service_override,
-                "service_override_reason": emit_reason if service_override else "",
-                "effective_cmd_before_service": self._cmd_dict(cmd),
-                "effective_cmd_after_service": self._cmd_dict(effective),
-                "perception_dropout_hold_active": bool(summary.get("perception_dropout_hold_active", False)),
-                "service_may_override": bool(summary.get("service_may_override", False)),
-                "active_table_docking": bool(active_table_docking),
-            }
+            "service_override_reason": emit_reason if service_override else "",
+            "effective_cmd_before_service": self._cmd_dict(cmd),
+            "effective_cmd_after_service": self._cmd_dict(effective),
+            "perception_dropout_hold_active": bool(summary.get("perception_dropout_hold_active", False)),
+            "service_may_override": bool(summary.get("service_may_override", False)),
+            "return_place_state": bool(return_place_state),
+            "return_place_ignores_table_stale": bool(return_place_state),
+            "active_table_docking": bool(active_table_docking),
+        }
         # Legacy fallback for non-table-docking or pre-arbiter commands.
         # Table docking commands with arbiter_applied=True bypass this visual
         # stale gate; final motion is decided by table docking motion arbiter.
@@ -1172,13 +1500,38 @@ class OrchestratorService(BaseModule):
         last_age_ms = self._last_valid_motion_age_ms(now)
         hold_ms = max(0, int(getattr(self.cfg.car, "motion_hold_ms", getattr(self.cfg.car, "cmd_hold_ms", 150)) or 0))
         hard_stale_stop_ms = max(0, int(getattr(self.cfg.car, "hard_stale_stop_ms", 800) or 800))
-        explicit_stop = bool(getattr(cmd, "brake", False) or mode in {"STOP", "IDLE", "DONE", "ERROR", "ERROR_RECOVERY"} or state in {"IDLE", "STOP"})
+        emergency_stop_active = bool(
+            summary.get("emergency_stop_active", False)
+            or summary.get("car_estop", False)
+            or summary.get("estop_active", False)
+            or str(summary.get("stop_class") or "").strip().lower() in {"emergency", "safety"}
+        )
+        explicit_stop = bool(
+            emergency_stop_active
+            or getattr(cmd, "brake", False)
+            or mode in {"STOP", "IDLE", "DONE", "ERROR", "ERROR_RECOVERY"}
+            or state in {"IDLE", "STOP"}
+        )
+        return_place_zero_cmd = bool(return_place_state and not self._cmd_has_motion(cmd) and not explicit_stop)
         soft_stale_timed_out = bool(stale_level == "soft_stale" and last_age_ms is not None and last_age_ms >= float(hard_stale_stop_ms))
         perception_dead = bool(
             "perception_dead" in stale_reason
             or "camera_dead" in stale_reason
             or "vision_dead" in stale_reason
             or "system_perception_dead" in stale_reason
+        )
+        target_lateral_vy_allowed = bool(
+            edge_slide_state
+            and not perception_dead
+            and bool(summary.get("target_lateral_align_active", False))
+            and (
+                bool(summary.get("target_found", False))
+                or bool(summary.get("target_lateral_hold_active", False))
+                or str(summary.get("lateral_cmd_source") or "") == "hold"
+            )
+            and abs(float(getattr(cmd, "vy_mps", 0.0) or 0.0)) > 1e-9
+            and abs(float(getattr(cmd, "vx_mps", 0.0) or 0.0)) <= 1e-9
+            and abs(float(getattr(cmd, "wz_radps", 0.0) or 0.0)) <= 1e-9
         )
         yolo_allows_edge_stale = bool(
             control_source in {"yolo_forward", "yolo_track_forward", "edge_guided_forward"}
@@ -1198,7 +1551,14 @@ class OrchestratorService(BaseModule):
             or soft_stale_timed_out
         )
         bbox_lost_hold_active = bool(summary.get("bbox_lost_hold_active", False))
-        hard_stale = bool(hard_stale_raw and not search_allows_edge_stale and not yolo_allows_edge_stale and not bbox_lost_hold_active)
+        hard_stale = bool(
+            hard_stale_raw
+            and not search_allows_edge_stale
+            and not yolo_allows_edge_stale
+            and not bbox_lost_hold_active
+            and not target_lateral_vy_allowed
+            and not return_place_state
+        )
         dropout_hold_active = bool(summary.get("perception_dropout_hold_active", False))
         if dropout_hold_active:
             hard_stale = False
@@ -1209,6 +1569,7 @@ class OrchestratorService(BaseModule):
         else:
             stale_source = ""
         has_new_valid_motion = bool(self._cmd_has_motion(cmd) and not explicit_stop and not hard_stale)
+        target_flow_stop_only = bool(target_flow_state and not target_lateral_vy_allowed and not explicit_stop)
         last_within_hold = bool(last_age_ms is not None and last_age_ms <= float(hold_ms))
         soft_stale_within_hard_timeout = bool(
             stale_level == "soft_stale"
@@ -1232,6 +1593,22 @@ class OrchestratorService(BaseModule):
             emit_reason = "explicit_stop"
             zero_cmd_reason = "explicit_stop"
             stop_class = "emergency" if any(bool(summary.get(key, False)) for key in ("emergency_stop_active", "car_estop", "estop_active")) else "safety"
+            effective = self._make_stop_cmd(now, hold_ms=int(getattr(cmd, "hold_ms", self.cfg.car.cmd_hold_ms) or self.cfg.car.cmd_hold_ms))
+            self._last_valid_motion_cmd = None
+            self._last_valid_motion_ts = 0.0
+            last_age_ms = None
+        elif target_flow_stop_only:
+            emit_reason = "target_flow_stale_stop" if hard_stale_raw else "target_flow_no_recovery_stop"
+            zero_cmd_reason = stale_level or stale_reason or "target_flow_recovery_motion_blocked"
+            stop_class = "stale_recovery" if hard_stale_raw else "control_recovery"
+            effective = self._make_stop_cmd(now, hold_ms=int(getattr(cmd, "hold_ms", self.cfg.car.cmd_hold_ms) or self.cfg.car.cmd_hold_ms))
+            self._last_valid_motion_cmd = None
+            self._last_valid_motion_ts = 0.0
+            last_age_ms = None
+        elif return_place_zero_cmd:
+            emit_reason = "return_place_stop"
+            zero_cmd_reason = "return_place_zero_cmd"
+            stop_class = "control_recovery"
             effective = self._make_stop_cmd(now, hold_ms=int(getattr(cmd, "hold_ms", self.cfg.car.cmd_hold_ms) or self.cfg.car.cmd_hold_ms))
             self._last_valid_motion_cmd = None
             self._last_valid_motion_ts = 0.0
@@ -1286,6 +1663,11 @@ class OrchestratorService(BaseModule):
             "stale_source": stale_source,
             "yolo_allows_edge_stale": bool(yolo_allows_edge_stale),
             "search_allows_edge_stale": bool(search_allows_edge_stale),
+            "target_lateral_vy_allowed": bool(target_lateral_vy_allowed),
+            "target_flow_stop_only": bool(target_flow_stop_only),
+            "return_place_state": bool(return_place_state),
+            "return_place_ignores_table_stale": bool(return_place_state),
+            "return_place_zero_cmd": bool(return_place_zero_cmd),
             "search_table_stale_gate_bypass": bool(search_allows_edge_stale and hard_stale_raw),
             "stale_gate_stop_source_state": state if hard_stale else "",
             "stop_class": stop_class,
@@ -1300,6 +1682,57 @@ class OrchestratorService(BaseModule):
             "effective_cmd_after_service": self._cmd_dict(effective),
             "perception_dropout_hold_active": dropout_hold_active,
         }
+
+    def _apply_final_forward_only_clamp(self, cmd: CmdVel, summary: Dict[str, Any]) -> Tuple[CmdVel, Dict[str, Any]]:
+        state = str(getattr(self.core.ctx.state, "value", self.core.ctx.state) or "").strip().upper()
+        if state not in {"FINAL_SLOW_STOP", "AT_TABLE_EDGE"}:
+            if self._last_final_forward_only_state:
+                self._last_final_forward_only_state = ""
+            return cmd, {}
+        before_vx = float(getattr(cmd, "vx_mps", 0.0) or 0.0)
+        before_vy = float(getattr(cmd, "vy_mps", 0.0) or 0.0)
+        before_wz = float(getattr(cmd, "wz_radps", 0.0) or 0.0)
+        after_vx = max(0.0, before_vx)
+        meta = {
+            "final_forward_only_clamp_applied": True,
+            "final_forward_only_before_vx": before_vx,
+            "final_forward_only_before_vy": before_vy,
+            "final_forward_only_before_wz": before_wz,
+            "final_forward_only_after_vx": after_vx,
+            "final_forward_only_after_vy": 0.0,
+            "final_forward_only_after_wz": 0.0,
+            "vx_mps": after_vx,
+            "vy_mps": 0.0,
+            "wz_radps": 0.0,
+            "final_vx": after_vx,
+            "final_vy": 0.0,
+            "final_wz": 0.0,
+        }
+        clamped = CmdVel(
+            ts=float(getattr(cmd, "ts", time.time()) or time.time()),
+            mode=str(getattr(cmd, "mode", "") or state),
+            vx_mps=after_vx,
+            vy_mps=0.0,
+            wz_radps=0.0,
+            hold_ms=int(getattr(cmd, "hold_ms", self.cfg.car.cmd_hold_ms) or self.cfg.car.cmd_hold_ms),
+            brake=bool(getattr(cmd, "brake", False)),
+        )
+        entered = self._last_final_forward_only_state != state
+        changed = bool(abs(before_vy) > 1e-9 or abs(before_wz) > 1e-9 or before_vx < -1e-9)
+        self._last_final_forward_only_state = state
+        if entered or changed:
+            self._operator_emit(
+                "[FINAL][FORWARD_ONLY_CLAMP] "
+                f"state={state} "
+                f"before_vx={before_vx:.3f} before_vy={before_vy:.3f} before_wz={before_wz:.3f} "
+                f"after_vx={after_vx:.3f} after_vy=0 after_wz=0"
+            )
+        try:
+            self.run_logger.write_jsonl("final_forward_only_clamp", {"state": state, **meta})
+        except Exception:
+            pass
+        summary.update(meta)
+        return clamped, meta
 
     def _render_uart_line(self, payload: Dict[str, Any]) -> str:
         raw = str(payload.get("raw", "")).strip("\n")
@@ -1552,6 +1985,12 @@ class OrchestratorService(BaseModule):
         if expects_vel and not has_vel:
             state = str(payload.get("state") or self.core.ctx.state.value)
             reason = str(payload.get("reason") or "no_vel_line").strip() or "no_vel_line"
+            if str(payload.get("control_source") or payload.get("motion_intent_type") or "") == "manual_drive":
+                self._manual_log(
+                    "manual_override_sent",
+                    {"state": state, "reason": reason, "seq": payload.get("seq"), "cmd_id": self.core.ctx.manual_drive_last_cmd_id},
+                )
+                return
             self.operator_console.emit_error(
                 f"no_vel_sent:{state}:{reason}",
                 f"[ORCH] WARN no_vel_sent state={state} reason={reason}",
@@ -1636,12 +2075,134 @@ class OrchestratorService(BaseModule):
         }
         if tx_meta:
             payload.update({k: v for k, v in tx_meta.items() if v not in (None, "")})
+        actual_write_ms = payload.get("dryrun_write_ms" if dry_run else "uart_write_ms")
+        if dry_run:
+            self._last_dryrun_write_ms = float(actual_write_ms) if actual_write_ms is not None else None
+            self._observe_trace_sample("dryrun_write_ms", self._last_dryrun_write_ms)
+            self._last_uart_write_ms = None
+            event = "dryrun_write_done"
+        else:
+            self._last_uart_write_ms = float(actual_write_ms) if actual_write_ms is not None else None
+            self._observe_trace_sample("uart_write_ms", self._last_uart_write_ms)
+            self._last_dryrun_write_ms = None
+            event = "uart_write_done"
+        self._last_uart_write_done_mono_ns = int(payload.get("write_done_mono_ns") or time.monotonic_ns())
+        write_start_mono_ns = int(payload.get("write_start_mono_ns") or self._last_uart_write_done_mono_ns)
+        capture_mono_ns = payload.get("frame_capture_mono_ns")
+        critical_path_latency_ms = (
+            max(0.0, (self._last_uart_write_done_mono_ns - int(capture_mono_ns)) / 1_000_000.0)
+            if capture_mono_ns is not None else None
+        )
+        marker_context = {
+            "frame_id": payload.get("frame_id"),
+            "obs_seq": payload.get("obs_seq"),
+            "trace_id": payload.get("trace_id"),
+            "state": payload.get("state") or str(self.core.ctx.state.value or ""),
+            "uart_mode": "dry_run" if dry_run else "full",
+            "serial_write_ok": payload.get("serial_write_ok"),
+        }
+        if any(marker_context.get(name) is None for name in ("frame_id", "obs_seq", "trace_id")):
+            fallback = dict(getattr(self, "_last_motion_tx_context", {}) or self._perf_trace_context())
+            for name in ("frame_id", "obs_seq", "trace_id", "capture_mono_ns", "obs_publish_mono_ns", "obs_recv_mono_ns"):
+                if marker_context.get(name) is None and fallback.get(name) is not None:
+                    marker_context[name] = fallback.get(name)
+        self.run_logger.write_perf_marker(
+            "dryrun_write_start" if dry_run else "uart_write_start",
+            mono_ns=write_start_mono_ns,
+            **marker_context,
+        )
+        self._last_uart_trace_context = dict(marker_context)
+        if dry_run:
+            self.run_logger.write_perf_marker(
+                "ack_wait_start",
+                executed=False,
+                reason="dry_run",
+                mono_ns=self._last_uart_write_done_mono_ns,
+                **marker_context,
+            )
+            self.run_logger.write_perf_marker(
+                "ack_wait_done",
+                executed=False,
+                reason="dry_run",
+                duration_ms=None,
+                mono_ns=self._last_uart_write_done_mono_ns,
+                **marker_context,
+            )
+        else:
+            self.run_logger.write_perf_marker(
+                "ack_wait_start",
+                mono_ns=self._last_uart_write_done_mono_ns,
+                **marker_context,
+            )
+        self.run_logger.write_perf_marker(
+            event,
+            duration_ms=actual_write_ms,
+            mono_ns=self._last_uart_write_done_mono_ns,
+            critical_path_latency_ms=critical_path_latency_ms,
+            overlapped=True,
+            overlap_note="Measured wall path; stage durations may overlap.",
+            **marker_context,
+        )
+        state = str(payload.get("state") or self.core.ctx.state.value or "").strip().upper()
+        wz = float(payload.get("wz_radps", 0.0) or 0.0)
+        raw_upper = str(raw_line or "").strip().upper()
+        is_velocity_line = bool(raw_upper.startswith("V ") or raw_upper.startswith("VEL "))
+        if is_velocity_line and state in {"POST_GRASP_TURN_180", "POST_GRASP_TURN_FIXED", "SEARCH_BASKET"} and abs(wz) > 1e-9:
+            accepted = bool(payload.get("writer_accept_cmd") is not False and payload.get("uart_tx_ok", True))
+            if accepted:
+                if state == "POST_GRASP_TURN_180" and not bool(getattr(self.core.ctx, "post_grasp_turn_cmd_accepted", False)):
+                    self.core.ctx.post_grasp_turn_started_mono = monotonic_ts()
+                    self.core.ctx.post_grasp_turn_cmd_accepted = True
+                self.log("info", "state_machine", f"[RETURN_PLACE][TURN_CMD_ACCEPTED] state={state} wz={wz:.3f}")
+            else:
+                reason = str(
+                    payload.get("writer_discard_reason")
+                    or payload.get("service_override_reason")
+                    or payload.get("estop_cooldown_reason")
+                    or payload.get("rotate_block_reason")
+                    or payload.get("uart_tx_error")
+                    or "uart_not_accepted"
+                )
+                self.log("warn", "state_machine", f"[RETURN_PLACE][UART_BLOCKED] reason={reason} state={state}")
         payload["summary_key"] = self._uart_event_key(payload)
         payload["rendered"] = self._render_uart_line(payload)
+        if bool(payload.get("uart_mode_send_required")) or str(payload.get("stm32_kind") or "") == "mode":
+            mode_event = "uart_mode_sent" if bool(payload.get("uart_tx_ok")) and payload.get("writer_accept_cmd") is not False else "uart_mode_send_failed"
+            mode_payload = {
+                "state": payload.get("state"),
+                "requested_mode": payload.get("wire_mode"),
+                "last_wire_mode": payload.get("last_wire_mode"),
+                "reason": payload.get("reason"),
+                "uart_tx_ok": payload.get("uart_tx_ok"),
+                "writer_accept_cmd": payload.get("writer_accept_cmd"),
+                "retry_count": payload.get("uart_mode_retry_count"),
+                "seq": payload.get("seq"),
+            }
+            self.run_logger.write_jsonl(mode_event, mode_payload)
+            self.log("info" if mode_event == "uart_mode_sent" else "warn", "uart", mode_event, mode_payload)
         if self._uart_full_log or not bool(dry_run):
             self.run_logger.write_jsonl("uart_tx", payload)
         self._update_uart_lowfreq(payload)
         actual_payloads = self._actual_uart_payloads(payload)
+        if str(payload.get("control_source") or payload.get("motion_intent_type") or "") == "manual_drive":
+            if payload.get("writer_accept_cmd") is False:
+                self._manual_log("manual_drive_discarded", {
+                    "reason": str(payload.get("writer_discard_reason") or "writer_rejected"),
+                    "raw": payload.get("raw"),
+                    "cmd_id": self.core.ctx.manual_drive_last_cmd_id,
+                }, level="warn")
+            elif any(str(item.get("uart_kind") or "") == "vel" for item in actual_payloads):
+                vel_item = next((item for item in actual_payloads if str(item.get("uart_kind") or "") == "vel"), payload)
+                self._manual_log("manual_drive_uart_sent", {
+                    "vx": vel_item.get("vx_mps", payload.get("vx_mps")),
+                    "vy": vel_item.get("vy_mps", payload.get("vy_mps")),
+                    "wz": vel_item.get("wz_radps", payload.get("wz_radps")),
+                    "mode": payload.get("wire_mode") or payload.get("mode") or "SEARCH",
+                    "seq": payload.get("seq"),
+                    "writer_accept_cmd": payload.get("writer_accept_cmd"),
+                    "serial_write_ok": payload.get("serial_write_ok"),
+                    "cmd_id": self.core.ctx.manual_drive_last_cmd_id,
+                })
         self._emit_no_vel_if_needed(payload, actual_payloads)
         self._update_uart_keepalive_stats(payload, actual_payloads)
         for item in actual_payloads or [payload]:
@@ -1661,11 +2222,7 @@ class OrchestratorService(BaseModule):
         self.run_logger.write_jsonl("config", cfg_dump)
         self.run_logger.write_timeline("BOOT", run_dir=str(self.run_logger.run_dir), config=cfg_dump)
         loaded_files = ",".join(self.cfg.runtime.loaded_config_files) or "<defaults>"
-        self._operator_emit(
-            "[ORCH] CONFIG "
-            f"stage={self.cfg.runtime.stage_params_file} car_cmd={self.cfg.runtime.car_cmd_params_file} "
-            f"loaded={loaded_files}"
-        )
+        self._operator_emit(f"[ORCH] CONFIG loaded={loaded_files}")
         self._operator_emit(
             "[ORCH] PARAMS "
             f"tick_hz={float(self.cfg.runtime.tick_hz):.2f} send_period_ms={int(self.cfg.car.send_period_ms)} "
@@ -1714,6 +2271,7 @@ class OrchestratorService(BaseModule):
         except Exception:
             pass
         self.uart.close()
+        self.arm_bridge.close()
         self.task_server.close()
         self.vision_server.close()
         self.task_ack_sender.close()
@@ -1731,12 +2289,28 @@ class OrchestratorService(BaseModule):
         try:
             while self._running:
                 loop_start = time.time()
+                loop_start_ns = time.monotonic_ns()
                 self._drain_async_tx_results()
                 self._drain_uart_feedback()
                 self._drain_task_cmds()
                 self._drain_vision_msgs()
+                if self._check_manual_drive_timeout():
+                    self._emit_state_block_if_needed()
+                    self._emit_heartbeat_if_needed()
+                    self._emit_system_metrics_if_needed()
+                    elapsed = time.time() - loop_start
+                    time.sleep(max(0.0, period_s - elapsed))
+                    continue
+                self._lock_current_tick_obs_trace()
                 self._mark_state_machine_consume(loop_start)
+                self._perf_marker("state_tick_start", mono_ns=time.monotonic_ns())
+                self._perf_marker("motion_decision_start", mono_ns=time.monotonic_ns())
+                decision_start_ns = time.monotonic_ns()
                 decision = self.core.tick()
+                state_decision_ms = max(0.0, (time.monotonic_ns() - decision_start_ns) / 1_000_000.0)
+                self._last_state_decision_ms = state_decision_ms
+                self._observe_trace_sample("state_decision_ms", state_decision_ms)
+                self._perf_marker("motion_decision_done", duration_ms=state_decision_ms)
                 self._mark_cmd_publish(decision)
                 self._flush_pending_msgs()
                 self._emit_motion(decision)
@@ -1745,6 +2319,70 @@ class OrchestratorService(BaseModule):
                 self._emit_heartbeat_if_needed()
                 self._emit_system_metrics_if_needed()
                 elapsed = time.time() - loop_start
+                tick_process_ms = max(0.0, (time.monotonic_ns() - loop_start_ns) / 1_000_000.0)
+                self._last_tick_process_ms = tick_process_ms
+                self._observe_trace_sample("tick_process_ms", tick_process_ms)
+                self._perf_marker("state_tick_done", duration_ms=tick_process_ms)
+                obs = self.core.ctx.last_table_obs
+                control_summary = dict(getattr(decision, "control_summary", None) or {})
+                perf_record = {
+                    **self._perf_trace_context(),
+                    "tick_interval_ms": getattr(obs, "state_machine_tick_interval_ms", None) if obs is not None else None,
+                    "tick_process_ms": tick_process_ms,
+                    "state_decision_ms": state_decision_ms,
+                    "motion_decision_ms": state_decision_ms,
+                    "motion_arbitration_ms": self._last_motion_arbitration_ms,
+                    "car_cmd_map_ms": control_summary.get("car_cmd_map_ms"),
+                    "uart_write_ms": self._last_uart_write_ms,
+                    "dryrun_write_ms": self._last_dryrun_write_ms,
+                    "ack_wait_ms": self._last_ack_wait_ms if not self.cfg.serial.dry_run else None,
+                    "ack_wait_reason": (
+                        None if self._last_ack_wait_ms is not None and not self.cfg.serial.dry_run
+                        else ("dry_run" if self.cfg.serial.dry_run else "awaiting_ack")
+                    ),
+                    "vision_obs_age_ms": getattr(obs, "vision_obs_age_at_first_consume_ms", None) if obs is not None and int(self._same_obs_reuse_count) == 0 else None,
+                    "vision_obs_age_at_first_consume_ms": getattr(obs, "vision_obs_age_at_first_consume_ms", None) if obs is not None and int(self._same_obs_reuse_count) == 0 else None,
+                    "vision_obs_reuse_age_ms": getattr(obs, "vision_obs_reuse_age_ms", None) if obs is not None and int(self._same_obs_reuse_count) > 0 else None,
+                    "vision_capture_to_publish_ms": getattr(obs, "vision_capture_to_publish_ms", None) if obs is not None and int(self._same_obs_reuse_count) == 0 else None,
+                    "vision_publish_to_recv_ms": getattr(obs, "vision_publish_to_orch_recv_ms", None) if obs is not None and int(self._same_obs_reuse_count) == 0 else None,
+                    "vision_recv_to_first_consume_ms": getattr(obs, "orch_recv_to_state_consume_ms", None) if obs is not None and int(self._same_obs_reuse_count) == 0 else None,
+                    "fresh_obs_consumed": int(self._fresh_obs_consumed),
+                    "reused_obs_consumed": int(self._reused_obs_consumed),
+                    "vision_publish_to_orch_recv_ms": (
+                        getattr(obs, "vision_publish_to_orch_recv_ms", None) if obs is not None else None
+                    ),
+                    "orch_recv_to_state_consume_ms": (
+                        getattr(obs, "orch_recv_to_state_consume_ms", None) if obs is not None else None
+                    ),
+                    "same_obs_reuse_count": int(self._same_obs_reuse_count),
+                    "cmd_emit_interval_ms": control_summary.get("cmd_emit_interval_ms"),
+                    "state_transition_latency_ms": control_summary.get("state_transition_latency_ms"),
+                    "unavailable_reasons": {
+                        "uart_write_ms": "dry_run" if self.cfg.serial.dry_run else None,
+                        "dryrun_write_ms": None if self.cfg.serial.dry_run else "full_mode",
+                        "ack_wait_ms": "dry_run" if self.cfg.serial.dry_run else (
+                            None if self._last_ack_wait_ms is not None else "awaiting_ack"
+                        ),
+                        "state_transition_latency_ms": (
+                            None if control_summary.get("state_transition_latency_ms") is not None
+                            else "no_transition_followed_by_nonzero_command"
+                        ),
+                        "vision_obs_age_ms": None if obs is not None else "no_vision_observation",
+                    },
+                }
+                if self.core.ctx.state.value == "YOLO_APPROACH":
+                    for key in (
+                        "yolo_approach_speed_band",
+                        "yolo_approach_speed_depth",
+                        "yolo_approach_selected_vx",
+                        "yolo_approach_depth_source",
+                        "yolo_approach_obs_fresh",
+                        "yolo_approach_obs_age_s",
+                        "yolo_approach_far_allowed",
+                        "yolo_approach_speed_block_reason",
+                    ):
+                        perf_record[key] = control_summary.get(key)
+                self.run_logger.write_jsonl("perf_timing", perf_record)
                 time.sleep(max(0.0, period_s - elapsed))
         finally:
             self.stop()
@@ -1809,6 +2447,28 @@ class OrchestratorService(BaseModule):
 
     def _drain_uart_feedback(self):
         for raw in self.uart.drain_rx_lines():
+            ack_mono_ns = time.monotonic_ns()
+            ack_wait_ms = (
+                max(0.0, (ack_mono_ns - int(getattr(self, "_last_uart_write_done_mono_ns", ack_mono_ns))) / 1_000_000.0)
+                if getattr(self, "_last_uart_write_done_mono_ns", None)
+                else None
+            )
+            self._last_ack_wait_ms = ack_wait_ms
+            ack_context = dict(getattr(self, "_last_uart_trace_context", {}) or {})
+            self.run_logger.write_perf_marker(
+                "ack_wait_done",
+                duration_ms=ack_wait_ms,
+                mono_ns=ack_mono_ns,
+                raw=str(raw),
+                **ack_context,
+            )
+            self.run_logger.write_perf_marker(
+                "ack_recv",
+                duration_ms=ack_wait_ms,
+                mono_ns=ack_mono_ns,
+                raw=str(raw),
+                **ack_context,
+            )
             state = parse_car_state_line(raw)
             if state is not None:
                 self._update_stm32_motion_status(state)
@@ -1946,15 +2606,89 @@ class OrchestratorService(BaseModule):
             self.motion_status["jog_running"] = False
             self.motion_status["stm32_timeout_seen"] = True
 
-    def _send_task_ack(self, cmd: TaskCmd, accepted: bool, reason: str):
-        ack = make_task_ack(cmd, accepted=accepted, reason=reason, state=self.core.ctx.state.value)
-        disabled = str(getattr(self.cfg.task_ack_out, "transport", "") or "").lower() == "disabled"
-        sent = True if disabled else self.task_ack_sender.send(ack)
+    def _task_ack_socket_path(self) -> str:
+        endpoint = self.cfg.task_ack_out
+        return str(
+            getattr(endpoint, "uds_path", "")
+            or getattr(endpoint, "ipc_socket_path", "")
+            or ""
+        ).strip()
+
+    def _task_ack_out_unavailable_reason(self) -> str:
+        endpoint = self.cfg.task_ack_out
+        transport = str(getattr(endpoint, "transport", "") or "").strip().lower()
+        if transport == "disabled":
+            return "disabled"
+        if transport == "uds":
+            path = self._task_ack_socket_path()
+            if path and not os.path.exists(path):
+                return "socket_missing"
+        if self._task_ack_skip_until_ts > time.time():
+            return "recent_send_failed"
+        return ""
+
+    def _record_task_ack_skip(self, cmd: TaskCmd, ack: Dict[str, Any], accepted: bool, reason: str, skip_reason: str) -> None:
         self._last_tx_summary["task_ack_out"] = time.time()
         self.run_logger.write_jsonl("task_ack", ack)
         self.run_logger.write_ipc(
             "task_ack_out",
-            "disabled" if disabled else ("ack_sent" if sent else "ack_send_failed"),
+            f"skipped_{skip_reason}",
+            direction="TX",
+            cmd_id=cmd.cmd_id,
+            session_id=cmd.session_id,
+            epoch=cmd.epoch,
+            accepted=accepted,
+            ok=True,
+            reason=reason,
+        )
+        if skip_reason != "disabled":
+            now = time.time()
+            should_warn = False
+            if skip_reason == "socket_missing":
+                should_warn = not self._task_ack_missing_warned
+            elif now - self._task_ack_last_fail_log_ts >= 2.0:
+                should_warn = True
+                self._task_ack_last_fail_log_ts = now
+            if should_warn:
+                self.log_warn("task_ack_out", f"ack skipped reason={skip_reason} path={self._task_ack_socket_path() or 'n/a'}")
+                self._task_ack_missing_warned = True
+        self._operator_ipc_event(
+            "task_ack_out",
+            f"skipped_{skip_reason}",
+            {"cmd_id": cmd.cmd_id, "accepted": accepted, "error": skip_reason},
+        )
+        self.log_ipc("TX", "task_ack", f"skipped_{skip_reason}", {"cmd_id": cmd.cmd_id, "accepted": accepted})
+
+    def _send_task_ack(self, cmd: TaskCmd, accepted: bool, reason: str):
+        extra = getattr(self.core.ctx, "last_task_ack_extra", None)
+        extra = dict(extra or {}) if isinstance(extra, dict) else {}
+        if cmd.intent == "FIND":
+            extra.setdefault("raw_target", str(cmd.target or ""))
+            if accepted:
+                extra.setdefault("canonical_target", getattr(self.core.ctx, "canonical_target", "") or getattr(self.core.ctx, "active_target", "") or "")
+                extra.setdefault("class_name", getattr(self.core.ctx, "class_name", "") or "")
+                extra.setdefault("class_id", getattr(self.core.ctx, "class_id", None))
+                extra.setdefault("task_id", getattr(self.core.ctx, "active_task_id", "") or cmd.cmd_id)
+            else:
+                extra.setdefault("supported_targets", supported_targets())
+        ack = make_task_ack(cmd, accepted=accepted, reason=reason, state=self.core.ctx.state.value, **extra)
+        skip_reason = self._task_ack_out_unavailable_reason()
+        if skip_reason:
+            self._record_task_ack_skip(cmd, ack, accepted, reason, skip_reason)
+            return
+
+        sent = self.task_ack_sender.send(ack)
+        if not sent:
+            now = time.time()
+            self._task_ack_skip_until_ts = now + 2.0
+            if now - self._task_ack_last_fail_log_ts >= 2.0:
+                self.log_warn("task_ack_out", f"ack_send_failed; suppressing retries briefly path={self._task_ack_socket_path() or 'n/a'}")
+                self._task_ack_last_fail_log_ts = now
+        self._last_tx_summary["task_ack_out"] = time.time()
+        self.run_logger.write_jsonl("task_ack", ack)
+        self.run_logger.write_ipc(
+            "task_ack_out",
+            "ack_sent" if sent else "ack_send_failed",
             direction="TX",
             cmd_id=cmd.cmd_id,
             session_id=cmd.session_id,
@@ -1965,73 +2699,510 @@ class OrchestratorService(BaseModule):
         )
         self._operator_ipc_event(
             "task_ack_out",
-            "disabled" if disabled else ("ack_sent" if sent else "ack_send_failed"),
+            "ack_sent" if sent else "ack_send_failed",
             {"cmd_id": cmd.cmd_id, "accepted": accepted, "error": "" if sent else reason},
         )
-        self.log_ipc("TX", "task_ack", "disabled" if disabled else ("sent" if sent else "failed"), {"cmd_id": cmd.cmd_id, "accepted": accepted})
+        self.log_ipc("TX", "task_ack", "sent" if sent else "failed", {"cmd_id": cmd.cmd_id, "accepted": accepted})
+
+    @staticmethod
+    def _clamp_float(value: Any, lo: float, hi: float) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            number = 0.0
+        if not math.isfinite(number):
+            number = 0.0
+        return max(float(lo), min(float(hi), number))
+
+    @staticmethod
+    def _clamp_int(value: Any, lo: int, hi: int, default: int) -> int:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            number = int(default)
+        return max(int(lo), min(int(hi), number))
+
+    def _manual_log(self, event: str, payload: Dict[str, Any], level: str = "info") -> None:
+        self.run_logger.write_jsonl(event, payload)
+        if event == "manual_drive_writer_tick":
+            return
+        if event == "manual_drive_writer_publish":
+            prev = getattr(self, "_manual_drive_last_console_publish", None)
+            curr = dict(payload or {})
+            remaining_ms = int(curr.get("remaining_ms", 0) or 0)
+            first = prev is None or curr.get("cmd_id") != prev.get("cmd_id") or curr.get("generation") != prev.get("generation")
+            last = remaining_ms <= 100
+            speed_change = False
+            direction_change = False
+            if isinstance(prev, dict) and not first:
+                for key in ("vx", "vy", "wz"):
+                    try:
+                        curr_v = float(curr.get(key, 0.0) or 0.0)
+                        prev_v = float(prev.get(key, 0.0) or 0.0)
+                    except (TypeError, ValueError):
+                        speed_change = True
+                        continue
+                    if abs(curr_v - prev_v) > 0.005:
+                        speed_change = True
+                    if (curr_v > 1e-9 and prev_v < -1e-9) or (curr_v < -1e-9 and prev_v > 1e-9):
+                        direction_change = True
+            self._manual_drive_last_console_publish = curr
+            if not (first or last or direction_change or speed_change):
+                return
+        self.log(level, "manual_control", event, payload)
+
+    def _clear_manual_drive_active(self, *, bump_generation: bool = True) -> None:
+        if bump_generation:
+            self.core.ctx.manual_drive_generation = int(getattr(self.core.ctx, "manual_drive_generation", 0) or 0) + 1
+        self.core.ctx.manual_drive_active = False
+        self.core.ctx.manual_drive_until_ts = 0.0
+        self.core.ctx.manual_drive_vx_mps = 0.0
+        self.core.ctx.manual_drive_vy_mps = 0.0
+        self.core.ctx.manual_drive_wz_radps = 0.0
+        self.core.ctx.manual_drive_last_cmd_id = None
+        self.core.ctx.manual_drive_source = None
+
+    def _stop_manual_drive(self, reason: str, event: str) -> None:
+        generation = int(getattr(self.core.ctx, "manual_drive_generation", 0) or 0)
+        seq = self.motion_adapter.stop(reason=reason)
+        payload = {
+            "reason": reason,
+            "state": self.core.ctx.state.value,
+            "cmd_id": self.core.ctx.manual_drive_last_cmd_id,
+            "stm32_seq": seq,
+            "generation": generation,
+        }
+        self._clear_manual_drive_active()
+        self.motion_status["last_seq"] = seq
+        self.motion_status["jog_running"] = False
+        self._last_uart_tx_ts = time.time()
+        self._manual_log(event, payload)
+
+    def _manual_drive_allowed(self) -> Tuple[bool, str]:
+        state = self.core.ctx.state.value
+        if state not in MANUAL_DRIVE_ALLOWED_STATES:
+            return False, "state_not_allowed"
+        if self.core.ctx.task_intent or self.core.ctx.active_target:
+            return False, "auto_task_active"
+        return True, ""
+
+    def _emit_manual_drive_velocity(self, *, duration_ms: Optional[int] = None) -> int:
+        now = time.time()
+        generation = int(getattr(self.core.ctx, "manual_drive_generation", 0) or 0)
+        if not self.core.ctx.manual_drive_active:
+            self._manual_log("manual_drive_discarded", {
+                "reason": "inactive_before_writer_tick",
+                "generation": generation,
+            }, level="warn")
+            return 0
+        remaining_ms = max(0, int(round((float(self.core.ctx.manual_drive_until_ts or now) - now) * 1000.0)))
+        vx = float(self.core.ctx.manual_drive_vx_mps or 0.0)
+        vy = float(self.core.ctx.manual_drive_vy_mps or 0.0)
+        wz = float(self.core.ctx.manual_drive_wz_radps or 0.0)
+        tick_payload = {
+            "state": self.core.ctx.state.value,
+            "vx": vx,
+            "vy": vy,
+            "wz": wz,
+            "remaining_ms": remaining_ms,
+            "cmd_id": self.core.ctx.manual_drive_last_cmd_id,
+            "source": self.core.ctx.manual_drive_source,
+            "generation": generation,
+        }
+        self._manual_log("manual_drive_writer_tick", tick_payload)
+        if not self.core.ctx.manual_drive_active or generation != int(getattr(self.core.ctx, "manual_drive_generation", 0) or 0):
+            self._manual_log("manual_drive_discarded", {
+                "reason": "generation_changed_before_send",
+                "generation": generation,
+                "current_generation": int(getattr(self.core.ctx, "manual_drive_generation", 0) or 0),
+            }, level="warn")
+            return 0
+        self._last_motion_tx_context = {
+            "control_source": "manual_drive",
+            "motion_intent_type": "manual_drive",
+            "motion_class": "manual",
+            "yaw_owner": "manual_drive",
+            "forward_owner": "manual_drive" if abs(vx) > 1e-9 else "none",
+            "lateral_owner": "manual_drive" if abs(vy) > 1e-9 else "none",
+            "arbitration_reason": "manual_drive_idle_control",
+            "uart_emit_reason": "manual_drive",
+            "speed_profile": "manual_drive",
+            "stop_class": "none",
+            "allow_uart_send": True,
+            "service_override": True,
+            "service_override_reason": "manual_drive",
+            "estop_cooldown_applied": False,
+            "estop_cooldown_reason": "manual_drive_idle_control",
+            "vx_mps": vx,
+            "vy_mps": vy,
+            "wz_radps": wz,
+        }
+        seq = self.motion_adapter.set_velocity(vx, vy, wz, mode="SEARCH", reason="manual_drive")
+        self.motion_status["last_seq"] = seq
+        self.motion_status["jog_running"] = False
+        self._last_uart_tx_ts = now
+        sent_payload = {
+            "vx": vx,
+            "vy": vy,
+            "wz": wz,
+            "mode": "SEARCH",
+            "seq": seq,
+            "remaining_ms": remaining_ms,
+            "cmd_id": self.core.ctx.manual_drive_last_cmd_id,
+            "generation": generation,
+        }
+        if duration_ms is not None:
+            sent_payload["duration_ms"] = int(duration_ms)
+        self._manual_log("manual_drive_writer_publish", sent_payload)
+        return seq
+
+    def _handle_manual_drive_cmd(self, cmd: TaskCmd) -> Tuple[bool, str]:
+        state = self.core.ctx.state.value
+        raw_cmd = cmd.cmd or "manual_drive"
+        received = {
+            "raw_cmd": raw_cmd,
+            "state": state,
+            "vx": cmd.vx,
+            "vy": cmd.vy,
+            "wz": cmd.wz,
+            "duration_ms": cmd.duration_ms or MANUAL_DRIVE_DEFAULT_DURATION_MS,
+            "cmd_id": cmd.cmd_id,
+            "session_id": cmd.session_id,
+            "source": cmd.source,
+        }
+        self._manual_log("manual_drive_received", received)
+
+        allowed, reason = self._manual_drive_allowed()
+        if not allowed:
+            rejected = {"state": state, "reason": reason, "cmd_id": cmd.cmd_id, "session_id": cmd.session_id}
+            self._manual_log("manual_drive_rejected", rejected, level="warn")
+            return False, reason
+
+        vx = self._clamp_float(cmd.vx, -MANUAL_DRIVE_MAX_ABS_VX_MPS, MANUAL_DRIVE_MAX_ABS_VX_MPS)
+        vy = self._clamp_float(cmd.vy, -MANUAL_DRIVE_MAX_ABS_VY_MPS, MANUAL_DRIVE_MAX_ABS_VY_MPS)
+        wz = self._clamp_float(cmd.wz, -MANUAL_DRIVE_MAX_ABS_WZ_RADPS, MANUAL_DRIVE_MAX_ABS_WZ_RADPS)
+        duration_ms = self._clamp_int(
+            cmd.duration_ms or MANUAL_DRIVE_DEFAULT_DURATION_MS,
+            MANUAL_DRIVE_MIN_DURATION_MS,
+            MANUAL_DRIVE_MAX_DURATION_MS,
+            MANUAL_DRIVE_DEFAULT_DURATION_MS,
+        )
+        if abs(vx) < 1e-9 and abs(vy) < 1e-9 and abs(wz) < 1e-9:
+            return self._handle_manual_stop_cmd(cmd)
+
+        now = time.time()
+        until_ts = now + (float(duration_ms) / 1000.0)
+        self.core.ctx.manual_drive_generation = int(getattr(self.core.ctx, "manual_drive_generation", 0) or 0) + 1
+        self.core.ctx.manual_drive_active = True
+        self.core.ctx.manual_drive_until_ts = until_ts
+        self.core.ctx.manual_drive_vx_mps = vx
+        self.core.ctx.manual_drive_vy_mps = vy
+        self.core.ctx.manual_drive_wz_radps = wz
+        self.core.ctx.manual_drive_last_cmd_id = cmd.cmd_id
+        self.core.ctx.manual_drive_source = cmd.source
+        accepted = {
+            "state": state,
+            "vx_clamped": vx,
+            "vy_clamped": vy,
+            "wz_clamped": wz,
+            "duration_ms_clamped": duration_ms,
+            "until_ts": until_ts,
+            "cmd_id": cmd.cmd_id,
+            "session_id": cmd.session_id,
+            "generation": self.core.ctx.manual_drive_generation,
+        }
+        self._manual_log("manual_drive_accepted", accepted)
+        self._emit_manual_drive_velocity(duration_ms=duration_ms)
+        return True, "manual_drive accepted"
+
+    def _handle_manual_stop_cmd(self, cmd: TaskCmd) -> Tuple[bool, str]:
+        previous_active = bool(self.core.ctx.manual_drive_active)
+        previous_until_ts = float(self.core.ctx.manual_drive_until_ts or 0.0)
+        previous_vx = float(self.core.ctx.manual_drive_vx_mps or 0.0)
+        previous_vy = float(self.core.ctx.manual_drive_vy_mps or 0.0)
+        previous_wz = float(self.core.ctx.manual_drive_wz_radps or 0.0)
+        remaining_ms = max(0, int(round((previous_until_ts - time.time()) * 1000.0))) if previous_until_ts > 0.0 else 0
+        payload = {
+            "state": self.core.ctx.state.value,
+            "manual_drive_active": previous_active,
+            "cmd_id": cmd.cmd_id,
+            "session_id": cmd.session_id,
+            "source": cmd.source,
+        }
+        self._manual_log("manual_stop_received", payload)
+        self.core.ctx.manual_stop_seq = int(getattr(self.core.ctx, "manual_stop_seq", 0) or 0) + 1
+        generation = int(getattr(self.core.ctx, "manual_drive_generation", 0) or 0) + 1
+        self.core.ctx.manual_drive_generation = generation
+        self._clear_manual_drive_active(bump_generation=False)
+        if previous_active or any(abs(v) > 1e-9 for v in (previous_vx, previous_vy, previous_wz)):
+            self._manual_log("manual_drive_cancelled_by_stop", {
+                "previous_vx": previous_vx,
+                "previous_vy": previous_vy,
+                "previous_wz": previous_wz,
+                "remaining_ms": remaining_ms,
+                "previous_until_ts": previous_until_ts,
+                "generation": generation,
+                "manual_stop_seq": self.core.ctx.manual_stop_seq,
+                "cmd_id": cmd.cmd_id,
+            })
+        seq = self.motion_adapter.stop(reason="manual_stop")
+        if self.core.ctx.state in {
+            State.POST_GRASP_TURN_180,
+            State.POST_GRASP_TURN_FIXED,
+            State.POST_GRASP_FORWARD_FIXED,
+            State.POST_GRASP_STOP,
+            State.POST_GRASP_POSE_RISE,
+            State.SEARCH_BASKET,
+            State.APPROACH_BASKET,
+            State.PLACE_TO_BASKET,
+        }:
+            self.core._interrupt_to_idle("manual_stop_return_place", tts_text="已停止", interrupt_tts=True, send_vision_idle=True)
+        self.motion_status["last_seq"] = seq
+        self.motion_status["jog_running"] = False
+        self._last_uart_tx_ts = time.time()
+        accepted = dict(payload)
+        accepted["stm32_seq"] = seq
+        accepted.update({
+            "reason": "manual_stop",
+            "cleared_manual_drive": True,
+            "previous_until_ts": previous_until_ts,
+            "generation": generation,
+            "manual_stop_seq": self.core.ctx.manual_stop_seq,
+        })
+        self._manual_log("manual_stop_accepted", accepted)
+        self._manual_log("manual_stop_sent", accepted)
+        return True, "manual_stop accepted"
+
+    def _check_manual_drive_timeout(self) -> bool:
+        if not self.core.ctx.manual_drive_active:
+            return False
+        if time.time() < float(self.core.ctx.manual_drive_until_ts or 0.0):
+            self._emit_manual_drive_velocity()
+            return True
+        self._stop_manual_drive("duration_elapsed", "manual_drive_timeout_stop")
+        return False
+
+    def _record_bad_task_cmd(self, payload: Dict[str, Any], exc: Exception) -> None:
+        self.log_warn("task_cmd", f"bad task_cmd err={self._short_err(exc)}")
+        self.operator_console.emit_error(
+            f"task_cmd_bad:{exc}",
+            f"[ORCH] ERROR task_cmd invalid err={self._short_err(exc)}",
+        )
+        self.run_logger.write_event(f"bad task_cmd: {payload} ({exc})")
+        self.run_logger.write_ipc(
+            "task_cmd_in",
+            "bad_payload",
+            direction="RX",
+            ok=False,
+            error=str(exc),
+            payload=safe_dump(payload),
+        )
+        self.run_logger.write_timeline("TASK_CMD_BAD", payload=safe_dump(payload), error=str(exc))
+
+    def _process_task_cmd(self, item: Dict[str, Any], payload: Dict[str, Any], cmd: TaskCmd) -> None:
+        self._last_task_cmd_recv_ts = float(item.get("recv_ts", time.time()))
+        self.log_ipc("RX", "task_cmd", "received", {"cmd_id": payload.get("cmd_id"), "intent": cmd.intent})
+        if cmd.intent == "MANUAL_DRIVE":
+            accepted, reason = self._handle_manual_drive_cmd(cmd)
+            self.run_logger.write_jsonl("task_cmd", cmd.to_dict())
+            self.run_logger.write_timeline("TASK_CMD_RECV", cmd_id=cmd.cmd_id, intent=cmd.intent, target=cmd.target, accepted=accepted, reason=reason, session_id=cmd.session_id, epoch=cmd.epoch)
+            self._send_task_ack(cmd, accepted=accepted, reason=reason)
+            return
+        if cmd.intent == "MANUAL_STOP":
+            accepted, reason = self._handle_manual_stop_cmd(cmd)
+            self.run_logger.write_jsonl("task_cmd", cmd.to_dict())
+            self.run_logger.write_timeline("TASK_CMD_RECV", cmd_id=cmd.cmd_id, intent=cmd.intent, target=cmd.target, accepted=accepted, reason=reason, session_id=cmd.session_id, epoch=cmd.epoch)
+            self._send_task_ack(cmd, accepted=accepted, reason=reason)
+            return
+        if cmd.intent in {"FIND", "RETURN"} and self.core.ctx.manual_drive_active:
+            self._stop_manual_drive("auto_task_received", "manual_drive_interrupted_stop")
+        if cmd.intent in {"FIND", "RETURN", "STOP"}:
+            self.core.ctx.clear_close_final_latches()
+            self.core.ctx.clear_final_enter_candidate()
+        if cmd.intent in {"FIND", "RETURN"}:
+            self._demo_start_pending_target = cmd.target or ("return_home" if cmd.intent == "RETURN" else "n/a")
+        if cmd.intent == "STOP":
+            if self.core.ctx.manual_drive_active:
+                self._clear_manual_drive_active()
+            self.log("warn", "service", "Immediate task_cmd STOP received: triggering emergency stop")
+            self.motion_adapter.reset_wire_mode_latch(reason="task_cmd_stop")
+            self.uart.send_emergency_stop()
+            self.motion_adapter.cancel_active_jogs()
+        accepted, reason = self.core.handle_task_cmd(cmd)
+        if accepted and cmd.intent in {"FIND", "RETURN"}:
+            self.demo_console.dry_run = bool(getattr(self.cfg.serial, "dry_run", False))
+            self.demo_console.task_start(self._demo_start_pending_target)
+            self._flush_demo_deferred_phases()
+        else:
+            self._demo_deferred_phases = []
+        self._demo_start_pending_target = ""
+        self.operator_console.emit_change(
+            f"task:{cmd.session_id}:{cmd.epoch}:{cmd.cmd_id}",
+            f"[ORCH] TASK cmd={cmd.intent.lower()} target={cmd.target or ''} session={cmd.session_id or ''} epoch={cmd.epoch}",
+        )
+        self.run_logger.write_jsonl("task_cmd", cmd.to_dict())
+        self.run_logger.write_ipc(
+            "task_cmd_in",
+            "received",
+            direction="RX",
+            cmd_id=cmd.cmd_id,
+            session_id=cmd.session_id,
+            epoch=cmd.epoch,
+            ok=True,
+            intent=cmd.intent,
+            target=cmd.target,
+        )
+        self.run_logger.write_timeline("TASK_CMD_RECV", cmd_id=cmd.cmd_id, intent=cmd.intent, target=cmd.target, accepted=accepted, reason=reason, session_id=cmd.session_id, epoch=cmd.epoch)
+        self._send_task_ack(cmd, accepted=accepted, reason=reason)
+
+    def _log_skipped_manual_drive(self, event: str, skipped: TaskCmd, latest: Optional[TaskCmd], reason: str) -> None:
+        payload: Dict[str, Any] = {
+            "cmd_id": skipped.cmd_id,
+            "session_id": skipped.session_id,
+            "vx": skipped.vx,
+            "vy": skipped.vy,
+            "wz": skipped.wz,
+            "duration_ms": skipped.duration_ms,
+            "reason": reason,
+        }
+        if latest is not None:
+            payload.update({
+                "latest_cmd_id": latest.cmd_id,
+                "latest_session_id": latest.session_id,
+                "latest_vx": latest.vx,
+                "latest_vy": latest.vy,
+                "latest_wz": latest.wz,
+                "latest_duration_ms": latest.duration_ms,
+            })
+        self._manual_log(event, payload)
 
     def _drain_task_cmds(self):
-        for item in self.task_server.drain():
+        raw_items = list(self.task_server.drain())
+        if not raw_items:
+            return
+
+        parsed: List[Tuple[Dict[str, Any], Dict[str, Any], TaskCmd]] = []
+        for item in raw_items:
             payload = item["payload"]
-            self._last_task_cmd_recv_ts = float(item.get("recv_ts", time.time()))
-            self.log_ipc("RX", "task_cmd", "received", {"cmd_id": payload.get("cmd_id"), "intent": payload.get("intent")})
             try:
                 cmd = TaskCmd.from_dict(payload, set(self.cfg.frozen_targets.keys()))
             except Exception as exc:
-                self.log_warn("task_cmd", f"bad task_cmd err={self._short_err(exc)}")
-                self.operator_console.emit_error(
-                    f"task_cmd_bad:{exc}",
-                    f"[ORCH] ERROR task_cmd invalid err={self._short_err(exc)}",
-                )
-                self.run_logger.write_event(f"bad task_cmd: {payload} ({exc})")
-                self.run_logger.write_ipc(
-                    "task_cmd_in",
-                    "bad_payload",
-                    direction="RX",
-                    ok=False,
-                    error=str(exc),
-                    payload=safe_dump(payload),
-                )
-                self.run_logger.write_timeline("TASK_CMD_BAD", payload=safe_dump(payload), error=str(exc))
+                self._last_task_cmd_recv_ts = float(item.get("recv_ts", time.time()))
+                self.log_ipc("RX", "task_cmd", "received", {"cmd_id": payload.get("cmd_id"), "intent": payload.get("intent")})
+                self._record_bad_task_cmd(payload, exc)
                 continue
-            if cmd.intent in {"FIND", "RETURN"}:
-                self._demo_start_pending_target = cmd.target or ("return_home" if cmd.intent == "RETURN" else "n/a")
-            if cmd.intent == "STOP":
-                self.log("warn", "service", "Immediate task_cmd STOP received: triggering emergency stop")
-                self.uart.send_emergency_stop()
-                self.motion_adapter.cancel_active_jogs()
-            accepted, reason = self.core.handle_task_cmd(cmd)
-            if accepted and cmd.intent in {"FIND", "RETURN"}:
-                self.demo_console.dry_run = bool(getattr(self.cfg.serial, "dry_run", False))
-                self.demo_console.task_start(self._demo_start_pending_target)
-                self._flush_demo_deferred_phases()
-            else:
-                self._demo_deferred_phases = []
-            self._demo_start_pending_target = ""
-            self.operator_console.emit_change(
-                f"task:{cmd.session_id}:{cmd.epoch}:{cmd.cmd_id}",
-                f"[ORCH] TASK cmd={cmd.intent.lower()} target={cmd.target or ''} session={cmd.session_id or ''} epoch={cmd.epoch}",
-            )
-            self.run_logger.write_jsonl("task_cmd", cmd.to_dict())
-            self.run_logger.write_ipc(
-                "task_cmd_in",
-                "received",
-                direction="RX",
-                cmd_id=cmd.cmd_id,
-                session_id=cmd.session_id,
-                epoch=cmd.epoch,
-                ok=True,
-                intent=cmd.intent,
-                target=cmd.target,
-            )
-            self.run_logger.write_timeline("TASK_CMD_RECV", cmd_id=cmd.cmd_id, intent=cmd.intent, target=cmd.target, accepted=accepted, reason=reason, session_id=cmd.session_id, epoch=cmd.epoch)
-            self._send_task_ack(cmd, accepted=accepted, reason=reason)
+            parsed.append((item, payload, cmd))
+
+        if not parsed:
+            return
+
+        manual_stop_indices = [idx for idx, (_, _, cmd) in enumerate(parsed) if cmd.intent == "MANUAL_STOP"]
+        process_indices: List[int] = []
+        skipped_indices = set()
+        if manual_stop_indices:
+            stop_idx = manual_stop_indices[-1]
+            stop_cmd = parsed[stop_idx][2]
+            process_indices.append(stop_idx)
+            for idx, (_, _, cmd) in enumerate(parsed):
+                if idx <= stop_idx and cmd.intent == "MANUAL_DRIVE":
+                    skipped_indices.add(idx)
+                    self._log_skipped_manual_drive("manual_drive_cancelled_by_stop", cmd, stop_cmd, "queued_before_manual_stop")
+            for idx, (_, _, cmd) in enumerate(parsed):
+                if idx == stop_idx or idx in skipped_indices:
+                    continue
+                if idx < stop_idx and cmd.intent == "MANUAL_STOP":
+                    continue
+                process_indices.append(idx)
+        else:
+            manual_drive_indices = [idx for idx, (_, _, cmd) in enumerate(parsed) if cmd.intent == "MANUAL_DRIVE"]
+            latest_drive_idx = manual_drive_indices[-1] if manual_drive_indices else None
+            latest_drive_cmd = parsed[latest_drive_idx][2] if latest_drive_idx is not None else None
+            for idx in manual_drive_indices[:-1]:
+                skipped_indices.add(idx)
+                self._log_skipped_manual_drive("manual_drive_replaced_previous", parsed[idx][2], latest_drive_cmd, "newer_manual_drive_pending")
+            process_indices = [idx for idx in range(len(parsed)) if idx not in skipped_indices]
+
+        seen = set()
+        for idx in process_indices:
+            if idx in seen:
+                continue
+            seen.add(idx)
+            item, payload, cmd = parsed[idx]
+            self._process_task_cmd(item, payload, cmd)
+
+    @staticmethod
+    def _grasp_obs_from_vision_payload(payload: Dict[str, Any], env: VisionObsEnvelope) -> Optional[Dict[str, Any]]:
+        if str(env.stage or "").strip().upper() != "GRASP":
+            return None
+        result = env.result if isinstance(env.result, dict) else None
+        if result is None and isinstance(payload.get("result"), dict):
+            result = dict(payload.get("result") or {})
+        if result is None:
+            result = {}
+
+        grasp = payload.get("grasp") if isinstance(payload.get("grasp"), dict) else None
+        if grasp is None and isinstance(result.get("grasp"), dict):
+            grasp = result.get("grasp")
+        if grasp is None and isinstance(payload.get("canonical_grasp"), dict):
+            grasp = payload.get("canonical_grasp")
+        if grasp is None and isinstance(result.get("canonical_grasp"), dict):
+            grasp = result.get("canonical_grasp")
+
+        if not result and grasp is None and str(env.status or "").strip().upper() not in {"RESULT_READY", "FAILED"}:
+            return None
+
+        grasp_obs = dict(result)
+        if isinstance(grasp, dict):
+            grasp_obs["grasp"] = dict(grasp)
+        grasp_obs["result"] = dict(result)
+        grasp_obs["status"] = str(env.status or "")
+        grasp_obs["type"] = "grasp_obs"
+        grasp_obs["ts"] = float(env.ts)
+        grasp_obs["req_id"] = env.req_id
+        grasp_obs["session_id"] = env.session_id
+        grasp_obs["epoch"] = int(env.epoch)
+        return grasp_obs
+
+    def _log_grasp_result_payload(
+        self,
+        payload: Dict[str, Any],
+        env: VisionObsEnvelope,
+        grasp_obs: Optional[Dict[str, Any]],
+    ) -> None:
+        if str(env.stage or "").strip().upper() != "GRASP":
+            return
+        result = env.result if isinstance(env.result, dict) else payload.get("result")
+        result_dict = result if isinstance(result, dict) else {}
+        grasp = None
+        if isinstance(grasp_obs, dict) and isinstance(grasp_obs.get("grasp"), dict):
+            grasp = grasp_obs.get("grasp")
+        elif isinstance(payload.get("grasp"), dict):
+            grasp = payload.get("grasp")
+        elif isinstance(payload.get("canonical_grasp"), dict):
+            grasp = payload.get("canonical_grasp")
+        log_payload = {
+            "stage": env.stage,
+            "status": env.status,
+            "obs_class": env.obs_class,
+            "has_result": isinstance(result, dict),
+            "result_keys": sorted(str(key) for key in result_dict.keys()),
+            "has_grasp": isinstance(grasp, dict),
+            "grasp_keys": sorted(str(key) for key in grasp.keys()) if isinstance(grasp, dict) else [],
+            "top_level_keys": sorted(str(key) for key in payload.keys()),
+            "req_id": env.req_id,
+            "session_id": env.session_id,
+            "epoch": int(env.epoch),
+        }
+        self.run_logger.write_jsonl("orchestrator_grasp_result_payload", log_payload)
+        self.log_ipc("RX", "vision_obs", "orchestrator_grasp_result_payload", log_payload)
 
     def _flatten_vision_payloads(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         msg_type = str(payload.get("type", "") or "").strip().lower()
         if msg_type == "vision_obs":
             env = VisionObsEnvelope.from_dict(payload)
             self.run_logger.write_jsonl("vision_obs", env.to_dict() if self._vision_full_obs_log else self._lite_vision_obs(env))
+            grasp_obs = self._grasp_obs_from_vision_payload(payload, env)
+            self._log_grasp_result_payload(payload, env, grasp_obs)
             if env.obs_class == "diagnostic":
                 metrics = payload.get("metrics")
                 if not isinstance(metrics, dict):
@@ -2062,7 +3233,7 @@ class OrchestratorService(BaseModule):
                     obs_class=env.obs_class,
                     metrics=safe_dump(self._last_diagnostic_obs_metrics),
                 )
-                return []
+                return [grasp_obs] if grasp_obs is not None else []
             self.core.confirm_vision_state(env.stage, env.mode, source="vision_obs")
             perception = dict(env.perception or {})
             has_table_edge = isinstance(perception.get("table_edge_obs"), dict)
@@ -2101,14 +3272,8 @@ class OrchestratorService(BaseModule):
         out = list(iter_vision_perception_payloads(payload))
         if msg_type == "vision_obs":
             env = VisionObsEnvelope.from_dict(payload)
-            if env.stage == "GRASP" and isinstance(env.result, dict) and env.result:
-                grasp_obs = dict(env.result)
-                grasp_obs["status"] = str(env.status or "")
-                grasp_obs["type"] = "grasp_obs"
-                grasp_obs["ts"] = float(env.ts)
-                grasp_obs["req_id"] = env.req_id
-                grasp_obs["session_id"] = env.session_id
-                grasp_obs["epoch"] = int(env.epoch)
+            grasp_obs = self._grasp_obs_from_vision_payload(payload, env)
+            if grasp_obs is not None:
                 out.append(grasp_obs)
         return out
 
@@ -2132,6 +3297,15 @@ class OrchestratorService(BaseModule):
                 try:
                     if msg_type == "table_edge_obs":
                         parsed = TableEdgeObs.from_dict(payload)
+                        recv_mono_ns = time.monotonic_ns()
+                        parsed.obs_recv_mono_ns = recv_mono_ns
+                        table_trace = self._obs_trace_from_parsed(parsed, recv_mono_ns)
+                        table_trace["state"] = str(self.core.ctx.state.value or "")
+                        self._latest_obs_trace["table"] = table_trace
+                        self.run_logger.write_perf_marker(
+                            "obs_recv",
+                            **table_trace,
+                        )
                         parsed.obs_recv_ts = recv_ts
                         parsed.orchestrator_recv_ts_ms = self._epoch_ms(recv_ts)
                         recv_interval_ms = (
@@ -2243,6 +3417,12 @@ class OrchestratorService(BaseModule):
                         )
                     elif msg_type == "target_obs":
                         parsed = TargetObs.from_dict(payload)
+                        recv_mono_ns = time.monotonic_ns()
+                        parsed.obs_recv_mono_ns = recv_mono_ns
+                        target_trace = self._obs_trace_from_parsed(parsed, recv_mono_ns)
+                        target_trace["state"] = str(self.core.ctx.state.value or "")
+                        self._latest_obs_trace["target"] = target_trace
+                        self.run_logger.write_perf_marker("obs_recv", **target_trace)
                         self._target_obs_rate_ts.append(recv_ts)
                         if priority >= latest_target_priority:
                             latest_target = parsed
@@ -2267,6 +3447,10 @@ class OrchestratorService(BaseModule):
                             latest_grasp = dict(payload)
                             latest_grasp_priority = priority
                         self._last_vision_obs_recv_ts = recv_ts
+                        result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+                        grasp = payload.get("grasp") if isinstance(payload.get("grasp"), dict) else None
+                        if grasp is None and isinstance(result.get("grasp"), dict):
+                            grasp = result.get("grasp")
                         self.run_logger.write_ipc(
                             "vision_obs_in",
                             "grasp_received",
@@ -2276,6 +3460,10 @@ class OrchestratorService(BaseModule):
                             epoch=payload.get("epoch"),
                             ok=True,
                             grasp_status=payload.get("status"),
+                            has_result=bool(result),
+                            result_keys=sorted(str(key) for key in result.keys()),
+                            has_grasp=isinstance(grasp, dict),
+                            grasp_keys=sorted(str(key) for key in grasp.keys()) if isinstance(grasp, dict) else [],
                             from_envelope=from_envelope,
                             msg_type=msg_type,
                         )
@@ -2611,7 +3799,15 @@ class OrchestratorService(BaseModule):
         summary["near_table_latched"] = bool(summary.get("near_table_latched") or self.core.ctx.near_table_latched)
         summary["final_depth_latched"] = bool(summary.get("final_depth_latched") or self.core.ctx.final_depth_latched)
         summary["final_yaw_align_active"] = bool(summary.get("final_yaw_align_active") or self.core.ctx.final_yaw_align_active)
-        summary["final_locked"] = bool(summary.get("final_locked") or self.core.ctx.final_locked)
+        final_lock_state_allowed = str(summary.get("state") or self.core.ctx.state.value) in {"FINAL_SLOW_STOP", "AT_TABLE_EDGE"}
+        if not final_lock_state_allowed and bool(summary.get("final_locked") or self.core.ctx.final_locked):
+            self.core.ctx.final_locked = False
+            self.core.ctx.final_lock_reason = ""
+            summary["final_lock_rejected"] = {
+                "state": str(summary.get("state") or self.core.ctx.state.value),
+                "reason": "service_summary_non_final_state",
+            }
+        summary["final_locked"] = bool(final_lock_state_allowed and (summary.get("final_locked") or self.core.ctx.final_locked))
         summary["stop_class"] = summary.get("stop_class") or "none"
         summary["service_override"] = bool(getattr(self, "_last_service_override", False))
         summary["uart_tx_ok"] = bool(getattr(self, "_last_uart_tx_ok", True))
@@ -2731,12 +3927,17 @@ class OrchestratorService(BaseModule):
             return "target_search_hold"
         if str(self.core.ctx.confirmed_vision_mode or "").upper() == "FIND_OBJECT" and self.core.ctx.last_table_obs is None:
             return "no_table_edge_obs_in_track_local"
-        if not bool(getattr(self.cfg.control, "edge_relocate_enabled", True)):
-            return "config_disabled"
         return "target_search_hold"
 
     def _emit_target_obs_missing_warning(self) -> None:
-        if str(getattr(self.core.ctx.state, "value", self.core.ctx.state) or "") != "EDGE_SLIDE_SEARCH":
+        state = str(getattr(self.core.ctx.state, "value", self.core.ctx.state) or "")
+        if state not in {"SEARCH_TARGET_INIT", "EDGE_SLIDE_SEARCH"}:
+            if state not in {"FINAL_SLOW_STOP", "AT_TABLE_EDGE"}:
+                self.operator_console.emit_rate_limited(
+                    "target_preview_not_started",
+                    f"[ORCH] TARGET_PREVIEW not_started state={state}",
+                    self.operator_console.default_interval_s,
+                )
             return
         try:
             elapsed = self.core._state_elapsed()
@@ -2749,6 +3950,13 @@ class OrchestratorService(BaseModule):
         except Exception:
             fresh = self.core.ctx.last_target_obs
         if fresh is not None:
+            reason = str(getattr(self.core.ctx, "target_lateral_align_reason", "") or "bbox_filtered")
+            if not bool(getattr(fresh, "found", False)):
+                self.operator_console.emit_rate_limited(
+                    "target_obs_bbox_filtered",
+                    f"[ORCH] TARGET_PREVIEW bbox_filtered reason={reason}",
+                    self.operator_console.default_interval_s,
+                )
             return
         last_obs = getattr(self.core.ctx, "last_target_obs", None)
         if last_obs is not None and getattr(last_obs, "ts", 0.0):
@@ -2757,9 +3965,11 @@ class OrchestratorService(BaseModule):
             age = max(0.0, float(elapsed))
         desired = str(getattr(self.core.ctx, "desired_vision_mode", "") or "n/a").strip() or "n/a"
         confirmed = str(getattr(self.core.ctx, "confirmed_vision_mode", "") or "n/a").strip() or "n/a"
+        target_hz = self._rate_hz(self._target_obs_rate_ts)
+        reason = "find_object_sent_target_obs_hz_0" if desired.upper() == "FIND_OBJECT" and target_hz <= 0.0 else "waiting_find_object"
         self.operator_console.emit_rate_limited(
             "target_obs_missing",
-            f"[ORCH] WARN target_obs_missing desired_mode={desired} confirmed_mode={confirmed} age={age:.1f}s",
+            f"[ORCH] WARN target_obs_missing reason={reason} desired_mode={desired} confirmed_mode={confirmed} target_obs_hz={target_hz:.2f} age={age:.1f}s",
             self.operator_console.default_interval_s,
         )
 
@@ -2848,6 +4058,7 @@ class OrchestratorService(BaseModule):
             "stale_level": summary.get("stale_level") or "",
             "allow_forward": bool(summary.get("allow_forward", summary.get("forward_allowed", False))),
             "allow_rotate": bool(summary.get("allow_rotate", abs(wz) > 1e-9)),
+            "allow_lateral": bool(summary.get("allow_lateral", abs(vy) > 1e-9)),
             "vx_mps": vx,
             "vy_mps": vy,
             "wz_radps": wz,
@@ -2861,6 +4072,10 @@ class OrchestratorService(BaseModule):
             "table_roi_depth_valid_ratio": summary.get("table_roi_depth_valid_ratio", summary.get("roi_depth_valid_ratio")),
             "table_roi_depth_sample_count": summary.get("table_roi_depth_sample_count", summary.get("roi_depth_sample_count")),
             "table_roi_depth_coord_space": summary.get("table_roi_depth_coord_space", ""),
+            "table_roi_source": summary.get("table_roi_source", ""),
+            "table_roi_latched": bool(summary.get("table_roi_latched", False)),
+            "table_roi_latch_age_s": summary.get("table_roi_latch_age_s"),
+            "table_roi_xyxy": summary.get("table_roi_xyxy"),
             "roi_depth_window_ready": bool(summary.get("roi_depth_window_ready", False)),
             "transition_reason": summary.get("transition_reason") or summary.get("reason") or "",
             "bbox_wz_sign": summary.get("bbox_wz_sign", 0),
@@ -2920,6 +4135,14 @@ class OrchestratorService(BaseModule):
             "search_latch_age_ms": summary.get("search_latch_age_ms", 0.0),
             "search_latch_reason": summary.get("search_latch_reason", ""),
             "wz_sign_final": summary.get("wz_sign_final", 0),
+            "yolo_approach_speed_band": summary.get("yolo_approach_speed_band"),
+            "yolo_approach_speed_depth": summary.get("yolo_approach_speed_depth"),
+            "yolo_approach_selected_vx": summary.get("yolo_approach_selected_vx"),
+            "yolo_approach_depth_source": summary.get("yolo_approach_depth_source"),
+            "yolo_approach_obs_fresh": summary.get("yolo_approach_obs_fresh"),
+            "yolo_approach_obs_age_s": summary.get("yolo_approach_obs_age_s"),
+            "yolo_approach_far_allowed": summary.get("yolo_approach_far_allowed"),
+            "yolo_approach_speed_block_reason": summary.get("yolo_approach_speed_block_reason"),
         }
         self.run_logger.write_jsonl("motion_gate_trace", trace)
         is_docking = trace["state"] in {"SEARCH_TABLE", "YOLO_ACQUIRE_ALIGN", "YOLO_APPROACH", "EDGE_ADJUST", "FINAL_SLOW_STOP", "AT_TABLE_EDGE"}
@@ -3018,12 +4241,17 @@ class OrchestratorService(BaseModule):
     def _obs_key(obs: Optional[TableEdgeObs]):
         if obs is None:
             return None
+        source = getattr(obs, "source", None)
+        mode = getattr(obs, "mode", None)
+        stage = getattr(obs, "stage", None)
+        obs_seq = getattr(obs, "obs_seq", None)
+        if obs_seq is not None:
+            return (source, mode, stage, "obs_seq", obs_seq)
         return (
-            getattr(obs, "obs_seq", None),
+            source, mode, stage, "frame",
             getattr(obs, "camera_frame_seq", None),
-            getattr(obs, "seq", None),
             getattr(obs, "frame_id", None),
-            getattr(obs, "obs_ts", None),
+            getattr(obs, "trace_id", None),
         )
 
     @staticmethod
@@ -3097,9 +4325,28 @@ class OrchestratorService(BaseModule):
         obs.state_machine_consume_interval_ms = consume_interval_ms
         obs.same_obs_reuse_count = int(self._same_obs_reuse_count)
         obs.obs_seq_gap = seq_gap
+        if is_new_obs:
+            self._perf_marker(
+                "state_machine_consume",
+                mono_ns=time.monotonic_ns(),
+                consume_kind="fresh",
+                is_first_consume=True,
+                obs_seq=getattr(obs, "obs_seq", None),
+                frame_id=getattr(obs, "frame_id", None),
+                trace_id=getattr(obs, "trace_id", None),
+            )
+        obs_age_ms = None
         if getattr(obs, "frame_capture_ts", None) is not None:
             try:
-                obs.obs_age_at_consume_ms = max(0.0, (now - float(obs.frame_capture_ts)) * 1000.0)
+                obs_age_ms = max(0.0, (now - float(obs.frame_capture_ts)) * 1000.0)
+                if is_new_obs:
+                    obs.obs_age_at_consume_ms = obs_age_ms
+                    obs.vision_obs_age_at_first_consume_ms = obs_age_ms
+                    obs.vision_obs_reuse_age_ms = None
+                    self._fresh_obs_consumed += 1
+                else:
+                    obs.vision_obs_reuse_age_ms = obs_age_ms
+                    self._reused_obs_consumed += 1
             except Exception:
                 pass
         if getattr(obs, "obs_recv_ts", None) is not None:
@@ -3109,7 +4356,11 @@ class OrchestratorService(BaseModule):
                 pass
         if consume_interval_ms is not None:
             self._observe_trace_sample("state_machine_consume_interval_ms", consume_interval_ms)
-        self._observe_trace_sample("obs_age_at_consume_ms", getattr(obs, "obs_age_at_consume_ms", None))
+        if is_new_obs:
+            self._observe_trace_sample("obs_age_at_consume_ms", obs_age_ms)
+            self._observe_trace_sample("vision_obs_age_at_first_consume_ms", obs_age_ms)
+        else:
+            self._observe_trace_sample("vision_obs_reuse_age_ms", obs_age_ms)
         self._observe_trace_sample("orch_recv_to_state_consume_ms", getattr(obs, "orch_recv_to_state_consume_ms", None))
         self._emit_obs_frequency_summary_if_needed()
 
@@ -3136,6 +4387,8 @@ class OrchestratorService(BaseModule):
             "table_edge_obs_recv_hz": float(recv_hz),
             "target_obs_recv_hz": float(target_hz),
             "same_obs_reuse_count": int(self._same_obs_reuse_count),
+            "fresh_obs_consumed": int(self._fresh_obs_consumed),
+            "reused_obs_consumed": int(self._reused_obs_consumed),
             "obs_seq": getattr(obs, "obs_seq", None) if obs is not None else None,
             "camera_frame_seq": getattr(obs, "camera_frame_seq", None) if obs is not None else None,
             "seq": getattr(obs, "seq", None) if obs is not None else None,
@@ -3143,6 +4396,12 @@ class OrchestratorService(BaseModule):
             "tick_hz_config": float(self.cfg.runtime.tick_hz),
             "receiver_poll_interval_ms_config": int(round((1.0 / max(1.0, float(self.cfg.runtime.tick_hz))) * 1000.0)),
             "status_publish_hz_config": 1.0 / max(1e-6, float(self.cfg.runtime.state_block_period_s or 1.0)),
+            "tick_interval_ms": getattr(obs, "state_machine_tick_interval_ms", None) if obs is not None else None,
+            "tick_process_ms": self._last_tick_process_ms,
+            "state_decision_ms": self._last_state_decision_ms,
+            "motion_arbitration_ms": self._last_motion_arbitration_ms,
+            "uart_write_ms": self._last_uart_write_ms,
+            "vision_obs_age_ms": getattr(obs, "obs_age_at_consume_ms", None) if obs is not None else None,
         }
         for key in self._obs_trace_samples:
             record[key] = self._trace_stats(key)
@@ -3212,14 +4471,312 @@ class OrchestratorService(BaseModule):
     def _emit_motion(self, decision):
         if getattr(decision, "arm_cmd", None) is not None:
             arm = decision.arm_cmd
+            arm_command = str(getattr(arm, "command", "POSE") or "POSE").strip().upper()
+            builtin_pose_line = str(getattr(self.cfg.control, "builtin_bottle_pose_line", "POSE_BOTTLE") or "POSE_BOTTLE").strip()
+            builtin_apple_pose_line = str(getattr(self.cfg.control, "builtin_apple_pose_line", "POSE_APPLE") or "POSE_APPLE").strip()
+            post_grasp_rise_line = str(getattr(self.cfg.control, "post_grasp_rise_line", "POSE_RISE") or "POSE_RISE").strip()
+            builtin_grab_line = str(getattr(self.cfg.control, "builtin_bottle_grab_line", "GRABBED") or "GRABBED").strip()
+            builtin_target = str(getattr(self.core.ctx, "builtin_grasp_target", "") or "")
+            if not builtin_target and str(getattr(self.core.ctx, "canonical_target", "") or "").strip().lower() in {"apple", "bottle"}:
+                builtin_target = str(getattr(self.core.ctx, "canonical_target", "") or "").strip().lower()
+            builtin_grab_line = str(getattr(self.cfg.control, f"builtin_{builtin_target}_grab_line", builtin_grab_line) or builtin_grab_line).strip()
+            builtin_active = bool(getattr(self.core.ctx, "builtin_grasp_active", False) or getattr(self.core.ctx, "builtin_bottle_active", False))
+            builtin_pose_lines = {builtin_pose_line.upper(), builtin_apple_pose_line.upper(), post_grasp_rise_line.upper(), "POSE_BOTTLE", "POSE_APPLE", "POSE_RISE"}
+            if arm_command == (builtin_grab_line or "GRABBED").upper() or arm_command == "GRABBED":
+                grab_line = str(getattr(arm, "command", "") or builtin_grab_line or "GRABBED").strip() or "GRABBED"
+                self.motion_adapter.cancel_active_jogs()
+                self.run_logger.write_jsonl("arm_grabbed_send", {
+                    "request_id": self.core.ctx.active_req_id or "",
+                    "target": self.core.ctx.active_target or "",
+                    "line": grab_line,
+                    "grasp_source": "builtin" if builtin_active else str(getattr(self.core.ctx, "grasp_source", "") or ""),
+                    "builtin_target": builtin_target,
+                    "builtin_bottle_active": builtin_active,
+                    "builtin_grasp_active": builtin_active,
+                })
+                self.run_logger.write_jsonl("arm_cmd_planned", {
+                    "request_id": self.core.ctx.active_req_id or "",
+                    "grasp_source": "builtin" if builtin_active else str(getattr(self.core.ctx, "grasp_source", "") or ""),
+                    "builtin_target": builtin_target,
+                    "builtin_bottle_active": builtin_active,
+                    "builtin_grasp_active": builtin_active,
+                    "pose_line": builtin_pose_line,
+                    "grab_line": grab_line,
+                    "skip_remote": bool(getattr(self.cfg.control, f"builtin_{builtin_target}_skip_remote", True)) if builtin_active else False,
+                })
+                result = self.arm_bridge.send_grabbed_and_wait(
+                    line=grab_line,
+                    timeout_s=(
+                        float(getattr(self.cfg.control, f"builtin_{builtin_target}_grab_timeout_s", 10.0) or 10.0)
+                        if builtin_active
+                        else float(getattr(getattr(self.cfg, "arm_serial", None), "response_timeout_s", 10.0) or 10.0)
+                    ),
+                )
+                resp = result.get("response") if isinstance(result, dict) else None
+                if resp is None:
+                    error = str((result or {}).get("error") or "arm_grabbed_error")
+                    parsed_status = {
+                        "arm_serial_open_failed": "ARM_SERIAL_OPEN_FAILED",
+                        "arm_tx_failed": "ARM_TX_FAILED",
+                        "arm_grabbed_timeout": "ARM_GRABBED_TIMEOUT",
+                    }.get(error, error.upper())
+                    resp = ArmResponse(
+                        ok=False,
+                        message=error,
+                        raw_line=error,
+                        ts=time.time(),
+                        parsed_status=parsed_status,
+                    )
+                if resp is not None:
+                    parsed_status = str(getattr(resp, "parsed_status", "") or resp.message or "").strip().upper()
+                    if parsed_status == "OK_GRABBED_DONE" and bool(resp.ok):
+                        self.run_logger.write_jsonl("arm_grabbed_done", {
+                            "raw": resp.raw_line,
+                            "parsed_status": parsed_status,
+                            "ok": True,
+                            "received_lines": (result or {}).get("received_lines"),
+                        })
+                    elif parsed_status == "ARM_GRABBED_TIMEOUT":
+                        self.run_logger.write_jsonl("arm_grabbed_timeout", {
+                            "raw": resp.raw_line,
+                            "parsed_status": parsed_status,
+                            "ok": False,
+                            "last_lines": (result or {}).get("last_lines"),
+                        })
+                    else:
+                        self.run_logger.write_jsonl("arm_grabbed_failed", {
+                            "raw": resp.raw_line,
+                            "parsed_status": parsed_status,
+                            "ok": bool(resp.ok),
+                            "error": (result or {}).get("error", ""),
+                            "received_lines": (result or {}).get("received_lines"),
+                        })
+                    self.core.handle_arm_response(resp)
+                    self.run_logger.write_jsonl("arm_response", {
+                        "raw": resp.raw_line,
+                        "parsed_status": parsed_status,
+                        "builtin_stage": "grab_done" if parsed_status == "OK_GRABBED_DONE" and builtin_active else "",
+                        "ok": bool(resp.ok),
+                        "error": (result or {}).get("error", ""),
+                        "received_lines_count": (result or {}).get("received_lines_count"),
+                        "last_lines": (result or {}).get("last_lines"),
+                    })
+                return
+            elif arm_command in builtin_pose_lines:
+                pose_line = str(getattr(arm, "command", "") or builtin_pose_line or "POSE_BOTTLE").strip() or "POSE_BOTTLE"
+                is_rise = bool(pose_line.strip().upper() == post_grasp_rise_line.upper() or pose_line.strip().upper() == "POSE_RISE")
+                self.motion_adapter.cancel_active_jogs()
+                arm_planned = {
+                    "request_id": self.core.ctx.active_req_id or "",
+                    "input_grasp": {},
+                    "grasp_source": "post_grasp_fixed" if is_rise else "builtin",
+                    "builtin_target": builtin_target,
+                    "builtin_bottle_active": bool(getattr(self.core.ctx, "builtin_bottle_active", False)),
+                    "builtin_grasp_active": bool(getattr(self.core.ctx, "builtin_grasp_active", False)),
+                    "pose_line": pose_line,
+                    "grab_line": builtin_grab_line,
+                    "skip_remote": bool(getattr(self.cfg.control, f"builtin_{builtin_target}_skip_remote", True)) if builtin_target else False,
+                    "x": 0, "y": 0, "z": 0, "pitch": 0, "roll": 0, "claw": 0, "time_ms": 0,
+                }
+                self.run_logger.write_jsonl("arm_cmd_planned", dict(arm_planned))
+                self.run_logger.write_jsonl("arm_pose_encoded", dict(arm_planned))
+                self.run_logger.write_jsonl(
+                    "arm_cmd_sent",
+                    {
+                        "line": pose_line,
+                        "request_id": self.core.ctx.active_req_id or "",
+                        "source": "post_grasp_fixed" if is_rise else "builtin",
+                        **arm.to_dict(),
+                    },
+                )
+                self.run_logger.write_jsonl(
+                    "arm_pose_send",
+                    {
+                        "line": pose_line,
+                        "request_id": self.core.ctx.active_req_id or "",
+                        "target": self.core.ctx.active_target or "",
+                        **arm.to_dict(),
+                    },
+                )
+                result = self.arm_bridge.send_pose_bottle_and_wait(
+                    line=pose_line,
+                    timeout_s=(
+                        float(getattr(self.cfg.control, "post_grasp_rise_timeout_s", 10.0) or 10.0)
+                        if is_rise
+                        else float(getattr(self.cfg.control, f"builtin_{builtin_target}_pose_timeout_s", 15.0) or 15.0)
+                    ),
+                )
+                resp = result.get("response") if isinstance(result, dict) else None
+                if resp is None:
+                    error = str((result or {}).get("error") or "arm_response_timeout")
+                    parsed_status = {
+                        "arm_serial_open_failed": "ARM_SERIAL_OPEN_FAILED",
+                        "arm_tx_failed": "ARM_TX_FAILED",
+                        "arm_response_timeout": "ARM_RESPONSE_TIMEOUT",
+                    }.get(error, error.upper())
+                    resp = ArmResponse(
+                        ok=False,
+                        message=error,
+                        raw_line=error,
+                        ts=time.time(),
+                        parsed_status=parsed_status,
+                    )
+                if resp is not None:
+                    parsed_status = str(getattr(resp, "parsed_status", "") or resp.message or "").strip().upper()
+                    received_lines = list((result or {}).get("received_lines") or [])
+                    start_ack = str(
+                        getattr(
+                            self.cfg.control,
+                            "post_grasp_rise_start_ack" if is_rise else f"builtin_{builtin_target}_pose_start_ack",
+                            "OK POSE_RISE START" if is_rise else "OK POSE_BOTTLE START",
+                        )
+                    ).upper()
+                    start_line = next((str(line) for line in received_lines if str(line).strip().upper().startswith(start_ack)), "")
+                    if start_line:
+                        if is_rise:
+                            self.core._log("info", f"[POST_GRASP_FIXED][POSE_RISE_START] raw={start_line!r}")
+                        else:
+                            self.core._log("info", f"[GRASP][BUILTIN_POSE_START] target={builtin_target} raw={start_line!r}")
+                    if parsed_status == "OK_BUILTIN_POSE_DONE" and bool(resp.ok):
+                        if is_rise:
+                            self.core._log("info", f"[POST_GRASP_FIXED][POSE_RISE_DONE] raw={resp.raw_line!r}")
+                        else:
+                            self.core._log("info", f"[GRASP][BUILTIN_POSE_DONE] target={builtin_target} raw={resp.raw_line!r}")
+                        self.run_logger.write_jsonl("arm_pose_done", {
+                            "raw": resp.raw_line,
+                            "parsed_status": parsed_status,
+                            "builtin_stage": "pose_done",
+                            "builtin_target": "rise" if is_rise else builtin_target,
+                            "ok": True,
+                            "received_lines": received_lines,
+                        })
+                    elif parsed_status == "OK_POSE" and bool(resp.ok):
+                        self.run_logger.write_jsonl("arm_pose_done", {
+                            "raw": resp.raw_line,
+                            "parsed_status": parsed_status,
+                            "ok": True,
+                            "received_lines": (result or {}).get("received_lines"),
+                        })
+                    elif parsed_status == "ARM_RESPONSE_TIMEOUT":
+                        self.run_logger.write_jsonl("arm_pose_timeout", {
+                            "raw": resp.raw_line,
+                            "parsed_status": parsed_status,
+                            "ok": False,
+                            "last_lines": (result or {}).get("last_lines"),
+                        })
+                    else:
+                        self.run_logger.write_jsonl("arm_pose_failed", {
+                            "raw": resp.raw_line,
+                            "parsed_status": parsed_status,
+                            "ok": bool(resp.ok),
+                            "error": (result or {}).get("error", ""),
+                            "received_lines": (result or {}).get("received_lines"),
+                        })
+                    self.core.handle_arm_response(resp)
+                    self.run_logger.write_jsonl("arm_response", {
+                        "raw": resp.raw_line,
+                        "parsed_status": parsed_status,
+                        "builtin_stage": "pose_done" if parsed_status == "OK_BUILTIN_POSE_DONE" else "",
+                        "ok": bool(resp.ok),
+                        "error": (result or {}).get("error", ""),
+                        "received_lines_count": (result or {}).get("received_lines_count"),
+                        "last_lines": (result or {}).get("last_lines"),
+                    })
+                return
             arm_line = encode_pose(
                 arm.x_cm, arm.y_cm, arm.z_cm,
                 arm.pitch_deg, arm.roll_deg,
                 arm.claw_deg, arm.time_ms,
             )
             self.motion_adapter.cancel_active_jogs()
-            self.uart.send_arm_command(arm_line)
-            self.run_logger.write_jsonl("arm_cmd", arm.to_dict())
+            arm_planned = {
+                "request_id": self.core.ctx.active_req_id or "",
+                "input_grasp": dict(getattr(decision, "control_summary", {}) or {}).get("input_grasp"),
+                "pose_line": arm_line,
+                "x": round(float(arm.x_cm)),
+                "y": round(float(arm.y_cm)),
+                "z": round(float(arm.z_cm)),
+                "pitch": round(float(arm.pitch_deg)),
+                "roll": round(float(arm.roll_deg)),
+                "claw": round(float(arm.claw_deg)),
+                "time_ms": int(arm.time_ms),
+            }
+            self.run_logger.write_jsonl("arm_cmd_planned", dict(arm_planned))
+            self.run_logger.write_jsonl(
+                "arm_pose_encoded",
+                dict(arm_planned),
+            )
+            self.run_logger.write_jsonl(
+                "arm_cmd_sent",
+                {
+                    "line": arm_line,
+                    "request_id": self.core.ctx.active_req_id or "",
+                    "source": "remote_grasp_client",
+                    **arm.to_dict(),
+                },
+            )
+            self.run_logger.write_jsonl(
+                "arm_pose_send",
+                {
+                    "line": arm_line,
+                    "request_id": self.core.ctx.active_req_id or "",
+                    "target": self.core.ctx.active_target or "",
+                    **arm.to_dict(),
+                },
+            )
+            result = self.arm_bridge.send_pose_and_wait(
+                arm_line,
+                timeout_s=float(getattr(getattr(self.cfg, "arm_serial", None), "response_timeout_s", 10.0) or 10.0),
+            )
+            resp = result.get("response") if isinstance(result, dict) else None
+            if resp is None:
+                error = str((result or {}).get("error") or "arm_serial_error")
+                parsed_status = {
+                    "arm_serial_open_failed": "ARM_SERIAL_OPEN_FAILED",
+                    "arm_serial_write_failed": "ARM_TX_FAILED",
+                    "arm_tx_failed": "ARM_TX_FAILED",
+                    "arm_response_timeout": "ARM_RESPONSE_TIMEOUT",
+                }.get(error, error.upper())
+                resp = ArmResponse(
+                    ok=False,
+                    message=error,
+                    raw_line=error,
+                    ts=time.time(),
+                    parsed_status=parsed_status,
+                )
+                if isinstance(result, dict):
+                    setattr(resp, "sent_pose", dict(result.get("sent_pose") or {}))
+                    setattr(resp, "response_pose", dict(result.get("response_pose") or {}))
+                    setattr(resp, "response_matches_sent", False)
+            if resp is not None:
+                self.core.handle_arm_response(resp)
+                parsed_status = str(getattr(resp, "parsed_status", "") or resp.message or "").strip().upper()
+                pose_log = {
+                    "raw": resp.raw_line,
+                    "parsed_status": parsed_status,
+                    "ok": bool(resp.ok),
+                    "error": (result or {}).get("error", ""),
+                    "sent_pose": dict(getattr(resp, "sent_pose", {}) or (result or {}).get("sent_pose") or {}),
+                    "response_pose": dict(getattr(resp, "response_pose", {}) or (result or {}).get("response_pose") or {}),
+                    "response_matches_sent": bool(getattr(resp, "response_matches_sent", False)),
+                }
+                self.run_logger.write_jsonl("arm_pose_success" if bool(resp.ok) else "arm_pose_failed", pose_log)
+                self.run_logger.write_jsonl(
+                    "arm_response",
+                    {
+                        "raw": resp.raw_line,
+                        "parsed_status": parsed_status,
+                        "ok": bool(resp.ok),
+                        "error": (result or {}).get("error", ""),
+                        "sent_pose": dict(getattr(resp, "sent_pose", {}) or (result or {}).get("sent_pose") or {}),
+                        "response_pose": dict(getattr(resp, "response_pose", {}) or (result or {}).get("response_pose") or {}),
+                        "response_matches_sent": bool(getattr(resp, "response_matches_sent", False)),
+                        "received_lines_count": (result or {}).get("received_lines_count"),
+                        "mismatch_count": (result or {}).get("mismatch_count"),
+                        "last_lines": (result or {}).get("last_lines"),
+                        "mismatch_lines": (result or {}).get("mismatch_lines"),
+                    },
+                )
             return
         jog_action = str(getattr(decision, "jog_action", "") or "").strip().lower()
         if jog_action:
@@ -3227,11 +4784,50 @@ class OrchestratorService(BaseModule):
             return
         cmd = decision.cmd
         summary = dict(getattr(decision, "control_summary", None) or {})
-        
+
+        motion_arbitration_start_ns = time.monotonic_ns()
+        self._perf_marker("motion_arbiter_start")
         effective_cmd, uart_arbitration = self._arbitrate_uart_motion_cmd(cmd, summary)
         summary.update(uart_arbitration)
-        
         allow_send = bool(summary.get("allow_uart_send", True))
+        smoothed_cmd, smoothing_meta = self.velocity_smoother.apply(
+            effective_cmd,
+            state=str(getattr(self.core.ctx.state, "value", self.core.ctx.state) or ""),
+            summary=summary,
+            task_epoch=getattr(self.core.ctx, "active_epoch", None),
+        )
+        effective_cmd = smoothed_cmd
+        summary.update(smoothing_meta)
+        effective_cmd, final_clamp_meta = self._apply_final_forward_only_clamp(effective_cmd, summary)
+        if final_clamp_meta:
+            summary.update(final_clamp_meta)
+        motion_arbitration_ms = max(0.0, (time.monotonic_ns() - motion_arbitration_start_ns) / 1_000_000.0)
+        self._perf_marker("motion_arbiter_done", duration_ms=motion_arbitration_ms)
+        self._last_motion_arbitration_ms = motion_arbitration_ms
+        self._observe_trace_sample("motion_arbitration_ms", motion_arbitration_ms)
+        self._sync_last_valid_motion_after_smoothing(effective_cmd, time.time())
+        summary["last_valid_motion_cmd"] = dict(self._last_valid_motion_cmd or {})
+        summary["last_valid_motion_age_ms"] = self._last_valid_motion_age_ms(time.time())
+        summary["effective_cmd"] = self._cmd_dict(effective_cmd)
+        summary["effective_cmd_after_service"] = self._cmd_dict(effective_cmd)
+        obs = self.core.ctx.last_table_obs
+        summary["tick_interval_ms"] = getattr(obs, "state_machine_tick_interval_ms", None) if obs is not None else None
+        summary["tick_process_ms"] = self._last_tick_process_ms
+        summary["state_decision_ms"] = self._last_state_decision_ms
+        summary["motion_arbitration_ms"] = motion_arbitration_ms
+        summary["uart_write_ms"] = self._last_uart_write_ms
+        summary["vision_obs_age_ms"] = getattr(obs, "obs_age_at_consume_ms", None) if obs is not None else None
+        summary["same_obs_reuse_count"] = int(self._same_obs_reuse_count)
+        uart_arbitration.update(
+            {
+                "last_valid_motion_cmd": summary.get("last_valid_motion_cmd"),
+                "last_valid_motion_age_ms": summary.get("last_valid_motion_age_ms"),
+                "effective_cmd": summary.get("effective_cmd"),
+                "effective_cmd_after_service": summary.get("effective_cmd_after_service"),
+            }
+        )
+        uart_arbitration.update(smoothing_meta)
+
         if allow_send:
             summary["uart_tx_cmd"] = {
                 "vx_mps": float(effective_cmd.vx_mps),
@@ -3249,7 +4845,12 @@ class OrchestratorService(BaseModule):
 
         self._emit_operator_control(decision)
         self._flush_state_traces(decision)
+        map_start_ns = time.monotonic_ns()
+        self._perf_marker("car_cmd_map_start", mono_ns=map_start_ns)
         car_cmd = self.mapper.from_cmd_vel(effective_cmd, cx_norm_abs=decision.cx_norm_abs, distance_ratio=decision.distance_ratio)
+        car_cmd_map_ms = max(0.0, (time.monotonic_ns() - map_start_ns) / 1_000_000.0)
+        self._observe_trace_sample("car_cmd_map_ms", car_cmd_map_ms)
+        self._perf_marker("car_cmd_map_done", duration_ms=car_cmd_map_ms)
         tx_meta = self._build_uart_tx_meta(car_cmd)
         stop_class = str(uart_arbitration.get("stop_class") or "").strip()
         reason = (stop_class if stop_class and stop_class != "none" else "") or str(tx_meta.get("reason") or car_cmd.kind or "").strip()
@@ -3266,6 +4867,10 @@ class OrchestratorService(BaseModule):
             "speed_profile": speed_profile,
             "speed_limit_reason": summary.get("speed_limit_reason") or "",
             "forward_block_reason": summary.get("forward_block_reason") or "",
+            "rotate_block_reason": summary.get("rotate_block_reason") or "",
+            "return_place_phase": summary.get("return_place_phase") or "",
+            "return_place_depth_slowdown_bypassed": bool(summary.get("return_place_depth_slowdown_bypassed", False)),
+            "return_place_depth_p10_m": summary.get("return_place_depth_p10_m"),
             "table_approach_phase": summary.get("table_approach_phase") or "",
             "motion_intent_type": summary.get("motion_intent_type") or "",
             "yaw_owner": summary.get("yaw_owner") or summary.get("yaw_source") or "",
@@ -3303,6 +4908,7 @@ class OrchestratorService(BaseModule):
             "wz_radps": float(velocity[2]),
         }
         self._last_motion_tx_context.update(uart_arbitration)
+        self._last_motion_tx_context.update(self._perf_trace_context())
         tx_meta.update({
             "docking_stage": summary.get("docking_stage") or "",
             "docking_action": summary.get("docking_action") or "",
@@ -3312,7 +4918,27 @@ class OrchestratorService(BaseModule):
             "uart_tx_ok": bool(getattr(self, "_last_uart_tx_ok", True)),
         })
         tx_meta.update(uart_arbitration)
+        tx_meta.update(self._perf_trace_context())
+        self._perf_marker("cmd_vel_emit")
         seq = self.motion_adapter.send_cmd_vel(effective_cmd, reason=reason)
+        summary["car_cmd_map_ms"] = car_cmd_map_ms
+        summary["uart_write_ms"] = self._last_uart_write_ms
+        summary["dryrun_write_ms"] = self._last_dryrun_write_ms
+        now_ns = time.monotonic_ns()
+        summary["cmd_emit_interval_ms"] = (
+            max(0.0, (now_ns - self._last_cmd_emit_mono_ns) / 1_000_000.0)
+            if self._last_cmd_emit_mono_ns is not None else None
+        )
+        self._last_cmd_emit_mono_ns = now_ns
+        nonzero = any(abs(float(v or 0.0)) > 1e-9 for v in (effective_cmd.vx_mps, effective_cmd.vy_mps, effective_cmd.wz_radps))
+        if nonzero and self._transition_pending_state == self.core.ctx.state.value:
+            transition_ms = max(0.0, (now_ns - self._state_enter_mono_ns) / 1_000_000.0)
+            summary["state_transition_latency_ms"] = transition_ms
+            self._observe_trace_sample("state_transition_latency_ms", transition_ms)
+            self._transition_pending_state = ""
+        else:
+            summary["state_transition_latency_ms"] = None
+        decision.control_summary = summary
         self.motion_status["last_seq"] = seq
         self.motion_status["jog_running"] = False
         car_record = {
@@ -3519,6 +5145,22 @@ class OrchestratorService(BaseModule):
             "fallback_decision": decision_summary.get("fallback_decision", (self.core.ctx.last_edge_quality or {}).get("fallback_decision")),
             "fallback_suppressed_reason": (self.core.ctx.last_edge_quality or {}).get("fallback_suppressed_reason"),
             "target_found": bool(getattr(target_obs, "found", False)) if target_obs is not None else False,
+            "target_center_x_norm": decision_summary.get("target_center_x_norm"),
+            "target_err_x": decision_summary.get("target_err_x"),
+            "target_lateral_align_active": bool(decision_summary.get("target_lateral_align_active", False)),
+            "target_lateral_vy_cmd": decision_summary.get("target_lateral_vy_cmd", float(cmd.vy_mps)),
+            "target_lateral_hold_active": bool(decision_summary.get("target_lateral_hold_active", False)),
+            "target_lateral_hold_age_s": decision_summary.get("target_lateral_hold_age_s"),
+            "last_good_target_age_s": decision_summary.get("last_good_target_age_s"),
+            "last_good_vy_mps": decision_summary.get("last_good_vy_mps"),
+            "lateral_cmd_source": decision_summary.get("lateral_cmd_source"),
+            "slice_timeout_reason": decision_summary.get("slice_timeout_reason"),
+            "candidate_count": decision_summary.get("candidate_count"),
+            "selected_candidate_idx": decision_summary.get("selected_candidate_idx"),
+            "selected_candidate_score": decision_summary.get("selected_candidate_score"),
+            "selected_candidate_conf": decision_summary.get("selected_candidate_conf"),
+            "selected_candidate_cx": decision_summary.get("selected_candidate_cx"),
+            "selected_candidate_reason": decision_summary.get("selected_candidate_reason"),
             "target_conf": (
                 getattr(target_obs, "matched_conf", None)
                 if target_obs is not None and getattr(target_obs, "matched_conf", None) is not None
@@ -3859,6 +5501,8 @@ class OrchestratorService(BaseModule):
         sample = self._system_metrics.sample_if_due(force=force)
         if sample is not None:
             self.run_logger.write_jsonl("system_metrics", sample)
+            self.run_logger.write_jsonl("system_resource", sample)
+            self.run_logger.write_runtime_summaries()
 
 
 def run_orchestrator_service(cfg: OrchestratorConfig):

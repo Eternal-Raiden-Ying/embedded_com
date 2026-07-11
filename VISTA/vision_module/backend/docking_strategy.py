@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import math
 from typing import Any, Dict, Optional, Tuple
 
 
@@ -13,7 +12,7 @@ class TableDockingStrategy:
 
     This class decouples alignment state decisions (e.g., stop_ready, align,
     approach_slow, rotate_only, stop, alignment, approach) from data gathering
-    layers. It supports both 'fast' (fast_plane_only) and 'full' modes.
+    layers. Online docking uses the fast_plane_only detector path.
     """
 
     def __init__(
@@ -120,7 +119,7 @@ class TableDockingStrategy:
         """Evaluate and determine control level and rejection reasons.
 
         Args:
-            mode: Either 'fast' (fast_plane_only) or 'full' (standard crease/plane).
+            mode: 'fast' (fast_plane_only).
             dist_err_m: Lateral/Forward distance error in meters.
             yaw_err_rad: Heading error in radians.
             confidence: Evaluated confidence score.
@@ -129,23 +128,13 @@ class TableDockingStrategy:
 
         Returns:
             A tuple of:
-                - control_level: 'stop_ready', 'align', 'approach_slow', 'rotate_only', 'none'
-                  (for fast mode) or 'stop', 'alignment', 'approach', 'none' (for full mode).
+                - control_level: 'stop_ready', 'align', 'approach_slow', 'rotate_only', 'none'.
                 - reject_reason: Description of the rejection (empty if accepted).
                 - extras: Mode-specific extra output parameters.
         """
         if mode == "fast":
             return self._evaluate_fast(dist_err_m, yaw_err_rad, confidence, x_span, **kwargs)
-        elif mode == "full":
-            return self._evaluate_full(
-                yaw=yaw_err_rad,
-                dist=dist_err_m,
-                conf=confidence,
-                x_span=x_span,
-                **kwargs
-            )
-        else:
-            raise ValueError(f"Unsupported docking strategy mode: {mode}")
+        raise ValueError(f"Unsupported docking strategy mode: {mode}")
 
     def _evaluate_fast(
         self,
@@ -293,198 +282,3 @@ class TableDockingStrategy:
                 control_level = "align"
 
         return control_level, reject_reason, {"distance_stage": distance_stage}
-
-    def _evaluate_full(
-        self,
-        *,
-        yaw: float,
-        dist: float,
-        conf: float,
-        x_span: float,
-        pose_found: bool,
-        pose_source: str,
-        residual: float,
-        geometry_score: float,
-        temporal_jump: bool,
-        stable_count: int,
-        target_dist_m: float,
-        plane_only_mode: bool = False,
-        geometry_reject_reason: str = "",
-        front_plane_score: float = 0.0,
-        # Internal configuration overriders
-        control_min_confidence: float = 0.50,
-        plane_min_x_span_m: float = 0.20,
-        line_min_x_span_m: float = 0.15,
-        plane_max_residual_m: float = 0.04,
-        line_max_residual_m: float = 0.03,
-        control_max_yaw_rad: float = 0.52,
-        z_max: float = 2.0,
-        control_approach_min_stable_frames: int = 3,
-        control_alignment_min_stable_frames: int = 5,
-        control_stop_min_stable_frames: int = 3,
-        control_stop_dist_abs_max_m: float = 0.12,
-        table_geometry_approach_score: float = 0.40,
-        table_geometry_alignment_score: float = 0.52,
-        table_geometry_stop_score: float = 0.60,
-        control_approach_min_score: float = 0.40,
-        control_alignment_min_score: float = 0.52,
-        control_stop_min_score: float = 0.60,
-        **kwargs: Any,
-    ) -> Tuple[str, str, Dict[str, Any]]:
-        reason = ""
-        yaw_abs = abs(yaw)
-
-        if plane_only_mode:
-            valid_base = pose_found and pose_source == "front_plane"
-            if not valid_base and not reason:
-                reason = "pose_not_found"
-            if valid_base and conf < control_min_confidence:
-                valid_base = False
-                reason = "low_confidence"
-            if valid_base and x_span < plane_min_x_span_m:
-                valid_base = False
-                reason = "plane_x_span_short"
-            if valid_base and (not math.isfinite(residual) or residual > plane_max_residual_m):
-                valid_base = False
-                reason = "plane_residual_high"
-            if valid_base and yaw_abs > control_max_yaw_rad:
-                valid_base = False
-                reason = "yaw_out_of_range"
-            if valid_base and temporal_jump:
-                valid_base = False
-                reason = "temporal_jump"
-
-            if valid_base:
-                new_stable_count = stable_count + 1
-            else:
-                new_stable_count = 0
-
-            dist_valid = pose_found and math.isfinite(dist) and abs(dist) <= max(target_dist_m, z_max)
-            usable_for_approach = bool(
-                pose_found
-                and dist_valid
-                and front_plane_score >= control_approach_min_score
-                and new_stable_count >= control_approach_min_stable_frames
-            )
-            usable_for_alignment = bool(
-                valid_base
-                and front_plane_score >= control_alignment_min_score
-                and new_stable_count >= control_alignment_min_stable_frames
-            )
-            usable_for_stop = bool(
-                valid_base
-                and front_plane_score >= control_stop_min_score
-                and abs(dist) <= control_stop_dist_abs_max_m
-                and new_stable_count >= control_stop_min_stable_frames
-            )
-            valid_for_control = bool(usable_for_alignment or usable_for_stop)
-            
-            if usable_for_stop:
-                control_level = "stop"
-            elif usable_for_alignment:
-                control_level = "alignment"
-            elif usable_for_approach:
-                control_level = "approach"
-            else:
-                control_level = "none"
-
-            if control_level == "none":
-                if not pose_found:
-                    control_reason = reason or "pose_not_found"
-                elif front_plane_score < control_approach_min_score:
-                    control_reason = geometry_reject_reason or "front_plane_score_low"
-                elif not valid_base:
-                    control_reason = reason or "control_gate_rejected"
-                else:
-                    control_reason = "stabilizing"
-            elif control_level == "approach" and not valid_for_control:
-                control_reason = "approach_only"
-            else:
-                control_reason = ""
-
-            if valid_base and control_level == "none" and not reason:
-                reason = "stabilizing"
-        else:
-            valid_base = pose_found and pose_source != "conflict"
-            if not valid_base and not reason:
-                reason = "pose_not_found"
-            if valid_base and conf < control_min_confidence:
-                valid_base = False
-                reason = "low_confidence"
-            min_span = min(plane_min_x_span_m, line_min_x_span_m)
-            if valid_base and x_span < min_span:
-                valid_base = False
-                reason = "insufficient_x_span"
-            max_residual = max(plane_max_residual_m, line_max_residual_m)
-            if valid_base and (not math.isfinite(residual) or residual > max_residual):
-                valid_base = False
-                reason = "residual_too_high"
-            if valid_base and yaw_abs > control_max_yaw_rad:
-                valid_base = False
-                reason = "yaw_out_of_range"
-            if valid_base and temporal_jump:
-                valid_base = False
-                reason = "temporal_jump"
-
-            if valid_base:
-                new_stable_count = stable_count + 1
-            else:
-                new_stable_count = 0
-
-            approach_base = (
-                pose_found
-                and geometry_score >= table_geometry_approach_score
-                and abs(dist) <= max(target_dist_m, z_max)
-                and pose_source != "conflict"
-            )
-            usable_for_approach = bool(approach_base and new_stable_count >= control_approach_min_stable_frames)
-            alignment_source_ok = pose_source in {"fused", "crease_line"}
-            usable_for_alignment = bool(
-                valid_base
-                and alignment_source_ok
-                and geometry_score >= table_geometry_alignment_score
-                and new_stable_count >= control_alignment_min_stable_frames
-            )
-            usable_for_stop = bool(
-                valid_base
-                and geometry_score >= table_geometry_stop_score
-                and abs(dist) <= control_stop_dist_abs_max_m
-                and new_stable_count >= control_stop_min_stable_frames
-            )
-            valid_for_control = bool(usable_for_alignment or usable_for_stop)
-            
-            if usable_for_stop:
-                control_level = "stop"
-            elif usable_for_alignment:
-                control_level = "alignment"
-            elif usable_for_approach:
-                control_level = "approach"
-            else:
-                control_level = "none"
-
-            if control_level == "none":
-                if not pose_found:
-                    control_reason = reason or "pose_not_found"
-                elif geometry_score < table_geometry_approach_score:
-                    control_reason = geometry_reject_reason or "geometry_score_low"
-                elif not valid_base:
-                    control_reason = reason or "control_gate_rejected"
-                else:
-                    control_reason = "stabilizing"
-            elif control_level == "approach" and not valid_for_control:
-                control_reason = "approach_only"
-            else:
-                control_reason = ""
-
-            if valid_base and control_level == "none" and not reason:
-                reason = "stabilizing"
-
-        extras = {
-            "valid_for_control": valid_for_control,
-            "usable_for_approach": usable_for_approach,
-            "usable_for_alignment": usable_for_alignment,
-            "usable_for_stop": usable_for_stop,
-            "new_stable_count": new_stable_count,
-            "control_reject_reason": control_reason,
-        }
-        return control_level, reason, extras

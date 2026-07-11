@@ -49,6 +49,7 @@ from .safety.base_motion_safety import BaseMotionSafetyMixin
 from .safety.stale_guard import StaleGuardMixin
 from .states.grasp_flow import GraspFlowMixin
 from .states.recovery import RecoveryMixin
+from .states.return_place import ReturnPlaceMixin
 from .states.table_docking import TableDockingMixin
 from .states.target_search import TargetSearchMixin
 from .task_runtime import TaskRuntimeMixin
@@ -56,7 +57,7 @@ from .transitions import TransitionsMixin
 from .vision_sync import VisionSyncMixin
 
 
-class OrchestratorCore(ExportStateMixin, VisionSyncMixin, TransitionsMixin, TaskRuntimeMixin, TableDockingMixin, TargetSearchMixin, GraspFlowMixin, RecoveryMixin, StaleGuardMixin, BaseMotionSafetyMixin):
+class OrchestratorCore(ExportStateMixin, VisionSyncMixin, TransitionsMixin, TaskRuntimeMixin, TableDockingMixin, TargetSearchMixin, GraspFlowMixin, ReturnPlaceMixin, RecoveryMixin, StaleGuardMixin, BaseMotionSafetyMixin):
     def __init__(
         self,
         cfg: ControlThresholds,
@@ -102,6 +103,14 @@ class OrchestratorCore(ExportStateMixin, VisionSyncMixin, TransitionsMixin, Task
                 State.TARGET_LOCKED: self._tick_target_locked,
                 State.FREEZE_BASE: self._tick_freeze_base,
                 State.LEAVE_EDGE: self._tick_leave_edge,
+                State.POST_GRASP_TURN_180: self._tick_post_grasp_turn_180,
+                State.POST_GRASP_TURN_FIXED: self._tick_post_grasp_turn_fixed,
+                State.POST_GRASP_FORWARD_FIXED: self._tick_post_grasp_forward_fixed,
+                State.POST_GRASP_STOP: self._tick_post_grasp_stop,
+                State.POST_GRASP_POSE_RISE: self._tick_post_grasp_pose_rise,
+                State.SEARCH_BASKET: self._tick_search_basket,
+                State.APPROACH_BASKET: self._tick_approach_basket,
+                State.PLACE_TO_BASKET: self._tick_place_to_basket,
                 State.RELOCATE_TO_EDGE: self._tick_relocate_to_edge,
                 State.REACQUIRE_TABLE: self._tick_reacquire_table,
                 State.NEXT_TABLE: self._tick_next_table,
@@ -118,4 +127,3 @@ class OrchestratorCore(ExportStateMixin, VisionSyncMixin, TransitionsMixin, Task
 
     def _table_visible(self, obs: Optional[TableEdgeObs]) -> bool:
         return bool(obs is not None and self._table_yolo_reliable(obs) and (obs.table_found or self._table_plane_stable(obs) or self._table_yolo_reliable(obs)))
-

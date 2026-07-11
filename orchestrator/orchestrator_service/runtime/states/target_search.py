@@ -23,7 +23,7 @@ from ...ipc.protocol import (
 )
 from ...bridge.arm_protocol import parse_arm_response
 from ...utils.grasp_utils import grasp_to_pose_params
-from ...utils.target_utils import target_to_class_id
+from ...utils.target_utils import resolve_target, target_to_class_id
 from ..common import monotonic_ts
 from ..context import RuntimeContext, State
 from ..controller import MotionController, MotionDecision
@@ -46,80 +46,192 @@ from ..core_types import (
 
 
 class TargetSearchMixin:
+    def _target_control_observation_update(self, obs: Optional[TargetObs], candidate_ok: bool) -> Tuple[int, bool]:
+        key = None
+        if obs is not None:
+            key = (
+                getattr(obs, "obs_seq", None),
+                getattr(obs, "frame_id", None),
+                getattr(obs, "capture_mono_ns", None),
+            )
+        if (
+            getattr(self.ctx, "target_control_last_obs_key", None) is None
+            and getattr(self.ctx, "target_prewarm_last_obs_key", None) is not None
+        ):
+            self.ctx.target_control_stable_count = int(getattr(self.ctx, "target_prewarm_stable_count", 0) or 0)
+            self.ctx.target_control_last_obs_key = getattr(self.ctx, "target_prewarm_last_obs_key", None)
+        is_new = key is not None and key != getattr(self.ctx, "target_control_last_obs_key", None)
+        if is_new:
+            self.ctx.target_control_last_obs_key = key
+            if candidate_ok:
+                self.ctx.target_control_stable_count = int(self.ctx.target_control_stable_count or 0) + 1
+            else:
+                self.ctx.target_control_stable_count = 0
+        return int(self.ctx.target_control_stable_count or 0), bool(is_new)
+
     def _tick_search_target_init(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
-        edge_obs = self._fresh_table_obs()
-        if edge_obs is not None:
-            self._maybe_add_slide_ref_sample(edge_obs)
-        needed = max(1, int(getattr(self.cfg, "edge_handoff_samples", 3) or 3))
-        min_s = max(float(self.cfg.search_target_init_hold_s), float(getattr(self.cfg, "edge_handoff_min_s", 0.5) or 0.5))
-        max_s = max(min_s, float(getattr(self.cfg, "edge_handoff_max_s", 1.0) or 1.0))
-        enough_samples = len(self.ctx.slide_ref_samples) >= needed
-        if enough_samples and self._state_elapsed() >= min_s:
-            self._finalize_slide_ref()
-        if not self.ctx.slide_ref_ready:
-            self.ctx.handoff_state = "collecting" if self._state_elapsed() < max_s or not enough_samples else "waiting_valid_light_edge"
-            if self._state_elapsed() >= float(getattr(self.cfg, "reacquire_timeout_s", 8.0) or 8.0):
-                if not self._table_final_lock_enabled():
-                    self._transition(State.EDGE_ADJUST, "slide_ref_handoff_timeout final_lock disabled")
-                    return self._table_approach_decision(edge_obs, phase="PLANE_APPROACH", stop_ready_ignored=True)
-                self._transition(State.FINAL_SLOW_STOP, "slide_ref_handoff_timeout")
-                return self.controller.final_lock_cmd(edge_obs)
-            return self.controller.stop_cmd("SEARCH_TARGET_INIT")
-        if self._state_elapsed() < min_s:
-            return self.controller.stop_cmd("SEARCH_TARGET_INIT")
-        self._transition(State.EDGE_SLIDE_SEARCH, "开始沿桌边搜索目标 slide_ref_ready=1")
-        self._queue_tts("开始沿桌边搜索目标")
-        return self.controller.stop_cmd("SEARCH_TARGET_INIT")
-
-    def _tick_edge_slide_search(self) -> MotionDecision:
-        self._maybe_resend_req(self._active_req_payload())
-        target_obs = self._fresh_target_obs()
+        if getattr(self.ctx, "final_to_lateral_fast_start_ready", None) is False:
+            if not self._final_forward_speed_near_zero():
+                return self.controller.stop_cmd("SEARCH_TARGET_INIT")
+            self.ctx.final_to_lateral_fast_start_ready = True
+        target_obs, candidate_reason = self._select_active_target_obs(self._fresh_target_obs())
         candidate_ok, candidate_reason = self._target_candidate_status(
             target_obs,
             self.cfg.target_confirm_conf_th,
             min_area=self.cfg.target_confirm_min_bbox_area,
         )
-        target_window = self._record_target_window_sample(target_obs, candidate_reason)
+        stable_count, _is_new_obs = self._target_control_observation_update(target_obs, candidate_ok)
+        stable_required = max(1, int(getattr(self.cfg, "target_prewarm_stable_obs", 2) or 2))
+        if candidate_ok and target_obs is not None and stable_count >= stable_required:
+            self._log("info", "target_search_start_slide")
+            conf = self._target_conf_value(target_obs)
+            target_name = str(getattr(target_obs, "matched_cls", None) or getattr(target_obs, "target", "") or self.ctx.active_target or "")
+            self._log("info", f"[TARGET_SEARCH][FAST_START] target={target_name} conf={conf if conf is not None else 'n/a'} reason=fresh_target_obs")
+            self._log("info", "[TARGET_SEARCH][SKIP_ZERO] state=SEARCH_TARGET_INIT")
+            self._transition(State.EDGE_SLIDE_SEARCH, self._format_target_transition_reason("target_found_start_lateral_align", target_obs))
+            self._log("info", "[TARGET_SEARCH][FAST_START_TO_SLICE] fresh_target=1")
+            align_decision = self._target_lateral_align_decision(target_obs, state="EDGE_SLIDE_SEARCH")
+            if align_decision is not None:
+                return align_decision
+        self._log("info", "target_search_start_slide")
+        self._transition(State.EDGE_SLIDE_SEARCH, f"target_search_init_internal_skip_zero reason={candidate_reason}")
+        self._log("info", f"[TARGET_SEARCH][SKIP_ZERO] state=SEARCH_TARGET_INIT reason={candidate_reason}")
+        return self._tick_edge_slide_search()
+
+    def _tick_edge_slide_search(self) -> MotionDecision:
+        self._maybe_resend_req(self._active_req_payload())
+        target_obs, select_reason = self._select_active_target_obs(self._fresh_target_obs())
+        candidate_ok, candidate_reason = self._target_candidate_status(
+            target_obs,
+            self.cfg.target_confirm_conf_th,
+            min_area=self.cfg.target_confirm_min_bbox_area,
+        )
+        if select_reason and select_reason != "single_candidate":
+            candidate_reason = select_reason if not candidate_ok else candidate_reason
+        stable_count, is_new_obs = self._target_control_observation_update(target_obs, candidate_ok)
+        stable_required = max(1, int(getattr(self.cfg, "target_prewarm_stable_obs", 2) or 2))
+        target_window = (
+            self._record_target_window_sample(target_obs, candidate_reason)
+            if is_new_obs
+            else self._target_window_stats()
+        )
+        timed_out = self._state_elapsed() >= float(self.cfg.target_search_timeout_s)
         if candidate_ok and target_obs is not None:
-            self.ctx.target_found_frames += 1
+            if is_new_obs:
+                self.ctx.target_found_frames += 1
             self.ctx.target_lost_frames = 0
-            self._update_target_stability(target_obs)
+            self._remember_good_target(target_obs, self.ctx.target_lateral_vy_cmd)
+            if is_new_obs:
+                self._update_target_stability(target_obs)
+            self._record_target_lateral_good(target_obs, None)
+            if stable_count < stable_required:
+                return self._annotate_target_lateral_decision(
+                    self.controller.stop_cmd("EDGE_SLIDE_SEARCH"),
+                    target_obs,
+                    active=False,
+                    reason="target_prewarm_confirming",
+                    vy_cmd=0.0,
+                )
             found_ratio_ok = (
                 float(target_window.get("found_ratio", 0.0) or 0.0)
                 >= float(getattr(self.cfg, "target_confirm_found_ratio_th", 0.5) or 0.5)
                 and int(target_window.get("samples", 0) or 0) >= int(self.cfg.target_found_frames_to_confirm)
             )
             consecutive_ok = self.ctx.target_found_frames >= int(self.cfg.target_found_frames_to_confirm)
-            if found_ratio_ok or consecutive_ok:
-                self.ctx.target_last_transition_reason = (
-                    f"confirm_enter found_ratio={float(target_window.get('found_ratio', 0.0) or 0.0):.2f} "
-                    f"consecutive_frames={int(self.ctx.target_found_frames)} bbox_valid={int(self._target_bbox_valid(target_obs))}"
+            centered_ok = self._target_lateral_centered(target_obs)
+            stable_ok = int(self.ctx.target_lateral_stable_count) >= self._target_lateral_stable_frames()
+            if (found_ratio_ok or consecutive_ok) and centered_ok and stable_ok:
+                confirm_allowed, confirm_block_reason, progress = self._edge_slide_confirm_guard()
+                if confirm_allowed:
+                    self._log(
+                        "info",
+                        "[SLICE][CONFIRM_ALLOWED] "
+                        f"elapsed={float(progress.get('edge_slide_elapsed_s', 0.0) or 0.0):.2f} "
+                        f"lateral_dist={float(progress.get('edge_slide_lateral_distance_m', 0.0) or 0.0):.3f} "
+                        f"frames={int(progress.get('edge_slide_frames', 0) or 0)}",
+                    )
+                    self.ctx.target_last_transition_reason = (
+                        f"confirm_enter found_ratio={float(target_window.get('found_ratio', 0.0) or 0.0):.2f} "
+                        f"consecutive_frames={int(self.ctx.target_found_frames)} bbox_valid={int(self._target_bbox_valid(target_obs))} "
+                        f"target_lateral_stable_count={int(self.ctx.target_lateral_stable_count)} "
+                        f"edge_slide_elapsed_s={float(progress.get('edge_slide_elapsed_s', 0.0) or 0.0):.2f} "
+                        f"edge_slide_lateral_distance_m={float(progress.get('edge_slide_lateral_distance_m', 0.0) or 0.0):.3f} "
+                        f"edge_slide_frames={int(progress.get('edge_slide_frames', 0) or 0)}"
+                    )
+                    self._transition(
+                        State.TARGET_CONFIRM,
+                        self._format_target_transition_reason("target_found", target_obs),
+                    )
+                    return self._annotate_target_lateral_decision(
+                        self.controller.stop_cmd("TARGET_CONFIRM"),
+                        target_obs,
+                        active=False,
+                        reason="target_lateral_centered_confirm",
+                        vy_cmd=0.0,
+                    )
+                self.ctx.edge_slide_confirm_block_reason = confirm_block_reason
+                self._log(
+                    "info",
+                    "[SLICE][MIN_GUARD] "
+                    f"elapsed={float(progress.get('edge_slide_elapsed_s', 0.0) or 0.0):.2f} "
+                    f"lateral_dist={float(progress.get('edge_slide_lateral_distance_m', 0.0) or 0.0):.3f} "
+                    f"frames={int(progress.get('edge_slide_frames', 0) or 0)} "
+                    "confirm_allowed=false",
                 )
-                self._transition(
-                    State.TARGET_CONFIRM,
-                    self._format_target_transition_reason("target_found", target_obs),
+            if timed_out:
+                return self._handle_edge_slide_target_timeout(target_obs, target_window, candidate_reason)
+            align_decision = self._target_lateral_align_decision(target_obs, state="EDGE_SLIDE_SEARCH")
+            if align_decision is not None:
+                return align_decision
+            if centered_ok:
+                return self._annotate_target_lateral_decision(
+                    self.controller.stop_cmd("EDGE_SLIDE_SEARCH"),
+                    target_obs,
+                    active=False,
+                    reason="target_centered_wait_stable",
+                    vy_cmd=0.0,
                 )
-                return self.controller.stop_cmd("TARGET_CONFIRM")
         else:
+            if timed_out:
+                return self._handle_edge_slide_target_timeout(target_obs, target_window, candidate_reason)
+            had_recent_target = bool(
+                self.ctx.target_found_frames > 0
+                or self.ctx.target_lateral_stable_count > 0
+                or self.ctx.target_stable_since_mono > 0.0
+                or self.ctx.last_good_target_mono > 0.0
+            )
             self.ctx.target_found_frames = 0
+            self.ctx.target_lateral_stable_count = 0
             self.ctx.target_last_lost_reason = candidate_reason
-        if self._state_elapsed() >= float(self.cfg.target_search_timeout_s):
-            self.ctx.last_fail_reason = "当前桌边未找到目标"
-            if self._can_relocate_edge():
-                self.ctx.advance_edge()
-                self._transition(State.LEAVE_EDGE, f"{self.ctx.last_fail_reason}，切换到边 {self.ctx.current_edge_id}")
-                self._queue_tts("当前边未找到目标，准备换边")
-                return self.controller.leave_edge_cmd()
-            self._transition(State.NEXT_TABLE, f"{self.ctx.last_fail_reason}，准备切换下一张桌")
-            self._queue_tts("当前桌位未找到目标，尝试下一张桌")
-            return self.controller.next_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+            hold_decision = self._target_lateral_hold_decision(state="EDGE_SLIDE_SEARCH", reason=candidate_reason)
+            if hold_decision is not None:
+                return hold_decision
+            if had_recent_target:
+                self._start_loss_timer("target_loss_since_mono")
+                lost_s = self._loss_elapsed(self.ctx.target_loss_since_mono)
+                lost_stop_s = float(getattr(self.cfg, "target_lateral_lost_stop_s", 1.2) or 1.2)
+                if lost_s >= lost_stop_s:
+                    self._log("warn", f"[SLICE][TARGET_LOST_STOP] lost_s={lost_s:.2f} reason=target_lost_timeout")
+            else:
+                self.ctx.target_loss_since_mono = 0.0
+            self.ctx.target_lateral_vy_cmd = 0.0
+            return self._annotate_target_lateral_decision(
+                self.controller.stop_cmd("EDGE_SLIDE_SEARCH"),
+                target_obs,
+                active=False,
+                reason="target_lost_timeout" if had_recent_target else (candidate_reason or "target_never_found"),
+                vy_cmd=0.0,
+            )
         edge_obs = self._fresh_table_obs()
-        if not self.ctx.slide_ref_ready:
-            self._transition(State.SEARCH_TARGET_INIT, "slide_ref_missing")
-            return self.controller.stop_cmd("SEARCH_TARGET_INIT")
         if edge_obs is None or not self._table_visible(edge_obs):
-            return self._handle_edge_slide_edge_loss("edge_obs_missing" if edge_obs is None else "edge_not_visible")
+            return self._annotate_target_lateral_decision(
+                self.controller.stop_cmd("EDGE_SLIDE_SEARCH"),
+                target_obs,
+                active=False,
+                reason="target_search_hold_no_edge_motion",
+                vy_cmd=0.0,
+            )
         if self._edge_obs_is_stale(edge_obs):
             age_ms = self._table_obs_age_ms(edge_obs)
             age_text = "unknown" if age_ms is None else f"{age_ms:.0f}"
@@ -226,6 +338,83 @@ class TargetSearchMixin:
             reason=reason,
         )
         return self._annotate_edge_slide_decision(decision, quality, fallback_decision="slide")
+
+    def _handle_edge_slide_target_timeout(
+        self,
+        target_obs: Optional[TargetObs],
+        target_window: Dict[str, Any],
+        candidate_reason: str,
+    ) -> MotionDecision:
+        reject_reason = self._target_search_reject_reason(target_obs, target_window, candidate_reason, timeout=True)
+        if self.ctx.last_good_target_mono > 0.0:
+            reject_reason = "target_lost_timeout"
+        elif self.ctx.target_found_frames <= 0:
+            reject_reason = "target_never_found_timeout"
+        elif int(self.ctx.target_lateral_stable_count) < self._target_lateral_stable_frames():
+            reject_reason = "target_lateral_align_timeout"
+        self.ctx.target_last_lost_reason = reject_reason
+        self.ctx.last_fail_reason = f"当前桌边未找到目标 reject_reason={reject_reason}"
+        min_abs_err = getattr(self.ctx, "target_lateral_min_abs_err_x", None)
+        last_err = getattr(self.ctx, "target_lateral_last_err_x", None)
+        timeout_s = float(self.cfg.target_search_timeout_s)
+        self._log(
+            "warn",
+            "[SLICE][ALIGN_TIMEOUT] "
+            f"min_abs_err={min_abs_err if min_abs_err is not None else 'n/a'} "
+            f"last_err={last_err if last_err is not None else 'n/a'} "
+            f"timeout_s={timeout_s:.1f} reason={reject_reason}",
+        )
+        if self._can_relocate_edge():
+            self.ctx.advance_edge()
+            self._transition(State.LEAVE_EDGE, f"{self.ctx.last_fail_reason}，切换到边 {self.ctx.current_edge_id}")
+            self._queue_tts("当前边未找到目标，准备换边")
+            decision = self.controller.leave_edge_cmd()
+        else:
+            self._transition(State.NEXT_TABLE, f"{self.ctx.last_fail_reason}，准备切换下一张桌")
+            self._queue_tts("当前桌位未找到目标，尝试下一张桌")
+            decision = self.controller.next_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+        if decision.control_summary is not None:
+            decision.control_summary.update(
+                {
+                    "target_search_reject_reason": reject_reason,
+                    "target_search_timeout": True,
+                    "slice_timeout_reason": reject_reason,
+                    "target_lateral_min_abs_err": min_abs_err,
+                    "target_lateral_last_err": last_err,
+                    "found_ratio": float(target_window.get("found_ratio", 0.0) or 0.0),
+                    "stable_count": int(self.ctx.target_found_frames),
+                    "lateral_stable_count": int(self.ctx.target_lateral_stable_count),
+                    "center_jitter": float(target_window.get("center_jitter", 0.0) or 0.0),
+                }
+            )
+        return decision
+
+    def _edge_slide_timeout_reason(
+        self,
+        target_obs: Optional[TargetObs],
+        target_window: Dict[str, Any],
+        candidate_reason: str,
+    ) -> str:
+        del target_obs
+        samples = int(target_window.get("samples", 0) or 0)
+        found_ratio = float(target_window.get("found_ratio", 0.0) or 0.0)
+        had_target = bool(
+            samples > 0
+            and (
+                found_ratio > 0.0
+                or getattr(self.ctx, "target_lateral_last_good_obs_mono", 0.0) > 0.0
+                or getattr(self.ctx, "target_lateral_min_abs_err_x", None) is not None
+            )
+        )
+        if not had_target:
+            return "target_never_found_timeout"
+        lost_s = self._loss_elapsed(self.ctx.target_loss_since_mono) if self.ctx.target_loss_since_mono > 0.0 else 0.0
+        lost_stop_s = max(0.0, float(getattr(self.cfg, "target_lateral_lost_stop_s", 1.2) or 1.2))
+        if lost_s >= lost_stop_s and str(candidate_reason or "").startswith("target"):
+            return "target_lost_timeout"
+        if int(self.ctx.target_lateral_stable_count) < self._target_lateral_stable_frames():
+            return "target_lateral_align_timeout"
+        return "target_confirm_timeout"
 
     def _edge_slide_fallback_state(self) -> State:
         if not self._table_final_lock_enabled():
@@ -356,7 +545,7 @@ class TargetSearchMixin:
 
     def _tick_target_confirm(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
-        obs = self._fresh_target_obs()
+        obs, visible_reason = self._select_active_target_obs(self._fresh_target_obs())
         visible_ok, visible_reason = self._target_candidate_status(
             obs,
             self.cfg.target_confirm_conf_th,
@@ -367,11 +556,13 @@ class TargetSearchMixin:
         if visible_ok and obs is not None:
             self.ctx.target_found_frames += 1
             self.ctx.target_lost_frames = 0
+            self._remember_good_target(obs, self.ctx.target_lateral_vy_cmd)
             center_jitter = self._update_target_stability(obs)
             window_jitter = self._float_or_none(target_window.get("center_jitter"))
             if window_jitter is not None:
                 center_jitter = window_jitter
                 self.ctx.target_last_center_jitter = float(window_jitter)
+
             confirm_elapsed_s = self._state_elapsed()
             confirm_min_ok = confirm_elapsed_s >= float(self.cfg.target_confirm_min_s)
             found_ratio = float(target_window.get("found_ratio", 0.0) or 0.0)
@@ -380,43 +571,153 @@ class TargetSearchMixin:
             jitter_ok = center_jitter <= float(self.cfg.target_lock_center_jitter_th)
             ratio_ok = found_ratio >= float(getattr(self.cfg, "target_lock_found_ratio_th", 0.6) or 0.6)
             conf_ok = conf_median is not None and conf_median >= float(self.cfg.target_lock_conf_th or 0.0)
-            if lock_ok and confirm_min_ok and stable_ok and jitter_ok and ratio_ok and conf_ok:
+            centered_ok = self._target_lateral_centered(obs)
+
+            # TARGET_CONFIRM uses the wider center_x_tol as the semantic "centered enough"
+            # condition.  Do not keep issuing tiny lateral-align commands merely because the
+            # target is outside the narrower deadband; otherwise the early align return can
+            # starve both lock evaluation and confirm-timeout handling.
+            if centered_ok:
+                self.ctx.target_lateral_stable_count += 1
+                self.ctx.target_lateral_vy_cmd = 0.0
+                self.ctx.target_lateral_align_reason = "target_center_tol"
+            else:
+                self.ctx.target_lateral_stable_count = 0
+            lateral_stable_ok = int(self.ctx.target_lateral_stable_count) >= self._target_lateral_stable_frames()
+
+            err_x = self._target_lateral_error_x(obs)
+            deadband = self._target_deadband_x()
+            tol = abs(float(getattr(self.cfg, "target_lateral_align_center_x_tol", 0.06) or 0.06))
+            blockers = []
+            if not lock_ok:
+                blockers.append(lock_reason)
+            if not confirm_min_ok:
+                blockers.append("confirm_min_not_reached")
+            if not stable_ok:
+                blockers.append("target_stable_not_enough")
+            if not jitter_ok:
+                blockers.append("center_jitter_high")
+            if not ratio_ok:
+                blockers.append(f"found_ratio_low ratio={found_ratio:.2f}")
+            if not conf_ok:
+                blockers.append("conf_median_low")
+            if not centered_ok:
+                blockers.append("target_not_centered")
+            if not lateral_stable_ok:
+                blockers.append("target_lateral_stable_not_enough")
+
+            debug_fields = {
+                "target_confirm_elapsed_s": float(confirm_elapsed_s),
+                "target_confirm_err_x": err_x,
+                "target_confirm_deadband": float(deadband),
+                "target_confirm_center_tol": float(tol),
+                "target_confirm_centered_ok": bool(centered_ok),
+                "target_confirm_lock_ok": bool(lock_ok),
+                "target_confirm_lock_reason": str(lock_reason or ""),
+                "target_confirm_min_ok": bool(confirm_min_ok),
+                "target_confirm_stable_ok": bool(stable_ok),
+                "target_confirm_jitter_ok": bool(jitter_ok),
+                "target_confirm_ratio_ok": bool(ratio_ok),
+                "target_confirm_conf_ok": bool(conf_ok),
+                "target_confirm_lateral_stable_ok": bool(lateral_stable_ok),
+                "target_confirm_blockers": list(blockers),
+                "target_lateral_stable_count": int(self.ctx.target_lateral_stable_count),
+                "target_lateral_stable_frames": int(self._target_lateral_stable_frames()),
+                "target_confirm_found_ratio": float(found_ratio),
+                "target_confirm_conf_median": conf_median,
+                "target_confirm_center_jitter": float(center_jitter),
+            }
+
+            if lock_ok and confirm_min_ok and stable_ok and jitter_ok and ratio_ok and conf_ok and centered_ok and lateral_stable_ok:
                 self.ctx.target_last_transition_reason = (
                     f"lock_ok found_ratio={found_ratio:.2f} conf_median={float(conf_median):.3f} "
-                    f"center_jitter={float(center_jitter):.3f} stable_ms={self._target_stable_ms()}"
+                    f"center_jitter={float(center_jitter):.3f} stable_ms={self._target_stable_ms()} "
+                    f"target_lateral_stable_count={int(self.ctx.target_lateral_stable_count)}"
                 )
+                self.ctx.target_locked = True
                 self._transition(
                     State.TARGET_LOCKED,
                     self._format_target_transition_reason("target_confirmed", obs),
                 )
-                return self.controller.stop_cmd("TARGET_LOCKED")
-            if self._state_elapsed() >= float(self.cfg.target_confirm_timeout_s):
-                reasons = []
-                if not lock_ok:
-                    reasons.append(lock_reason)
-                if not confirm_min_ok:
-                    reasons.append("confirm_min_not_reached")
-                if not stable_ok:
-                    reasons.append("target_stable_not_enough")
-                if not jitter_ok:
-                    reasons.append("center_jitter_high")
-                if not ratio_ok:
-                    reasons.append(f"found_ratio_low ratio={found_ratio:.2f}")
-                if not conf_ok:
-                    reasons.append("conf_median_low")
-                self.ctx.target_last_lost_reason = ",".join(reasons) or "lock_condition_timeout"
+                decision = self._annotate_target_lateral_decision(
+                    self.controller.stop_cmd("TARGET_LOCKED"),
+                    obs,
+                    active=False,
+                    reason="target_lateral_centered_locked",
+                    vy_cmd=0.0,
+                )
+                if decision.control_summary is not None:
+                    decision.control_summary.update(debug_fields)
+                return decision
+
+            # Confirm timeout must be checked before any lateral-align early return.  If the
+            # target cannot satisfy the lock conditions in time, return to slide search rather
+            # than staying forever in TARGET_CONFIRM.
+            if confirm_elapsed_s >= float(self.cfg.target_confirm_timeout_s):
+                self.ctx.target_last_lost_reason = ",".join(blockers) or "lock_condition_timeout"
                 self._transition(
                     State.EDGE_SLIDE_SEARCH,
                     self._format_target_transition_reason("confirm_timeout", obs),
                 )
-            return self.controller.stop_cmd("TARGET_CONFIRM")
+                decision = self._annotate_target_lateral_decision(
+                    self.controller.stop_cmd("EDGE_SLIDE_SEARCH"),
+                    obs,
+                    active=False,
+                    reason=f"target_confirm_timeout blockers={self.ctx.target_last_lost_reason}",
+                    vy_cmd=0.0,
+                )
+                if decision.control_summary is not None:
+                    decision.control_summary.update(debug_fields)
+                return decision
+
+            # Only request lateral motion in TARGET_CONFIRM when the target is outside the
+            # wider tolerance band.  Inside tolerance, allow the lock/stability conditions to
+            # settle instead of starving them with micro-align commands.
+            if not centered_ok:
+                align_decision = self._target_lateral_align_decision(obs, state="TARGET_CONFIRM")
+                if align_decision is not None:
+                    if align_decision.control_summary is not None:
+                        align_decision.control_summary.update(debug_fields)
+                        align_decision.control_summary["target_confirm_align_allowed"] = True
+                    return align_decision
+
+            if centered_ok and not lateral_stable_ok:
+                decision = self._annotate_target_lateral_decision(
+                    self.controller.stop_cmd("TARGET_CONFIRM"),
+                    obs,
+                    active=False,
+                    reason="target_centered_wait_stable",
+                    vy_cmd=0.0,
+                )
+                if decision.control_summary is not None:
+                    decision.control_summary.update(debug_fields)
+                return decision
+
+            decision = self._annotate_target_lateral_decision(
+                self.controller.stop_cmd("TARGET_CONFIRM"),
+                obs,
+                active=False,
+                reason="target_confirm_hold",
+                vy_cmd=0.0,
+            )
+            if decision.control_summary is not None:
+                decision.control_summary.update(debug_fields)
+            return decision
         self.ctx.target_found_frames = 0
+        self.ctx.target_lateral_stable_count = 0
+        self.ctx.target_lateral_vy_cmd = 0.0
         self.ctx.target_lost_frames += 1
         self._start_loss_timer("target_loss_since_mono")
         lost_s = self._loss_elapsed(self.ctx.target_loss_since_mono)
         self.ctx.target_last_lost_reason = f"{visible_reason} lost_hold_ms={int(round(lost_s * 1000.0))}"
         if self._state_elapsed() < float(self.cfg.target_confirm_min_s):
-            return self.controller.stop_cmd("TARGET_CONFIRM")
+            return self._annotate_target_lateral_decision(
+                self.controller.stop_cmd("TARGET_CONFIRM"),
+                obs,
+                active=False,
+                reason="target_confirm_lost_hold",
+                vy_cmd=0.0,
+            )
         if lost_s >= float(self.cfg.target_confirm_lost_hold_s):
             self._reset_target_stability(visible_reason)
             self._transition(
@@ -427,24 +728,85 @@ class TargetSearchMixin:
 
     def _tick_target_locked(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
+        elapsed_s = self._state_elapsed()
+        settle_s = float(getattr(self.cfg, "target_lock_settle_s", 0.5) or 0.5)
+        stuck_guard_s = 3.0
+        if elapsed_s >= settle_s:
+            reason = "target_locked_stuck_guard" if elapsed_s >= stuck_guard_s else "target_locked_settle_done"
+            if elapsed_s >= stuck_guard_s:
+                self._log("warn", f"target_locked_stuck_guard elapsed_s={elapsed_s:.2f} forcing FREEZE_BASE")
+            else:
+                self._log("info", f"target_locked_settle_done elapsed_s={elapsed_s:.2f} settle_s={settle_s:.2f}")
+            self._transition(State.FREEZE_BASE, reason)
+            self._log("info", "target_locked_to_freeze_base")
+            decision = self.controller.stop_cmd("FREEZE_BASE")
+            if decision.control_summary is not None:
+                decision.control_summary.update(
+                    {
+                        "target_locked_freeze_elapsed_s": float(elapsed_s),
+                        "target_locked_freeze_after_s": float(settle_s),
+                        "target_ready_for_grasp": True,
+                        "target_ready_for_grasp_reason": reason,
+                        "target_lock_freeze_blockers": [],
+                    }
+                )
+            return decision
         obs = self._fresh_target_obs()
         lock_ok, lock_reason = self._target_candidate_status(obs, self.cfg.target_lock_conf_th, min_area=0.0)
         target_window = self._record_target_window_sample(obs, lock_reason)
         if not lock_ok or obs is None:
             self.ctx.target_lost_frames += 1
+            self.ctx.target_locked = False
             self._start_loss_timer("target_loss_since_mono")
             lost_s = self._loss_elapsed(self.ctx.target_loss_since_mono)
             self.ctx.target_last_lost_reason = f"{lock_reason} lost_hold_ms={int(round(lost_s * 1000.0))}"
+            freeze_fields = {
+                "target_locked_freeze_elapsed_s": float(self._state_elapsed()),
+                "target_locked_freeze_after_s": float(self.cfg.target_locked_freeze_after_s),
+                "target_lock_ok": bool(lock_ok),
+                "target_lock_reason": str(lock_reason or "target_obs_missing"),
+                "target_centered_ok": False,
+                "target_lateral_stable_ok": False,
+                "target_lateral_stable_count": int(self.ctx.target_lateral_stable_count),
+                "target_lateral_stable_frames": int(self._target_lateral_stable_frames()),
+                "target_ready_for_grasp": False,
+                "target_ready_for_grasp_reason": "target_lock_not_ok",
+                "target_lock_stable_ok": False,
+                "target_lock_jitter_ok": False,
+                "target_lock_conf_stable": False,
+                "target_lock_ratio_ok": False,
+                "target_lock_freeze_blockers": ["target_lock_not_ok"],
+            }
             if lost_s >= float(self.cfg.target_lock_lost_hold_s):
                 self._reset_target_stability(lock_reason)
                 self._transition(
                     State.EDGE_SLIDE_SEARCH,
                     self._format_target_transition_reason("locked_lost_hold_exceeded", obs),
                 )
-                return self.controller.stop_cmd("EDGE_SLIDE_SEARCH")
-            return self.controller.stop_cmd("TARGET_LOCKED")
+                decision = self._annotate_target_lateral_decision(
+                    self.controller.stop_cmd("EDGE_SLIDE_SEARCH"),
+                    obs,
+                    active=False,
+                    reason="target_locked_lost_return_search",
+                    vy_cmd=0.0,
+                )
+                if decision.control_summary is not None:
+                    decision.control_summary.update(freeze_fields)
+                return decision
+            decision = self._annotate_target_lateral_decision(
+                self.controller.stop_cmd("TARGET_LOCKED"),
+                obs,
+                active=False,
+                reason="target_locked_lost_hold",
+                vy_cmd=0.0,
+            )
+            if decision.control_summary is not None:
+                decision.control_summary.update(freeze_fields)
+            return decision
         self.ctx.target_lost_frames = 0
         self.ctx.target_lock_frames += 1
+        self.ctx.target_locked = True
+        self.ctx.target_lateral_vy_cmd = 0.0
         center_jitter = self._update_target_stability(obs)
         window_jitter = self._float_or_none(target_window.get("center_jitter"))
         if window_jitter is not None:
@@ -456,32 +818,90 @@ class TargetSearchMixin:
         jitter_ok = center_jitter <= float(self.cfg.target_lock_center_jitter_th)
         conf_stable = conf_median is not None and conf_median >= float(self.cfg.target_lock_conf_th or 0.0)
         ratio_ok = found_ratio >= float(getattr(self.cfg, "target_lock_found_ratio_th", 0.6) or 0.6)
-        ready_for_grasp = self._check_target_ready_for_grasp(obs)
-        if (
-            self._state_elapsed() >= float(self.cfg.target_locked_freeze_after_s)
-            and stable_ok
-            and jitter_ok
-            and conf_stable
-            and ratio_ok
-            and self.ctx.target_loss_since_mono <= 0.0
-            and ready_for_grasp
-        ):
+        centered_ok = self._target_lateral_centered(obs)
+        if centered_ok:
+            self.ctx.target_lateral_stable_count += 1
+        else:
+            self.ctx.target_lateral_stable_count = 0
+        lateral_stable_ok = int(self.ctx.target_lateral_stable_count) >= self._target_lateral_stable_frames()
+        ready_for_grasp, ready_reason = self._target_ready_for_grasp_status(obs)
+        bbox_valid = self._target_bbox_valid(obs)
+        cls_ok = self._target_cls_matches_active(obs)
+        found_ok = bool(getattr(obs, "found", False))
+        freeze_after_s = float(getattr(self.cfg, "target_locked_freeze_after_s", settle_s) or settle_s)
+        freeze_blockers = []
+        if elapsed_s < freeze_after_s:
+            freeze_blockers.append("freeze_settle_not_elapsed")
+        if not lock_ok:
+            freeze_blockers.append("target_lock_not_ok")
+        if not centered_ok:
+            freeze_blockers.append("target_not_centered")
+        if not bbox_valid:
+            freeze_blockers.append("target_bbox_invalid")
+        if not found_ok:
+            freeze_blockers.append("target_not_found")
+        if not cls_ok:
+            freeze_blockers.append("target_cls_mismatch")
+        if not lateral_stable_ok:
+            freeze_blockers.append("target_lateral_stable_not_enough")
+        if not ready_for_grasp:
+            freeze_blockers.append(f"ready_for_grasp:{ready_reason}")
+
+        freeze_fields = {
+            "target_locked_freeze_elapsed_s": float(elapsed_s),
+            "target_locked_freeze_after_s": float(freeze_after_s),
+            "target_lock_ok": bool(lock_ok),
+            "target_lock_reason": str(lock_reason or ""),
+            "target_centered_ok": bool(centered_ok),
+            "target_lateral_stable_ok": bool(lateral_stable_ok),
+            "target_lateral_stable_count": int(self.ctx.target_lateral_stable_count),
+            "target_lateral_stable_frames": int(self._target_lateral_stable_frames()),
+            "target_ready_for_grasp": bool(ready_for_grasp),
+            "target_ready_for_grasp_reason": str(ready_reason or ""),
+            "target_lock_stable_ok": bool(stable_ok),
+            "target_lock_jitter_ok": bool(jitter_ok),
+            "target_lock_conf_stable": bool(conf_stable),
+            "target_lock_ratio_ok": bool(ratio_ok),
+            "target_lock_freeze_blockers": list(freeze_blockers),
+        }
+        if not freeze_blockers:
             self.ctx.target_last_transition_reason = (
                 f"freeze_ok found_ratio={found_ratio:.2f} conf_median={float(conf_median):.3f} "
-                f"center_jitter={float(center_jitter):.3f} stable_ms={self._target_stable_ms()}"
+                f"center_jitter={float(center_jitter):.3f} stable_ms={self._target_stable_ms()} "
+                f"target_lateral_stable_count={int(self.ctx.target_lateral_stable_count)}"
             )
             self._transition(
                 State.FREEZE_BASE,
                 self._format_target_transition_reason("locked_stable_freeze", obs),
             )
-            return self.controller.stop_cmd("FREEZE_BASE")
-        return self.controller.stop_cmd("TARGET_LOCKED")
+            decision = self._annotate_target_lateral_decision(
+                self.controller.stop_cmd("FREEZE_BASE"),
+                obs,
+                active=False,
+                reason="target_locked_freeze_base",
+                vy_cmd=0.0,
+            )
+            if decision.control_summary is not None:
+                decision.control_summary.update(freeze_fields)
+            return decision
+        decision = self._annotate_target_lateral_decision(
+            self.controller.stop_cmd("TARGET_LOCKED"),
+            obs,
+            active=False,
+            reason="target_locked_hold",
+            vy_cmd=0.0,
+        )
+        if decision.control_summary is not None:
+            decision.control_summary.update(freeze_fields)
+        return decision
 
     def _tick_freeze_base(self) -> MotionDecision:
         if self._state_elapsed() < float(self.cfg.freeze_settle_s):
             return self.controller.stop_cmd("FREEZE_BASE")
-        if self.ctx.task_intent == "FIND" and self.ctx.active_target:
-            self._transition(State.GRASP, f"已锁定 {self.ctx.active_target}，开始抓取")
+        if self.ctx.active_target:
+            self._log("info", "freeze_base_stop_barrier_done")
+            self._transition(State.GRASP, f"freeze_base_to_grasp target={self.ctx.active_target}")
+            self._log("info", "freeze_base_to_grasp")
             self._queue_tts(f"已锁定 {self.ctx.active_target}，开始抓取")
             return self.controller.stop_cmd("GRASP")
         self._transition(State.DONE, f"已在桌边锁定 {self.ctx.active_target}")
@@ -489,18 +909,34 @@ class TargetSearchMixin:
         return self.controller.stop_cmd("DONE")
 
     def _target_matches_active(self, obs: TargetObs) -> bool:
-        if not self.ctx.active_target or not obs.target:
+        if not self.ctx.active_target:
             return True
-        return str(obs.target).strip() == str(self.ctx.active_target).strip()
+        candidate = str(obs.canonical_target or obs.target or "").strip()
+        if not candidate:
+            return True
+        spec = resolve_target(candidate)
+        candidate_canonical = spec.canonical_target if spec is not None else candidate
+        return candidate_canonical == str(self.ctx.canonical_target or self.ctx.active_target).strip()
 
     def _target_cls_matches_active(self, obs: TargetObs) -> bool:
         active = str(self.ctx.active_target or "").strip()
         if not active:
             return True
+        expected_id = self.ctx.class_id
+        matched_id = getattr(obs, "matched_class_id", None)
+        if expected_id is not None and matched_id is not None:
+            try:
+                return int(expected_id) == int(matched_id)
+            except Exception:
+                pass
+        expected_name = str(self.ctx.class_name or "").strip()
         candidate_cls = str(obs.matched_cls or obs.target or "").strip()
         if not candidate_cls:
             return True
-        return candidate_cls == active
+        spec = resolve_target(candidate_cls)
+        if spec is not None:
+            return spec.canonical_target == str(self.ctx.canonical_target or active).strip()
+        return bool(expected_name and candidate_cls == expected_name) or candidate_cls == active
 
     def _target_conf_value(self, obs: TargetObs) -> Optional[float]:
         value = obs.matched_conf if obs.matched_conf is not None else obs.confidence
@@ -641,6 +1077,616 @@ class TargetSearchMixin:
                 return width * height
         return None
 
+    def _target_deadband_x(self) -> float:
+        tol = abs(float(getattr(self.cfg, "target_lateral_align_center_x_tol", 0.06) or 0.06))
+        return max(0.0, 0.5 * tol)
+
+    def _target_candidate_list(self, obs: Optional[TargetObs]) -> List[Dict[str, Any]]:
+        if obs is None:
+            return []
+        raw = getattr(obs, "target_candidates", None)
+        if not isinstance(raw, list) or not raw:
+            return []
+        return [dict(item) for item in raw if isinstance(item, dict)]
+
+    def _candidate_class_matches_active(self, cand: Dict[str, Any]) -> bool:
+        active = str(self.ctx.active_target or "").strip()
+        if not active:
+            return True
+        expected_id = self.ctx.class_id
+        for key in ("matched_class_id", "class_id", "target_class_id"):
+            if expected_id is not None and cand.get(key) is not None:
+                try:
+                    if int(expected_id) == int(cand.get(key)):
+                        return True
+                except Exception:
+                    pass
+        expected = str(self.ctx.canonical_target or active).strip()
+        for key in ("canonical_target", "matched_cls", "class_name", "target", "label", "cls"):
+            text = str(cand.get(key) or "").strip()
+            if not text:
+                continue
+            spec = resolve_target(text)
+            canonical = spec.canonical_target if spec is not None else text
+            if canonical == expected or text == str(self.ctx.class_name or "").strip() or text == active:
+                return True
+        return False
+
+    def _candidate_bbox(self, cand: Dict[str, Any]) -> Optional[List[float]]:
+        bbox = cand.get("matched_bbox") or cand.get("bbox") or cand.get("box")
+        if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+            return None
+        vals = [self._float_or_none(item) for item in bbox[:4]]
+        if not all(item is not None for item in vals):
+            return None
+        return [float(item) for item in vals]  # type: ignore[arg-type]
+
+    def _candidate_center_x(self, cand: Dict[str, Any]) -> Optional[float]:
+        center = cand.get("matched_center_full_norm") or cand.get("matched_center") or cand.get("center")
+        if isinstance(center, dict):
+            cx = self._float_or_none(center.get("cx", center.get("x_norm")))
+            if cx is not None:
+                return max(0.0, min(1.0, float(cx)))
+        for key in ("cx_norm", "x_norm", "cx"):
+            cx = self._float_or_none(cand.get(key))
+            if cx is not None:
+                return max(0.0, min(1.0, float(cx)))
+        bbox = self._candidate_bbox(cand)
+        if bbox is None:
+            return None
+        x0, _, x1, _ = bbox
+        if max(abs(x0), abs(x1)) > 1.5:
+            return None
+        return max(0.0, min(1.0, 0.5 * (x0 + x1)))
+
+    def _candidate_area(self, cand: Dict[str, Any]) -> Optional[float]:
+        for key in ("matched_area", "area_norm", "size_norm", "mask_area_ratio"):
+            value = self._float_or_none(cand.get(key))
+            if value is not None and value > 0.0:
+                return float(value)
+        bbox = self._candidate_bbox(cand)
+        if bbox is None:
+            return None
+        x0, y0, x1, y1 = bbox
+        width = abs(x1 - x0)
+        height = abs(y1 - y0)
+        if width > 1.0 or height > 1.0:
+            return None
+        return max(0.0, width * height)
+
+    def _candidate_conf(self, cand: Dict[str, Any]) -> Optional[float]:
+        for key in ("matched_conf", "confidence", "conf", "score"):
+            value = self._float_or_none(cand.get(key))
+            if value is not None:
+                return max(0.0, min(1.0, float(value)))
+        return None
+
+    def _candidate_execute_score(self, cand: Dict[str, Any]) -> Tuple[float, str]:
+        cx = self._candidate_center_x(cand)
+        conf = self._candidate_conf(cand)
+        area = self._candidate_area(cand)
+        target_x = max(0.0, min(1.0, float(getattr(self.cfg, "target_lateral_align_center_x_target", 0.40) or 0.40)))
+        center_score = 0.0 if cx is None else max(0.0, 1.0 - abs(float(cx) - target_x))
+        if area is None:
+            area_score = 0.4
+            edge_penalty = 0.2
+        else:
+            area_score = max(0.0, min(1.0, area / 0.20))
+            edge_penalty = 0.0 if 0.002 <= area <= 0.60 else 0.35
+        bbox = self._candidate_bbox(cand)
+        if bbox is not None:
+            x0, y0, x1, y1 = bbox
+            if min(x0, y0) <= 0.01 or max(x1, y1) >= 0.99:
+                edge_penalty += 0.20
+        track_score = 0.0
+        last = self.ctx.last_good_target_obs
+        last_cx = self._target_lateral_center_x(last) if last is not None else None
+        if cx is not None and last_cx is not None:
+            track_score = max(0.0, 1.0 - abs(float(cx) - float(last_cx)) * 2.0)
+        score = 0.45 * float(conf or 0.0) + 0.15 * area_score + 0.25 * center_score + 0.15 * track_score - edge_penalty
+        return float(score), "score"
+
+    def _apply_candidate_to_obs(self, obs: TargetObs, cand: Dict[str, Any], idx: int, score: float, reason: str) -> TargetObs:
+        obs.found = True
+        obs.target_found = True
+        obs.matched_cls = str(cand.get("matched_cls") or cand.get("class_name") or cand.get("target") or cand.get("label") or obs.matched_cls or obs.target or "")
+        obs.target = str(cand.get("target") or obs.target or obs.matched_cls or "")
+        spec = resolve_target(obs.matched_cls or obs.target or "")
+        if spec is not None:
+            obs.canonical_target = spec.canonical_target
+        obs.matched_class_id = self._float_or_none(cand.get("matched_class_id") or cand.get("class_id") or cand.get("target_class_id"))
+        if obs.matched_class_id is not None:
+            try:
+                obs.matched_class_id = int(obs.matched_class_id)
+            except Exception:
+                pass
+        obs.matched_conf = self._candidate_conf(cand)
+        bbox = self._candidate_bbox(cand)
+        if bbox is not None:
+            obs.matched_bbox = list(bbox)
+            obs.bbox = list(bbox)
+        cx = self._candidate_center_x(cand)
+        if cx is not None:
+            center = dict(obs.matched_center_full_norm or {})
+            center["cx"] = float(cx)
+            if cand.get("cy_norm") is not None:
+                center["cy"] = self._float_or_none(cand.get("cy_norm"))
+            obs.matched_center_full_norm = center
+            obs.cx_norm = float(cx)
+        area = self._candidate_area(cand)
+        if area is not None:
+            obs.matched_area = float(area)
+            obs.size_norm = float(area)
+        obs.matched_rank_in_all_boxes = idx
+        self.ctx.selected_candidate_idx = int(idx)
+        self.ctx.selected_candidate_score = float(score)
+        self.ctx.selected_candidate_reason = str(reason or "score")
+        return obs
+
+    def _select_active_target_obs(self, obs: Optional[TargetObs]) -> Tuple[Optional[TargetObs], str]:
+        candidates = self._target_candidate_list(obs)
+        if obs is None:
+            self.ctx.selected_candidate_idx = None
+            self.ctx.selected_candidate_score = None
+            self.ctx.selected_candidate_reason = "target_missing"
+            return None, "target_missing"
+        if not candidates:
+            self.ctx.selected_candidate_idx = 0 if bool(getattr(obs, "found", False)) else None
+            self.ctx.selected_candidate_score = None
+            self.ctx.selected_candidate_reason = "single_candidate"
+            return obs, "single_candidate"
+        scored: List[Tuple[float, int, Dict[str, Any], str]] = []
+        for idx, cand in enumerate(candidates):
+            if not self._candidate_class_matches_active(cand):
+                self._log("info", f"[SLICE][CANDIDATE_REJECT] reason=class_mismatch idx={idx}")
+                continue
+            cx = self._candidate_center_x(cand)
+            if cx is None:
+                self._log("info", f"[SLICE][CANDIDATE_REJECT] reason=bad_bbox idx={idx}")
+                continue
+            score, reason = self._candidate_execute_score(cand)
+            scored.append((score, idx, cand, reason))
+        if not scored:
+            self.ctx.selected_candidate_idx = None
+            self.ctx.selected_candidate_score = None
+            self.ctx.selected_candidate_reason = "no_matching_candidate"
+            return None, "class_mismatch"
+        score, idx, cand, reason = max(scored, key=lambda item: item[0])
+        selected = self._apply_candidate_to_obs(obs, cand, idx, score, reason)
+        conf = self._candidate_conf(cand)
+        cx = self._candidate_center_x(cand)
+        self._log(
+            "info",
+            "[SLICE][CANDIDATE_SELECT] "
+            f"count={len(candidates)} selected_idx={idx} selected_score={score:.3f} "
+            f"selected_conf={conf if conf is not None else 'n/a'} selected_cx={cx if cx is not None else 'n/a'}",
+        )
+        return selected, "candidate_selected"
+
+    def _remember_good_target(self, obs: Optional[TargetObs], vy_cmd: float) -> None:
+        if obs is None or not bool(getattr(obs, "found", False)):
+            return
+        self.ctx.last_good_target_obs = obs
+        self.ctx.last_good_target_mono = monotonic_ts()
+        self.ctx.last_good_vy_mps = float(vy_cmd)
+        self.ctx.target_lateral_hold_active = False
+        self.ctx.target_lateral_hold_source = "current"
+
+    def _target_lateral_hold_decision(self, *, state: str, reason: str) -> Optional[MotionDecision]:
+        if not bool(getattr(self.cfg, "target_lateral_hold_enable", True)):
+            return None
+        if self.ctx.last_good_target_mono <= 0.0:
+            return None
+        age_s = max(0.0, monotonic_ts() - float(self.ctx.last_good_target_mono))
+        hold_s = max(0.0, float(getattr(self.cfg, "target_lateral_hold_s", 0.8) or 0.8))
+        lost_stop_s = max(hold_s, float(getattr(self.cfg, "target_lateral_lost_stop_s", 1.2) or 1.2))
+        if age_s > lost_stop_s:
+            self.ctx.target_lateral_hold_active = False
+            self.ctx.target_lateral_hold_source = "stop"
+            return None
+        if age_s > hold_s:
+            return None
+        vy = float(self.ctx.last_good_vy_mps or 0.0)
+        min_vy = abs(float(getattr(self.cfg, "target_lateral_min_vy_mps", 0.016) or 0.016))
+        if abs(vy) < min_vy:
+            last_obs = self.ctx.last_good_target_obs
+            err = self._target_lateral_error_x(last_obs)
+            if err is None or abs(float(err)) <= self._target_deadband_x():
+                vy = 0.0
+            else:
+                vy = min_vy if -float(err) >= 0.0 else -min_vy
+        self.ctx.target_lateral_hold_active = True
+        self.ctx.target_lateral_hold_source = "hold"
+        self.ctx.target_lateral_vy_cmd = float(vy)
+        cmd = self.controller._cmd(state, vx=0.0, vy=vy, wz=0.0)
+        decision = MotionDecision(
+            cmd=cmd,
+            control_summary=self.controller._summary(state, cmd, reason="target_lateral_hold"),
+        )
+        self._log(
+            "info",
+            f"[SLICE][TARGET_HOLD] age_s={age_s:.2f} vy={vy:.3f} reason={reason or 'target_missing'}",
+        )
+        return self._annotate_target_lateral_decision(
+            decision,
+            self.ctx.last_good_target_obs,
+            active=bool(abs(vy) > 1e-9),
+            reason=f"target_lateral_hold lost_age_s={age_s:.2f}",
+            vy_cmd=vy,
+        )
+
+    def _target_lateral_stable_frames(self) -> int:
+        return max(1, int(getattr(self.cfg, "target_lateral_align_stable_frames", 3) or 3))
+
+    def _target_lateral_center_x(self, obs: Optional[TargetObs]) -> Optional[float]:
+        center = self._target_center_pair(obs)
+        if center is None:
+            return None
+        return max(0.0, min(1.0, float(center[0])))
+
+    def _target_lateral_error_x(self, obs: Optional[TargetObs]) -> Optional[float]:
+        cx = self._target_lateral_center_x(obs)
+        if cx is None:
+            return None
+        target = max(0.0, min(1.0, float(getattr(self.cfg, "target_lateral_align_center_x_target", 0.40) or 0.40)))
+        # target_err_x = target_center_x_norm - target_lateral_align_center_x_target
+        return float(cx - target)
+
+    def _target_lateral_centered(self, obs: Optional[TargetObs]) -> bool:
+        err = self._target_lateral_error_x(obs)
+        if err is None:
+            return False
+        tol = abs(float(getattr(self.cfg, "target_lateral_align_center_x_tol", 0.06) or 0.06))
+        return abs(float(err)) <= tol
+
+    def _annotate_target_lateral_decision(
+        self,
+        decision: MotionDecision,
+        obs: Optional[TargetObs],
+        *,
+        active: bool,
+        reason: str,
+        vy_cmd: float,
+        lateral_cmd_source: str = "current",
+        hold_active: bool = False,
+        hold_age_s: Optional[float] = None,
+        slice_timeout_reason: str = "",
+        target_found_override: Optional[bool] = None,
+    ) -> MotionDecision:
+        summary = dict(decision.control_summary or {})
+        conf = self._target_conf_value(obs) if obs is not None else None
+        cx = self._target_lateral_center_x(obs)
+        err = self._target_lateral_error_x(obs)
+        target_x = max(0.0, min(1.0, float(getattr(self.cfg, "target_lateral_align_center_x_target", 0.40) or 0.40)))
+        centered_ok = bool(self._target_lateral_centered(obs))
+        last_good_age_s = self._target_lateral_last_good_age_s()
+        edge_slide_progress = self._edge_slide_progress_snapshot()
+        target_found = bool(obs is not None and getattr(obs, "found", False)) if target_found_override is None else bool(target_found_override)
+        summary.update(
+            {
+                "target_found": bool(target_found),
+                "raw_target": str(getattr(obs, "raw_target", "") or self.ctx.raw_target or "") if obs is not None else self.ctx.raw_target,
+                "canonical_target": str(getattr(obs, "canonical_target", "") or self.ctx.canonical_target or "") if obs is not None else self.ctx.canonical_target,
+                "expected_class_name": str(getattr(obs, "expected_class_name", "") or self.ctx.class_name or "") if obs is not None else self.ctx.class_name,
+                "expected_class_id": getattr(obs, "expected_class_id", None) if obs is not None else self.ctx.class_id,
+                "target_cls": str(getattr(obs, "matched_cls", None) or getattr(obs, "target", "") or "") if obs is not None else "",
+                "matched_cls": str(getattr(obs, "matched_cls", None) or "") if obs is not None else "",
+                "matched_class_id": getattr(obs, "matched_class_id", None) if obs is not None else None,
+                "best_cls": str(getattr(obs, "best_cls", "") or "") if obs is not None else "",
+                "best_conf": getattr(obs, "best_conf", None) if obs is not None else None,
+                "target_conf": conf,
+                "target_center_x_norm": cx,
+                "target_lateral_align_center_x_target": float(target_x),
+                "target_err_x": err,
+                "target_lateral_centered_ok": bool(centered_ok),
+                "target_lateral_align_active": bool(active),
+                "target_lateral_align_reason": str(reason or ""),
+                "target_lateral_hold_active": bool(hold_active),
+                "target_lateral_hold_age_s": hold_age_s,
+                "last_good_target_age_s": last_good_age_s,
+                "last_good_vy_mps": float(getattr(self.ctx, "target_lateral_last_good_vy_mps", 0.0) or 0.0),
+                "lateral_cmd_source": str(lateral_cmd_source or "current"),
+                "slice_timeout_reason": str(slice_timeout_reason or ""),
+                "edge_slide_elapsed_s": float(edge_slide_progress.get("edge_slide_elapsed_s", 0.0) or 0.0),
+                "edge_slide_lateral_distance_m": float(edge_slide_progress.get("edge_slide_lateral_distance_m", 0.0) or 0.0),
+                "edge_slide_frames": int(edge_slide_progress.get("edge_slide_frames", 0) or 0),
+                "confirm_block_reason": str(getattr(self.ctx, "edge_slide_confirm_block_reason", "") or ""),
+                "target_search_reject_reason": self._target_search_reject_reason(
+                    obs,
+                    self._target_window_stats(),
+                    str(reason or ""),
+                ),
+                "centered_ok": bool(centered_ok),
+                "bbox_valid": bool(self._target_bbox_valid(obs)),
+                "stable_count": int(self.ctx.target_found_frames),
+                "found_ratio": float(self._target_window_stats().get("found_ratio", 0.0) or 0.0),
+                "center_jitter": float(self.ctx.target_last_center_jitter),
+                "target_lateral_vy_cmd": float(vy_cmd),
+                "target_lateral_stable_count": int(self.ctx.target_lateral_stable_count),
+                "target_lateral_stable_frames": int(self._target_lateral_stable_frames()),
+                "target_lateral_hold_active": bool(getattr(self.ctx, "target_lateral_hold_active", False)),
+                "target_lateral_hold_age_s": (
+                    max(0.0, monotonic_ts() - float(self.ctx.last_good_target_mono))
+                    if float(getattr(self.ctx, "last_good_target_mono", 0.0) or 0.0) > 0.0 else None
+                ),
+                "last_good_target_age_s": (
+                    max(0.0, monotonic_ts() - float(self.ctx.last_good_target_mono))
+                    if float(getattr(self.ctx, "last_good_target_mono", 0.0) or 0.0) > 0.0 else None
+                ),
+                "last_good_vy_mps": float(getattr(self.ctx, "last_good_vy_mps", 0.0) or 0.0),
+                "lateral_cmd_source": str(getattr(self.ctx, "target_lateral_hold_source", "") or ("current" if active else "stop")),
+                "slice_timeout_reason": str(self.ctx.target_last_lost_reason or ""),
+                "candidate_count": int(getattr(obs, "num_target_candidates", 0) or len(self._target_candidate_list(obs))),
+                "selected_candidate_idx": getattr(self.ctx, "selected_candidate_idx", None),
+                "selected_candidate_score": getattr(self.ctx, "selected_candidate_score", None),
+                "selected_candidate_conf": conf,
+                "selected_candidate_cx": cx,
+                "selected_candidate_reason": str(getattr(self.ctx, "selected_candidate_reason", "") or ""),
+                "target_locked": bool(self.ctx.target_locked),
+                "grasp_request_sent": False,
+                "grasp_dry_run": False,
+            }
+        )
+        summary["vx_mps"] = float(decision.cmd.vx_mps)
+        summary["vy_mps"] = float(decision.cmd.vy_mps)
+        summary["wz_radps"] = float(decision.cmd.wz_radps)
+        summary["final_vx"] = float(decision.cmd.vx_mps)
+        summary["final_vy"] = float(decision.cmd.vy_mps)
+        summary["final_wz"] = float(decision.cmd.wz_radps)
+        decision.control_summary = summary
+        self.ctx.target_lateral_align_reason = str(reason or "")
+        self.ctx.target_lateral_vy_cmd = float(vy_cmd)
+        if obs is not None and bool(getattr(obs, "found", False)) and lateral_cmd_source == "current":
+            self._record_target_lateral_good(obs, vy_cmd if active else None)
+        if str(getattr(decision.cmd, "mode", "") or "") == "EDGE_SLIDE_SEARCH":
+            self._log(
+                "info",
+                "[SLICE][LATERAL_CMD] "
+                f"found={str(bool(target_found)).lower()} "
+                f"cx={cx if cx is not None else 'n/a'} "
+                f"err={err if err is not None else 'n/a'} "
+                f"vy={float(vy_cmd):.3f} "
+                f"source={str(lateral_cmd_source or 'current')}"
+            )
+        if obs is not None and (active or reason in {"target_locked_hold", "target_locked_freeze_base", "target_lateral_centered_locked", "target_lateral_centered_confirm"}):
+            self._log(
+                "info",
+                "[TARGET][LATERAL_ALIGN] "
+                f"target={self.ctx.active_target or self.ctx.canonical_target or ''} "
+                f"cx={cx if cx is not None else 'n/a'} "
+                f"target_lateral_align_center_x_target={target_x:.2f} "
+                f"err={err if err is not None else 'n/a'} "
+                f"centered={str(centered_ok).lower()} "
+                f"target_lateral_stable_count={int(self.ctx.target_lateral_stable_count)}"
+            )
+        return decision
+
+    def _edge_slide_progress_snapshot(self) -> Dict[str, Any]:
+        now_m = monotonic_ts()
+        enter_m = float(getattr(self.ctx, "edge_slide_enter_mono", 0.0) or 0.0)
+        if enter_m <= 0.0:
+            enter_m = float(getattr(self.ctx, "state_enter_mono", now_m) or now_m)
+        return {
+            "edge_slide_elapsed_s": max(0.0, now_m - enter_m),
+            "edge_slide_lateral_distance_m": max(0.0, float(getattr(self.ctx, "edge_slide_lateral_distance_m", 0.0) or 0.0)),
+            "edge_slide_frames": max(0, int(getattr(self.ctx, "edge_slide_frames", 0) or 0)),
+        }
+
+    def _update_edge_slide_progress(self) -> Dict[str, Any]:
+        now_m = monotonic_ts()
+        enter_m = float(getattr(self.ctx, "edge_slide_enter_mono", 0.0) or 0.0)
+        if enter_m <= 0.0:
+            enter_m = now_m
+            self.ctx.edge_slide_enter_mono = now_m
+        last_m = float(getattr(self.ctx, "edge_slide_last_progress_mono", 0.0) or 0.0)
+        if last_m <= 0.0:
+            last_m = now_m
+        dt_s = max(0.0, now_m - last_m)
+        last_vy = abs(float(getattr(self.ctx, "target_lateral_vy_cmd", 0.0) or 0.0))
+        self.ctx.edge_slide_lateral_distance_m = max(
+            0.0,
+            float(getattr(self.ctx, "edge_slide_lateral_distance_m", 0.0) or 0.0) + last_vy * dt_s,
+        )
+        self.ctx.edge_slide_last_progress_mono = now_m
+        self.ctx.edge_slide_frames = max(0, int(getattr(self.ctx, "edge_slide_frames", 0) or 0)) + 1
+        return self._edge_slide_progress_snapshot()
+
+    def _edge_slide_confirm_guard(self) -> Tuple[bool, str, Dict[str, Any]]:
+        progress = self._edge_slide_progress_snapshot()
+        if bool(getattr(self.cfg, "target_fast_start_confirm_enable", False)):
+            self.ctx.edge_slide_confirm_block_reason = ""
+            return True, "", progress
+
+        elapsed_s = float(progress.get("edge_slide_elapsed_s", 0.0) or 0.0)
+        lateral_dist_m = float(progress.get("edge_slide_lateral_distance_m", 0.0) or 0.0)
+        frames = int(progress.get("edge_slide_frames", 0) or 0)
+        min_duration_s = max(0.0, float(getattr(self.cfg, "edge_slide_min_duration_s", 1.5) or 1.5))
+        min_distance_m = max(0.0, float(getattr(self.cfg, "edge_slide_min_lateral_distance_m", 0.08) or 0.08))
+        min_frames = max(0, int(getattr(self.cfg, "edge_slide_min_frames_before_confirm", 10) or 10))
+
+        frames_ok = frames >= min_frames
+        duration_ok = elapsed_s >= min_duration_s
+        distance_ok = lateral_dist_m >= min_distance_m
+        confirm_allowed = bool(frames_ok and (duration_ok or distance_ok))
+        if confirm_allowed:
+            self.ctx.edge_slide_confirm_block_reason = ""
+            return True, "", progress
+
+        missing = []
+        if not frames_ok:
+            missing.append(f"frames<{min_frames}")
+        if not (duration_ok or distance_ok):
+            missing.append(f"duration<{min_duration_s:.2f}_and_lateral_dist<{min_distance_m:.3f}")
+        reason = "slice_min_guard:" + ",".join(missing or ["not_ready"])
+        self.ctx.edge_slide_confirm_block_reason = reason
+        return False, reason, progress
+
+    def _target_lateral_last_good_age_s(self) -> Optional[float]:
+        ts = float(getattr(self.ctx, "target_lateral_last_good_obs_mono", 0.0) or 0.0)
+        if ts <= 0.0:
+            return None
+        return max(0.0, monotonic_ts() - ts)
+
+    def _record_target_lateral_good(self, obs: TargetObs, vy_cmd: Optional[float]) -> None:
+        err = self._target_lateral_error_x(obs)
+        now_m = monotonic_ts()
+        self.ctx.target_lateral_last_good_obs = obs
+        self.ctx.target_lateral_last_good_obs_mono = now_m
+        if vy_cmd is not None:
+            self.ctx.target_lateral_last_good_vy_mps = float(vy_cmd)
+        if err is not None:
+            self.ctx.target_lateral_last_err_x = float(err)
+            abs_err = abs(float(err))
+            previous = getattr(self.ctx, "target_lateral_min_abs_err_x", None)
+            if previous is None or abs_err < float(previous):
+                self.ctx.target_lateral_min_abs_err_x = abs_err
+
+    def _target_lateral_hold_decision(
+        self,
+        candidate_reason: Optional[str] = None,
+        *,
+        lost_s: Optional[float] = None,
+        state: str = "EDGE_SLIDE_SEARCH",
+        reason: Optional[str] = None,
+    ) -> Optional[MotionDecision]:
+        if not bool(getattr(self.cfg, "target_lateral_hold_enable", True)):
+            return None
+        candidate_reason = str(candidate_reason or reason or "target_missing")
+        last_obs = getattr(self.ctx, "target_lateral_last_good_obs", None)
+        age_s = self._target_lateral_last_good_age_s()
+        last_vy = float(getattr(self.ctx, "target_lateral_last_good_vy_mps", 0.0) or 0.0)
+        lost_stop_s = max(0.0, float(getattr(self.cfg, "target_lateral_lost_stop_s", 1.2) or 1.2))
+        if lost_s is None:
+            lost_s = age_s if age_s is not None else 0.0
+        if last_obs is None or age_s is None or abs(last_vy) <= 1e-9:
+            return None
+        if lost_s >= lost_stop_s:
+            self._log("warn", f"[SLICE][TARGET_LOST_STOP] lost_s={lost_s:.2f}")
+            return None
+        hold_s = max(0.0, float(getattr(self.cfg, "target_lateral_hold_s", 0.8) or 0.8))
+        coast_s = max(0.0, float(getattr(self.cfg, "target_lateral_coast_s", 0.5) or 0.5))
+        max_motion_s = max(hold_s, lost_stop_s)
+        if age_s > max_motion_s:
+            return None
+        if age_s <= coast_s or max_motion_s <= coast_s:
+            scale = 1.0
+        else:
+            scale = max(0.0, 1.0 - ((age_s - coast_s) / max(1e-6, max_motion_s - coast_s)))
+        min_vy = abs(float(getattr(self.cfg, "target_lateral_min_vy_mps", getattr(self.cfg, "target_lateral_align_vy_min_mps", 0.016)) or 0.016))
+        vy_max = abs(float(getattr(self.cfg, "target_lateral_align_vy_max_mps", 0.050) or 0.050))
+        vy_cmd = max(-vy_max, min(vy_max, last_vy * scale))
+        if 0.0 < abs(vy_cmd) < min_vy:
+            vy_cmd = min_vy if last_vy >= 0.0 else -min_vy
+        if abs(vy_cmd) <= 1e-9:
+            return None
+        self.ctx.target_lateral_vy_cmd = float(vy_cmd)
+        self._log(
+            "info",
+            f"[SLICE][TARGET_HOLD] state={state or 'EDGE_SLIDE_SEARCH'} age={age_s:.2f} last_vy={last_vy:.3f} reason={candidate_reason}",
+        )
+        state_name = str(state or "EDGE_SLIDE_SEARCH")
+        cmd = self.controller._cmd(state_name, vx=0.0, vy=vy_cmd, wz=0.0)
+        decision = MotionDecision(
+            cmd=cmd,
+            control_summary=self.controller._summary(state_name, cmd, reason="target_lateral_hold"),
+        )
+        return self._annotate_target_lateral_decision(
+            decision,
+            last_obs,
+            active=True,
+            reason=f"target_lateral_hold lost_s={lost_s:.2f}",
+            vy_cmd=vy_cmd,
+            lateral_cmd_source="hold",
+            hold_active=True,
+            hold_age_s=age_s,
+            target_found_override=False,
+        )
+
+    def _target_search_reject_reason(
+        self,
+        obs: Optional[TargetObs],
+        target_window: Dict[str, Any],
+        reason: str,
+        *,
+        timeout: bool = False,
+    ) -> str:
+        if timeout:
+            return "timeout"
+        raw = str(reason or "").strip()
+        if obs is None:
+            return "target_missing"
+        if raw in {"class_mismatch", "target_cls_mismatch", "target_mismatch"}:
+            return "class_mismatch"
+        if raw.startswith("bbox_") or raw == "target_bbox_invalid":
+            return "bbox_invalid"
+        if raw.startswith("target_lost") or raw in {"target_missing", "vision_stale"}:
+            return "target_missing"
+        if not self._target_lateral_centered(obs):
+            return "not_centered"
+        if not self._target_bbox_valid(obs):
+            return "bbox_invalid"
+        found_ratio = float(target_window.get("found_ratio", 0.0) or 0.0)
+        if found_ratio < float(getattr(self.cfg, "target_confirm_found_ratio_th", 0.5) or 0.5):
+            return "found_ratio_low"
+        if int(self.ctx.target_found_frames) < int(self.cfg.target_found_frames_to_confirm):
+            return "stable_count_not_enough"
+        if float(target_window.get("center_jitter", 0.0) or 0.0) > float(self.cfg.target_lock_center_jitter_th):
+            return "jitter_too_large"
+        if int(self.ctx.target_lateral_stable_count) < self._target_lateral_stable_frames():
+            return "stable_count_not_enough"
+        return raw or "stable_count_not_enough"
+
+    def _target_lateral_align_decision(self, obs: Optional[TargetObs], *, state: str) -> Optional[MotionDecision]:
+        if not bool(getattr(self.cfg, "target_lateral_align_enable", True)):
+            return None
+        err = self._target_lateral_error_x(obs)
+        if err is None:
+            self.ctx.target_lateral_stable_count = 0
+            self.ctx.target_lateral_vy_cmd = 0.0
+            return self._annotate_target_lateral_decision(
+                self.controller.stop_cmd(state),
+                obs,
+                active=False,
+                reason="target_center_missing",
+                vy_cmd=0.0,
+            )
+        deadband = self._target_deadband_x()
+        tol = abs(float(getattr(self.cfg, "target_lateral_align_center_x_tol", 0.06) or 0.06))
+        if abs(float(err)) <= tol:
+            self.ctx.target_lateral_stable_count += 1
+        else:
+            self.ctx.target_lateral_stable_count = 0
+        if abs(float(err)) <= deadband:
+            self.ctx.target_lateral_align_reason = "target_center_deadband"
+            self.ctx.target_lateral_vy_cmd = 0.0
+            self._remember_good_target(obs, 0.0)
+            return None
+        kp = abs(float(getattr(self.cfg, "target_lateral_align_kp_vy", 0.08) or 0.08))
+        vy_min = abs(float(getattr(self.cfg, "target_lateral_align_vy_min_mps", 0.015) or 0.015))
+        vy_max = abs(float(getattr(self.cfg, "target_lateral_align_vy_max_mps", 0.060) or 0.060))
+        vy_raw = -float(err) * kp
+        vy_cmd = max(-vy_max, min(vy_max, vy_raw))
+        if abs(vy_cmd) < vy_min:
+            vy_cmd = vy_min if vy_raw >= 0.0 else -vy_min
+        cmd = self.controller._cmd(state, vx=0.0, vy=vy_cmd, wz=0.0)
+        decision = MotionDecision(
+            cmd=cmd,
+            control_summary=self.controller._summary(state, cmd, reason="target_lateral_align"),
+        )
+        self._remember_good_target(obs, vy_cmd)
+        self._log(
+            "info",
+            f"[SLICE][LATERAL_CMD] source=current target_lateral_align_center_x_target={float(getattr(self.cfg, 'target_lateral_align_center_x_target', 0.40) or 0.40):.2f} "
+            f"err={err:.3f} vy={vy_cmd:.3f}",
+        )
+        return self._annotate_target_lateral_decision(
+            decision,
+            obs,
+            active=True,
+            reason="target_lateral_align",
+            vy_cmd=vy_cmd,
+        )
+
     def _target_candidate_status(
         self,
         obs: Optional[TargetObs],
@@ -649,9 +1695,9 @@ class TargetSearchMixin:
         min_area: float = 0.0,
     ) -> Tuple[bool, str]:
         if obs is None:
-            return False, "vision_stale"
+            return False, "target_missing"
         if not bool(obs.found):
-            return False, "target_lost"
+            return False, "target_missing"
         if not self._target_cls_matches_active(obs):
             return False, "class_mismatch"
         if not self._target_matches_active(obs):
@@ -753,45 +1799,32 @@ class TargetSearchMixin:
         return self._state_elapsed() % segment_s
 
     def _can_relocate_edge(self) -> bool:
-        if not bool(self.cfg.edge_relocate_enabled):
-            return False
-        if self.ctx.edge_transition_count >= int(self.cfg.max_edge_transitions_per_task):
-            return False
-        return self.ctx.edge_visit_index + 1 < len(self.ctx.edge_visit_order)
+        return False
 
-    def _check_target_ready_for_grasp(self, obs: Optional[TargetObs]) -> bool:
+    def _target_ready_for_grasp_status(self, obs: Optional[TargetObs]) -> Tuple[bool, str]:
         if obs is None:
-            return False
+            return False, "obs_missing"
         if not getattr(obs, "found", False):
-            return False
+            return False, "target_not_found"
         
         active_target = str(self.ctx.active_target or "").strip()
-        matched_cls = str(obs.matched_cls or "").strip()
-        if not active_target or matched_cls != active_target:
-            return False
+        matched_cls = str(obs.matched_cls or obs.target or "").strip()
+        if active_target and matched_cls and not self._target_cls_matches_active(obs):
+            return False, "target_cls_mismatch"
             
         conf = obs.matched_conf if obs.matched_conf is not None else 0.0
         if conf < 0.45:
-            return False
+            return False, "target_conf_low"
             
         mb = obs.matched_bbox
         if not mb or not isinstance(mb, list) or len(mb) < 4:
-            return False
-            
-        table_obs = self._fresh_table_obs()
-        if table_obs is not None and getattr(table_obs, "table_bbox_xyxy", None):
-            tb = table_obs.table_bbox_xyxy
-            if len(tb) >= 4:
-                mcx = (float(mb[0]) + float(mb[2])) / 2.0
-                mcy = (float(mb[1]) + float(mb[3])) / 2.0
-                tx1, ty1, tx2, ty2 = float(tb[0]), float(tb[1]), float(tb[2]), float(tb[3])
-                if not (tx1 - 10 <= mcx <= tx2 + 10 and ty1 - 10 <= mcy <= ty2 + 10):
-                    return False
+            return False, "target_bbox_invalid"
                     
         if int(getattr(self.ctx, "target_found_frames", 0) or 0) < 5:
-            return False
+            return False, "target_found_frames_low"
             
-        if obs.depth_m is None or obs.depth_m <= 0.0:
-            return False
-            
-        return True
+        return True, "ready"
+
+    def _check_target_ready_for_grasp(self, obs: Optional[TargetObs]) -> bool:
+        ready, _ = self._target_ready_for_grasp_status(obs)
+        return bool(ready)

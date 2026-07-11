@@ -139,11 +139,11 @@ class VisionSyncMixin:
 
         request_key = self._vision_request_key(payload, req_type=req_type)
         if req_type == "mode_request":
-            if request_key and request_key == self._last_mode_request_key:
+            if not force and request_key and request_key == self._last_mode_request_key:
                 return
         elif req_type == "target_update":
             target_period_s = max(1.0, float(self.cfg.req_resend_period_s or 0.0))
-            if request_key and request_key == self._last_target_update_key and (now_m - self._last_target_update_mono) < target_period_s:
+            if not force and request_key and request_key == self._last_target_update_key and (now_m - self._last_target_update_mono) < target_period_s:
                 return
         elif not force and now_m - self._last_req_mono < self.cfg.req_resend_period_s:
             return
@@ -154,6 +154,12 @@ class VisionSyncMixin:
             payload["epoch"] = self.ctx.active_epoch
         self.ctx.active_req_id = str(payload.get("req_id", self.ctx.active_req_id) or self.ctx.active_req_id)
         self.ctx.pending_vision_msgs.append(payload)
+        try:
+            self.ctx.last_vision_req_final_phase_active = bool(req_payload.get("final_phase_active", False))
+            self.ctx.last_vision_req_state = str(req_payload.get("orchestrator_state") or "")
+            self.ctx.last_vision_req_mono = now_m
+        except Exception:
+            pass
         self._last_req_mono = now_m
         if req_type == "target_update":
             self._last_target_update_key = request_key
@@ -175,6 +181,20 @@ class VisionSyncMixin:
         payload = dict(binding.payload or {})
         payload["req_type"] = req_type
         payload["request_reason"] = "vision_mode_changed" if req_type == "mode_request" else "target_or_stage_update"
+        payload["orchestrator_state"] = self.ctx.state.value
+        payload["final_phase_active"] = self.ctx.state == State.FINAL_SLOW_STOP
+        if self.ctx.active_task_id:
+            payload.setdefault("task_id", self.ctx.active_task_id)
+        if self.ctx.raw_target:
+            payload.setdefault("raw_target", self.ctx.raw_target)
+        if self.ctx.canonical_target:
+            payload.setdefault("canonical_target", self.ctx.canonical_target)
+        if self.ctx.class_name:
+            payload.setdefault("class_name", self.ctx.class_name)
+        if self.ctx.class_id is not None:
+            payload.setdefault("class_id", self.ctx.class_id)
+        payload.setdefault("session_id", self.ctx.active_session_id)
+        payload.setdefault("epoch", self.ctx.active_epoch)
         
         self._log("info", f"[VISION_PAYLOAD] state={self.ctx.state.value} type={req_type} op={op} desired={self.ctx.desired_vision_stage}/{self.ctx.desired_vision_mode} confirmed={prev_stage}/{prev_mode}")
         
@@ -223,6 +243,10 @@ class VisionSyncMixin:
                     "need_depth": True,
                     "current_edge_id": self.ctx.current_edge_id,
                     "orchestrator_state": state.value,
+                    "close_range_latched": bool(getattr(self.ctx, "close_range_latched", False)),
+                    "final_roi_mode_latched": bool(getattr(self.ctx, "final_roi_mode_latched", False)),
+                    "final_edge_mode_latched": bool(getattr(self.ctx, "final_edge_mode_latched", False)),
+                    "final_distance_servo_active": bool(getattr(self.ctx, "final_distance_servo_active", False)),
                     "table_cycle_count": int(self.ctx.table_cycle_count),
                     "edge_visit_index": int(self.ctx.edge_visit_index),
                 },
@@ -231,7 +255,7 @@ class VisionSyncMixin:
             return VisionStageBinding(
                 stage="SEARCH",
                 mode_hint="FIND_OBJECT",
-                target=self.ctx.active_target,
+                target=self.ctx.class_name or self.ctx.canonical_target or self.ctx.active_target,
                 payload={
                     "search_kind": "TARGET",
                     "need_depth": True,
@@ -247,16 +271,52 @@ class VisionSyncMixin:
                     "locked_obs_seq": self.ctx.locked_obs_seq,
                     "orchestrator_state": state.value,
                     "edge_visit_index": int(self.ctx.edge_visit_index),
+                    "task_id": self.ctx.active_task_id,
+                    "raw_target": self.ctx.raw_target,
+                    "canonical_target": self.ctx.canonical_target or self.ctx.active_target,
+                    "class_name": self.ctx.class_name,
+                    "class_id": self.ctx.class_id,
+                },
+            )
+        if state in {State.SEARCH_BASKET, State.APPROACH_BASKET}:
+            return VisionStageBinding(
+                stage="SEARCH",
+                mode_hint="FIND_OBJECT",
+                target="basket",
+                payload={
+                    "search_kind": "RETURN_PLACE_BASKET",
+                    "target": "basket",
+                    "canonical_target": "basket",
+                    "class_name": "basket",
+                    "class_id": target_to_class_id("basket"),
+                    "return_place_target": "basket",
+                    "carried_target": getattr(self.ctx, "carried_target", None),
+                    "need_depth": False,
+                    "orchestrator_state": state.value,
+                    "basket_align_center_x_target": float(getattr(self.cfg, "basket_align_center_x_target", 0.50) or 0.50),
                 },
             )
         if state == State.GRASP:
-            class_id = target_to_class_id(self.ctx.active_target or "")
+            if getattr(self.ctx, "use_fallback_grasp", False) or (
+                bool(getattr(self.ctx, "builtin_grasp_active", False) or getattr(self.ctx, "builtin_bottle_active", False))
+                and bool(getattr(self.cfg, f"builtin_{getattr(self.ctx, 'builtin_grasp_target', '') or 'bottle'}_skip_remote", True))
+            ):
+                return None
+            class_id = int(self.ctx.class_id) if self.ctx.class_id is not None else target_to_class_id(self.ctx.active_target or "")
+            target_obs = self.ctx.last_target_obs
             return VisionStageBinding(
                 stage="GRASP",
                 mode_hint="GRASP_REMOTE",
-                target=self.ctx.active_target,
+                target=self.ctx.class_name or self.ctx.canonical_target or self.ctx.active_target,
                 payload={
                     "class_id": class_id,
+                    "task_id": self.ctx.active_task_id,
+                    "raw_target": self.ctx.raw_target,
+                    "canonical_target": self.ctx.canonical_target or self.ctx.active_target,
+                    "class_name": self.ctx.class_name,
+                    "local_target_bbox_xyxy": getattr(target_obs, "matched_bbox", None) or getattr(target_obs, "bbox", None) if target_obs is not None else None,
+                    "local_target_conf": getattr(target_obs, "matched_conf", None) if target_obs is not None else None,
+                    "local_target_frame_id": getattr(target_obs, "frame_id", None) if target_obs is not None else None,
                     "remote_grasp": True,
                     "need_depth": True,
                     "orchestrator_state": state.value,
@@ -273,4 +333,3 @@ class VisionSyncMixin:
                 },
             )
         return None
-

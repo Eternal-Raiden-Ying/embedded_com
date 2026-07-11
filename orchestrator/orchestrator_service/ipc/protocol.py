@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Set
 
 import msgpack
 
-ALLOWED_INTENTS: Set[str] = {"FIND", "RETURN", "STOP"}
+ALLOWED_INTENTS: Set[str] = {"FIND", "RETURN", "STOP", "MANUAL_DRIVE", "MANUAL_STOP"}
 ALLOWED_VISTA_OPS: Set[str] = {"START", "UPDATE", "RESPOND", "STOP"}
 ALLOWED_VISTA_STAGES: Set[str] = {"SEARCH", "GRASP", "RETURN", "IDLE"}
 ALLOWED_VISION_OBS_CLASSES: Set[str] = {"control", "diagnostic"}
@@ -30,6 +30,21 @@ def _new_id(prefix: str) -> str:
 def _upper_text(value: Any, default: str = "") -> str:
     text = str(value or default).strip().upper()
     return text or str(default).strip().upper()
+
+
+def _optional_float(value: Any, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    return number if math.isfinite(number) else float(default)
+
+
+def _optional_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
 
 
 def canonical_vision_obs_class(value: Any) -> str:
@@ -401,10 +416,26 @@ class TaskCmd:
     high_priority: bool = False
     state: Optional[str] = None
     wake_score: Optional[float] = None
+    cmd: Optional[str] = None
+    vx: float = 0.0
+    vy: float = 0.0
+    wz: float = 0.0
+    duration_ms: int = 0
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any], frozen_targets: Set[str]) -> "TaskCmd":
-        intent = str(payload.get("intent", "")).upper().strip()
+        raw_cmd = ""
+        for key in ("cmd", "action", "intent", "command"):
+            raw_cmd = str(payload.get(key) or "").strip()
+            if raw_cmd:
+                break
+        raw_cmd_l = raw_cmd.lower()
+        if raw_cmd_l == "manual_drive":
+            intent = "MANUAL_DRIVE"
+        elif raw_cmd_l == "manual_stop":
+            intent = "MANUAL_STOP"
+        else:
+            intent = str(payload.get("intent", "")).upper().strip()
         if intent not in ALLOWED_INTENTS:
             raise ProtocolError(f"非法 intent: {intent!r}")
         confidence = float(payload.get("confidence", 0.0))
@@ -413,8 +444,7 @@ class TaskCmd:
             target = str(target or "").strip()
             if not target:
                 raise ProtocolError("FIND 缺少 target")
-            if target not in frozen_targets:
-                raise ProtocolError(f"target 不在冻结词表中: {target}")
+            _ = frozen_targets
         else:
             target = None
         return cls(
@@ -432,6 +462,11 @@ class TaskCmd:
             high_priority=bool(payload.get("high_priority", False)),
             state=(str(payload.get("state")).strip() if payload.get("state") is not None else None),
             wake_score=(float(payload["wake_score"]) if payload.get("wake_score") is not None else None),
+            cmd=(raw_cmd_l or None),
+            vx=_optional_float(payload.get("vx", payload.get("vx_mps", 0.0)), 0.0),
+            vy=_optional_float(payload.get("vy", payload.get("vy_mps", 0.0)), 0.0),
+            wz=_optional_float(payload.get("wz", payload.get("wz_radps", 0.0)), 0.0),
+            duration_ms=_optional_int(payload.get("duration_ms", 0), 0),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -444,9 +479,19 @@ class TaskAck:
     cmd_id: str
     accepted: bool
     state: str
+    ok: bool = False
+    cmd: str = ""
+    message: str = ""
     session_id: str = ""
     epoch: int = 0
     reason: str = ""
+    target: str = ""
+    raw_target: str = ""
+    canonical_target: str = ""
+    class_name: str = ""
+    class_id: Optional[int] = None
+    task_id: str = ""
+    supported_targets: Optional[List[str]] = None
     source: str = "orchestrator"
     type: str = "task_ack"
 
@@ -471,6 +516,12 @@ class TableEdgeObs:
     vision_start_ts: Optional[float] = None
     vision_done_ts: Optional[float] = None
     obs_publish_ts: Optional[float] = None
+    frame_capture_mono_ns: Optional[int] = None
+    capture_mono_ns: Optional[int] = None
+    camera_capture_done_mono_ns: Optional[int] = None
+    obs_publish_mono_ns: Optional[int] = None
+    obs_recv_mono_ns: Optional[int] = None
+    trace_id: Optional[str] = None
     obs_recv_ts: Optional[float] = None
     control_ts: Optional[float] = None
     obs_seq: Optional[int] = None
@@ -533,6 +584,19 @@ class TableEdgeObs:
     table_roi_depth_bbox_norm: Optional[list] = None
     table_roi_depth_coord_space: Optional[str] = None
     table_roi_depth_mapping_source: Optional[str] = None
+    table_roi_source: Optional[str] = None
+    table_roi_latched: bool = False
+    table_roi_latch_age_s: Optional[float] = None
+    table_roi_xyxy: Optional[list] = None
+    final_fixed_roi_active: bool = False
+    final_fixed_roi_xyxy: Optional[list] = None
+    final_fixed_roi_depth_valid: bool = False
+    final_fixed_roi_depth_mean: Optional[float] = None
+    final_fixed_roi_depth_median: Optional[float] = None
+    final_fixed_roi_depth_p10: Optional[float] = None
+    final_fixed_roi_depth_sample_count: Optional[int] = None
+    final_fixed_roi_depth_valid_ratio: Optional[float] = None
+    final_fixed_roi_depth_invalid_reason: Optional[str] = None
     edge_angle_rad: Optional[float] = None
     edge_k: Optional[float] = None
     edge_b: Optional[float] = None
@@ -679,6 +743,11 @@ class TableEdgeObs:
             vision_start_ts=_pick_optional_float(payload, "vision_start_ts"),
             vision_done_ts=_pick_optional_float(payload, "vision_done_ts"),
             obs_publish_ts=_pick_optional_float(payload, "obs_publish_ts", "publish_ts"),
+            frame_capture_mono_ns=_pick_optional_int(payload, "frame_capture_mono_ns"),
+            capture_mono_ns=_pick_optional_int(payload, "capture_mono_ns", "frame_capture_mono_ns"),
+            camera_capture_done_mono_ns=_pick_optional_int(payload, "camera_capture_done_mono_ns"),
+            obs_publish_mono_ns=_pick_optional_int(payload, "obs_publish_mono_ns"),
+            trace_id=_pick_optional_str(payload, "trace_id"),
             obs_recv_ts=_pick_optional_float(payload, "obs_recv_ts"),
             control_ts=_pick_optional_float(payload, "control_ts"),
             obs_seq=_pick_optional_int(payload, "obs_seq"),
@@ -741,6 +810,19 @@ class TableEdgeObs:
             table_roi_depth_bbox_norm=_pick_optional_bbox(payload, "table_roi_depth_bbox_norm"),
             table_roi_depth_coord_space=_pick_optional_str(payload, "table_roi_depth_coord_space"),
             table_roi_depth_mapping_source=_pick_optional_str(payload, "table_roi_depth_mapping_source"),
+            table_roi_source=_pick_optional_str(payload, "table_roi_source", "roi_source"),
+            table_roi_latched=_pick_optional_bool(payload, "table_roi_latched") is True,
+            table_roi_latch_age_s=_pick_optional_float(payload, "table_roi_latch_age_s"),
+            table_roi_xyxy=_pick_optional_bbox(payload, "table_roi_xyxy", "table_edge_roi", "depth_edge_roi"),
+            final_fixed_roi_active=bool(payload.get("final_fixed_roi_active", False)),
+            final_fixed_roi_xyxy=_pick_optional_bbox(payload, "final_fixed_roi_xyxy"),
+            final_fixed_roi_depth_valid=bool(payload.get("final_fixed_roi_depth_valid", False)),
+            final_fixed_roi_depth_mean=_pick_optional_float(payload, "final_fixed_roi_depth_mean", "fixed_roi_depth_mean"),
+            final_fixed_roi_depth_median=_pick_optional_float(payload, "final_fixed_roi_depth_median", "fixed_roi_depth_median"),
+            final_fixed_roi_depth_p10=_pick_optional_float(payload, "final_fixed_roi_depth_p10"),
+            final_fixed_roi_depth_sample_count=_pick_optional_int(payload, "final_fixed_roi_depth_sample_count"),
+            final_fixed_roi_depth_valid_ratio=_pick_optional_float(payload, "final_fixed_roi_depth_valid_ratio", "fixed_roi_valid_ratio"),
+            final_fixed_roi_depth_invalid_reason=_pick_optional_str(payload, "final_fixed_roi_depth_invalid_reason"),
             edge_angle_rad=_pick_optional_float(payload, "edge_angle_rad"),
             edge_k=_pick_optional_float(payload, "edge_k"),
             edge_b=_pick_optional_float(payload, "edge_b"),
@@ -844,8 +926,13 @@ class TargetObs:
     ts: float
     found: bool
     target: Optional[str] = None
+    raw_target: Optional[str] = None
+    canonical_target: Optional[str] = None
+    expected_class_name: Optional[str] = None
+    expected_class_id: Optional[int] = None
     target_found: Optional[bool] = None
     matched_cls: Optional[str] = None
+    matched_class_id: Optional[int] = None
     matched_conf: Optional[float] = None
     matched_bbox: Optional[list] = None
     matched_center: Optional[Dict[str, Any]] = None
@@ -855,6 +942,7 @@ class TargetObs:
     matched_rank_in_all_boxes: Optional[int] = None
     num_target_candidates: Optional[int] = None
     all_candidate_classes: Optional[list] = None
+    target_candidates: Optional[list] = None
     confidence: Optional[float] = None
     x_norm: Optional[float] = None
     y_norm: Optional[float] = None
@@ -885,6 +973,17 @@ class TargetObs:
     obstacle_distance_m: Optional[float] = None
     vision_status: Optional[str] = None
     source: Optional[str] = None
+    frame_id: Optional[int] = None
+    obs_seq: Optional[int] = None
+    trace_id: Optional[str] = None
+    capture_mono_ns: Optional[int] = None
+    frame_capture_ts: Optional[float] = None
+    target_done_mono_ns: Optional[int] = None
+    freshness_ms: Optional[float] = None
+    freshness: Optional[str] = None
+    camera_capture_done_mono_ns: Optional[int] = None
+    obs_publish_mono_ns: Optional[int] = None
+    obs_recv_mono_ns: Optional[int] = None
     type: str = "target_obs"
 
     @classmethod
@@ -897,11 +996,16 @@ class TargetObs:
         if cy_value is None and isinstance(matched_center_full_norm, dict):
             cy_value = matched_center_full_norm.get("cy")
         return cls(
-            ts=_payload_ts(payload),
+            ts=float(_pick_optional_float(payload, "frame_capture_ts", "capture_ts", "obs_ts", "ts") or _payload_ts(payload)),
             found=bool(payload.get("target_found", payload.get("found", False))),
             target=(str(payload.get("target")).strip() if payload.get("target") is not None else None),
+            raw_target=_pick_optional_str(payload, "raw_target"),
+            canonical_target=_pick_optional_str(payload, "canonical_target"),
+            expected_class_name=_pick_optional_str(payload, "expected_class_name", "class_name"),
+            expected_class_id=_pick_optional_int(payload, "expected_class_id", "class_id"),
             target_found=_pick_optional_bool(payload, "target_found"),
             matched_cls=_pick_optional_str(payload, "matched_cls", "target_cls"),
+            matched_class_id=_pick_optional_int(payload, "matched_class_id", "matched_cls_id", "target_class_id"),
             matched_conf=_pick_optional_float(payload, "matched_conf", "target_conf"),
             matched_bbox=payload.get("matched_bbox"),
             matched_center=matched_center,
@@ -911,6 +1015,7 @@ class TargetObs:
             matched_rank_in_all_boxes=_pick_optional_int(payload, "matched_rank_in_all_boxes"),
             num_target_candidates=_pick_optional_int(payload, "num_target_candidates"),
             all_candidate_classes=payload.get("all_candidate_classes"),
+            target_candidates=payload.get("target_candidates") or payload.get("candidates") or payload.get("candidate_targets"),
             confidence=_pick_optional_float(payload, "matched_conf", "confidence", "score"),
             x_norm=_pick_optional_float(payload, "x_norm"),
             y_norm=_pick_optional_float(payload, "y_norm"),
@@ -941,6 +1046,16 @@ class TargetObs:
             obstacle_distance_m=_pick_optional_float(payload, "obstacle_distance_m", "obstacle_distance", "front_obstacle_m"),
             vision_status=payload.get("vision_status", payload.get("status")),
             source=_pick_optional_str(payload, "source"),
+            frame_id=_pick_optional_int(payload, "frame_id", "camera_frame_seq"),
+            obs_seq=_pick_optional_int(payload, "obs_seq", "seq"),
+            trace_id=_pick_optional_str(payload, "trace_id"),
+            capture_mono_ns=_pick_optional_int(payload, "capture_mono_ns", "frame_capture_mono_ns"),
+            frame_capture_ts=_pick_optional_float(payload, "frame_capture_ts", "capture_ts"),
+            target_done_mono_ns=_pick_optional_int(payload, "target_done_mono_ns", "inference_done_mono_ns"),
+            freshness_ms=_pick_optional_float(payload, "freshness_ms", "age_ms"),
+            freshness=_pick_optional_str(payload, "freshness"),
+            camera_capture_done_mono_ns=_pick_optional_int(payload, "camera_capture_done_mono_ns"),
+            obs_publish_mono_ns=_pick_optional_int(payload, "obs_publish_mono_ns"),
             type=str(payload.get("type", "target_obs") or "target_obs"),
         )
 
@@ -1069,6 +1184,7 @@ class ArmCommand:
     roll_deg: float
     claw_deg: float
     time_ms: int = 500
+    command: str = "POSE"
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -1080,6 +1196,7 @@ class ArmResponse:
     message: str = ""
     raw_line: str = ""
     ts: float = 0.0
+    parsed_status: str = ""
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "ArmResponse":
@@ -1088,21 +1205,48 @@ class ArmResponse:
             message=str(payload.get("message", "")),
             raw_line=str(payload.get("raw_line", "")),
             ts=float(payload.get("ts", now_ts())),
+            parsed_status=str(payload.get("parsed_status", "")),
         )
 
     def to_dict(self) -> Dict[str, Any]:
         return {"ok": self.ok, "message": self.message, "raw_line": self.raw_line, "ts": self.ts}
 
 
-def make_task_ack(cmd: TaskCmd, accepted: bool, state: str, reason: str = "") -> Dict[str, Any]:
+def make_task_ack(
+    cmd: TaskCmd,
+    accepted: bool,
+    state: str,
+    reason: str = "",
+    *,
+    raw_target: str = "",
+    canonical_target: str = "",
+    class_name: str = "",
+    class_id: Optional[int] = None,
+    task_id: str = "",
+    supported_targets: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    cmd_name = str(cmd.cmd or cmd.intent or "").strip().lower()
+    message = str(reason or "")
+    if accepted and cmd_name in {"manual_drive", "manual_stop"} and "accepted" not in message:
+        message = f"{cmd_name} accepted"
     return TaskAck(
         ts=now_ts(),
         cmd_id=cmd.cmd_id,
         session_id=cmd.session_id,
         epoch=cmd.epoch,
         accepted=bool(accepted),
+        ok=bool(accepted),
+        cmd=cmd_name,
+        message=message,
         state=str(state),
         reason=str(reason or ""),
+        target=str(canonical_target or class_name or cmd.target or ""),
+        raw_target=str(raw_target or cmd.target or ""),
+        canonical_target=str(canonical_target or ""),
+        class_name=str(class_name or ""),
+        class_id=class_id,
+        task_id=str(task_id or ""),
+        supported_targets=list(supported_targets or []) if supported_targets is not None else None,
     ).to_dict()
 
 
@@ -1165,7 +1309,15 @@ def make_grasp_req(
     req_id: str = "",
     *,
     op: str = "START",
+    payload: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    req_payload = {
+        "class_id": int(class_id),
+        "remote_grasp": True,
+        "need_depth": True,
+    }
+    if isinstance(payload, dict):
+        req_payload.update(payload)
     return make_vision_req(
         target=target,
         session_id=session_id,
@@ -1174,11 +1326,7 @@ def make_grasp_req(
         op=op,
         stage="GRASP",
         mode_hint="GRASP_REMOTE",
-        payload={
-            "class_id": int(class_id),
-            "remote_grasp": True,
-            "need_depth": True,
-        },
+        payload=req_payload,
     )
 
 

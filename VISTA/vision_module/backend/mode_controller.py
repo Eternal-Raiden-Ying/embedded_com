@@ -150,6 +150,15 @@ class ModeController:
                     "kind": str(remote_profile.kind).strip().lower(),
                     "action": str(remote_profile.action).strip().lower(),
                     "max_retries": int(remote_profile.max_retries),
+                    "init_reason": str(remote_profile.init_reason or "").strip().lower(),
+                    # ModeController intentionally has no global config reference.
+                    # Mode defaults attach this canonical runtime value to every
+                    # remote profile, including disabled local modes.
+                    "remote_init_auto_enabled": bool(
+                        (remote_profile.metadata or {}).get(
+                            "remote_init_auto_enabled", False
+                        )
+                    ),
                     "base_url": remote_profile.base_url,
                     "command": remote_profile.command,
                     "require_depth": bool(remote_profile.require_depth),
@@ -158,13 +167,16 @@ class ModeController:
                     "depth_encoding": str(remote_profile.depth_encoding).strip().lower(),
                     "rgb_quality": int(remote_profile.rgb_quality),
                     "depth_compression": int(remote_profile.depth_compression),
+                    "capture_warmup_frames": int(remote_profile.capture_warmup_frames),
+                    "capture_warmup_timeout_s": float(remote_profile.capture_warmup_timeout_s),
+                    "expected_rgb_shape": list(remote_profile.expected_rgb_shape or ()),
+                    "expected_depth_shape": list(remote_profile.expected_depth_shape or ()),
                     "metadata": dict(remote_profile.metadata or {}),
                 },
                 "table_edge": {
                     "enabled": bool(profile.table_edge.enabled),
                     "detector_mode": str(profile.table_edge.detector_mode),
                     "update_hz": float(profile.table_edge.update_hz),
-                    "light_stride": int(profile.table_edge.light_stride),
                     "fast_plane_stride": int(profile.table_edge.fast_plane_stride),
                     "depth_stride": int(profile.table_edge.depth_stride),
                     "require_yolo_confirm": bool(profile.table_edge.require_yolo_confirm),

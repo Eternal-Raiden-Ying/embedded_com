@@ -1,0 +1,39 @@
+{
+  "camera_type": "realsense",
+  "align_mode": "depth",
+  "depth": {
+    "width": 1280,
+    "height": 720,
+    "fx": 640.3674926757812,
+    "fy": 640.3674926757812,
+    "cx": 635.0687255859375,
+    "cy": 360.5285949707031,
+    "model": "distortion.brown_conrady",
+    "coeffs": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "color": {
+    "width": 1280,
+    "height": 720,
+    "fx": 906.9821166992188,
+    "fy": 905.0339965820312,
+    "cx": 646.3739624023438,
+    "cy": 369.0766296386719,
+    "model": "distortion.inverse_brown_conrady",
+    "coeffs": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "depth_scale": 0.0010000000474974513,
+  "factor_depth": 999.999952502551,
+  "description": "Camera intrinsics from raw depth frame (matching graspnet model processing)"
+}
