@@ -1,5 +1,8 @@
 profile: "sc171_voice_phone_tts_dryrun"
 runtime_overrides:
+  vision:
+    req_in: {transport: "disabled"}
+    obs_out: {transport: "disabled"}
   orchestrator:
     runtime:
       config_profile: "sc171_voice_phone_tts_dryrun"
@@ -19,8 +22,9 @@ runtime_overrides:
       transport: "uds"
       ipc_socket_path: "/tmp/robot_stack/mobile_tts_event.sock"
   gateway:
-    command_in: {transport: "mqtt"}
-    status_out: {transport: "mqtt"}
+    # MQTT is handled by MqttAdapter; these are framed-msgpack IPC endpoints.
+    command_in: {transport: "disabled"}
+    status_out: {transport: "disabled"}
     orchestrator_task_cmd_out:
       transport: "uds"
       ipc_socket_path: "/tmp/robot_stack/task_cmd.sock"
@@ -33,6 +37,7 @@ runtime_overrides:
       ipc_socket_path: "/tmp/robot_stack/tts_playback.sock"
     mqtt:
       enabled: true
+      accept_commands: true
       tts_qos: 1
       topics:
         tts: "robot/v1/SC171/mobile/tts"
