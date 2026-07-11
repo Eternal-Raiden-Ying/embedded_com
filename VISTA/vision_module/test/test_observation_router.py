@@ -137,7 +137,9 @@ def test_skip_and_drop_counts_update() -> None:
     assert router.metrics.obs_drop_count == 1
 
     second = router.route(vision_obs=_vision_obs(), frame_meta={"frame_seq": 1, "frame_capture_ts": 100.0}, now=100.2)
-    assert second.control_obs is not None
-    assert second.control_obs["metrics"]["obs_skip_count"] == 1
-    assert second.control_obs["metrics"]["obs_drop_count"] == 1
-    assert second.control_obs["metrics"]["same_frame_reuse_count"] == 1
+    assert second.control_obs is None
+    assert second.skip_reason == "same_observation"
+    assert router.metrics.duplicate_obs_suppressed == 1
+    assert router.metrics.obs_skip_count == 2
+    assert router.metrics.obs_drop_count == 1
+    assert router.metrics.same_frame_reuse_count == 0

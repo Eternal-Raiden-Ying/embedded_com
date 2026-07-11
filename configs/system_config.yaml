@@ -161,6 +161,16 @@ vision:
     extended_roi_max_width_px: 200
     extended_roi_max_height_px: 120
     extended_roi_max_area_px: 24000
+    fallback_roi_lower_band_center_ratio: 0.75
+    fallback_roi_width_px: 160
+    fallback_roi_height_px: 90
+    depth_margin_extension_enable: true
+    bbox_center_edge_band_x_ratio: 0.12
+    bbox_center_edge_band_y_ratio: 0.12
+    depth_margin_max_extend_left_px: 40
+    depth_margin_max_extend_right_px: 40
+    depth_margin_max_extend_bottom_px: 28
+    depth_margin_max_extend_top_px: 0
     adaptive_sampling_enable: true # Bound dynamic ROI sampling work per frame
     adaptive_target_sample_count: 300 # Maximum regular-grid samples before candidate cap
     adaptive_min_stride: 4 # Minimum effective regular-grid stride
@@ -185,6 +195,10 @@ vision:
     fast_candidate_point_cap: 1800 # Cap input raw points
     fast_front_edge_col_step: 2 # Column stride for edge search
     fast_front_edge_row_step: 2 # Row stride for edge search
+    plane_fit_fast_path_enable: true
+    plane_fit_fast_accept_inlier_ratio: 0.75
+    plane_fit_fast_accept_residual_scale: 1.0
+    plane_fit_ransac_max_iterations: 20
     depth_stride: 2 # Column and row downsample stride for fast plane depth map
     detector_mode: "fast_plane_only" # Online table-edge detector mode
     update_hz: 5.0 # Perception thread loop frequency
@@ -403,6 +417,7 @@ orchestrator:
     final_fixed_roi_stop_stable_count_required: 3 # Fixed ROI stop frames required
     final_slow_probe_vx_mps: 0.05 # Final slow probe forward speed
     remote_init_min_interval_s: 30.0 # Minimum interval between remote init warmups
+    remote_init_auto_enabled: false # Disable automatic remote /init warmup; explicit GRASP init remains enabled
     near_start_final_enable: true # Allow near-start handoff into final
     near_start_final_depth_m: 0.58 # Near-start depth threshold
     near_start_align_enable: true # Allow brief near-start yaw/table align

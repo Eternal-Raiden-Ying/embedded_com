@@ -50,6 +50,10 @@ class OpenCVPreviewSink(PreviewSink):
         self.debug_points_enabled = False
         self.legend_level = "compact"
         self.preview_mode = "light"
+        self.light_depth_min_m = 0.20
+        self.light_depth_max_m = 2.00
+        self.light_output_width = 848
+        self.light_output_height = 480
         self._last_displayed_frame_id: Optional[int] = None
         self._depth_colormap_cache: Optional[np.ndarray] = None
         self._depth_colormap_cache_key: Optional[Tuple[int, Tuple[int, int]]] = None
@@ -79,6 +83,7 @@ class OpenCVPreviewSink(PreviewSink):
             "table_bbox_enabled",
             "mock_table_bbox",
             "preview_mode",
+            "light_depth_min_m", "light_depth_max_m", "light_output_width", "light_output_height",
         ):
             if key in kwargs:
                 value = kwargs[key]
@@ -188,10 +193,36 @@ class OpenCVPreviewSink(PreviewSink):
         if layout not in self._supported_layouts:
             layout = "rgb_minimal"
         if self.preview_mode == "light":
-            layout = "rgb_minimal"
+            layout = "depth_roi_light"
         self.layout = layout
+        light_direct = layout == "depth_roi_light"
 
-        if layout == "rgb_yolo_edge_overlay":
+        if light_direct:
+            depth = frames.get("depth") if frames else frame.image
+            if not isinstance(depth, np.ndarray) or depth.size == 0:
+                canvas = np.zeros((int(self.light_output_height), int(self.light_output_width), 3), dtype=np.uint8)
+            else:
+                raw = depth[..., 0] if depth.ndim == 3 else depth
+                normalize_start = time.monotonic_ns()
+                min_raw, max_raw = float(self.light_depth_min_m) * 1000.0, float(self.light_depth_max_m) * 1000.0
+                clipped = np.clip(raw.astype(np.float32, copy=False), min_raw, max_raw)
+                gray = cv2.convertScaleAbs(clipped, alpha=255.0 / max(1.0, max_raw - min_raw), beta=-min_raw * 255.0 / max(1.0, max_raw - min_raw))
+                gray[raw <= 0] = 0
+                self._add_timing("preview_depth_normalize_ms", (time.monotonic_ns() - normalize_start) / 1_000_000.0)
+                color_start = time.monotonic_ns()
+                canvas = cv2.applyColorMap(gray, cv2.COLORMAP_TURBO)
+                canvas[raw <= 0] = 0
+                self._add_timing("preview_colormap_ms", (time.monotonic_ns() - color_start) / 1_000_000.0)
+                roi = table_edge.get("selected_roi_xyxy") or table_edge.get("depth_edge_roi") or table_edge.get("table_edge_roi") or table_edge.get("edge_roi")
+                parsed = self._parse_roi(roi)
+                if parsed is not None:
+                    draw_start = time.monotonic_ns()
+                    cv2.rectangle(canvas, (parsed[0], parsed[1]), (parsed[2], parsed[3]), (0, 255, 255), 2)
+                    self._add_timing("preview_roi_draw_ms", (time.monotonic_ns() - draw_start) / 1_000_000.0)
+                resize_start = time.monotonic_ns()
+                canvas = cv2.resize(canvas, (int(self.light_output_width), int(self.light_output_height)), interpolation=cv2.INTER_NEAREST)
+                self._add_timing("preview_resize_ms", (time.monotonic_ns() - resize_start) / 1_000_000.0)
+        elif layout == "rgb_yolo_edge_overlay":
             rgb_w = max(480, int(self.canvas_w * 0.68))
             info_w = max(280, self.canvas_w - rgb_w)
             target_metadata = dict(metadata)
@@ -236,11 +267,11 @@ class OpenCVPreviewSink(PreviewSink):
             title = "RGB HOT PREVIEW" if layout == "rgb_hot_preview" else "RGB MINIMAL"
             canvas = self._make_minimal_rgb_panel(frames.get("rgb") if frames else frame.image, minimal_metadata, (self.canvas_w, self.canvas_h), title=title)
 
-        if self.canvas_w > 0 and self.canvas_h > 0 and canvas.shape[:2] != (self.canvas_h, self.canvas_w):
+        if not light_direct and self.canvas_w > 0 and self.canvas_h > 0 and canvas.shape[:2] != (self.canvas_h, self.canvas_w):
             resize_start_ns = time.monotonic_ns()
             canvas = cv2.resize(canvas, (self.canvas_w, self.canvas_h), interpolation=cv2.INTER_AREA)
             self._add_timing("preview_resize_ms", (time.monotonic_ns() - resize_start_ns) / 1_000_000.0)
-        if self.scale > 0 and abs(self.scale - 1.0) > 1e-3:
+        if not light_direct and self.scale > 0 and abs(self.scale - 1.0) > 1e-3:
             resize_start_ns = time.monotonic_ns()
             canvas = cv2.resize(canvas, None, fx=self.scale, fy=self.scale, interpolation=cv2.INTER_AREA)
             self._add_timing("preview_resize_ms", (time.monotonic_ns() - resize_start_ns) / 1_000_000.0)
@@ -294,8 +325,9 @@ class OpenCVPreviewSink(PreviewSink):
         self._last_frame_ts = float(frame.ts or 0.0)
         self._update_fps()
         wait_start_ns = time.monotonic_ns()
-        key = cv2.waitKey(1)
-        self._add_timing("preview_waitkey_ms", (time.monotonic_ns() - wait_start_ns) / 1_000_000.0)
+        poll = getattr(cv2, "pollKey", None)
+        key = poll() if callable(poll) else cv2.waitKey(1)
+        self._add_timing("preview_event_pump_ms", (time.monotonic_ns() - wait_start_ns) / 1_000_000.0)
         timing = dict(self._timing_frame or {})
         timing["preview_total_ms"] = (time.monotonic_ns() - total_start_ns) / 1_000_000.0
         timing["preview_fps"] = float(self._fps)

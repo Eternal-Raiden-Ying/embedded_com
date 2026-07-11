@@ -85,6 +85,7 @@ class PreviewTableBboxTest(unittest.TestCase):
         os.environ["VISTA_TABLE_BBOX_ENABLE"] = "1"
         os.environ.pop("VISTA_MOCK_TABLE_BBOX", None)
         sink = RecordingSink()
+        sink.preview_mode = "debug"
         sink._make_rgb_panel(
             np.zeros((100, 100, 3), dtype=np.uint8),
             {

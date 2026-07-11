@@ -641,6 +641,8 @@ class StageController:
         )
 
     def _handle_remote_init_warmup(self, req: VisionReq, payload: Dict[str, Any]) -> Optional[StageOutput]:
+        if not bool(getattr(self.cfg.runtime, "remote_init_auto_enabled", False)):
+            return StageOutput(signals={"remote_init_warmup": False, "remote_init_result": {"ok": True, "skipped": True, "reason": "remote_init_auto_disabled"}})
         min_interval_s = float(payload.get("remote_init_min_interval_s", 30.0) or 30.0)
         remote_payload: Dict[str, Any] = {}
         if self._mode_controller is not None:

@@ -248,7 +248,7 @@ class TableEdgeManagerDynamicRoiTest(unittest.TestCase):
         self.assertEqual(roi["table_bbox"], [400, 380, 620, 620])
         self.assertEqual(roi["table_center_norm"], [0.796875, 0.78125])
         self.assertEqual(roi["table_quadrant"], "RB")
-        self.assertEqual(roi["roi_source"], "extended")
+        self.assertEqual(roi["roi_source"], "primary")
         self.assertEqual(roi["rgb_fov_depth_xyxy"], [80, 60, 560, 420])
         self.assertGreaterEqual(roi["depth_edge_roi"][0], 80)
         self.assertLessEqual(roi["depth_edge_roi"][2], 560)
@@ -268,15 +268,15 @@ class TableEdgeManagerDynamicRoiTest(unittest.TestCase):
         roi = self.manager._select_roi(self.depth)
         self.assertEqual(roi["table_quadrant"], "LB")
         self.assertEqual(roi["depth_edge_roi"], first["depth_edge_roi"])
-        self.assertEqual(roi["roi_source"], "primary")
+        self.assertEqual(roi["roi_source"], "latched_table_roi")
 
     def test_no_bbox_and_no_history_falls_back_to_static_roi(self):
         self.scheduler.local = {"rgb_shape": (640, 640, 3), "infer_boxes": []}
         roi = self.manager._select_roi(self.depth)
         self.assertIsNone(roi["table_bbox"])
         self.assertIsNone(roi["table_quadrant"])
-        self.assertIsNone(roi["depth_edge_roi"])
-        self.assertEqual(roi["roi_source"], "primary")
+        self.assertEqual(roi["roi_source"], "fallback_fov_lower_band")
+        self.assertEqual(roi["depth_edge_roi"], [240, 285, 400, 375])
 
     def test_file_config_roi_preset_overrides_dynamic_roi_selection(self):
         cfg = VisionServiceConfig()
@@ -286,7 +286,7 @@ class TableEdgeManagerDynamicRoiTest(unittest.TestCase):
         manager.bind_runtime(self.scheduler, lambda: 1)
         self.scheduler.local = {"rgb_shape": (640, 640, 3), "infer_boxes": []}
         roi = manager._select_roi(self.depth)
-        self.assertEqual(roi["roi_source"], "primary")
+        self.assertEqual(roi["roi_source"], "preset:center_lower")
         self.assertEqual(roi["roi_preset"], "center_lower")
         self.assertEqual(roi["depth_edge_roi"], [160, 240, 480, 408])
 

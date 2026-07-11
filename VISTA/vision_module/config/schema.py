@@ -30,6 +30,7 @@ class RuntimeConfig:
     loop_hz: float = 12.0
     send_hz: float = 10.0
     track_local_send_hz: float = 10.0
+    remote_init_auto_enabled: bool = False
     stale_req_s: float = 3.0
     hot_standby_s: float = 30.0
     keep_preview_after_stop: bool = True
@@ -209,6 +210,16 @@ class TableEdgeConfig:
     extended_roi_max_width_px: int = 200
     extended_roi_max_height_px: int = 120
     extended_roi_max_area_px: int = 24000
+    fallback_roi_lower_band_center_ratio: float = 0.75
+    fallback_roi_width_px: int = 160
+    fallback_roi_height_px: int = 90
+    depth_margin_extension_enable: bool = True
+    bbox_center_edge_band_x_ratio: float = 0.12
+    bbox_center_edge_band_y_ratio: float = 0.12
+    depth_margin_max_extend_left_px: int = 40
+    depth_margin_max_extend_right_px: int = 40
+    depth_margin_max_extend_bottom_px: int = 28
+    depth_margin_max_extend_top_px: int = 0
     adaptive_sampling_enable: bool = True
     adaptive_target_sample_count: int = 300
     adaptive_min_stride: int = 4
@@ -234,6 +245,10 @@ class TableEdgeConfig:
     fast_candidate_point_cap: int = 1800
     fast_front_edge_col_step: int = 2
     fast_front_edge_row_step: int = 2
+    plane_fit_fast_path_enable: bool = True
+    plane_fit_fast_accept_inlier_ratio: float = 0.75
+    plane_fit_fast_accept_residual_scale: float = 1.0
+    plane_fit_ransac_max_iterations: int = 20
     depth_stride: int = 2
     detector_mode: str = "fast_plane_only"
     update_hz: float = 10.0
@@ -282,6 +297,10 @@ class PreviewConfig:
     show_depth: bool = True
     show_edge: bool = True
     destroy_all_on_close: bool = True
+    light_depth_min_m: float = 0.20
+    light_depth_max_m: float = 2.00
+    light_output_width: int = 848
+    light_output_height: int = 480
 
 
 @dataclass

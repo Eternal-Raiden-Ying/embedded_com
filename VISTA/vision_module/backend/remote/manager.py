@@ -300,6 +300,7 @@ class RemoteManager:
         self._service_init_last_ts: Optional[float] = None
         self._service_init_pending = False
         self._service_init_inflight = False
+        self._remote_init_auto_enabled = False
         self._warmup_keepalive_until = 0.0
         self._last_result: Dict[str, Any] = {
             "enabled": False,
@@ -374,9 +375,15 @@ class RemoteManager:
             "service_init_last_error": str(self._service_init_last_error or ""),
             "service_init_last_ok": bool(self._service_init_last_ok),
             "service_init_last_ts": self._service_init_last_ts,
+            "remote_init_auto_enabled": bool(self._remote_init_auto_enabled),
         }
 
     def _schedule_service_init(self) -> None:
+        if not bool(self._remote_init_auto_enabled):
+            if not bool(getattr(self, "_auto_init_skip_logged", False)):
+                self._auto_init_skip_logged = True
+                self._log("info", "[REMOTE_INIT][AUTO_INIT_SKIPPED] config_disabled")
+            return
         if not self.enabled or not self._service_has_base_url():
             return
         if self._service_init_confirmed or self._service_init_inflight:
@@ -493,9 +500,15 @@ class RemoteManager:
                 "remote_rgb_capture_wait_timeout_s": max(0.1, float(profile.get("remote_rgb_capture_wait_timeout_s", next_profile.get("remote_rgb_capture_wait_timeout_s", 2.0)) or 2.0)),
                 "remote_rgb_min_luma_mean": max(0.0, float(profile.get("remote_rgb_min_luma_mean", next_profile.get("remote_rgb_min_luma_mean", 40.0)) or 0.0)),
                 "remote_rgb_require_fresh_after_mode_enter": bool(profile.get("remote_rgb_require_fresh_after_mode_enter", next_profile.get("remote_rgb_require_fresh_after_mode_enter", True))),
+                "remote_init_auto_enabled": bool(profile.get("remote_init_auto_enabled", next_profile.get("remote_init_auto_enabled", False))),
+                "init_reason": str(profile.get("init_reason", next_profile.get("init_reason", "")) or "").strip().lower(),
             }
         )
         self._runtime_profile = next_profile
+        if "remote_init_auto_enabled" in profile:
+            self._remote_init_auto_enabled = bool(profile.get("remote_init_auto_enabled"))
+        if not self._remote_init_auto_enabled:
+            self._service_init_pending = False
         next_base_url = str(next_profile.get("base_url") or "").strip()
         if self.client is not None and next_profile.get("base_url"):
             try:
@@ -505,8 +518,8 @@ class RemoteManager:
         if not next_base_url:
             self._reset_service_init_state()
         elif next_base_url != previous_base_url:
-            self._reset_service_init_state(pending=self.enabled)
-        elif self.enabled and not self._service_init_confirmed and self._service_init_attempts <= 0:
+            self._reset_service_init_state(pending=bool(self.enabled and next_profile.get("remote_init_auto_enabled", False)))
+        elif bool(next_profile.get("remote_init_auto_enabled", False)) and self.enabled and not self._service_init_confirmed and self._service_init_attempts <= 0:
             self._schedule_service_init()
 
     def bind_runtime(self, scheduler, generation_getter=None) -> None:
@@ -1466,6 +1479,9 @@ class RemoteManager:
         }
 
     def _run_service_init(self, *, timeout_s: float, source: str = "service", request_id: Optional[str] = None) -> Dict[str, Any]:
+        source_normalized = str(source or "").strip().lower()
+        if self._is_auto_init_reason(source_normalized) and not self._remote_init_auto_enabled:
+            return {"op": "INIT", "ok": True, "skipped": True, "reason": "remote_init_auto_disabled", "error_message": "", "status_code": None, "elapsed_ms": 0, "request_id": request_id, "source": source_normalized}
         client = self.client
         base_url = self._runtime_base_url()
         if not self.enabled or client is None:
@@ -1553,19 +1569,27 @@ class RemoteManager:
         kind = str(self._runtime_profile.get("kind") or "loop").strip().lower()
         action = str(self._runtime_profile.get("action") or "").strip().lower()
         max_retries = max(1, int(self._runtime_profile.get("max_retries", 1) or 1))
+        init_reason = str(self._runtime_profile.get("init_reason") or "").strip().lower()
 
         if kind == "task" and action:
             # ── task worker: execute action once, publish to action-specific route, exit ──
-            self._run_task(action=action, max_retries=max_retries)
+            if action == "init" and self._is_auto_init_reason(init_reason) and not self._remote_init_auto_enabled:
+                self._service_init_pending = False
+                self._update_result(action="init", state="init_skipped", ok=True, error="")
+            else:
+                self._run_task(action=action, max_retries=max_retries, init_reason=init_reason)
             self._publish_result(self._task_route(action), self._task_payload(action))
             self._runtime_running = False
             return
 
         # ── loop worker: no longer used (effects channel removed) ──
-        if self._service_init_pending:
+        if self._service_init_pending and bool(self._runtime_profile.get("remote_init_auto_enabled", False)):
             timeout_s = float(self._runtime_profile.get("timeout_s", 10.0) or 10.0)
             self._run_service_init(timeout_s=timeout_s, source="loop_init_compat")
             self._publish_result("remote_result", dict(self._last_result))
+        elif self._service_init_pending:
+            self._service_init_pending = False
+            self._schedule_service_init()  # emits the one-time disabled marker
         self.logger.warning("remote loop worker started but no effects producer exists; idling")
         self._worker_stop.wait(timeout=1.0)
 
@@ -1694,7 +1718,7 @@ class RemoteManager:
         self._update_result(action="predict", state="predict_failed", ok=False, error=reason, request_id=request_id)
         return None, None
 
-    def _run_task(self, *, action: str, max_retries: int) -> None:
+    def _run_task(self, *, action: str, max_retries: int, init_reason: str = "") -> None:
         """Execute a finite task action (init / predict / release).
 
         For ``init``: retry up to *max_retries* times.
@@ -1709,11 +1733,15 @@ class RemoteManager:
         timeout_s = float(self._runtime_profile.get("timeout_s", 10.0) or 10.0)
 
         if action == "init":
+            source = str(init_reason or "manual_explicit").strip().lower()
+            if self._is_auto_init_reason(source) and not self._remote_init_auto_enabled:
+                self._update_result(action="init", state="init_skipped", ok=True, error="")
+                return
             for attempt in range(1, max_retries + 1):
                 if self._worker_stop.is_set():
                     self._update_result(action="init", state="init_cancelled", ok=False, error="stopped")
                     return
-                self._run_service_init(timeout_s=timeout_s, source="task_init")
+                self._run_service_init(timeout_s=timeout_s, source=source)
                 if self._service_init_confirmed:
                     return
             self._update_result(action="init", state="init_exhausted", ok=False,
@@ -1925,7 +1953,8 @@ class RemoteManager:
                 except Exception:
                     pass
             self.client.open()
-        self._schedule_service_init()
+        if bool(self._remote_init_auto_enabled):
+            self._schedule_service_init()
         self._update_result(action="enable", state="enabled", ok=True)
         self._emit("enabled", enabled=True)
         return True
@@ -2007,3 +2036,8 @@ class RemoteManager:
             "runtime_profile": dict(self._runtime_profile or {}),
             "service_init": self._service_init_fields(),
         }
+    _AUTO_INIT_REASONS = frozenset({"startup_auto", "task_warmup", "orchestrator_task_start", "base_url_changed", "loop_init_compat"})
+
+    @classmethod
+    def _is_auto_init_reason(cls, reason: str) -> bool:
+        return str(reason or "").strip().lower() in cls._AUTO_INIT_REASONS

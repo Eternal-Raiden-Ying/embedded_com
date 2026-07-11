@@ -531,6 +531,13 @@ class RunLogger:
             "vision_publish_to_orch_recv_ms": [],
             "orch_recv_to_state_consume_ms": [],
             "same_obs_reuse_count": [],
+            "vision_obs_age_at_first_consume_ms": [],
+            "vision_obs_reuse_age_ms": [],
+            "vision_capture_to_publish_ms": [],
+            "vision_publish_to_recv_ms": [],
+            "vision_recv_to_first_consume_ms": [],
+            "vision_capture_to_first_consume_ms": [],
+            "observation_consumption": Counter(),
             "table_edge_ts": [],
             "reject_reasons": Counter(),
             "detector_mode": Counter(),
@@ -1104,6 +1111,12 @@ class RunLogger:
                 "vision_publish_interval_ms": "vision_publish_interval_ms",
                 "tick_interval_ms": "state_machine_tick_interval_ms",
                 "vision_obs_age_ms": "obs_total_age_ms",
+                "vision_obs_age_at_first_consume_ms": "vision_obs_age_at_first_consume_ms",
+                "vision_obs_reuse_age_ms": "vision_obs_reuse_age_ms",
+                "vision_capture_to_publish_ms": "vision_capture_to_publish_ms",
+                "vision_publish_to_recv_ms": "vision_publish_to_recv_ms",
+                "vision_recv_to_first_consume_ms": "vision_recv_to_first_consume_ms",
+                "vision_capture_to_first_consume_ms": "vision_capture_to_first_consume_ms",
                 "same_obs_reuse_count": "same_obs_reuse_count",
                 "vision_publish_to_orch_recv_ms": "vision_publish_to_orch_recv_ms",
                 "orch_recv_to_state_consume_ms": "orch_recv_to_state_consume_ms",
@@ -1112,6 +1125,10 @@ class RunLogger:
                 value = self._finite_float(payload.get(source_key))
                 if value is not None and stat_key in stats:
                     stats[stat_key].append(value)
+            for key in ("unique_obs_received", "fresh_obs_consumed", "reused_obs_consumed", "duplicate_obs_received"):
+                value = self._finite_float(payload.get(key))
+                if value is not None:
+                    stats["observation_consumption"][key] = max(stats["observation_consumption"].get(key, 0), int(value))
             preview = stats["preview"]
             for key in (
                 "preview_enabled",
@@ -1164,7 +1181,17 @@ class RunLogger:
             mono_ns = payload.get("mono_ns")
             if trace_id and mono_ns is not None:
                 events = self._trace_events.setdefault(trace_id, {})
-                events[event] = int(mono_ns)
+                canonical_one_shot = {
+                    "camera_capture_done", "vision_process_done", "obs_publish_done", "obs_recv",
+                    "state_machine_consume", "motion_decision_done", "command_map_done",
+                    "dryrun_write_done", "uart_write_done",
+                }
+                if event in canonical_one_shot:
+                    # A reused tick may emit the same trace id again; canonical
+                    # control latency is the first legal chain, never the last.
+                    events.setdefault(event, int(mono_ns))
+                else:
+                    events[event] = int(mono_ns)
                 if payload.get("state") is not None:
                     events["state"] = str(payload.get("state") or "")
                 if event == "obs_recv":
@@ -1176,14 +1203,9 @@ class RunLogger:
                         events["obs_publish_done"] = int(publish_ns)
                 if len(self._trace_events) > 4096:
                     self._trace_events.pop(next(iter(self._trace_events)), None)
-                if event == "camera_capture_start":
-                    self._critical_path_start_ns[trace_id] = int(mono_ns)
-                elif event in {"uart_write_done", "dryrun_write_done", "ack_wait_done", "ack_recv"}:
-                    start_ns = self._critical_path_start_ns.pop(trace_id, None)
-                    if start_ns is not None:
-                        self._perf_stats.setdefault("critical_path_latency_ms", []).append(
-                            max(0.0, (int(mono_ns) - start_ns) / 1_000_000.0)
-                        )
+                # Canonical critical-path statistics are derived once from the
+                # complete trace in _critical_path_summary(); do not create a
+                # second camera-start-to-write sample stream here.
         elif name in {"system_metrics", "system_resource"}:
             self._observe_numeric_fields(payload, self._resource_stats)
 
@@ -1293,6 +1315,13 @@ class RunLogger:
             "same_obs_reuse_count": self._stats_or_reason(
                 stats["same_obs_reuse_count"], "no_observation_reuse_samples"
             ),
+            "observation_consumption": dict(stats["observation_consumption"]),
+            "vision_obs_age_at_first_consume_ms": self._stats_or_reason(stats["vision_obs_age_at_first_consume_ms"], "no_fresh_consume_samples"),
+            "vision_obs_reuse_age_ms": self._stats_or_reason(stats["vision_obs_reuse_age_ms"], "no_reuse_samples"),
+            "vision_capture_to_publish_ms": self._stats_or_reason(stats["vision_capture_to_publish_ms"], "no_fresh_consume_samples"),
+            "vision_publish_to_recv_ms": self._stats_or_reason(stats["vision_publish_to_recv_ms"], "no_fresh_consume_samples"),
+            "vision_recv_to_first_consume_ms": self._stats_or_reason(stats["vision_recv_to_first_consume_ms"], "no_fresh_consume_samples"),
+            "vision_capture_to_first_consume_ms": self._stats_or_reason(stats["vision_capture_to_first_consume_ms"], "no_fresh_consume_samples"),
             "ipc_summary": dict(stats["ipc"].most_common(32)),
             "preview_summary": self._preview_run_summary(stats["preview"]),
             "cpu_summary": {
@@ -1301,6 +1330,7 @@ class RunLogger:
             },
             "main_warnings_reject_reasons": dict(stats["reject_reasons"].most_common(32)),
         }
+        summary["vision_obs_age_ms"] = summary["vision_obs_age_at_first_consume_ms"]
         with open(self._path_for("run_summary.json"), "w", encoding="utf-8") as fp:
             json.dump(summary, fp, ensure_ascii=False, indent=2, sort_keys=True)
             fp.write("\n")
@@ -1388,18 +1418,25 @@ class RunLogger:
                 for key in metric_keys
                 if key.startswith("preview_")
             }
+        canonical_critical_path = self._critical_path_summary() if self.module_name == "orch" else None
+        if canonical_critical_path is not None:
+            summary["critical_path"] = canonical_critical_path
+            summary["per_stage_duration_ms"]["critical_path_latency_ms"] = dict(canonical_critical_path["complete_latency_ms"])
         slow = sorted(
             (
                 (key, self._summary_percentiles(values).get("p95"))
                 for key, values in self._perf_stats.items()
-                if self._is_duration_metric(key) and values
+                if self._is_duration_metric(key) and values and key != "critical_path_latency_ms"
             ),
             key=lambda item: float(item[1] or 0.0),
             reverse=True,
         )
+        if canonical_critical_path is not None:
+            cp_stats = canonical_critical_path["complete_latency_ms"]
+            if cp_stats.get("p95") is not None:
+                slow.append(("critical_path_latency_ms", cp_stats.get("p95")))
+                slow.sort(key=lambda item: float(item[1] or 0.0), reverse=True)
         summary["top_slow_stages"] = [{"stage": key, "p95_ms": value} for key, value in slow[:10]]
-        if self.module_name == "orch":
-            summary["critical_path"] = self._critical_path_summary()
         self._write_json_file("perf_summary.json", summary)
 
     @staticmethod
@@ -1465,11 +1502,7 @@ class RunLogger:
         missing = set()
         endpoints = Counter()
         runtime_mode = self._runtime_mode()
-        endpoint_candidates = (
-            ("dryrun_write_done",)
-            if runtime_mode == "dry_run"
-            else ("ack_recv", "uart_write_done", "ack_wait_done")
-        )
+        endpoint_candidates = ("dryrun_write_done",) if runtime_mode == "dry_run" else ("uart_write_done",)
         active_states = {
             "SEARCH_TABLE",
             "YOLO_ACQUIRE_ALIGN",
@@ -1502,12 +1535,15 @@ class RunLogger:
                 "camera_capture_done",
                 "obs_publish_done",
                 "obs_recv",
-                "state_tick_start",
-                "state_tick_done",
+                "state_machine_consume",
                 "motion_decision_done",
                 "car_cmd_map_done",
             )
             missing_required = [name for name in required if events.get(name) is None]
+            if not missing_required and not (
+                events["camera_capture_done"] <= events["obs_publish_done"] <= events["obs_recv"] <= events["state_machine_consume"] <= events["motion_decision_done"] <= events["car_cmd_map_done"] <= endpoint
+            ):
+                missing_required = ["invalid_event_order"]
             if not missing_required:
                 start = events["camera_capture_done"]
                 if endpoint >= start:
@@ -1515,6 +1551,8 @@ class RunLogger:
             else:
                 if "obs_publish_done" in missing_required:
                     missing.add("missing_obs_publish_done")
+                if "invalid_event_order" in missing_required:
+                    missing.add("invalid_event_order")
                 if events.get("camera_capture_done") is None and events.get("obs_recv") is not None:
                     missing.add("missing_cross_process_trace_linkage")
                 if events.get("obs_recv") is None:
@@ -1525,11 +1563,14 @@ class RunLogger:
         denominator = max(1, considered)
         return {
             "complete_available": bool(complete),
+            "complete_count": int(len(complete)),
+            "incomplete_count": int(max(0, considered - len(complete))),
             "complete_latency_ms": self._stats_or_reason(complete, "complete_camera_to_output_trace_unavailable"),
             "partial_available": bool(partial),
             "partial_latency_ms": self._stats_or_reason(partial, "no_partial_trace_segments"),
             "available_ratio": float(endpoint_count) / float(denominator),
             "missing_segments": sorted(missing),
+            "missing_segment_counts": dict(Counter(missing)),
             "endpoint": endpoints.most_common(1)[0][0] if endpoints else (
                 "dryrun_write_done" if runtime_mode == "dry_run" else "uart_write_done"
             ),

@@ -1779,6 +1779,7 @@ class VistaApp(BaseModule):
                 "log_file": CONFIG.runtime.log_file,
                 "pid_file": CONFIG.runtime.pid_file,
                 "structured_logs": self.log_paths,
+                "remote_init_auto_enabled": bool(getattr(CONFIG.runtime, "remote_init_auto_enabled", False)),
                 "config": cfg_dump,
             }
         )

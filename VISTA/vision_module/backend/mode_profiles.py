@@ -16,6 +16,7 @@ class RemoteProfile:
     kind: str = "loop"       # "loop" | "task"
     action: str = ""         # task only: "init" | "predict" | "release"
     max_retries: int = 1     # task only
+    init_reason: str = ""
     timeout_s: float = 10.0
     rgb_encoding: str = "png"
     depth_encoding: str = "png"

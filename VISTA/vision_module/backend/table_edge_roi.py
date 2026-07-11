@@ -216,6 +216,21 @@ def _fit_roi_to_bounds(cx: float, cy: float, roi_w: int, roi_h: int, bounds: Seq
     return [x1, y1, x1 + roi_w, y1 + roi_h]
 
 
+def fov_lower_band_fallback_roi(
+    depth_shape: Any, *, fov_scale_x: float, fov_scale_y: float, center_off_x: float, center_off_y: float,
+    center_ratio: float, width_px: int, height_px: int, max_width_px: int, max_height_px: int, max_area_px: int,
+) -> Optional[list[int]]:
+    bounds = _rgb_fov_depth_bounds(depth_shape, fov_scale_x=fov_scale_x, fov_scale_y=fov_scale_y, center_off_x=center_off_x, center_off_y=center_off_y)
+    if bounds is None:
+        return None
+    roi_w, roi_h = min(max(1, int(width_px)), max(1, int(max_width_px))), min(max(1, int(height_px)), max(1, int(max_height_px)))
+    if roi_w * roi_h > max(1, int(max_area_px)):
+        scale = (float(max_area_px) / float(roi_w * roi_h)) ** 0.5
+        roi_w, roi_h = max(1, int(roi_w * scale)), max(1, int(roi_h * scale))
+    bx1, by1, bx2, by2 = bounds
+    return _fit_roi_to_bounds((bx1 + bx2) * 0.5, by1 + (by2 - by1) * max(0.0, min(1.0, center_ratio)), roi_w, roi_h, bounds)
+
+
 def _bounded_extended_roi(
     primary_roi: Sequence[int], mapped_bbox: Sequence[int], fov_bounds: Sequence[int], *,
     touch_left: bool, touch_right: bool, touch_bottom: bool, scale_x: float, scale_y: float,
@@ -312,6 +327,16 @@ def map_rgb_bbox_to_depth_roi(
     extended_roi_max_width_px: int = 200,
     extended_roi_max_height_px: int = 120,
     extended_roi_max_area_px: int = 24000,
+    depth_margin_extension_enable: bool = True,
+    bbox_center_edge_band_x_ratio: float = 0.12,
+    bbox_center_edge_band_y_ratio: float = 0.12,
+    depth_margin_max_extend_left_px: int = 40,
+    depth_margin_max_extend_right_px: int = 40,
+    depth_margin_max_extend_bottom_px: int = 28,
+    depth_margin_max_extend_top_px: int = 0,
+    fallback_roi_lower_band_center_ratio: float = 0.75,
+    fallback_roi_width_px: int = 160,
+    fallback_roi_height_px: int = 90,
     **_compat: Any,
 ) -> Tuple[Optional[list[int]], Dict[str, Any]]:
     """Map a YOLO table bbox from RGB output coordinates into a depth ROI.
@@ -495,6 +520,13 @@ def compute_dynamic_table_roi_from_yolo_bbox(
     extended_roi_max_width_px: int = 200,
     extended_roi_max_height_px: int = 120,
     extended_roi_max_area_px: int = 24000,
+    depth_margin_extension_enable: bool = True,
+    bbox_center_edge_band_x_ratio: float = 0.12,
+    bbox_center_edge_band_y_ratio: float = 0.12,
+    depth_margin_max_extend_left_px: int = 40,
+    depth_margin_max_extend_right_px: int = 40,
+    depth_margin_max_extend_bottom_px: int = 28,
+    depth_margin_max_extend_top_px: int = 0,
     **_compat: Any,
 ) -> Dict[str, Any]:
     """Return a center-following ROI that preserves the current static ROI size."""
@@ -613,18 +645,32 @@ def compute_dynamic_table_roi_from_yolo_bbox(
         except Exception:
             pass
     fov_bounds = mapping_debug.get("rgb_fov_depth_xyxy") or [0, 0, width, height]
+    edge_x = max(1e-6, min(0.49, float(bbox_center_edge_band_x_ratio)))
+    edge_y = max(1e-6, min(0.49, float(bbox_center_edge_band_y_ratio)))
+    left_alpha = max(0.0, min(1.0, (edge_x - raw_center_norm) / edge_x))
+    right_alpha = max(0.0, min(1.0, (raw_center_norm - (1.0 - edge_x)) / edge_x))
+    bottom_alpha = max(0.0, min(1.0, (raw_center_y_norm - (1.0 - edge_y)) / edge_y))
+    fx1, fy1, fx2, fy2 = [int(v) for v in fov_bounds]
+    allowed_bounds = [
+        max(0, fx1 - int(round(left_alpha * max(0, int(depth_margin_max_extend_left_px))))) if depth_margin_extension_enable else fx1,
+        max(0, fy1 - int(round(0.0 * max(0, int(depth_margin_max_extend_top_px))))) if depth_margin_extension_enable else fy1,
+        min(width, fx2 + int(round(right_alpha * max(0, int(depth_margin_max_extend_right_px))))) if depth_margin_extension_enable else fx2,
+        min(height, fy2 + int(round(bottom_alpha * max(0, int(depth_margin_max_extend_bottom_px))))) if depth_margin_extension_enable else fy2,
+    ]
+    margin_direction = "+".join(name for name, alpha in (("left", left_alpha), ("right", right_alpha), ("bottom", bottom_alpha)) if alpha > 0.0)
+    margin_active = bool(depth_margin_extension_enable and margin_direction)
     mapped_bbox = mapping_debug.get("mapped_depth_bbox_xyxy") or roi
     boundary_extended_roi = _bounded_extended_roi(
-        roi, mapped_bbox, fov_bounds,
-        touch_left=touch_left,
-        touch_right=touch_right,
-        touch_bottom=touch_bottom,
+        roi, mapped_bbox, allowed_bounds,
+        touch_left=bool(touch_left or left_alpha > 0.0),
+        touch_right=bool(touch_right or right_alpha > 0.0),
+        touch_bottom=bool(touch_bottom or bottom_alpha > 0.0),
         scale_x=float(extended_roi_scale_x), scale_y=float(extended_roi_scale_y),
         lower_band_center_ratio=float(extended_roi_lower_band_center_ratio),
         bottom_margin_px=int(extended_roi_bottom_margin_px),
         max_width_px=int(extended_roi_max_width_px), max_height_px=int(extended_roi_max_height_px),
         max_area_px=int(extended_roi_max_area_px),
-    ) if bool(boundary_extend_enable) and str(boundary_extend_mode or "fov_aligned_bounded") == "fov_aligned_bounded" else None
+    ) if bool(boundary_extend_enable) and str(boundary_extend_mode or "fov_aligned_bounded") == "fov_aligned_bounded" and (bool(touch_left or touch_right or touch_bottom) or margin_active) else None
     boundary_axes = []
     if touch_left:
         boundary_axes.append("left")
@@ -653,6 +699,10 @@ def compute_dynamic_table_roi_from_yolo_bbox(
         "table_bbox_boundary_allowed": bool(touch_left or touch_right or touch_bottom),
         "boundary_extend_enabled": bool(boundary_extend_enable),
         "boundary_extend_mode": str(boundary_extend_mode),
+        "depth_margin_mode_active": margin_active,
+        "depth_margin_direction": margin_direction,
+        "depth_margin_alpha": float(max(left_alpha, right_alpha, bottom_alpha)),
+        "allowed_depth_roi_bounds_xyxy": allowed_bounds,
         "boundary_extend_candidate": bool(boundary_extended_roi is not None),
         "boundary_extended_roi": boundary_extended_roi,
         "boundary_extend_touch_axes": boundary_axes,
@@ -721,6 +771,16 @@ def choose_depth_roi(
     extended_roi_max_width_px: int = 200,
     extended_roi_max_height_px: int = 120,
     extended_roi_max_area_px: int = 24000,
+    fallback_roi_lower_band_center_ratio: float = 0.75,
+    fallback_roi_width_px: int = 160,
+    fallback_roi_height_px: int = 90,
+    depth_margin_extension_enable: bool = True,
+    bbox_center_edge_band_x_ratio: float = 0.12,
+    bbox_center_edge_band_y_ratio: float = 0.12,
+    depth_margin_max_extend_left_px: int = 40,
+    depth_margin_max_extend_right_px: int = 40,
+    depth_margin_max_extend_bottom_px: int = 28,
+    depth_margin_max_extend_top_px: int = 0,
     last_valid_depth_roi: Any = None,
     yolo_table_bbox_hold_enable: bool = True,
     yolo_table_bbox_hold_frames: int = 8,
@@ -787,6 +847,13 @@ def choose_depth_roi(
             extended_roi_max_width_px=extended_roi_max_width_px,
             extended_roi_max_height_px=extended_roi_max_height_px,
             extended_roi_max_area_px=extended_roi_max_area_px,
+            depth_margin_extension_enable=depth_margin_extension_enable,
+            bbox_center_edge_band_x_ratio=bbox_center_edge_band_x_ratio,
+            bbox_center_edge_band_y_ratio=bbox_center_edge_band_y_ratio,
+            depth_margin_max_extend_left_px=depth_margin_max_extend_left_px,
+            depth_margin_max_extend_right_px=depth_margin_max_extend_right_px,
+            depth_margin_max_extend_bottom_px=depth_margin_max_extend_bottom_px,
+            depth_margin_max_extend_top_px=depth_margin_max_extend_top_px,
         )
         depth_edge_roi = dyn.get("dynamic_roi") or fallback_roi
         roi_source = str(dyn.get("roi_source") or "static_no_yolo_fallback")
@@ -813,13 +880,14 @@ def choose_depth_roi(
         roi_source = "yolo_table_bbox_hold"
         roi_reason = "table_bbox_lost_short_hold_last_yolo_roi"
     elif yolo_dynamic_enable and table_bbox is None:
-        # Hold expired or no previous YOLO ROI: do not fall back to a static or
-        # quadrant ROI for docking.  With no table bbox, the higher-level system
-        # should enter/search table mode instead of trusting edge geometry.
-        depth_edge_roi = None
-        rgb_search_roi = None
-        roi_source = "disabled_no_table_bbox"
-        roi_reason = "table_bbox_lost_hold_expired"
+        depth_edge_roi = fov_lower_band_fallback_roi(
+            depth_shape, fov_scale_x=float(rgb_fov_in_depth_scale_x), fov_scale_y=float(rgb_fov_in_depth_scale_y),
+            center_off_x=float(rgb_depth_center_offset_x), center_off_y=float(rgb_depth_center_offset_y),
+            center_ratio=float(fallback_roi_lower_band_center_ratio), width_px=int(fallback_roi_width_px), height_px=int(fallback_roi_height_px),
+            max_width_px=int(extended_roi_max_width_px), max_height_px=int(extended_roi_max_height_px), max_area_px=int(extended_roi_max_area_px),
+        )
+        roi_source = "fallback_fov_lower_band"
+        roi_reason = "table_bbox_unavailable_fov_lower_band"
     elif quadrant is not None and table_bbox is not None:
         depth_edge_roi = quadrant_to_depth_roi(quadrant, depth_shape, fallback_roi)
         rgb_hw = _parse_shape(resolved_rgb_shape)

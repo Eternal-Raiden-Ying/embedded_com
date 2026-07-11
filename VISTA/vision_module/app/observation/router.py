@@ -62,9 +62,13 @@ class ObservationRouter:
             )
 
         frame_id, capture_ts = self._frame_identity(vision_obs, frame_meta or {}, now)
-        control_identity = self._control_identity(vision_obs, frame_id)
-        if not force_send and control_identity is not None and control_identity == self._last_control_identity:
+        identity_frame_id = (frame_meta or {}).get("frame_id") or (frame_meta or {}).get("frame_seq") or frame_id
+        control_identity = self._control_identity(vision_obs, identity_frame_id)
+        # Force bypasses cadence only.  It must never turn the same perception
+        # identity into a fresh control observation again.
+        if control_identity is not None and control_identity == self._last_control_identity:
             self.metrics.mark_skip()
+            self.metrics.mark_duplicate_suppressed()
             return ObservationRouteResult(control_obs=None, diagnostic_obs=None, skipped=True, skip_reason="same_observation")
         self.metrics.mark_frame(frame_id)
         self._pending_control_identity = control_identity
@@ -139,6 +143,8 @@ class ObservationRouter:
     @staticmethod
     def _control_identity(vision_obs: Dict[str, Any], fallback_frame_id: Any):
         perception = vision_obs.get("perception") or {}
+        stage = vision_obs.get("stage") or vision_obs.get("stage_name") or ""
+        mode = vision_obs.get("mode") or vision_obs.get("mode_name") or ""
         identities = []
         if isinstance(perception, dict):
             for key in CONTROL_PERCEPTION_KEYS:
@@ -150,7 +156,9 @@ class ObservationRouter:
                 # old protocol senders are not accidentally suppressed.
                 identity = obs.get("obs_seq")
                 if identity is not None:
-                    identities.append((key, identity))
+                    identities.append((stage, mode, key, "seq", identity))
+                else:
+                    identities.append((stage, mode, key, "frame", obs.get("frame_id", fallback_frame_id), obs.get("trace_id")))
         return tuple(identities) if identities else None
 
     @staticmethod
@@ -294,3 +302,12 @@ class ObservationRouter:
         payload["process_latency_ms"] = process_latency_ms
         payload["send_latency_ms"] = send_latency_ms
         payload["obs_total_age_ms"] = obs_total_age_ms
+        # Fresh-observation transport fields. Reuse age is deliberately not
+        # refreshed here: duplicate identities are suppressed before routing.
+        payload["vision_capture_to_publish_ms"] = obs_total_age_ms
+        payload["vision_publish_to_recv_ms"] = None
+        payload["vision_capture_to_recv_ms"] = None
+        payload["vision_obs_age_ms"] = obs_total_age_ms
+        payload["vision_obs_age_at_first_consume_ms"] = None
+        payload["vision_obs_reuse_age_ms"] = None
+        payload["same_obs_reuse_count"] = 0

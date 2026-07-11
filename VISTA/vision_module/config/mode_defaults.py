@@ -82,13 +82,14 @@ def _camera_override_with_updates(cfg, camera_name: str, **updates: Any) -> Dict
 
 def _default_remote_profile(*, enabled: bool, require_depth: bool = False,
                              kind: str = "loop", action: str = "",
-                             max_retries: int = 1) -> RemoteProfile:
+                             max_retries: int = 1, init_reason: str = "") -> RemoteProfile:
     return RemoteProfile(
         enabled=bool(enabled),
         kind=str(kind or "loop").strip().lower() or "loop",
         action=str(action or "").strip().lower(),
         max_retries=int(max_retries),
         require_depth=bool(require_depth),
+        init_reason=str(init_reason or "").strip().lower(),
     )
 
 
@@ -98,7 +99,7 @@ def _apply_remote_overrides(profile: RemoteProfile, section: Dict[str, Any]) -> 
         return
     if "enabled" in remote:
         profile.enabled = bool(remote.get("enabled"))
-    for key in ("base_url", "kind", "action", "command", "rgb_encoding", "depth_encoding"):
+    for key in ("base_url", "kind", "action", "command", "rgb_encoding", "depth_encoding", "init_reason"):
         if key in remote and remote.get(key) is not None:
             setattr(profile, key, str(remote.get(key)).strip())
     for key in ("require_depth",):
@@ -157,6 +158,8 @@ def _apply_camera_override_section(profile: ModeProfile, section: Dict[str, Any]
 
 
 def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) -> Dict[str, ModeProfile]:
+    runtime_cfg = getattr(cfg, "runtime", None)
+    remote_init_auto_enabled = bool(getattr(runtime_cfg, "remote_init_auto_enabled", False))
     """Build the initial mode profile set for VISTA."""
     mode_cfg = dict(getattr(cfg, "mode_profiles", {}) or {})
     model_cfg = getattr(cfg, "model", None)
@@ -258,11 +261,11 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             camera_overrides={},
             predictor_enabled=False,
             predictor_model=None,
-            remote=_default_remote_profile(enabled=True, require_depth=False,
-                                             kind="task", action="init", max_retries=3),
+            remote=_default_remote_profile(enabled=remote_init_auto_enabled, require_depth=False,
+                                             kind="task", action="init", max_retries=3, init_reason="startup_auto"),
             preview=preview_profile("INIT", enabled=False, sink_name="null"),
             release_cooldown_s=0.0,
-            metadata={"contract": {"stage": "INIT", "remote": "required"}},
+            metadata={"contract": {"stage": "INIT", "remote": "required" if remote_init_auto_enabled else "disabled"}},
         ),
         "SILENT": ModeProfile(
             name="SILENT",
@@ -406,7 +409,7 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             predictor_enabled=False,
             predictor_model=None,
             remote=_default_remote_profile(enabled=True, require_depth=False,
-                                             kind="task", action="init", max_retries=3),
+                                             kind="task", action="init", max_retries=3, init_reason="explicit_grasp"),
             preview=preview_profile("GRASP_REMOTE_INIT", enabled=True),
             release_cooldown_s=3.0,
             metadata={
@@ -550,5 +553,13 @@ def build_default_mode_profiles(active_model: str, cfg: Optional[Any] = None) ->
             current = dict(profile.camera_overrides.get(str(camera_name), {}))
             current.update({str(k): v for k, v in updates.items() if v is not None})
             profile.camera_overrides[str(camera_name)] = current
+
+    # ModeController is intentionally config-free.  Carry the canonical
+    # runtime auto-init switch with every remote capability so local profile
+    # transitions cannot overwrite RemoteManager's configured value.
+    for profile in profiles.values():
+        remote_metadata = dict(profile.remote.metadata or {})
+        remote_metadata["remote_init_auto_enabled"] = bool(remote_init_auto_enabled)
+        profile.remote.metadata = remote_metadata
 
     return profiles

@@ -258,6 +258,8 @@ class OrchestratorService(BaseModule):
             "state_machine_tick_interval_ms": deque(maxlen=512),
             "state_machine_consume_interval_ms": deque(maxlen=512),
             "obs_age_at_consume_ms": deque(maxlen=512),
+            "vision_obs_age_at_first_consume_ms": deque(maxlen=512),
+            "vision_obs_reuse_age_ms": deque(maxlen=512),
             "vision_publish_to_orch_recv_ms": deque(maxlen=512),
             "orch_recv_to_state_consume_ms": deque(maxlen=512),
             "tick_process_ms": deque(maxlen=512),
@@ -274,6 +276,8 @@ class OrchestratorService(BaseModule):
         self._last_consumed_table_obs_key = None
         self._last_consumed_obs_seq: Optional[int] = None
         self._same_obs_reuse_count = 0
+        self._fresh_obs_consumed = 0
+        self._reused_obs_consumed = 0
         self._last_tick_process_ms: Optional[float] = None
         self._last_state_decision_ms: Optional[float] = None
         self._last_motion_arbitration_ms: Optional[float] = None
@@ -2336,7 +2340,14 @@ class OrchestratorService(BaseModule):
                         None if self._last_ack_wait_ms is not None and not self.cfg.serial.dry_run
                         else ("dry_run" if self.cfg.serial.dry_run else "awaiting_ack")
                     ),
-                    "vision_obs_age_ms": getattr(obs, "obs_age_at_consume_ms", None) if obs is not None else None,
+                    "vision_obs_age_ms": getattr(obs, "vision_obs_age_at_first_consume_ms", None) if obs is not None and int(self._same_obs_reuse_count) == 0 else None,
+                    "vision_obs_age_at_first_consume_ms": getattr(obs, "vision_obs_age_at_first_consume_ms", None) if obs is not None and int(self._same_obs_reuse_count) == 0 else None,
+                    "vision_obs_reuse_age_ms": getattr(obs, "vision_obs_reuse_age_ms", None) if obs is not None and int(self._same_obs_reuse_count) > 0 else None,
+                    "vision_capture_to_publish_ms": getattr(obs, "vision_capture_to_publish_ms", None) if obs is not None and int(self._same_obs_reuse_count) == 0 else None,
+                    "vision_publish_to_recv_ms": getattr(obs, "vision_publish_to_orch_recv_ms", None) if obs is not None and int(self._same_obs_reuse_count) == 0 else None,
+                    "vision_recv_to_first_consume_ms": getattr(obs, "orch_recv_to_state_consume_ms", None) if obs is not None and int(self._same_obs_reuse_count) == 0 else None,
+                    "fresh_obs_consumed": int(self._fresh_obs_consumed),
+                    "reused_obs_consumed": int(self._reused_obs_consumed),
                     "vision_publish_to_orch_recv_ms": (
                         getattr(obs, "vision_publish_to_orch_recv_ms", None) if obs is not None else None
                     ),
@@ -4230,12 +4241,17 @@ class OrchestratorService(BaseModule):
     def _obs_key(obs: Optional[TableEdgeObs]):
         if obs is None:
             return None
+        source = getattr(obs, "source", None)
+        mode = getattr(obs, "mode", None)
+        stage = getattr(obs, "stage", None)
+        obs_seq = getattr(obs, "obs_seq", None)
+        if obs_seq is not None:
+            return (source, mode, stage, "obs_seq", obs_seq)
         return (
-            getattr(obs, "obs_seq", None),
+            source, mode, stage, "frame",
             getattr(obs, "camera_frame_seq", None),
-            getattr(obs, "seq", None),
             getattr(obs, "frame_id", None),
-            getattr(obs, "obs_ts", None),
+            getattr(obs, "trace_id", None),
         )
 
     @staticmethod
@@ -4309,9 +4325,28 @@ class OrchestratorService(BaseModule):
         obs.state_machine_consume_interval_ms = consume_interval_ms
         obs.same_obs_reuse_count = int(self._same_obs_reuse_count)
         obs.obs_seq_gap = seq_gap
+        if is_new_obs:
+            self._perf_marker(
+                "state_machine_consume",
+                mono_ns=time.monotonic_ns(),
+                consume_kind="fresh",
+                is_first_consume=True,
+                obs_seq=getattr(obs, "obs_seq", None),
+                frame_id=getattr(obs, "frame_id", None),
+                trace_id=getattr(obs, "trace_id", None),
+            )
+        obs_age_ms = None
         if getattr(obs, "frame_capture_ts", None) is not None:
             try:
-                obs.obs_age_at_consume_ms = max(0.0, (now - float(obs.frame_capture_ts)) * 1000.0)
+                obs_age_ms = max(0.0, (now - float(obs.frame_capture_ts)) * 1000.0)
+                if is_new_obs:
+                    obs.obs_age_at_consume_ms = obs_age_ms
+                    obs.vision_obs_age_at_first_consume_ms = obs_age_ms
+                    obs.vision_obs_reuse_age_ms = None
+                    self._fresh_obs_consumed += 1
+                else:
+                    obs.vision_obs_reuse_age_ms = obs_age_ms
+                    self._reused_obs_consumed += 1
             except Exception:
                 pass
         if getattr(obs, "obs_recv_ts", None) is not None:
@@ -4321,7 +4356,11 @@ class OrchestratorService(BaseModule):
                 pass
         if consume_interval_ms is not None:
             self._observe_trace_sample("state_machine_consume_interval_ms", consume_interval_ms)
-        self._observe_trace_sample("obs_age_at_consume_ms", getattr(obs, "obs_age_at_consume_ms", None))
+        if is_new_obs:
+            self._observe_trace_sample("obs_age_at_consume_ms", obs_age_ms)
+            self._observe_trace_sample("vision_obs_age_at_first_consume_ms", obs_age_ms)
+        else:
+            self._observe_trace_sample("vision_obs_reuse_age_ms", obs_age_ms)
         self._observe_trace_sample("orch_recv_to_state_consume_ms", getattr(obs, "orch_recv_to_state_consume_ms", None))
         self._emit_obs_frequency_summary_if_needed()
 
@@ -4348,6 +4387,8 @@ class OrchestratorService(BaseModule):
             "table_edge_obs_recv_hz": float(recv_hz),
             "target_obs_recv_hz": float(target_hz),
             "same_obs_reuse_count": int(self._same_obs_reuse_count),
+            "fresh_obs_consumed": int(self._fresh_obs_consumed),
+            "reused_obs_consumed": int(self._reused_obs_consumed),
             "obs_seq": getattr(obs, "obs_seq", None) if obs is not None else None,
             "camera_frame_seq": getattr(obs, "camera_frame_seq", None) if obs is not None else None,
             "seq": getattr(obs, "seq", None) if obs is not None else None,

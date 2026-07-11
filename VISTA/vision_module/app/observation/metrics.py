@@ -11,6 +11,8 @@ class ObservationMetrics:
     obs_skip_count: int = 0
     obs_drop_count: int = 0
     same_frame_reuse_count: int = 0
+    unique_obs_sent: int = 0
+    duplicate_obs_suppressed: int = 0
     obs_total_age_ms: float = 0.0
     last_control_send_ts: float = 0.0
     last_diag_send_ts: float = 0.0
@@ -33,6 +35,10 @@ class ObservationMetrics:
     def mark_control_sent(self, now: float) -> None:
         self.last_control_send_ts = float(now)
         self.control_send_samples.append(float(now))
+        self.unique_obs_sent += 1
+
+    def mark_duplicate_suppressed(self) -> None:
+        self.duplicate_obs_suppressed += 1
 
     def mark_diag_sent(self, now: float) -> None:
         self.last_diag_send_ts = float(now)
@@ -50,6 +56,8 @@ class ObservationMetrics:
             "obs_skip_count": int(self.obs_skip_count),
             "obs_drop_count": int(self.obs_drop_count),
             "same_frame_reuse_count": int(self.same_frame_reuse_count),
+            "unique_obs_sent": int(self.unique_obs_sent),
+            "duplicate_obs_suppressed": int(self.duplicate_obs_suppressed),
             "control_obs_hz": float(self.hz_for_samples(self.control_send_samples, now)),
             "diag_obs_hz": float(self.hz_for_samples(self.diag_send_samples, now)),
             "obs_total_age_ms": float(self.obs_total_age_ms),

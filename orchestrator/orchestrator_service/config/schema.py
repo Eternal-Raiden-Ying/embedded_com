@@ -229,6 +229,7 @@ class ControlThresholds:
     near_start_align_enable: bool = True
     near_start_align_timeout_s: float = 2.0
     remote_init_min_interval_s: float = 30.0
+    remote_init_auto_enabled: bool = False
     edge_final_enter_margin_m: float = 0.06
     edge_final_stop_margin_m: float = 0.02
     close_range_enter_p10_m: float = 0.55

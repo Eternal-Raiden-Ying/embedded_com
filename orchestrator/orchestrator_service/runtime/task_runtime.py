@@ -514,6 +514,9 @@ class TaskRuntimeMixin:
         self._queue_tts(f"开始寻找 {spec.class_name}")
 
     def _queue_remote_init_warmup(self, *, target: str) -> None:
+        if not bool(getattr(self.cfg, "remote_init_auto_enabled", False)):
+            self._log("info", "[GRASP_REMOTE][AUTO_INIT_SKIPPED] config_disabled")
+            return
         now = monotonic_ts()
         min_interval = max(0.0, float(getattr(self.cfg, "remote_init_min_interval_s", 30.0) or 30.0))
         last_success = float(getattr(self.ctx, "remote_init_last_success_mono", 0.0) or 0.0)

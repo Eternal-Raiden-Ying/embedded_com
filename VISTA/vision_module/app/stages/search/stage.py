@@ -451,11 +451,17 @@ class SearchStagePlan(BaseStagePlan):
             ctx.stage_state["_table_edge_obs_cache"] = dict(table_edge_obs)
         
         status_changed = (after_edge_found != prev_found) or (after_edge_valid != prev_valid) or (after_edge_trusted != prev_trusted)
-        force_send = False
-        if table_edge_source == "results" and is_current_frame:
-            force_send = True
-        elif status_changed:
-            force_send = True
+        obs_seq = table_edge_obs.get("obs_seq")
+        obs_identity = (obs_seq,) if obs_seq is not None else (edge_frame_id, table_edge_obs.get("trace_id"))
+        previous_identity = ctx.stage_state.get("last_seen_table_edge_identity")
+        is_new_identity = obs_identity != previous_identity
+        if is_new_identity:
+            ctx.stage_state["last_seen_table_edge_identity"] = obs_identity
+            ctx.stage_state["last_seen_table_edge_obs_seq"] = obs_seq
+            ctx.stage_state["last_seen_table_edge_frame_id"] = edge_frame_id
+        # A result is urgent only on first arrival; repeated scheduler reads are
+        # retained as latest state but do not refresh observation freshness.
+        force_send = bool((table_edge_source == "results" and is_current_frame and is_new_identity) or status_changed)
 
         return table_edge_obs, table_edge_source, force_send
 

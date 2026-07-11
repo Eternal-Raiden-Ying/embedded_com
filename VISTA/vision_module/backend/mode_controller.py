@@ -150,6 +150,15 @@ class ModeController:
                     "kind": str(remote_profile.kind).strip().lower(),
                     "action": str(remote_profile.action).strip().lower(),
                     "max_retries": int(remote_profile.max_retries),
+                    "init_reason": str(remote_profile.init_reason or "").strip().lower(),
+                    # ModeController intentionally has no global config reference.
+                    # Mode defaults attach this canonical runtime value to every
+                    # remote profile, including disabled local modes.
+                    "remote_init_auto_enabled": bool(
+                        (remote_profile.metadata or {}).get(
+                            "remote_init_auto_enabled", False
+                        )
+                    ),
                     "base_url": remote_profile.base_url,
                     "command": remote_profile.command,
                     "require_depth": bool(remote_profile.require_depth),
