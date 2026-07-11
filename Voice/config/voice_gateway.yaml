@@ -1,7 +1,7 @@
 # Default Voice Gateway Configuration
 audio:
   backend: arecord
-  input_device: plughw:1,0
+  input_device: plughw:CARD=UACDemoV10,DEV=0
   sample_rate: 16000
   channels: 1
   frame_ms: 80
@@ -21,7 +21,7 @@ stop_kws:
 
 vad:
   enabled: true
-  model_path: Voice/thirdparty/fsmn_vad
+  model_path: Voice/ONNX/speech_fsmn_vad_zh-cn-16k-common-onnx
   energy_threshold: 450
   start_frames: 2
   end_frames: 4
@@ -31,7 +31,7 @@ vad:
 asr:
   enabled: true
   backend: funasr_onnx
-  model_path: Voice/thirdparty/paraformer_asr_online
+  model_path: Voice/ONNX/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-onnx
   mode: online
   quantized: false
   chunk_frames: 6

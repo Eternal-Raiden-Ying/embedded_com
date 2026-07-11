@@ -32,6 +32,8 @@ models:
 
   tts:
     enabled: true
+    required: false
+    optional: true
     backend: "piper"
     model_path: "Voice/tts/zh_CN-huayan-x_low/zh_CN-huayan-x_low.onnx"
     config_path: "Voice/tts/zh_CN-huayan-x_low/zh_CN-huayan-x_low.onnx.json"
