@@ -815,6 +815,7 @@ gateway:
     ack_qos: 1 # Quality of service grade for acknowledgments
     status_qos: 0 # Quality of service grade for status
     heartbeat_qos: 0 # Quality of service grade for heartbeat
+    tts_qos: 1 # Quality of service grade for phone TTS events
     retain_status: false # Retain flag for status updates
     retain_heartbeat: false # Retain flag for heartbeat updates
     keepalive_s: 60 # Connection keepalive ping interval in seconds
@@ -824,6 +825,8 @@ gateway:
       ack: "robot/sc171_car_01/ack" # ACK topic path
       status: "robot/sc171_car_01/status" # Status topic path
       heartbeat: "robot/sc171_car_01/heartbeat" # Heartbeat topic path
+      tts: "robot/v1/SC171/mobile/tts" # Phone TTS event topic
+      tts_ack: "robot/v1/SC171/mobile/tts_ack" # Phone TTS playback state topic
   command_in:
     transport: "http" # Gateway external command mode: http, tcp, uds, disabled
     ipc_socket_path: "/tmp/robot_stack/mobile_gateway_cmd.sock" # Socket file path
@@ -840,6 +843,13 @@ gateway:
   orchestrator_task_ack_in:
     transport: "disabled" # Gateway incoming orchestrator ack IPC mode
     ipc_socket_path: "/tmp/robot_stack/mobile_gateway_ack.sock" # Socket file path
+  tts_event_in:
+    transport: "disabled" # Incoming authoritative TTS event IPC mode
+    ipc_socket_path: "/tmp/robot_stack/mobile_tts_event.sock" # Socket file path
+  tts_playback_out:
+    transport: "disabled" # Outgoing phone TTS playback state IPC mode
+    ipc_socket_path: "/tmp/robot_stack/tts_playback.sock" # Socket file path
+    send_mode: "oneshot" # Socket persistence mode
 
 ### === Online Edge Detector Configuration === ###
 online_edge:

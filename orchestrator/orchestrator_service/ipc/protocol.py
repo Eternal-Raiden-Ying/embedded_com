@@ -1342,12 +1342,13 @@ def make_vision_idle(session_id: str = "", epoch: int = 0, req_id: str = "") -> 
     )
 
 
-def make_tts_event(text: str, source: str = "orchestrator", interrupt: bool = False) -> Dict[str, Any]:
-    text = str(text).strip()
-    if not text:
-        raise ProtocolError("tts_event.text 不能为空")
-    return {"ts": now_ts(), "type": "tts_event", "text": text, "source": source, "interrupt": bool(interrupt)}
-
+def make_tts_event(text: str, source: str = "orchestrator", interrupt: bool = False, *, event_id: str = "", session_id: str = "", cmd_id: str = "", phrase_id: str = "", priority: str = "P2", dedup_key: str = "") -> Dict[str, Any]:
+    text, phrase_id, priority = str(text).strip(), str(phrase_id).strip(), str(priority or "P2").upper()
+    if not text and not phrase_id:
+        raise ProtocolError("tts_event.text or phrase_id required")
+    if priority not in {"P0", "P1", "P2", "P3"}:
+        raise ProtocolError("tts_event.priority must be P0/P1/P2/P3")
+    return {"schema_version": 1, "type": "tts_event", "event_id": str(event_id).strip() or _new_id("tts"), "source": str(source).strip() or "orchestrator", "session_id": str(session_id).strip(), "cmd_id": str(cmd_id).strip(), "text": text, "phrase_id": phrase_id, "priority": priority, "interrupt": bool(interrupt), "dedup_key": str(dedup_key).strip(), "ts": now_ts()}
 
 def pack_msg(payload: Dict[str, Any]) -> bytes:
     return msgpack.packb(payload, use_bin_type=True)

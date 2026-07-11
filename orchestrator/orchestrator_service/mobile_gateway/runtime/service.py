@@ -33,6 +33,8 @@ from ..protocol import (
     ROBOT_ID,
     SUPPORTED_TARGETS,
     make_error_status,
+    make_tts_playback_state,
+    normalize_tts_event,
     new_id,
     now_ts,
 )
@@ -671,6 +673,10 @@ class MobileGatewayService(BaseModule):
         )
         requested_mode = str(cfg.backend.mode or "mock").strip().lower()
         self.backend_mode = TCP_BACKEND_ALIASES.get(requested_mode, requested_mode)
+        self.tts_event_server = self._build_optional_server(cfg.tts_event_in, "tts_event_in")
+        self.tts_playback_sender = JsonlClientSender(mode=cfg.tts_playback_out.transport, tcp_host=getattr(cfg.tts_playback_out, "host", "127.0.0.1"), tcp_port=getattr(cfg.tts_playback_out, "port", 0), uds_path=getattr(cfg.tts_playback_out, "uds_path", "") or getattr(cfg.tts_playback_out, "ipc_socket_path", ""), name="tts_playback_out", send_mode=cfg.tts_playback_out.send_mode)
+        self._recent_tts_event_ids: Deque[str] = deque(maxlen=max(1, int(cfg.runtime.cmd_dedup_cache_size or 64)))
+        self._recent_tts_event_id_set: Set[str] = set()
         self.ack_server = None
         if self.backend_mode in ACK_REQUIRED_MODES and str(cfg.orchestrator_task_ack_in.transport).strip().lower() != "disabled":
             self.ack_server = self._build_optional_server(cfg.orchestrator_task_ack_in, "orchestrator_task_ack_in")
@@ -689,6 +695,7 @@ class MobileGatewayService(BaseModule):
             self.mqtt_adapter = MqttAdapter(
                 cfg.mqtt,
                 self.handle_mobile_command_payload,
+                tts_ack_handler=self.handle_tts_ack_payload,
                 logger=self._log_mqtt_event,
                 enable_raw_debug=cfg.runtime.enable_raw_mqtt_debug,
                 suppress_heartbeat_success_log=cfg.runtime.suppress_heartbeat_success_log,
@@ -1603,6 +1610,8 @@ class MobileGatewayService(BaseModule):
             self.http_server.start()
         if self.ack_server is not None:
             self.ack_server.start()
+        if self.tts_event_server is not None:
+            self.tts_event_server.start()
         if self.backend_mode == "mock":
             self.backend.start(self._handle_backend_event)
         else:
@@ -1645,6 +1654,15 @@ class MobileGatewayService(BaseModule):
                 self.ack_server.close()
             except Exception:
                 pass
+        if self.tts_event_server is not None:
+            try:
+                self.tts_event_server.close()
+            except Exception:
+                pass
+        try:
+            self.tts_playback_sender.close()
+        except Exception:
+            pass
         try:
             self.status_sender.close()
         except Exception:
@@ -1669,6 +1687,7 @@ class MobileGatewayService(BaseModule):
                 loop_start = time.time()
                 self._drain_inbound_commands()
                 self._drain_pending_after_stop()
+                self._drain_tts_event_messages()
                 self._drain_ack_messages()
                 self._drain_orchestrator_observer()
                 self._emit_heartbeat_if_needed()
@@ -1715,6 +1734,37 @@ class MobileGatewayService(BaseModule):
             self._last_req_ts = recv_ts
             self._handle_command_payload(payload)
 
+    def _drain_tts_event_messages(self) -> None:
+        if self.tts_event_server is None:
+            return
+        for item in self.tts_event_server.drain():
+            try:
+                event = normalize_tts_event(dict(item.get("payload") or {}))
+            except Exception as exc:
+                self.log_error("tts", "invalid tts_event", {"error": str(exc)})
+                continue
+            event_id = event["event_id"]
+            if event_id in self._recent_tts_event_id_set:
+                self.log_info("tts", "duplicate tts_event ignored", {"event_id": event_id})
+                continue
+            if len(self._recent_tts_event_ids) >= self._recent_tts_event_ids.maxlen:
+                self._recent_tts_event_id_set.discard(self._recent_tts_event_ids.popleft())
+            self._recent_tts_event_ids.append(event_id)
+            self._recent_tts_event_id_set.add(event_id)
+            if self.mqtt_adapter is not None:
+                self.mqtt_adapter.publish_tts_event(event)
+            self.run_logger.write_jsonl("tts_event", event)
+            self.log_info("tts", "[GATEWAY][TTS] forwarded", {"event_id": event_id})
+
+    def handle_tts_ack_payload(self, payload: Dict[str, Any]) -> None:
+        try:
+            state = make_tts_playback_state(payload)
+        except Exception as exc:
+            self.log_error("tts", "invalid tts_ack", {"error": str(exc)})
+            return
+        sent = self.tts_playback_sender.send(state)
+        self.run_logger.write_jsonl("tts_playback_state", state)
+        self.log_info("tts", "[GATEWAY][ACK] forwarded", {"event_id": state["event_id"], "state": state["state"], "sent": bool(sent)})
     def _drain_ack_messages(self) -> None:
         if self.ack_server is None:
             return

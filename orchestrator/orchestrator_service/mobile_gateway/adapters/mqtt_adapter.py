@@ -20,6 +20,7 @@ class MqttAdapter:
         self,
         cfg: MqttAdapterConfig,
         command_handler: Callable[[Dict[str, Any]], None],
+        tts_ack_handler: Optional[Callable[[Dict[str, Any]], None]] = None,
         logger: Optional[Callable[[str, str, Dict[str, Any]], None]] = None,
         *,
         enable_raw_debug: bool = False,
@@ -27,6 +28,7 @@ class MqttAdapter:
     ):
         self.cfg = cfg
         self.command_handler = command_handler
+        self.tts_ack_handler = tts_ack_handler,
         self.logger = logger
         self.enable_raw_debug = bool(enable_raw_debug)
         self.suppress_heartbeat_success_log = bool(suppress_heartbeat_success_log)
@@ -37,6 +39,8 @@ class MqttAdapter:
         self._ack_topic = self._render_topic(self.cfg.topics.ack)
         self._heartbeat_topic = self._render_topic(self.cfg.topics.heartbeat)
         self._cmd_topic = self._render_topic(self.cfg.topics.cmd)
+        self._tts_topic = self._render_topic(self.cfg.topics.tts)
+        self._tts_ack_topic = self._render_topic(self.cfg.topics.tts_ack)
 
     def _log(self, level: str, event: str, **data: Any) -> None:
         if self.logger is not None:
@@ -120,6 +124,9 @@ class MqttAdapter:
     def publish_heartbeat(self, payload: Dict[str, Any]) -> None:
         self._publish(self._heartbeat_topic, payload, qos=self.cfg.heartbeat_qos, retain=self.cfg.retain_heartbeat)
 
+    def publish_tts_event(self, payload: Dict[str, Any]) -> None:
+        self._publish(self._tts_topic, payload, qos=self.cfg.tts_qos, retain=False)
+
     def _publish(self, topic: str, payload: Dict[str, Any], qos: int, retain: bool) -> None:
         client = self._client
         if not self._started or client is None:
@@ -140,6 +147,7 @@ class MqttAdapter:
 
     def _on_connect(self, client, userdata, flags, reason_code, properties=None) -> None:
         client.subscribe(self._cmd_topic, qos=int(self.cfg.cmd_qos))
+        client.subscribe(self._tts_ack_topic, qos=int(self.cfg.tts_qos))
         self._log("info", "mqtt_connected", topic=self._cmd_topic, qos=int(self.cfg.cmd_qos), reason_code=int(reason_code))
 
     def _on_disconnect(self, client, userdata, disconnect_flags, reason_code, properties=None) -> None:
@@ -157,4 +165,9 @@ class MqttAdapter:
             event["raw_payload"] = raw_payload
             event["payload"] = dict(payload)
         self._log("info", "mqtt_message", **event)
-        self.command_handler(payload)
+        if msg.topic == self._tts_ack_topic:
+            if self.tts_ack_handler is not None:
+                self.tts_ack_handler(payload)
+            return
+        if msg.topic == self._cmd_topic:
+            self.command_handler(payload)

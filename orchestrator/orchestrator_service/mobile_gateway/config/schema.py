@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from ..protocol import MQTT_TOPIC_ACK, MQTT_TOPIC_CMD, MQTT_TOPIC_HEARTBEAT, MQTT_TOPIC_STATUS, ROBOT_ID
+from ..protocol import MQTT_TOPIC_ACK, MQTT_TOPIC_CMD, MQTT_TOPIC_HEARTBEAT, MQTT_TOPIC_STATUS, MQTT_TOPIC_TTS, MQTT_TOPIC_TTS_ACK, ROBOT_ID
 
 _ORCH_ROOT = Path(__file__).resolve().parents[3]
 _REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -94,6 +94,8 @@ class MqttTopicConfig:
     ack: str = MQTT_TOPIC_ACK
     status: str = MQTT_TOPIC_STATUS
     heartbeat: str = MQTT_TOPIC_HEARTBEAT
+    tts: str = MQTT_TOPIC_TTS
+    tts_ack: str = MQTT_TOPIC_TTS_ACK
 
 
 @dataclass
@@ -112,6 +114,7 @@ class MqttAdapterConfig:
     ack_qos: int = 1
     status_qos: int = 0
     heartbeat_qos: int = 0
+    tts_qos: int = 1
     retain_status: bool = False
     retain_heartbeat: bool = False
     keepalive_s: int = 60
@@ -145,3 +148,5 @@ class MobileGatewayConfig:
         transport="disabled",
         ipc_socket_path="/tmp/robot_stack/mobile_gateway_ack.sock",
     ))
+    tts_event_in: GatewayEndpoint = field(default_factory=lambda: GatewayEndpoint(transport="disabled", ipc_socket_path="/tmp/robot_stack/mobile_tts_event.sock"))
+    tts_playback_out: GatewayEndpoint = field(default_factory=lambda: GatewayEndpoint(transport="disabled", ipc_socket_path="/tmp/robot_stack/tts_playback.sock", send_mode="oneshot"))

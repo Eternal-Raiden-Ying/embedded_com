@@ -1224,6 +1224,8 @@ class MqttTopicConfig:
     ack: str = "robot/sc171_car_01/ack"
     status: str = "robot/sc171_car_01/status"
     heartbeat: str = "robot/sc171_car_01/heartbeat"
+    tts: str = "robot/v1/SC171/mobile/tts"
+    tts_ack: str = "robot/v1/SC171/mobile/tts_ack"
 
 
 @dataclass
@@ -1242,6 +1244,7 @@ class MqttAdapterConfig:
     ack_qos: int = 1
     status_qos: int = 0
     heartbeat_qos: int = 0
+    tts_qos: int = 1
     retain_status: bool = False
     retain_heartbeat: bool = False
     keepalive_s: int = 60
@@ -1268,6 +1271,8 @@ class MobileGatewayConfig:
     orchestrator_task_ack_in: GatewayEndpoint = field(default_factory=lambda: GatewayEndpoint(
         transport="disabled", ipc_socket_path="/tmp/robot_stack/mobile_gateway_ack.sock",
     ))
+    tts_event_in: GatewayEndpoint = field(default_factory=lambda: GatewayEndpoint(transport="disabled", ipc_socket_path="/tmp/robot_stack/mobile_tts_event.sock"))
+    tts_playback_out: GatewayEndpoint = field(default_factory=lambda: GatewayEndpoint(transport="disabled", ipc_socket_path="/tmp/robot_stack/tts_playback.sock", send_mode="oneshot"))
 
 
 # ==============================================================================
