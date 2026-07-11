@@ -55,6 +55,11 @@ def resolve_target(target: str) -> Optional[TargetSpec]:
     return OBJECT_REGISTRY.get(canonical)
 
 
+DISPLAY_NAMES: Dict[str, str] = {"apple": "苹果", "banana": "香蕉", "basket": "篮子", "bottle": "瓶子", "cup": "杯子"}
+
+def target_display_name(target: TargetSpec) -> str:
+    return DISPLAY_NAMES.get(target.canonical_target, target.canonical_target)
+
 def supported_targets() -> List[str]:
     return sorted(OBJECT_REGISTRY.keys())
 

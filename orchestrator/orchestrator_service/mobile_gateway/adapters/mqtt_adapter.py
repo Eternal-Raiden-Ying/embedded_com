@@ -127,9 +127,12 @@ class MqttAdapter:
     def publish_heartbeat(self, payload: Dict[str, Any]) -> None:
         self._publish(self._heartbeat_topic, payload, qos=self.cfg.heartbeat_qos, retain=self.cfg.retain_heartbeat)
 
+    def publish_tts_event(self, payload: Dict[str, Any]) -> None:
+        self._publish(self._tts_topic, payload, qos=self.cfg.tts_qos, retain=False)
+
     def publish_tts(self, payload: Dict[str, Any]) -> None:
-        """Publish a TTS event without triggering any local audio playback."""
-        self._publish(self._tts_topic, payload, qos=self.cfg.ack_qos, retain=False)
+        """Backward-compatible alias for the authoritative TTS event publisher."""
+        self.publish_tts_event(payload)
 
     def _publish(self, topic: str, payload: Dict[str, Any], qos: int, retain: bool) -> None:
         client = self._client
@@ -154,8 +157,8 @@ class MqttAdapter:
         if bool(self.cfg.accept_commands):
             client.subscribe(self._cmd_topic, qos=int(self.cfg.cmd_qos))
             subscriptions.append({"topic": self._cmd_topic, "qos": int(self.cfg.cmd_qos)})
-        client.subscribe(self._tts_ack_topic, qos=int(self.cfg.ack_qos))
-        subscriptions.append({"topic": self._tts_ack_topic, "qos": int(self.cfg.ack_qos)})
+        client.subscribe(self._tts_ack_topic, qos=int(self.cfg.tts_qos))
+        subscriptions.append({"topic": self._tts_ack_topic, "qos": int(self.cfg.tts_qos)})
         self._log("info", "mqtt_connected", subscriptions=subscriptions, reason_code=int(reason_code))
 
     def _on_disconnect(self, client, userdata, disconnect_flags, reason_code, properties=None) -> None:

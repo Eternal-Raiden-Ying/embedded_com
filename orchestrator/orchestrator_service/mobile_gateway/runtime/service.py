@@ -33,6 +33,8 @@ from ..protocol import (
     ROBOT_ID,
     SUPPORTED_TARGETS,
     make_error_status,
+    make_tts_playback_state,
+    normalize_tts_event,
     new_id,
     now_ts,
 )
@@ -699,7 +701,7 @@ class MobileGatewayService(BaseModule):
                 cfg.mqtt,
                 self.handle_mobile_command_payload,
                 logger=self._log_mqtt_event,
-                tts_ack_handler=self._handle_tts_ack,
+                tts_ack_handler=self.handle_tts_ack_payload,
                 enable_raw_debug=cfg.runtime.enable_raw_mqtt_debug,
                 suppress_heartbeat_success_log=cfg.runtime.suppress_heartbeat_success_log,
             )
@@ -1702,8 +1704,8 @@ class MobileGatewayService(BaseModule):
                 loop_start = time.time()
                 self._drain_inbound_commands()
                 self._drain_pending_after_stop()
+                self._drain_tts_event_messages()
                 self._drain_ack_messages()
-                self._drain_tts_events()
                 self._drain_orchestrator_observer()
                 self._emit_heartbeat_if_needed()
                 elapsed = time.time() - loop_start
@@ -1749,67 +1751,54 @@ class MobileGatewayService(BaseModule):
             self._last_req_ts = recv_ts
             self._handle_command_payload(payload)
 
+    def _drain_tts_event_messages(self) -> None:
+        if self.tts_event_server is None:
+            return
+        for item in self.tts_event_server.drain():
+            raw_event = dict(item.get("payload") or {})
+            raw_event.setdefault("event_id", new_id("tts"))
+            try:
+                event = normalize_tts_event(raw_event)
+            except Exception as exc:
+                self.log_error("tts", "invalid tts_event", {"error": str(exc)})
+                continue
+            event_id = event["event_id"]
+            if event_id in self._recent_tts_event_id_set:
+                self.log_info("tts", "duplicate tts_event ignored", {"event_id": event_id})
+                continue
+            if len(self._recent_tts_event_ids) >= self._recent_tts_event_ids.maxlen:
+                self._recent_tts_event_id_set.discard(self._recent_tts_event_ids.popleft())
+            self._recent_tts_event_ids.append(event_id)
+            self._recent_tts_event_id_set.add(event_id)
+            if self.mqtt_adapter is not None:
+                self.mqtt_adapter.publish_tts_event(event)
+            self.run_logger.write_jsonl("tts_event", event)
+            self.run_logger.write_ipc_record(
+                "RX", "tts_event_in", "received", msg_type="tts_event",
+                data={"event_id": event_id, "payload": event}, ok=True,
+            )
+            self.log_info("tts", "[GATEWAY][TTS] forwarded", {"event_id": event_id})
+
+    def handle_tts_ack_payload(self, payload: Dict[str, Any]) -> None:
+        try:
+            state = make_tts_playback_state(payload)
+        except Exception as exc:
+            self.log_error("tts", "invalid tts_ack", {"error": str(exc)})
+            return
+        sent = self.tts_playback_sender.send(state)
+        self.run_logger.write_jsonl("tts_playback_state", state)
+        self.run_logger.write_ipc_record(
+            "TX", "tts_playback_out", "forwarded" if sent else "forward_failed",
+            msg_type="tts_playback_state", data={"event_id": state["event_id"], "payload": state}, ok=sent,
+        )
+        self.log_info("tts", "[GATEWAY][ACK] forwarded", {"event_id": state["event_id"], "state": state["state"], "sent": bool(sent)})
+
     def _drain_ack_messages(self) -> None:
         if self.ack_server is None:
             return
         for item in self.ack_server.drain():
             payload = dict(item.get("payload") or {})
             self._handle_task_ack(payload)
-
-    def _drain_tts_events(self) -> None:
-        if self.tts_event_server is None:
-            return
-        for item in self.tts_event_server.drain():
-            payload = dict(item.get("payload") or {})
-            self._handle_tts_event(payload)
-
-    def _handle_tts_event(self, payload: Dict[str, Any]) -> None:
-        """Bridge a local framed-msgpack TTS event to the mini-program MQTT topic."""
-        event = dict(payload or {})
-        event_id = str(event.get("event_id") or "").strip() or new_id("tts")
-        event["event_id"] = event_id
-        event.setdefault("type", "tts_event")
-        event.setdefault("ts", now_ts())
-        if event_id in self._recent_tts_event_id_set:
-            self.run_logger.write_ipc_record(
-                "RX", "tts_event_in", "duplicate_event_id", msg_type="tts_event",
-                data={"event_id": event_id}, ok=True,
-            )
-            self.log_info("tts", "duplicate TTS event ignored", {"event_id": event_id})
-            return
-        if len(self._recent_tts_event_ids) >= self._recent_tts_event_ids.maxlen:
-            expired = self._recent_tts_event_ids.popleft()
-            self._recent_tts_event_id_set.discard(expired)
-        self._recent_tts_event_ids.append(event_id)
-        self._recent_tts_event_id_set.add(event_id)
-        self.run_logger.write_ipc_record(
-            "RX", "tts_event_in", "received", msg_type="tts_event",
-            data={"event_id": event_id, "payload": event}, ok=True,
-        )
-        if self.mqtt_adapter is None:
-            self.log_warn("tts", "TTS event received while MQTT is disabled", {"event_id": event_id})
-            return
-        self.mqtt_adapter.publish_tts(event)
-        self.run_logger.write_ipc_record(
-            "TX", "mqtt_tts", "published", msg_type="tts_event",
-            data={"event_id": event_id, "payload": event}, ok=True,
-        )
-        self.log_info("tts", "TTS event published", {"event_id": event_id})
-
-    def _handle_tts_ack(self, payload: Dict[str, Any]) -> None:
-        """Forward mini-program playback state to the local framed-msgpack endpoint."""
-        playback = dict(payload or {})
-        playback.setdefault("kind", "tts_playback")
-        ok = self.tts_playback_sender.send(playback)
-        self.run_logger.write_ipc_record(
-            "TX", "tts_playback_out", "forwarded" if ok else "forward_failed",
-            msg_type=str(playback.get("type") or "tts_ack"),
-            data={"event_id": playback.get("event_id"), "payload": playback}, ok=ok,
-        )
-        if ok:
-            self.log_info("tts", "TTS playback state forwarded", {"event_id": playback.get("event_id")})
-        else:
-            self.log_warn("tts", "TTS playback state forward failed", {"event_id": playback.get("event_id")})
 
     def _drain_orchestrator_observer(self) -> None:
         if self.observer is None:

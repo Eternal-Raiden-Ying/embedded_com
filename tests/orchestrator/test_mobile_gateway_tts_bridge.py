@@ -47,6 +47,9 @@ class _MqttPublishSpy:
     def publish_tts(self, payload):
         self.events.append(dict(payload))
 
+    def publish_tts_event(self, payload):
+        self.events.append(dict(payload))
+
     def start(self):
         pass
 
@@ -108,10 +111,11 @@ def test_tts_bridge_forwards_framed_event_and_playback_state(tmp_path: Path, tra
         orch_tts_event = make_tts_event("开始寻找 apple")
         orch_tts_event["event_id"] = "evt-1"
         assert sender.send(orch_tts_event)
+        assert sender.send(orch_tts_event)
         deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline and service.tts_event_server.snapshot()["total_recv_count"] < 1:
+        while time.monotonic() < deadline and service.tts_event_server.snapshot()["total_recv_count"] < 2:
             time.sleep(0.02)
-        service._drain_tts_events()
+        service._drain_tts_event_messages()
         assert len(service.mqtt_adapter.events) == 1
         event = service.mqtt_adapter.events[0]
         assert event["type"] == "tts_event"
@@ -119,18 +123,19 @@ def test_tts_bridge_forwards_framed_event_and_playback_state(tmp_path: Path, tra
         assert event["text"] == "开始寻找 apple"
         assert isinstance(event["ts"], float)
 
-        service._handle_tts_event({"text": "generated id"})
+        generated_event = {"type": "tts_event", "text": "generated id"}
+        service.tts_event_server._queue.put({"payload": generated_event})
+        service._drain_tts_event_messages()
         assert len(service.mqtt_adapter.events) == 2
         assert service.mqtt_adapter.events[-1]["event_id"].startswith("tts_")
 
-        service._handle_tts_event({"event_id": "evt-1", "text": "duplicate"})
-        assert len(service.mqtt_adapter.events) == 2
-
-        service._handle_tts_ack({"type": "tts_ack", "event_id": "evt-1", "state": "finished"})
+        service.handle_tts_ack_payload({"type": "tts_ack", "event_id": "evt-1", "state": "finished"})
         playback = _wait_for_items(playback_server)
-        assert playback[0]["payload"] == {
-            "type": "tts_ack", "event_id": "evt-1", "state": "finished", "kind": "tts_playback"
-        }
+        playback_state = playback[0]["payload"]
+        assert playback_state["type"] == "tts_playback_state"
+        assert playback_state["event_id"] == "evt-1"
+        assert playback_state["state"] == "finished"
+        assert playback_state["source"] == "mini_program"
     finally:
         sender.close()
         service.stop()
@@ -165,7 +170,7 @@ def test_mqtt_adapter_playback_only_routes_tts_ack_and_rejects_cmd_subscription(
     adapter._started = True
 
     adapter._on_connect(client, None, None, 0)
-    assert client.subscriptions == [(cfg.topics.tts_ack, cfg.ack_qos)]
+    assert client.subscriptions == [(cfg.topics.tts_ack, cfg.tts_qos)]
 
     adapter._on_message(client, None, SimpleNamespace(
         topic=cfg.topics.cmd, payload=b'{"cmd":"stop"}',
@@ -177,7 +182,7 @@ def test_mqtt_adapter_playback_only_routes_tts_ack_and_rejects_cmd_subscription(
 
     assert command_events == []
     assert tts_ack_events == [{"event_id": "evt-2", "state": "started"}]
-    assert client.published == [(cfg.topics.tts, {"event_id": "evt-2", "text": "hello"}, cfg.ack_qos, False)]
+    assert client.published == [(cfg.topics.tts, {"event_id": "evt-2", "text": "hello"}, cfg.tts_qos, False)]
 
 
 def test_sc171_voice_phone_tts_profile_routes_orchestrator_to_gateway(monkeypatch):

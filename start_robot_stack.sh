@@ -1112,19 +1112,19 @@ voice_start() {
   if [[ "$STACK_PROFILE" == "windows_voice_dev" || "$STACK_PROFILE" == "windows_dev" || "$STACK_PROFILE" == "dryrun" ]]; then
     dryrun_flag="--dry-run-text"
   fi
-  "$STACK_ROOT/Voice/start_voice_asr.sh" start "$SYSTEM_CONFIG_PROFILE" "$dryrun_flag"
+  bash "$STACK_ROOT/Voice/start_voice_asr.sh" start --profile "configs/profiles/${SYSTEM_CONFIG_PROFILE}.yaml" $dryrun_flag
 }
 
 voice_stop() {
-  "$STACK_ROOT/Voice/start_voice_asr.sh" stop
+  bash "$STACK_ROOT/Voice/start_voice_asr.sh" stop
 }
 
 voice_status() {
-  "$STACK_ROOT/Voice/start_voice_asr.sh" status
+  bash "$STACK_ROOT/Voice/start_voice_asr.sh" status
 }
 
 voice_tail() {
-  "$STACK_ROOT/Voice/start_voice_asr.sh" tail
+  bash "$STACK_ROOT/Voice/start_voice_asr.sh" tail
 }
 
 stop_gateway() {

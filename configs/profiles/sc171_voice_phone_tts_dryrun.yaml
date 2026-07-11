@@ -1,0 +1,52 @@
+profile: "sc171_voice_phone_tts_dryrun"
+runtime_overrides:
+  orchestrator:
+    runtime:
+      config_profile: "sc171_voice_phone_tts_dryrun"
+    serial:
+      dry_run: true
+    arm_serial:
+      dry_run: true
+    vista:
+      enabled: false
+    task_cmd_in:
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/task_cmd.sock"
+    task_ack_out:
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/task_ack.sock"
+    tts_event_out:
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/mobile_tts_event.sock"
+  gateway:
+    command_in: {transport: "mqtt"}
+    status_out: {transport: "mqtt"}
+    orchestrator_task_cmd_out:
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/task_cmd.sock"
+    orchestrator_task_ack_in: {transport: "disabled"}
+    tts_event_in:
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/mobile_tts_event.sock"
+    tts_playback_out:
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/tts_playback.sock"
+    mqtt:
+      enabled: true
+      tts_qos: 1
+      topics:
+        tts: "robot/v1/SC171/mobile/tts"
+        tts_ack: "robot/v1/SC171/mobile/tts_ack"
+voice_gateway:
+  runtime:
+    input_mode: voice_only
+    dry_run_text: true
+  tts: {enabled: false}
+  ipc:
+    task_cmd_out:
+      transport: uds
+      ipc_socket_path: /tmp/robot_stack/task_cmd.sock
+    task_ack_in:
+      transport: uds
+      ipc_socket_path: /tmp/robot_stack/task_ack.sock
+    tts_event_in: {transport: disabled}

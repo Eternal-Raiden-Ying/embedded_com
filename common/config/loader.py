@@ -225,6 +225,7 @@ def apply_env_overrides(config: SystemGlobalConfig) -> None:
     _set_from_env(config.gateway.mqtt, "password", "MOBILE_GATEWAY_MQTT_PASSWORD", str)
     _set_from_env(config.gateway.mqtt, "client_id", "MOBILE_GATEWAY_MQTT_CLIENT_ID", str)
     _set_from_env(config.gateway.mqtt, "robot_id", "MOBILE_GATEWAY_MQTT_ROBOT_ID", str)
+    _set_from_env(config.gateway.mqtt, "tts_qos", "MOBILE_GATEWAY_MQTT_TTS_QOS", int)
     _set_from_env(config.gateway.mqtt, "accept_commands", "MOBILE_GATEWAY_MQTT_ACCEPT_COMMANDS", bool)
     _set_from_env(config.gateway.mqtt.topics, "cmd", "MOBILE_GATEWAY_MQTT_TOPIC_CMD", str)
     _set_from_env(config.gateway.mqtt.topics, "ack", "MOBILE_GATEWAY_MQTT_TOPIC_ACK", str)

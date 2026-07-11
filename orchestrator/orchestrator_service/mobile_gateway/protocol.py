@@ -13,6 +13,7 @@ MQTT_TOPIC_STATUS = "robot/v1/SC171/mobile/status"
 MQTT_TOPIC_HEARTBEAT = "robot/v1/SC171/heartbeat"
 MQTT_TOPIC_TTS = "robot/v1/SC171/mobile/tts"
 MQTT_TOPIC_TTS_ACK = "robot/v1/SC171/mobile/tts_ack"
+TTS_PLAYBACK_STATES: Set[str] = {"queued", "synthesizing", "started", "finished", "failed", "interrupted"}
 
 SUPPORTED_COMMANDS: Set[str] = {
     "fetch_object",
@@ -66,6 +67,24 @@ class MobileProtocolError(ValueError):
 def now_ts() -> float:
     return time.time()
 
+
+def normalize_tts_event(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if str(payload.get("type", "")).strip() != "tts_event":
+        raise MobileProtocolError("not a tts_event payload", ERROR_CODES["invalid_command"])
+    event_id, text, phrase_id = str(payload.get("event_id", "")).strip(), str(payload.get("text", "")).strip(), str(payload.get("phrase_id", "")).strip()
+    if not event_id or (not text and not phrase_id):
+        raise MobileProtocolError("tts_event requires event_id and text or phrase_id", ERROR_CODES["invalid_command"])
+    priority = str(payload.get("priority", "P2") or "P2").upper()
+    return {**dict(payload), "schema_version": int(payload.get("schema_version", 1) or 1), "type": "tts_event", "event_id": event_id, "text": text, "phrase_id": phrase_id, "source": str(payload.get("source", "orchestrator") or "orchestrator"), "session_id": str(payload.get("session_id", "") or ""), "cmd_id": str(payload.get("cmd_id", "") or ""), "priority": priority if priority in {"P0", "P1", "P2", "P3"} else "P2", "interrupt": bool(payload.get("interrupt", False)), "dedup_key": str(payload.get("dedup_key", "") or ""), "ts": float(payload.get("ts", now_ts()))}
+
+
+def make_tts_playback_state(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if str(payload.get("type", "")).strip() != "tts_ack":
+        raise MobileProtocolError("not a tts_ack payload", ERROR_CODES["invalid_command"])
+    event_id, state = str(payload.get("event_id", "")).strip(), str(payload.get("state", "")).strip().lower()
+    if not event_id or state not in TTS_PLAYBACK_STATES:
+        raise MobileProtocolError("invalid tts_ack event_id or state", ERROR_CODES["invalid_command"])
+    return {"schema_version": int(payload.get("schema_version", 1) or 1), "type": "tts_playback_state", "event_id": event_id, "state": state, "source": str(payload.get("source", "mini_program") or "mini_program"), "session_id": str(payload.get("session_id", "") or ""), "cmd_id": str(payload.get("cmd_id", "") or ""), "duration_ms": int(payload.get("duration_ms", 0) or 0), "reason": str(payload.get("reason", "") or ""), "ts": float(payload.get("ts", now_ts()))}
 
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:10]}"

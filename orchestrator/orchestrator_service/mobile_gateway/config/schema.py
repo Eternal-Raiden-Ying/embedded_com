@@ -122,6 +122,7 @@ class MqttAdapterConfig:
     ack_qos: int = 1
     status_qos: int = 0
     heartbeat_qos: int = 0
+    tts_qos: int = 1
     retain_status: bool = False
     retain_heartbeat: bool = False
     keepalive_s: int = 60
@@ -156,12 +157,5 @@ class MobileGatewayConfig:
         transport="disabled",
         ipc_socket_path="/tmp/robot_stack/mobile_gateway_ack.sock",
     ))
-    tts_event_in: GatewayEndpoint = field(default_factory=lambda: GatewayEndpoint(
-        transport="uds",
-        ipc_socket_path="/tmp/robot_stack/mobile_tts_event.sock",
-    ))
-    tts_playback_out: GatewayEndpoint = field(default_factory=lambda: GatewayEndpoint(
-        transport="uds",
-        ipc_socket_path="/tmp/robot_stack/tts_playback.sock",
-        send_mode="oneshot",
-    ))
+    tts_event_in: GatewayEndpoint = field(default_factory=lambda: GatewayEndpoint(transport="disabled", ipc_socket_path="/tmp/robot_stack/mobile_tts_event.sock"))
+    tts_playback_out: GatewayEndpoint = field(default_factory=lambda: GatewayEndpoint(transport="disabled", ipc_socket_path="/tmp/robot_stack/tts_playback.sock", send_mode="oneshot"))

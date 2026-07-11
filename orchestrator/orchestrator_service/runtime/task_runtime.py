@@ -23,7 +23,7 @@ from ..ipc.protocol import (
 )
 from ..bridge.arm_protocol import parse_arm_response
 from ..utils.grasp_utils import grasp_to_pose_params
-from ..utils.target_utils import resolve_target, supported_targets, target_to_class_id
+from ..utils.target_utils import resolve_target, supported_targets, target_to_class_id, target_display_name
 from .common import monotonic_ts
 from .context import RuntimeContext, State
 from .controller import MotionController, MotionDecision
@@ -504,9 +504,10 @@ class TaskRuntimeMixin:
         if tts_text:
             self._queue_tts(tts_text, interrupt=interrupt_tts)
 
-    def _queue_tts(self, text: str, interrupt: bool = False):
+    def _queue_tts(self, text: str, interrupt: bool = False, *, phrase_id: str = "", priority: str = "P2", dedup_key: str = ""):
         try:
-            self.ctx.pending_tts_msgs.append(make_tts_event(text, interrupt=interrupt))
+            last_cmd = self.ctx.last_task_cmd
+            self.ctx.pending_tts_msgs.append(make_tts_event(text, interrupt=interrupt, phrase_id=phrase_id, priority=priority, dedup_key=dedup_key, session_id=self.ctx.active_session_id, cmd_id=str(getattr(last_cmd, "cmd_id", "") or "")))
         except Exception:
             pass
 
@@ -537,7 +538,7 @@ class TaskRuntimeMixin:
         })
         self._queue_remote_init_warmup(target=spec.class_name)
         self._transition(State.SEARCH_TABLE, f"开始桌边任务，进入桌边搜索，目标 {spec.canonical_target}")
-        self._queue_tts(f"开始寻找 {spec.class_name}")
+        self._queue_tts(f"任务已经开始，正在寻找{target_display_name(spec)}。", phrase_id="TASK_ACCEPTED", priority="P2", dedup_key=f"task_accepted:{cmd.cmd_id}")
 
     def _queue_remote_init_warmup(self, *, target: str) -> None:
         if not bool(getattr(self.cfg, "remote_init_auto_enabled", False)):

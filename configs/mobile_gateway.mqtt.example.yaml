@@ -25,6 +25,7 @@ mqtt:
   ack_qos: 1
   status_qos: 0
   heartbeat_qos: 0
+  tts_qos: 1
   accept_commands: true
   retain_status: true
   retain_heartbeat: false

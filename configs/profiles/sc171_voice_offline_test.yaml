@@ -1,0 +1,13 @@
+profile: "sc171_voice_offline_test"
+runtime_overrides:
+  gateway:
+    command_in: {transport: "disabled"}
+    status_out: {transport: "disabled"}
+    tts_event_in: {transport: "disabled"}
+voice_gateway:
+  runtime: {input_mode: voice_only, dry_run_text: true}
+  tts: {enabled: false}
+  ipc:
+    task_cmd_out: {transport: disabled}
+    task_ack_in: {transport: disabled}
+    tts_event_in: {transport: disabled}
