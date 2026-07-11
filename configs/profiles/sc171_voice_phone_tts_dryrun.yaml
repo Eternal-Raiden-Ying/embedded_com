@@ -55,3 +55,12 @@ voice_gateway:
       transport: uds
       ipc_socket_path: /tmp/robot_stack/task_ack.sock
     tts_event_in: {transport: disabled}
+  mobile_feedback:
+    transport: uds
+    ipc_socket_path: /tmp/robot_stack/mobile_tts_event.sock
+  playback:
+    transport: uds
+    ipc_socket_path: /tmp/robot_stack/tts_playback.sock
+    start_timeout_s: 1.5
+    finish_timeout_s: 6.0
+    post_guard_s: 0.35

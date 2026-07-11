@@ -14,14 +14,14 @@ from voice_service.runtime.service import run_voice_service, list_audio_devices
 def check_models(cfg) -> None:
     # "Normal vs. dry-run models: If model binaries are missing during dry-run-text, the gateway must print a warning and run successfully. In normal mode, it must crash with a structured error."
     missing = []
-    
+
     # We check: KWS wake, KWS stop, VAD, ASR, TTS model files
     to_check = {
         "Wake Word Model": cfg.wake_tflite,
         "Stop Word Model": cfg.stop_tflite,
         "ASR Model Directory": cfg.asr_dir,
     }
-    
+
     if cfg.asr_mode != "online":
         to_check["VAD Model Directory"] = cfg.vad_dir
     if not cfg.disable_tts:
@@ -36,7 +36,7 @@ def check_models(cfg) -> None:
                 missing.append((label, path_str))
         else:
             missing.append((label, "<not configured>"))
-                
+
     if missing:
         lines = [f" - {lbl}: {p_str}" for lbl, p_str in missing]
         msg = "CRITICAL ERROR: Configuration references missing model files or directories:\n" + "\n".join(lines)
@@ -60,40 +60,40 @@ def run_audio_replay(cfg, replay_path_str: str, send_task: bool) -> None:
     from voice_service.runtime.commands import CommandInterpreter
     from voice_service.runtime.asr_engine import AudioCommandPipeline
     from voice_service.runtime.kws_engine import FlexibleWakeWord
-    
+
     interpreter = CommandInterpreter.from_json(cfg.commands_json)
     pipeline = AudioCommandPipeline(cfg, interpreter)
-    
+
     models = []
     if cfg.wake_tflite:
         models.append(cfg.wake_tflite)
     if cfg.stop_tflite:
         models.append(cfg.stop_tflite)
     oww = FlexibleWakeWord(models, vad_threshold=cfg.oww_vad_th, ncpu=1, dry_run_text=cfg.dry_run_text)
-    
+
     replay_path = Path(replay_path_str)
     wav_files = sorted(list(replay_path.rglob("*.wav"))) if replay_path.is_dir() else [replay_path]
-    
+
     print(f"\n--- Audio Replay Mode started: {len(wav_files)} files ---")
-    
+
     results = []
     run_dir = Path(cfg.runs_dir) / f"replay_{int(time.time())}"
     run_dir.mkdir(parents=True, exist_ok=True)
-    
+
     for wf_path in wav_files:
         print(f"\nProcessing file: {wf_path.name}")
         try:
             from voice_service.examples.kws_probe import read_wav, resample_audio
             raw_audio, sr, duration = read_wav(wf_path)
             audio, _ = resample_audio(raw_audio, sr, 16000)
-            
+
             t0 = time.perf_counter()
             frame_samples = 1280
             num_frames = len(audio) // frame_samples
             wake_score, stop_score = 0.0, 0.0
             wake_key = cfg.wake_key or (Path(cfg.wake_tflite).stem if cfg.wake_tflite else "")
             stop_key = cfg.stop_key or (Path(cfg.stop_tflite).stem if cfg.stop_tflite else "")
-            
+
             for i in range(num_frames):
                 chunk = audio[i * frame_samples : (i + 1) * frame_samples]
                 preds = oww.predict(chunk)
@@ -101,18 +101,18 @@ def run_audio_replay(cfg, replay_path_str: str, send_task: bool) -> None:
                 ss = preds.get(stop_key, 0.0)
                 if ws > wake_score: wake_score = ws
                 if ss > stop_score: stop_score = ss
-                
+
             kws_latency = (time.perf_counter() - t0) * 1000.0
-            
+
             t_asr = time.perf_counter()
             asr_result = pipeline.process_audio(audio)
             asr_latency = (time.perf_counter() - t_asr) * 1000.0
             total_latency = (time.perf_counter() - t0) * 1000.0
-            
+
             print(f"  KWS Wake Score: {wake_score:.3f}, Stop Score: {stop_score:.3f}")
             print(f"  Raw ASR: {asr_result.get('text')}")
             print(f"  Intent: {asr_result.get('intent')}, Target: {asr_result.get('target')}")
-            
+
             if send_task and asr_result.get("status") == "OK":
                 print("  Sending TaskCmd to Orchestrator...")
                 from voice_service.runtime.service import build_task_sender
@@ -126,7 +126,7 @@ def run_audio_replay(cfg, replay_path_str: str, send_task: bool) -> None:
                 })
                 task_sender.send(cmd_msg)
                 task_sender.close()
-                
+
             results.append({
                 "file": wf_path.name,
                 "expected_wake": "yes",
@@ -165,7 +165,7 @@ def run_audio_replay(cfg, replay_path_str: str, send_task: bool) -> None:
                 "result": "ERROR",
                 "error": str(e)
             })
-            
+
     if replay_path.is_dir():
         csv_file = run_dir / "audio_replay_results.csv"
         print(f"\nWriting replay results to CSV: {csv_file}")
@@ -249,7 +249,7 @@ def main():
                 # Print prompt
                 sys.stdout.write("Voice Command > ")
                 sys.stdout.flush()
-                
+
                 # Check for input or shutdown
                 line = sys.stdin.readline()
                 if not line:
@@ -260,7 +260,7 @@ def main():
                     break
                 if not line:
                     continue
-                    
+
                 # Put the command text into the queue with wildcard epoch
                 utter_q.put({"kind": "TEXT", "text": line, "epoch": -1})
                 # Pause briefly to allow the worker thread to process and print logs

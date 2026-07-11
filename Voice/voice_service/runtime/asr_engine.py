@@ -30,7 +30,7 @@ class VADProcessor:
         self.vad = None
         if self.dry_run_text:
             return
-            
+
         from funasr_onnx import Fsmn_vad
         self.vad = Fsmn_vad(vad_dir, quantize=quantize)
 
@@ -66,14 +66,14 @@ class OfflineASREngine:
         self.asr = None
         if self.dry_run_text:
             return
-            
+
         from funasr_onnx import Paraformer as OfflineParaformer
         self.asr = OfflineParaformer(asr_dir, batch_size=1, quantize=quantize, device_id=-1)
 
     def transcribe(self, audio, debug: bool = False) -> Tuple[str, Optional[float]]:
         if self.dry_run_text:
             return "", None
-            
+
         asr_out = self.asr(audio)
         if debug:
             jlog({"level": "debug", "src": "asr", "raw": str(asr_out)})
@@ -115,7 +115,7 @@ class OnlineASREngine:
     def create_session(self) -> OnlineStreamSession:
         if self.dry_run_text:
             return OnlineStreamSession(backend=None, debug={"backend": "mock"})
-            
+
         from funasr_onnx.paraformer_online_bin import Paraformer as OnlineParaformerImpl
         attempts = [
             {"batch_size": 1, "quantize": self.quantize, "chunk_size": self.chunk_size, "intra_op_num_threads": 1},
@@ -157,7 +157,7 @@ class OnlineASREngine:
         audio_arr = np.asarray(audio)
         session.samples += int(len(audio_arr))
         session.feed_calls += 1
-        
+
         # Audio normalization and contiguous check
         audio_feed = np.asarray(audio_arr, dtype=np.float32).reshape(-1)
         if audio_feed.size:
@@ -196,16 +196,16 @@ class OnlineASREngine:
                     if prev[-i:] == text[:i]:
                         max_overlap = i
                 merged = prev + text[max_overlap:]
-                
+
             if is_final:
                 session.final_text = merged
             else:
                 session.partial_text = merged
                 session.last_partial_at = time.time()
-                
+
         if is_final and not session.final_text:
             session.final_text = session.partial_text
-            
+
         return {
             "text": text,
             "merged_text": session.final_text if is_final else session.partial_text,

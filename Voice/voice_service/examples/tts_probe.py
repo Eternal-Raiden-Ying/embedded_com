@@ -29,21 +29,21 @@ def main():
     parser.add_argument("--play", action="store_true", default=False, help="Play audio after synthesis")
     parser.add_argument("--no-play", action="store_true", default=False, help="Explicitly disable playback")
     args = parser.parse_known_args()[0]
-    
+
     # Honor explicit --no-play flag
     play_audio = args.play and not args.no_play
-    
+
     # Load configuration
     cfg = load_voice_config(["--profile", args.profile])
-    
+
     print("\n==================================================")
     print("Voice Gateway TTS Probe")
     print("==================================================")
     print(f"Text to Synthesize: {args.text}")
-    
+
     output_path = resolve_path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    
+
     # Check companion file
     if cfg.piper_model:
         tts_model_path = Path(cfg.piper_model)
@@ -51,7 +51,7 @@ def main():
         if tts_model_path.exists() and not tts_json_path.exists():
             print(f"\n[VOICE][MODEL] status=BLOCKED_MODEL_LAYOUT reason='Missing TTS companion JSON config: {tts_json_path.name}'")
             sys.exit(0)
-            
+
     # Measure model load time
     t0 = time.perf_counter()
     try:
@@ -74,12 +74,12 @@ def main():
         traceback.print_exc()
         sys.exit(0)
     load_time = time.perf_counter() - t0
-    
+
     print(f"Backend            : {'mock_stub' if cfg.dry_run_text else 'piper'}")
     print(f"Model Path         : {cfg.piper_model}")
     print(f"Config Path        : {cfg.piper_config}")
     print(f"Model Load Time    : {load_time * 1000.0:.2f} ms")
-    
+
     # Synthesis
     t_synth = time.perf_counter()
     # In piper mode "save", say() synthesizes to a file and returns path
@@ -102,18 +102,18 @@ def main():
             import shutil
             shutil.copy(res_file, str(output_path))
             res_file = str(output_path)
-            
+
     synth_time = time.perf_counter() - t_synth
-    
+
     duration, sr = get_wav_duration_and_sr(output_path)
     print(f"Synthesis Time     : {synth_time * 1000.0:.2f} ms")
     print(f"WAV Output Path    : {output_path}")
     print(f"Output Sample Rate : {sr} Hz")
     print(f"Audio Duration     : {duration:.3f} seconds")
-    
+
     playback_backend = cfg.play_cmd
     playback_result = "SKIPPED"
-    
+
     if play_audio:
         print(f"Playback started using backend: {playback_backend}")
         t_play = time.perf_counter()

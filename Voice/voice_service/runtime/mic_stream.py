@@ -44,7 +44,7 @@ class RawMicStream:
         self.eof_events = 0
         self.last_chunk_sizes: List[int] = []
         self.last_restart_reason = ""
-        
+
         if not self.dry_run_text:
             self.start()
 
@@ -52,7 +52,7 @@ class RawMicStream:
         self.close()
         if os.name == "nt" or self.dry_run_text:
             return
-            
+
         cmd = [
             "arecord", "-D", self.device,
             "-q", "-t", "raw",
@@ -103,7 +103,7 @@ class RawMicStream:
         assert self.proc is not None
         if self.proc.stdout is None:
             raise RuntimeError("arecord stdout is None")
-            
+
         if select is None:
             raise RuntimeError("select module not available on this platform")
 

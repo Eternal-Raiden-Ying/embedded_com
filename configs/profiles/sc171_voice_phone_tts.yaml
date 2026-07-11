@@ -26,10 +26,6 @@ runtime_overrides:
       send_mode: "oneshot"
       async_enabled: true
   gateway:
-    mqtt:
-      # Keep the mini-program FIND/debug command topic active in addition to
-      # the tts_ack subscription. Broker credentials stay in the local MQTT file.
-      accept_commands: true
     command_in:
       transport: "http"
       ipc_socket_path: "/tmp/robot_stack/mobile_gateway_cmd.sock"
@@ -51,6 +47,9 @@ runtime_overrides:
       ipc_socket_path: "/tmp/robot_stack/tts_playback.sock"
       send_mode: "oneshot"
     mqtt:
+      # Keep the mini-program FIND/debug command topic active in addition to
+      # the tts_ack subscription. Broker credentials stay in the local MQTT file.
+      accept_commands: true
       tts_qos: 1
       topics:
         tts: "robot/v1/SC171/mobile/tts"
@@ -77,3 +76,12 @@ voice_gateway:
       ipc_socket_path: /tmp/robot_stack/task_ack.sock
     tts_event_in:
       transport: disabled
+  mobile_feedback:
+    transport: uds
+    ipc_socket_path: /tmp/robot_stack/mobile_tts_event.sock
+  playback:
+    transport: uds
+    ipc_socket_path: /tmp/robot_stack/tts_playback.sock
+    start_timeout_s: 1.5
+    finish_timeout_s: 6.0
+    post_guard_s: 0.35

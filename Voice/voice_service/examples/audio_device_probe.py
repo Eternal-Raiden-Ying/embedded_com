@@ -30,7 +30,7 @@ def run_5sec_record_test(device, out_path):
     if not check_command_exists("arecord"):
         print("ERROR: arecord binary not available on this system.")
         return False
-        
+
     cmd = [
         "arecord", "-D", device,
         "-d", "5", "-f", "S16_LE", "-r", "16000", "-c", "1",
@@ -52,12 +52,12 @@ def run_5sec_record_test(device, out_path):
     except Exception as e:
         print(f"ERROR: failed to execute arecord: {e}")
         return False
-        
+
     # Read recording and analyze stats
     if not out_path.exists():
         print("ERROR: Output recording WAV file was not created.")
         return False
-        
+
     try:
         with wave.open(str(out_path), "rb") as wf:
             frames = wf.getnframes()
@@ -66,14 +66,14 @@ def run_5sec_record_test(device, out_path):
         if len(audio) == 0:
             print("ERROR: Recorded file is empty.")
             return False
-            
+
         peak = np.max(np.abs(audio))
         rms = np.sqrt(np.mean(audio.astype(np.float64) ** 2))
-        
+
         # Judge if silent or clipped
         silent = rms < 10.0
         clipped = peak >= 32767
-        
+
         print("\n--- Audio Stats ---")
         print(f"  Total samples  : {len(audio)}")
         print(f"  Peak Amplitude : {peak}")
@@ -98,7 +98,7 @@ def run_play_test(play_cmd, test_wav):
             wf.setsampwidth(2)
             wf.setframerate(sr)
             wf.writeframes(data.tobytes())
-            
+
     print(f"Playing WAV: {test_wav}")
     cmd = play_cmd.split() + [test_wav]
     print(f"Executing: {' '.join(cmd)}")
@@ -120,31 +120,31 @@ def main():
     parser.add_argument("--record-test", action="store_true", default=False, help="Perform a 5-second record test")
     parser.add_argument("--play-test", action="store_true", default=False, help="Perform a playback test")
     args = parser.parse_known_args()[0]
-    
+
     cfg = load_voice_config(["--profile", args.profile])
-    
+
     print("\n==================================================")
     print("Voice Gateway Audio Device Probe")
     print("==================================================")
     print(f"arecord path: {shutil.which('arecord') or 'not found'}")
     print(f"aplay path: {shutil.which('aplay') or 'not found'}")
-    
+
     print("\n[ arecord -l ]")
     print_subprocess_output(["arecord", "-l"])
-    
+
     print("\n[ arecord -L ]")
     print_subprocess_output(["arecord", "-L"])
-    
+
     print("\n[ aplay -l ]")
     print_subprocess_output(["aplay", "-l"])
-    
+
     print("\n[ aplay -L ]")
     print_subprocess_output(["aplay", "-L"])
-    
+
     print("\n[ Configuration Settings ]")
     print(f"  Configured Input Device  : {cfg.arecord_device}")
     print(f"  Configured Playback Cmd  : {cfg.play_cmd}")
-    
+
     # 5-second record test
     if args.record_test:
         out_wav = Path(cfg.runs_dir) / "probes" / "record_test.wav"
@@ -152,7 +152,7 @@ def main():
         run_5sec_record_test(cfg.arecord_device, out_wav)
     else:
         print("\nNote: Recording test skipped (use --record-test to run)")
-        
+
     # Play test
     if args.play_test:
         test_wav = str(Path(cfg.runs_dir) / "probes" / "playback_test_beep.wav")

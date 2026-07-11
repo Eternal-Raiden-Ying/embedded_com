@@ -60,37 +60,37 @@ def main():
     parser.add_argument("--mode", type=str, choices=["online", "offline"], default="offline", help="ASR Mode")
     parser.add_argument("--send-task", action="store_true", default=False, help="Connect and send TaskCmd to Orchestrator")
     args = parser.parse_known_args()[0]
-    
+
     # Overrides config's asr_mode
     overrides = ["--profile", args.profile, "--asr_mode", args.mode]
     cfg = load_voice_config(overrides)
-    
+
     print("\n==================================================")
     print("Voice Gateway ASR Probe")
     print("==================================================")
     print(f"ASR Mode: {args.mode}")
     print(f"WAV Path: {args.wav}")
-    
+
     if not os.path.exists(args.wav):
         print(f"ERROR: WAV file does not exist: {args.wav}")
         sys.exit(1)
-        
+
     audio, duration = read_wav_mono_16k(args.wav)
     print(f"Audio Duration: {duration:.3f} seconds")
-    
+
     interpreter = CommandInterpreter.from_json(cfg.commands_json)
-    
+
     # Check companion files
     from voice_service.examples.inspect_models import check_companion_files
-    
+
     vad_missing = check_companion_files(Path(cfg.vad_dir), ["config.yaml", "configuration.json", "am.mvn"]) if cfg.vad_dir else []
     asr_missing = check_companion_files(Path(cfg.asr_dir), ["tokens.json", "config.yaml", "configuration.json", "am.mvn"]) if cfg.asr_dir else []
-    
+
     if (cfg.vad_dir and vad_missing) or (cfg.asr_dir and asr_missing):
         missing_all = vad_missing + asr_missing
         print(f"\n[VOICE][MODEL] status=BLOCKED_MODEL_LAYOUT reason='Missing required companion files: {missing_all}'")
         sys.exit(0)
-        
+
     # Measure ASR pipeline load time
     t0 = time.perf_counter()
     try:
@@ -106,11 +106,11 @@ def main():
         traceback.print_exc()
         sys.exit(0)
     load_time = time.perf_counter() - t0
-    
+
     print(f"Backend ASR Model: {cfg.asr_dir}")
     print(f"Backend VAD Model: {cfg.vad_dir}")
     print(f"Model Load Time  : {load_time * 1000.0:.2f} ms")
-    
+
     t_start = time.perf_counter()
     if args.mode == "online":
         session = pipeline.start_stream_session()
@@ -123,10 +123,10 @@ def main():
         result = pipeline.finalize_stream_result(session)
     else:
         result = pipeline.process_audio(audio)
-        
+
     inference_time = time.perf_counter() - t_start
     rtf = inference_time / duration if duration > 0 else 0.0
-    
+
     print("\n--- Transcription Result ---")
     print(f"Status        : {result.get('status')}")
     print(f"Raw ASR       : {result.get('text')}")
@@ -134,15 +134,15 @@ def main():
     print(f"Target        : {result.get('target')}")
     print(f"Confidence    : {result.get('confidence')}")
     print(f"ASR Conf      : {result.get('asr_confidence')}")
-    
+
     print("\n--- Inference Performance Baseline ---")
     print(f"Inference Time: {inference_time * 1000.0:.2f} ms")
     print(f"RTF           : {rtf:.4f}")
-    
+
     rss, cpu = get_process_metrics()
     print(f"Peak RSS      : {rss}")
     print(f"CPU Time      : {cpu}")
-    
+
     # Send task cmd to Orchestrator if send_task is active
     if args.send_task:
         print("\nSending TaskCmd to Orchestrator...")
@@ -160,7 +160,7 @@ def main():
         task_sender.close()
     else:
         print("\nNote: Orchestrator dispatch skipped (--send-task flag not active)")
-        
+
     # Save latency summary logs
     run_dir = Path(cfg.runs_dir) / "probes"
     run_dir.mkdir(parents=True, exist_ok=True)

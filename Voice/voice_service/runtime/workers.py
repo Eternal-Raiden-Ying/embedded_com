@@ -26,14 +26,14 @@ def dispatch_task_cmd(payload: Dict[str, Any], publisher: Any, ack_inbox: Option
     out = build_task_cmd(payload)
     cmd_id = out["cmd_id"]
     rt.note_command(cmd_id)
-    
+
     # Register pending cmd_id in ack_inbox
     if ack_inbox is not None:
         ack_inbox.register_pending(cmd_id)
 
     write_timeline(f"{label}_SEND_ATTEMPT", cmd_id=cmd_id, intent=out.get("intent"), target=out.get("target"), session_id=out.get("session_id"), epoch=out.get("epoch"))
     jlog({"level": "info", "src": "ipc", "msg": f"{label} send", "cmd_id": cmd_id, "intent": out.get("intent"), "target": out.get("target")})
-    
+
     sent = publisher.send(out)
     if not sent:
         rt.set_ipc_state("DEGRADED")
@@ -45,7 +45,7 @@ def dispatch_task_cmd(payload: Dict[str, Any], publisher: Any, ack_inbox: Option
     ack_raw = None
     if ack_inbox is not None and ack_timeout_s > 0:
         ack_raw = ack_inbox.wait_ack(cmd_id, ack_timeout_s)
-        
+
     if ack_raw is None:
         rt.set_ipc_state("ACK_TIMEOUT")
         write_ipc_event("ACK_TIMEOUT", cmd_id=cmd_id, timeout_s=ack_timeout_s)
@@ -96,18 +96,18 @@ class AudioKWSWorker(threading.Thread):
         self.phone_playback = phone_playback
         self.asr_mode = str(getattr(cfg, "asr_mode", "offline") or "offline").lower()
         self.dry_run_text = getattr(cfg, "dry_run_text", False)
-        
+
         self.online_chunk_size = list(getattr(cfg, "asr_online_chunk_size", [5, 10, 5]))
         if len(self.online_chunk_size) < 3 or self.online_chunk_size == [0, 8, 4]:
             self.online_chunk_size = [5, 10, 5]
         self.online_step_samples = max(1, int(self.online_chunk_size[1]) * 960)
-        
+
         models = []
         if cfg.wake_tflite:
             models.append(cfg.wake_tflite)
         if cfg.stop_tflite:
             models.append(cfg.stop_tflite)
-            
+
         self.oww = FlexibleWakeWord(
             models,
             vad_threshold=cfg.oww_vad_th,
@@ -301,7 +301,7 @@ class AudioKWSWorker(threading.Thread):
 
     def run(self):
         jlog({"level": "info", "src": "loop", "msg": "audio/kws thread started"})
-        
+
         if self.dry_run_text:
             while not self.stop_event.is_set():
                 time.sleep(0.5)
@@ -629,7 +629,7 @@ class ASRDecisionWorker(threading.Thread):
                     item_epoch = int(item.get("epoch", -1))
                     if item_epoch == -1:
                         item_epoch = self.rt.get_epoch()
-                    
+
                     if item_epoch != self.rt.get_epoch():
                         jlog({"level": "info", "src": "decision", "msg": "drop stale text command", "item_epoch": item_epoch, "current_epoch": self.rt.get_epoch()})
                         self.rt.mark_result(False, intent="DROP_STALE")
@@ -637,17 +637,17 @@ class ASRDecisionWorker(threading.Thread):
                     else:
                         jlog({"level": "info", "src": "decision", "msg": f"processing text injection: {text}"})
                         result = self.pipeline._interpret_text(text, 1.0, 0.0, 4000)
-                        
+
                         # Set busy state while processing command turn
                         self.rt.set_busy(True)
                         self.rt.set_state("BUSY")
                         write_state_block(self.rt.snapshot())
-                        
+
                         handle_meta = self._handle_result(result)
                         self.say_text(handle_meta.get("tts", ""))
                         write_state_block(self.rt.snapshot())
                         finalize_turn = True
-                
+
                 elif self.pipeline.is_online():
                     outcome = self._handle_online_event(item)
                     finalize_turn = bool(outcome.get("finalize_turn", False))

@@ -26,7 +26,7 @@ class VoiceServiceConfig:
     # Optimization toggles
     asr_quant: bool = False
     vad_quant: bool = False
-    
+
     # ASR configurations
     asr_mode: str = "online"  # online / offline
     asr_online_chunk_frames: int = 6
@@ -34,7 +34,7 @@ class VoiceServiceConfig:
     asr_online_encoder_chunk_look_back: int = 4
     asr_online_decoder_chunk_look_back: int = 1
     asr_emit_partial: bool = True
-    
+
     # Wake & Stop Hotword parameters
     wake_key: str = ""
     stop_key: str = ""
@@ -49,7 +49,7 @@ class VoiceServiceConfig:
     frontend_backend: str = "tflite"
     classifier_backend: str = "onnx"
     wake_phrases: str = "你好小车,你好 小车,小车你好"
-    
+
     # Energy-based VAD / segmenting
     energy_th: float = 450.0
     start_frames: int = 2
