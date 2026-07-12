@@ -2,12 +2,17 @@
 # -*- coding: utf-8 -*-
 
 from types import SimpleNamespace
+import time
+import wave
+import pytest
 
 from voice_service.runtime.playback import PhonePlaybackGuard
 from voice_service.runtime.state import RuntimeState
 from voice_service.config.loader import load_voice_config
 from voice_service.runtime.service import DebugInputOnlySender
 from voice_service.runtime.workers import AudioKWSWorker, dispatch_task_cmd, select_hotword_action
+from voice_service.runtime.mic_stream import WavReplayAudioSource
+from orchestrator_service.ipc.protocol import TaskCmd, make_task_ack
 
 
 class FakeClock:
@@ -206,3 +211,51 @@ def test_recording_freezes_armed_deadline_but_armed_wait_still_times_out():
 def test_stop_wins_when_wake_and_stop_cross_threshold_together():
     pred = {"wake": 0.836, "stop": 0.991}
     assert select_hotword_action(pred, "wake", 0.90, "stop", 0.58) == "STOP"
+
+
+def _write_pcm_wav(path, samples=1280):
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes(b"\x01\x00" * samples)
+
+
+def test_wav_replay_matches_pcm_frame_contract_and_step_order(tmp_path):
+    wav_path = tmp_path / "input.wav"
+    _write_pcm_wav(wav_path)
+    manifest = tmp_path / "scenario.yaml"
+    manifest.write_text("steps:\n  - silence_s: 0.08\n  - wav: {}\n".format(wav_path), encoding="utf-8")
+    source = WavReplayAudioSource(str(manifest), realtime=False)
+    first, second = source.read_frame(), source.read_frame()
+    assert len(first) == len(second) == 2560
+    assert first == b"\x00" * 2560
+    assert second == b"\x01\x00" * 1280
+    assert source.read_frame() is None
+    assert source.completed
+
+
+def test_wav_replay_realtime_does_not_inject_all_frames_at_once(tmp_path):
+    manifest = tmp_path / "realtime.yaml"
+    manifest.write_text("steps:\n  - silence_s: 0.16\n", encoding="utf-8")
+    source = WavReplayAudioSource(str(manifest), realtime=True)
+    start = time.monotonic()
+    source.read_frame()
+    source.read_frame()
+    assert time.monotonic() - start >= 0.07
+
+
+def test_wav_replay_missing_manifest_or_invalid_wav_fails_fast(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        WavReplayAudioSource(str(tmp_path / "missing.yaml"))
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("steps:\n  - wav: missing.wav\n", encoding="utf-8")
+    with pytest.raises(FileNotFoundError):
+        WavReplayAudioSource(str(bad))
+
+
+def test_task_ack_preserves_execution_status_for_replay_orchestrator_chain():
+    cmd = TaskCmd.from_dict({"type": "task_cmd", "intent": "FIND", "target": "apple", "cmd_id": "replay-cmd", "session_id": "replay-session"}, {"apple"})
+    ack = make_task_ack(cmd, accepted=True, state="SEARCH_TABLE", reason="accepted", execution_status="executable")
+    assert ack["cmd_id"] == "replay-cmd"
+    assert ack["execution_status"] == "executable"

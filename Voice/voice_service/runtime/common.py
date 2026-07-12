@@ -90,7 +90,7 @@ def should_emit(payload: Dict[str, Any]) -> bool:
         return False
     keep_info_src = {
         "boot", "loop", "oww", "seg", "decision", "tts", "tts_event",
-        "heartbeat", "signal", "queue", "ipc", "state", "stop", "asr_partial",
+        "heartbeat", "signal", "queue", "ipc", "state", "stop", "asr_partial", "debug_input",
     }
     if src == "mic":
         return not QUIET_MIC_INFO and level == "info"

@@ -1,0 +1,28 @@
+profile: "sc171_voice_replay_debug"
+runtime_overrides:
+  gateway:
+    command_in: {transport: "disabled"}
+    status_out: {transport: "disabled"}
+    tts_event_in: {transport: "disabled"}
+voice_gateway:
+  runtime:
+    input_mode: wav_replay
+    debug_input_only: true
+    dry_run_text: false
+    replay_manifest: Voice/config/replay/find_apple.yaml
+    replay_realtime: true
+    replay_exit_after_complete: true
+    replay_repeat: 1
+    replay_fail_fast: true
+    asr_warmup_enabled: true
+  kws:
+    threshold: 0.90
+    frontend_backend: onnx
+    classifier_backend: onnx
+  asr: {quantized: true, mode: offline}
+  vad: {quantized: true}
+  tts: {enabled: false}
+  ipc:
+    task_cmd_out: {transport: disabled}
+    task_ack_in: {transport: disabled}
+    tts_event_in: {transport: disabled}

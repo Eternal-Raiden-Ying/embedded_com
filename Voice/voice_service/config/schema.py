@@ -127,3 +127,8 @@ class VoiceServiceConfig:
     input_mode: str = "voice_only"  # voice_only / hybrid / mobile_only
     dry_run_text: bool = False
     debug_input_only: bool = False
+    replay_manifest: str = ""
+    replay_realtime: bool = True
+    replay_exit_after_complete: bool = True
+    replay_repeat: int = 1
+    replay_fail_fast: bool = True

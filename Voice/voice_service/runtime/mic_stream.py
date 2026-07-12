@@ -5,9 +5,99 @@ import os
 import errno
 import subprocess
 import time
+import wave
+from pathlib import Path
 from typing import List, Optional
 
 from .common import jlog, FRAME_BYTES
+
+
+class WavReplayAudioSource:
+    """Deterministic PCM source with the same read_frame contract as arecord."""
+    def __init__(self, manifest_path: str, frame_bytes: int = FRAME_BYTES, realtime: bool = True, repeat: int = 1):
+        if not manifest_path:
+            raise ValueError("wav_replay requires replay_manifest")
+        self.manifest_path = Path(manifest_path)
+        if not self.manifest_path.is_file():
+            raise FileNotFoundError("replay manifest not found: {}".format(self.manifest_path))
+        self.frame_bytes = int(frame_bytes)
+        self.realtime = bool(realtime)
+        self.repeat = max(1, int(repeat))
+        self.frames = self._load_frames()
+        self.index = 0
+        self.completed = False
+        self.started_mono = None
+        self.max_schedule_lag_ms = 0.0
+        self.scenario = self.manifest_path.stem
+
+    def _load_frames(self) -> List[bytes]:
+        try:
+            import yaml
+        except ImportError as exc:
+            raise RuntimeError("PyYAML is required for replay manifest: {}".format(exc))
+        data = yaml.safe_load(self.manifest_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(data, dict) or not isinstance(data.get("steps"), list):
+            raise ValueError("replay manifest requires a steps list")
+        frames: List[bytes] = []
+        root = Path(__file__).resolve().parents[3]
+        silence = b"\x00" * self.frame_bytes
+        for step in data["steps"]:
+            if not isinstance(step, dict):
+                raise ValueError("replay step must be a mapping")
+            if "silence_s" in step:
+                count = int(round(float(step["silence_s"]) * 16000 * 2 / self.frame_bytes))
+                frames.extend([silence] * max(0, count))
+                continue
+            rel = step.get("wav")
+            if not rel:
+                raise ValueError("replay step requires silence_s or wav")
+            path = Path(str(rel))
+            if not path.is_absolute():
+                path = root / path
+            if not path.is_file():
+                raise FileNotFoundError("replay WAV not found: {}".format(path))
+            with wave.open(str(path), "rb") as wav:
+                if wav.getframerate() != 16000 or wav.getnchannels() != 1 or wav.getsampwidth() != 2:
+                    raise ValueError("replay WAV must be 16kHz mono S16_LE: {}".format(path))
+                data_bytes = wav.readframes(wav.getnframes())
+            for offset in range(0, len(data_bytes), self.frame_bytes):
+                frame = data_bytes[offset:offset + self.frame_bytes]
+                if len(frame) < self.frame_bytes:
+                    frame += b"\x00" * (self.frame_bytes - len(frame))
+                frames.append(frame)
+        if not frames:
+            raise ValueError("replay manifest produced no PCM frames")
+        return frames * self.repeat
+
+    def read_frame(self) -> Optional[bytes]:
+        if self.index >= len(self.frames):
+            self.completed = True
+            return None
+        if self.started_mono is None:
+            self.started_mono = time.monotonic()
+        if self.realtime:
+            due = self.started_mono + (self.index * self.frame_bytes / 2.0 / 16000.0)
+            now = time.monotonic()
+            if due > now:
+                time.sleep(due - now)
+            else:
+                self.max_schedule_lag_ms = max(self.max_schedule_lag_ms, (now - due) * 1000.0)
+        frame = self.frames[self.index]
+        self.index += 1
+        return frame
+
+    def stats(self) -> dict:
+        return {
+            "replay": True,
+            "scenario": self.scenario,
+            "frames_total": len(self.frames),
+            "frames_emitted": self.index,
+            "completed": self.completed,
+            "max_schedule_lag_ms": round(self.max_schedule_lag_ms, 3),
+        }
+
+    def close(self):
+        self.completed = True
 
 try:
     import fcntl

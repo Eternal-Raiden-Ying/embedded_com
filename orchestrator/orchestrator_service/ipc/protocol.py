@@ -491,6 +491,7 @@ class TaskAck:
     class_name: str = ""
     class_id: Optional[int] = None
     task_id: str = ""
+    execution_status: str = ""
     supported_targets: Optional[List[str]] = None
     source: str = "orchestrator"
     type: str = "task_ack"
@@ -1223,6 +1224,7 @@ def make_task_ack(
     class_name: str = "",
     class_id: Optional[int] = None,
     task_id: str = "",
+    execution_status: str = "",
     supported_targets: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     cmd_name = str(cmd.cmd or cmd.intent or "").strip().lower()
@@ -1246,6 +1248,7 @@ def make_task_ack(
         class_name=str(class_name or ""),
         class_id=class_id,
         task_id=str(task_id or ""),
+        execution_status=str(execution_status or ""),
         supported_targets=list(supported_targets or []) if supported_targets is not None else None,
     ).to_dict()
 

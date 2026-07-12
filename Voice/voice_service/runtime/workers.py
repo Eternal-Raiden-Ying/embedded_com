@@ -4,7 +4,9 @@
 import queue
 import threading
 import time
+import wave
 from collections import deque
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
@@ -13,9 +15,9 @@ from ..ipc import build_task_cmd, normalize_task_ack, normalize_tts_event
 from ..ipc import JsonlAckInbox, InboundPollerThread, build_msgpack_client_sender, build_msgpack_inbound_server
 from .asr_engine import AudioCommandPipeline
 from .commands import CommandInterpreter
-from .common import FRAME_MS, SR, clean_asr_text, jlog, kws_trigger, rms_int16, write_ipc_event, write_state_block, write_timeline
+from .common import FRAME_MS, SR, clean_asr_text, current_run_dir, jlog, kws_trigger, rms_int16, write_ipc_event, write_state_block, write_timeline
 from .kws_engine import FlexibleWakeWord
-from .mic_stream import RawMicStream
+from .mic_stream import RawMicStream, WavReplayAudioSource
 from .state import AudioConfig, RuntimeState
 from .playback import PhonePlaybackGuard
 from .tts_engine import ThreadSafeTTS
@@ -130,16 +132,23 @@ class AudioKWSWorker(threading.Thread):
             frontend_backend=cfg.frontend_backend,
             classifier_backend=cfg.classifier_backend
         )
-        self.mic = RawMicStream(
-            device=cfg.arecord_device,
-            sr=SR,
-            channels=1,
-            read_timeout_sec=cfg.mic_read_timeout,
-            startup_delay_sec=cfg.mic_startup_delay,
-            mic_debug=cfg.mic_debug,
-            mic_debug_every=cfg.mic_debug_every,
-            dry_run_text=self.dry_run_text,
-        )
+        if str(getattr(cfg, "input_mode", "voice_only")) == "wav_replay":
+            self.mic = WavReplayAudioSource(
+                manifest_path=cfg.replay_manifest,
+                realtime=bool(cfg.replay_realtime),
+                repeat=int(cfg.replay_repeat),
+            )
+        else:
+            self.mic = RawMicStream(
+                device=cfg.arecord_device,
+                sr=SR,
+                channels=1,
+                read_timeout_sec=cfg.mic_read_timeout,
+                startup_delay_sec=cfg.mic_startup_delay,
+                mic_debug=cfg.mic_debug,
+                mic_debug_every=cfg.mic_debug_every,
+                dry_run_text=self.dry_run_text,
+            )
         self.prebuf = deque(maxlen=self.cfg_runtime.pre_frames)
         self.state = "WAIT_WAKE"
         self.speech_up = 0
@@ -213,6 +222,17 @@ class AudioKWSWorker(threading.Thread):
             "epoch": self.rt.get_epoch(),
         }
         if self._push_q_item(item):
+            run_dir = current_run_dir()
+            if run_dir:
+                utter_dir = Path(run_dir) / "utterances"
+                utter_dir.mkdir(parents=True, exist_ok=True)
+                utter_path = utter_dir / "utterance_{}_{}.wav".format(item["epoch"], int(item["ts"] * 1000))
+                with wave.open(str(utter_path), "wb") as wav:
+                    wav.setnchannels(1)
+                    wav.setsampwidth(2)
+                    wav.setframerate(SR)
+                    wav.writeframes(audio.tobytes())
+                item["utterance_wav"] = str(utter_path)
             self.rt.set_busy(True)
             self.rt.set_state("ASR_PROCESSING")
             write_state_block(self.rt.snapshot())
@@ -346,6 +366,11 @@ class AudioKWSWorker(threading.Thread):
             while not self.stop_event.is_set():
                 b = self.mic.read_frame()
                 if b is None:
+                    if getattr(self.mic, "completed", False) and bool(getattr(self.cfg_board, "replay_exit_after_complete", False)):
+                        jlog({"level": "info", "src": "loop", "msg": "WAV replay complete", "stats": self.mic.stats()})
+                        write_timeline("REPLAY_COMPLETE", **self.mic.stats())
+                        self.stop_event.set()
+                        break
                     continue
                 x = np.frombuffer(b, dtype=np.int16)
                 r = rms_int16(x)
@@ -555,6 +580,7 @@ class ASRDecisionWorker(threading.Thread):
             return {"keep_alive": True, "tts": ""}
 
         text = clean_asr_text(result.get("text", ""))
+        write_timeline("ASR_FINAL", raw_text=str(result.get("text", "")), normalized_text=text, inference_ms=round(float(result.get("latency_ms", 0.0)), 2))
         if text:
             self.rt.set_last_text(text)
         jlog({
@@ -573,6 +599,7 @@ class ASRDecisionWorker(threading.Thread):
         intent = result.get("intent")
         target = result.get("target")
         conf = float(result.get("confidence", 0.0))
+        write_timeline("INTENT", intent=intent, target=target, confidence=conf)
         dispatch = self.emit_action(intent, target, conf, text=text)
         if dispatch.get("suppressed"):
             self.rt.mark_result(True, intent=intent or "")
