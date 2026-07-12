@@ -256,6 +256,9 @@ colorize_line() {
     "[phone-gateway]"*)
       printf '%b%s%b\n' "$C_YELLOW" "$line" "$C_RESET"
       ;;
+    "[voice]"*|"[VOICE]"*)
+      printf '%b%s%b\n' "$C_MAGENTA" "$line" "$C_RESET"
+      ;;
     *)
       printf '%s\n' "$line"
       ;;
@@ -1387,14 +1390,14 @@ for name, endpoint in (
 }
 
 tail_stack_summary() {
-  touch "$ORCH_LOG_FILE" "$GATEWAY_LOG_FILE" "$VISION_LOG_FILE"
+  touch "$ORCH_LOG_FILE" "$GATEWAY_LOG_FILE" "$VISION_LOG_FILE" "$VOICE_LOG_FILE"
   headline "单终端日志"
-  log "显示 mobile_gateway / orchestrator / VISTA 的关键日志。"
+  log "显示 mobile_gateway / orchestrator / VISTA / voice_gateway 的关键日志。"
   log "console level: ROBOT_CONSOLE_LEVEL=$ROBOT_CONSOLE_LEVEL (demo/normal/debug)"
   log "按 Ctrl+C 只退出日志显示，不会停止服务；需要结束时执行：./start_robot_stack.sh stop"
   log "彩色显示测试：ROBOT_CONSOLE_COLOR=always ./start_robot_stack.sh"
   divider
-  tail -n "$LOG_TAIL_N" -F "$GATEWAY_LOG_FILE" "$ORCH_LOG_FILE" "$VISION_LOG_FILE" 2>/dev/null | \
+  tail -n "$LOG_TAIL_N" -F "$GATEWAY_LOG_FILE" "$ORCH_LOG_FILE" "$VISION_LOG_FILE" "$VOICE_LOG_FILE" 2>/dev/null | \
   awk -v orch_pat="$ORCH_SUMMARY_PATTERN" \
       -v gw_pat="$GATEWAY_SUMMARY_PATTERN" \
       -v vista_pat="$VISION_SUMMARY_PATTERN" \
@@ -1410,7 +1413,8 @@ tail_stack_summary() {
     }
     function is_key_state(s) {
       return (s ~ /\[ORCH\] STATE/ || s ~ /SERVICE_READY/ || s ~ /\[VISTA\] READY/ ||
-              s ~ /gateway online/ || s ~ /mqtt connected/ || s ~ /mqtt disabled/)
+              s ~ /gateway online/ || s ~ /mqtt connected/ || s ~ /mqtt disabled/ ||
+              s ~ /voice service ready/)
     }
     /^==> .* <==$/ {
       src=$0
@@ -1436,13 +1440,17 @@ tail_stack_summary() {
       } else if (src ~ /vision\.out/) {
         tag="[vista]"
         show=($0 ~ vista_pat)
+      } else if (src ~ /voice\.out/) {
+        tag="[voice]"
+        show=($0 ~ /WAKE_TRIGGERED|REC_STARTED|REC_ENDED|ASR_FINAL|TASK_CMD_SENT|TASK_ACK|INTENT_ACCEPTED|INTENT_REJECTED|WARN|ERROR|AUDIO_READY/)
       }
       if (console_level == "debug") {
         show=1
       } else if (console_level == "demo") {
-        show=(is_demo_line($0) || is_warn_error($0))
+        show=(is_demo_line($0) || is_warn_error($0) || $0 ~ /\[EVENT\]/)
       } else {
-        show=(is_demo_line($0) || is_warn_error($0) || is_key_state($0))
+        # normal mode: only print structured event logs starting with [EVENT] or containing [EVENT], plus ready key states.
+        show=($0 ~ /\[EVENT\]/ || is_key_state($0))
       }
       if (show) {
         if (preview_unavailable && $0 ~ /\[DEMO\]\[HEALTH\]/) {

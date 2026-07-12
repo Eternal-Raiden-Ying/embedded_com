@@ -1488,6 +1488,23 @@ class VistaApp(BaseModule):
                     f"[VISTA] STAGE {prev_stage} -> {stage} reason={reason}",
                 )
             if prev_mode != mode:
+                wake_to_vista_ms = 0.0
+                if ctx.wake_trigger_wall_ts > 0.0:
+                    wake_to_vista_ms = (time.time() - ctx.wake_trigger_wall_ts) * 1000.0
+
+                self.run_logger.write_event_record(
+                    "VISTA_MODE_CHANGED",
+                    level="info",
+                    trigger="stage_controller",
+                    prev_mode=prev_mode,
+                    mode=mode,
+                    session_id=ctx.session_id,
+                    epoch=int(getattr(ctx, "epoch", 0) or 0),
+                    cmd_id=ctx.cmd_id,
+                    wake_to_vista_ms=round(wake_to_vista_ms, 2) if wake_to_vista_ms > 0 else None,
+                    reason=reason,
+                )
+
                 self.operator_console.emit_change(
                     "mode",
                     f"[VISTA] MODE {prev_mode} -> {mode} reason={reason}",
@@ -1618,6 +1635,27 @@ class VistaApp(BaseModule):
             self._sync_observation_metrics_from_router()
             self._record_rate_sample(control_obs, now)
             self._emit_rate_summary_if_needed()
+
+            # Track and log FIRST_TASK_OBSERVATION
+            ctx = self._ctx()
+            is_task_mode = ctx.current_mode not in {"SILENT", "IDLE", ""}
+            is_not_heartbeat = ctx.current_stage != "INIT"
+            if is_task_mode and is_not_heartbeat and ctx.session_id:
+                sess_epoch_key = (ctx.session_id, int(getattr(ctx, "epoch", 0) or 0))
+                if not hasattr(self, "_last_first_obs_key") or self._last_first_obs_key != sess_epoch_key:
+                    self._last_first_obs_key = sess_epoch_key
+                    wake_to_first_observation_ms = 0.0
+                    if ctx.wake_trigger_wall_ts > 0.0:
+                        wake_to_first_observation_ms = (time.time() - ctx.wake_trigger_wall_ts) * 1000.0
+                    self.run_logger.write_event_record(
+                        "FIRST_TASK_OBSERVATION",
+                        level="info",
+                        trigger="stage_controller",
+                        session_id=ctx.session_id,
+                        epoch=int(getattr(ctx, "epoch", 0) or 0),
+                        cmd_id=ctx.cmd_id,
+                        wake_to_first_observation_ms=round(wake_to_first_observation_ms, 2) if wake_to_first_observation_ms > 0 else None,
+                    )
         else:
             self.obs_router.mark_drop()
             self._sync_observation_metrics_from_router()

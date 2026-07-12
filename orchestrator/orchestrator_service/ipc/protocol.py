@@ -421,6 +421,8 @@ class TaskCmd:
     vy: float = 0.0
     wz: float = 0.0
     duration_ms: int = 0
+    wake_trigger_wall_ts: float = 0.0
+    wake_trigger_mono_ns: int = 0
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any], frozen_targets: Set[str]) -> "TaskCmd":
@@ -467,6 +469,8 @@ class TaskCmd:
             vy=_optional_float(payload.get("vy", payload.get("vy_mps", 0.0)), 0.0),
             wz=_optional_float(payload.get("wz", payload.get("wz_radps", 0.0)), 0.0),
             duration_ms=_optional_int(payload.get("duration_ms", 0), 0),
+            wake_trigger_wall_ts=_optional_float(payload.get("wake_trigger_wall_ts", 0.0), 0.0),
+            wake_trigger_mono_ns=_optional_int(payload.get("wake_trigger_mono_ns", 0), 0),
         )
 
     def to_dict(self) -> Dict[str, Any]:

@@ -5,6 +5,24 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Union, Optional
 
 @dataclass
+class VoiceConsoleConfig:
+    events: List[str] = field(default_factory=lambda: ["AUDIO_READY", "WAKE_TRIGGERED", "REC_STARTED", "REC_ENDED", "ASR_FINAL", "TASK_CMD_SENT", "TASK_ACK", "INTENT_ACCEPTED", "INTENT_REJECTED", "WARN", "ERROR"])
+    fields: List[str] = field(default_factory=lambda: ["run_id", "session_id", "cmd_id", "epoch", "timestamp"])
+    periodic_health_s: float = 5.0
+
+@dataclass
+class VoiceLexiconConfig:
+    intents: List[str] = field(default_factory=lambda: ["FIND", "RETURN", "STOP"])
+    targets: List[str] = field(default_factory=lambda: ["apple", "banana", "bottle", "key", "mouse"])
+    asr_hotwords: List[str] = field(default_factory=list)
+
+@dataclass
+class VoiceInteractionConfig:
+    post_command_cooldown_ms: int = 1500
+    reject_commands_while_busy: bool = True
+    allow_stop_while_busy: bool = True
+
+@dataclass
 class VoiceServiceConfig:
     # Repository & runs directories
     project_root: str = ""
@@ -132,3 +150,8 @@ class VoiceServiceConfig:
     replay_exit_after_complete: bool = True
     replay_repeat: int = 1
     replay_fail_fast: bool = True
+
+    # Voice helper subsections
+    console: VoiceConsoleConfig = field(default_factory=VoiceConsoleConfig)
+    lexicon: VoiceLexiconConfig = field(default_factory=VoiceLexiconConfig)
+    interaction: VoiceInteractionConfig = field(default_factory=VoiceInteractionConfig)

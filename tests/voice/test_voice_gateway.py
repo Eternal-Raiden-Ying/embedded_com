@@ -351,3 +351,38 @@ def test_target_catalog_rejection():
     assert reason == "accepted"
     assert len(orch.find_calls) == 1
 
+
+def test_voice_new_config_structures():
+    from voice_service.config.schema import VoiceServiceConfig, VoiceConsoleConfig, VoiceLexiconConfig, VoiceInteractionConfig
+    
+    cfg = VoiceServiceConfig(
+        wake_key="xiaoche",
+        stop_key="ting",
+        wake_phrases="xiaoche",
+        asr_dir="",
+        vad_dir="",
+        console=VoiceConsoleConfig(
+            events=["WAKE_TRIGGERED", "ASR_FINAL"],
+            fields=["session_id", "epoch"],
+            periodic_health_s=5
+        ),
+        lexicon=VoiceLexiconConfig(
+            intents=["FIND", "RETURN", "STOP"],
+            targets=["apple", "key"],
+            asr_hotwords=["停止", "返航"]
+        ),
+        interaction=VoiceInteractionConfig(
+            post_command_cooldown_ms=1000,
+            reject_commands_while_busy=True,
+            allow_stop_while_busy=True
+        )
+    )
+    
+    assert cfg.console.events == ["WAKE_TRIGGERED", "ASR_FINAL"]
+    assert cfg.lexicon.intents == ["FIND", "RETURN", "STOP"]
+    assert cfg.lexicon.asr_hotwords == ["停止", "返航"]
+    assert cfg.interaction.post_command_cooldown_ms == 1000
+    assert cfg.interaction.reject_commands_while_busy is True
+    assert cfg.interaction.allow_stop_while_busy is True
+
+

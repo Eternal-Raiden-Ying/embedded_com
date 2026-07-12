@@ -20,6 +20,9 @@ class StageContext:
     epoch: int = 0
     target_name: Optional[str] = None
     interaction_id: Optional[str] = None
+    cmd_id: Optional[str] = None
+    wake_trigger_wall_ts: float = 0.0
+    wake_trigger_mono_ns: int = 0
     server_status: str = "unknown"  # "unknown" | "ready" | "error" — remote grasp server health
     stage_state: Dict[str, Any] = field(default_factory=dict)
 
@@ -94,6 +97,7 @@ def build_vision_obs(
         perception=perception,
         proposal=proposal,
         result=result,
+        cmd_id=ctx.cmd_id,
     ).to_dict()
 
 

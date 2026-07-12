@@ -66,6 +66,8 @@ class RuntimeState:
     playback_session_id: str = ""
     playback_epoch: int = -1
     playback_phase: str = ""
+    wake_trigger_wall_ts: float = 0.0
+    wake_trigger_mono_ns: int = 0
 
     def _new_session_id(self) -> str:
         return f"sess_{uuid.uuid4().hex[:10]}"

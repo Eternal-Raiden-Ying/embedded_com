@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Type, Union
 
 from .paths import REPO_ROOT, resolve_path
-from .schema import VoiceServiceConfig
+from .schema import VoiceServiceConfig, VoiceConsoleConfig, VoiceLexiconConfig, VoiceInteractionConfig
 
 # Import common loader if possible, or fall back to simple parser
 try:
@@ -165,6 +165,39 @@ def map_nested_dict(nested: Dict[str, Any], flat: Dict[str, Any]) -> None:
         for source, target in (("transport", "playback_transport"), ("ipc_socket_path", "playback_uds_path"), ("uds_path", "playback_uds_path"), ("start_timeout_s", "playback_start_timeout_s"), ("finish_timeout_s", "playback_finish_timeout_s"), ("post_guard_s", "post_playback_guard_s")):
             if source in playback:
                 flat[target] = playback[source]
+
+    # Map Voice Gateway nested structures
+    voice_data = nested.get("voice", {}) if "voice" in nested else nested
+    if isinstance(voice_data, dict):
+        # 1. Console
+        console_data = voice_data.get("console", {})
+        if isinstance(console_data, dict):
+            flat.setdefault("console", {})
+            for k in ("events", "fields", "periodic_health_s"):
+                if k in console_data:
+                    flat["console"][k] = console_data[k]
+        # 2. Lexicon
+        lexicon_data = voice_data.get("lexicon", {})
+        if isinstance(lexicon_data, dict):
+            flat.setdefault("lexicon", {})
+            for k in ("intents", "targets", "asr_hotwords"):
+                if k in lexicon_data:
+                    flat["lexicon"][k] = lexicon_data[k]
+        # 3. Interaction
+        interaction_data = voice_data.get("interaction", {})
+        if isinstance(interaction_data, dict):
+            flat.setdefault("interaction", {})
+            for k in ("post_command_cooldown_ms", "reject_commands_while_busy", "allow_stop_while_busy"):
+                if k in interaction_data:
+                    flat["interaction"][k] = interaction_data[k]
+        # Support flat interaction protection values at voice level
+        for k in ("post_command_cooldown_ms", "reject_commands_while_busy", "allow_stop_while_busy"):
+            if k in voice_data:
+                flat.setdefault("interaction", {})
+                flat["interaction"][k] = voice_data[k]
+            elif k in nested:
+                flat.setdefault("interaction", {})
+                flat["interaction"][k] = nested[k]
 
     # Map direct flat values
     for k in list(flat.keys()):
@@ -405,5 +438,21 @@ def load_voice_config(argv: Optional[List[str]] = None) -> VoiceServiceConfig:
     for path_field in ("commands_json", "runs_dir", "logs_dir", "tts_cache", "tts_out_dir"):
         if flat.get(path_field):
             flat[path_field] = str(resolve_path(flat[path_field]))
+
+    # Instantiate nested dataclasses from raw dictionaries
+    if isinstance(flat.get("console"), dict):
+        flat["console"] = VoiceConsoleConfig(**flat["console"])
+    elif flat.get("console") is None:
+        flat["console"] = VoiceConsoleConfig()
+
+    if isinstance(flat.get("lexicon"), dict):
+        flat["lexicon"] = VoiceLexiconConfig(**flat["lexicon"])
+    elif flat.get("lexicon") is None:
+        flat["lexicon"] = VoiceLexiconConfig()
+
+    if isinstance(flat.get("interaction"), dict):
+        flat["interaction"] = VoiceInteractionConfig(**flat["interaction"])
+    elif flat.get("interaction") is None:
+        flat["interaction"] = VoiceInteractionConfig()
 
     return VoiceServiceConfig(**flat)

@@ -129,12 +129,28 @@ class VisionSyncMixin:
         if not isinstance(payload, dict) or not payload:
             return
         now_m = monotonic_ts()
+
+        # Sync active session correlation fields from context
+        if self.ctx.active_session_id and not payload.get("session_id"):
+            payload["session_id"] = self.ctx.active_session_id
+        if self.ctx.active_epoch and not payload.get("epoch"):
+            payload["epoch"] = self.ctx.active_epoch
+
         req_type = str(payload.get("req_type") or (payload.get("payload") or {}).get("req_type") or "").strip().lower()
         if not req_type:
             req_type = "mode_request" if str(payload.get("op") or "").strip().upper() in {"START", "STOP"} else "target_update"
             payload["req_type"] = req_type
         req_payload = dict(payload.get("payload") or {})
         req_payload["req_type"] = req_type
+
+        # Inject triggering cmd_id if available
+        if self.ctx.last_task_cmd and getattr(self.ctx.last_task_cmd, "cmd_id", None):
+            req_payload["cmd_id"] = self.ctx.last_task_cmd.cmd_id
+        if getattr(self.ctx, "active_wake_trigger_wall_ts", 0.0) > 0.0:
+            req_payload["wake_trigger_wall_ts"] = self.ctx.active_wake_trigger_wall_ts
+        if getattr(self.ctx, "active_wake_trigger_mono_ns", 0) > 0:
+            req_payload["wake_trigger_mono_ns"] = self.ctx.active_wake_trigger_mono_ns
+
         payload["payload"] = req_payload
 
         request_key = self._vision_request_key(payload, req_type=req_type)

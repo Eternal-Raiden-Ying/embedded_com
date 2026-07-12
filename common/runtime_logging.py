@@ -592,6 +592,7 @@ class RunLogger:
         out.setdefault("wall_ts", wall_ts)
         out.setdefault("mono_ns", mono_ns)
         out.setdefault("run_id", self.stack_run_id)
+        out.setdefault("timestamp", wall_ts)
         out.setdefault("mode", self._runtime_mode())
         out.setdefault("component", "orchestrator" if self.module_name == "orch" else self.module_name)
         out.setdefault("event", None)
@@ -1645,6 +1646,45 @@ class RunLogger:
         )
         ordered = self._ordered_payload(payload, EVENT_FIELD_ORDER, extras_into_data=True)
         self._enqueue_json_line("event", ordered)
+
+        # Standardized event stream output for launcher display
+        event_upper = str(event).strip().upper()
+        level_lower = str(level).strip().lower()
+        is_key = event_upper in {
+            "STATE_CHANGED", "VISTA_MODE_CHANGED", "FIRST_TASK_OBSERVATION",
+            "TARGET_FOUND", "TARGET_LOST", "MOTION_SUPPRESSED", "WARN", "ERROR"
+        } or level_lower in {"warn", "warning", "error", "fatal"}
+        if is_key:
+            kv = []
+            ev_name = event_upper
+            if level_lower in {"warn", "warning"} and ev_name not in {"WARN", "ERROR"}:
+                ev_name = "WARN"
+            elif level_lower in {"error", "fatal"} and ev_name not in {"WARN", "ERROR"}:
+                ev_name = "ERROR"
+            kv.append(f"event={ev_name}")
+            # Map standard correlation variables
+            # Also map cmd_id explicitly, fallback to req_id if missing
+            cmd_val = ordered.get("cmd_id") or ordered.get("req_id")
+            for k in ("run_id", "session_id", "epoch", "timestamp"):
+                val = ordered.get(k)
+                if val is not None and val != "":
+                    kv.append(f"{k}={val}")
+            if cmd_val is not None and cmd_val != "":
+                kv.append(f"cmd_id={cmd_val}")
+
+            # Append other parameters
+            for k, val in ordered.items():
+                if k not in {"event", "run_id", "session_id", "cmd_id", "req_id", "epoch", "timestamp", "ts", "wall_ts", "mono_ns", "module", "component", "mode", "level", "stage", "trigger", "interaction_id", "data"}:
+                    if val is not None and val != "":
+                        kv.append(f"{k}={val}")
+            data_dict = ordered.get("data")
+            if isinstance(data_dict, dict):
+                for k, val in data_dict.items():
+                    if val is not None and val != "":
+                        kv.append(f"{k}={val}")
+            import sys
+            sys.stderr.write(f"[EVENT] {' | '.join(kv)}\n")
+            sys.stderr.flush()
 
     def write_ipc_record(
         self,

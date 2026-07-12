@@ -48,10 +48,12 @@ from .core_types import (
 class TaskRuntimeMixin:
     def handle_task_cmd(self, cmd: TaskCmd) -> Tuple[bool, str]:
         self.ctx.last_task_cmd = cmd
+        self.ctx.active_session_id = cmd.session_id
+        self.ctx.active_epoch = cmd.epoch
+        self.ctx.active_wake_trigger_wall_ts = getattr(cmd, "wake_trigger_wall_ts", 0.0) or 0.0
+        self.ctx.active_wake_trigger_mono_ns = getattr(cmd, "wake_trigger_mono_ns", 0) or 0
         if cmd.intent == "STOP":
             self._last_stop_mono = monotonic_ts()
-            self.ctx.active_session_id = cmd.session_id
-            self.ctx.active_epoch = cmd.epoch
             self._interrupt_to_idle("收到 STOP 命令", tts_text="已停止", interrupt_tts=True, send_vision_idle=True)
             return True, "STOP accepted"
         if self._last_stop_mono > 0 and (monotonic_ts() - self._last_stop_mono) < float(self.cfg.post_stop_ignore_s):

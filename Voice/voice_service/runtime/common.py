@@ -58,6 +58,40 @@ def write_timeline(event: str, **fields):
     payload.update(fields)
     _append_jsonl("timeline", payload)
 
+    # Standardized event stream output for launcher display
+    event_upper = str(event).strip().upper()
+    if event_upper in {
+        "AUDIO_READY", "WAKE_TRIGGERED", "REC_STARTED", "REC_ENDED", "ASR_FINAL",
+        "TASK_CMD_SENT", "TASK_ACK", "INTENT_ACCEPTED", "INTENT_REJECTED", "WARN", "ERROR"
+    }:
+        import os
+        run_id = os.getenv("STACK_RUN_ID", "")
+        if not run_id and _RUN_DIR is not None:
+            run_id = _RUN_DIR.name
+
+        kv = [f"event={event_upper}"]
+        if run_id:
+            kv.append(f"run_id={run_id}")
+
+        # Map standard correlation variables
+        cmd_val = fields.get("cmd_id") or fields.get("req_id")
+        for k in ("session_id", "epoch"):
+            val = fields.get(k)
+            if val is not None and val != "":
+                kv.append(f"{k}={val}")
+        if cmd_val is not None and cmd_val != "":
+            kv.append(f"cmd_id={cmd_val}")
+        kv.append(f"timestamp={payload['ts']}")
+
+        for k, val in fields.items():
+            if k not in {"session_id", "cmd_id", "req_id", "epoch", "timestamp", "ts", "run_id"}:
+                if val is not None and val != "":
+                    kv.append(f"{k}={val}")
+
+        import sys
+        sys.stderr.write(f"[EVENT] {" | ".join(kv)}\n")
+        sys.stderr.flush()
+
 
 def write_ipc_event(event: str, **fields):
     payload = {"ts": time.time(), "event": event}
@@ -99,6 +133,13 @@ def should_emit(payload: Dict[str, Any]) -> bool:
 
 def jlog(payload: Dict[str, Any]):
     _append_jsonl("console", dict(payload))
+
+    # Extract warning / error and emit as timeline events
+    level = str(payload.get("level", "info")).lower()
+    if level in {"warn", "warning", "error", "fatal"}:
+        ev = "WARN" if level in {"warn", "warning"} else "ERROR"
+        write_timeline(ev, msg=payload.get("msg", ""), src=payload.get("src", ""))
+
     if not should_emit(payload):
         return
     s = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))

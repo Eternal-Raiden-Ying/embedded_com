@@ -224,6 +224,7 @@ class VisionObsEnvelope:
     perception: Optional[Dict[str, Any]] = None
     proposal: Optional[Dict[str, Any]] = None
     result: Optional[Dict[str, Any]] = None
+    cmd_id: Optional[str] = None
     type: str = "vision_obs"
 
     @classmethod
@@ -241,6 +242,7 @@ class VisionObsEnvelope:
             perception=_opt_dict(payload, "perception"),
             proposal=_opt_dict(payload, "proposal"),
             result=_opt_dict(payload, "result"),
+            cmd_id=_opt_str(payload, "cmd_id"),
             type=str(payload.get("type", "vision_obs") or "vision_obs"),
         )
 

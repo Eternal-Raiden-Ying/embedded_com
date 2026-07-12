@@ -252,6 +252,11 @@ class AudioCommandPipeline:
             self.vad = VADProcessor(cfg.vad_dir, vad_quant, dry_run_text=False)
             self.asr = OfflineASREngine(cfg.asr_dir, asr_quant, dry_run_text=False)
 
+        # Check hotwords capability
+        hotwords = getattr(getattr(cfg, "lexicon", None), "asr_hotwords", [])
+        if hotwords:
+            jlog({"level": "warn", "src": "boot", "msg": "backend capability warning: ASR engine does not support runtime hotwords."})
+
     def is_online(self) -> bool:
         return self.asr_mode == "online"
 
@@ -315,7 +320,9 @@ class AudioCommandPipeline:
                 "asr_confidence": asr_conf,
                 "latency_ms": latency_ms,
             }
+        t_intent_start = time.perf_counter()
         intent, target, rule_conf = self.interpreter.infer_intent_and_target(text)
+        intent_latency_ms = (time.perf_counter() - t_intent_start) * 1000.0
         return {
             "status": "OK" if intent != "REJECT" else "REJECT",
             "text": text,
@@ -324,6 +331,7 @@ class AudioCommandPipeline:
             "confidence": rule_conf,
             "asr_confidence": asr_conf,
             "latency_ms": latency_ms,
+            "intent_latency_ms": intent_latency_ms,
         }
 
     def process_audio(self, audio) -> Dict[str, Any]:

@@ -48,6 +48,12 @@ class StageController:
         if req.target:
             self._ctx.target_name = req.target
 
+        # Extract cmd_id from request payload
+        payload = req.payload if isinstance(req.payload, dict) else {}
+        self._ctx.cmd_id = payload.get("cmd_id")
+        self._ctx.wake_trigger_wall_ts = float(payload.get("wake_trigger_wall_ts") or 0.0)
+        self._ctx.wake_trigger_mono_ns = int(payload.get("wake_trigger_mono_ns") or 0)
+
     @staticmethod
     def _request_type(req: VisionReq) -> str:
         payload = req.payload if isinstance(req.payload, dict) else {}
