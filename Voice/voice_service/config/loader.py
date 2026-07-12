@@ -49,6 +49,8 @@ def map_nested_dict(nested: Dict[str, Any], flat: Dict[str, Any]) -> None:
         audio = nested["audio"]
         if "input_device" in audio:
             flat["arecord_device"] = str(audio["input_device"])
+        if "device" in audio:
+            flat["arecord_device"] = str(audio["device"])
         if "backend" in audio:
             pass
 
@@ -81,6 +83,8 @@ def map_nested_dict(nested: Dict[str, Any], flat: Dict[str, Any]) -> None:
             flat["vad_dir"] = str(vad["model_path"])
         if "energy_threshold" in vad:
             flat["energy_th"] = float(vad["energy_threshold"])
+        if "quantized" in vad:
+            flat["vad_quant"] = bool(vad["quantized"])
         for key in ("start_frames", "end_frames", "pre_frames", "max_frames"):
             if key in vad:
                 flat[key] = int(vad[key])
@@ -147,9 +151,20 @@ def map_nested_dict(nested: Dict[str, Any], flat: Dict[str, Any]) -> None:
     # 9. runtime section
     if "runtime" in nested and isinstance(nested["runtime"], dict):
         run = nested["runtime"]
-        for k in ("input_mode", "dry_run_text", "debug_input_only", "runs_dir", "logs_dir"):
+        for k in ("input_mode", "dry_run_text", "debug_input_only", "runs_dir", "logs_dir", "asr_warmup_enabled", "asr_warmup_samples", "replay_manifest", "replay_realtime", "replay_exit_after_complete", "replay_repeat", "replay_fail_fast"):
             if k in run:
                 flat[k] = run[k]
+
+    if "mobile_feedback" in nested and isinstance(nested["mobile_feedback"], dict):
+        feedback = nested["mobile_feedback"]
+        for source, target in (("transport", "mobile_feedback_transport"), ("ipc_socket_path", "mobile_tts_event_uds_path"), ("uds_path", "mobile_tts_event_uds_path")):
+            if source in feedback:
+                flat[target] = str(feedback[source])
+    if "playback" in nested and isinstance(nested["playback"], dict):
+        playback = nested["playback"]
+        for source, target in (("transport", "playback_transport"), ("ipc_socket_path", "playback_uds_path"), ("uds_path", "playback_uds_path"), ("start_timeout_s", "playback_start_timeout_s"), ("finish_timeout_s", "playback_finish_timeout_s"), ("post_guard_s", "post_playback_guard_s")):
+            if source in playback:
+                flat[target] = playback[source]
 
     # Map direct flat values
     for k in list(flat.keys()):
@@ -176,7 +191,7 @@ def load_voice_config(argv: Optional[List[str]] = None) -> VoiceServiceConfig:
     parser.add_argument("--config", "-c", type=str, default=None)
     parser.add_argument("--profile", "-p", type=str, default=None)
     parser.add_argument("--dry-run-text", action="store_true", default=None)
-    
+
     # We parse known args, ignoring the rest for now (they will be handled as direct overrides later)
     cli_args, remaining = parser.parse_known_args(argv if argv is not None else sys.argv[1:])
 
@@ -187,7 +202,7 @@ def load_voice_config(argv: Optional[List[str]] = None) -> VoiceServiceConfig:
         cand = REPO_ROOT / "Voice" / "config" / "voice_gateway.yaml"
         if cand.exists():
             global_yaml_path = str(cand)
-            
+
     if global_yaml_path:
         nested_global = load_yaml_file(global_yaml_path)
         map_nested_dict(nested_global, flat)
@@ -362,22 +377,22 @@ def load_voice_config(argv: Optional[List[str]] = None) -> VoiceServiceConfig:
 
     # Resolve and print verification
     from .paths import resolve_and_verify_model
-    
+
     p_asr, _ = resolve_and_verify_model("asr", flat.get("asr_dir"), "VOICE_ASR_MODEL_PATH", "funasr")
     if p_asr: flat["asr_dir"] = str(p_asr)
-    
+
     p_vad, _ = resolve_and_verify_model("vad", flat.get("vad_dir"), "VOICE_VAD_MODEL_PATH", "fsmn_vad")
     if p_vad: flat["vad_dir"] = str(p_vad)
-    
+
     p_wake, _ = resolve_and_verify_model("wake_kws", flat.get("wake_tflite"), "VOICE_WAKE_MODEL_PATH", "openwakeword")
     if p_wake: flat["wake_tflite"] = str(p_wake)
-    
+
     p_stop, _ = resolve_and_verify_model("stop_kws", flat.get("stop_tflite"), "VOICE_STOP_MODEL_PATH", "openwakeword")
     if p_stop: flat["stop_tflite"] = str(p_stop)
-    
+
     p_tts, _ = resolve_and_verify_model("tts", flat.get("piper_model"), "VOICE_TTS_MODEL_PATH", "piper")
     if p_tts: flat["piper_model"] = str(p_tts)
-    
+
     p_tts_cfg, _ = resolve_and_verify_model("tts_config", flat.get("piper_config"), "VOICE_TTS_CONFIG_PATH", "piper")
     if p_tts_cfg: flat["piper_config"] = str(p_tts_cfg)
 

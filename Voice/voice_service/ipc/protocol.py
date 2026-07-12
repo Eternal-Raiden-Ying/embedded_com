@@ -14,7 +14,7 @@ def build_task_cmd(payload: Dict[str, Any]) -> Dict[str, Any]:
     intent = str(payload.get("intent", "")).upper().strip()
     if intent not in ALLOWED_INTENTS:
         raise ValueError(f"unsupported intent: {intent!r}")
-        
+
     out: Dict[str, Any] = {
         "ts": float(payload.get("ts", time.time())),
         "type": "task_cmd",
@@ -25,20 +25,20 @@ def build_task_cmd(payload: Dict[str, Any]) -> Dict[str, Any]:
         "epoch": int(payload.get("epoch", 0) or 0),
         "source": str(payload.get("source", "voice_gateway") or "voice_gateway"),
     }
-    
+
     if intent == "FIND":
         target = str(payload.get("target", "")).strip()
         if not target:
             raise ValueError("FIND requires non-empty target")
         out["target"] = target
-    
+
     for key in ("text", "raw_text", "high_priority", "wake_score"):
         if key in payload and payload[key] not in (None, ""):
             out[key] = payload[key]
-            
+
     if intent == "STOP":
         out["high_priority"] = True
-            
+
     return out
 
 def normalize_task_ack(payload: Dict[str, Any]) -> Dict[str, Any]:

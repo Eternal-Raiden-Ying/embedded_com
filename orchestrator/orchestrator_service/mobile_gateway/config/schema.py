@@ -5,7 +5,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from ..protocol import MQTT_TOPIC_ACK, MQTT_TOPIC_CMD, MQTT_TOPIC_HEARTBEAT, MQTT_TOPIC_STATUS, MQTT_TOPIC_TTS, MQTT_TOPIC_TTS_ACK, ROBOT_ID
+from ..protocol import (
+    MQTT_TOPIC_ACK,
+    MQTT_TOPIC_CMD,
+    MQTT_TOPIC_HEARTBEAT,
+    MQTT_TOPIC_STATUS,
+    MQTT_TOPIC_TTS,
+    MQTT_TOPIC_TTS_ACK,
+    ROBOT_ID,
+)
 
 _ORCH_ROOT = Path(__file__).resolve().parents[3]
 _REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -119,6 +127,7 @@ class MqttAdapterConfig:
     retain_heartbeat: bool = False
     keepalive_s: int = 60
     connect_timeout_s: float = 5.0
+    accept_commands: bool = True
     topics: MqttTopicConfig = field(default_factory=MqttTopicConfig)
 
 

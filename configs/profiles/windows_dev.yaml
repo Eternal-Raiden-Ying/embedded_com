@@ -39,6 +39,10 @@ runtime_overrides:
       transport: "disabled"
     orchestrator_task_ack_in:
       transport: "disabled"
+    tts_event_in:
+      transport: "disabled"
+    tts_playback_out:
+      transport: "disabled"
   online_edge:
     output:
       transport: "disabled"

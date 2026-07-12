@@ -1249,6 +1249,9 @@ class MqttAdapterConfig:
     retain_heartbeat: bool = False
     keepalive_s: int = 60
     connect_timeout_s: float = 5.0
+    # Lets a playback-only gateway receive mini-program TTS acknowledgements
+    # without exposing the normal task-command ingress.
+    accept_commands: bool = True
     topics: MqttTopicConfig = field(default_factory=MqttTopicConfig)
 
 

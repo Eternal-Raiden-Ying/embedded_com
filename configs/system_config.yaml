@@ -820,6 +820,7 @@ gateway:
     retain_heartbeat: false # Retain flag for heartbeat updates
     keepalive_s: 60 # Connection keepalive ping interval in seconds
     connect_timeout_s: 5.0 # Timeout duration of connection attempts
+    accept_commands: true # Accept ordinary mobile cmd topic; false subscribes only to tts_ack
     topics:
       cmd: "robot/sc171_car_01/cmd" # CMD topic path
       ack: "robot/sc171_car_01/ack" # ACK topic path

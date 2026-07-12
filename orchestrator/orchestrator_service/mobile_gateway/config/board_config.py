@@ -32,6 +32,17 @@ def _apply_legacy_gateway_config(cfg: MobileGatewayConfig, config_file: str) -> 
         if isinstance(topics, dict):
             _set_attrs(cfg.mqtt.topics, topics)
 
+    # Keep the compact legacy MQTT file useful for the two TTS bridge sockets.
+    # Missing keys deliberately leave the schema defaults untouched.
+    legacy_gateway = data.get("mobile_gateway")
+    if isinstance(legacy_gateway, dict):
+        event_path = legacy_gateway.get("tts_event_in_socket_path")
+        if event_path not in (None, ""):
+            cfg.tts_event_in.ipc_socket_path = str(event_path)
+        playback_path = legacy_gateway.get("tts_playback_out_socket_path")
+        if playback_path not in (None, ""):
+            cfg.tts_playback_out.ipc_socket_path = str(playback_path)
+
     # Older mobile_gateway.mqtt.yaml files used top-level sections. Keep the
     # current unified profile's southbound transport unless explicitly
     # overridden by environment variables; the legacy file mainly restores the

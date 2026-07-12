@@ -1,0 +1,9 @@
+realtime: true
+exit_after_complete: true
+steps:
+  - silence_s: 1.0
+  - wav: Voice/runs/farfield_stop_repeat_20260712_114256/stop_xiaoche_tingzhi_01.wav
+  - silence_s: 1.5
+expected:
+  limitation: STOP-FARFIELD-001
+  result: EXPECTED_LIMITATION

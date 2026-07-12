@@ -1,6 +1,8 @@
 # Scoped gitignore for Voice module
 __pycache__/
 *.pyc
+*.wav
+*.log
 
 # Ignore model directories and binaries
 ONNX/

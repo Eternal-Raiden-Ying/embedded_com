@@ -225,10 +225,14 @@ def apply_env_overrides(config: SystemGlobalConfig) -> None:
     _set_from_env(config.gateway.mqtt, "password", "MOBILE_GATEWAY_MQTT_PASSWORD", str)
     _set_from_env(config.gateway.mqtt, "client_id", "MOBILE_GATEWAY_MQTT_CLIENT_ID", str)
     _set_from_env(config.gateway.mqtt, "robot_id", "MOBILE_GATEWAY_MQTT_ROBOT_ID", str)
+    _set_from_env(config.gateway.mqtt, "tts_qos", "MOBILE_GATEWAY_MQTT_TTS_QOS", int)
+    _set_from_env(config.gateway.mqtt, "accept_commands", "MOBILE_GATEWAY_MQTT_ACCEPT_COMMANDS", bool)
     _set_from_env(config.gateway.mqtt.topics, "cmd", "MOBILE_GATEWAY_MQTT_TOPIC_CMD", str)
     _set_from_env(config.gateway.mqtt.topics, "ack", "MOBILE_GATEWAY_MQTT_TOPIC_ACK", str)
     _set_from_env(config.gateway.mqtt.topics, "status", "MOBILE_GATEWAY_MQTT_TOPIC_STATUS", str)
     _set_from_env(config.gateway.mqtt.topics, "heartbeat", "MOBILE_GATEWAY_MQTT_TOPIC_HEARTBEAT", str)
+    _set_from_env(config.gateway.mqtt.topics, "tts", "MOBILE_GATEWAY_MQTT_TOPIC_TTS", str)
+    _set_from_env(config.gateway.mqtt.topics, "tts_ack", "MOBILE_GATEWAY_MQTT_TOPIC_TTS_ACK", str)
 
     # Gateway endpoints
     _set_from_env(config.gateway.command_in, "transport", "MOBILE_GATEWAY_COMMAND_IN_TRANSPORT", str)
@@ -247,6 +251,14 @@ def apply_env_overrides(config: SystemGlobalConfig) -> None:
     _set_from_env(config.gateway.orchestrator_task_ack_in, "ipc_socket_path", "MOBILE_GATEWAY_ORCH_TASK_ACK_SOCKET_PATH", str)
     _set_from_env(config.gateway.orchestrator_task_ack_in, "tcp_host", "MOBILE_GATEWAY_ORCH_TASK_ACK_HOST", str)
     _set_from_env(config.gateway.orchestrator_task_ack_in, "tcp_port", "MOBILE_GATEWAY_ORCH_TASK_ACK_PORT", int)
+    _set_from_env(config.gateway.tts_event_in, "transport", "MOBILE_GATEWAY_TTS_EVENT_IN_TRANSPORT", str)
+    _set_from_env(config.gateway.tts_event_in, "ipc_socket_path", "MOBILE_GATEWAY_TTS_EVENT_IN_SOCKET_PATH", str)
+    _set_from_env(config.gateway.tts_event_in, "tcp_host", "MOBILE_GATEWAY_TTS_EVENT_IN_HOST", str)
+    _set_from_env(config.gateway.tts_event_in, "tcp_port", "MOBILE_GATEWAY_TTS_EVENT_IN_PORT", int)
+    _set_from_env(config.gateway.tts_playback_out, "transport", "MOBILE_GATEWAY_TTS_PLAYBACK_OUT_TRANSPORT", str)
+    _set_from_env(config.gateway.tts_playback_out, "ipc_socket_path", "MOBILE_GATEWAY_TTS_PLAYBACK_OUT_SOCKET_PATH", str)
+    _set_from_env(config.gateway.tts_playback_out, "tcp_host", "MOBILE_GATEWAY_TTS_PLAYBACK_OUT_HOST", str)
+    _set_from_env(config.gateway.tts_playback_out, "tcp_port", "MOBILE_GATEWAY_TTS_PLAYBACK_OUT_PORT", int)
 
     # Online Edge Runtime
     _set_from_env(config.online_edge.runtime, "project_root", "EDGE_PROJECT_ROOT", str)

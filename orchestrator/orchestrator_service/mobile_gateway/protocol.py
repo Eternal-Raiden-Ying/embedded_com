@@ -84,7 +84,7 @@ def make_tts_playback_state(payload: Dict[str, Any]) -> Dict[str, Any]:
     event_id, state = str(payload.get("event_id", "")).strip(), str(payload.get("state", "")).strip().lower()
     if not event_id or state not in TTS_PLAYBACK_STATES:
         raise MobileProtocolError("invalid tts_ack event_id or state", ERROR_CODES["invalid_command"])
-    return {"schema_version": int(payload.get("schema_version", 1) or 1), "type": "tts_playback_state", "event_id": event_id, "state": state, "source": str(payload.get("source", "mini_program") or "mini_program"), "session_id": str(payload.get("session_id", "") or ""), "cmd_id": str(payload.get("cmd_id", "") or ""), "duration_ms": int(payload.get("duration_ms", 0) or 0), "reason": str(payload.get("reason", "") or ""), "ts": float(payload.get("ts", now_ts()))}
+    return {"schema_version": int(payload.get("schema_version", 1) or 1), "type": "tts_playback_state", "event_id": event_id, "state": state, "source": str(payload.get("source", "mini_program") or "mini_program"), "session_id": str(payload.get("session_id", "") or ""), "cmd_id": str(payload.get("cmd_id", "") or ""), "epoch": int(payload.get("epoch", 0) or 0), "duration_ms": int(payload.get("duration_ms", 0) or 0), "reason": str(payload.get("reason", "") or ""), "ts": float(payload.get("ts", now_ts()))}
 
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:10]}"

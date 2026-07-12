@@ -82,6 +82,12 @@ class TaskRuntimeMixin:
                             status = targets[cmd.target].get("status", "unknown")
                 except Exception as e:
                     self._log("error", f"Error loading target catalog: {e}")
+
+            execution_status = str(status or "unknown")
+            setattr(self.ctx, "last_task_ack_extra", {
+                "raw_target": str(cmd.target or ""),
+                "execution_status": execution_status,
+            })
                     
             if status == "model_pending":
                 self._log("warn", f"Target recognized but model is pending: {cmd.target}")
@@ -90,10 +96,12 @@ class TaskRuntimeMixin:
                 
             spec = resolve_target(cmd.target or "")
             if spec is None:
-                setattr(self.ctx, "last_task_ack_extra", {
+                extra = dict(getattr(self.ctx, "last_task_ack_extra", {}) or {})
+                extra.update({
                     "raw_target": str(cmd.target or ""),
                     "supported_targets": supported_targets(),
                 })
+                setattr(self.ctx, "last_task_ack_extra", extra)
                 return False, "unsupported_target"
             self._start_find_task(cmd)
             return True, "accepted"
@@ -531,6 +539,7 @@ class TaskRuntimeMixin:
         self.ctx.task_start_wall_ts = time.time()
         setattr(self.ctx, "last_task_ack_extra", {
             "raw_target": raw_target,
+            "execution_status": "executable",
             "canonical_target": spec.canonical_target,
             "class_name": spec.class_name,
             "class_id": int(spec.class_id),

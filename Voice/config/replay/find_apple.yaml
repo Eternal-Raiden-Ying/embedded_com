@@ -1,0 +1,14 @@
+realtime: true
+exit_after_complete: true
+steps:
+  - silence_s: 1.0
+  - wav: Voice/runs/manual_audio/wake_01.wav
+  - silence_s: 0.8
+  - wav: Voice/runs/manual_audio/fetch_apple_01.wav
+  - silence_s: 2.0
+expected:
+  wake: true
+  asr_text: "帮我拿苹果"
+  intent: FIND
+  target: apple
+  task_ack: accepted

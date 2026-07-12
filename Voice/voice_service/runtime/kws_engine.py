@@ -144,7 +144,7 @@ class FlexibleWakeWord:
     def predict(self, x: np.ndarray, only: Optional[Iterable[str]] = None) -> Dict[str, float]:
         preds: Dict[str, float] = {}
         wanted = set(only) if only is not None else None
-        
+
         if self.dry_run_text:
             for name in self.models.keys():
                 if wanted is not None and name not in wanted:
@@ -156,10 +156,10 @@ class FlexibleWakeWord:
             x = np.asarray(x, dtype=np.int16)
         if x.dtype != np.int16:
             x = x.astype(np.int16)
-            
+
         if self.pre is None:
             return {name: 0.0 for name in self.models.keys()}
-            
+
         self.pre(x)
         vad_ok = self._vad_gate_ok(x)
         for name, meta in self.models.items():

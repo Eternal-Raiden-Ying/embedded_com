@@ -34,7 +34,7 @@ class AudioConfig:
 @dataclass
 class RuntimeState:
     lock: threading.Lock = field(default_factory=threading.Lock)
-    current_state: str = "IDLE"
+    current_state: str = "WAIT_WAKE"
     armed_until: float = 0.0
     mute_until: float = 0.0
     busy: bool = False
@@ -62,6 +62,10 @@ class RuntimeState:
     last_stop_ack_ok: bool = False
     last_stop_accepted: bool = False
     last_task_route: str = ""
+    playback_event_id: str = ""
+    playback_session_id: str = ""
+    playback_epoch: int = -1
+    playback_phase: str = ""
 
     def _new_session_id(self) -> str:
         return f"sess_{uuid.uuid4().hex[:10]}"
@@ -87,6 +91,50 @@ class RuntimeState:
             self.session_reason = reason
             if not self.busy:
                 self.current_state = "ARMED_WAIT"
+
+    def begin_recording(self) -> None:
+        """Freeze the arm deadline while a real utterance is being captured."""
+        with self.lock:
+            self.armed_until = 0.0
+            if not self.busy:
+                self.current_state = "REC"
+
+    def begin_prompt_playback(self, session_id: str, event_id: str, epoch: int) -> None:
+        """Record a Voice wake prompt without arming ASR yet."""
+        with self.lock:
+            self.session_id = str(session_id)
+            self.session_reason = "wake_prompt"
+            self.armed_until = 0.0
+            self.playback_event_id = str(event_id)
+            self.playback_session_id = str(session_id)
+            self.playback_epoch = int(epoch)
+            self.playback_phase = "WAIT_START"
+            if not self.busy:
+                self.current_state = "WAIT_PROMPT_PLAYBACK"
+
+    def note_playback_phase(self, phase: str) -> None:
+        with self.lock:
+            self.playback_phase = str(phase)
+
+    def arm_prompt_session(self, secs: float) -> None:
+        """Arm the existing wake session after a validated playback guard."""
+        with self.lock:
+            if not self.session_id:
+                self.session_id = self._new_session_id()
+            self.armed_until = time.time() + max(0.0, secs)
+            self.session_turns = 0
+            self.reject_streak = 0
+            self.session_reason = "wake_prompt_complete"
+            self.playback_phase = "COMPLETE"
+            if not self.busy:
+                self.current_state = "ARMED_WAIT"
+
+    def clear_playback(self) -> None:
+        with self.lock:
+            self.playback_event_id = ""
+            self.playback_session_id = ""
+            self.playback_epoch = -1
+            self.playback_phase = ""
 
     def keep_session(self, secs: float, reason: str = "followup"):
         with self.lock:
@@ -132,8 +180,12 @@ class RuntimeState:
             self.reject_streak = 0
             self.session_reason = ""
             self.session_id = ""
+            self.playback_event_id = ""
+            self.playback_session_id = ""
+            self.playback_epoch = -1
+            self.playback_phase = ""
             if not self.busy:
-                self.current_state = "IDLE"
+                self.current_state = "WAIT_WAKE"
 
     def disarm(self):
         self.clear_session()
@@ -147,6 +199,10 @@ class RuntimeState:
             self.reject_streak = 0
             self.session_reason = ""
             self.session_id = ""
+            self.playback_event_id = ""
+            self.playback_session_id = ""
+            self.playback_epoch = -1
+            self.playback_phase = ""
             self.guard_until = max(self.guard_until, now + max(0.0, guard_secs))
             self.mute_until = max(self.mute_until, now + max(0.0, mute_secs))
             self.stop_block_until = max(self.stop_block_until, now + max(0.0, block_secs))
@@ -156,7 +212,7 @@ class RuntimeState:
                 elif self.ipc_state != "CONNECTED":
                     self.current_state = "IPC_DEGRADED"
                 else:
-                    self.current_state = "IDLE"
+                    self.current_state = "WAIT_WAKE"
 
     def is_armed(self) -> bool:
         with self.lock:
@@ -174,7 +230,7 @@ class RuntimeState:
             elif self.ipc_state != "CONNECTED":
                 self.current_state = "IPC_DEGRADED"
             else:
-                self.current_state = "IDLE"
+                self.current_state = "WAIT_WAKE"
 
     def set_mute(self, secs: float):
         with self.lock:
@@ -251,6 +307,10 @@ class RuntimeState:
                 "last_stop_ack_ok": self.last_stop_ack_ok,
                 "last_stop_accepted": self.last_stop_accepted,
                 "last_task_route": self.last_task_route,
+                "playback_event_id": self.playback_event_id,
+                "playback_session_id": self.playback_session_id,
+                "playback_epoch": self.playback_epoch,
+                "playback_phase": self.playback_phase,
             }
 
     def set_rms(self, rms: float):

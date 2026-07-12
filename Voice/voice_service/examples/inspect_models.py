@@ -1,17 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os
-import sys
 from pathlib import Path
 from typing import Dict, Any, List
-
-# Fix python path dynamically if run directly
-current = Path(__file__).resolve().parent
-for parent in [current] + list(current.parents):
-    if (parent / "voice_service").exists():
-        sys.path.insert(0, str(parent))
-        break
 
 from voice_service.config.loader import load_voice_config
 from voice_service.config.paths import resolve_path
@@ -41,19 +32,19 @@ def inspect_onnx_metadata(onnx_path: Path) -> Dict[str, Any]:
         "status": "PASS",
         "error": None
     }
-    
+
     try:
         import onnxruntime as ort
     except ImportError:
         meta["status"] = "SKIPPED_ENV_DEPENDENCY"
         meta["error"] = "onnxruntime not installed"
         return meta
-        
+
     try:
         meta["providers"] = ort.get_available_providers()
         sess = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
         meta["selected_provider"] = sess.get_providers()[0] if sess.get_providers() else "none"
-        
+
         for inp in sess.get_inputs():
             meta["inputs"].append({
                 "name": inp.name,
@@ -62,7 +53,7 @@ def inspect_onnx_metadata(onnx_path: Path) -> Dict[str, Any]:
             })
         for out in sess.get_outputs():
             meta["outputs"].append(out.name)
-            
+
         try:
             import onnx
             model = onnx.load(str(onnx_path), load_external_data=False)
@@ -71,20 +62,20 @@ def inspect_onnx_metadata(onnx_path: Path) -> Dict[str, Any]:
                 meta["opset"] = str(opset_info[0])
         except Exception:
             pass
-            
+
     except Exception as e:
         meta["status"] = "FAIL"
         meta["error"] = str(e)
-        
+
     return meta
 
 def inspect_models():
     print("==================================================")
     print("Voice Gateway Model Inspection Tool")
     print("==================================================")
-    
+
     cfg = load_voice_config()
-    
+
     components = [
         {
             "name": "wake_kws",
@@ -123,7 +114,7 @@ def inspect_models():
             "required_companions": []
         }
     ]
-    
+
     for comp in components:
         name = comp["name"]
         backend = comp["backend"]
@@ -131,28 +122,32 @@ def inspect_models():
         companions = comp["required_companions"]
         if not companions or companions == [""]:
             companions = []
-            
+
         print(f"\n[ Component: {name} (backend={backend}) ]")
         print(f"  configured_path    : {conf_path}")
-        
+
         if not conf_path:
             print("  status             : SKIPPED (not configured)")
             continue
-            
+
+        if name in {"tts", "tts_config"} and cfg.disable_tts:
+            print("  status             : DISABLED_OPTIONAL (profile disables local Piper)")
+            continue
+
         try:
             res_path = resolve_path(conf_path)
             exists = res_path.exists()
         except Exception as e:
             print(f"  status             : FAIL (resolution error: {e})")
             continue
-            
+
         print(f"  resolved_path      : {res_path}")
         print(f"  exists             : {exists}")
-        
+
         if not exists:
             print("  status             : SKIPPED_MODEL_MISSING (not found on disk)")
             continue
-            
+
         # Check size and contents
         if res_path.is_file():
             size = res_path.stat().st_size
@@ -166,7 +161,7 @@ def inspect_models():
                     print(f"      - {f.relative_to(res_path)} ({f.stat().st_size} bytes)")
             if len(files) > 6:
                 print("      - ...")
-                
+
         # Check companions
         missing_companions = []
         if companions:
@@ -180,7 +175,7 @@ def inspect_models():
                     print(f"    - {mc}")
                 print("  status             : BLOCKED_MODEL_LAYOUT (companions missing)")
                 continue
-                
+
         # Inspect ONNX shapes
         onnx_file = None
         if res_path.is_file() and res_path.suffix.lower() == ".onnx":
@@ -192,7 +187,7 @@ def inspect_models():
                 if cand.exists():
                     onnx_file = cand
                     break
-                    
+
         if onnx_file:
             print(f"  ONNX analysis of: {onnx_file.name}")
             meta = inspect_onnx_metadata(onnx_file)

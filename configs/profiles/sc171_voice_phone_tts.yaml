@@ -1,38 +1,63 @@
-﻿profile: "sc171_voice_phone_tts"
+profile: "sc171_voice_phone_tts"
 runtime_overrides:
   orchestrator:
     runtime:
       config_profile: "sc171_voice_phone_tts"
+    serial:
+      port: "/dev/ttyHS1"
+      dry_run: false
+      readback_enabled: true
     task_cmd_in:
       transport: "uds"
       ipc_socket_path: "/tmp/robot_stack/task_cmd.sock"
     task_ack_out:
       transport: "uds"
       ipc_socket_path: "/tmp/robot_stack/task_ack.sock"
+    vision_obs_in:
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/vision_obs.sock"
+    vision_req_out:
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/vision_req.sock"
+    # The only TTS producer is the Orchestrator's existing tts_event stream.
     tts_event_out:
       transport: "uds"
       ipc_socket_path: "/tmp/robot_stack/mobile_tts_event.sock"
+      send_mode: "oneshot"
+      async_enabled: true
   gateway:
     command_in:
-      transport: "mqtt"
+      transport: "http"
+      ipc_socket_path: "/tmp/robot_stack/mobile_gateway_cmd.sock"
+      tcp_host: "0.0.0.0"
+      tcp_port: 9001
     status_out:
-      transport: "mqtt"
+      transport: "disabled"
     orchestrator_task_cmd_out:
       transport: "uds"
       ipc_socket_path: "/tmp/robot_stack/task_cmd.sock"
     orchestrator_task_ack_in:
       transport: "disabled"
+    # The gateway is the UDS listener and is started before the Orchestrator.
     tts_event_in:
       transport: "uds"
       ipc_socket_path: "/tmp/robot_stack/mobile_tts_event.sock"
     tts_playback_out:
       transport: "uds"
       ipc_socket_path: "/tmp/robot_stack/tts_playback.sock"
+      send_mode: "oneshot"
     mqtt:
+      # Keep the mini-program FIND/debug command topic active in addition to
+      # the tts_ack subscription. Broker credentials stay in the local MQTT file.
+      accept_commands: true
       tts_qos: 1
       topics:
         tts: "robot/v1/SC171/mobile/tts"
         tts_ack: "robot/v1/SC171/mobile/tts_ack"
+  online_edge:
+    output:
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/table_edge_obs.sock"
 
 # Voice remains the USB KWS/VAD/ASR TaskCmd producer.  Local Piper playback is
 # deliberately disabled: all user feedback comes from authoritative tts_event.
@@ -40,6 +65,14 @@ voice_gateway:
   runtime:
     input_mode: voice_only
     dry_run_text: false
+    asr_warmup_enabled: true
+  kws:
+    frontend_backend: onnx
+    classifier_backend: onnx
+  asr:
+    quantized: true
+  vad:
+    quantized: true
   tts:
     enabled: false
   ipc:
@@ -51,3 +84,12 @@ voice_gateway:
       ipc_socket_path: /tmp/robot_stack/task_ack.sock
     tts_event_in:
       transport: disabled
+  mobile_feedback:
+    transport: uds
+    ipc_socket_path: /tmp/robot_stack/mobile_tts_event.sock
+  playback:
+    transport: uds
+    ipc_socket_path: /tmp/robot_stack/tts_playback.sock
+    start_timeout_s: 1.5
+    finish_timeout_s: 6.0
+    post_guard_s: 0.35

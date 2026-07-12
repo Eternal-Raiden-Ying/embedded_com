@@ -21,12 +21,12 @@ class VoiceServiceConfig:
     commands_json: str = ""
 
     # Audio device parameters
-    arecord_device: str = "plughw:1,0"
+    arecord_device: str = "plughw:CARD=UACDemoV10,DEV=0"
 
     # Optimization toggles
     asr_quant: bool = False
     vad_quant: bool = False
-    
+
     # ASR configurations
     asr_mode: str = "online"  # online / offline
     asr_online_chunk_frames: int = 6
@@ -34,7 +34,9 @@ class VoiceServiceConfig:
     asr_online_encoder_chunk_look_back: int = 4
     asr_online_decoder_chunk_look_back: int = 1
     asr_emit_partial: bool = True
-    
+    asr_warmup_enabled: bool = True
+    asr_warmup_samples: int = 1600
+
     # Wake & Stop Hotword parameters
     wake_key: str = ""
     stop_key: str = ""
@@ -49,7 +51,7 @@ class VoiceServiceConfig:
     frontend_backend: str = "tflite"
     classifier_backend: str = "onnx"
     wake_phrases: str = "你好小车,你好 小车,小车你好"
-    
+
     # Energy-based VAD / segmenting
     energy_th: float = 450.0
     start_frames: int = 2
@@ -65,7 +67,7 @@ class VoiceServiceConfig:
     play_cmd: str = "aplay -q"
 
     # Orchestrator TaskCmd connection (client)
-    task_transport: str = "tcp"  # stdout / tcp / uds / tcp+stdout / uds+stdout
+    task_transport: str = "disabled"  # disabled / tcp / uds
     task_tcp_host: str = "127.0.0.1"
     task_tcp_port: int = 19101
     task_uds_path: str = "/tmp/robot_stack/task_cmd.sock"
@@ -74,17 +76,26 @@ class VoiceServiceConfig:
     task_send_mode: str = "persistent"  # oneshot / persistent
 
     # Orchestrator TaskAck binding (server)
-    task_ack_transport: str = "tcp"  # disabled / tcp / uds
+    task_ack_transport: str = "disabled"  # disabled / tcp / uds
     task_ack_tcp_host: str = "127.0.0.1"
     task_ack_tcp_port: int = 19102
     task_ack_uds_path: str = "/tmp/robot_stack/task_ack.sock"
     task_ack_timeout_s: float = 0.60
 
     # Orchestrator TTSEvent binding (server)
-    tts_event_transport: str = "tcp"  # disabled / tcp / uds
+    tts_event_transport: str = "disabled"  # disabled / tcp / uds
     tts_event_host: str = "127.0.0.1"
     tts_event_port: int = 19111
     tts_event_uds_path: str = "/tmp/robot_stack/tts_event.sock"
+
+    # Phone-TTS bridge: Voice is a client for events and server for playback state.
+    mobile_feedback_transport: str = "disabled"
+    mobile_tts_event_uds_path: str = "/tmp/robot_stack/mobile_tts_event.sock"
+    playback_transport: str = "disabled"
+    playback_uds_path: str = "/tmp/robot_stack/tts_playback.sock"
+    playback_start_timeout_s: float = 1.5
+    playback_finish_timeout_s: float = 6.0
+    post_playback_guard_s: float = 0.35
 
     # Mic recording loop tunables
     mic_read_timeout: float = 2.0
@@ -116,3 +127,8 @@ class VoiceServiceConfig:
     input_mode: str = "voice_only"  # voice_only / hybrid / mobile_only
     dry_run_text: bool = False
     debug_input_only: bool = False
+    replay_manifest: str = ""
+    replay_realtime: bool = True
+    replay_exit_after_complete: bool = True
+    replay_repeat: int = 1
+    replay_fail_fast: bool = True

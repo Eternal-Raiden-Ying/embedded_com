@@ -40,7 +40,14 @@ def _endpoint_items(config: SystemGlobalConfig) -> Iterable[Tuple[str, Any]]:
         yield f"vision.{name}", getattr(vision, name)
 
     gateway = config.gateway
-    for name in ("command_in", "status_out", "orchestrator_task_cmd_out", "orchestrator_task_ack_in"):
+    for name in (
+        "command_in",
+        "status_out",
+        "orchestrator_task_cmd_out",
+        "orchestrator_task_ack_in",
+        "tts_event_in",
+        "tts_playback_out",
+    ):
         yield f"gateway.{name}", getattr(gateway, name)
 
     yield "online_edge.output", config.online_edge.output

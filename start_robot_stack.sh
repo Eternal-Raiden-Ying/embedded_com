@@ -310,8 +310,16 @@ apply_profile_defaults() {
       CONFIG_PROFILE_EFFECTIVE="sc171_hybrid"
       ROBOT_INPUT_MODE="hybrid"
       ;;
+    sc171_voice_phone_tts)
+      ORCH_SERIAL_DRY_RUN=0
+      ORCH_TTS_EVENT_OUT_TRANSPORT="uds"
+      ORCH_DRY_RUN_ECHO_STDOUT=0
+      CONFIG_PROFILE_EFFECTIVE="sc171_voice_phone_tts"
+      # This profile is phone-only: it deliberately does not start Voice/Piper.
+      ROBOT_INPUT_MODE="mobile_only"
+      ;;
     *)
-      die "STACK_PROFILE 只支持 dryrun/full/sc171_board/windows_dev/windows_voice_dev/sc171_voice_gateway/sc171_hybrid，当前=$STACK_PROFILE"
+      die "STACK_PROFILE 只支持 dryrun/full/sc171_board/windows_dev/windows_voice_dev/sc171_voice_gateway/sc171_hybrid/sc171_voice_phone_tts，当前=$STACK_PROFILE"
       ;;
   esac
 
@@ -713,6 +721,8 @@ elif name == "orchestrator_task_cmd":
     ep = cfg.orchestrator.task_cmd_in
 elif name == "orchestrator_vision_obs":
     ep = cfg.orchestrator.vision_obs_in
+elif name == "gateway_tts_event_in":
+    ep = cfg.gateway.tts_event_in
 else:
     raise SystemExit(f"unknown endpoint: {name}")
 
@@ -1102,19 +1112,19 @@ voice_start() {
   if [[ "$STACK_PROFILE" == "windows_voice_dev" || "$STACK_PROFILE" == "windows_dev" || "$STACK_PROFILE" == "dryrun" ]]; then
     dryrun_flag="--dry-run-text"
   fi
-  "$STACK_ROOT/Voice/start_voice_asr.sh" start "$SYSTEM_CONFIG_PROFILE" "$dryrun_flag"
+  bash "$STACK_ROOT/Voice/start_voice_asr.sh" start --profile "configs/profiles/${SYSTEM_CONFIG_PROFILE}.yaml" $dryrun_flag
 }
 
 voice_stop() {
-  "$STACK_ROOT/Voice/start_voice_asr.sh" stop
+  bash "$STACK_ROOT/Voice/start_voice_asr.sh" stop
 }
 
 voice_status() {
-  "$STACK_ROOT/Voice/start_voice_asr.sh" status
+  bash "$STACK_ROOT/Voice/start_voice_asr.sh" status
 }
 
 voice_tail() {
-  "$STACK_ROOT/Voice/start_voice_asr.sh" tail
+  bash "$STACK_ROOT/Voice/start_voice_asr.sh" tail
 }
 
 stop_gateway() {
@@ -1199,17 +1209,35 @@ status_all() {
   else
     log "  - task_cmd  (Orchestrator IN) : /tmp/robot_stack/task_cmd.sock (UDS)"
     log "  - task_ack  (Voice/Mobile IN) : /tmp/robot_stack/task_ack.sock (UDS)"
-    if [[ "${ORCH_TTS_EVENT_OUT_TRANSPORT:-}" == "uds" ]]; then
-      log "  - tts_event (Voice Gateway IN): /tmp/robot_stack/tts_event.sock (UDS)"
-    else
-      log "  - tts_event (Voice Gateway IN): disabled"
-    fi
   fi
+  tts_route_status
   
   status_one "vision" "$VISION_PID_FILE" 0 "$VISION_LOG_FILE"
   status_one "orchestrator/controller" "$ORCH_PID_FILE" $([[ $(orch_use_sudo_effective; echo $?) -eq 0 ]] && echo 1 || echo 0) "$ORCH_LOG_FILE"
   status_one "mobile_gateway" "$GATEWAY_PID_FILE" 0 "$(gateway_status_log_file)"
   status_one "voice_gateway" "$STACK_ROOT/Voice/voice.pid" 0 "$STACK_ROOT/Voice/voice.out"
+}
+
+tts_route_status() {
+  SYSTEM_CONFIG_FILE="$SYSTEM_CONFIG_FILE" SYSTEM_CONFIG_PROFILE="$SYSTEM_CONFIG_PROFILE" PYTHONPATH="$STACK_ROOT:${PYTHONPATH:-}" \
+    /usr/bin/python3 -c '
+from common.config_loader import get_config
+
+cfg = get_config()
+for name, endpoint in (
+    ("orchestrator tts_event_out", cfg.orchestrator.tts_event_out),
+    ("gateway tts_event_in", cfg.gateway.tts_event_in),
+    ("gateway tts_playback_out", cfg.gateway.tts_playback_out),
+):
+    mode = str(getattr(endpoint, "transport", "disabled") or "disabled").lower()
+    if mode == "uds":
+        address = str(getattr(endpoint, "ipc_socket_path", "") or getattr(endpoint, "uds_path", ""))
+    elif mode == "tcp":
+        address = "{}:{}".format(getattr(endpoint, "tcp_host", "127.0.0.1"), getattr(endpoint, "tcp_port", 0))
+    else:
+        address = "disabled"
+    print(f"  - {name}: {mode} {address}")
+'
 }
 
 tail_stack_summary() {
@@ -1344,6 +1372,17 @@ start_gateway_only() {
 }
 
 start_core() {
+  # core-start is also used by the gateway's control helper. Preserve the TTS
+  # ordering even when it is invoked directly instead of through `start`.
+  if [[ "$STACK_PROFILE" == "sc171_voice_phone_tts" ]]; then
+    if ! pid_alive "$GATEWAY_PID_FILE" 0; then
+      start_gateway_only
+    fi
+    wait_for_endpoint "mobile_gateway" "gateway_tts_event_in" "$READY_TIMEOUT_S" 0 || {
+      mark err "mobile_gateway tts_event_in 未就绪，拒绝启动 Orchestrator TTS 发送端"
+      return 1
+    }
+  fi
   if core_any_running; then
     local current_run
     current_run="$(active_run_id)"
@@ -1393,6 +1432,9 @@ start_stack() {
       prepare_latest_run_paths
       log "mobile_gateway 已在运行, pid=$(cat "$GATEWAY_PID_FILE")"
     fi
+    # The gateway owns this listener. Do not start the Orchestrator TTS sender
+    # until it is bindable, otherwise the first announcement can be lost.
+    wait_for_endpoint "mobile_gateway" "gateway_tts_event_in" "$READY_TIMEOUT_S" 0 || exit 1
   fi
 
   if [[ "$ROBOT_INPUT_MODE" == "voice_only" || "$ROBOT_INPUT_MODE" == "hybrid" ]]; then
@@ -1465,7 +1507,7 @@ restart_core() {
 main() {
   local action="${1:-start}"
   case "$action" in
-    dryrun|dry_run|full|sc171_board|windows_dev|windows_voice_dev|sc171_voice_gateway|sc171_hybrid)
+    dryrun|dry_run|full|sc171_board|windows_dev|windows_voice_dev|sc171_voice_gateway|sc171_hybrid|sc171_voice_phone_tts)
       STACK_PROFILE="$action"
       shift || true
       action="${1:-start}"

@@ -25,6 +25,8 @@ mqtt:
   ack_qos: 1
   status_qos: 0
   heartbeat_qos: 0
+  tts_qos: 1
+  accept_commands: true
   retain_status: true
   retain_heartbeat: false
   topics:
@@ -32,6 +34,8 @@ mqtt:
     ack: "robot/v1/SC171/mobile/ack"
     status: "robot/v1/SC171/mobile/status"
     heartbeat: "robot/v1/SC171/heartbeat"
+    tts: "robot/v1/SC171/mobile/tts"
+    tts_ack: "robot/v1/SC171/mobile/tts_ack"
 
 orchestrator:
   task_cmd_socket_path: "/tmp/robot_stack/task_cmd.sock"
@@ -43,3 +47,5 @@ orchestrator:
 mobile_gateway:
   cmd_in_socket_path: "/tmp/robot_stack/mobile_gateway_cmd.sock"
   status_out_socket_path: "/tmp/robot_stack/mobile_gateway_status.sock"
+  tts_event_in_socket_path: "/tmp/robot_stack/mobile_tts_event.sock"
+  tts_playback_out_socket_path: "/tmp/robot_stack/tts_playback.sock"

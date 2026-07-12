@@ -1,0 +1,10 @@
+realtime: true
+exit_after_complete: true
+steps:
+  - silence_s: 1.0
+  - wav: Voice/runs/manual_audio/stop_01.wav
+  - silence_s: 1.5
+expected:
+  stop: true
+  wake: false
+  epoch_bump: true
