@@ -50,6 +50,18 @@ mocks.
 ## Gate E — live safe input-debug
 
 Prerequisite: USB audio appears in `arecord -l`; no robot components running.
+First run the read-only permission preflight:
+
+```bash
+bash Voice/scripts/check_usb_mic_access.sh
+```
+
+The SC171 Android audio node uses GID `1005`, while the usual AidLux audio GID
+is `29`. ACLs are unsupported on `/dev`; ask an administrator to add `aidlux`
+to the existing GID-1005 group, then re-login SSH/VS Code. `chgrp audio` is a
+temporary workaround only and may be lost after reboot or USB replug. The
+Voice launcher never runs sudo.
+
 Run exactly:
 
 ```bash

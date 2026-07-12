@@ -127,6 +127,10 @@ def test_debug_profile_disables_all_robot_and_phone_ipc():
     assert cfg.mobile_feedback_transport == "disabled"
     assert cfg.playback_transport == "disabled"
     assert cfg.disable_tts
+    assert cfg.frontend_backend == "onnx"
+    assert cfg.classifier_backend == "onnx"
+    assert cfg.asr_quant is True
+    assert cfg.vad_quant is True
 
 
 def test_debug_sender_suppresses_find_and_stop_without_socket_io():

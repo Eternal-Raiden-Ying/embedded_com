@@ -14,6 +14,13 @@ voice_gateway:
     sample_rate: 16000
     channels: 1
     format: "S16_LE"
+  kws:
+    frontend_backend: onnx
+    classifier_backend: onnx
+  asr:
+    quantized: true
+  vad:
+    quantized: true
   tts: {enabled: false}
   ipc:
     task_cmd_out: {transport: disabled}

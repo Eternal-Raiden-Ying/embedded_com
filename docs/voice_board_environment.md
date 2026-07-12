@@ -30,3 +30,17 @@ The pre-install package snapshot is
 found under `/home/aidlux`; installation is therefore blocked pending a
 deliberate isolated-environment dependency decision, rather than falling back
 to a system-wide install.
+
+## USB microphone permission preflight
+
+On the SC171 target the Android audio device node is
+`/dev/snd/pcmC1D0c`, owned by `system`, GID `1005`, mode `0660`. AidLux audio
+membership is GID `29`, which does not grant access to the Android audio GID.
+ACL operations on `/dev` returned `Operation not supported`, so ACLs are not a
+viable workaround. Prefer adding `aidlux` to the existing GID `1005` group
+(use its existing name when present); re-login SSH/VS Code before retrying.
+
+Run `bash Voice/scripts/check_usb_mic_access.sh` for a read-only diagnosis.
+`chgrp audio /dev/snd/pcmC1D0c` is only a temporary system workaround because
+it can be lost on reboot or USB replug; neither the script nor launcher runs
+sudo or changes device permissions.

@@ -83,6 +83,8 @@ def map_nested_dict(nested: Dict[str, Any], flat: Dict[str, Any]) -> None:
             flat["vad_dir"] = str(vad["model_path"])
         if "energy_threshold" in vad:
             flat["energy_th"] = float(vad["energy_threshold"])
+        if "quantized" in vad:
+            flat["vad_quant"] = bool(vad["quantized"])
         for key in ("start_frames", "end_frames", "pre_frames", "max_frames"):
             if key in vad:
                 flat[key] = int(vad[key])
