@@ -5,14 +5,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STACK_ROOT="$SCRIPT_DIR"
 
 # ======================================================
-# robot stack launcher v6 (mobile control edition)
+# robot stack launcher v7 (explicit mobile / Voice dry-run edition)
 # 使用方式：
 #   1) ./start_robot_stack.sh          # 开启（默认）
 #   2) ./start_robot_stack.sh stop     # 结束
 #   3) ./start_robot_stack.sh status   # 查看状态
 #
-# 当前主链路：Mobile Gateway -> Orchestrator/Controller -> VISTA
-# voice 默认不再启动；手机小程序现在是任务入口。
+# Task input is deliberately singular: mobile or voice.  TTS is an
+# independent feedback capability and remains disabled by default.
 # ======================================================
 
 # =========================
@@ -104,6 +104,10 @@ GATEWAY_LOG_DIR=""
 VISION_LOG_FILE=""
 ORCH_LOG_FILE=""
 GATEWAY_LOG_FILE=""
+VOICE_LOG_DIR=""
+VOICE_LOG_FILE=""
+LAUNCHER_LOG_DIR=""
+SUMMARY_LOG_DIR=""
 
 gateway_logs_enabled() {
   case "${ENABLE_GATEWAY_LOGS:-false}" in
@@ -303,12 +307,12 @@ apply_profile_defaults() {
       CONFIG_PROFILE_EFFECTIVE="sc171_voice_gateway"
       ROBOT_INPUT_MODE="voice_only"
       ;;
-    sc171_hybrid)
-      ORCH_SERIAL_DRY_RUN=0
-      ORCH_TTS_EVENT_OUT_TRANSPORT="uds"
+    sc171_voice_orchestrator_dryrun)
+      ORCH_SERIAL_DRY_RUN=1
+      ORCH_TTS_EVENT_OUT_TRANSPORT="disabled"
       ORCH_DRY_RUN_ECHO_STDOUT=0
-      CONFIG_PROFILE_EFFECTIVE="sc171_hybrid"
-      ROBOT_INPUT_MODE="hybrid"
+      CONFIG_PROFILE_EFFECTIVE="sc171_voice_orchestrator_dryrun"
+      ROBOT_INPUT_MODE="voice"
       ;;
     sc171_voice_phone_tts)
       ORCH_SERIAL_DRY_RUN=0
@@ -319,20 +323,38 @@ apply_profile_defaults() {
       ROBOT_INPUT_MODE="mobile_only"
       ;;
     *)
-      die "STACK_PROFILE 只支持 dryrun/full/sc171_board/windows_dev/windows_voice_dev/sc171_voice_gateway/sc171_hybrid/sc171_voice_phone_tts，当前=$STACK_PROFILE"
+      die "STACK_PROFILE 只支持 dryrun/full/sc171_board/windows_dev/windows_voice_dev/sc171_voice_gateway/sc171_voice_orchestrator_dryrun/sc171_voice_phone_tts，当前=$STACK_PROFILE"
       ;;
   esac
 
   SYSTEM_CONFIG_PROFILE="${SYSTEM_CONFIG_PROFILE:-$CONFIG_PROFILE_EFFECTIVE}"
   PYTHONUNBUFFERED=1
+  normalize_input_mode
+}
+
+normalize_input_mode() {
+  case "${ROBOT_INPUT_MODE:-mobile_only}" in
+    mobile|mobile_only) ROBOT_INPUT_MODE="mobile" ;;
+    voice|voice_only) ROBOT_INPUT_MODE="voice" ;;
+    hybrid)
+      die "ROBOT_INPUT_MODE=hybrid is no longer a supported command-entry mode; choose mobile or voice"
+      ;;
+    *) die "ROBOT_INPUT_MODE must be mobile or voice (legacy mobile_only/voice_only are accepted), current=${ROBOT_INPUT_MODE}" ;;
+  esac
+  FEEDBACK_OUTPUT_MODE="${FEEDBACK_OUTPUT_MODE:-disabled}"
+  case "$FEEDBACK_OUTPUT_MODE" in
+    disabled|phone_tts) ;;
+    *) die "FEEDBACK_OUTPUT_MODE must be disabled or phone_tts, current=$FEEDBACK_OUTPUT_MODE" ;;
+  esac
 }
 
 show_banner() {
-  headline "robot stack controller v6"
+  headline "robot stack controller v7"
   [[ -n "${STACK_RUN_ID:-}" ]] && printf '%brun id%b         : %s\n' "$C_BOLD" "$C_RESET" "$STACK_RUN_ID"
   printf '%bprofile%b        : %s\n' "$C_BOLD" "$C_RESET" "$STACK_PROFILE"
   printf '%bconfig profile%b : %s\n' "$C_BOLD" "$C_RESET" "$SYSTEM_CONFIG_PROFILE"
-  printf '%binput mode%b     : %s\n' "$C_BOLD" "$C_RESET" "${ROBOT_INPUT_MODE:-mobile_only}"
+  printf '%binput mode%b     : %s\n' "$C_BOLD" "$C_RESET" "${ROBOT_INPUT_MODE:-mobile}"
+  printf '%bfeedback mode%b  : %s\n' "$C_BOLD" "$C_RESET" "${FEEDBACK_OUTPUT_MODE:-disabled}"
   printf '%bvision root%b    : %s\n' "$C_BOLD" "$C_RESET" "$VISION_ROOT"
   printf '%bvision preload%b : %s\n' "$C_BOLD" "$C_RESET" "${VISION_LD_PRELOAD:-<none>}"
   printf '%btable bbox%b     : enable=%s model=%s mock=%s preview_rgb=%s\n' \
@@ -361,18 +383,15 @@ apply_run_log_paths() {
   STACK_RUN_DIR="$run_dir"
   VISION_LOG_DIR="$run_dir/vision"
   ORCH_LOG_DIR="$run_dir/orchestrator"
-  GATEWAY_LOG_DIR="$GATEWAY_STANDALONE_LOG_DIR"
+  GATEWAY_LOG_DIR="$run_dir/gateway"
+  VOICE_LOG_DIR="$run_dir/voice"
+  LAUNCHER_LOG_DIR="$run_dir/launcher"
+  SUMMARY_LOG_DIR="$run_dir/summary"
   VISION_LOG_FILE="$VISION_LOG_DIR/vision.out"
   ORCH_LOG_FILE="$ORCH_LOG_DIR/orchestrator.out"
-  if gateway_logs_enabled; then
-    GATEWAY_LOG_FILE="$GATEWAY_STANDALONE_LOG_FILE"
-  else
-    GATEWAY_LOG_FILE="/dev/null"
-  fi
-  mkdir -p "$VISION_LOG_DIR" "$ORCH_LOG_DIR" "$STACK_RUNS_ROOT"
-  if gateway_logs_enabled; then
-    mkdir -p "$GATEWAY_LOG_DIR"
-  fi
+  GATEWAY_LOG_FILE="$GATEWAY_LOG_DIR/mobile_gateway.out"
+  VOICE_LOG_FILE="$VOICE_LOG_DIR/voice.out"
+  mkdir -p "$VISION_LOG_DIR" "$ORCH_LOG_DIR" "$GATEWAY_LOG_DIR" "$VOICE_LOG_DIR" "$LAUNCHER_LOG_DIR" "$SUMMARY_LOG_DIR" "$STACK_RUNS_ROOT"
 }
 
 prepare_start_run_paths() {
@@ -411,6 +430,12 @@ core_any_running() {
   pid_alive "$VISION_PID_FILE" 0 || pid_alive "$ORCH_PID_FILE" "$sudo_flag"
 }
 
+core_all_running() {
+  local sudo_flag=0
+  orch_use_sudo_effective && sudo_flag=1
+  pid_alive "$VISION_PID_FILE" 0 && pid_alive "$ORCH_PID_FILE" "$sudo_flag"
+}
+
 cleanup_unused_run_dir() {
   local run_id="$1"
   local status="${2:-aborted}"
@@ -434,11 +459,15 @@ prepare_latest_run_paths() {
 }
 
 prepare_gateway_paths() {
-  STACK_RUN_ID="${STACK_RUN_ID:-gateway_$(date +%Y%m%d_%H%M%S)}"
-  STACK_RUN_DIR="$GATEWAY_STANDALONE_LOG_DIR"
-  GATEWAY_LOG_DIR="$GATEWAY_STANDALONE_LOG_DIR"
-  GATEWAY_LOG_FILE="$GATEWAY_STANDALONE_LOG_FILE"
-  mkdir -p "$GATEWAY_STANDALONE_LOG_DIR" "$GATEWAY_CORE_CONTROL_LOG_DIR"
+  if [[ -n "${STACK_RUN_ID:-}" ]]; then
+    apply_run_log_paths "$STACK_RUN_ID"
+  else
+    STACK_RUN_ID="gateway_$(date +%Y%m%d_%H%M%S)"
+    STACK_RUN_DIR="$GATEWAY_STANDALONE_LOG_DIR"
+    GATEWAY_LOG_DIR="$GATEWAY_STANDALONE_LOG_DIR"
+    GATEWAY_LOG_FILE="$GATEWAY_STANDALONE_LOG_FILE"
+  fi
+  mkdir -p "$GATEWAY_LOG_DIR" "$GATEWAY_CORE_CONTROL_LOG_DIR"
 }
 
 path_user_writable_or_creatable() {
@@ -648,9 +677,7 @@ start_gateway_bg() {
   fi
   headline "启动 mobile gateway"
   mark run "gateway config=$GATEWAY_CONFIG"
-  GATEWAY_LOG_DIR="$GATEWAY_STANDALONE_LOG_DIR"
-  GATEWAY_LOG_FILE="$GATEWAY_STANDALONE_LOG_FILE"
-  mkdir -p "$GATEWAY_STANDALONE_LOG_DIR" "$GATEWAY_CORE_CONTROL_LOG_DIR"
+  mkdir -p "$GATEWAY_LOG_DIR" "$GATEWAY_CORE_CONTROL_LOG_DIR"
   local cmd
   cmd=$(cat <<CMD
 set -euo pipefail
@@ -708,13 +735,25 @@ is_port_listening() {
 
 endpoint_spec() {
   local endpoint="$1"
-  SYSTEM_CONFIG_FILE="$SYSTEM_CONFIG_FILE" SYSTEM_CONFIG_PROFILE="$SYSTEM_CONFIG_PROFILE" PYTHONPATH="$STACK_ROOT:${PYTHONPATH:-}" \
+  SYSTEM_CONFIG_FILE="$SYSTEM_CONFIG_FILE" SYSTEM_CONFIG_PROFILE="$SYSTEM_CONFIG_PROFILE" PYTHONPATH="$STACK_ROOT:$STACK_ROOT/Voice:${PYTHONPATH:-}" \
     /usr/bin/python3 -c '
 import sys
 from common.config_loader import get_config
 
-cfg = get_config()
 name = sys.argv[1]
+if name == "voice_task_ack":
+    import contextlib
+    import os
+    from voice_service.config.loader import load_voice_config
+    with contextlib.redirect_stdout(sys.stderr):
+        ep = load_voice_config(["--profile", os.environ.get("VOICE_PROFILE", "")])
+    mode = str(getattr(ep, "task_ack_transport", "disabled") or "disabled").strip().lower()
+    path = str(getattr(ep, "task_ack_uds_path", "") or "")
+    host = str(getattr(ep, "task_ack_tcp_host", "") or "127.0.0.1")
+    port = int(getattr(ep, "task_ack_tcp_port", 0) or 0)
+    print(f"{mode}|{path}|{host}|{port}")
+    raise SystemExit(0)
+cfg = get_config()
 if name == "vision_req":
     ep = cfg.vision.req_in
 elif name == "orchestrator_task_cmd":
@@ -773,6 +812,9 @@ ready_pid_alive() {
     mobile_gateway)
       pid_file="$GATEWAY_PID_FILE"
       ;;
+    voice_gateway)
+      pid_file="$STACK_ROOT/Voice/voice.pid"
+      ;;
   esac
   [[ -n "$pid_file" ]] && pid_alive "$pid_file" "$use_sudo"
 }
@@ -787,7 +829,7 @@ ready_log_file_for() {
 }
 
 wait_for_endpoint() {
-  local service="$1" endpoint="$2" timeout_s="$3" extra_s="$4"
+  local service="$1" endpoint="$2" timeout_s="$3" extra_s="$4" required="${5:-1}"
   local spec mode path host port start_ts now_ts log_file
   spec="$(endpoint_spec "$endpoint")" || return 1
   IFS='|' read -r mode path host port <<< "$spec"
@@ -798,8 +840,13 @@ wait_for_endpoint() {
     tcp)
       mark note "[READY_CHECK] $endpoint endpoint mode=tcp host=$host port=$port"
       ;;
-    disabled)
-      mark note "[READY_CHECK] $endpoint endpoint mode=disabled; checking process + READY log"
+    disabled|disable|off|none)
+      if [[ "$required" == "0" ]]; then
+        mark note "[SKIP] $endpoint disabled by configuration"
+        return 0
+      fi
+      mark err "$service required endpoint=$endpoint is disabled by configuration"
+      return 1
       ;;
     *)
       mark err "$service ready-check 不支持 endpoint=$endpoint mode=$mode"
@@ -809,14 +856,7 @@ wait_for_endpoint() {
 
   start_ts=$(date +%s)
   while true; do
-    if [[ "$mode" == "disabled" ]]; then
-      log_file="$(ready_log_file_for "$service")"
-      if ready_pid_alive "$service" && [[ -f "$log_file" ]] && grep -qE 'READY|SERVICE_READY' "$log_file" 2>/dev/null; then
-        [[ "$extra_s" -gt 0 ]] && sleep "$extra_s"
-        mark ok "$service ready  endpoint=$endpoint mode=disabled"
-        return 0
-      fi
-    elif [[ "$mode" == "uds" ]]; then
+    if [[ "$mode" == "uds" ]]; then
       if [[ -S "$path" ]] && endpoint_connect_ok "$mode" "$path" "$host" "$port"; then
         [[ "$extra_s" -gt 0 ]] && sleep "$extra_s"
         if ! ready_pid_alive "$service"; then
@@ -843,12 +883,107 @@ wait_for_endpoint() {
       case "$mode" in
         uds) mark err "$service ready-check 超时  endpoint=$endpoint mode=uds path=$path" ;;
         tcp) mark err "$service ready-check 超时  endpoint=$endpoint mode=tcp host=$host port=$port" ;;
-        disabled) mark err "$service ready-check 超时  endpoint=$endpoint mode=disabled pattern=/READY|SERVICE_READY/" ;;
       esac
       return 1
     fi
     sleep 0.5
   done
+}
+
+write_stack_manifest() {
+  [[ -n "${STACK_RUN_DIR:-}" ]] || return 0
+  local manifest="$LAUNCHER_LOG_DIR/manifest.json"
+  SYSTEM_CONFIG_FILE="$SYSTEM_CONFIG_FILE" SYSTEM_CONFIG_PROFILE="$SYSTEM_CONFIG_PROFILE" \
+    PYTHONPATH="$STACK_ROOT:${PYTHONPATH:-}" /usr/bin/python3 - "$manifest" <<'PY'
+import json
+import os
+import subprocess
+import sys
+from common.config_loader import get_config
+
+cfg = get_config()
+def endpoint(ep):
+    return {
+        "transport": str(getattr(ep, "transport", "disabled") or "disabled"),
+        "path": str(getattr(ep, "ipc_socket_path", "") or getattr(ep, "uds_path", "") or ""),
+        "host": str(getattr(ep, "host", "") or getattr(ep, "tcp_host", "") or ""),
+        "port": int(getattr(ep, "port", 0) or getattr(ep, "tcp_port", 0) or 0),
+    }
+payload = {
+    "run_id": os.environ.get("STACK_RUN_ID", ""),
+    "git_head": subprocess.check_output(["git", "-C", os.environ["STACK_ROOT"], "rev-parse", "HEAD"], text=True).strip(),
+    "stack_profile": os.environ.get("STACK_PROFILE", ""),
+    "task_input_mode": os.environ.get("ROBOT_INPUT_MODE", ""),
+    "feedback_output_mode": os.environ.get("FEEDBACK_OUTPUT_MODE", "disabled"),
+    "system_config_profile": os.environ.get("SYSTEM_CONFIG_PROFILE", ""),
+    "voice_profile": os.environ.get("VOICE_PROFILE", ""),
+    "serial_dry_run": bool(getattr(cfg.orchestrator.serial, "dry_run", False)),
+    "arm_dry_run": bool(getattr(cfg.orchestrator.arm_serial, "dry_run", False)),
+    "endpoint_map": {
+        "task_cmd": endpoint(cfg.orchestrator.task_cmd_in),
+        "task_ack": endpoint(cfg.orchestrator.task_ack_out),
+        "vision_req": endpoint(cfg.vision.req_in),
+        "vision_obs": endpoint(cfg.orchestrator.vision_obs_in),
+        "tts_event_out": endpoint(cfg.orchestrator.tts_event_out),
+    },
+    "process_pid_files": {
+        "gateway": os.environ.get("GATEWAY_PID_FILE", ""),
+        "voice": os.environ.get("VOICE_PID_FILE", ""),
+        "vision": os.environ.get("VISION_PID_FILE", ""),
+        "orchestrator": os.environ.get("ORCH_PID_FILE", ""),
+    },
+    "start_timestamp": __import__("datetime").datetime.now().astimezone().isoformat(),
+}
+
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=True)
+    fh.write("\n")
+PY
+}
+
+assert_dryrun_safety() {
+  # A stack command must fail closed before it starts any process if the
+  # selected configuration could address real actuators or enable TTS.
+  SYSTEM_CONFIG_FILE="$SYSTEM_CONFIG_FILE" SYSTEM_CONFIG_PROFILE="$SYSTEM_CONFIG_PROFILE" \
+    PYTHONPATH="$STACK_ROOT:$STACK_ROOT/Voice:${PYTHONPATH:-}" /usr/bin/python3 - <<'PY'
+from common.config_loader import get_config
+from voice_service.config.loader import load_voice_config
+import os
+
+cfg = get_config()
+voice = load_voice_config(["--profile", os.environ["VOICE_PROFILE"]]) if os.environ.get("ROBOT_INPUT_MODE") == "voice" else None
+errors = []
+if not bool(getattr(cfg.orchestrator.serial, "dry_run", False)):
+    errors.append("orchestrator.serial.dry_run must be true")
+if not bool(getattr(cfg.orchestrator.arm_serial, "dry_run", False)):
+    errors.append("orchestrator.arm_serial.dry_run must be true")
+for name in ("tts_event_out",):
+    if str(getattr(getattr(cfg.orchestrator, name), "transport", "disabled")).lower() not in ("disabled", "disable", "off", "none"):
+        errors.append("orchestrator.%s must be disabled" % name)
+if voice is not None:
+    for name in ("disable_tts",):
+        if not bool(getattr(voice, name)):
+            errors.append("voice.%s must be true" % name)
+    for name in ("mobile_feedback_transport", "playback_transport", "tts_event_transport"):
+        if str(getattr(voice, name)).lower() not in ("disabled", "disable", "off", "none"):
+            errors.append("voice.%s must be disabled" % name)
+if errors:
+    raise SystemExit("[BLOCKED] unsafe dry-run profile: " + "; ".join(errors))
+print("[READY] dry-run safety gate: serial/arm/TTS disabled")
+PY
+}
+
+voice_profile_input_mode() {
+  VOICE_PROFILE="${VOICE_PROFILE:-}" /usr/bin/python3 - <<'PY'
+import os
+from pathlib import Path
+import yaml
+
+path = Path(os.environ["VOICE_PROFILE"])
+data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+section = (data.get("runtime_overrides", {}) or {}).get("voice_gateway", data.get("voice_gateway", {})) or {}
+print((section.get("runtime", {}) or {}).get("input_mode", "voice_only"))
+PY
 }
 
 wait_for_endpoint_group() {
@@ -1108,11 +1243,13 @@ cleanup_core_sockets() {
 }
 
 voice_start() {
+  local profile="${VOICE_PROFILE:-configs/profiles/${SYSTEM_CONFIG_PROFILE}.yaml}"
   local dryrun_flag=""
-  if [[ "$STACK_PROFILE" == "windows_voice_dev" || "$STACK_PROFILE" == "windows_dev" || "$STACK_PROFILE" == "dryrun" ]]; then
+  if [[ "${VOICE_DRY_RUN_TEXT:-0}" == "1" ]]; then
     dryrun_flag="--dry-run-text"
   fi
-  bash "$STACK_ROOT/Voice/start_voice_asr.sh" start --profile "configs/profiles/${SYSTEM_CONFIG_PROFILE}.yaml" $dryrun_flag
+  VOICE_LOG_FILE="$VOICE_LOG_FILE" STACK_RUN_ID="$STACK_RUN_ID" \
+    bash "$STACK_ROOT/Voice/start_voice_asr.sh" start --profile "$profile" $dryrun_flag
 }
 
 voice_stop() {
@@ -1139,7 +1276,7 @@ stop_core() {
   headline "停止 core: VISTA + orchestrator"
   kill_pid_group "$VISION_PID_FILE" 0 "vision"
   kill_pid_group "$ORCH_PID_FILE" $([[ $(orch_use_sudo_effective; echo $?) -eq 0 ]] && echo 1 || echo 0) "orchestrator"
-  if [[ "${ROBOT_INPUT_MODE:-}" == "voice_only" || "${ROBOT_INPUT_MODE:-}" == "hybrid" ]]; then
+  if [[ "${ROBOT_INPUT_MODE:-}" == "voice" ]]; then
     voice_stop
   fi
   cleanup_core_sockets
@@ -1156,6 +1293,15 @@ stop_all() {
   voice_stop
   kill_by_ports
   cleanup_sockets
+}
+
+stop_started_stack() {
+  # Transactional startup cleanup: only PID files owned by this launcher are
+  # touched.  Do not use port-wide termination here.
+  kill_pid_group "$GATEWAY_PID_FILE" 0 "mobile_gateway" || true
+  kill_pid_group "$VISION_PID_FILE" 0 "vision" || true
+  kill_pid_group "$ORCH_PID_FILE" 0 "orchestrator" || true
+  voice_stop || true
 }
 
 run_latest_summary() {
@@ -1198,7 +1344,7 @@ status_all() {
   headline "当前状态"
   mark note "core = vision + orchestrator/controller; gateway = mobile_gateway; voice = voice_gateway"
   
-  local mode="${ROBOT_INPUT_MODE:-mobile_only}"
+  local mode="${ROBOT_INPUT_MODE:-mobile}"
   log "输入模式 (ROBOT_INPUT_MODE) : $mode"
   
   log "IPC 端点信息 (IPC Endpoints) :"
@@ -1378,12 +1524,12 @@ start_core() {
     if ! pid_alive "$GATEWAY_PID_FILE" 0; then
       start_gateway_only
     fi
-    wait_for_endpoint "mobile_gateway" "gateway_tts_event_in" "$READY_TIMEOUT_S" 0 || {
+    wait_for_endpoint "mobile_gateway" "gateway_tts_event_in" "$READY_TIMEOUT_S" 0 0 || {
       mark err "mobile_gateway tts_event_in 未就绪，拒绝启动 Orchestrator TTS 发送端"
       return 1
     }
   fi
-  if core_any_running; then
+  if core_all_running; then
     local current_run
     current_run="$(active_run_id)"
     if [[ -n "$current_run" ]]; then
@@ -1400,12 +1546,14 @@ start_core() {
   fi
   prepare_start_run_paths
   show_banner
-  start_vision_bg
-  if ! wait_for_endpoint "vision" "vision_req" "$READY_TIMEOUT_S" "$VISION_READY_EXTRA_S"; then
-    tail_last_logs_on_failure "vision" "$VISION_LOG_FILE"
-    cleanup_unused_run_dir "$STACK_RUN_ID" "aborted"
-    stop_core || true
-    exit 1
+  if ! pid_alive "$VISION_PID_FILE" 0; then
+    start_vision_bg
+    if ! wait_for_endpoint "vision" "vision_req" "$READY_TIMEOUT_S" "$VISION_READY_EXTRA_S"; then
+      tail_last_logs_on_failure "vision" "$VISION_LOG_FILE"
+      cleanup_unused_run_dir "$STACK_RUN_ID" "aborted"
+      stop_core || true
+      exit 1
+    fi
   fi
 
   start_orch_bg
@@ -1423,52 +1571,70 @@ start_core() {
 }
 
 start_stack() {
-  ROBOT_INPUT_MODE="${ROBOT_INPUT_MODE:-mobile_only}"
-  
-  if [[ "$ROBOT_INPUT_MODE" == "mobile_only" || "$ROBOT_INPUT_MODE" == "hybrid" ]]; then
-    if ! pid_alive "$GATEWAY_PID_FILE" 0; then
-      start_gateway_only
+  normalize_input_mode
+  if core_any_running || pid_alive "$GATEWAY_PID_FILE" 0; then
+    mark err "refusing to join an existing stack run; use status or stop-all first"
+    return 1
+  fi
+  prepare_start_run_paths
+  export STACK_ROOT STACK_PROFILE SYSTEM_CONFIG_PROFILE STACK_RUN_ID STACK_RUN_DIR ROBOT_INPUT_MODE
+  export GATEWAY_PID_FILE VISION_PID_FILE ORCH_PID_FILE
+  export VOICE_PID_FILE="$STACK_ROOT/Voice/voice.pid"
+  export VOICE_PROFILE="${VOICE_PROFILE:-configs/profiles/${SYSTEM_CONFIG_PROFILE}.yaml}"
+  assert_dryrun_safety || return 1
+  write_stack_manifest
+
+  # Listener owners start before connectors: VISTA(req_in), Voice(task_ack_in),
+  # Orchestrator(task_cmd_in/vision_obs_in), then the mobile connector.
+  if [[ "$ROBOT_INPUT_MODE" == "voice" ]]; then
+    start_vision_bg
+    if ! wait_for_endpoint "vision" "vision_req" "$READY_TIMEOUT_S" "$VISION_READY_EXTRA_S"; then
+      tail_last_logs_on_failure "vision" "$VISION_LOG_FILE"
+      stop_started_stack || true
+      return 1
+    fi
+    local voice_input_mode
+    voice_input_mode="$(voice_profile_input_mode)"
+    if [[ "$voice_input_mode" == "wav_replay" ]]; then
+      # Replay starts consuming its finite manifest immediately after model
+      # initialization.  Start its TaskCmd listener first so the real WAV
+      # result cannot be dispatched before Orchestrator is available.
+      start_core
+      voice_start
+      if ! wait_for_endpoint "voice_gateway" "voice_task_ack" "$READY_TIMEOUT_S" 0 1; then
+        mark err "voice task_ack listener did not become ready"
+        stop_started_stack || true
+        return 1
+      fi
     else
-      prepare_latest_run_paths
-      log "mobile_gateway 已在运行, pid=$(cat "$GATEWAY_PID_FILE")"
-    fi
-    # The gateway owns this listener. Do not start the Orchestrator TTS sender
-    # until it is bindable, otherwise the first announcement can be lost.
-    wait_for_endpoint "mobile_gateway" "gateway_tts_event_in" "$READY_TIMEOUT_S" 0 || exit 1
-  fi
-
-  if [[ "$ROBOT_INPUT_MODE" == "voice_only" || "$ROBOT_INPUT_MODE" == "hybrid" ]]; then
-    voice_start
-  fi
-
-  unset STACK_RUN_ID STACK_RUN_DIR
-  start_core
-
-  if [[ "$ROBOT_INPUT_MODE" == "mobile_only" || "$ROBOT_INPUT_MODE" == "hybrid" ]]; then
-    check_gateway_to_orchestrator_link || { stop_core || true; exit 1; }
-    if ! wait_for_gateway_ready "$READY_TIMEOUT_S" "$GATEWAY_READY_EXTRA_S"; then
-      tail_last_logs_on_failure "mobile_gateway" "$GATEWAY_LOG_FILE"
-      stop_core || true
-      exit 1
-    fi
-  fi
-
-  if [[ "$ROBOT_INPUT_MODE" == "voice_only" || "$ROBOT_INPUT_MODE" == "hybrid" ]]; then
-    # In sc171 hardware/board modes, check that Voice Gateway sockets exist
-    if [[ "$STACK_PROFILE" != "windows_voice_dev" && "$STACK_PROFILE" != "windows_dev" && "$STACK_PROFILE" != "dryrun" ]]; then
-      log "等待 Voice Gateway socket 准备就绪..."
-      if ! wait_for_endpoint "voice_gateway" "task_ack" "$READY_TIMEOUT_S" "1"; then
-        log "Voice Gateway task_ack socket 未能在超时时间内就绪"
-        stop_core || true
-        exit 1
+      voice_start
+      if ! wait_for_endpoint "voice_gateway" "voice_task_ack" "$READY_TIMEOUT_S" 0 1; then
+        mark err "voice task_ack listener did not become ready"
+        stop_started_stack || true
+        return 1
       fi
     fi
   fi
 
+  if [[ "$ROBOT_INPUT_MODE" != "voice" || "$(voice_profile_input_mode)" != "wav_replay" ]]; then
+    start_core
+  fi
+
+  if [[ "$ROBOT_INPUT_MODE" == "mobile" ]]; then
+    start_gateway_bg
+    check_gateway_to_orchestrator_link || { stop_core || true; exit 1; }
+    if ! wait_for_gateway_ready "$READY_TIMEOUT_S" "$GATEWAY_READY_EXTRA_S"; then
+      tail_last_logs_on_failure "mobile_gateway" "$GATEWAY_LOG_FILE"
+      stop_started_stack || true
+      return 1
+    fi
+    # TTS is optional in both formal modes.  This records a deterministic SKIP
+    # for the default disabled route without delaying Core startup.
+    wait_for_endpoint "mobile_gateway" "gateway_tts_event_in" "$READY_TIMEOUT_S" 0 0
+  fi
+
   headline "启动完成"
-  if [[ "$ROBOT_INPUT_MODE" == "hybrid" ]]; then
-    mark ok "vision / orchestrator(controller) / mobile_gateway + voice_gateway 均已通过 ready-check。"
-  elif [[ "$ROBOT_INPUT_MODE" == "voice_only" ]]; then
+  if [[ "$ROBOT_INPUT_MODE" == "voice" ]]; then
     mark ok "vision / orchestrator(controller) / voice_gateway 均已通过 ready-check。"
   else
     mark ok "vision / orchestrator(controller) / mobile_gateway 均已通过 ready-check，可以用手机端发指令。"
@@ -1505,9 +1671,9 @@ restart_core() {
 }
 
 main() {
-  local action="${1:-start}"
+  local action="${1:-usage}"
   case "$action" in
-    dryrun|dry_run|full|sc171_board|windows_dev|windows_voice_dev|sc171_voice_gateway|sc171_hybrid|sc171_voice_phone_tts)
+    dryrun|dry_run|full|sc171_board|windows_dev|windows_voice_dev|sc171_voice_gateway|sc171_voice_orchestrator_dryrun|sc171_voice_phone_tts)
       STACK_PROFILE="$action"
       shift || true
       action="${1:-start}"
@@ -1515,6 +1681,19 @@ main() {
   esac
   apply_profile_defaults
   case "$action" in
+    start-mobile)
+      ROBOT_INPUT_MODE="mobile"
+      FEEDBACK_OUTPUT_MODE="disabled"
+      start_stack
+      ;;
+    start-voice)
+      ROBOT_INPUT_MODE="voice"
+      FEEDBACK_OUTPUT_MODE="disabled"
+      if [[ "$STACK_PROFILE" == "dryrun" || "$STACK_PROFILE" == "dry_run" ]]; then
+        SYSTEM_CONFIG_PROFILE="sc171_voice_orchestrator_dryrun"
+      fi
+      start_stack
+      ;;
     start|on|up|run|开启|开)
       start_stack
       ;;
@@ -1579,7 +1758,10 @@ main() {
       echo "  ./start_robot_stack.sh core-start       # 启动 core: VISTA + orchestrator (+ voice 如果已配置)"
       echo "  ./start_robot_stack.sh core-stop        # 停止 core，保留 mobile_gateway"
       echo "  ./start_robot_stack.sh core-restart     # 重启 core"
-      echo "  ./start_robot_stack.sh start            # 根据 ROBOT_INPUT_MODE 启动 gateway，再启动 core"
+      echo "  ./start_robot_stack.sh dryrun start-mobile # dry-run mobile -> core"
+      echo "  ./start_robot_stack.sh dryrun start-voice  # dry-run USB mic Voice -> core"
+      echo "  ROBOT_INPUT_MODE=mobile_only ./start_robot_stack.sh dryrun start"
+      echo "  ROBOT_INPUT_MODE=voice_only ./start_robot_stack.sh dryrun start"
       echo "  ./start_robot_stack.sh stop             # 等价 core-stop，保留 mobile_gateway"
       echo "  ./start_robot_stack.sh stop-all         # 停止 mobile_gateway + core + voice_gateway，并完整清理"
       echo "  ./start_robot_stack.sh status           # 查看状态"
@@ -1591,4 +1773,6 @@ main() {
   esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

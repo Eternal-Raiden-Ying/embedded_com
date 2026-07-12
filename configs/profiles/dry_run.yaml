@@ -22,6 +22,8 @@ runtime_overrides:
       port: "DRY_RUN"
       dry_run: true
       readback_enabled: false
+    arm_serial:
+      dry_run: true
     control:
       vision_req_fail_to_stop: false
       yolo_table_control_enable: true

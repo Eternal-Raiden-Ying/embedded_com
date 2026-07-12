@@ -301,7 +301,6 @@ def load_voice_config(argv: Optional[List[str]] = None) -> VoiceServiceConfig:
         "VOICE_MAX_REJECT_STREAK": "max_reject_streak",
         "VOICE_DEBUG": "debug",
         "VOICE_INPUT_MODE": "input_mode",
-        "ROBOT_INPUT_MODE": "input_mode",
         "VOICE_DRY_RUN_TEXT": "dry_run_text"
     }
 
