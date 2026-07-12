@@ -21,9 +21,23 @@ from .playback import PhonePlaybackGuard
 from .tts_engine import ThreadSafeTTS
 
 
+def select_hotword_action(pred: Dict[str, float], wake_key: str, wake_th: float, stop_key: str, stop_th: float) -> str:
+    """STOP wins deterministically when a classifier window crosses both thresholds."""
+    if stop_key and kws_trigger(pred, stop_key, stop_th):
+        return "STOP"
+    if wake_key and kws_trigger(pred, wake_key, wake_th):
+        return "WAKE"
+    return ""
+
+
 def dispatch_task_cmd(payload: Dict[str, Any], publisher: Any, ack_inbox: Optional[JsonlAckInbox], rt: RuntimeState,
-                      ack_timeout_s: float, label: str = "TASK_CMD") -> Dict[str, Any]:
+                      ack_timeout_s: float, label: str = "TASK_CMD", suppress_dispatch: bool = False) -> Dict[str, Any]:
     out = build_task_cmd(payload)
+    if suppress_dispatch:
+        marker = "STOP" if out["intent"] == "STOP" else "TASK"
+        jlog({"level": "info", "src": "debug_input", "msg": "[VOICE][{}] suppressed debug_input_only=true".format(marker), "intent": out["intent"]})
+        write_timeline("{}_SUPPRESSED".format(label), intent=out["intent"], session_id=out.get("session_id"), epoch=out.get("epoch"))
+        return {"sent": True, "ack": None, "ack_ok": True, "accepted": True, "cmd": out, "suppressed": True}
     cmd_id = out["cmd_id"]
     rt.note_command(cmd_id)
 
@@ -149,7 +163,7 @@ class AudioKWSWorker(threading.Thread):
         jlog(snap)
         write_state_block(snap)
 
-    def _reset_recording(self, next_state: str = "WAIT_WAKE"):
+    def _reset_recording(self, next_state: str = "WAIT_WAKE", update_runtime: bool = True):
         self.state = next_state
         self.speech_up = 0
         self.speech_down = 0
@@ -158,8 +172,13 @@ class AudioKWSWorker(threading.Thread):
         self.asr_chunk_seq = 0
         self.prebuf.clear()
         self.oww.reset()
-        self.rt.set_state(next_state)
-        write_state_block(self.rt.snapshot())
+        if update_runtime:
+            self.rt.set_state(next_state)
+            write_state_block(self.rt.snapshot())
+
+    @staticmethod
+    def _armed_timeout_applies(state: str, rt: RuntimeState) -> bool:
+        return state == "ARMED_WAIT" and not rt.is_armed()
 
     def _drop_pending_utterances(self) -> int:
         dropped = 0
@@ -182,9 +201,9 @@ class AudioKWSWorker(threading.Thread):
             jlog({"level": "warn", "src": "queue", "msg": "utterance queue full", "kind": item.get("kind")})
             return False
 
-    def _enqueue_utterance(self, captured: List[np.ndarray], rms: float):
+    def _enqueue_utterance(self, captured: List[np.ndarray], rms: float) -> bool:
         if not captured:
-            return
+            return False
         audio = np.concatenate(captured, axis=0).astype(np.int16)
         item = {
             "kind": "FINAL_UTT",
@@ -195,8 +214,11 @@ class AudioKWSWorker(threading.Thread):
         }
         if self._push_q_item(item):
             self.rt.set_busy(True)
-            self.rt.set_state("BUSY")
+            self.rt.set_state("ASR_PROCESSING")
             write_state_block(self.rt.snapshot())
+            write_timeline("ASR_ENQUEUED", samples=len(audio), epoch=item["epoch"])
+            return True
+        return False
 
     def _emit_online_asr_event(self, kind: str, audio: Optional[np.ndarray] = None, rms: float = 0.0, too_long: bool = False):
         item = {
@@ -277,14 +299,21 @@ class AudioKWSWorker(threading.Thread):
             "session_id": session_id,
             "epoch": self.rt.get_epoch(),
         }
-        result = dispatch_task_cmd(payload, self.task_sender, self.ack_inbox, self.rt, self.cfg_board.task_ack_timeout_s, label="STOP")
+        result = dispatch_task_cmd(
+            payload, self.task_sender, self.ack_inbox, self.rt,
+            self.cfg_board.task_ack_timeout_s, label="STOP",
+            suppress_dispatch=bool(getattr(self.cfg_board, "debug_input_only", False)),
+        )
         self.rt.reset_after_stop(
             guard_secs=self.cfg_runtime.stop_guard_secs,
             mute_secs=self.cfg_runtime.stop_mute_secs,
             block_secs=self.cfg_runtime.stop_repeat_block_secs,
             state="POST_STOP_GUARD",
         )
-        self._reset_recording("POST_STOP_GUARD")
+        if self.state == "REC":
+            self._abort_recording("stop_hotword", "POST_STOP_GUARD")
+        else:
+            self._reset_recording("POST_STOP_GUARD")
         event = "STOP_ACKED" if result.get("ack_ok") else "STOP_ACK_TIMEOUT"
         write_timeline(event, cmd_id=result["cmd"]["cmd_id"], accepted=result.get("accepted", False), dropped_utts=dropped)
         jlog({
@@ -298,6 +327,11 @@ class AudioKWSWorker(threading.Thread):
             "prev_state": prev_state,
             "dropped_utts": dropped,
         })
+
+    def _abort_recording(self, reason: str, next_state: str = "WAIT_WAKE") -> None:
+        jlog({"level": "info", "src": "seg", "msg": "REC abort reason={}".format(reason), "frames": len(self.captured)})
+        write_timeline("REC_ABORTED", reason=reason, frames=len(self.captured), epoch=self.rt.get_epoch())
+        self._reset_recording(next_state)
 
     def run(self):
         jlog({"level": "info", "src": "loop", "msg": "audio/kws thread started"})
@@ -325,17 +359,26 @@ class AudioKWSWorker(threading.Thread):
                 in_guard = self.rt.in_guard()
 
                 pred = {}
+                hotword_action = ""
                 if self.cfg_runtime.stop_key and self.rt.can_trigger_stop():
                     pred = self.oww.predict(x, only=self._predict_subset(armed=armed, busy=busy))
                     if self.cfg_runtime.debug:
                         jlog({"level": "debug", "src": "oww", "pred": pred})
-                    if kws_trigger(pred, self.cfg_runtime.stop_key, self.cfg_runtime.stop_th):
+                    hotword_action = select_hotword_action(
+                        pred, self.cfg_runtime.wake_key, self.cfg_runtime.wake_th,
+                        self.cfg_runtime.stop_key, self.cfg_runtime.stop_th,
+                    )
+                    if hotword_action == "STOP":
                         self._emit_stop_hotword(pred.get(self.cfg_runtime.stop_key, 0.0))
                         continue
                 elif not muted:
                     pred = self.oww.predict(x, only=[self.cfg_runtime.wake_key] if self.cfg_runtime.wake_key else [])
+                    hotword_action = select_hotword_action(
+                        pred, self.cfg_runtime.wake_key, self.cfg_runtime.wake_th, "", self.cfg_runtime.stop_th,
+                    )
 
-                if (not muted) and (not armed) and (not busy) and (not in_guard) and pred and kws_trigger(pred, self.cfg_runtime.wake_key, self.cfg_runtime.wake_th):
+                if (self.state == "WAIT_WAKE" and not muted and not armed and not busy and not in_guard and
+                        hotword_action == "WAKE"):
                     phone_prompt_sent = False
                     if self.phone_playback is not None and self.phone_playback.enabled:
                         phone_prompt_sent = self.phone_playback.request_wake_prompt()
@@ -349,7 +392,7 @@ class AudioKWSWorker(threading.Thread):
                     self.asr_sample_buf = np.zeros((0,), dtype=np.int16)
                     self.asr_chunk_seq = 0
                     jlog({"level": "info", "src": "oww", "msg": "WAKE triggered -> phone prompt" if phone_prompt_sent else "WAKE triggered -> armed", "session_id": self.rt.snapshot().get("session_id")})
-                    write_timeline("WAKE_TRIGGERED", session_id=self.rt.snapshot().get("session_id"), epoch=self.rt.snapshot().get("epoch"))
+                    write_timeline("WAKE_TRIGGERED", reason="wake_hotword", session_id=self.rt.snapshot().get("session_id"), epoch=self.rt.snapshot().get("epoch"))
                     continue
 
                 if self.phone_playback is not None:
@@ -359,7 +402,13 @@ class AudioKWSWorker(threading.Thread):
                         continue
 
                 armed = self.rt.is_armed()
-                if not armed:
+                if self._armed_timeout_applies(self.state, self.rt):
+                    write_timeline("ARM_TIMEOUT", reason="armed_wait_deadline", session_id=self.rt.snapshot().get("session_id"), epoch=self.rt.get_epoch())
+                    jlog({"level": "info", "src": "seg", "msg": "ARM timeout reason=armed_wait_deadline"})
+                    self.rt.disarm()
+                    self._reset_recording("WAIT_WAKE")
+                    continue
+                if self.state != "REC" and not armed:
                     if self.rt.in_guard():
                         if self.state != "POST_STOP_GUARD":
                             self._reset_recording("POST_STOP_GUARD")
@@ -389,15 +438,15 @@ class AudioKWSWorker(threading.Thread):
                         self.captured.append(x.copy())
                         self.speech_down = 0
                         self.state = "REC"
-                        self.rt.set_state("REC")
+                        self.rt.begin_recording()
                         if self.asr_mode == "online":
                             self.asr_sample_buf = np.zeros((0,), dtype=np.int16)
                             self.asr_chunk_seq = 0
                             self._append_online_samples(np.concatenate(self.captured, axis=0).astype(np.int16))
                             self._emit_online_asr_event("START")
                             self._flush_online_chunk(is_final=False)
-                        jlog({"level": "info", "src": "seg", "msg": "REC start", "rms": round(r, 2)})
-                        write_timeline("REC_START", rms=round(r, 2), session_id=self.rt.snapshot().get("session_id"), epoch=self.rt.snapshot().get("epoch"))
+                        jlog({"level": "info", "src": "seg", "msg": "REC start reason=speech_start", "rms": round(r, 2)})
+                        write_timeline("REC_STARTED", reason="speech_start", rms=round(r, 2), session_id=self.rt.snapshot().get("session_id"), epoch=self.rt.snapshot().get("epoch"))
                     continue
 
                 if self.state == "REC":
@@ -417,13 +466,16 @@ class AudioKWSWorker(threading.Thread):
                         if self.asr_mode == "online":
                             self._flush_online_chunk(is_final=True, rms=r, too_long=too_long)
                         else:
-                            self._enqueue_utterance(self.captured, r)
+                            queued = self._enqueue_utterance(self.captured, r)
+                            if not queued:
+                                self._abort_recording("utterance_queue_full")
+                                continue
                         jlog({
                             "level": "info", "src": "seg", "msg": "REC end",
                             "frames": len(self.captured), "too_long": too_long,
                         })
-                        write_timeline("REC_END", frames=len(self.captured), too_long=too_long)
-                        self._reset_recording("WAIT_WAKE")
+                        write_timeline("REC_ENDED", reason="max_frames" if too_long else "silence_end", frames=len(self.captured), too_long=too_long)
+                        self._reset_recording("WAIT_WAKE", update_runtime=False)
         finally:
             try:
                 self.mic.close()
@@ -482,7 +534,10 @@ class ASRDecisionWorker(threading.Thread):
         if intent == "FIND":
             payload["target"] = target or "unknown"
             payload["slots"] = {"target": payload["target"]}
-        return dispatch_task_cmd(payload, self.publisher, self.ack_inbox, self.rt, self.cfg.task_ack_timeout_s, label="TASK_CMD")
+        return dispatch_task_cmd(
+            payload, self.publisher, self.ack_inbox, self.rt, self.cfg.task_ack_timeout_s,
+            label="TASK_CMD", suppress_dispatch=bool(getattr(self.cfg, "debug_input_only", False)),
+        )
 
     def _handle_result(self, result: dict):
         status = result.get("status")
@@ -519,6 +574,9 @@ class ASRDecisionWorker(threading.Thread):
         target = result.get("target")
         conf = float(result.get("confidence", 0.0))
         dispatch = self.emit_action(intent, target, conf, text=text)
+        if dispatch.get("suppressed"):
+            self.rt.mark_result(True, intent=intent or "")
+            return {"keep_alive": True, "tts": "", "intent": intent, "suppressed": True}
         if not dispatch.get("sent"):
             self.rt.mark_result(False, intent="IPC_SEND_FAIL")
             return {"keep_alive": False, "tts": "通信异常，请检查状态机", "intent": intent}

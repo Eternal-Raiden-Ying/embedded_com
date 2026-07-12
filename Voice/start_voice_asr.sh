@@ -33,7 +33,7 @@ boot(){
  local inspect_args=()
  [ -n "$PROFILE" ] && inspect_args+=(--profile "$PROFILE")
  "$PYTHON_BIN" -m voice_service.app.main "${inspect_args[@]}" --inspect-config \
-  | awk -F= '/^(debug_input_only|arecord_device|task_transport|disable_tts|mobile_feedback_transport)=/ {print "[VOICE][BOOT] "$1"="$2}'
+  | awk '/^(debug_input_only|arecord_device|task_transport|disable_tts|mobile_feedback_transport)=/ {print "[VOICE][BOOT] "$0}'
 }
 args=(); [ -n "$PROFILE" ] && args+=(--profile "$PROFILE"); args+=("${EXTRA[@]}")
 case "$ACTION" in

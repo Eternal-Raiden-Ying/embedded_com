@@ -255,6 +255,18 @@ class AudioCommandPipeline:
     def is_online(self) -> bool:
         return self.asr_mode == "online"
 
+    def warmup(self, samples: int = 1600) -> float:
+        """Run one discarded silence inference without creating a Voice session."""
+        silence = np.zeros((max(1, int(samples)),), dtype=np.int16)
+        t0 = time.perf_counter()
+        if self.is_online():
+            session = self.start_stream_session()
+            self.stream_feed(session, silence, is_final=True)
+            self.finalize_stream_result(session)
+        else:
+            self.process_audio(silence)
+        return (time.perf_counter() - t0) * 1000.0
+
     def is_wake_text(self, text: str) -> bool:
         nt = normalize_text(text)
         return any(p and p in nt for p in self.wake_phrases)

@@ -92,6 +92,13 @@ class RuntimeState:
             if not self.busy:
                 self.current_state = "ARMED_WAIT"
 
+    def begin_recording(self) -> None:
+        """Freeze the arm deadline while a real utterance is being captured."""
+        with self.lock:
+            self.armed_until = 0.0
+            if not self.busy:
+                self.current_state = "REC"
+
     def begin_prompt_playback(self, session_id: str, event_id: str, epoch: int) -> None:
         """Record a Voice wake prompt without arming ASR yet."""
         with self.lock:

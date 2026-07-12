@@ -7,7 +7,7 @@ from voice_service.runtime.playback import PhonePlaybackGuard
 from voice_service.runtime.state import RuntimeState
 from voice_service.config.loader import load_voice_config
 from voice_service.runtime.service import DebugInputOnlySender
-from voice_service.runtime.workers import dispatch_task_cmd
+from voice_service.runtime.workers import AudioKWSWorker, dispatch_task_cmd, select_hotword_action
 
 
 class FakeClock:
@@ -116,6 +116,22 @@ def test_phone_profile_disables_local_piper_and_enables_phone_endpoints():
     assert cfg.mobile_tts_event_uds_path == "/tmp/robot_stack/mobile_tts_event.sock"
     assert cfg.playback_transport == "uds"
     assert cfg.playback_uds_path == "/tmp/robot_stack/tts_playback.sock"
+    assert cfg.frontend_backend == "onnx"
+    assert cfg.classifier_backend == "onnx"
+    assert cfg.asr_quant is True
+    assert cfg.vad_quant is True
+
+
+def test_phone_dryrun_profile_uses_onnx_quantized_voice_configuration():
+    cfg = load_voice_config(["--profile", "configs/profiles/sc171_voice_phone_tts_dryrun.yaml"])
+    assert cfg.disable_tts
+    assert cfg.task_transport == "uds"
+    assert cfg.mobile_feedback_transport == "uds"
+    assert cfg.playback_transport == "uds"
+    assert cfg.frontend_backend == "onnx"
+    assert cfg.classifier_backend == "onnx"
+    assert cfg.asr_quant is True
+    assert cfg.vad_quant is True
 
 
 def test_debug_profile_disables_all_robot_and_phone_ipc():
@@ -147,3 +163,46 @@ def test_debug_sender_suppresses_find_and_stop_without_socket_io():
     assert not stop_result["sent"]
     assert stop_result["cmd"]["high_priority"] is True
     assert sender.snapshot()["link_state"] == "DISABLED"
+
+
+class CountingSender:
+    def __init__(self):
+        self.calls = 0
+
+    def send(self, payload):
+        self.calls += 1
+        return False
+
+    def snapshot(self):
+        return {"link_state": "SHOULD_NOT_BE_USED"}
+
+
+def test_debug_dispatch_does_not_call_sender_or_degrade_ipc_for_find_or_stop():
+    sender, rt = CountingSender(), RuntimeState()
+    find = dispatch_task_cmd(
+        {"intent": "FIND", "target": "apple", "session_id": "debug", "epoch": 0},
+        sender, None, rt, 0.0, suppress_dispatch=True,
+    )
+    stop = dispatch_task_cmd(
+        {"intent": "STOP", "session_id": "debug", "epoch": 1},
+        sender, None, rt, 0.0, label="STOP", suppress_dispatch=True,
+    )
+    assert find["suppressed"] and stop["suppressed"]
+    assert sender.calls == 0
+    assert rt.snapshot()["ipc_state"] == "CONNECTED"
+    assert rt.snapshot()["last_intent"] != "IPC_SEND_FAIL"
+
+
+def test_recording_freezes_armed_deadline_but_armed_wait_still_times_out():
+    rt = RuntimeState()
+    rt.start_session(0.0, reason="test")
+    assert AudioKWSWorker._armed_timeout_applies("ARMED_WAIT", rt)
+    rt.start_session(0.0, reason="test")
+    rt.begin_recording()
+    assert rt.snapshot()["state"] == "REC"
+    assert not AudioKWSWorker._armed_timeout_applies("REC", rt)
+
+
+def test_stop_wins_when_wake_and_stop_cross_threshold_together():
+    pred = {"wake": 0.836, "stop": 0.991}
+    assert select_hotword_action(pred, "wake", 0.90, "stop", 0.58) == "STOP"

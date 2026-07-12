@@ -34,6 +34,8 @@ class VoiceServiceConfig:
     asr_online_encoder_chunk_look_back: int = 4
     asr_online_decoder_chunk_look_back: int = 1
     asr_emit_partial: bool = True
+    asr_warmup_enabled: bool = True
+    asr_warmup_samples: int = 1600
 
     # Wake & Stop Hotword parameters
     wake_key: str = ""

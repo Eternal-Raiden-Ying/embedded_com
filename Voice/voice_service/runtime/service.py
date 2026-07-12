@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import queue
+import os
 import signal
 import subprocess
 import threading
@@ -189,11 +190,24 @@ def run_voice_service(cfg: VoiceServiceConfig, stop_event: Optional[threading.Ev
                 print(f"[VOICE][ERROR] component=phone_playback reason={e}")
                 sys.exit(1)
 
+    os.environ.setdefault("NUMBA_CACHE_DIR", "/tmp/voice_numba_cache")
+    try:
+        os.makedirs(os.environ["NUMBA_CACHE_DIR"], exist_ok=True)
+    except OSError:
+        pass
     try:
         pipeline = AudioCommandPipeline(cfg, interpreter)
     except Exception as e:
         print(f"[VOICE][ERROR] component=asr reason={e}")
         sys.exit(1)
+    if bool(getattr(cfg, "asr_warmup_enabled", False)):
+        try:
+            warmup_ms = pipeline.warmup(int(getattr(cfg, "asr_warmup_samples", 1600)))
+            jlog({"level": "info", "src": "asr", "msg": "ASR warmup complete", "warmup_latency_ms": round(warmup_ms, 2)})
+            write_timeline("ASR_WARMUP", reason="startup_silence", latency_ms=round(warmup_ms, 2))
+        except Exception as e:
+            jlog({"level": "error", "src": "asr", "msg": "ASR warmup failed", "error": str(e)})
+            write_timeline("ASR_WARMUP_FAILED", reason="startup_silence", error=str(e))
 
     tts_enabled = shared_tts is not None
     tts_listener_enabled = tts_listener is not None

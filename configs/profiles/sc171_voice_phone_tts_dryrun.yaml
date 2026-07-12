@@ -46,6 +46,14 @@ voice_gateway:
   runtime:
     input_mode: voice_only
     dry_run_text: true
+    asr_warmup_enabled: true
+  kws:
+    frontend_backend: onnx
+    classifier_backend: onnx
+  asr:
+    quantized: true
+  vad:
+    quantized: true
   tts: {enabled: false}
   ipc:
     task_cmd_out:

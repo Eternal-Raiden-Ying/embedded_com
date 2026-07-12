@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+import errno
 import subprocess
 import time
 from typing import List, Optional
@@ -79,6 +80,9 @@ class RawMicStream:
             return ""
 
     def _restart(self, reason: str, got_bytes: int = 0, extra: Optional[dict] = None):
+        if reason == "interrupted" or (self.proc is not None and self.proc.poll() is not None and self.last_restart_reason == "closing"):
+            jlog({"level": "info", "src": "mic", "msg": "arecord stopped", "reason": reason})
+            return
         self.last_restart_reason = reason
         err = self._read_stderr_nonblocking().strip()
         code = None if self.proc is None else self.proc.poll()
@@ -124,7 +128,13 @@ class RawMicStream:
                 self.last_chunk_sizes = chunks[-16:]
                 self._restart("select_timeout_wait_data", got_bytes=len(buf), extra={"elapsed_ms": int((time.monotonic()-t0)*1000)})
                 return None
-            chunk = os.read(fd, nbytes - len(buf))
+            try:
+                chunk = os.read(fd, nbytes - len(buf))
+            except OSError as exc:
+                if exc.errno == errno.EINTR:
+                    self._restart("interrupted", got_bytes=len(buf))
+                    return None
+                raise
             if not chunk:
                 self.eof_events += 1
                 self.last_chunk_sizes = chunks[-16:]
@@ -156,6 +166,7 @@ class RawMicStream:
 
     def close(self):
         if self.proc is not None:
+            self.last_restart_reason = "closing"
             try:
                 self.proc.terminate()
             except Exception:
