@@ -26,6 +26,8 @@ voice_gateway:
     debug_input_only: false
     dry_run_text: false
     asr_warmup_enabled: true
+  interaction:
+    post_command_cooldown_ms: 1500
   audio:
     device: "plughw:CARD=UACDemoV10,DEV=0"
     sample_rate: 16000

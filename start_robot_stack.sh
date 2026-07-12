@@ -1416,6 +1416,24 @@ tail_stack_summary() {
               s ~ /gateway online/ || s ~ /mqtt connected/ || s ~ /mqtt disabled/ ||
               s ~ /voice service ready/)
     }
+    function concise_demo(s) {
+      if (s ~ /voice service ready|\[VISTA\] READY|\[ORCH\] READY/) return "[系统] 语音、控制与视觉服务已就绪"
+      if (s ~ /event=WAKE_TRIGGERED/) return "[语音] 已检测到唤醒词"
+      if (s ~ /event=ASR_FINAL/) { if (match(s, /normalized_text=([^|]+)/, a)) return "[识别] “" a[1] "”"; return "[识别] 已完成语音识别" }
+      if (s ~ /event=INTENT_ACCEPTED|event=TASK_ACK/ && s ~ /accepted=True|accepted=true/) return "[任务] 已接受：寻找物品"
+      if (s ~ /\[VISTA\] MODE (SILENT|IDLE_HOT) -> FIND_EDGE/) return "[视觉] 已启动桌边搜索"
+      if (s ~ /STOP/ && s ~ /accepted=True|accepted=true/) return "[停止] 停止命令已接受，系统返回待机"
+      if (s ~ /ERROR|FATAL|FAILED/) return "[错误] " s
+      return ""
+    }
+    function concise_normal(s) {
+      if (s ~ /event=WAKE_TRIGGERED/) return "[voice] WAKE"
+      if (s ~ /event=ASR_FINAL/) return "[voice] ASR " s
+      if (s ~ /event=INTENT_ACCEPTED|event=TASK_ACK/) return "[voice] INTENT " s
+      if (s ~ /\[ORCH\] STATE/) return "[orch] " s
+      if (s ~ /\[VISTA\] MODE/ && s !~ /INIT -> SILENT|SILENT -> IDLE_HOT|reason=service_start|reason=tick/) return "[vista] " s
+      return ""
+    }
     /^==> .* <==$/ {
       src=$0
       next
@@ -1453,6 +1471,18 @@ tail_stack_summary() {
         show=($0 ~ /\[EVENT\]/ || is_key_state($0))
       }
       if (show) {
+        if (console_level == "demo") {
+          line=concise_demo($0)
+          if (line == "") next
+          print line
+          next
+        }
+        if (console_level == "normal") {
+          line=concise_normal($0)
+          if (line == "") next
+          print line
+          next
+        }
         if (preview_unavailable && $0 ~ /\[DEMO\]\[HEALTH\]/) {
           gsub(/preview=n\/a/, "preview=unavailable", $0)
         }

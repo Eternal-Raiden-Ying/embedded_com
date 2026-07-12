@@ -208,6 +208,18 @@ def test_recording_freezes_armed_deadline_but_armed_wait_still_times_out():
     assert not AudioKWSWorker._armed_timeout_applies("REC", rt)
 
 
+def test_accepted_command_consumes_wake_interaction_until_new_wake():
+    rt = RuntimeState()
+    rt.start_session(6.0, reason="wake_hotword")
+    assert rt.recording_gate_reason() == ""
+    rt.consume_interaction(1.5)
+    assert rt.recording_gate_reason() == "cooldown"
+    rt.command_cooldown_until = 0.0
+    assert rt.recording_gate_reason() == "interaction_consumed"
+    rt.start_session(6.0, reason="wake_hotword")
+    assert rt.recording_gate_reason() == ""
+
+
 def test_stop_wins_when_wake_and_stop_cross_threshold_together():
     pred = {"wake": 0.836, "stop": 0.991}
     assert select_hotword_action(pred, "wake", 0.90, "stop", 0.58) == "STOP"

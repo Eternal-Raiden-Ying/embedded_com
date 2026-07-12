@@ -68,6 +68,8 @@ class RuntimeState:
     playback_phase: str = ""
     wake_trigger_wall_ts: float = 0.0
     wake_trigger_mono_ns: int = 0
+    interaction_consumed: bool = False
+    command_cooldown_until: float = 0.0
 
     def _new_session_id(self) -> str:
         return f"sess_{uuid.uuid4().hex[:10]}"
@@ -91,6 +93,7 @@ class RuntimeState:
             self.session_turns = 0
             self.reject_streak = 0
             self.session_reason = reason
+            self.interaction_consumed = False
             if not self.busy:
                 self.current_state = "ARMED_WAIT"
 
@@ -182,6 +185,8 @@ class RuntimeState:
             self.reject_streak = 0
             self.session_reason = ""
             self.session_id = ""
+            self.wake_trigger_wall_ts = 0.0
+            self.wake_trigger_mono_ns = 0
             self.playback_event_id = ""
             self.playback_session_id = ""
             self.playback_epoch = -1
@@ -219,6 +224,31 @@ class RuntimeState:
     def is_armed(self) -> bool:
         with self.lock:
             return time.time() < self.armed_until
+
+    def consume_interaction(self, cooldown_secs: float) -> None:
+        """Atomically end a successful non-STOP wake interaction."""
+        with self.lock:
+            self.interaction_consumed = True
+            self.command_cooldown_until = max(self.command_cooldown_until, time.time() + max(0.0, cooldown_secs))
+            self.armed_until = 0.0
+            self.guard_until = 0.0
+            self.session_id = ""
+            self.session_reason = ""
+            self.wake_trigger_wall_ts = 0.0
+            self.wake_trigger_mono_ns = 0
+            if not self.busy:
+                self.current_state = "WAIT_WAKE"
+
+    def recording_gate_reason(self) -> str:
+        with self.lock:
+            now = time.time()
+            if now < self.command_cooldown_until:
+                return "cooldown"
+            if self.interaction_consumed:
+                return "interaction_consumed"
+            if not self.session_id or now >= self.armed_until:
+                return "not_armed"
+            return ""
 
     def set_busy(self, v: bool):
         with self.lock:
@@ -313,6 +343,8 @@ class RuntimeState:
                 "playback_session_id": self.playback_session_id,
                 "playback_epoch": self.playback_epoch,
                 "playback_phase": self.playback_phase,
+                "interaction_consumed": self.interaction_consumed,
+                "cooldown": time.time() < self.command_cooldown_until,
             }
 
     def set_rms(self, rms: float):

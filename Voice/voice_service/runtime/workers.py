@@ -169,6 +169,7 @@ class AudioKWSWorker(threading.Thread):
         self.last_heartbeat = 0.0
         self.asr_sample_buf = np.zeros((0,), dtype=np.int16)
         self.asr_chunk_seq = 0
+        self._last_record_drop_reason = ""
 
     def _emit_heartbeat(self):
         now = time.time()
@@ -482,6 +483,11 @@ class AudioKWSWorker(threading.Thread):
                     self._reset_recording("WAIT_WAKE")
                     continue
                 if self.state != "REC" and not armed:
+                    if r >= self.cfg_runtime.energy_th:
+                        reason = self.rt.recording_gate_reason()
+                        if reason and reason != self._last_record_drop_reason:
+                            write_timeline("REC_DROPPED", reason=reason, epoch=self.rt.get_epoch())
+                            self._last_record_drop_reason = reason
                     if self.rt.in_guard():
                         if self.state != "POST_STOP_GUARD":
                             self._reset_recording("POST_STOP_GUARD")
@@ -490,6 +496,7 @@ class AudioKWSWorker(threading.Thread):
                     if self.state != "WAIT_WAKE":
                         self._reset_recording("WAIT_WAKE")
                     continue
+                self._last_record_drop_reason = ""
                 if busy:
                     continue
                 if self.rt.in_guard():
@@ -671,7 +678,10 @@ class ASRDecisionWorker(threading.Thread):
         # Apply command cooldown guard if successfully sent and accepted
         if intent != "STOP":
             cooldown_secs = float(getattr(getattr(self.cfg, "interaction", None), "post_command_cooldown_ms", 1500)) / 1000.0
-            self.rt.set_mute(cooldown_secs)
+            self.rt.consume_interaction(cooldown_secs)
+            # The audio worker owns the pending queue; bumping epoch makes
+            # already queued tail utterances stale without touching STOP.
+            self.rt.bump_epoch()
 
         self.rt.mark_result(True, intent=intent or "")
         return {"keep_alive": True, "tts": self._compose_ack(intent, target), "intent": intent}
@@ -697,7 +707,9 @@ class ASRDecisionWorker(threading.Thread):
                 state="POST_STOP_GUARD",
             )
             return
-        if handle_meta.get("keep_alive", False):
+        if intent and intent != "STOP" and self.rt.snapshot().get("interaction_consumed"):
+            self.rt.disarm()
+        elif handle_meta.get("keep_alive", False):
             self.rt.keep_session(self.cfg.followup_secs, reason="post_turn_followup")
         else:
             self.rt.disarm()
