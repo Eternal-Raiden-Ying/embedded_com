@@ -71,7 +71,7 @@ def dispatch_task_cmd(payload: Dict[str, Any], publisher: Any, ack_inbox: Option
     ack = normalize_task_ack(ack_raw)
     rt.set_ipc_state("CONNECTED")
     rt.note_ack(ack["cmd_id"], ack["accepted"], ack.get("reason", ""))
-    write_ipc_event("ACK_RECV", cmd_id=ack["cmd_id"], accepted=ack["accepted"], reason=ack.get("reason", ""), state=ack.get("state", ""))
+    write_ipc_event("ACK_RECV", cmd_id=ack["cmd_id"], session_id=ack.get("session_id", ""), epoch=ack.get("epoch", 0), accepted=ack["accepted"], reason=ack.get("reason", ""), state=ack.get("state", ""))
     jlog({"level": "info", "src": "ipc", "msg": f"{label} ack", "cmd_id": ack["cmd_id"], "accepted": ack["accepted"], "reason": ack.get("reason", "")})
     return {"sent": True, "ack": ack, "ack_ok": True, "accepted": ack["accepted"], "cmd": out}
 
@@ -220,6 +220,7 @@ class AudioKWSWorker(threading.Thread):
             "audio": audio,
             "rms": float(rms),
             "epoch": self.rt.get_epoch(),
+            "session_id": self.rt.snapshot().get("session_id", ""),
         }
         if self._push_q_item(item):
             run_dir = current_run_dir()
@@ -236,7 +237,7 @@ class AudioKWSWorker(threading.Thread):
             self.rt.set_busy(True)
             self.rt.set_state("ASR_PROCESSING")
             write_state_block(self.rt.snapshot())
-            write_timeline("ASR_ENQUEUED", samples=len(audio), epoch=item["epoch"])
+            write_timeline("ASR_ENQUEUED", samples=len(audio), session_id=item["session_id"], epoch=item["epoch"])
             return True
         return False
 
@@ -580,7 +581,8 @@ class ASRDecisionWorker(threading.Thread):
             return {"keep_alive": True, "tts": ""}
 
         text = clean_asr_text(result.get("text", ""))
-        write_timeline("ASR_FINAL", raw_text=str(result.get("text", "")), normalized_text=text, inference_ms=round(float(result.get("latency_ms", 0.0)), 2))
+        snap = self.rt.snapshot()
+        write_timeline("ASR_FINAL", raw_text=str(result.get("text", "")), normalized_text=text, inference_ms=round(float(result.get("latency_ms", 0.0)), 2), session_id=snap.get("session_id", ""), epoch=snap.get("epoch", 0))
         if text:
             self.rt.set_last_text(text)
         jlog({
@@ -599,7 +601,7 @@ class ASRDecisionWorker(threading.Thread):
         intent = result.get("intent")
         target = result.get("target")
         conf = float(result.get("confidence", 0.0))
-        write_timeline("INTENT", intent=intent, target=target, confidence=conf)
+        write_timeline("INTENT", intent=intent, target=target, confidence=conf, session_id=self.rt.snapshot().get("session_id", ""), epoch=self.rt.get_epoch())
         dispatch = self.emit_action(intent, target, conf, text=text)
         if dispatch.get("suppressed"):
             self.rt.mark_result(True, intent=intent or "")
