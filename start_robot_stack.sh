@@ -1419,7 +1419,15 @@ tail_stack_summary() {
     function concise_demo(s) {
       if (s ~ /voice service ready|\[VISTA\] READY|\[ORCH\] READY/) return "[系统] 语音、控制与视觉服务已就绪"
       if (s ~ /event=WAKE_TRIGGERED/) return "[语音] 已检测到唤醒词"
-      if (s ~ /event=ASR_FINAL/) { if (match(s, /normalized_text=([^|]+)/, a)) return "[识别] “" a[1] "”"; return "[识别] 已完成语音识别" }
+      if (s ~ /event=ASR_FINAL/) {
+        text=s
+        if (text ~ /normalized_text=/) {
+          sub(/.*normalized_text=/, "", text)
+          sub(/[|].*/, "", text)
+          return "[识别] “" text "”"
+        }
+        return "[识别] 已完成语音识别"
+      }
       if (s ~ /event=INTENT_ACCEPTED|event=TASK_ACK/ && s ~ /accepted=True|accepted=true/) return "[任务] 已接受：寻找物品"
       if (s ~ /\[VISTA\] MODE (SILENT|IDLE_HOT) -> FIND_EDGE/) return "[视觉] 已启动桌边搜索"
       if (s ~ /STOP/ && s ~ /accepted=True|accepted=true/) return "[停止] 停止命令已接受，系统返回待机"
