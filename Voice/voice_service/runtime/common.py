@@ -89,7 +89,7 @@ def write_timeline(event: str, **fields):
                     kv.append(f"{k}={val}")
 
         import sys
-        sys.stderr.write(f"[EVENT] {" | ".join(kv)}\n")
+        sys.stderr.write(f"[EVENT] {' | '.join(kv)}\n")
         sys.stderr.flush()
 
 
