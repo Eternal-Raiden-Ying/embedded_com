@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import queue
+import math
 import threading
 import time
 import wave
@@ -170,6 +171,10 @@ class AudioKWSWorker(threading.Thread):
         self.asr_sample_buf = np.zeros((0,), dtype=np.int16)
         self.asr_chunk_seq = 0
         self._last_record_drop_reason = ""
+        self._noise_floor_rms = 0.0
+        self._kws_window_started = time.monotonic()
+        self._kws_scores = []
+        self._kws_rms = []
 
     def _emit_heartbeat(self):
         now = time.time()
@@ -422,6 +427,8 @@ class AudioKWSWorker(threading.Thread):
                 x = np.frombuffer(b, dtype=np.int16)
                 r = rms_int16(x)
                 self.rt.set_rms(r)
+                if not self.rt.is_armed() and not self.rt.snapshot()["busy"]:
+                    self._noise_floor_rms = r if self._noise_floor_rms <= 0 else (0.95 * self._noise_floor_rms + 0.05 * r)
                 self.prebuf.append(x.copy())
                 self._emit_heartbeat()
 
@@ -449,6 +456,32 @@ class AudioKWSWorker(threading.Thread):
                         pred, self.cfg_runtime.wake_key, self.cfg_runtime.wake_th, "", self.cfg_runtime.stop_th,
                     )
 
+                wake_score_sample = float(pred.get(self.cfg_runtime.wake_key, 0.0) or 0.0)
+                self._kws_scores.append(wake_score_sample)
+                self._kws_rms.append(float(r))
+                now_mono = time.monotonic()
+                if now_mono - self._kws_window_started >= 1.0:
+                    scores = self._kws_scores
+                    rms_values = self._kws_rms
+                    try:
+                        write_timeline(
+                            "KWS_WINDOW_STATS",
+                            window_s=round(now_mono - self._kws_window_started, 3),
+                            wake_score_max=round(max(scores), 4) if scores else 0.0,
+                            wake_score_mean=round(sum(scores) / len(scores), 4) if scores else 0.0,
+                            wake_threshold=float(self.cfg_runtime.wake_th),
+                            audio_rms_max=round(max(rms_values), 2) if rms_values else 0.0,
+                            audio_rms_mean=round(sum(rms_values) / len(rms_values), 2) if rms_values else 0.0,
+                            noise_floor_rms=round(float(self._noise_floor_rms), 2),
+                            frame_count=len(scores),
+                            triggered=bool(hotword_action == "WAKE"),
+                        )
+                    except Exception:
+                        pass
+                    self._kws_window_started = now_mono
+                    self._kws_scores = []
+                    self._kws_rms = []
+
                 if (self.state == "WAIT_WAKE" and not muted and not armed and not busy and not in_guard and
                         hotword_action == "WAKE"):
                     self.rt.wake_trigger_wall_ts = time.time()
@@ -466,7 +499,10 @@ class AudioKWSWorker(threading.Thread):
                     self.asr_sample_buf = np.zeros((0,), dtype=np.int16)
                     self.asr_chunk_seq = 0
                     jlog({"level": "info", "src": "oww", "msg": "WAKE triggered -> phone prompt" if phone_prompt_sent else "WAKE triggered -> armed", "session_id": self.rt.snapshot().get("session_id")})
-                    write_timeline("WAKE_TRIGGERED", reason="wake_hotword", session_id=self.rt.snapshot().get("session_id"), epoch=self.rt.snapshot().get("epoch"))
+                    wake_score = float(pred.get(self.cfg_runtime.wake_key, 0.0) or 0.0)
+                    noise = float(self._noise_floor_rms or 0.0)
+                    snr = 20.0 * math.log10(max(r, 1e-6) / max(noise, 1e-6)) if noise > 0 else None
+                    write_timeline("WAKE_TRIGGERED", reason="wake_hotword", session_id=self.rt.snapshot().get("session_id"), epoch=self.rt.snapshot().get("epoch"), wake_score=round(wake_score, 4), wake_threshold=float(self.cfg_runtime.wake_th), audio_rms=round(r, 2), noise_floor_rms=round(noise, 2), snr_db=round(snr, 2) if snr is not None else None)
                     continue
 
                 if self.phone_playback is not None:

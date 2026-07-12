@@ -1397,8 +1397,8 @@ tail_stack_summary() {
   log "按 Ctrl+C 只退出日志显示，不会停止服务；需要结束时执行：./start_robot_stack.sh stop"
   log "彩色显示测试：ROBOT_CONSOLE_COLOR=always ./start_robot_stack.sh"
   divider
-  tail -n "$LOG_TAIL_N" -F "$GATEWAY_LOG_FILE" "$ORCH_LOG_FILE" "$VISION_LOG_FILE" "$VOICE_LOG_FILE" 2>/dev/null | \
-  awk -v orch_pat="$ORCH_SUMMARY_PATTERN" \
+  tail -n 0 -F "$GATEWAY_LOG_FILE" "$ORCH_LOG_FILE" "$VISION_LOG_FILE" "$VOICE_LOG_FILE" 2>/dev/null | \
+  stdbuf -oL -eL awk -v orch_pat="$ORCH_SUMMARY_PATTERN" \
       -v gw_pat="$GATEWAY_SUMMARY_PATTERN" \
       -v vista_pat="$VISION_SUMMARY_PATTERN" \
       -v console_level="$ROBOT_CONSOLE_LEVEL" '
@@ -1482,13 +1482,13 @@ tail_stack_summary() {
         if (console_level == "demo") {
           line=concise_demo($0)
           if (line == "") next
-          print line
+          print line; fflush()
           next
         }
         if (console_level == "normal") {
           line=concise_normal($0)
           if (line == "") next
-          print line
+          print line; fflush()
           next
         }
         if (preview_unavailable && $0 ~ /\[DEMO\]\[HEALTH\]/) {
@@ -1497,7 +1497,7 @@ tail_stack_summary() {
         if (console_level == "debug" && $0 ~ /(mobile_cmd|cmd received|gateway_ack|task_ack|fetch_object|status changed|stop)/) {
           print "···· phone command path ····"
         }
-        print tag " " $0
+        print tag " " $0; fflush()
       }
     }
   ' | while IFS= read -r line; do
