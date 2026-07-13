@@ -56,6 +56,56 @@ def test_no_argument_prints_explicit_usage_without_starting_stack():
     assert result.returncode != 0
     assert "start-mobile" in result.stdout
     assert "start-voice" in result.stdout
+    assert "start-voice-tts" in result.stdout
+
+
+def test_dedicated_phone_tts_dryrun_preflight_allows_only_its_ipc_contract():
+    result = shell(
+        "source ./start_robot_stack.sh; STACK_PROFILE=dryrun; apply_profile_defaults; "
+        "configure_voice_phone_tts_dryrun; normalize_input_mode; assert_dryrun_safety; "
+        "phone_tts_route_enabled; "
+        "printf '%s|%s|%s|%s' \"$SYSTEM_CONFIG_PROFILE\" \"$ROBOT_INPUT_MODE\" \"$FEEDBACK_OUTPUT_MODE\" \"$ORCH_SERIAL_DRY_RUN\""
+    )
+    assert result.returncode == 0, result.stderr
+    assert "dedicated phone-TTS IPC enabled" in result.stdout
+    assert result.stdout.endswith("sc171_voice_phone_tts_dryrun|voice|phone_tts|1")
+
+
+def test_voice_phone_tts_dryrun_banner_reports_selected_effective_modes():
+    result = shell(
+        "source ./start_robot_stack.sh; STACK_PROFILE=dryrun; apply_profile_defaults; "
+        "configure_voice_phone_tts_dryrun; normalize_input_mode; show_banner"
+    )
+    assert result.returncode == 0, result.stderr
+    assert "config profile : sc171_voice_phone_tts_dryrun" in result.stdout
+    assert "input mode     : voice" in result.stdout
+    assert "feedback mode  : phone_tts" in result.stdout
+    assert "ORCH_SERIAL_DRY_RUN=1" in result.stdout
+
+
+def test_generic_dryrun_keeps_phone_tts_transports_blocked():
+    result = shell(
+        "source ./start_robot_stack.sh; STACK_PROFILE=dryrun; SYSTEM_CONFIG_PROFILE=dry_run; "
+        "ROBOT_INPUT_MODE=voice; FEEDBACK_OUTPUT_MODE=phone_tts; "
+        "VOICE_PROFILE=configs/profiles/sc171_voice_phone_tts_dryrun.yaml; apply_profile_defaults; "
+        "assert_dryrun_safety"
+    )
+    assert result.returncode != 0
+    assert "voice.mobile_feedback_transport must be disabled" in result.stderr
+    assert "voice.playback_transport must be disabled" in result.stderr
+
+
+def test_non_dedicated_profile_with_real_actuators_remains_blocked():
+    result = shell(
+        "source ./start_robot_stack.sh; STACK_PROFILE=dryrun; SYSTEM_CONFIG_PROFILE=sc171_voice_phone_tts; "
+        "ROBOT_INPUT_MODE=voice; FEEDBACK_OUTPUT_MODE=phone_tts; "
+        "VOICE_PROFILE=configs/profiles/sc171_voice_phone_tts.yaml; apply_profile_defaults; "
+        "ORCH_SERIAL_DRY_RUN=0; "
+        "assert_dryrun_safety"
+    )
+    assert result.returncode != 0
+    assert "orchestrator.serial.dry_run must be true" in result.stderr
+    assert "orchestrator.arm_serial.dry_run must be true" in result.stderr
 
 
 def test_voice_dryrun_profile_is_real_arecord_with_tts_disabled():

@@ -946,8 +946,12 @@ PY
 
 assert_dryrun_safety() {
   # A stack command must fail closed before it starts any process if the
-  # selected configuration could address real actuators or enable TTS.
+  # selected configuration could address real actuators.  The dedicated
+  # phone-TTS dry-run profile is the sole exception for its non-actuator IPC
+  # transports, and must satisfy its complete effective-config contract.
   SYSTEM_CONFIG_FILE="$SYSTEM_CONFIG_FILE" SYSTEM_CONFIG_PROFILE="$SYSTEM_CONFIG_PROFILE" \
+    ORCH_SERIAL_DRY_RUN="$ORCH_SERIAL_DRY_RUN" ROBOT_INPUT_MODE="$ROBOT_INPUT_MODE" \
+    FEEDBACK_OUTPUT_MODE="$FEEDBACK_OUTPUT_MODE" VOICE_PROFILE="$VOICE_PROFILE" \
     PYTHONPATH="$STACK_ROOT:$STACK_ROOT/Voice:${PYTHONPATH:-}" /usr/bin/python3 - <<'PY'
 from common.config_loader import get_config
 from voice_service.config.loader import load_voice_config
@@ -956,23 +960,71 @@ import os
 cfg = get_config()
 voice = load_voice_config(["--profile", os.environ["VOICE_PROFILE"]]) if os.environ.get("ROBOT_INPUT_MODE") == "voice" else None
 errors = []
+disabled = {"disabled", "disable", "off", "none"}
+
+def transport_enabled(value):
+    return str(value or "disabled").strip().lower() not in disabled
+
+def endpoint_enabled(endpoint):
+    return transport_enabled(getattr(endpoint, "transport", "disabled"))
+
+dedicated_phone_tts_dryrun = os.environ.get("SYSTEM_CONFIG_PROFILE") == "sc171_voice_phone_tts_dryrun"
+phone_tts_contract = (
+    dedicated_phone_tts_dryrun
+    and str(os.environ.get("ORCH_SERIAL_DRY_RUN", "")).strip() == "1"
+    and str(getattr(cfg.gateway.runtime, "task_input_mode", "")).strip().lower() in {"voice", "voice_only"}
+    and str(getattr(cfg.gateway.runtime, "feedback_output_mode", "")).strip().lower() == "phone_tts"
+    and endpoint_enabled(cfg.orchestrator.tts_event_out)
+    and endpoint_enabled(cfg.gateway.tts_event_in)
+    and endpoint_enabled(cfg.gateway.tts_playback_out)
+    and voice is not None
+    and transport_enabled(getattr(voice, "mobile_feedback_transport", "disabled"))
+    and transport_enabled(getattr(voice, "playback_transport", "disabled"))
+)
 if not bool(getattr(cfg.orchestrator.serial, "dry_run", False)):
     errors.append("orchestrator.serial.dry_run must be true")
 if not bool(getattr(cfg.orchestrator.arm_serial, "dry_run", False)):
     errors.append("orchestrator.arm_serial.dry_run must be true")
-for name in ("tts_event_out",):
-    if str(getattr(getattr(cfg.orchestrator, name), "transport", "disabled")).lower() not in ("disabled", "disable", "off", "none"):
-        errors.append("orchestrator.%s must be disabled" % name)
-if voice is not None:
-    for name in ("disable_tts",):
-        if not bool(getattr(voice, name)):
-            errors.append("voice.%s must be true" % name)
-    for name in ("mobile_feedback_transport", "playback_transport", "tts_event_transport"):
-        if str(getattr(voice, name)).lower() not in ("disabled", "disable", "off", "none"):
-            errors.append("voice.%s must be disabled" % name)
+if not phone_tts_contract:
+    if endpoint_enabled(cfg.orchestrator.tts_event_out):
+        errors.append("orchestrator.tts_event_out must be disabled")
+    if voice is not None:
+        if not bool(getattr(voice, "disable_tts", False)):
+            errors.append("voice.disable_tts must be true")
+        for name in ("mobile_feedback_transport", "playback_transport", "tts_event_transport"):
+            if transport_enabled(getattr(voice, name, "disabled")):
+                errors.append("voice.%s must be disabled" % name)
+else:
+    if not bool(getattr(voice, "disable_tts", False)):
+        errors.append("voice.disable_tts must be true")
+    if transport_enabled(getattr(voice, "tts_event_transport", "disabled")):
+        errors.append("voice.tts_event_transport must be disabled")
 if errors:
     raise SystemExit("[BLOCKED] unsafe dry-run profile: " + "; ".join(errors))
-print("[READY] dry-run safety gate: serial/arm/TTS disabled")
+if phone_tts_contract:
+    print("[READY] dry-run safety gate: serial/arm dry-run; dedicated phone-TTS IPC enabled")
+else:
+    print("[READY] dry-run safety gate: serial/arm/TTS disabled")
+PY
+}
+
+phone_tts_route_enabled() {
+  SYSTEM_CONFIG_FILE="$SYSTEM_CONFIG_FILE" SYSTEM_CONFIG_PROFILE="$SYSTEM_CONFIG_PROFILE" \
+    PYTHONPATH="$STACK_ROOT:${PYTHONPATH:-}" /usr/bin/python3 - <<'PY'
+from common.config_loader import get_config
+
+cfg = get_config()
+disabled = {"disabled", "disable", "off", "none"}
+enabled = lambda endpoint: str(getattr(endpoint, "transport", "disabled") or "disabled").strip().lower() not in disabled
+task_input_mode = str(getattr(cfg.gateway.runtime, "task_input_mode", "") or "").strip().lower()
+feedback_output_mode = str(getattr(cfg.gateway.runtime, "feedback_output_mode", "") or "").strip().lower()
+raise SystemExit(0 if (
+    task_input_mode in {"voice", "voice_only"}
+    and feedback_output_mode == "phone_tts"
+    and enabled(cfg.orchestrator.tts_event_out)
+    and enabled(cfg.gateway.tts_event_in)
+    and enabled(cfg.gateway.tts_playback_out)
+) else 1)
 PY
 }
 
@@ -1566,7 +1618,7 @@ start_gateway_only() {
 start_core() {
   # core-start is also used by the gateway's control helper. Preserve the TTS
   # ordering even when it is invoked directly instead of through `start`.
-  if [[ "$STACK_PROFILE" == "sc171_voice_phone_tts" ]]; then
+  if phone_tts_route_enabled; then
     if ! pid_alive "$GATEWAY_PID_FILE" 0; then
       start_gateway_only
     fi
@@ -1666,7 +1718,7 @@ start_stack() {
     start_core
   fi
 
-  if [[ "$ROBOT_INPUT_MODE" == "mobile" ]]; then
+  if [[ "$ROBOT_INPUT_MODE" == "mobile" ]] || phone_tts_route_enabled; then
     start_gateway_bg
     check_gateway_to_orchestrator_link || { stop_core || true; exit 1; }
     if ! wait_for_gateway_ready "$READY_TIMEOUT_S" "$GATEWAY_READY_EXTRA_S"; then
@@ -1716,6 +1768,16 @@ restart_core() {
   start_core
 }
 
+configure_voice_phone_tts_dryrun() {
+  if [[ "$STACK_PROFILE" != "dryrun" && "$STACK_PROFILE" != "dry_run" ]]; then
+    die "start-voice-tts 仅支持 dryrun 启动器 profile"
+  fi
+  SYSTEM_CONFIG_PROFILE="sc171_voice_phone_tts_dryrun"
+  ROBOT_INPUT_MODE="voice_only"
+  FEEDBACK_OUTPUT_MODE="phone_tts"
+  VOICE_PROFILE="$STACK_ROOT/configs/profiles/sc171_voice_phone_tts_dryrun.yaml"
+}
+
 main() {
   local action="${1:-usage}"
   case "$action" in
@@ -1738,6 +1800,10 @@ main() {
       if [[ "$STACK_PROFILE" == "dryrun" || "$STACK_PROFILE" == "dry_run" ]]; then
         SYSTEM_CONFIG_PROFILE="sc171_voice_orchestrator_dryrun"
       fi
+      start_stack
+      ;;
+    start-voice-tts)
+      configure_voice_phone_tts_dryrun
       start_stack
       ;;
     start|on|up|run|开启|开)
@@ -1806,6 +1872,7 @@ main() {
       echo "  ./start_robot_stack.sh core-restart     # 重启 core"
       echo "  ./start_robot_stack.sh dryrun start-mobile # dry-run mobile -> core"
       echo "  ./start_robot_stack.sh dryrun start-voice  # dry-run USB mic Voice -> core"
+      echo "  ./start_robot_stack.sh dryrun start-voice-tts # USB 麦克风 + Orchestrator/VISTA + 手机 TTS，执行器 dry-run"
       echo "  ROBOT_INPUT_MODE=mobile_only ./start_robot_stack.sh dryrun start"
       echo "  ROBOT_INPUT_MODE=voice_only ./start_robot_stack.sh dryrun start"
       echo "  ./start_robot_stack.sh stop             # 等价 core-stop，保留 mobile_gateway"
