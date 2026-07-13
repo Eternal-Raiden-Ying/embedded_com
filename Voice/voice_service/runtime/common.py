@@ -67,7 +67,7 @@ def write_timeline(event: str, **fields):
     # Standardized event stream output for launcher display
     event_upper = str(event).strip().upper()
     if event_upper in {
-        "AUDIO_READY", "WAKE_TRIGGERED", "REC_STARTED", "REC_ENDED", "ASR_FINAL",
+        "AUDIO_READY", "WAKE_TRIGGERED", "COMMAND_CAPTURE_ARMED", "SPEECH_GATE_BLOCKED", "REC_STARTED", "REC_ENDED", "ASR_FINAL",
         "TASK_CMD_SENT", "TASK_ACK", "INTENT_ACCEPTED", "INTENT_REJECTED", "WARN", "ERROR"
     }:
         import os

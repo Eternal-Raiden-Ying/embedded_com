@@ -289,6 +289,8 @@ def run_voice_service(cfg: VoiceServiceConfig, stop_event: Optional[threading.Ev
     except Exception as e:
         print(f"[VOICE][ERROR] component=kws reason={e}")
         sys.exit(1)
+    if phone_playback is not None:
+        phone_playback.set_capture_arm_callback(audio_thread._arm_command_capture)
     worker_thread = ASRDecisionWorker(cfg, rt, stop_event, utter_q, publisher=task_sender, ack_inbox=ack_inbox, tts=shared_tts, pipeline=pipeline)
 
     if task_ack_listener is not None:

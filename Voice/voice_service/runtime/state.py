@@ -123,13 +123,18 @@ class RuntimeState:
 
     def arm_prompt_session(self, secs: float) -> None:
         """Arm the existing wake session after a validated playback guard."""
+        self.arm_command_capture(secs, reason="wake_prompt_complete")
+
+    def arm_command_capture(self, secs: float, reason: str = "wake_prompt_complete") -> None:
+        """Atomically reopen command capture for the current wake interaction."""
         with self.lock:
             if not self.session_id:
                 self.session_id = self._new_session_id()
             self.armed_until = time.time() + max(0.0, secs)
             self.session_turns = 0
             self.reject_streak = 0
-            self.session_reason = "wake_prompt_complete"
+            self.session_reason = str(reason)
+            self.interaction_consumed = False
             self.playback_phase = "COMPLETE"
             if not self.busy:
                 self.current_state = "ARMED_WAIT"
@@ -314,6 +319,7 @@ class RuntimeState:
             return {
                 "state": self.current_state,
                 "armed": time.time() < self.armed_until,
+                "armed_until": round(self.armed_until, 3),
                 "mute": time.time() < self.mute_until,
                 "busy": self.busy,
                 "guard": time.time() < self.guard_until,

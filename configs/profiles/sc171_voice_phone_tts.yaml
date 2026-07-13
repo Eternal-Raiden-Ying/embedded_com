@@ -79,6 +79,7 @@ voice_gateway:
     input_mode: voice_only
     dry_run_text: false
     asr_warmup_enabled: true
+    followup_secs: 8.0
   kws:
     frontend_backend: onnx
     classifier_backend: onnx

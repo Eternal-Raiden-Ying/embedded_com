@@ -172,6 +172,8 @@ class AudioKWSWorker(threading.Thread):
         self.asr_chunk_seq = 0
         self._last_record_drop_reason = ""
         self._noise_floor_rms = 0.0
+        self._noise_floor_before_prompt: Optional[float] = None
+        self._last_speech_gate_blocked_at = 0.0
         self._kws_window_started = time.monotonic()
         self._kws_scores = []
         self._kws_rms = []
@@ -233,6 +235,134 @@ class AudioKWSWorker(threading.Thread):
         if update_runtime:
             self.rt.set_state(next_state)
             write_state_block(self.rt.snapshot())
+
+    @staticmethod
+    def _effective_energy_threshold(static_threshold: float, noise_floor_rms: float) -> float:
+        """Use a bounded noise-relative onset gate without losing speech capture.
+
+        A phone prompt can be much louder than normal ambience.  The cap makes
+        a transient unable to turn the command gate into a permanently closed
+        high-energy gate; the pre-prompt floor is restored after phone playback.
+        """
+        static = max(1.0, float(static_threshold))
+        noise = max(0.0, float(noise_floor_rms or 0.0))
+        return max(static, min(noise * 1.5, static * 2.0))
+
+    @staticmethod
+    def _snr_db(rms: float, noise_floor_rms: float) -> Optional[float]:
+        noise = float(noise_floor_rms or 0.0)
+        if noise <= 0.0:
+            return None
+        return 20.0 * math.log10(max(float(rms), 1e-6) / max(noise, 1e-6))
+
+    def _noise_floor_updates_allowed(self) -> bool:
+        snap = self.rt.snapshot()
+        phone_waiting = self.phone_playback is not None and self.phone_playback.waiting()
+        return (
+            self.state == "WAIT_WAKE"
+            and not snap["armed"]
+            and not snap["busy"]
+            and not snap["mute"]
+            and not snap["guard"]
+            and not phone_waiting
+        )
+
+    def _arm_command_capture(self, reason: str) -> None:
+        """Single local/phone-TTS command-capture transition.
+
+        The playback listener only moves the PhonePlaybackGuard to IDLE; this
+        method runs in the audio loop when that guard expires, so the worker and
+        RuntimeState cannot disagree about whether recording is armed.
+        """
+        if self._noise_floor_before_prompt is not None:
+            self._noise_floor_rms = self._noise_floor_before_prompt
+        self._noise_floor_before_prompt = None
+        self.rt.arm_command_capture(self.cfg_runtime.armed_secs, reason=reason)
+        self.state = "ARMED_WAIT"
+        self.speech_up = 0
+        self.speech_down = 0
+        self.captured = []
+        self.asr_sample_buf = np.zeros((0,), dtype=np.int16)
+        self.asr_chunk_seq = 0
+        self.prebuf.clear()
+        self.oww.reset()
+        static = float(self.cfg_runtime.energy_th)
+        effective = self._effective_energy_threshold(static, self._noise_floor_rms)
+        snap = self.rt.snapshot()
+        fields = {
+            "reason": reason,
+            "state": self.state,
+            "armed_until": snap["armed_until"],
+            "static_threshold": round(static, 2),
+            "noise_floor": round(float(self._noise_floor_rms), 2),
+            "effective_threshold": round(effective, 2),
+            "start_frames": int(self.cfg_runtime.start_frames),
+            "session_id": snap.get("session_id", ""),
+            "epoch": snap.get("epoch"),
+        }
+        write_timeline("COMMAND_CAPTURE_ARMED", **fields)
+        jlog({"level": "info", "src": "seg", "msg": "COMMAND_CAPTURE_ARMED", **fields})
+        write_state_block(snap)
+
+    def _log_speech_gate_blocked(self, rms: float, effective: float, blocked_reason: str) -> None:
+        now = time.monotonic()
+        if now - self._last_speech_gate_blocked_at < 1.0:
+            return
+        self._last_speech_gate_blocked_at = now
+        snr = self._snr_db(rms, self._noise_floor_rms)
+        fields = {
+            "rms": round(float(rms), 2),
+            "effective_threshold": round(float(effective), 2),
+            "snr_db": round(snr, 2) if snr is not None else None,
+            "speech_up": int(self.speech_up),
+            "blocked_reason": blocked_reason,
+            "session_id": self.rt.snapshot().get("session_id", ""),
+            "epoch": self.rt.get_epoch(),
+        }
+        write_timeline("SPEECH_GATE_BLOCKED", **fields)
+        jlog({"level": "info", "src": "seg", "msg": "SPEECH_GATE_BLOCKED", **fields})
+
+    def _advance_armed_capture(self, x: np.ndarray, rms: float) -> bool:
+        """Advance the onset gate and return true when a recording starts."""
+        static = float(self.cfg_runtime.energy_th)
+        effective = self._effective_energy_threshold(static, self._noise_floor_rms)
+        if rms >= effective:
+            self.speech_up += 1
+        else:
+            if rms >= static:
+                self._log_speech_gate_blocked(rms, effective, "below_effective_threshold")
+            self.speech_up = 0
+        if self.speech_up < self.cfg_runtime.start_frames:
+            return False
+        self.captured = list(self.prebuf)
+        self.captured.append(x.copy())
+        self.speech_down = 0
+        self.state = "REC"
+        self.rt.begin_recording()
+        if self.asr_mode == "online":
+            self.asr_sample_buf = np.zeros((0,), dtype=np.int16)
+            self.asr_chunk_seq = 0
+            self._append_online_samples(np.concatenate(self.captured, axis=0).astype(np.int16))
+            self._emit_online_asr_event("START")
+            self._flush_online_chunk(is_final=False)
+        wake_to_record_ms = (time.time() - self.rt.wake_trigger_wall_ts) * 1000.0 if self.rt.wake_trigger_wall_ts > 0 else 0.0
+        snr = self._snr_db(rms, self._noise_floor_rms)
+        fields = {
+            "reason": "speech_start",
+            "rms": round(rms, 2),
+            "static_threshold": round(static, 2),
+            "noise_floor": round(float(self._noise_floor_rms), 2),
+            "effective_threshold": round(effective, 2),
+            "snr_db": round(snr, 2) if snr is not None else None,
+            "speech_up": int(self.speech_up),
+            "start_frames": int(self.cfg_runtime.start_frames),
+            "session_id": self.rt.snapshot().get("session_id"),
+            "epoch": self.rt.snapshot().get("epoch"),
+            "wake_to_record_ms": round(wake_to_record_ms, 2),
+        }
+        jlog({"level": "info", "src": "seg", "msg": "REC_STARTED", **fields})
+        write_timeline("REC_STARTED", **fields)
+        return True
 
     @staticmethod
     def _armed_timeout_applies(state: str, rt: RuntimeState) -> bool:
@@ -427,7 +557,7 @@ class AudioKWSWorker(threading.Thread):
                 x = np.frombuffer(b, dtype=np.int16)
                 r = rms_int16(x)
                 self.rt.set_rms(r)
-                if not self.rt.is_armed() and not self.rt.snapshot()["busy"]:
+                if self._noise_floor_updates_allowed():
                     self._noise_floor_rms = r if self._noise_floor_rms <= 0 else (0.95 * self._noise_floor_rms + 0.05 * r)
                 self.prebuf.append(x.copy())
                 self._emit_heartbeat()
@@ -488,16 +618,18 @@ class AudioKWSWorker(threading.Thread):
                     self.rt.wake_trigger_mono_ns = time.monotonic_ns()
                     phone_prompt_sent = False
                     if self.phone_playback is not None and self.phone_playback.enabled:
+                        self._noise_floor_before_prompt = self._noise_floor_rms
                         phone_prompt_sent = self.phone_playback.request_wake_prompt()
                     if not phone_prompt_sent:
-                        self.rt.start_session(self.cfg_runtime.armed_secs, reason="wake_hotword")
+                        self._arm_command_capture("wake_hotword")
                     self.rt.set_mute(self.cfg_runtime.post_wake_mute_secs)
                     self.state = "WAIT_PROMPT_PLAYBACK" if phone_prompt_sent else "ARMED_WAIT"
-                    self.speech_up = 0
-                    self.speech_down = 0
-                    self.captured = []
-                    self.asr_sample_buf = np.zeros((0,), dtype=np.int16)
-                    self.asr_chunk_seq = 0
+                    if phone_prompt_sent:
+                        self.speech_up = 0
+                        self.speech_down = 0
+                        self.captured = []
+                        self.asr_sample_buf = np.zeros((0,), dtype=np.int16)
+                        self.asr_chunk_seq = 0
                     jlog({"level": "info", "src": "oww", "msg": "WAKE triggered -> phone prompt" if phone_prompt_sent else "WAKE triggered -> armed", "session_id": self.rt.snapshot().get("session_id")})
                     wake_score = float(pred.get(self.cfg_runtime.wake_key, 0.0) or 0.0)
                     noise = float(self._noise_floor_rms or 0.0)
@@ -545,25 +677,7 @@ class AudioKWSWorker(threading.Thread):
                     self.rt.set_state("ARMED_WAIT")
 
                 if self.state == "ARMED_WAIT":
-                    if r >= self.cfg_runtime.energy_th:
-                        self.speech_up += 1
-                    else:
-                        self.speech_up = 0
-                    if self.speech_up >= self.cfg_runtime.start_frames:
-                        self.captured = list(self.prebuf)
-                        self.captured.append(x.copy())
-                        self.speech_down = 0
-                        self.state = "REC"
-                        self.rt.begin_recording()
-                        if self.asr_mode == "online":
-                            self.asr_sample_buf = np.zeros((0,), dtype=np.int16)
-                            self.asr_chunk_seq = 0
-                            self._append_online_samples(np.concatenate(self.captured, axis=0).astype(np.int16))
-                            self._emit_online_asr_event("START")
-                            self._flush_online_chunk(is_final=False)
-                        wake_to_record_ms = (time.time() - self.rt.wake_trigger_wall_ts) * 1000.0 if self.rt.wake_trigger_wall_ts > 0 else 0.0
-                        jlog({"level": "info", "src": "seg", "msg": "REC start reason=speech_start", "rms": round(r, 2)})
-                        write_timeline("REC_STARTED", reason="speech_start", rms=round(r, 2), session_id=self.rt.snapshot().get("session_id"), epoch=self.rt.snapshot().get("epoch"), wake_to_record_ms=round(wake_to_record_ms, 2))
+                    self._advance_armed_capture(x, r)
                     continue
 
                 if self.state == "REC":

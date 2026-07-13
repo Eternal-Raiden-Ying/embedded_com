@@ -30,6 +30,7 @@ class PhonePlaybackGuard:
         self._epoch = -1
         self._phase = "IDLE"
         self._deadline = 0.0
+        self._capture_arm_callback: Optional[Callable[[str], None]] = None
 
     @property
     def enabled(self) -> bool:
@@ -38,6 +39,11 @@ class PhonePlaybackGuard:
     def waiting(self) -> bool:
         with self._lock:
             return self._phase in {"WAIT_START", "WAIT_FINISH", "POST_GUARD"}
+
+    def set_capture_arm_callback(self, callback: Callable[[str], None]) -> None:
+        """Install the audio-thread transition used after the playback tail guard."""
+        with self._lock:
+            self._capture_arm_callback = callback
 
     def request_wake_prompt(self) -> bool:
         if not self.enabled:
@@ -117,7 +123,13 @@ class PhonePlaybackGuard:
                     return
                 self._phase = "IDLE"
                 self._deadline = 0.0
-            self.rt.arm_prompt_session(float(self.cfg.armed_secs))
+                callback = self._capture_arm_callback
+            if callback is not None:
+                callback("wake_prompt_complete")
+            else:
+                # Keep the controller independently testable and preserve the
+                # legacy local/state-only behavior for callers without audio.
+                self.rt.arm_command_capture(float(self.cfg.armed_secs), reason="wake_prompt_complete")
 
     def _enter_guard(self, reason: str) -> None:
         with self._lock:

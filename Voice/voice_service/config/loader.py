@@ -151,7 +151,7 @@ def map_nested_dict(nested: Dict[str, Any], flat: Dict[str, Any]) -> None:
     # 9. runtime section
     if "runtime" in nested and isinstance(nested["runtime"], dict):
         run = nested["runtime"]
-        for k in ("input_mode", "dry_run_text", "debug_input_only", "runs_dir", "logs_dir", "asr_warmup_enabled", "asr_warmup_samples", "replay_manifest", "replay_realtime", "replay_exit_after_complete", "replay_repeat", "replay_fail_fast"):
+        for k in ("input_mode", "dry_run_text", "debug_input_only", "runs_dir", "logs_dir", "asr_warmup_enabled", "asr_warmup_samples", "followup_secs", "replay_manifest", "replay_realtime", "replay_exit_after_complete", "replay_repeat", "replay_fail_fast"):
             if k in run:
                 flat[k] = run[k]
 

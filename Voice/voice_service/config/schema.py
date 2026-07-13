@@ -6,7 +6,7 @@ from typing import List, Dict, Union, Optional
 
 @dataclass
 class VoiceConsoleConfig:
-    events: List[str] = field(default_factory=lambda: ["AUDIO_READY", "WAKE_TRIGGERED", "REC_STARTED", "REC_ENDED", "ASR_FINAL", "TASK_CMD_SENT", "TASK_ACK", "INTENT_ACCEPTED", "INTENT_REJECTED", "WARN", "ERROR"])
+    events: List[str] = field(default_factory=lambda: ["AUDIO_READY", "WAKE_TRIGGERED", "COMMAND_CAPTURE_ARMED", "SPEECH_GATE_BLOCKED", "REC_STARTED", "REC_ENDED", "ASR_FINAL", "TASK_CMD_SENT", "TASK_ACK", "INTENT_ACCEPTED", "INTENT_REJECTED", "WARN", "ERROR"])
     fields: List[str] = field(default_factory=lambda: ["run_id", "session_id", "cmd_id", "epoch", "timestamp"])
     periodic_health_s: float = 5.0
 

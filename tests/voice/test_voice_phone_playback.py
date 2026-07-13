@@ -4,6 +4,8 @@
 from types import SimpleNamespace
 import time
 import wave
+from collections import deque
+import numpy as np
 import pytest
 
 from voice_service.runtime.playback import PhonePlaybackGuard
@@ -31,6 +33,43 @@ class FakeSender:
     def send(self, payload):
         self.messages.append(dict(payload))
         return self.result
+
+
+class FakeOWW:
+    def __init__(self):
+        self.reset_calls = 0
+
+    def reset(self):
+        self.reset_calls += 1
+
+
+class FakePlayback:
+    def __init__(self, waiting=False):
+        self._waiting = waiting
+
+    def waiting(self):
+        return self._waiting
+
+
+def make_capture_worker(rt=None, phone_playback=None):
+    """Exercise the onset gate without constructing models or an audio device."""
+    worker = object.__new__(AudioKWSWorker)
+    worker.rt = rt or RuntimeState()
+    worker.phone_playback = phone_playback
+    worker.cfg_runtime = SimpleNamespace(armed_secs=6.0, energy_th=450.0, start_frames=2)
+    worker.state = "WAIT_WAKE"
+    worker.speech_up = 0
+    worker.speech_down = 0
+    worker.captured = []
+    worker.asr_sample_buf = np.zeros((0,), dtype=np.int16)
+    worker.asr_chunk_seq = 0
+    worker.prebuf = deque(maxlen=3)
+    worker.oww = FakeOWW()
+    worker._noise_floor_rms = 0.0
+    worker._noise_floor_before_prompt = None
+    worker._last_speech_gate_blocked_at = 0.0
+    worker.asr_mode = "offline"
+    return worker
 
 
 def make_cfg():
@@ -74,6 +113,75 @@ def test_wake_waits_for_ordered_phone_playback_then_arms():
     guard.poll()
     assert rt.snapshot()["state"] == "ARMED_WAIT"
     assert rt.is_armed()
+
+
+def test_phone_finished_uses_audio_capture_arm_transition():
+    clock, sender, rt = FakeClock(), FakeSender(), RuntimeState()
+    guard = PhonePlaybackGuard(make_cfg(), rt, sender, clock=clock)
+    worker = make_capture_worker(rt, guard)
+    worker._noise_floor_rms = 5734.71
+    worker._noise_floor_before_prompt = 555.98
+    guard.set_capture_arm_callback(worker._arm_command_capture)
+
+    assert guard.request_wake_prompt()
+    event = sender.messages[-1]
+    assert guard.handle_playback(ack_for(event, "started"))
+    assert guard.handle_playback(ack_for(event, "finished"))
+    clock.now += 0.36
+    guard.poll()
+
+    assert worker.state == "ARMED_WAIT"
+    assert rt.snapshot()["state"] == "ARMED_WAIT"
+    assert rt.snapshot()["session_reason"] == "wake_prompt_complete"
+    assert rt.is_armed()
+    assert worker.speech_up == 0
+    assert worker.captured == []
+    assert worker._noise_floor_rms == pytest.approx(555.98)
+
+
+def test_phone_playback_freezes_noise_floor_updates():
+    worker = make_capture_worker(phone_playback=FakePlayback(waiting=True))
+    assert not worker._noise_floor_updates_allowed()
+
+    worker.phone_playback._waiting = False
+    assert worker._noise_floor_updates_allowed()
+    worker.state = "POST_PLAYBACK_GUARD"
+    assert not worker._noise_floor_updates_allowed()
+
+
+def test_phone_finished_command_gate_starts_recording_for_speech_rms():
+    worker = make_capture_worker()
+    worker._noise_floor_rms = 555.98
+    worker._arm_command_capture("wake_prompt_complete")
+    frame = np.full(1280, 1054, dtype=np.int16)
+
+    assert not worker._advance_armed_capture(frame, 1054.0)
+    assert worker._advance_armed_capture(frame, 1054.0)
+    assert worker.state == "REC"
+    assert worker.rt.snapshot()["state"] == "REC"
+    assert AudioKWSWorker._effective_energy_threshold(450.0, 5734.71) == pytest.approx(900.0)
+
+
+def test_local_wake_uses_same_capture_arm_transition():
+    worker = make_capture_worker()
+    worker.prebuf.append(np.ones(8, dtype=np.int16))
+    worker.captured = [np.ones(8, dtype=np.int16)]
+    worker.speech_up = 3
+
+    worker._arm_command_capture("wake_hotword")
+
+    assert worker.state == "ARMED_WAIT"
+    assert worker.rt.snapshot()["session_reason"] == "wake_hotword"
+    assert worker.speech_up == 0
+    assert worker.captured == []
+    assert not worker.prebuf
+    assert worker.oww.reset_calls == 1
+
+
+def test_armed_command_capture_only_predicts_stop_not_wake():
+    worker = SimpleNamespace(cfg_runtime=SimpleNamespace(wake_key="wake", stop_key="stop"))
+    assert AudioKWSWorker._predict_subset(worker, armed=True, busy=False) == ["stop"]
+    assert AudioKWSWorker._predict_subset(worker, armed=False, busy=False) == ["wake", "stop"]
 
 
 def test_stale_wrong_and_duplicate_playback_ack_are_ignored():
@@ -141,6 +249,19 @@ def test_phone_dryrun_profile_uses_onnx_quantized_voice_configuration():
     assert cfg.classifier_backend == "onnx"
     assert cfg.asr_quant is True
     assert cfg.vad_quant is True
+    assert cfg.followup_secs == 8.0
+
+
+def test_phone_profile_uses_extended_followup_window():
+    cfg = load_voice_config(["--profile", "configs/profiles/sc171_voice_phone_tts.yaml"])
+    assert cfg.followup_secs == 8.0
+
+    rt = RuntimeState()
+    rt.keep_session(cfg.followup_secs, reason="post_turn_followup")
+    assert rt.is_armed()
+    assert rt.armed_until - time.time() >= 7.5
+    rt.armed_until = time.time() - 0.01
+    assert AudioKWSWorker._armed_timeout_applies("ARMED_WAIT", rt)
 
 
 def test_debug_profile_disables_all_robot_and_phone_ipc():
