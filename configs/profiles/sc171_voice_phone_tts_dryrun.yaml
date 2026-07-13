@@ -32,6 +32,13 @@ runtime_overrides:
     vision_req_out:
       transport: "uds"
       ipc_socket_path: "/tmp/robot_stack/vision_req.sock"
+    tts_feedback:
+      enabled: true
+      verbosity: detailed
+      min_interval_s: 1.5
+      default_ttl_s: 8.0
+      dedupe_window_s: 30.0
+      detailed_progress_enabled: true
     tts_event_out:
       transport: "uds"
       ipc_socket_path: "/tmp/robot_stack/mobile_tts_event.sock"

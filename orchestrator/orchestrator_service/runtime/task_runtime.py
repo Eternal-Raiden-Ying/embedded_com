@@ -47,6 +47,7 @@ from .core_types import (
 
 class TaskRuntimeMixin:
     def handle_task_cmd(self, cmd: TaskCmd) -> Tuple[bool, str]:
+        previous_target = str(getattr(self.ctx, "active_target", "") or "")
         self.ctx.last_task_cmd = cmd
         self.ctx.active_session_id = cmd.session_id
         self.ctx.active_epoch = cmd.epoch
@@ -54,7 +55,8 @@ class TaskRuntimeMixin:
         self.ctx.active_wake_trigger_mono_ns = getattr(cmd, "wake_trigger_mono_ns", 0) or 0
         if cmd.intent == "STOP":
             self._last_stop_mono = monotonic_ts()
-            self._interrupt_to_idle("收到 STOP 命令", tts_text="已停止", interrupt_tts=True, send_vision_idle=True)
+            self._interrupt_to_idle("\u6536\u5230 STOP \u547d\u4ee4", send_vision_idle=True)
+            self._emit_tts_event("TASK_STOPPED", force=True)
             return True, "STOP accepted"
         if self._last_stop_mono > 0 and (monotonic_ts() - self._last_stop_mono) < float(self.cfg.post_stop_ignore_s):
             self._log("info", f"忽略 STOP 短窗内的后续命令: {cmd.intent}")
@@ -105,7 +107,7 @@ class TaskRuntimeMixin:
                 })
                 setattr(self.ctx, "last_task_ack_extra", extra)
                 return False, "unsupported_target"
-            self._start_find_task(cmd)
+            self._start_find_task(cmd, old_target=previous_target)
             return True, "accepted"
         if cmd.intent == "RETURN":
             self._start_return_task(cmd)
@@ -514,14 +516,27 @@ class TaskRuntimeMixin:
         if tts_text:
             self._queue_tts(tts_text, interrupt=interrupt_tts)
 
+    def _emit_tts_event(self, event_key: str, *, state: str = "", old_target: str = "", force: bool = False):
+        try:
+            return self.tts_feedback.emit(
+                self.ctx.pending_tts_msgs, event_key, session_id=self.ctx.active_session_id,
+                epoch=self.ctx.active_epoch, state=state or self.ctx.state.value,
+                target=str(getattr(self.ctx, "active_target", "") or ""), old_target=old_target, force=force,
+            )
+        except Exception:
+            return None
+
     def _queue_tts(self, text: str, interrupt: bool = False, *, phrase_id: str = "", priority: str = "P2", dedup_key: str = ""):
+        # Structured catalog events replace legacy business narration. Preserve P0 safety output.
+        if str(priority).upper() != "P0" and not interrupt:
+            return
         try:
             last_cmd = self.ctx.last_task_cmd
             self.ctx.pending_tts_msgs.append(make_tts_event(text, interrupt=interrupt, phrase_id=phrase_id, priority=priority, dedup_key=dedup_key, session_id=self.ctx.active_session_id, cmd_id=str(getattr(last_cmd, "cmd_id", "") or "")))
         except Exception:
             pass
 
-    def _start_find_task(self, cmd: TaskCmd):
+    def _start_find_task(self, cmd: TaskCmd, old_target: str = ""):
         raw_target = str(cmd.target or "").strip()
         spec = resolve_target(raw_target)
         if not raw_target or spec is None:
@@ -548,8 +563,8 @@ class TaskRuntimeMixin:
             "task_id": self.ctx.active_task_id,
         })
         self._queue_remote_init_warmup(target=spec.class_name)
+        self._emit_tts_event("TASK_SWITCHED" if old_target and old_target != spec.canonical_target else "TASK_ACCEPTED", old_target=old_target)
         self._transition(State.SEARCH_TABLE, f"开始桌边任务，进入桌边搜索，目标 {spec.canonical_target}")
-        self._queue_tts(f"任务已经开始，正在寻找{target_display_name(spec)}。", phrase_id="TASK_ACCEPTED", priority="P2", dedup_key=f"task_accepted:{cmd.cmd_id}")
 
     def _queue_remote_init_warmup(self, *, target: str) -> None:
         if not bool(getattr(self.cfg, "remote_init_auto_enabled", False)):

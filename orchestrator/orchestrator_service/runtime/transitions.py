@@ -92,6 +92,28 @@ class TransitionsMixin:
                 self.transition_observer(old_state.value, new_state.value, reason)
             except Exception:
                 pass
+        event_key = {
+            State.SEARCH_TABLE: "SEARCH_TABLE_STARTED",
+            State.YOLO_ACQUIRE_ALIGN: "TABLE_FOUND",
+            State.YOLO_APPROACH: "TABLE_APPROACH_STARTED",
+            State.AT_TABLE_EDGE: "TABLE_EDGE_REACHED",
+            State.SEARCH_TARGET_INIT: "SEARCH_TARGET_STARTED",
+            State.TARGET_LOCKED: "TARGET_LOCKED",
+            State.FREEZE_BASE: "PICK_PREPARING",
+            State.POST_GRASP_TURN_FIXED: "PICK_SUCCEEDED",
+            State.RETURN_HOME: "PICK_SUCCEEDED",
+            State.DONE: "TASK_COMPLETED",
+        }.get(new_state)
+        if old_state == State.GRASP and new_state == State.SEARCH_TARGET_INIT:
+            self._emit_tts_event("PICK_FAILED", state=old_state.value)
+        if old_state == State.ERROR_RECOVERY and new_state != State.ERROR_RECOVERY:
+            self._emit_tts_event("SYSTEM_RECOVERED", state=new_state.value)
+        if new_state == State.DONE and "arm_motion_done" in str(reason or ""):
+            self._emit_tts_event("PICK_SUCCEEDED", state=new_state.value)
+        if new_state == State.ERROR_RECOVERY:
+            event_key = "PICK_FAILED" if old_state == State.GRASP else "TASK_TIMEOUT"
+        if event_key:
+            self._emit_tts_event(event_key, state=new_state.value)
         self._on_enter_state(new_state)
 
     def _frames_to_ms(self, frames: int) -> int:

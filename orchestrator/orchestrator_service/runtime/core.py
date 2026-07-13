@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import time
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..config.schema import CarMotionConfig, ControlThresholds
@@ -54,6 +55,7 @@ from .states.table_docking import TableDockingMixin
 from .states.target_search import TargetSearchMixin
 from .task_runtime import TaskRuntimeMixin
 from .transitions import TransitionsMixin
+from .tts_feedback import TtsFeedbackEmitter
 from .vision_sync import VisionSyncMixin
 
 
@@ -64,6 +66,7 @@ class OrchestratorCore(ExportStateMixin, VisionSyncMixin, TransitionsMixin, Task
         car_cfg: CarMotionConfig,
         docking_cfg: Optional[DockingControlConfig] = None,
         logger: Optional[Callable] = None,
+        tts_feedback: Optional[Any] = None,
     ):
         self.cfg = cfg
         self.car_cfg = car_cfg
@@ -78,6 +81,10 @@ class OrchestratorCore(ExportStateMixin, VisionSyncMixin, TransitionsMixin, Task
         self._last_target_update_key = ""
         self._last_target_update_mono = 0.0
         self._last_stop_mono = 0.0
+        self.tts_feedback = TtsFeedbackEmitter(tts_feedback or SimpleNamespace(
+            enabled=True, verbosity="detailed", min_interval_s=1.5, default_ttl_s=8.0,
+            dedupe_window_s=30.0, detailed_progress_enabled=True,
+        ))
 
     def _log(self, level: str, msg: str, *args):
         if self._logger:

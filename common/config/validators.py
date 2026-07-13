@@ -81,6 +81,14 @@ def validate_config(config: SystemGlobalConfig, force_production: bool = False) 
             f"{gateway_runtime.feedback_output_mode!r}; expected disabled, optional, or phone_tts"
         )
 
+    tts_feedback = config.orchestrator.tts_feedback
+    verbosity = str(getattr(tts_feedback, "verbosity", "") or "").strip().lower()
+    if verbosity not in {"off", "basic", "detailed"}:
+        raise ValueError("Invalid orchestrator.tts_feedback.verbosity; expected off, basic, or detailed")
+    for name in ("min_interval_s", "default_ttl_s", "dedupe_window_s"):
+        if float(getattr(tts_feedback, name, 0.0) or 0.0) < 0.0:
+            raise ValueError(f"Invalid orchestrator.tts_feedback.{name}; must be non-negative")
+
     car = config.orchestrator.car
     serial = config.orchestrator.serial
     dry_run = bool(serial.dry_run)

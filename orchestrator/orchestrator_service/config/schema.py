@@ -604,6 +604,17 @@ class CarMotionConfig:
 
 
 @dataclass
+class TtsFeedbackConfig:
+    """Policy for structured Phone-TTS task feedback."""
+    enabled: bool = True
+    verbosity: str = "detailed"
+    min_interval_s: float = 1.5
+    default_ttl_s: float = 8.0
+    dedupe_window_s: float = 30.0
+    detailed_progress_enabled: bool = True
+
+
+@dataclass
 class OrchestratorConfig:
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     serial: SerialConfig = field(default_factory=SerialConfig)
@@ -635,6 +646,7 @@ class OrchestratorConfig:
         send_mode="oneshot",
         async_enabled=True,
     ))
+    tts_feedback: TtsFeedbackConfig = field(default_factory=TtsFeedbackConfig)
     tts_event_out: SocketEndpoint = field(default_factory=lambda: SocketEndpoint(
         transport="disabled",
         ipc_socket_path="/tmp/robot_stack/tts_event.sock",

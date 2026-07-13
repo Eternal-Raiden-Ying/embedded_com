@@ -1092,6 +1092,17 @@ class DockingControlConfig:
 
 
 @dataclass
+class TtsFeedbackConfig:
+    """Policy for structured Phone-TTS task feedback."""
+    enabled: bool = True
+    verbosity: str = "detailed"
+    min_interval_s: float = 1.5
+    default_ttl_s: float = 8.0
+    dedupe_window_s: float = 30.0
+    detailed_progress_enabled: bool = True
+
+
+@dataclass
 class OrchestratorConfig:
     """Configuration structure representing the Orchestrator service."""
     runtime: OrchestratorRuntimeConfig = field(default_factory=OrchestratorRuntimeConfig)
@@ -1113,6 +1124,7 @@ class OrchestratorConfig:
     vision_req_out: SocketEndpoint = field(default_factory=lambda: SocketEndpoint(
         transport="tcp", ipc_socket_path="/tmp/robot_stack/vision_req.sock", tcp_port=19104, send_mode="oneshot", async_enabled=True,
     ))
+    tts_feedback: TtsFeedbackConfig = field(default_factory=TtsFeedbackConfig)
     tts_event_out: SocketEndpoint = field(default_factory=lambda: SocketEndpoint(
         transport="disabled", ipc_socket_path="/tmp/robot_stack/tts_event.sock", async_enabled=True,
     ))

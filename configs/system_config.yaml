@@ -739,6 +739,13 @@ orchestrator:
     tcp_port: 19104 # TCP connect port
     send_mode: "oneshot" # Socket persistence mode
     async_enabled: true # Enable async socket operations
+  tts_feedback:
+    enabled: true
+    verbosity: detailed
+    min_interval_s: 1.5
+    default_ttl_s: 8.0
+    dedupe_window_s: 30.0
+    detailed_progress_enabled: true
   tts_event_out:
     transport: "disabled" # Audio TTS event output channel mode
     ipc_socket_path: "/tmp/robot_stack/tts_event.sock" # Socket file path

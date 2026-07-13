@@ -75,7 +75,9 @@ def normalize_tts_event(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not event_id or (not text and not phrase_id):
         raise MobileProtocolError("tts_event requires event_id and text or phrase_id", ERROR_CODES["invalid_command"])
     priority = str(payload.get("priority", "P2") or "P2").upper()
-    return {**dict(payload), "schema_version": int(payload.get("schema_version", 1) or 1), "type": "tts_event", "event_id": event_id, "text": text, "phrase_id": phrase_id, "source": str(payload.get("source", "orchestrator") or "orchestrator"), "session_id": str(payload.get("session_id", "") or ""), "cmd_id": str(payload.get("cmd_id", "") or ""), "priority": priority if priority in {"P0", "P1", "P2", "P3"} else "P2", "interrupt": bool(payload.get("interrupt", False)), "dedup_key": str(payload.get("dedup_key", "") or ""), "ts": float(payload.get("ts", now_ts()))}
+    dedupe_key = str(payload.get("dedupe_key", payload.get("dedup_key", "")) or "")
+    created_at = float(payload.get("created_at", payload.get("ts", now_ts())) or now_ts())
+    return {**dict(payload), "schema_version": int(payload.get("schema_version", 1) or 1), "version": int(payload.get("version", 1) or 1), "type": "tts_event", "event_id": event_id, "text": text, "phrase_id": phrase_id, "event_key": str(payload.get("event_key", phrase_id) or ""), "state": str(payload.get("state", "") or ""), "target": str(payload.get("target", "") or ""), "source": str(payload.get("source", "orchestrator") or "orchestrator"), "session_id": str(payload.get("session_id", "") or ""), "cmd_id": str(payload.get("cmd_id", "") or ""), "epoch": int(payload.get("epoch", 0) or 0), "priority": priority if priority in {"P0", "P1", "P2", "P3"} else "P2", "interrupt": bool(payload.get("interrupt", False)), "dedup_key": dedupe_key, "dedupe_key": dedupe_key, "created_at": created_at, "expires_at": float(payload.get("expires_at", 0.0) or 0.0), "ttl_s": float(payload.get("ttl_s", 0.0) or 0.0), "ts": float(payload.get("ts", created_at) or created_at)}
 
 
 def make_tts_playback_state(payload: Dict[str, Any]) -> Dict[str, Any]:

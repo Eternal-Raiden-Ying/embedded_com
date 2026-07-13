@@ -211,7 +211,7 @@ class OrchestratorService(BaseModule):
         ensure_dir(cfg.runtime.pid_dir)
         os.environ.setdefault("ROBOT_LOG_PROFILE", str(getattr(cfg.runtime, "log_profile", "normal") or "normal"))
         self.run_logger = RunLogger("orch", cfg.runtime.runs_dir, cfg.runtime.stack_run_id)
-        self.core = OrchestratorCore(cfg.control, cfg.car, cfg.docking, logger=self.log)
+        self.core = OrchestratorCore(cfg.control, cfg.car, cfg.docking, logger=self.log, tts_feedback=getattr(cfg, "tts_feedback", None))
         self.core.transition_observer = self._on_state_transition
         self.operator_console = OperatorConsole(
             mode=os.getenv("ORCH_CONSOLE_MODE", "operator"),
@@ -4470,6 +4470,9 @@ class OrchestratorService(BaseModule):
 
     def _emit_motion(self, decision):
         if getattr(decision, "arm_cmd", None) is not None:
+            # This is the actual fixed-arm command dispatch boundary, not a control tick.
+            if self.core.ctx.state == State.GRASP:
+                self.core._emit_tts_event("PICK_EXECUTING", state=State.GRASP.value)
             arm = decision.arm_cmd
             arm_command = str(getattr(arm, "command", "POSE") or "POSE").strip().upper()
             builtin_pose_line = str(getattr(self.cfg.control, "builtin_bottle_pose_line", "POSE_BOTTLE") or "POSE_BOTTLE").strip()
