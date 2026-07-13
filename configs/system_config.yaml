@@ -787,6 +787,12 @@ gateway:
     log_enabled: true # Enable gateway logs
     status_stdout: true # Write status payload logs to console stdout
     stdin_enabled: false # Read tasks from terminal stdin
+    task_input_mode: "mobile" # mobile/mobile_only/voice/voice_only; gateway publishes mobile/voice
+    feedback_output_mode: "optional" # disabled/optional/phone_tts
+    mobile_task_commands_allowed: true # Permit ordinary mobile robot task commands
+    mobile_manual_control_allowed: true # Permit manual_drive/manual_stop from mobile
+    mobile_core_control_allowed: true # Permit core_start/core_stop/core_restart from mobile
+    mobile_emergency_stop_allowed: true # Permit mobile STOP emergency command
   backend:
     mode: "tcp_no_ack" # Backend gateway operations mode: mock, orchestrator_tcp, tcp_no_ack
     default_robot_id: "sc171_car_01" # Robot serial number identifier
@@ -822,10 +828,10 @@ gateway:
     connect_timeout_s: 5.0 # Timeout duration of connection attempts
     accept_commands: true # Accept ordinary mobile cmd topic; false subscribes only to tts_ack
     topics:
-      cmd: "robot/sc171_car_01/cmd" # CMD topic path
-      ack: "robot/sc171_car_01/ack" # ACK topic path
-      status: "robot/sc171_car_01/status" # Status topic path
-      heartbeat: "robot/sc171_car_01/heartbeat" # Heartbeat topic path
+      cmd: "robot/v1/SC171/mobile/cmd" # CMD topic path
+      ack: "robot/v1/SC171/mobile/ack" # ACK topic path
+      status: "robot/v1/SC171/mobile/status" # Status topic path
+      heartbeat: "robot/v1/SC171/heartbeat" # Heartbeat topic path
       tts: "robot/v1/SC171/mobile/tts" # Phone TTS event topic
       tts_ack: "robot/v1/SC171/mobile/tts_ack" # Phone TTS playback state topic
   command_in:

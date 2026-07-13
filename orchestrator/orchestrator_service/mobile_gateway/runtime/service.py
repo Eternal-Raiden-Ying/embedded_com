@@ -19,12 +19,12 @@ from typing import Any, Callable, Deque, Dict, List, Optional, Set, Tuple
 
 from common.base_module import BaseModule
 from common.console_presenter import DemoConsolePresenter
+from common.config.schema import GatewayEndpoint, MobileGatewayConfig
 from common.runtime_logging import OperatorConsole, RunLogger, ensure_dir, safe_dump
 from orchestrator_service.ipc.transport import JsonlClientSender, JsonlInboundServer
 
 from ..adapters.mqtt_adapter import MqttAdapter
 from ..config.board_config import build_config
-from ..config.schema import GatewayEndpoint, MobileGatewayConfig
 from ..protocol import (
     ERROR_CODES,
     MobileCommand,

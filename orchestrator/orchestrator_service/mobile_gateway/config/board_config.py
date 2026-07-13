@@ -3,7 +3,7 @@
 """Local board config delegating to unified loader."""
 
 from common.config_loader import get_config, load_global_config, load_yaml_file
-from .schema import MobileGatewayConfig
+from common.config.schema import MobileGatewayConfig
 
 CONFIG = get_config().gateway
 

@@ -1200,6 +1200,14 @@ class GatewayRuntimeConfig:
     log_enabled: bool = True
     status_stdout: bool = True
     stdin_enabled: bool = False
+    # Northbound mobile/voice ownership.  Legacy *_only aliases are accepted
+    # by validation and normalized before being published to the mini-program.
+    task_input_mode: str = "mobile"
+    feedback_output_mode: str = "optional"
+    mobile_task_commands_allowed: bool = True
+    mobile_manual_control_allowed: bool = True
+    mobile_core_control_allowed: bool = True
+    mobile_emergency_stop_allowed: bool = True
 
 
 @dataclass
@@ -1220,10 +1228,10 @@ class GatewayBackendConfig:
 
 @dataclass
 class MqttTopicConfig:
-    cmd: str = "robot/sc171_car_01/cmd"
-    ack: str = "robot/sc171_car_01/ack"
-    status: str = "robot/sc171_car_01/status"
-    heartbeat: str = "robot/sc171_car_01/heartbeat"
+    cmd: str = "robot/v1/SC171/mobile/cmd"
+    ack: str = "robot/v1/SC171/mobile/ack"
+    status: str = "robot/v1/SC171/mobile/status"
+    heartbeat: str = "robot/v1/SC171/heartbeat"
     tts: str = "robot/v1/SC171/mobile/tts"
     tts_ack: str = "robot/v1/SC171/mobile/tts_ack"
 

@@ -67,6 +67,20 @@ def _print_warnings(warnings) -> None:
 def validate_config(config: SystemGlobalConfig, force_production: bool = False) -> None:
     """Validate the final effective config before runtime use."""
     warnings = []
+    gateway_runtime = config.gateway.runtime
+    task_input_mode = str(getattr(gateway_runtime, "task_input_mode", "") or "").strip().lower()
+    if task_input_mode not in {"mobile", "mobile_only", "voice", "voice_only"}:
+        raise ValueError(
+            "Invalid gateway.runtime.task_input_mode: "
+            f"{gateway_runtime.task_input_mode!r}; expected mobile, mobile_only, voice, or voice_only"
+        )
+    feedback_output_mode = str(getattr(gateway_runtime, "feedback_output_mode", "") or "").strip().lower()
+    if feedback_output_mode not in {"disabled", "optional", "phone_tts"}:
+        raise ValueError(
+            "Invalid gateway.runtime.feedback_output_mode: "
+            f"{gateway_runtime.feedback_output_mode!r}; expected disabled, optional, or phone_tts"
+        )
+
     car = config.orchestrator.car
     serial = config.orchestrator.serial
     dry_run = bool(serial.dry_run)

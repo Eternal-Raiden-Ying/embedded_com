@@ -5,7 +5,7 @@ import json
 import ssl
 from typing import Any, Callable, Dict, Optional
 
-from ..config.schema import MqttAdapterConfig
+from common.config.schema import MqttAdapterConfig
 
 
 class MqttAdapter:

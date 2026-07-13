@@ -15,7 +15,7 @@ if str(ROOT) not in sys.path:
 if str(ORCH_ROOT) not in sys.path:
     sys.path.insert(0, str(ORCH_ROOT))
 
-from orchestrator_service.mobile_gateway.config.schema import MobileGatewayConfig  # noqa: E402
+from common.config.schema import MobileGatewayConfig  # noqa: E402
 from orchestrator_service.mobile_gateway.protocol import ROBOT_ID  # noqa: E402
 from orchestrator_service.mobile_gateway.runtime.service import MobileGatewayService  # noqa: E402
 
