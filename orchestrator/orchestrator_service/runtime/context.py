@@ -41,6 +41,8 @@ class State(str, Enum):
     ERROR_RECOVERY = "ERROR_RECOVERY"
     DONE = "DONE"
     NO_PROGRESS_RECOVERY = "NO_PROGRESS_RECOVERY"
+    LOCATE_GUIDANCE_ACTIVE = "LOCATE_GUIDANCE_ACTIVE"
+    WAIT_USER_APPROACH = "WAIT_USER_APPROACH"
 
 
 @dataclass
@@ -55,6 +57,12 @@ class RuntimeContext:
     canonical_target: str = ""
     class_name: str = ""
     class_id: Optional[int] = None
+    target_action_policy: str = ""
+    target_support_status: str = ""
+    target_grasp_recipe: str = ""
+    locate_guidance_event_id: str = ""
+    locate_tts_finished: bool = False
+    locate_tts_deadline_mono: float = 0.0
     active_task_id: str = ""
     active_session_id: str = ""
     active_epoch: int = 0
@@ -610,6 +618,12 @@ class RuntimeContext:
         self.canonical_target = ""
         self.class_name = ""
         self.class_id = None
+        self.target_action_policy = ""
+        self.target_support_status = ""
+        self.target_grasp_recipe = ""
+        self.locate_guidance_event_id = ""
+        self.locate_tts_finished = False
+        self.locate_tts_deadline_mono = 0.0
         self.active_task_id = ""
         self.active_session_id = ""
         self.active_epoch = 0

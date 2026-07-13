@@ -66,45 +66,15 @@ class TaskRuntimeMixin:
             self._queue_tts("命令置信度过低")
             return False, "low confidence"
         if cmd.intent == "FIND":
-            import yaml
-            from pathlib import Path
-            
-            repo_root = Path(__file__).resolve().parent
-            for parent in [repo_root] + list(repo_root.parents):
-                if (parent / "configs" / "target_catalog.yaml").exists():
-                    repo_root = parent
-                    break
-            catalog_path = repo_root / "configs" / "target_catalog.yaml"
-            
-            status = "unknown"
-            if catalog_path.exists():
-                try:
-                    with open(catalog_path, "r", encoding="utf-8") as f:
-                        cat_data = yaml.safe_load(f) or {}
-                        targets = cat_data.get("targets", {})
-                        if cmd.target in targets:
-                            status = targets[cmd.target].get("status", "unknown")
-                except Exception as e:
-                    self._log("error", f"Error loading target catalog: {e}")
-
-            execution_status = str(status or "unknown")
+            spec = resolve_target(cmd.target or "")
+            execution_status = spec.support_status if spec is not None else "unknown"
             setattr(self.ctx, "last_task_ack_extra", {
                 "raw_target": str(cmd.target or ""),
                 "execution_status": execution_status,
             })
-                    
-            if status == "model_pending":
-                self._log("warn", f"Target recognized but model is pending: {cmd.target}")
-                self._queue_tts("该物品模型尚在开发中，无法获取")
-                return False, "target_recognized_but_not_executable"
-                
-            spec = resolve_target(cmd.target or "")
-            if spec is None:
+            if spec is None or not spec.selectable or spec.action_policy in {"docking_only", "place_destination"}:
                 extra = dict(getattr(self.ctx, "last_task_ack_extra", {}) or {})
-                extra.update({
-                    "raw_target": str(cmd.target or ""),
-                    "supported_targets": supported_targets(),
-                })
+                extra.update({"supported_targets": supported_targets(selectable_only=True)})
                 setattr(self.ctx, "last_task_ack_extra", extra)
                 return False, "unsupported_target"
             self._start_find_task(cmd, old_target=previous_target)
@@ -536,6 +506,34 @@ class TaskRuntimeMixin:
         except Exception:
             pass
 
+    def handle_tts_playback_state(self, payload: Dict[str, Any]) -> bool:
+        """Accept the existing mobile playback-state schema for locate guidance."""
+        if str(payload.get("type", "")) != "tts_playback_state":
+            return False
+        if str(payload.get("state", "")).lower() != "finished":
+            return False
+        if str(payload.get("event_id", "")) != str(self.ctx.locate_guidance_event_id or ""):
+            return False
+        if str(payload.get("session_id", "")) != str(self.ctx.active_session_id or ""):
+            return False
+        if int(payload.get("epoch", -1)) != int(self.ctx.active_epoch):
+            return False
+        self.ctx.locate_tts_finished = True
+        return True
+
+    def _tick_locate_guidance_active(self) -> MotionDecision:
+        if self.ctx.locate_tts_finished or monotonic_ts() >= float(self.ctx.locate_tts_deadline_mono or 0.0):
+            reason = "locate_tts_finished" if self.ctx.locate_tts_finished else "locate_tts_timeout"
+            self._transition(State.WAIT_USER_APPROACH, reason)
+            return self.controller.stop_cmd("WAIT_USER_APPROACH")
+        return self.controller.stop_cmd("LOCATE_GUIDANCE_ACTIVE")
+
+    def _tick_wait_user_approach(self) -> MotionDecision:
+        if self._state_elapsed() >= max(0.0, float(getattr(self.cfg, "locate_ring_timeout_s", 30.0) or 30.0)):
+            self._transition(State.DONE, "locate_ring_timeout")
+            return self.controller.stop_cmd("DONE")
+        return self.controller.stop_cmd("WAIT_USER_APPROACH")
+
     def _start_find_task(self, cmd: TaskCmd, old_target: str = ""):
         raw_target = str(cmd.target or "").strip()
         spec = resolve_target(raw_target)
@@ -549,6 +547,9 @@ class TaskRuntimeMixin:
         self.ctx.canonical_target = spec.canonical_target
         self.ctx.class_name = spec.class_name
         self.ctx.class_id = int(spec.class_id)
+        self.ctx.target_action_policy = spec.action_policy
+        self.ctx.target_support_status = spec.support_status
+        self.ctx.target_grasp_recipe = spec.grasp_recipe or ""
         self.ctx.active_task_id = f"task_{int(time.time() * 1000)}"
         self.ctx.active_target = spec.canonical_target
         self.ctx.active_session_id = cmd.session_id
@@ -556,14 +557,16 @@ class TaskRuntimeMixin:
         self.ctx.task_start_wall_ts = time.time()
         setattr(self.ctx, "last_task_ack_extra", {
             "raw_target": raw_target,
-            "execution_status": "executable",
+            "execution_status": spec.support_status,
+            "action_policy": spec.action_policy,
             "canonical_target": spec.canonical_target,
             "class_name": spec.class_name,
             "class_id": int(spec.class_id),
             "task_id": self.ctx.active_task_id,
         })
-        self._queue_remote_init_warmup(target=spec.class_name)
-        self._emit_tts_event("TASK_SWITCHED" if old_target and old_target != spec.canonical_target else "TASK_ACCEPTED", old_target=old_target)
+        # Remote/cloud initialization remains deliberately disabled; fixed recipes are local only.
+        accepted_event = "TASK_SWITCHED" if old_target and old_target != spec.canonical_target else ("LOCATE_TARGET_ACCEPTED" if spec.action_policy == "locate_and_ring" else "TASK_ACCEPTED")
+        self._emit_tts_event(accepted_event, old_target=old_target)
         self._transition(State.SEARCH_TABLE, f"开始桌边任务，进入桌边搜索，目标 {spec.canonical_target}")
 
     def _queue_remote_init_warmup(self, *, target: str) -> None:

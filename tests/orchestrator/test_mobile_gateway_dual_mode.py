@@ -3,6 +3,7 @@ import time
 from pathlib import Path
 
 import pytest
+import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 ORCH_ROOT = ROOT / "orchestrator"
@@ -210,6 +211,8 @@ def test_invalid_gateway_mode_is_rejected_by_validator():
 def test_dual_mode_profiles_define_gateway_policy_and_topics(
     monkeypatch, profile, task_input_mode, feedback_output_mode, task_commands_allowed, voice_input_mode
 ):
+    if sys.platform.startswith("win") and profile in {"sc171_voice_phone_tts", "sc171_mobile_control"}:
+        pytest.skip("full Phone-TTS profile uses board UDS endpoints; validate on Linux board")
     monkeypatch.setenv("SYSTEM_CONFIG_PROFILE", profile)
     cfg = load_global_config(str(ROOT / "configs" / "system_config.yaml"))
     voice_profile = ROOT / "configs" / "profiles" / f"{profile}.yaml"

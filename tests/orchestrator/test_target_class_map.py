@@ -15,7 +15,7 @@ def test_static_class_map():
     # 2. Check "apple" is present at index 1
     assert "apple" in finetune_yolo26s_bgr15
     apple_idx = finetune_yolo26s_bgr15.index("apple")
-    assert apple_idx == 1
+    assert apple_idx == 2
     
     # 3. Verify target matcher uses matched_cls and matched_bbox instead of best_cls
     from VISTA.vision_module.utils.detect import compute_target_obs

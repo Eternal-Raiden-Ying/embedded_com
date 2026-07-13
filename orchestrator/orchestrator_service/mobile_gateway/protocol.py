@@ -6,6 +6,8 @@ import uuid
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, Optional, Set
 
+from common.target_catalog import resolve_target, supported_targets as catalog_supported_targets
+
 ROBOT_ID = "SC171"
 MQTT_TOPIC_CMD = "robot/v1/SC171/mobile/cmd"
 MQTT_TOPIC_ACK = "robot/v1/SC171/mobile/ack"
@@ -26,25 +28,7 @@ SUPPORTED_COMMANDS: Set[str] = {
     "manual_stop",
 }
 
-SUPPORTED_TARGETS: Set[str] = {
-    "apple",
-    "banana",
-    "basket",
-    "bottle",
-    "grape",
-    "key",
-    "keys",
-    "kiwi",
-    "kiwi fruit",
-    "lemon",
-    "mango",
-    "mouse",
-    "orange",
-    "peach",
-    "star fruit",
-    "starfruit",
-    "strawberry",
-}
+SUPPORTED_TARGETS: Set[str] = set(catalog_supported_targets(selectable_only=True))
 
 ERROR_CODES: Dict[str, int] = {
     "invalid_json": 1001,
@@ -126,8 +110,10 @@ class MobileCommand:
             target = str(target or "").strip().lower()
             if not target:
                 raise MobileProtocolError("fetch_object requires target", ERROR_CODES["missing_target"])
-            if target not in supported:
+            spec = resolve_target(target)
+            if spec is None or spec.canonical_name not in supported:
                 raise MobileProtocolError(f"unsupported target: {target!r}", ERROR_CODES["invalid_target"])
+            target = spec.canonical_name
         else:
             target = str(target).strip().lower() if target is not None and str(target).strip() else None
         session_id = str(payload.get("session_id") or new_id("sess"))

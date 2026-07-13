@@ -42,6 +42,10 @@ runtime_overrides:
     tts_event_out:
       transport: "uds"
       ipc_socket_path: "/tmp/robot_stack/mobile_tts_event.sock"
+    tts_playback_in:
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/orchestrator_tts_playback.sock"
+      async_enabled: true
   gateway:
     runtime:
       task_input_mode: "voice"
@@ -63,6 +67,11 @@ runtime_overrides:
     tts_playback_out:
       transport: "uds"
       ipc_socket_path: "/tmp/robot_stack/tts_playback.sock"
+    orchestrator_tts_playback_out:
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/orchestrator_tts_playback.sock"
+      send_mode: "oneshot"
+      async_enabled: true
     mqtt:
       enabled: true
       accept_commands: true

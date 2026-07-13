@@ -699,6 +699,14 @@ class MobileGatewayService(BaseModule):
             name="tts_playback_out",
             send_mode=cfg.tts_playback_out.send_mode,
         )
+        self.orchestrator_tts_playback_sender = JsonlClientSender(
+            mode=cfg.orchestrator_tts_playback_out.transport,
+            tcp_host=getattr(cfg.orchestrator_tts_playback_out, "host", "127.0.0.1"),
+            tcp_port=getattr(cfg.orchestrator_tts_playback_out, "port", 0),
+            uds_path=getattr(cfg.orchestrator_tts_playback_out, "uds_path", "") or getattr(cfg.orchestrator_tts_playback_out, "ipc_socket_path", ""),
+            name="orchestrator_tts_playback_out",
+            send_mode=cfg.orchestrator_tts_playback_out.send_mode,
+        )
         if self.backend_mode in REAL_ORCHESTRATOR_BACKEND_MODES:
             self.backend: Any = TcpTaskCmdBackend(cfg.orchestrator_task_cmd_out)
         else:
@@ -757,6 +765,8 @@ class MobileGatewayService(BaseModule):
         self._recent_cmd_id_set: Set[str] = set()
         self._recent_tts_event_ids: Deque[str] = deque(maxlen=max(1, int(cfg.runtime.cmd_dedup_cache_size or 64)))
         self._recent_tts_event_id_set: Set[str] = set()
+        # ACK correlation retains only routing metadata, never prior TTS text.
+        self._tts_event_context: Dict[str, Dict[str, Any]] = {}
         self._snapshot: Dict[str, Any] = MobileStatus(
             robot_id=ROBOT_ID,
             session_id="",
@@ -1767,6 +1777,10 @@ class MobileGatewayService(BaseModule):
             self.tts_playback_sender.close()
         except Exception:
             pass
+        try:
+            self.orchestrator_tts_playback_sender.close()
+        except Exception:
+            pass
         if self.mqtt_adapter is not None:
             try:
                 self.mqtt_adapter.stop()
@@ -1850,9 +1864,16 @@ class MobileGatewayService(BaseModule):
                 self.log_info("tts", "duplicate tts_event ignored", {"event_id": event_id})
                 continue
             if len(self._recent_tts_event_ids) >= self._recent_tts_event_ids.maxlen:
-                self._recent_tts_event_id_set.discard(self._recent_tts_event_ids.popleft())
+                expired_event_id = self._recent_tts_event_ids.popleft()
+                self._recent_tts_event_id_set.discard(expired_event_id)
+                self._tts_event_context.pop(expired_event_id, None)
             self._recent_tts_event_ids.append(event_id)
             self._recent_tts_event_id_set.add(event_id)
+            self._tts_event_context[event_id] = {
+                "session_id": str(event.get("session_id", "") or ""),
+                "epoch": int(event.get("epoch", 0) or 0),
+                "cmd_id": str(event.get("cmd_id", "") or ""),
+            }
             if self.mqtt_adapter is not None:
                 self.mqtt_adapter.publish_tts_event(event)
             self.run_logger.write_jsonl("tts_event", event)
@@ -1868,13 +1889,26 @@ class MobileGatewayService(BaseModule):
         except Exception as exc:
             self.log_error("tts", "invalid tts_ack", {"error": str(exc)})
             return
+        # Mini-program ACKs commonly contain event_id/state only. Fill the
+        # original event's correlation fields without retaining or rewriting text.
+        context = self._tts_event_context.get(str(state.get("event_id", "")), {})
+        for field in ("session_id", "cmd_id"):
+            if not state.get(field) and context.get(field):
+                state[field] = context[field]
+        if not int(state.get("epoch", 0) or 0) and int(context.get("epoch", 0) or 0):
+            state["epoch"] = int(context["epoch"])
         sent = self.tts_playback_sender.send(state)
+        orchestrator_sent = self.orchestrator_tts_playback_sender.send(state)
         self.run_logger.write_jsonl("tts_playback_state", state)
         self.run_logger.write_ipc_record(
             "TX", "tts_playback_out", "forwarded" if sent else "forward_failed",
             msg_type="tts_playback_state", data={"event_id": state["event_id"], "payload": state}, ok=sent,
         )
-        self.log_info("tts", "[GATEWAY][ACK] forwarded", {"event_id": state["event_id"], "state": state["state"], "sent": bool(sent)})
+        self.run_logger.write_ipc_record(
+            "TX", "orchestrator_tts_playback_out", "forwarded" if orchestrator_sent else "forward_failed",
+            msg_type="tts_playback_state", data={"event_id": state["event_id"], "payload": state}, ok=orchestrator_sent,
+        )
+        self.log_info("tts", "[GATEWAY][ACK] forwarded", {"event_id": state["event_id"], "state": state["state"], "sent": bool(sent), "orchestrator_sent": bool(orchestrator_sent)})
 
     def _drain_ack_messages(self) -> None:
         if self.ack_server is None:

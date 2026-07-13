@@ -8,6 +8,7 @@ import sys
 from typing import Any, Iterable, Tuple
 
 from .schema import SystemGlobalConfig
+from common.target_catalog import load_target_catalog
 
 
 def _is_test_process() -> bool:
@@ -66,6 +67,7 @@ def _print_warnings(warnings) -> None:
 
 def validate_config(config: SystemGlobalConfig, force_production: bool = False) -> None:
     """Validate the final effective config before runtime use."""
+    load_target_catalog()
     warnings = []
     gateway_runtime = config.gateway.runtime
     task_input_mode = str(getattr(gateway_runtime, "task_input_mode", "") or "").strip().lower()

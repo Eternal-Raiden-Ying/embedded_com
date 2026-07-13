@@ -103,6 +103,7 @@ class TransitionsMixin:
             State.POST_GRASP_TURN_FIXED: "PICK_SUCCEEDED",
             State.RETURN_HOME: "PICK_SUCCEEDED",
             State.DONE: "TASK_COMPLETED",
+            State.LOCATE_GUIDANCE_ACTIVE: "LOCATE_GUIDANCE_STARTED",
         }.get(new_state)
         if old_state == State.GRASP and new_state == State.SEARCH_TARGET_INIT:
             self._emit_tts_event("PICK_FAILED", state=old_state.value)
@@ -113,7 +114,11 @@ class TransitionsMixin:
         if new_state == State.ERROR_RECOVERY:
             event_key = "PICK_FAILED" if old_state == State.GRASP else "TASK_TIMEOUT"
         if event_key:
-            self._emit_tts_event(event_key, state=new_state.value)
+            event = self._emit_tts_event(event_key, state=new_state.value)
+            if new_state == State.LOCATE_GUIDANCE_ACTIVE:
+                self.ctx.locate_guidance_event_id = str((event or {}).get("event_id", ""))
+                self.ctx.locate_tts_finished = False
+                self.ctx.locate_tts_deadline_mono = monotonic_ts() + max(0.0, float(getattr(self.cfg, "locate_tts_ack_timeout_s", 8.0) or 8.0))
         self._on_enter_state(new_state)
 
     def _frames_to_ms(self, frames: int) -> int:

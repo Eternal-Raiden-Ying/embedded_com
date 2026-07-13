@@ -13,7 +13,7 @@ class VoiceConsoleConfig:
 @dataclass
 class VoiceLexiconConfig:
     intents: List[str] = field(default_factory=lambda: ["FIND", "RETURN", "STOP"])
-    targets: List[str] = field(default_factory=lambda: ["apple", "banana", "bottle", "key", "mouse"])
+    targets: List[str] = field(default_factory=list)  # generated from common.target_catalog at runtime
     asr_hotwords: List[str] = field(default_factory=list)
 
 @dataclass

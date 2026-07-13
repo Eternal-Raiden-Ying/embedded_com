@@ -558,7 +558,6 @@ orchestrator:
       "瓶子": 30.0
       "apple": 50.0
       "bottle": 30.0
-      "kiwi_fruit": 20.0
   car:
     grasp_reposition_speed_cm_s: 10.0 # Base reposition speed during grasp retry
     pre_arm_stop_settle_ms: 150 # Stop settle before sending arm POSE
@@ -750,24 +749,7 @@ orchestrator:
     transport: "disabled" # Audio TTS event output channel mode
     ipc_socket_path: "/tmp/robot_stack/tts_event.sock" # Socket file path
     async_enabled: true # Enable async socket operations
-  frozen_targets:
-    bottle: ["瓶子", "水瓶", "饮料瓶"]
-    key: ["钥匙", "钥匙串"]
-    keys: ["钥匙", "钥匙串"]
-    apple: ["苹果"]
-    banana: ["香蕉"]
-    basket: ["篮子"]
-    grape: ["葡萄"]
-    kiwi fruit: ["猕猴桃", "奇异果"]
-    kiwi: ["猕猴桃", "奇异果"]
-    lemon: ["柠檬"]
-    mango: ["芒果"]
-    mouse: ["鼠标"]
-    orange: ["橙子"]
-    peach: ["桃子"]
-    star fruit: ["杨桃"]
-    starfruit: ["杨桃"]
-    strawberry: ["草莓"]
+  frozen_targets: {} # legacy compatibility only; use configs/target_catalog.yaml
 
 ### === Mobile Gateway Configuration === ###
 gateway:

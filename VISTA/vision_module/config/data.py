@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from typing import Dict, Iterable, Tuple
 
+from common.target_catalog import model_class_names
+
 
 def normalize_class_name(name: object) -> str:
     return " ".join(str(name or "").strip().lower().split())
@@ -142,23 +144,7 @@ grasping_coco20 = (
     "toothbrush",
 )
 
-finetune_yolo26s_bgr15 = (
-    "table1",
-    "apple",
-    "banana",
-    "basket",
-    "bottle",
-    "grape",
-    "key",
-    "kiwi fruit",
-    "lemon",
-    "mango",
-    "mouse",
-    "orange",
-    "peach",
-    "star fruit",
-    "strawberry",
-)
+finetune_yolo26s_bgr15 = tuple(model_class_names())
 
 COCO80_CLASSES = normalize_class_names(coco80)
 GRASPING_COCO20_CLASSES = normalize_class_names(grasping_coco20)
@@ -169,31 +155,7 @@ FINETUNE_YOLO26S_BGR15_CLASSES = normalize_class_names(finetune_yolo26s_bgr15)
 #            asr vocabulary             #
 #########################################
 
-asr_class_map = {
-    "cup": set(),
-    "bottle": {"bottle"},
-    "phone": set(),
-    "remote": set(),
-    "apple": {"apple"},
-    "banana": {"banana"},
-    "basket": {"basket"},
-    "grape": {"grape"},
-    "key": {"key"},
-    "keys": {"key"},
-    "kiwi": {"kiwi fruit"},
-    "kiwi fruit": {"kiwi fruit"},
-    "lemon": {"lemon"},
-    "mango": {"mango"},
-    "mouse": {"mouse"},
-    "orange": {"orange"},
-    "peach": {"peach"},
-    "star fruit": {"star fruit"},
-    "starfruit": {"star fruit"},
-    "strawberry": {"strawberry"},
-    "book": set(),
-    # The following targets do not have a reliable class in the current model.
-    "medicine_box": set(),
-    "wallet": set(),
-}
+# Compatibility export only. Target alias resolution is in common.target_catalog.
+asr_class_map = {}
 
 ASR_VOCAB_MAP = normalize_vocab_map(asr_class_map)

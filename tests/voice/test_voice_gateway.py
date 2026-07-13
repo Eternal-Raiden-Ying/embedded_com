@@ -47,46 +47,17 @@ def test_path_resolution():
 
 def test_intent_matching():
     interpreter = CommandInterpreter()
-    
-    # 1. 帮我拿苹果 -> FIND/apple
-    intent, target, score = interpreter.infer_intent_and_target("帮我拿苹果")
-    assert intent == "FIND"
-    assert target == "apple"
-    
-    # 2. 帮我拿水瓶 -> FIND/bottle
-    intent, target, score = interpreter.infer_intent_and_target("帮我拿水瓶")
-    assert intent == "FIND"
-    assert target == "bottle"
-    
-    # 3. 帮我拿香蕉 -> FIND/banana
-    intent, target, score = interpreter.infer_intent_and_target("帮我拿香蕉")
-    assert intent == "FIND"
-    assert target == "banana"
-    
-    # 4. 帮我拿钥匙 -> FIND/key
-    intent, target, score = interpreter.infer_intent_and_target("帮我拿钥匙")
-    assert intent == "FIND"
-    assert target == "key"
-    
-    # 5. 帮我拿鼠标 -> FIND/mouse
-    intent, target, score = interpreter.infer_intent_and_target("帮我拿鼠标")
-    assert intent == "FIND"
-    assert target == "mouse"
-    
-    # 6. 回来 -> RETURN
-    intent, target, score = interpreter.infer_intent_and_target("回来")
-    assert intent == "RETURN"
-    assert target is None
-    
-    # 7. 停止 -> STOP
-    intent, target, score = interpreter.infer_intent_and_target("停止")
-    assert intent == "STOP"
-    assert target is None
-    
-    # 8. 小车停止 -> STOP
-    intent, target, score = interpreter.infer_intent_and_target("小车停止")
-    assert intent == "STOP"
-    assert target is None
+    cases = [
+        ("\u5e2e\u6211\u62ff\u82f9\u679c", "apple"), ("\u627e\u6c34\u74f6", "bottle"),
+        ("\u627e\u836f\u74f6", "pill_bottle"), ("\u627e\u836f\u76d2", "pill_box"),
+        ("\u627e\u70ed\u6c34\u5668", "water_dispenser"), ("\u627e\u996e\u6c34\u673a", "water_dispenser"),
+        ("\u627e\u5f00\u6c34\u673a", "water_dispenser"),
+    ]
+    for text, expected in cases:
+        intent, target, _ = interpreter.infer_intent_and_target(text)
+        assert (intent, target) == ("FIND", expected)
+    assert interpreter.infer_intent_and_target("\u627e\u4e00\u53f7\u684c\u9762")[0] == "REJECT"
+    assert interpreter.infer_intent_and_target("\u627e\u6536\u7eb3\u7b50")[0] == "REJECT"
 
 
 def test_stop_state_updates():
@@ -271,85 +242,13 @@ def test_ack_routing():
     assert ack["accepted"] is True
 
 
-@pytest.mark.skipif(not HAS_ORCH, reason="orchestrator_service package not importable")
 def test_target_catalog_rejection():
-    # 1. Verify target_catalog status lookup
-    import yaml
-    repo_root = Path(__file__).resolve().parents[2]
-    catalog_path = repo_root / "configs" / "target_catalog.yaml"
-    assert catalog_path.exists()
-    
-    with open(catalog_path, "r", encoding="utf-8") as f:
-        cat = yaml.safe_load(f)
-        targets = cat.get("targets", {})
-        
-    assert targets["apple"]["status"] == "executable"
-    assert targets["key"]["status"] == "executable"
-    assert targets["remote"]["status"] == "model_pending"
-    assert targets["medicine_box"]["status"] == "model_pending"
-    assert targets["eye_drops"]["status"] == "model_pending"
-    assert targets["nail_clipper"]["status"] == "model_pending"
-    assert targets["battery"]["status"] == "model_pending"
-
-    # 2. Test mock orchestrator handle_task_cmd capability gating
-    from orchestrator_service.ipc.protocol import TaskCmd
-    from orchestrator_service.runtime.task_runtime import TaskRuntimeMixin
-    from orchestrator_service.runtime.transitions import RuntimeContext
-    
-    class MockConfig:
-        post_stop_ignore_s = 1.0
-        cmd_confidence_th = 0.5
-        
-    class MockOrchestrator(TaskRuntimeMixin):
-        def __init__(self):
-            self.ctx = RuntimeContext()
-            self.cfg = MockConfig()
-            self._last_stop_mono = 0
-            self.tts_calls = []
-            self.find_calls = []
-            
-        def _log(self, level, msg):
-            pass
-            
-        def _queue_tts(self, text):
-            self.tts_calls.append(text)
-            
-        def _start_find_task(self, cmd):
-            self.find_calls.append(cmd)
-
-    orch = MockOrchestrator()
-    
-    # Test remote (model_pending)
-    cmd_remote = TaskCmd.from_dict({
-        "intent": "FIND",
-        "target": "remote",
-        "cmd_id": "cr",
-        "confidence": 0.8,
-        "ts": time.time(),
-        "epoch": 0,
-        "session_id": "s1"
-    }, {"apple", "banana", "key", "mouse", "remote"})
-    accepted, reason = orch.handle_task_cmd(cmd_remote)
-    assert not accepted
-    assert reason == "target_recognized_but_not_executable"
-    assert "该物品模型尚在开发中，无法获取" in orch.tts_calls
-    assert len(orch.find_calls) == 0
-    
-    # Test key (executable)
-    orch.tts_calls.clear()
-    cmd_key = TaskCmd.from_dict({
-        "intent": "FIND",
-        "target": "key",
-        "cmd_id": "ck",
-        "confidence": 0.8,
-        "ts": time.time(),
-        "epoch": 0,
-        "session_id": "s1"
-    }, {"apple", "banana", "key", "mouse", "remote"})
-    accepted, reason = orch.handle_task_cmd(cmd_key)
-    assert accepted
-    assert reason == "accepted"
-    assert len(orch.find_calls) == 1
+    from common.target_catalog import resolve_target, target_to_class_id
+    assert target_to_class_id("apple") == 2
+    assert target_to_class_id("bottle") == 5
+    assert target_to_class_id("basket") == 4
+    assert target_to_class_id("water_dispenser") == 14
+    assert resolve_target("kiwi_fruit") is None
 
 
 def test_voice_new_config_structures():

@@ -126,6 +126,8 @@ class OrchestratorCore(ExportStateMixin, VisionSyncMixin, TransitionsMixin, Task
                 State.ERROR_RECOVERY: self._tick_error_recovery,
                 State.DONE: self._tick_done,
                 State.GRASP: self._tick_grasp,
+                State.LOCATE_GUIDANCE_ACTIVE: self._tick_locate_guidance_active,
+                State.WAIT_USER_APPROACH: self._tick_wait_user_approach,
             }
             decision = dispatch.get(self.ctx.state, self._tick_idle)()
         decision = self._apply_soft_interception_and_safety(decision)

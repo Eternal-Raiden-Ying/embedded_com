@@ -62,6 +62,11 @@ class UartBridge:
         self.sent_count = 0
         self.send_fail_count = 0
         self.replaced_pending_count = 0
+        self.ring_active = False
+        self.ring_target = ""
+        self.ring_started_at = 0.0
+        self.ring_command_sent = False
+        self.last_ring_ack = ""
 
     def _log(self, level: str, msg: str, *args):
         if self._logger:
@@ -250,6 +255,44 @@ class UartBridge:
             self._write_line(command_line, tx_meta=tx_meta)
         return True
 
+    def ring_start(self, target: str = "", tx_meta: Optional[Dict[str, Any]] = None) -> bool:
+        """Idempotent non-blocking RING command; dry-run records the simulated send."""
+        if self.ring_active:
+            return True
+        meta = dict(tx_meta or {})
+        meta.update({"kind": "ring", "target": str(target or ""), "ring_action": "start"})
+        sent = self.send_motion_line_now("RING", tx_meta=meta)
+        if sent:
+            self.ring_active = True
+            self.ring_target = str(target or "")
+            self.ring_started_at = time.time()
+            self.ring_command_sent = True
+        return bool(sent)
+
+    def ring_stop(self, tx_meta: Optional[Dict[str, Any]] = None) -> bool:
+        """Idempotent best-effort RING_STOP; it never waits for an MCU ACK."""
+        if not self.ring_active and not self.ring_command_sent:
+            return True
+        meta = dict(tx_meta or {})
+        meta.update({"kind": "ring", "target": self.ring_target, "ring_action": "stop"})
+        sent = self.send_motion_line_now("RING_STOP", tx_meta=meta)
+        if sent:
+            self.ring_active = False
+            self.ring_target = ""
+            self.ring_started_at = 0.0
+            self.ring_command_sent = False
+        return bool(sent)
+
+    def handle_ring_ack(self, line: str) -> bool:
+        normalized = str(line or "").strip().upper()
+        if normalized not in {"OK RING", "OK RING_STOP"}:
+            return False
+        self.last_ring_ack = normalized
+        if normalized == "OK RING_STOP":
+            self.ring_active = False
+            self.ring_command_sent = False
+        return True
+
     def drain_rx_lines(self) -> List[str]:
         items: List[str] = []
         while True:
@@ -277,6 +320,11 @@ class UartBridge:
             "last_rx_ts": self.last_rx_ts,
             "last_tx_error": self.last_tx_error,
             "link_state": self._link_state(),
+            "ring_active": self.ring_active,
+            "ring_target": self.ring_target,
+            "ring_started_at": self.ring_started_at,
+            "ring_command_sent": self.ring_command_sent,
+            "last_ring_ack": self.last_ring_ack,
         }
 
     def _link_state(self) -> str:

@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import json
 import os
-from pathlib import Path
 
 import numpy as np
 
-from ..config.data import ASR_VOCAB_MAP, COCO80_CLASSES, normalize_class_name, normalize_class_names, normalize_vocab_map
+from ..config.data import COCO80_CLASSES, normalize_class_name, normalize_class_names
 
 
 def _center_priority(x1, y1, x2, y2, w, h):
@@ -26,42 +24,19 @@ def _resolve_class_names(class_names) -> tuple:
     return COCO80_CLASSES
 
 
-_TARGET_ALIAS_CACHE = {"path": None, "aliases": {}}
-
-
-def _target_alias_file() -> str:
-    default_path = Path(__file__).resolve().parents[2] / "configs" / "target_aliases.json"
-    return str(os.getenv("VISTA_TARGET_ALIAS_FILE", str(default_path)) or "").strip()
-
-
-def _load_target_aliases() -> dict:
-    path = _target_alias_file()
-    if _TARGET_ALIAS_CACHE.get("path") == path:
-        return dict(_TARGET_ALIAS_CACHE.get("aliases") or {})
-    aliases = {}
-    if path and Path(path).is_file():
-        try:
-            raw = json.loads(Path(path).read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                aliases = normalize_vocab_map(raw)
-        except Exception:
-            aliases = {}
-    _TARGET_ALIAS_CACHE["path"] = path
-    _TARGET_ALIAS_CACHE["aliases"] = aliases
-    return dict(aliases)
-
-
 def resolve_target_classes(target: str, class_names=None) -> set:
-    normalized_target = normalize_class_name(target)
-    if not normalized_target:
+    """Resolve only catalog targets; unknown or retired names are rejected."""
+    from common.target_catalog import resolve_target
+    spec = resolve_target(target)
+    if spec is None:
         return set()
-    valid_names = set(ASR_VOCAB_MAP.get(normalized_target, set()))
-    valid_names.update(_load_target_aliases().get(normalized_target, set()))
-    resolved_class_names = set(_resolve_class_names(class_names))
-    if normalized_target in resolved_class_names:
-        valid_names.add(normalized_target)
-    return {name for name in valid_names if name}
+    available = set(_resolve_class_names(class_names))
+    return {spec.canonical_name} if spec.canonical_name in available else set()
 
+
+def resolve_target_class_id(target: str):
+    from common.target_catalog import target_to_class_id
+    return target_to_class_id(target)
 
 def _target_min_conf() -> float:
     try:
@@ -237,8 +212,13 @@ def compute_target_obs(
         name = str(det.get("cls_name") or "")
         if name and name not in all_candidate_classes:
             all_candidate_classes.append(name)
+    from common.target_catalog import resolve_target
+    target_spec = resolve_target(target)
     return {
-        "target": target,
+        "target": target_spec.canonical_name if target_spec else str(target),
+        "canonical_target": target_spec.canonical_name if target_spec else "",
+        "model_class_name": matched["cls_name"],
+        "class_id": int(matched["cls_id"]),
         "target_found": True,
         "matched_cls": matched["cls_name"],
         "matched_class_id": int(matched["cls_id"]),

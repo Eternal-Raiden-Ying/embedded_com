@@ -78,11 +78,11 @@ def test_structured_fields_priority_target_and_switch_copy():
     pending, emitter = [], TtsFeedbackEmitter(policy())
     accepted = emit(emitter, pending, "TASK_ACCEPTED", target="apple")
     switched = emit(emitter, pending, "TASK_SWITCHED", session="session-2", target="bottle", old_target="apple")
-    success = emit(emitter, pending, "PICK_SUCCEEDED", session="session-3", target="kiwi_fruit")
+    success = emit(emitter, pending, "PICK_SUCCEEDED", session="session-3", target="bottle")
     basket = emit(emitter, pending, "TASK_ACCEPTED", session="session-4", target="basket")
     assert accepted["text"] == "\u5df2\u6536\u5230\uff0c\u51c6\u5907\u5bfb\u627e\u82f9\u679c\u3002"
     assert switched["text"] == "\u5df2\u53d6\u6d88\u82f9\u679c\u4efb\u52a1\uff0c\u6b63\u5728\u6539\u4e3a\u5bfb\u627e\u6c34\u74f6\u3002"
-    assert success["text"] == "\u5df2\u7ecf\u62ff\u5230\u7315\u7334\u6843\u3002"
+    assert success["text"] == "\u5df2\u7ecf\u62ff\u5230\u6c34\u74f6\u3002"
     assert basket["text"] == "\u5df2\u6536\u5230\uff0c\u51c6\u5907\u5bfb\u627e\u6536\u7eb3\u7b50\u3002"
     assert accepted["dedupe_key"] == "session-1:1:TASK_ACCEPTED:apple"
     assert accepted["created_at"] <= accepted["expires_at"]

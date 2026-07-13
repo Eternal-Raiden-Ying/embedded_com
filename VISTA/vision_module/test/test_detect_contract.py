@@ -30,21 +30,9 @@ from vision_module.utils.detect import compute_target_obs
 
 
 FINETUNE_CLASSES = (
-    "table1",
-    "apple",
-    "banana",
-    "basket",
-    "bottle",
-    "grape",
-    "key",
-    "kiwi fruit",
-    "lemon",
-    "mango",
-    "mouse",
-    "orange",
-    "peach",
-    "star fruit",
-    "strawberry",
+    "table1", "table2", "apple", "banana", "basket", "bottle", "cellphone",
+    "charger", "cup", "orange", "pill_bottle", "pill_box", "tea", "tissue",
+    "water_dispenser",
 )
 
 
@@ -85,7 +73,7 @@ class DetectClassVocabularyTest(unittest.TestCase):
         class_names = tuple(profile.classes)
         self.assertEqual(profile.class_num, len(class_names))
         self.assertIn("apple", class_names)
-        self.assertEqual(class_names.index("apple"), 1)
+        self.assertEqual(class_names.index("apple"), 2)
         self.assertNotIn("tag_home", class_names)
         self.assertNotIn("tag_station", class_names)
 

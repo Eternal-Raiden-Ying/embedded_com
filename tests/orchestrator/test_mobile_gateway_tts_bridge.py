@@ -68,6 +68,8 @@ class _MqttPublishSpy:
 
 @pytest.mark.parametrize("transport", ["tcp", "uds"])
 def test_tts_bridge_forwards_framed_event_and_playback_state(tmp_path: Path, transport: str):
+    if transport == "uds" and sys.platform.startswith("win"):
+        pytest.skip("UDS transport is unavailable on Windows")
     cfg = SystemGlobalConfig().gateway
     cfg.runtime.log_enabled = False
     cfg.runtime.status_stdout = False
@@ -78,15 +80,19 @@ def test_tts_bridge_forwards_framed_event_and_playback_state(tmp_path: Path, tra
     cfg.backend.mode = "mock"
     cfg.tts_event_in.transport = transport
     cfg.tts_playback_out.transport = transport
+    cfg.orchestrator_tts_playback_out.transport = transport
 
     if transport == "tcp":
         cfg.tts_event_in.tcp_host = "127.0.0.1"
         cfg.tts_event_in.tcp_port = _free_port()
         cfg.tts_playback_out.tcp_host = "127.0.0.1"
         cfg.tts_playback_out.tcp_port = _free_port()
+        cfg.orchestrator_tts_playback_out.tcp_host = "127.0.0.1"
+        cfg.orchestrator_tts_playback_out.tcp_port = _free_port()
     else:
         cfg.tts_event_in.ipc_socket_path = str(tmp_path / "mobile_tts_event.sock")
         cfg.tts_playback_out.ipc_socket_path = str(tmp_path / "tts_playback.sock")
+        cfg.orchestrator_tts_playback_out.ipc_socket_path = str(tmp_path / "orchestrator_tts_playback.sock")
 
     playback_server = JsonlInboundServer(
         mode=transport,
@@ -96,6 +102,14 @@ def test_tts_bridge_forwards_framed_event_and_playback_state(tmp_path: Path, tra
         name="test_tts_playback",
     )
     playback_server.start()
+    orchestrator_playback_server = JsonlInboundServer(
+        mode=transport,
+        tcp_host=cfg.orchestrator_tts_playback_out.tcp_host,
+        tcp_port=cfg.orchestrator_tts_playback_out.tcp_port,
+        uds_path=cfg.orchestrator_tts_playback_out.ipc_socket_path,
+        name="test_orchestrator_tts_playback",
+    )
+    orchestrator_playback_server.start()
     service = MobileGatewayService(cfg)
     service.mqtt_adapter = _MqttPublishSpy()
     sender = JsonlClientSender(
@@ -110,6 +124,8 @@ def test_tts_bridge_forwards_framed_event_and_playback_state(tmp_path: Path, tra
         service.start()
         orch_tts_event = make_tts_event("开始寻找 apple")
         orch_tts_event["event_id"] = "evt-1"
+        orch_tts_event["session_id"] = "session-1"
+        orch_tts_event["epoch"] = 7
         assert sender.send(orch_tts_event)
         assert sender.send(orch_tts_event)
         deadline = time.monotonic() + 2.0
@@ -136,10 +152,15 @@ def test_tts_bridge_forwards_framed_event_and_playback_state(tmp_path: Path, tra
         assert playback_state["event_id"] == "evt-1"
         assert playback_state["state"] == "finished"
         assert playback_state["source"] == "mini_program"
+        assert playback_state["session_id"] == "session-1"
+        assert playback_state["epoch"] == 7
+        orchestrator_playback = _wait_for_items(orchestrator_playback_server)
+        assert orchestrator_playback[0]["payload"] == playback_state
     finally:
         sender.close()
         service.stop()
         playback_server.close()
+        orchestrator_playback_server.close()
 
 
 class _FakeMqttClient:
@@ -186,6 +207,8 @@ def test_mqtt_adapter_playback_only_routes_tts_ack_and_rejects_cmd_subscription(
 
 
 def test_sc171_voice_phone_tts_profile_routes_orchestrator_to_gateway(monkeypatch):
+    if sys.platform.startswith("win"):
+        pytest.skip("full Phone-TTS profile uses board UDS endpoints; validate on Linux board")
     monkeypatch.setenv("SYSTEM_CONFIG_PROFILE", "sc171_voice_phone_tts")
     cfg = load_global_config(str(ROOT / "configs" / "system_config.yaml"))
 
@@ -197,3 +220,5 @@ def test_sc171_voice_phone_tts_profile_routes_orchestrator_to_gateway(monkeypatc
     assert cfg.gateway.tts_event_in.ipc_socket_path == "/tmp/robot_stack/mobile_tts_event.sock"
     assert cfg.gateway.tts_playback_out.transport == "uds"
     assert cfg.gateway.tts_playback_out.ipc_socket_path == "/tmp/robot_stack/tts_playback.sock"
+    assert cfg.orchestrator.tts_playback_in.ipc_socket_path == "/tmp/robot_stack/orchestrator_tts_playback.sock"
+    assert cfg.gateway.orchestrator_tts_playback_out.ipc_socket_path == "/tmp/robot_stack/orchestrator_tts_playback.sock"

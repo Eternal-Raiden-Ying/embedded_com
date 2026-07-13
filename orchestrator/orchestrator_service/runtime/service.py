@@ -361,6 +361,9 @@ class OrchestratorService(BaseModule):
         )
         self.task_server = self._build_server(cfg.task_cmd_in, "task_cmd_in")
         self.vision_server = self._build_server(cfg.vision_obs_in, "vision_obs_in")
+        self.tts_playback_server = None
+        if str(cfg.tts_playback_in.transport).strip().lower() != "disabled":
+            self.tts_playback_server = self._build_server(cfg.tts_playback_in, "tts_playback_in")
         self.task_ack_sender = self._build_sender(cfg.task_ack_out, "task_ack_out", async_allowed=False)
         self.vision_req_sender = self._build_sender(cfg.vision_req_out, "vision_req_out", async_allowed=True)
         self.tts_sender = self._build_sender(cfg.tts_event_out, "tts_event_out", async_allowed=True)
@@ -696,6 +699,12 @@ class OrchestratorService(BaseModule):
         )
         self._state_enter_mono_ns = time.monotonic_ns()
         self._transition_pending_state = str(new_state)
+        if new_state == "WAIT_USER_APPROACH":
+            ring_sent = self.uart.ring_start(self.core.ctx.canonical_target or self.core.ctx.active_target or "", tx_meta={"state": new_state, "reason": reason})
+            self.run_logger.write_jsonl("ring_started", {"state": new_state, "target": self.core.ctx.active_target, "sent": bool(ring_sent)})
+        if old_state == "WAIT_USER_APPROACH" and new_state != "WAIT_USER_APPROACH":
+            self.uart.ring_stop(tx_meta={"state": new_state, "reason": reason})
+            self.core._emit_tts_event("RING_STOPPED", state=new_state)
         if old_state == "FINAL_SLOW_STOP" and new_state not in {"FINAL_SLOW_STOP", "AT_TABLE_EDGE", "DONE"}:
             self.core.ctx.clear_close_final_latches()
             self.core.ctx.clear_final_enter_candidate()
@@ -2244,6 +2253,8 @@ class OrchestratorService(BaseModule):
         self.uart.start()
         self.task_server.start()
         self.vision_server.start()
+        if self.tts_playback_server is not None:
+            self.tts_playback_server.start()
         self._running = True
         self.run_logger.write_service_event("SERVICE_READY", run_dir=str(self.run_logger.run_dir))
         effective_dry_run = bool(getattr(self.uart, "dry_run", self.cfg.serial.dry_run))
@@ -2260,6 +2271,10 @@ class OrchestratorService(BaseModule):
         self._running = False
         self.run_logger.write_service_event("SERVICE_STOPPING", state=self.core.ctx.state.value)
         try:
+            self.uart.ring_stop(tx_meta={"state": self.core.ctx.state.value, "reason": "service_stop"})
+        except Exception:
+            pass
+        try:
             self.uart.send_stop(tx_meta={
                 "mode": "STOP",
                 "kind": "stop",
@@ -2274,6 +2289,8 @@ class OrchestratorService(BaseModule):
         self.arm_bridge.close()
         self.task_server.close()
         self.vision_server.close()
+        if self.tts_playback_server is not None:
+            self.tts_playback_server.close()
         self.task_ack_sender.close()
         self.vision_req_sender.close()
         self.tts_sender.close()
@@ -2292,6 +2309,7 @@ class OrchestratorService(BaseModule):
                 loop_start_ns = time.monotonic_ns()
                 self._drain_async_tx_results()
                 self._drain_uart_feedback()
+                self._drain_tts_playback_states()
                 self._drain_task_cmds()
                 self._drain_vision_msgs()
                 if self._check_manual_drive_timeout():
@@ -2445,6 +2463,27 @@ class OrchestratorService(BaseModule):
                 )
                 self.run_logger.write_timeline("TTS_EVENT_SEND", text=payload.get("text"), sent=ok, interrupt=payload.get("interrupt", False))
 
+    def handle_tts_playback_state(self, payload: Dict[str, Any]) -> bool:
+        accepted = bool(self.core.handle_tts_playback_state(payload))
+        if accepted:
+            self.run_logger.write_timeline("TTS_PLAYBACK_FINISHED", event_id=payload.get("event_id"))
+        return accepted
+
+    def _drain_tts_playback_states(self):
+        """Accept the Mobile Gateway's unchanged playback ACK envelope."""
+        if self.tts_playback_server is None:
+            return
+        for item in self.tts_playback_server.drain():
+            payload = item.get("payload") or {}
+            if not isinstance(payload, dict):
+                continue
+            accepted = self.handle_tts_playback_state(dict(payload))
+            self.run_logger.write_ipc_record(
+                "RX", "tts_playback_in", "accepted" if accepted else "ignored",
+                msg_type=str(payload.get("type", "tts_playback_state")),
+                data={"event_id": payload.get("event_id"), "payload": payload}, ok=accepted,
+            )
+
     def _drain_uart_feedback(self):
         for raw in self.uart.drain_rx_lines():
             ack_mono_ns = time.monotonic_ns()
@@ -2469,6 +2508,9 @@ class OrchestratorService(BaseModule):
                 raw=str(raw),
                 **ack_context,
             )
+            if self.uart.handle_ring_ack(raw):
+                self.run_logger.write_timeline("RING_ACK", raw=str(raw))
+                continue
             state = parse_car_state_line(raw)
             if state is not None:
                 self._update_stm32_motion_status(state)
@@ -3085,7 +3127,7 @@ class OrchestratorService(BaseModule):
         for item in raw_items:
             payload = item["payload"]
             try:
-                cmd = TaskCmd.from_dict(payload, set(self.cfg.frozen_targets.keys()))
+                cmd = TaskCmd.from_dict(payload, set(supported_targets(selectable_only=True)))
             except Exception as exc:
                 self._last_task_cmd_recv_ts = float(item.get("recv_ts", time.time()))
                 self.log_ipc("RX", "task_cmd", "received", {"cmd_id": payload.get("cmd_id"), "intent": payload.get("intent")})

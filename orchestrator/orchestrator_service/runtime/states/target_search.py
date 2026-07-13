@@ -24,6 +24,7 @@ from ...ipc.protocol import (
 from ...bridge.arm_protocol import parse_arm_response
 from ...utils.grasp_utils import grasp_to_pose_params
 from ...utils.target_utils import resolve_target, target_to_class_id
+from ..target_policy import route_locked_target
 from ..common import monotonic_ts
 from ..context import RuntimeContext, State
 from ..controller import MotionController, MotionDecision
@@ -898,15 +899,16 @@ class TargetSearchMixin:
     def _tick_freeze_base(self) -> MotionDecision:
         if self._state_elapsed() < float(self.cfg.freeze_settle_s):
             return self.controller.stop_cmd("FREEZE_BASE")
-        if self.ctx.active_target:
-            self._log("info", "freeze_base_stop_barrier_done")
-            self._transition(State.GRASP, f"freeze_base_to_grasp target={self.ctx.active_target}")
-            self._log("info", "freeze_base_to_grasp")
-            self._queue_tts(f"已锁定 {self.ctx.active_target}，开始抓取")
-            return self.controller.stop_cmd("GRASP")
-        self._transition(State.DONE, f"已在桌边锁定 {self.ctx.active_target}")
-        self._queue_tts(f"已在桌边锁定 {self.ctx.active_target}")
-        return self.controller.stop_cmd("DONE")
+        spec = resolve_target(self.ctx.canonical_target or self.ctx.active_target or "")
+        if spec is None:
+            self._transition(State.DONE, "target_catalog_missing_after_lock")
+            return self.controller.stop_cmd("DONE")
+        route = route_locked_target(spec)
+        if route.tts_event:
+            self._emit_tts_event(route.tts_event, state=State.FREEZE_BASE.value)
+        next_state = State(route.next_state)
+        self._transition(next_state, f"target_policy={spec.action_policy} target={spec.canonical_name}")
+        return self.controller.stop_cmd(next_state.value)
 
     def _target_matches_active(self, obs: TargetObs) -> bool:
         if not self.ctx.active_target:

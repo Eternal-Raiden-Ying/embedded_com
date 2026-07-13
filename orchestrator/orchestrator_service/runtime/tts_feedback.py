@@ -29,6 +29,13 @@ EVENT_CATALOG = {
     "TASK_TIMEOUT": ("\u6682\u65f6\u6ca1\u6709\u627e\u5230{target_name}\u3002", "P2", "basic"),
     "TASK_COMPLETED": ("{target_name}\u5df2\u7ecf\u53d6\u5230\u3002", "P1", "basic"),
     "SYSTEM_RECOVERED": ("\u7cfb\u7edf\u5df2\u7ecf\u6062\u590d\uff0c\u53ef\u4ee5\u7ee7\u7eed\u4f7f\u7528\u3002", "P2", "basic"),
+    "LOCATE_TARGET_ACCEPTED": ("\u5df2\u6536\u5230\uff0c\u51c6\u5907\u5bfb\u627e{target_name}\u3002", "P2", "basic"),
+    "LOCATE_TARGET_FOUND": ("\u5df2\u7ecf\u627e\u5230{target_name}\uff0c\u6b63\u5728\u9760\u8fd1\u3002", "P3", "detailed"),
+    "LOCATE_GUIDANCE_STARTED": ("\u5df2\u7ecf\u5230\u8fbe{target_name}\u9644\u8fd1\uff0c\u8bf7\u5faa\u7740\u58f0\u97f3\u9760\u8fd1\u673a\u5668\u4eba\u3002", "P1", "basic"),
+    "RING_STARTED": ("", "P3", "detailed"),
+    "RING_STOPPED": ("\u54cd\u94c3\u5df2\u7ecf\u505c\u6b62\u3002", "P2", "basic"),
+    "UNSUPPORTED_GRASP_TARGET": ("\u5df2\u7ecf\u627e\u5230{target_name}\uff0c\u4f46\u5f53\u524d\u4e0d\u652f\u6301\u6293\u53d6\u8fd9\u4e2a\u7269\u54c1\u3002", "P1", "basic"),
+    "RECIPE_NOT_READY": ("\u5df2\u7ecf\u627e\u5230{target_name}\uff0c\u4f46\u5f53\u524d\u8fd8\u6ca1\u6709\u914d\u7f6e\u5bf9\u5e94\u7684\u6293\u53d6\u52a8\u4f5c\u3002", "P1", "basic"),
 }
 
 _VERBOSITY = {"off": 0, "basic": 1, "detailed": 2}

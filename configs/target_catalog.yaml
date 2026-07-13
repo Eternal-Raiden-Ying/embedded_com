@@ -1,40 +1,22 @@
+version: 1
+model:
+  name: finetune_yolo_15_class
+  class_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
 targets:
-  apple:
-    status: "executable"
-  banana:
-    status: "executable"
-  basket:
-    status: "executable"
-  bottle:
-    status: "executable"
-  grape:
-    status: "executable"
-  key:
-    status: "executable"
-  kiwi_fruit:
-    status: "executable"
-  lemon:
-    status: "executable"
-  mango:
-    status: "executable"
-  mouse:
-    status: "executable"
-  orange:
-    status: "executable"
-  peach:
-    status: "executable"
-  star_fruit:
-    status: "executable"
-  strawberry:
-    status: "executable"
-
-  remote:
-    status: "model_pending"
-  medicine_box:
-    status: "model_pending"
-  eye_drops:
-    status: "model_pending"
-  nail_clipper:
-    status: "model_pending"
-  battery:
-    status: "model_pending"
+  table1: {class_id: 0, canonical_name: table1, display_name: "\u4e00\u53f7\u684c\u9762", aliases: [], role: navigation_anchor, action_policy: docking_only, support_status: navigation_only, grasp_recipe: null, selectable: false}
+  table2: {class_id: 1, canonical_name: table2, display_name: "\u4e8c\u53f7\u684c\u9762", aliases: [], role: navigation_anchor, action_policy: docking_only, support_status: navigation_only, grasp_recipe: null, selectable: false}
+  apple: {class_id: 2, canonical_name: apple, display_name: "\u82f9\u679c", aliases: ["\u82f9\u679c", "\u7ea2\u82f9\u679c"], role: graspable, action_policy: fixed_grasp, support_status: ready, grasp_recipe: apple, selectable: true}
+  banana: {class_id: 3, canonical_name: banana, display_name: "\u9999\u8549", aliases: ["\u9999\u8549"], role: graspable, action_policy: fixed_grasp, support_status: unverified, grasp_recipe: null, selectable: true}
+  basket: {class_id: 4, canonical_name: basket, display_name: "\u6536\u7eb3\u7b50", aliases: ["\u6536\u7eb3\u7b50", "\u7bee\u5b50", "\u6536\u7eb3\u7bee"], role: destination, action_policy: place_destination, support_status: destination_only, grasp_recipe: null, selectable: false}
+  bottle: {class_id: 5, canonical_name: bottle, display_name: "\u6c34\u74f6", aliases: ["\u6c34\u74f6", "\u74f6\u5b50", "\u77ff\u6cc9\u6c34\u74f6"], role: graspable, action_policy: fixed_grasp, support_status: ready, grasp_recipe: bottle, selectable: true}
+  cellphone: {class_id: 6, canonical_name: cellphone, display_name: "\u624b\u673a", aliases: ["\u624b\u673a", "\u79fb\u52a8\u7535\u8bdd"], role: graspable, action_policy: fixed_grasp, support_status: unverified, grasp_recipe: null, selectable: true}
+  charger: {class_id: 7, canonical_name: charger, display_name: "\u5145\u7535\u5668", aliases: ["\u5145\u7535\u5668", "\u5145\u7535\u5934"], role: graspable, action_policy: fixed_grasp, support_status: unverified, grasp_recipe: null, selectable: true}
+  cup: {class_id: 8, canonical_name: cup, display_name: "\u6c34\u676f", aliases: ["\u6c34\u676f", "\u676f\u5b50"], role: graspable, action_policy: fixed_grasp, support_status: unverified, grasp_recipe: null, selectable: true}
+  orange: {class_id: 9, canonical_name: orange, display_name: "\u6a59\u5b50", aliases: ["\u6a59\u5b50", "\u6a58\u5b50"], role: graspable, action_policy: fixed_grasp, support_status: unverified, grasp_recipe: null, selectable: true}
+  pill_bottle: {class_id: 10, canonical_name: pill_bottle, display_name: "\u836f\u74f6", aliases: ["\u836f\u74f6", "\u836f\u6c34\u74f6", "\u773c\u836f\u6c34\u74f6"], role: graspable, action_policy: fixed_grasp, support_status: unverified, grasp_recipe: null, selectable: true}
+  pill_box: {class_id: 11, canonical_name: pill_box, display_name: "\u836f\u76d2", aliases: ["\u836f\u76d2", "\u836f\u54c1\u76d2"], role: graspable, action_policy: fixed_grasp, support_status: unverified, grasp_recipe: null, selectable: true}
+  tea: {class_id: 12, canonical_name: tea, display_name: "\u8336\u53f6", aliases: ["\u8336\u53f6", "\u8336\u5305"], role: semantic_pending, action_policy: unsupported, support_status: unsupported, grasp_recipe: null, selectable: true}
+  tissue: {class_id: 13, canonical_name: tissue, display_name: "\u7eb8\u5dfe", aliases: ["\u7eb8\u5dfe", "\u7eb8\u5dfe\u76d2"], role: graspable, action_policy: fixed_grasp, support_status: unverified, grasp_recipe: null, selectable: true}
+  water_dispenser: {class_id: 14, canonical_name: water_dispenser, display_name: "\u70ed\u6c34\u5668", aliases: ["\u70ed\u6c34\u5668", "\u996e\u6c34\u673a", "\u5f00\u6c34\u673a"], role: locate_only, action_policy: locate_and_ring, support_status: locate_only, grasp_recipe: null, selectable: true}
+deprecated_targets:
+  kiwi_fruit: {support_status: disabled, selectable: false, reason: not_in_current_15_class_model}

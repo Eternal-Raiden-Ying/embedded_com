@@ -37,10 +37,10 @@ _COCO80 = (
     "scissors", "teddy bear", "hair drier", "toothbrush"
 )
 
-_FINETUNE_YOLO26S_BGR15 = (
-    "table1", "apple", "banana", "basket", "bottle", "grape", "key", "kiwi fruit",
-    "lemon", "mango", "mouse", "orange", "peach", "star fruit", "strawberry"
-)
+from common.target_catalog import model_class_names
+
+# The model class order is sourced from the same catalog as Voice/VISTA/Orchestrator.
+_FINETUNE_YOLO26S_BGR15 = model_class_names()
 
 _GRASPING_COCO20 = (
     "person", "backpack", "umbrella", "handbag", "tie", "suitcase", "bottle", "wine glass",
@@ -908,7 +908,6 @@ class ControlThresholds:
         "瓶子": 70.0,
         "apple": 80.0,
         "bottle": 80.0,
-        "kiwi_fruit": 70.0,
     })
 
 
@@ -1128,25 +1127,11 @@ class OrchestratorConfig:
     tts_event_out: SocketEndpoint = field(default_factory=lambda: SocketEndpoint(
         transport="disabled", ipc_socket_path="/tmp/robot_stack/tts_event.sock", async_enabled=True,
     ))
-    frozen_targets: Dict[str, List[str]] = field(default_factory=lambda: {
-        "bottle": ["瓶子", "水瓶", "饮料瓶"],
-        "key": ["钥匙", "钥匙串"],
-        "keys": ["钥匙", "钥匙串"],
-        "apple": ["苹果"],
-        "banana": ["香蕉"],
-        "basket": ["篮子", "筐", "收纳篮"],
-        "grape": ["葡萄"],
-        "kiwi fruit": ["猕猴桃", "奇异果"],
-        "kiwi": ["猕猴桃", "奇异果"],
-        "lemon": ["柠檬"],
-        "mango": ["芒果"],
-        "mouse": ["鼠标"],
-        "orange": ["橙子"],
-        "peach": ["桃子"],
-        "star fruit": ["杨桃"],
-        "starfruit": ["杨桃"],
-        "strawberry": ["草莓"],
-    })
+    # Playback ACKs are forwarded transparently by Mobile Gateway when enabled.
+    tts_playback_in: SocketEndpoint = field(default_factory=lambda: SocketEndpoint(
+        transport="disabled", ipc_socket_path="/tmp/robot_stack/orchestrator_tts_playback.sock", async_enabled=True,
+    ))
+    frozen_targets: Dict[str, List[str]] = field(default_factory=dict)  # legacy input ignored; catalog is authoritative
 
 
 # ==============================================================================
@@ -1296,6 +1281,8 @@ class MobileGatewayConfig:
     ))
     tts_event_in: GatewayEndpoint = field(default_factory=lambda: GatewayEndpoint(transport="disabled", ipc_socket_path="/tmp/robot_stack/mobile_tts_event.sock"))
     tts_playback_out: GatewayEndpoint = field(default_factory=lambda: GatewayEndpoint(transport="disabled", ipc_socket_path="/tmp/robot_stack/tts_playback.sock", send_mode="oneshot"))
+    # Optional transparent tee to Orchestrator for task-level playback sequencing.
+    orchestrator_tts_playback_out: GatewayEndpoint = field(default_factory=lambda: GatewayEndpoint(transport="disabled", ipc_socket_path="/tmp/robot_stack/orchestrator_tts_playback.sock", send_mode="oneshot"))
 
 
 # ==============================================================================
