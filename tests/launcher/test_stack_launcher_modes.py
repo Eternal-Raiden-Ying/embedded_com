@@ -83,6 +83,44 @@ def test_voice_phone_tts_dryrun_banner_reports_selected_effective_modes():
     assert "ORCH_SERIAL_DRY_RUN=1" in result.stdout
 
 
+def test_phone_tts_dryrun_profile_keeps_vista_ipc_and_actuator_dryrun_contract():
+    code = """
+from common.config.loader import get_config
+from voice_service.config.loader import load_voice_config
+
+cfg = get_config()
+voice = load_voice_config(['--profile', 'configs/profiles/sc171_voice_phone_tts_dryrun.yaml'])
+assert cfg.vision.req_in.transport == 'uds'
+assert cfg.vision.req_in.ipc_socket_path == '/tmp/robot_stack/vision_req.sock'
+assert cfg.vision.obs_out.transport == 'uds'
+assert cfg.vision.obs_out.ipc_socket_path == '/tmp/robot_stack/vision_obs.sock'
+assert cfg.orchestrator.vision_req_out.transport == 'uds'
+assert cfg.orchestrator.vision_req_out.ipc_socket_path == '/tmp/robot_stack/vision_req.sock'
+assert cfg.orchestrator.vision_obs_in.transport == 'uds'
+assert cfg.orchestrator.vision_obs_in.ipc_socket_path == '/tmp/robot_stack/vision_obs.sock'
+assert not hasattr(cfg.orchestrator, 'vista')
+assert cfg.orchestrator.serial.dry_run is True
+assert cfg.orchestrator.serial.port == 'DRY_RUN'
+assert cfg.orchestrator.arm_serial.dry_run is True
+assert cfg.gateway.runtime.feedback_output_mode == 'phone_tts'
+assert voice.input_mode == 'voice_only'
+assert voice.dry_run_text is False
+"""
+    result = subprocess.run(
+        ["python3", "-c", code],
+        cwd=str(ROOT),
+        env={
+            **os.environ,
+            "SYSTEM_CONFIG_PROFILE": "sc171_voice_phone_tts_dryrun",
+            "PYTHONPATH": f"{ROOT}:{ROOT / 'Voice'}",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_generic_dryrun_keeps_phone_tts_transports_blocked():
     result = shell(
         "source ./start_robot_stack.sh; STACK_PROFILE=dryrun; SYSTEM_CONFIG_PROFILE=dry_run; "

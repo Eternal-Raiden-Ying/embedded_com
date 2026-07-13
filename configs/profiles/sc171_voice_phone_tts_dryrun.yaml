@@ -1,23 +1,37 @@
 profile: "sc171_voice_phone_tts_dryrun"
 runtime_overrides:
   vision:
-    req_in: {transport: "disabled"}
-    obs_out: {transport: "disabled"}
+    runtime:
+      keep_vision_alive_after_task: true
+      keep_preview_alive_after_task: true
+      release_model_on_idle: false
+    req_in:
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/vision_req.sock"
+    obs_out:
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/vision_obs.sock"
   orchestrator:
     runtime:
       config_profile: "sc171_voice_phone_tts_dryrun"
     serial:
+      port: "DRY_RUN"
       dry_run: true
+      readback_enabled: false
     arm_serial:
       dry_run: true
-    vista:
-      enabled: false
     task_cmd_in:
       transport: "uds"
       ipc_socket_path: "/tmp/robot_stack/task_cmd.sock"
     task_ack_out:
       transport: "uds"
       ipc_socket_path: "/tmp/robot_stack/task_ack.sock"
+    vision_obs_in:
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/vision_obs.sock"
+    vision_req_out:
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/vision_req.sock"
     tts_event_out:
       transport: "uds"
       ipc_socket_path: "/tmp/robot_stack/mobile_tts_event.sock"
@@ -58,8 +72,14 @@ runtime_overrides:
 voice_gateway:
   runtime:
     input_mode: voice_only
-    dry_run_text: true
+    debug_input_only: false
+    dry_run_text: false
     asr_warmup_enabled: true
+  audio:
+    device: "plughw:CARD=UACDemoV10,DEV=0"
+    sample_rate: 16000
+    channels: 1
+    format: "S16_LE"
   kws:
     frontend_backend: onnx
     classifier_backend: onnx

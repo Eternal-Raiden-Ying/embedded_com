@@ -130,6 +130,10 @@ def test_phone_profile_disables_local_piper_and_enables_phone_endpoints():
 def test_phone_dryrun_profile_uses_onnx_quantized_voice_configuration():
     cfg = load_voice_config(["--profile", "configs/profiles/sc171_voice_phone_tts_dryrun.yaml"])
     assert cfg.disable_tts
+    assert cfg.input_mode == "voice_only"
+    assert cfg.debug_input_only is False
+    assert cfg.dry_run_text is False
+    assert cfg.arecord_device == "plughw:CARD=UACDemoV10,DEV=0"
     assert cfg.task_transport == "uds"
     assert cfg.mobile_feedback_transport == "uds"
     assert cfg.playback_transport == "uds"
