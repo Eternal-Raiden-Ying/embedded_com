@@ -37,6 +37,8 @@ VISTA_MOCK_TABLE_BBOX="${VISTA_MOCK_TABLE_BBOX:-}"
 # full：连接小车串口，真实下发控制。
 # STACK_PROFILE="full"
 STACK_PROFILE="${STACK_PROFILE:-dryrun}"
+FULL_MODE_SERIAL_DRY_RUN_OVERRIDE=0
+PHONE_TTS_ARM_DRY_RUN=""
 
 # orchestrator 是否使用 sudo：auto / 0 / 1
 # full 模式通常需要 sudo 访问串口；dryrun 一般不需要。
@@ -277,6 +279,12 @@ warn() { mark warn "$*" >&2; }
 die() { mark err "$*" >&2; exit 1; }
 
 apply_profile_defaults() {
+  # Preserve an explicit unsafe carry-over before this function establishes
+  # the launcher default.  Full mode must never silently discard a requested
+  # ORCH_SERIAL_DRY_RUN=1 override and then start real hardware.
+  if [[ "$STACK_PROFILE" == "full" && "${ORCH_SERIAL_DRY_RUN:-}" == "1" ]]; then
+    FULL_MODE_SERIAL_DRY_RUN_OVERRIDE=1
+  fi
   case "$STACK_PROFILE" in
     dryrun|dry_run)
       ORCH_SERIAL_DRY_RUN=1
@@ -369,6 +377,10 @@ show_banner() {
   printf '%buart device%b    : %s @ %s\n' "$C_BOLD" "$C_RESET" "$UART_DEV" "$UART_BAUDRATE"
   printf '%bsudo%b           : requested=%s effective=%s\n' "$C_BOLD" "$C_RESET" "$ORCH_USE_SUDO" "$([[ $(orch_use_sudo_effective; echo $?) -eq 0 ]] && echo 1 || echo 0)"
   printf '%bdry-run%b        : ORCH_SERIAL_DRY_RUN=%s  ORCH_DRY_RUN_ECHO_STDOUT=%s\n' "$C_BOLD" "$C_RESET" "$ORCH_SERIAL_DRY_RUN" "$ORCH_DRY_RUN_ECHO_STDOUT"
+  if [[ -n "$PHONE_TTS_ARM_DRY_RUN" ]]; then
+    printf '%bserial dry-run%b : %s\n' "$C_BOLD" "$C_RESET" "$([[ "$ORCH_SERIAL_DRY_RUN" == "1" ]] && echo true || echo false)"
+    printf '%barm dry-run%b    : %s\n' "$C_BOLD" "$C_RESET" "$PHONE_TTS_ARM_DRY_RUN"
+  fi
   printf '%bconsole%b        : ROBOT_CONSOLE_LEVEL=%s  ROBOT_CONSOLE_COLOR=%s\n' "$C_BOLD" "$C_RESET" "$ROBOT_CONSOLE_LEVEL" "${ROBOT_CONSOLE_COLOR:-auto}"
   printf '%blog profile%b    : %s\n' "$C_BOLD" "$C_RESET" "$ROBOT_LOG_PROFILE"
   printf '%bgateway logs%b   : enabled=%s\n' "$C_BOLD" "$C_RESET" "$ENABLE_GATEWAY_LOGS"
@@ -1006,6 +1018,80 @@ if phone_tts_contract:
 else:
     print("[READY] dry-run safety gate: serial/arm/TTS disabled")
 PY
+}
+
+assert_full_phone_tts_safety() {
+  # Full mode has its own fail-closed contract.  It deliberately permits the
+  # Phone-TTS IPC route, but rejects dry-run actuator settings or an incomplete
+  # feedback/vision route before any process is started.
+  SYSTEM_CONFIG_FILE="$SYSTEM_CONFIG_FILE" SYSTEM_CONFIG_PROFILE="$SYSTEM_CONFIG_PROFILE" \
+    ORCH_SERIAL_DRY_RUN="$ORCH_SERIAL_DRY_RUN" VOICE_PROFILE="$VOICE_PROFILE" \
+    GATEWAY_CONFIG="$GATEWAY_CONFIG" FULL_MODE_SERIAL_DRY_RUN_OVERRIDE="$FULL_MODE_SERIAL_DRY_RUN_OVERRIDE" \
+    PYTHONPATH="$STACK_ROOT:$STACK_ROOT/Voice:$ORCH_ROOT:${PYTHONPATH:-}" /usr/bin/python3 - <<'PY'
+from common.config_loader import get_config
+from orchestrator_service.mobile_gateway.config.board_config import build_config as build_gateway_config
+from voice_service.config.loader import load_voice_config
+import os
+
+cfg = get_config()
+gateway = build_gateway_config(os.environ.get("GATEWAY_CONFIG", ""))
+voice = load_voice_config(["--profile", os.environ["VOICE_PROFILE"]])
+disabled = {"disabled", "disable", "off", "none"}
+
+def enabled(value):
+    return str(value or "disabled").strip().lower() not in disabled
+
+def endpoint_enabled(endpoint):
+    return enabled(getattr(endpoint, "transport", "disabled"))
+
+actuator_dry_run = (
+    bool(getattr(cfg.orchestrator.serial, "dry_run", False))
+    or bool(getattr(cfg.orchestrator.arm_serial, "dry_run", False))
+    or str(os.environ.get("ORCH_SERIAL_DRY_RUN", "")).strip() == "1"
+    or str(os.environ.get("FULL_MODE_SERIAL_DRY_RUN_OVERRIDE", "")).strip() == "1"
+)
+if actuator_dry_run:
+    raise SystemExit("[BLOCKED] full profile unexpectedly keeps actuator dry-run enabled")
+
+route_errors = []
+if str(getattr(gateway.runtime, "task_input_mode", "")).strip().lower() not in {"voice", "voice_only"}:
+    route_errors.append("task_input_mode must be voice")
+if str(getattr(gateway.runtime, "feedback_output_mode", "")).strip().lower() != "phone_tts":
+    route_errors.append("feedback_output_mode must be phone_tts")
+for name, endpoint in (
+    ("orchestrator.tts_event_out", cfg.orchestrator.tts_event_out),
+    ("gateway.tts_event_in", gateway.tts_event_in),
+    ("gateway.tts_playback_out", gateway.tts_playback_out),
+    ("vision.req_in", cfg.vision.req_in),
+    ("vision.obs_out", cfg.vision.obs_out),
+    ("orchestrator.vision_req_out", cfg.orchestrator.vision_req_out),
+    ("orchestrator.vision_obs_in", cfg.orchestrator.vision_obs_in),
+):
+    if not endpoint_enabled(endpoint):
+        route_errors.append(name + " must be enabled")
+if not bool(getattr(gateway.mqtt, "enabled", False)):
+    route_errors.append("mobile gateway MQTT must be enabled")
+if not enabled(getattr(voice, "mobile_feedback_transport", "disabled")):
+    route_errors.append("voice.mobile_feedback_transport must be enabled")
+if not enabled(getattr(voice, "playback_transport", "disabled")):
+    route_errors.append("voice.playback_transport must be enabled")
+if route_errors:
+    raise SystemExit("[BLOCKED] full phone-TTS profile has incomplete feedback route: " + "; ".join(route_errors))
+print("[READY] full phone-TTS safety gate: real serial/arm; VISTA, MQTT, and Phone-TTS IPC enabled")
+PY
+}
+
+assert_launcher_safety() {
+  case "$STACK_PROFILE" in
+    dryrun|dry_run)
+      assert_dryrun_safety
+      ;;
+    full)
+      if [[ "$SYSTEM_CONFIG_PROFILE" == "sc171_voice_phone_tts" ]]; then
+        assert_full_phone_tts_safety
+      fi
+      ;;
+  esac
 }
 
 phone_tts_route_enabled() {
@@ -1679,7 +1765,7 @@ start_stack() {
   export GATEWAY_PID_FILE VISION_PID_FILE ORCH_PID_FILE
   export VOICE_PID_FILE="$STACK_ROOT/Voice/voice.pid"
   export VOICE_PROFILE="${VOICE_PROFILE:-configs/profiles/${SYSTEM_CONFIG_PROFILE}.yaml}"
-  assert_dryrun_safety || return 1
+  assert_launcher_safety || return 1
   write_stack_manifest
 
   # Listener owners start before connectors: VISTA(req_in), Voice(task_ack_in),
@@ -1776,6 +1862,20 @@ configure_voice_phone_tts_dryrun() {
   ROBOT_INPUT_MODE="voice_only"
   FEEDBACK_OUTPUT_MODE="phone_tts"
   VOICE_PROFILE="$STACK_ROOT/configs/profiles/sc171_voice_phone_tts_dryrun.yaml"
+  PHONE_TTS_ARM_DRY_RUN=true
+}
+
+configure_voice_phone_tts_full() {
+  if [[ "$STACK_PROFILE" != "full" ]]; then
+    die "start-voice-tts 正式入口仅支持 full 启动器 profile"
+  fi
+  SYSTEM_CONFIG_PROFILE="sc171_voice_phone_tts"
+  ROBOT_INPUT_MODE="voice_only"
+  FEEDBACK_OUTPUT_MODE="phone_tts"
+  VOICE_PROFILE="$STACK_ROOT/configs/profiles/sc171_voice_phone_tts.yaml"
+  ORCH_SERIAL_DRY_RUN=0
+  ORCH_TTS_EVENT_OUT_TRANSPORT="uds"
+  PHONE_TTS_ARM_DRY_RUN=false
 }
 
 main() {
@@ -1803,7 +1903,13 @@ main() {
       start_stack
       ;;
     start-voice-tts)
-      configure_voice_phone_tts_dryrun
+      if [[ "$STACK_PROFILE" == "dryrun" || "$STACK_PROFILE" == "dry_run" ]]; then
+        configure_voice_phone_tts_dryrun
+      elif [[ "$STACK_PROFILE" == "full" ]]; then
+        configure_voice_phone_tts_full
+      else
+        die "start-voice-tts 仅支持 dryrun 或 full 启动器 profile"
+      fi
       start_stack
       ;;
     start|on|up|run|开启|开)
@@ -1873,6 +1979,7 @@ main() {
       echo "  ./start_robot_stack.sh dryrun start-mobile # dry-run mobile -> core"
       echo "  ./start_robot_stack.sh dryrun start-voice  # dry-run USB mic Voice -> core"
       echo "  ./start_robot_stack.sh dryrun start-voice-tts # USB 麦克风 + Orchestrator/VISTA + 手机 TTS，执行器 dry-run"
+      echo "  ./start_robot_stack.sh full start-voice-tts   # USB 麦克风 + 手机 TTS + VISTA/Orchestrator + 真实底盘与机械臂"
       echo "  ROBOT_INPUT_MODE=mobile_only ./start_robot_stack.sh dryrun start"
       echo "  ROBOT_INPUT_MODE=voice_only ./start_robot_stack.sh dryrun start"
       echo "  ./start_robot_stack.sh stop             # 等价 core-stop，保留 mobile_gateway"
