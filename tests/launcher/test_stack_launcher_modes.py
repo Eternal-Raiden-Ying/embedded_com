@@ -143,6 +143,45 @@ def test_full_phone_tts_requires_complete_feedback_route():
     assert "full phone-TTS profile has incomplete feedback route" in result.stderr
 
 
+def test_full_phone_tts_requires_nonempty_vista_uds_path():
+    result = shell(
+        "source ./start_robot_stack.sh; STACK_PROFILE=full; apply_profile_defaults; "
+        "configure_voice_phone_tts_full; export VISION_REQ_IN_SOCKET_PATH=''; "
+        "assert_launcher_safety"
+    )
+    assert result.returncode != 0
+    assert "vision.req_in must be enabled with a UDS socket path" in result.stderr
+
+
+def test_full_phone_tts_profile_configures_vista_uds_endpoints():
+    code = """
+from common.config.loader import get_config
+
+cfg = get_config()
+assert cfg.vision.req_in.transport == 'uds'
+assert cfg.vision.req_in.ipc_socket_path == '/tmp/robot_stack/vision_req.sock'
+assert cfg.vision.obs_out.transport == 'uds'
+assert cfg.vision.obs_out.ipc_socket_path == '/tmp/robot_stack/vision_obs.sock'
+assert cfg.orchestrator.vision_req_out.transport == 'uds'
+assert cfg.orchestrator.vision_req_out.ipc_socket_path == '/tmp/robot_stack/vision_req.sock'
+assert cfg.orchestrator.vision_obs_in.transport == 'uds'
+assert cfg.orchestrator.vision_obs_in.ipc_socket_path == '/tmp/robot_stack/vision_obs.sock'
+"""
+    result = subprocess.run(
+        ["python3", "-c", code],
+        cwd=str(ROOT),
+        env={
+            **os.environ,
+            "SYSTEM_CONFIG_PROFILE": "sc171_voice_phone_tts",
+            "PYTHONPATH": str(ROOT),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_phone_tts_dryrun_profile_keeps_vista_ipc_and_actuator_dryrun_contract():
     code = """
 from common.config.loader import get_config

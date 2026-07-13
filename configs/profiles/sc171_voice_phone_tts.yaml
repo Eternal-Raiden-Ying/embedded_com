@@ -1,5 +1,12 @@
 profile: "sc171_voice_phone_tts"
 runtime_overrides:
+  vision:
+    req_in:
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/vision_req.sock"
+    obs_out:
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/vision_obs.sock"
   orchestrator:
     runtime:
       config_profile: "sc171_voice_phone_tts"

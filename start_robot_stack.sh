@@ -1044,6 +1044,15 @@ def enabled(value):
 def endpoint_enabled(endpoint):
     return enabled(getattr(endpoint, "transport", "disabled"))
 
+def endpoint_contract_ready(endpoint):
+    if not endpoint_enabled(endpoint):
+        return False
+    if str(getattr(endpoint, "transport", "")).strip().lower() != "uds":
+        return True
+    return bool(
+        str(getattr(endpoint, "ipc_socket_path", "") or getattr(endpoint, "uds_path", "")).strip()
+    )
+
 actuator_dry_run = (
     bool(getattr(cfg.orchestrator.serial, "dry_run", False))
     or bool(getattr(cfg.orchestrator.arm_serial, "dry_run", False))
@@ -1067,8 +1076,8 @@ for name, endpoint in (
     ("orchestrator.vision_req_out", cfg.orchestrator.vision_req_out),
     ("orchestrator.vision_obs_in", cfg.orchestrator.vision_obs_in),
 ):
-    if not endpoint_enabled(endpoint):
-        route_errors.append(name + " must be enabled")
+    if not endpoint_contract_ready(endpoint):
+        route_errors.append(name + " must be enabled with a UDS socket path")
 if not bool(getattr(gateway.mqtt, "enabled", False)):
     route_errors.append("mobile gateway MQTT must be enabled")
 if not enabled(getattr(voice, "mobile_feedback_transport", "disabled")):
