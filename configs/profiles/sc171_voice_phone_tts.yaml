@@ -26,6 +26,13 @@ runtime_overrides:
       send_mode: "oneshot"
       async_enabled: true
   gateway:
+    runtime:
+      task_input_mode: "voice"
+      feedback_output_mode: "phone_tts"
+      mobile_task_commands_allowed: false
+      mobile_manual_control_allowed: true
+      mobile_core_control_allowed: true
+      mobile_emergency_stop_allowed: true
     command_in:
       transport: "http"
       ipc_socket_path: "/tmp/robot_stack/mobile_gateway_cmd.sock"
@@ -50,8 +57,14 @@ runtime_overrides:
       # Keep the mini-program FIND/debug command topic active in addition to
       # the tts_ack subscription. Broker credentials stay in the local MQTT file.
       accept_commands: true
+      retain_status: true
+      retain_heartbeat: false
       tts_qos: 1
       topics:
+        cmd: "robot/v1/SC171/mobile/cmd"
+        ack: "robot/v1/SC171/mobile/ack"
+        status: "robot/v1/SC171/mobile/status"
+        heartbeat: "robot/v1/SC171/heartbeat"
         tts: "robot/v1/SC171/mobile/tts"
         tts_ack: "robot/v1/SC171/mobile/tts_ack"
   online_edge:

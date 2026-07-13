@@ -1,11 +1,11 @@
-profile: "sc171_voice_phone_tts_dryrun"
+profile: "sc171_mobile_control_dryrun"
 runtime_overrides:
   vision:
     req_in: {transport: "disabled"}
     obs_out: {transport: "disabled"}
   orchestrator:
     runtime:
-      config_profile: "sc171_voice_phone_tts_dryrun"
+      config_profile: "sc171_mobile_control_dryrun"
     serial:
       dry_run: true
     arm_serial:
@@ -23,13 +23,12 @@ runtime_overrides:
       ipc_socket_path: "/tmp/robot_stack/mobile_tts_event.sock"
   gateway:
     runtime:
-      task_input_mode: "voice"
-      feedback_output_mode: "phone_tts"
-      mobile_task_commands_allowed: false
+      task_input_mode: "mobile"
+      feedback_output_mode: "optional"
+      mobile_task_commands_allowed: true
       mobile_manual_control_allowed: true
       mobile_core_control_allowed: true
       mobile_emergency_stop_allowed: true
-    # MQTT is handled by MqttAdapter; these are framed-msgpack IPC endpoints.
     command_in: {transport: "disabled"}
     status_out: {transport: "disabled"}
     orchestrator_task_cmd_out:
@@ -55,18 +54,11 @@ runtime_overrides:
         heartbeat: "robot/v1/SC171/heartbeat"
         tts: "robot/v1/SC171/mobile/tts"
         tts_ack: "robot/v1/SC171/mobile/tts_ack"
+
 voice_gateway:
   runtime:
-    input_mode: voice_only
+    input_mode: mobile_only
     dry_run_text: true
-    asr_warmup_enabled: true
-  kws:
-    frontend_backend: onnx
-    classifier_backend: onnx
-  asr:
-    quantized: true
-  vad:
-    quantized: true
   tts: {enabled: false}
   ipc:
     task_cmd_out:
@@ -82,6 +74,3 @@ voice_gateway:
   playback:
     transport: uds
     ipc_socket_path: /tmp/robot_stack/tts_playback.sock
-    start_timeout_s: 1.5
-    finish_timeout_s: 6.0
-    post_guard_s: 0.35

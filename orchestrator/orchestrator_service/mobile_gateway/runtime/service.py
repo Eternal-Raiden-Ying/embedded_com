@@ -182,6 +182,20 @@ MANUAL_COMMAND_INTENTS: Dict[str, str] = {
     "manual_stop": "MANUAL_STOP",
 }
 
+TASK_INPUT_MODE_ALIASES: Dict[str, str] = {
+    "mobile": "mobile",
+    "mobile_only": "mobile",
+    "voice": "voice",
+    "voice_only": "voice",
+}
+
+MOBILE_POLICY_MESSAGES: Dict[str, str] = {
+    "mobile_task_disabled_in_current_mode": "当前模式不允许手机发起普通机器人任务",
+    "mobile_manual_control_disabled": "手机手动控制当前已禁用",
+    "mobile_core_control_disabled": "手机 Core 控制当前已禁用",
+    "mobile_emergency_stop_disabled": "手机紧急停止当前已禁用",
+}
+
 
 class TcpTaskCmdBackend:
     def __init__(self, endpoint: GatewayEndpoint, name: str = "mobile_gateway_task_cmd_out"):
@@ -830,6 +844,60 @@ class MobileGatewayService(BaseModule):
             if normalized:
                 return normalized, raw_value
         return None, ""
+
+    def _normalized_task_input_mode(self) -> str:
+        raw_mode = str(self.cfg.runtime.task_input_mode or "mobile").strip().lower()
+        return TASK_INPUT_MODE_ALIASES.get(raw_mode, raw_mode)
+
+    def _mobile_capability_fields(self) -> Dict[str, Any]:
+        task_input_mode = self._normalized_task_input_mode()
+        return {
+            "task_input_mode": task_input_mode,
+            "feedback_output_mode": str(self.cfg.runtime.feedback_output_mode or "optional").strip().lower(),
+            "mobile_permissions": {
+                "task_commands": bool(self.cfg.runtime.mobile_task_commands_allowed) and task_input_mode != "voice",
+                "manual_control": bool(self.cfg.runtime.mobile_manual_control_allowed),
+                "core_control": bool(self.cfg.runtime.mobile_core_control_allowed),
+                "emergency_stop": bool(self.cfg.runtime.mobile_emergency_stop_allowed),
+            },
+        }
+
+    def _evaluate_mobile_command_policy(self, command: str) -> Tuple[bool, str]:
+        """Evaluate normalized mobile commands before any gateway side effects."""
+        normalized_command = str(command or "").strip().lower()
+        permissions = self._mobile_capability_fields()["mobile_permissions"]
+        if normalized_command in {"core_status", "task_status", "query_status"}:
+            return True, ""
+        if normalized_command in CORE_CONTROL_SCRIPT_ACTIONS:
+            return (True, "") if permissions["core_control"] else (False, "mobile_core_control_disabled")
+        if normalized_command in MANUAL_COMMAND_INTENTS:
+            return (True, "") if permissions["manual_control"] else (False, "mobile_manual_control_disabled")
+        if normalized_command in {"stop", "emergency_stop", "emergency-stop"}:
+            return (True, "") if permissions["emergency_stop"] else (False, "mobile_emergency_stop_disabled")
+        return (True, "") if permissions["task_commands"] else (False, "mobile_task_disabled_in_current_mode")
+
+    def _reject_mobile_command_by_policy(self, payload: Dict[str, Any], command: str, reason: str) -> Dict[str, Any]:
+        message = MOBILE_POLICY_MESSAGES[reason]
+        rejected_payload = dict(payload)
+        rejected_payload["cmd"] = command
+        rejected_payload["reason"] = reason
+        rejected_payload["ok"] = False
+        log_payload = {
+            "cmd_id": rejected_payload.get("cmd_id"),
+            "session_id": rejected_payload.get("session_id"),
+            "cmd": command,
+            "reason": reason,
+            "task_input_mode": self._normalized_task_input_mode(),
+        }
+        self.log_warn("protocol", "mobile command rejected by policy", log_payload)
+        self.run_logger.write_jsonl("gateway_command_policy_rejected", log_payload)
+        self._publish_gateway_ack(
+            rejected_payload,
+            accepted=False,
+            message=message,
+            error_code=ERROR_CODES["task_rejected"],
+        )
+        return {"ok": False, "accepted": False, "reason": reason, "message": message}
 
     def _stack_script_path(self) -> Path:
         configured = str(os.environ.get("MOBILE_GATEWAY_STACK_SCRIPT_PATH") or "").strip()
@@ -1506,6 +1574,9 @@ class MobileGatewayService(BaseModule):
             return result
         core_action, raw_cmd = self._normalize_core_control_action(payload)
         if core_action:
+            allowed, reason = self._evaluate_mobile_command_policy(core_action)
+            if not allowed:
+                return self._reject_mobile_command_by_policy(payload, core_action, reason)
             result = self._handle_core_control_payload(payload, core_action, raw_cmd)
             ack_payload = dict(payload)
             ack_payload.update({
@@ -1521,6 +1592,18 @@ class MobileGatewayService(BaseModule):
             return result or {"ok": True, "accepted": True, "mode": "mobile_command"}
 
         task_cmd = self._coerce_http_task_cmd(payload)
+        policy_command = str(task_cmd.get("cmd") or "").strip().lower()
+        if not policy_command:
+            policy_command = {
+                "FIND": "fetch_object",
+                "RETURN": "go_home",
+                "STOP": "stop",
+                "MANUAL_DRIVE": "manual_drive",
+                "MANUAL_STOP": "manual_stop",
+            }.get(str(task_cmd.get("intent") or "").strip().upper(), "ordinary_task")
+        allowed, reason = self._evaluate_mobile_command_policy(policy_command)
+        if not allowed:
+            return self._reject_mobile_command_by_policy(payload, policy_command, reason)
         ok, reason = self.backend.submit(task_cmd)
         self.run_logger.write_jsonl("mobile_command", payload)
         self.run_logger.write_jsonl("task_cmd_forward", task_cmd)
@@ -1829,6 +1912,9 @@ class MobileGatewayService(BaseModule):
 
         core_action, raw_cmd = self._normalize_core_control_action(payload)
         if core_action:
+            allowed, reason = self._evaluate_mobile_command_policy(core_action)
+            if not allowed:
+                return self._reject_mobile_command_by_policy(payload, core_action, reason)
             result = self._handle_core_control_payload(payload, core_action, raw_cmd)
             ack_payload = dict(payload)
             ack_payload.update({
@@ -1873,6 +1959,9 @@ class MobileGatewayService(BaseModule):
                 epoch=int(payload.get("epoch", 0) or 0),
             ))
             return {"ok": False, "accepted": False, "message": str(exc)}
+        allowed, reason = self._evaluate_mobile_command_policy(command.cmd)
+        if not allowed:
+            return self._reject_mobile_command_by_policy(command.to_dict(), command.cmd, reason)
         if self._is_duplicate_cmd(command.cmd_id):
             self._publish_gateway_ack(command.to_dict(), accepted=True, message="gateway command accepted")
             if self._is_debug_mode():
@@ -2395,6 +2484,7 @@ class MobileGatewayService(BaseModule):
         payload["robot_id"] = ROBOT_ID
         payload["kind"] = "status"
         payload.setdefault("ts", now_ts())
+        payload.update(self._mobile_capability_fields())
         dedup_payload = dict(payload)
         dedup_payload.pop("ts", None)
         key = safe_dump(dedup_payload)
@@ -2442,6 +2532,7 @@ class MobileGatewayService(BaseModule):
             "session_id": self._snapshot.get("session_id", ""),
             "epoch": int(self._snapshot.get("epoch", 0) or 0),
         }
+        heartbeat_payload.update(self._mobile_capability_fields())
         if self._is_debug_mode():
             heartbeat_payload["status_age_s"] = last_status_age
             heartbeat_payload["recent_states"] = list(self._status_seq)
@@ -2527,6 +2618,7 @@ class MobileGatewayService(BaseModule):
             "source": "mobile_gateway",
             "ts": now_ts(),
         }
+        ack.update(self._mobile_capability_fields())
         ack = {k: v for k, v in ack.items() if v not in (None, "", [], {})}
         self.run_logger.write_jsonl("mobile_ack", ack)
         self.log_info("protocol", "gateway_ack sent", {

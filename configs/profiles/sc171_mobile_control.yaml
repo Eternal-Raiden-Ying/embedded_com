@@ -1,49 +1,57 @@
-profile: "sc171_voice_phone_tts_dryrun"
+profile: "sc171_mobile_control"
 runtime_overrides:
-  vision:
-    req_in: {transport: "disabled"}
-    obs_out: {transport: "disabled"}
   orchestrator:
     runtime:
-      config_profile: "sc171_voice_phone_tts_dryrun"
+      config_profile: "sc171_mobile_control"
     serial:
-      dry_run: true
-    arm_serial:
-      dry_run: true
-    vista:
-      enabled: false
+      port: "/dev/ttyHS1"
+      dry_run: false
+      readback_enabled: true
     task_cmd_in:
       transport: "uds"
       ipc_socket_path: "/tmp/robot_stack/task_cmd.sock"
     task_ack_out:
       transport: "uds"
       ipc_socket_path: "/tmp/robot_stack/task_ack.sock"
+    vision_obs_in:
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/vision_obs.sock"
+    vision_req_out:
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/vision_req.sock"
     tts_event_out:
       transport: "uds"
       ipc_socket_path: "/tmp/robot_stack/mobile_tts_event.sock"
+      send_mode: "oneshot"
+      async_enabled: true
   gateway:
     runtime:
-      task_input_mode: "voice"
-      feedback_output_mode: "phone_tts"
-      mobile_task_commands_allowed: false
+      task_input_mode: "mobile"
+      feedback_output_mode: "optional"
+      mobile_task_commands_allowed: true
       mobile_manual_control_allowed: true
       mobile_core_control_allowed: true
       mobile_emergency_stop_allowed: true
-    # MQTT is handled by MqttAdapter; these are framed-msgpack IPC endpoints.
-    command_in: {transport: "disabled"}
-    status_out: {transport: "disabled"}
+    command_in:
+      transport: "http"
+      ipc_socket_path: "/tmp/robot_stack/mobile_gateway_cmd.sock"
+      tcp_host: "0.0.0.0"
+      tcp_port: 9001
+    status_out:
+      transport: "disabled"
     orchestrator_task_cmd_out:
       transport: "uds"
       ipc_socket_path: "/tmp/robot_stack/task_cmd.sock"
-    orchestrator_task_ack_in: {transport: "disabled"}
+    orchestrator_task_ack_in:
+      transport: "disabled"
     tts_event_in:
       transport: "uds"
       ipc_socket_path: "/tmp/robot_stack/mobile_tts_event.sock"
     tts_playback_out:
       transport: "uds"
       ipc_socket_path: "/tmp/robot_stack/tts_playback.sock"
+      send_mode: "oneshot"
     mqtt:
-      enabled: true
       accept_commands: true
       retain_status: true
       retain_heartbeat: false
@@ -55,19 +63,19 @@ runtime_overrides:
         heartbeat: "robot/v1/SC171/heartbeat"
         tts: "robot/v1/SC171/mobile/tts"
         tts_ack: "robot/v1/SC171/mobile/tts_ack"
+  online_edge:
+    output:
+      transport: "uds"
+      ipc_socket_path: "/tmp/robot_stack/table_edge_obs.sock"
+
+# mobile_only is the existing Voice profile semantic for disabling ordinary
+# USB Voice TaskCmd production when the launcher elects to start Voice.
 voice_gateway:
   runtime:
-    input_mode: voice_only
-    dry_run_text: true
-    asr_warmup_enabled: true
-  kws:
-    frontend_backend: onnx
-    classifier_backend: onnx
-  asr:
-    quantized: true
-  vad:
-    quantized: true
-  tts: {enabled: false}
+    input_mode: mobile_only
+    dry_run_text: false
+  tts:
+    enabled: false
   ipc:
     task_cmd_out:
       transport: uds
@@ -75,13 +83,11 @@ voice_gateway:
     task_ack_in:
       transport: uds
       ipc_socket_path: /tmp/robot_stack/task_ack.sock
-    tts_event_in: {transport: disabled}
+    tts_event_in:
+      transport: disabled
   mobile_feedback:
     transport: uds
     ipc_socket_path: /tmp/robot_stack/mobile_tts_event.sock
   playback:
     transport: uds
     ipc_socket_path: /tmp/robot_stack/tts_playback.sock
-    start_timeout_s: 1.5
-    finish_timeout_s: 6.0
-    post_guard_s: 0.35

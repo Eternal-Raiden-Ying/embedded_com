@@ -115,6 +115,8 @@ class MobileCommand:
         cmd = str(payload.get("cmd", "")).strip().lower()
         if not cmd and allow_legacy_command_compat and legacy_type == "FIND_AND_PICK":
             cmd = "fetch_object"
+        if cmd in {"emergency_stop", "emergency-stop"}:
+            cmd = "stop"
         if cmd not in SUPPORTED_COMMANDS:
             raise MobileProtocolError(f"unsupported cmd: {cmd!r}", ERROR_CODES["invalid_command"])
         target = payload.get("target")
