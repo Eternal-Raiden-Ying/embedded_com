@@ -333,6 +333,8 @@ orchestrator:
     baudrate: 9600 # Arm controller baudrate
     timeout_s: 0.10 # Serial read timeout
     open_settle_s: 3.0 # Sleep after opening arm serial
+    boot_drain_max_s: 5.0 # One-time maximum STM32 boot drain window
+    boot_quiet_s: 0.5 # Quiet period required before arm serial is ready
     bytesize: 8 # Serial bytesize
     parity: "N" # Serial parity
     stopbits: 1 # Serial stopbits
@@ -437,36 +439,6 @@ orchestrator:
     yolo_approach_far_vx_mps: 0.20 # Canonical pre-Final speed for table ROI P10 > 2.0m
     yolo_approach_mid_vx_mps: 0.10 # Canonical pre-Final speed for 1.0m < table ROI P10 <= 2.0m
     yolo_approach_near_vx_mps: 0.05 # Canonical pre-Final speed for table ROI P10 <= 1.0m before Final
-    builtin_bottle_grasp_enable: true # Use STM32 builtin bottle grasp once target is locked
-    builtin_bottle_skip_remote: true # Do not send GRASP_REMOTE while builtin bottle path is active
-    builtin_bottle_pose_line: "POSE_BOTTLE" # Builtin bottle pose command line
-    builtin_bottle_pose_start_ack: "OK POSE_BOTTLE START" # Start ack is not completion
-    builtin_bottle_pose_done_ack: "OK POSE_BOTTLE DONE" # Pose completion ack
-    builtin_bottle_pose_timeout_s: 15.0 # Timeout for builtin bottle pose sequence
-    builtin_bottle_grab_enable: true # Send grab command after builtin bottle pose done
-    builtin_bottle_grab_line: "GRABBED" # Configurable grab/retract command
-    builtin_bottle_grab_done_ack: "OK GRABBED DONE" # Grab completion ack
-    builtin_bottle_grab_timeout_s: 10.0 # Timeout for builtin bottle grab stage
-    builtin_apple_grasp_enable: true # Use STM32 builtin apple grasp once target is locked
-    builtin_apple_skip_remote: true # Do not send GRASP_REMOTE while builtin apple path is active
-    builtin_apple_pose_line: "POSE_APPLE" # Builtin apple pose command line
-    builtin_apple_pose_start_ack: "OK POSE_APPLE START" # Start ack is not completion
-    builtin_apple_pose_done_ack: "OK POSE_APPLE DONE" # Pose completion ack
-    builtin_apple_pose_timeout_s: 15.0 # Timeout for builtin apple pose sequence
-    builtin_apple_grab_enable: true # Send grab command after builtin apple pose done
-    builtin_apple_grab_line: "GRABBED" # Configurable grab/retract command
-    builtin_apple_grab_done_ack: "OK GRABBED DONE" # Grab completion ack
-    builtin_apple_grab_timeout_s: 10.0 # Timeout for builtin apple grab stage
-    post_grasp_fixed_flow_enable: true # Use fixed post-grasp turn/forward/rise flow
-    post_grasp_turn_direction_sign: -1 # Sign applied to fixed post-grasp turn wz
-    post_grasp_forward_vx_mps: 0.2 # Fixed post-grasp forward speed
-    post_grasp_forward_duration_s: 5.0 # Fixed post-grasp forward duration
-    post_grasp_stop_hold_s: 0.5 # Stop hold before rise pose
-    post_grasp_rise_enable: true # Send POSE_RISE after fixed post-grasp stop
-    post_grasp_rise_line: "POSE_RISE" # Builtin rise command line
-    post_grasp_rise_start_ack: "OK POSE_RISE START" # Rise start ack
-    post_grasp_rise_done_ack: "OK POSE_RISE DONE" # Rise done ack
-    post_grasp_rise_timeout_s: 10.0 # Timeout for rise pose sequence
     yolo_table_lost_to_search_frames: 8 # Frame drop threshold to trigger search
     no_table_bbox_timeout_s: 10.0 # Timeout only when YOLO table bbox is also absent
     edge_geometry_timeout_s: 10.0 # Time to degrade edge geometry before YOLO assist fallback

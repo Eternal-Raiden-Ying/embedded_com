@@ -7,7 +7,9 @@ import signal
 import time
 import os
 import math
+import threading
 from collections import deque
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..bridge.arm_protocol import encode_pose, parse_arm_response
@@ -38,6 +40,7 @@ from ..ipc.transport import AsyncJsonlClientSender, JsonlClientSender, JsonlInbo
 from ..utils.target_utils import supported_targets
 from .common import RunLogger, ensure_dir, monotonic_ts, safe_dump
 from .context import State
+from .grasp_recipes import GraspRecipeRegistry
 from .state_machine import OrchestratorCore
 
 MANUAL_DRIVE_ALLOWED_STATES = {"IDLE"}
@@ -243,6 +246,14 @@ class OrchestratorService(BaseModule):
         self.mapper = SimpleCarMapper(cfg.car)
         self.velocity_smoother = VelocitySmoother(getattr(cfg, "motion_smoothing", None))
         self.arm_bridge = ArmSerialBridge(getattr(cfg, "arm_serial", None), logger=self.log)
+        configured_root = str(cfg.runtime.project_root or "").strip()
+        project_root = Path(configured_root) if configured_root else Path(__file__).resolve().parents[3]
+        recipe_path = project_root / "configs" / "grasp_recipes.yaml"
+        self.grasp_recipe_registry = GraspRecipeRegistry.load(recipe_path)
+        self.core.grasp_recipe_registry = self.grasp_recipe_registry
+        self._arm_preload_thread: Optional[threading.Thread] = None
+        self._arm_step_inflight = False
+        self._arm_step_result_queue: "queue.Queue[Dict[str, Any]]" = queue.Queue()
         self._async_result_queue: "queue.Queue[Dict[str, Any]]" = queue.Queue()
         self._boot_ts = time.time()
         self._last_state_block_ts = 0.0
@@ -2342,6 +2353,16 @@ class OrchestratorService(BaseModule):
         self.run_logger.write_service_event("SERVICE_STARTING", run_dir=str(self.run_logger.run_dir))
         self.run_logger.write_jsonl("config", cfg_dump)
         self.run_logger.write_timeline("BOOT", run_dir=str(self.run_logger.run_dir), config=cfg_dump)
+        self.log(
+            "info",
+            "grasp",
+            "grasp_recipe_config_loaded",
+            {
+                "enabled_recipes": list(self.grasp_recipe_registry.enabled_names),
+                "errors": list(self.grasp_recipe_registry.errors),
+            },
+        )
+        self._start_arm_serial_preload()
         loaded_files = ",".join(self.cfg.runtime.loaded_config_files) or "<defaults>"
         self._operator_emit(f"[ORCH] CONFIG loaded={loaded_files}")
         self._operator_emit(
@@ -2375,6 +2396,114 @@ class OrchestratorService(BaseModule):
         self.log_info("runtime", "SERVICE_READY", {"run_dir": str(self.run_logger.run_dir)})
         self._emit_heartbeat_if_needed(force=True)
         self._emit_system_metrics_if_needed(force=True)
+
+    def _start_arm_serial_preload(self) -> None:
+        if self._arm_preload_thread is not None and self._arm_preload_thread.is_alive():
+            return
+
+        def _worker() -> None:
+            started = monotonic_ts()
+            self.log("info", "arm_serial", "arm_serial_open_started")
+            ready = bool(self.arm_bridge.open())
+            self.core.ctx.arm_serial_ready = ready
+            self.log(
+                "info" if ready else "error",
+                "arm_serial",
+                "arm_serial_ready",
+                {"ready": ready, "arm_boot_drain_ms": round((monotonic_ts() - started) * 1000.0, 1)},
+            )
+
+        self.core.ctx.arm_serial_ready = False
+        self._arm_preload_thread = threading.Thread(
+            target=_worker,
+            name="arm-serial-preload",
+            daemon=True,
+        )
+        self._arm_preload_thread.start()
+
+    def _start_arm_recipe_step(self, arm: Any) -> None:
+        if self._arm_step_inflight:
+            self.log("error", "arm_serial", "arm_recipe_step_owner_conflict")
+            return
+        recipe_name = str(getattr(arm, "recipe_name", "") or "").strip()
+        step_index = int(getattr(arm, "recipe_step_index", -1))
+        command = str(getattr(arm, "command", "") or "").strip()
+        send_mono = monotonic_ts()
+        identity = {
+            "task_id": str(self.core.ctx.active_task_id or ""),
+            "session_id": str(self.core.ctx.active_session_id or ""),
+            "epoch": int(self.core.ctx.active_epoch or 0),
+            "recipe_name": recipe_name,
+            "step_index": step_index,
+            "step_command": command,
+            "send_mono": send_mono,
+        }
+        self._arm_step_inflight = True
+        self.run_logger.write_jsonl("arm_recipe_step_send", dict(identity))
+
+        def _worker() -> None:
+            result = self.arm_bridge.send_command_and_wait(
+                command,
+                expect_ack=bool(getattr(arm, "expect_ack", True)),
+                success_ack=str(getattr(arm, "success_ack", "") or ""),
+                timeout_s=float(getattr(arm, "timeout_s", 0.0) or 0.0),
+            )
+            self._arm_step_result_queue.put({**identity, "result": result, "ack_mono": monotonic_ts()})
+
+        threading.Thread(
+            target=_worker,
+            name=f"arm-recipe-{recipe_name}-{step_index}",
+            daemon=True,
+        ).start()
+
+    def _drain_arm_step_results(self) -> None:
+        while True:
+            try:
+                item = self._arm_step_result_queue.get_nowait()
+            except queue.Empty:
+                break
+            self._arm_step_inflight = False
+            result = item.get("result") if isinstance(item.get("result"), dict) else {}
+            resp = result.get("response")
+            if resp is None:
+                error = str(result.get("error") or "arm_recipe_step_failed")
+                resp = ArmResponse(
+                    ok=False,
+                    message=error,
+                    raw_line=error,
+                    ts=time.time(),
+                    parsed_status=error.upper(),
+                )
+            error = str(result.get("error") or "")
+            if error in {"arm_serial_not_ready", "arm_serial_open_failed", "arm_tx_failed"}:
+                self.core.ctx.arm_serial_ready = False
+                self._start_arm_serial_preload()
+            ack_mono = float(item.get("ack_mono", monotonic_ts()) or monotonic_ts())
+            self.run_logger.write_jsonl(
+                "arm_recipe_step_result",
+                {
+                    **{key: item.get(key) for key in ("recipe_name", "step_index", "step_command", "send_mono")},
+                    "ack_mono": ack_mono,
+                    "step_duration_ms": round((ack_mono - float(item.get("send_mono", ack_mono))) * 1000.0, 1),
+                    "step_result": "success" if bool(resp.ok) else "failed",
+                    "parsed_status": str(resp.parsed_status or ""),
+                },
+            )
+            still_owner = bool(
+                self.core.ctx.state == State.GRASP
+                and str(self.core.ctx.active_task_id or "") == str(item.get("task_id") or "")
+                and str(self.core.ctx.selected_grasp_recipe_name or "") == str(item.get("recipe_name") or "")
+                and int(self.core.ctx.grasp_recipe_step_index or 0) == int(item.get("step_index", -1))
+            )
+            if still_owner:
+                self.core.handle_arm_response(resp)
+            else:
+                self.log(
+                    "info",
+                    "arm_serial",
+                    "arm_recipe_step_result_ignored",
+                    {"reason": "task_or_owner_changed", "recipe_name": item.get("recipe_name"), "step_index": item.get("step_index")},
+                )
 
     def stop(self):
         if self._stopped:
@@ -2420,6 +2549,7 @@ class OrchestratorService(BaseModule):
                 loop_start = time.time()
                 loop_start_ns = time.monotonic_ns()
                 self._drain_async_tx_results()
+                self._drain_arm_step_results()
                 self._drain_uart_feedback()
                 self._drain_tts_playback_states()
                 self._drain_task_cmds()
@@ -3213,6 +3343,8 @@ class OrchestratorService(BaseModule):
             self.uart.send_emergency_stop()
             self.motion_adapter.cancel_active_jogs()
         accepted, reason = self.core.handle_task_cmd(cmd)
+        if accepted and cmd.intent == "FIND" and not bool(self.core.ctx.arm_serial_ready):
+            self._start_arm_serial_preload()
         if accepted and cmd.intent in {"FIND", "RETURN"}:
             self.demo_console.dry_run = bool(getattr(self.cfg.serial, "dry_run", False))
             self.demo_console.task_start(self._demo_start_pending_target)
@@ -4676,217 +4808,10 @@ class OrchestratorService(BaseModule):
             if self.core.ctx.state == State.GRASP:
                 self.core._emit_tts_event("PICK_EXECUTING", state=State.GRASP.value)
             arm = decision.arm_cmd
-            arm_command = str(getattr(arm, "command", "POSE") or "POSE").strip().upper()
-            builtin_pose_line = str(getattr(self.cfg.control, "builtin_bottle_pose_line", "POSE_BOTTLE") or "POSE_BOTTLE").strip()
-            builtin_apple_pose_line = str(getattr(self.cfg.control, "builtin_apple_pose_line", "POSE_APPLE") or "POSE_APPLE").strip()
-            post_grasp_rise_line = str(getattr(self.cfg.control, "post_grasp_rise_line", "POSE_RISE") or "POSE_RISE").strip()
-            builtin_grab_line = str(getattr(self.cfg.control, "builtin_bottle_grab_line", "GRABBED") or "GRABBED").strip()
-            builtin_target = str(getattr(self.core.ctx, "builtin_grasp_target", "") or "")
-            if not builtin_target and str(getattr(self.core.ctx, "canonical_target", "") or "").strip().lower() in {"apple", "bottle"}:
-                builtin_target = str(getattr(self.core.ctx, "canonical_target", "") or "").strip().lower()
-            builtin_grab_line = str(getattr(self.cfg.control, f"builtin_{builtin_target}_grab_line", builtin_grab_line) or builtin_grab_line).strip()
-            builtin_active = bool(getattr(self.core.ctx, "builtin_grasp_active", False) or getattr(self.core.ctx, "builtin_bottle_active", False))
-            builtin_pose_lines = {builtin_pose_line.upper(), builtin_apple_pose_line.upper(), post_grasp_rise_line.upper(), "POSE_BOTTLE", "POSE_APPLE", "POSE_RISE"}
-            if arm_command == (builtin_grab_line or "GRABBED").upper() or arm_command == "GRABBED":
-                grab_line = str(getattr(arm, "command", "") or builtin_grab_line or "GRABBED").strip() or "GRABBED"
+            recipe_name = str(getattr(arm, "recipe_name", "") or "").strip()
+            if recipe_name:
                 self.motion_adapter.cancel_active_jogs()
-                self.run_logger.write_jsonl("arm_grabbed_send", {
-                    "request_id": self.core.ctx.active_req_id or "",
-                    "target": self.core.ctx.active_target or "",
-                    "line": grab_line,
-                    "grasp_source": "builtin" if builtin_active else str(getattr(self.core.ctx, "grasp_source", "") or ""),
-                    "builtin_target": builtin_target,
-                    "builtin_bottle_active": builtin_active,
-                    "builtin_grasp_active": builtin_active,
-                })
-                self.run_logger.write_jsonl("arm_cmd_planned", {
-                    "request_id": self.core.ctx.active_req_id or "",
-                    "grasp_source": "builtin" if builtin_active else str(getattr(self.core.ctx, "grasp_source", "") or ""),
-                    "builtin_target": builtin_target,
-                    "builtin_bottle_active": builtin_active,
-                    "builtin_grasp_active": builtin_active,
-                    "pose_line": builtin_pose_line,
-                    "grab_line": grab_line,
-                    "skip_remote": bool(getattr(self.cfg.control, f"builtin_{builtin_target}_skip_remote", True)) if builtin_active else False,
-                })
-                result = self.arm_bridge.send_grabbed_and_wait(
-                    line=grab_line,
-                    timeout_s=(
-                        float(getattr(self.cfg.control, f"builtin_{builtin_target}_grab_timeout_s", 10.0) or 10.0)
-                        if builtin_active
-                        else float(getattr(getattr(self.cfg, "arm_serial", None), "response_timeout_s", 10.0) or 10.0)
-                    ),
-                )
-                resp = result.get("response") if isinstance(result, dict) else None
-                if resp is None:
-                    error = str((result or {}).get("error") or "arm_grabbed_error")
-                    parsed_status = {
-                        "arm_serial_open_failed": "ARM_SERIAL_OPEN_FAILED",
-                        "arm_tx_failed": "ARM_TX_FAILED",
-                        "arm_grabbed_timeout": "ARM_GRABBED_TIMEOUT",
-                    }.get(error, error.upper())
-                    resp = ArmResponse(
-                        ok=False,
-                        message=error,
-                        raw_line=error,
-                        ts=time.time(),
-                        parsed_status=parsed_status,
-                    )
-                if resp is not None:
-                    parsed_status = str(getattr(resp, "parsed_status", "") or resp.message or "").strip().upper()
-                    if parsed_status == "OK_GRABBED_DONE" and bool(resp.ok):
-                        self.run_logger.write_jsonl("arm_grabbed_done", {
-                            "raw": resp.raw_line,
-                            "parsed_status": parsed_status,
-                            "ok": True,
-                            "received_lines": (result or {}).get("received_lines"),
-                        })
-                    elif parsed_status == "ARM_GRABBED_TIMEOUT":
-                        self.run_logger.write_jsonl("arm_grabbed_timeout", {
-                            "raw": resp.raw_line,
-                            "parsed_status": parsed_status,
-                            "ok": False,
-                            "last_lines": (result or {}).get("last_lines"),
-                        })
-                    else:
-                        self.run_logger.write_jsonl("arm_grabbed_failed", {
-                            "raw": resp.raw_line,
-                            "parsed_status": parsed_status,
-                            "ok": bool(resp.ok),
-                            "error": (result or {}).get("error", ""),
-                            "received_lines": (result or {}).get("received_lines"),
-                        })
-                    self.core.handle_arm_response(resp)
-                    self.run_logger.write_jsonl("arm_response", {
-                        "raw": resp.raw_line,
-                        "parsed_status": parsed_status,
-                        "builtin_stage": "grab_done" if parsed_status == "OK_GRABBED_DONE" and builtin_active else "",
-                        "ok": bool(resp.ok),
-                        "error": (result or {}).get("error", ""),
-                        "received_lines_count": (result or {}).get("received_lines_count"),
-                        "last_lines": (result or {}).get("last_lines"),
-                    })
-                return
-            elif arm_command in builtin_pose_lines:
-                pose_line = str(getattr(arm, "command", "") or builtin_pose_line or "POSE_BOTTLE").strip() or "POSE_BOTTLE"
-                is_rise = bool(pose_line.strip().upper() == post_grasp_rise_line.upper() or pose_line.strip().upper() == "POSE_RISE")
-                self.motion_adapter.cancel_active_jogs()
-                arm_planned = {
-                    "request_id": self.core.ctx.active_req_id or "",
-                    "input_grasp": {},
-                    "grasp_source": "post_grasp_fixed" if is_rise else "builtin",
-                    "builtin_target": builtin_target,
-                    "builtin_bottle_active": bool(getattr(self.core.ctx, "builtin_bottle_active", False)),
-                    "builtin_grasp_active": bool(getattr(self.core.ctx, "builtin_grasp_active", False)),
-                    "pose_line": pose_line,
-                    "grab_line": builtin_grab_line,
-                    "skip_remote": bool(getattr(self.cfg.control, f"builtin_{builtin_target}_skip_remote", True)) if builtin_target else False,
-                    "x": 0, "y": 0, "z": 0, "pitch": 0, "roll": 0, "claw": 0, "time_ms": 0,
-                }
-                self.run_logger.write_jsonl("arm_cmd_planned", dict(arm_planned))
-                self.run_logger.write_jsonl("arm_pose_encoded", dict(arm_planned))
-                self.run_logger.write_jsonl(
-                    "arm_cmd_sent",
-                    {
-                        "line": pose_line,
-                        "request_id": self.core.ctx.active_req_id or "",
-                        "source": "post_grasp_fixed" if is_rise else "builtin",
-                        **arm.to_dict(),
-                    },
-                )
-                self.run_logger.write_jsonl(
-                    "arm_pose_send",
-                    {
-                        "line": pose_line,
-                        "request_id": self.core.ctx.active_req_id or "",
-                        "target": self.core.ctx.active_target or "",
-                        **arm.to_dict(),
-                    },
-                )
-                result = self.arm_bridge.send_pose_bottle_and_wait(
-                    line=pose_line,
-                    timeout_s=(
-                        float(getattr(self.cfg.control, "post_grasp_rise_timeout_s", 10.0) or 10.0)
-                        if is_rise
-                        else float(getattr(self.cfg.control, f"builtin_{builtin_target}_pose_timeout_s", 15.0) or 15.0)
-                    ),
-                )
-                resp = result.get("response") if isinstance(result, dict) else None
-                if resp is None:
-                    error = str((result or {}).get("error") or "arm_response_timeout")
-                    parsed_status = {
-                        "arm_serial_open_failed": "ARM_SERIAL_OPEN_FAILED",
-                        "arm_tx_failed": "ARM_TX_FAILED",
-                        "arm_response_timeout": "ARM_RESPONSE_TIMEOUT",
-                    }.get(error, error.upper())
-                    resp = ArmResponse(
-                        ok=False,
-                        message=error,
-                        raw_line=error,
-                        ts=time.time(),
-                        parsed_status=parsed_status,
-                    )
-                if resp is not None:
-                    parsed_status = str(getattr(resp, "parsed_status", "") or resp.message or "").strip().upper()
-                    received_lines = list((result or {}).get("received_lines") or [])
-                    start_ack = str(
-                        getattr(
-                            self.cfg.control,
-                            "post_grasp_rise_start_ack" if is_rise else f"builtin_{builtin_target}_pose_start_ack",
-                            "OK POSE_RISE START" if is_rise else "OK POSE_BOTTLE START",
-                        )
-                    ).upper()
-                    start_line = next((str(line) for line in received_lines if str(line).strip().upper().startswith(start_ack)), "")
-                    if start_line:
-                        if is_rise:
-                            self.core._log("info", f"[POST_GRASP_FIXED][POSE_RISE_START] raw={start_line!r}")
-                        else:
-                            self.core._log("info", f"[GRASP][BUILTIN_POSE_START] target={builtin_target} raw={start_line!r}")
-                    if parsed_status == "OK_BUILTIN_POSE_DONE" and bool(resp.ok):
-                        if is_rise:
-                            self.core._log("info", f"[POST_GRASP_FIXED][POSE_RISE_DONE] raw={resp.raw_line!r}")
-                        else:
-                            self.core._log("info", f"[GRASP][BUILTIN_POSE_DONE] target={builtin_target} raw={resp.raw_line!r}")
-                        self.run_logger.write_jsonl("arm_pose_done", {
-                            "raw": resp.raw_line,
-                            "parsed_status": parsed_status,
-                            "builtin_stage": "pose_done",
-                            "builtin_target": "rise" if is_rise else builtin_target,
-                            "ok": True,
-                            "received_lines": received_lines,
-                        })
-                    elif parsed_status == "OK_POSE" and bool(resp.ok):
-                        self.run_logger.write_jsonl("arm_pose_done", {
-                            "raw": resp.raw_line,
-                            "parsed_status": parsed_status,
-                            "ok": True,
-                            "received_lines": (result or {}).get("received_lines"),
-                        })
-                    elif parsed_status == "ARM_RESPONSE_TIMEOUT":
-                        self.run_logger.write_jsonl("arm_pose_timeout", {
-                            "raw": resp.raw_line,
-                            "parsed_status": parsed_status,
-                            "ok": False,
-                            "last_lines": (result or {}).get("last_lines"),
-                        })
-                    else:
-                        self.run_logger.write_jsonl("arm_pose_failed", {
-                            "raw": resp.raw_line,
-                            "parsed_status": parsed_status,
-                            "ok": bool(resp.ok),
-                            "error": (result or {}).get("error", ""),
-                            "received_lines": (result or {}).get("received_lines"),
-                        })
-                    self.core.handle_arm_response(resp)
-                    self.run_logger.write_jsonl("arm_response", {
-                        "raw": resp.raw_line,
-                        "parsed_status": parsed_status,
-                        "builtin_stage": "pose_done" if parsed_status == "OK_BUILTIN_POSE_DONE" else "",
-                        "ok": bool(resp.ok),
-                        "error": (result or {}).get("error", ""),
-                        "received_lines_count": (result or {}).get("received_lines_count"),
-                        "last_lines": (result or {}).get("last_lines"),
-                    })
+                self._start_arm_recipe_step(arm)
                 return
             arm_line = encode_pose(
                 arm.x_cm, arm.y_cm, arm.z_cm,

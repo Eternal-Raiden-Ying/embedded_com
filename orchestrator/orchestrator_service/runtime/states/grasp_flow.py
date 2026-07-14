@@ -1,790 +1,145 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+"""Config-driven fixed grasp sequence state handlers."""
 from __future__ import annotations
 
-import math
-import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
-
-from ...config.schema import CarMotionConfig, ControlThresholds
-from ...control.types import DockingControlConfig
-from ...ipc.protocol import (
-    ArmCommand,
-    ArmResponse,
-    CarState,
-    HomeTagObs,
-    TableEdgeObs,
-    TargetObs,
-    TaskCmd,
-    make_grasp_req,
-    make_tts_event,
-    make_vision_idle,
-    make_vision_req,
-)
-from ...bridge.arm_protocol import parse_arm_response
-from ...utils.grasp_utils import grasp_to_pose_params, width_to_claw_angle
-from ...utils.target_utils import target_to_class_id
+from ...ipc.protocol import ArmCommand
 from ..common import monotonic_ts
-from ..context import RuntimeContext, State
-from ..controller import MotionController, MotionDecision
-from ..control_authority import decide_table_control_authority
-from ..core_types import (
-    KNOWN_VISION_STATUS,
-    MOVING_STATES,
-    TABLE_APPROACH_STATES,
-    TABLE_VISION_STATES,
-    TARGET_SEARCH_STATES,
-    TARGET_VISION_STATES,
-    ObstacleSignal,
-    VisionStageBinding,
-    _GRASP_ARM_TIMEOUT_S,
-    _GRASP_REPOSITION_TIMEOUT_S,
-    _GRASP_RESPOND_TIMEOUT_S,
-    _GRASP_RESULT_TIMEOUT_S,
-    _GRASP_RETRY_LIMIT,
-)
+from ..context import State
+from ..controller import MotionDecision
 
 
 class GraspFlowMixin:
     def _tick_grasp(self) -> MotionDecision:
         now_m = monotonic_ts()
         substate = str(self.ctx.grasp_substate or "")
-
-        if substate == "AWAITING_RESPOND":
-            return self._tick_grasp_awaiting_respond(now_m)
-        if substate == "AWAITING_RESULT":
-            return self._tick_grasp_awaiting_result(now_m)
-        if substate == "PRE_ARM_STOP_SETTLE":
-            return self._tick_grasp_pre_arm_stop_settle(now_m)
-        if substate == "REPOSITIONING":
-            return self._tick_grasp_repositioning(now_m)
-        if substate == "BUILTIN_BOTTLE_SEND_POSE":
-            return self._tick_builtin_bottle_send_pose(now_m)
-        if substate == "BUILTIN_BOTTLE_WAIT_POSE_START":
-            return self._tick_builtin_bottle_wait_pose_start(now_m)
-        if substate == "BUILTIN_BOTTLE_WAIT_POSE_DONE":
-            return self._tick_builtin_bottle_wait_pose_done(now_m)
-        if substate == "BUILTIN_BOTTLE_SEND_GRAB":
-            return self._tick_builtin_bottle_send_grab(now_m)
-        if substate == "BUILTIN_BOTTLE_WAIT_GRAB_DONE":
-            return self._tick_builtin_bottle_wait_grab_done(now_m)
-        if substate == "BUILTIN_BOTTLE_DONE":
-            return self._tick_builtin_bottle_done(now_m)
-        if substate == "AWAITING_ARM":
-            return self._tick_grasp_awaiting_arm(now_m)
-        if substate == "AWAITING_GRABBED":
-            return self._tick_grasp_awaiting_grabbed(now_m)
-        if substate == "AWAITING_GRABBED_DONE":
-            return self._tick_grasp_awaiting_grabbed_done(now_m)
-        if substate == "GRASP_VERIFY":
-            return self._tick_grasp_verify(now_m)
+        if substate == "RECIPE_WAIT_ARM_READY":
+            return self._tick_recipe_wait_arm_ready(now_m)
+        if substate == "RECIPE_SEND_STEP":
+            return self._tick_recipe_send_step(now_m)
+        if substate == "RECIPE_WAIT_STEP":
+            return self._tick_recipe_wait_step(now_m)
+        if substate == "RECIPE_SETTLE":
+            return self._tick_recipe_settle(now_m)
+        if substate == "RECIPE_DONE":
+            return self._tick_recipe_done(now_m)
+        self._enter_error_recovery(f"invalid_grasp_recipe_substate:{substate or 'empty'}")
         return self.controller.stop_cmd("GRASP")
 
-    def _log_grasp_phase_update(self, phase: str, reason: str = "") -> None:
-        payload = {
-            "phase": phase,
-            "target": self.ctx.active_target or "",
-            "reason": reason,
-        }
-        self._log("info", f"grasp_phase_update {payload}")
+    def _selected_grasp_recipe(self):
+        recipe = getattr(self.ctx, "selected_grasp_recipe", None)
+        return recipe if bool(getattr(self.ctx, "grasp_recipe_ready", False)) else None
 
-    def _has_ready_grasp_result(self) -> bool:
-        return (
-            str(self.ctx.grasp_status or "").strip().upper() == "RESULT_READY"
-            and isinstance(self.ctx.grasp_result, dict)
-            and bool(self.ctx.grasp_result)
-        )
+    def _selected_grasp_step(self):
+        recipe = self._selected_grasp_recipe()
+        index = int(getattr(self.ctx, "grasp_recipe_step_index", 0) or 0)
+        steps = tuple(getattr(recipe, "steps", ()) or ()) if recipe is not None else ()
+        return recipe, index, (steps[index] if 0 <= index < len(steps) else None)
 
-    def _consume_ready_grasp_result(self, now_m: float, substate: str) -> MotionDecision:
-        self.ctx.grasp_substate = "PRE_ARM_STOP_SETTLE"
-        self.ctx.pre_arm_stop_settle_start_mono = now_m
-        grasp_keys = sorted(str(key) for key in (self.ctx.grasp_result or {}).keys())
-        payload = {
-            "substate": substate,
-            "ctx_grasp_status": str(self.ctx.grasp_status or "").strip().upper(),
-            "has_grasp_result": True,
-            "grasp_result_keys": grasp_keys,
-            "next_substate": "PRE_ARM_STOP_SETTLE",
-        }
-        self._log("info", f"grasp_result_ready_consumed {payload}")
-        return self.controller.stop_cmd("GRASP")
-
-    def _log_grasp_flow_tick_debug(self, substate: str, waiting_for: str, now_m: float) -> None:
-        grasp = self.ctx.grasp_result if isinstance(self.ctx.grasp_result, dict) else {}
-        payload = {
-            "substate": substate,
-            "ctx_grasp_status": str(self.ctx.grasp_status or "").strip().upper(),
-            "has_grasp_result": bool(grasp),
-            "grasp_result_keys": sorted(str(key) for key in grasp.keys()),
-            "elapsed_s": round(float(self._state_elapsed()), 3),
-            "waiting_for": waiting_for,
-            "timeout_left_s": round(max(0.0, float(self.ctx.grasp_timeout_mono or 0.0) - float(now_m)), 3),
-            "grasp_source": str(getattr(self.ctx, "grasp_source", "") or ""),
-            "builtin_substate": str(getattr(self.ctx, "grasp_substate", "") or ""),
-            "remote_grasp_active": bool(getattr(self.ctx, "remote_grasp_active", False)),
-            "builtin_bottle_active": bool(getattr(self.ctx, "builtin_bottle_active", False)),
-            "remote_result_ignored": bool(getattr(self.ctx, "remote_result_ignored", False)),
-        }
-        self._log("info", f"grasp_flow_tick_debug {payload}")
-
-    def _tick_grasp_awaiting_respond(self, now_m: float) -> MotionDecision:
-        if self._has_ready_grasp_result():
-            return self._consume_ready_grasp_result(now_m, "AWAITING_RESPOND")
-        if self._state_elapsed() < 0.3:
-            return self.controller.stop_cmd("GRASP")
-        if str(self.ctx.grasp_status or "").upper() == "FAILED":
-            reason = self._normalize_grasp_failed_reason(str(self.ctx.grasp_reason or ""))
-            self._enter_error_recovery(reason or "grasp failed")
-            return self.controller.stop_cmd("GRASP")
-        if now_m > self.ctx.grasp_timeout_mono:
-            self._log_grasp_flow_tick_debug("AWAITING_RESPOND", "remote_result", now_m)
-            reason = self._normalize_grasp_failed_reason(str(self.ctx.grasp_reason or ""))
-            self._enter_error_recovery(reason or "grasp respond timeout")
-            return self.controller.stop_cmd("GRASP")
-        if self.ctx.grasp_status == "WAITING_RESPONSE":
-            target_obs = self.ctx.last_target_obs
-            self._queue_vision_req(
-                make_grasp_req(
-                    target=self.ctx.class_name or self.ctx.canonical_target or self.ctx.active_target or "",
-                    class_id=int(self.ctx.class_id) if self.ctx.class_id is not None else target_to_class_id(self.ctx.active_target or ""),
-                    session_id=self.ctx.active_session_id,
-                    epoch=self.ctx.active_epoch,
-                    op="RESPOND",
-                    payload={
-                        "task_id": self.ctx.active_task_id,
-                        "raw_target": self.ctx.raw_target,
-                        "canonical_target": self.ctx.canonical_target or self.ctx.active_target,
-                        "class_name": self.ctx.class_name,
-                        "local_target_bbox_xyxy": getattr(target_obs, "matched_bbox", None) or getattr(target_obs, "bbox", None) if target_obs is not None else None,
-                        "local_target_conf": getattr(target_obs, "matched_conf", None) if target_obs is not None else None,
-                        "local_target_frame_id": getattr(target_obs, "frame_id", None) if target_obs is not None else None,
-                    },
-                ),
-                force=True,
-            )
-            self.ctx.grasp_substate = "AWAITING_RESULT"
-            self.ctx.grasp_timeout_mono = now_m + _GRASP_RESULT_TIMEOUT_S
-            self._log_grasp_flow_tick_debug("AWAITING_RESULT", "remote_result", now_m)
-        return self.controller.stop_cmd("GRASP")
-
-    def _tick_grasp_awaiting_result(self, now_m: float) -> MotionDecision:
-        if self._has_ready_grasp_result():
-            return self._consume_ready_grasp_result(now_m, "AWAITING_RESULT")
-        if now_m > self.ctx.grasp_timeout_mono:
-            self._log_grasp_flow_tick_debug("AWAITING_RESULT", "remote_result", now_m)
-            reason = self._normalize_grasp_failed_reason(str(self.ctx.grasp_reason or ""))
-            self._enter_error_recovery(reason or "grasp result timeout")
-            return self.controller.stop_cmd("GRASP")
-
-        status = str(self.ctx.grasp_status or "").upper()
-        if status not in {"", "RUNNING", "WAITING_RESPONSE", "RESULT_READY", "FAILED", "RELAXING"}:
-            self._enter_error_recovery(f"unknown vision status: {status}")
-            return self.controller.stop_cmd("GRASP")
-
-        if status == "RUNNING" and self.ctx.grasp_reposition_proposal is not None:
-            self.ctx.grasp_retry_count += 1
-            if self.ctx.grasp_retry_count > _GRASP_RETRY_LIMIT:
-                self._enter_error_recovery("grasp reposition retries exhausted")
-                return self.controller.stop_cmd("GRASP")
-            self.ctx.grasp_substate = "REPOSITIONING"
-            self.ctx.grasp_timeout_mono = now_m + _GRASP_REPOSITION_TIMEOUT_S
-            self.ctx.grasp_reposition_start_mono = now_m
-            return self.controller.stop_cmd("GRASP")
-
-        if status == "FAILED":
-            reason = self._normalize_grasp_failed_reason(str(self.ctx.grasp_reason or ""))
-            if reason == "no_detection":
-                self._transition(State.SEARCH_TARGET_INIT, "grasp failed: target not detected")
-                return self.controller.stop_cmd("SEARCH_TARGET_INIT")
-            self._enter_error_recovery(reason or "grasp failed")
-            return self.controller.stop_cmd("GRASP")
-
-        return self.controller.stop_cmd("GRASP")
-
-    @staticmethod
-    def _normalize_grasp_failed_reason(reason: str) -> str:
-        text = str(reason or "").strip()
-        prefix = "remote_predict_failed:predict_http_"
-        if text.startswith(prefix):
-            return "remote_predict_failed:http_" + text[len(prefix):]
-        return text
-
-    def _builtin_grasp_target(self) -> str:
-        names = {
-            str(self.ctx.canonical_target or "").strip().lower(),
-            str(self.ctx.class_name or "").strip().lower(),
-            str(self.ctx.active_target or "").strip().lower(),
-            str(self.ctx.raw_target or "").strip().lower(),
-        }
-        for target in ("apple", "bottle"):
-            if target in names and bool(getattr(self.cfg, f"builtin_{target}_grasp_enable", True)):
-                return target
-        return ""
-
-    def _builtin_bottle_target_active(self) -> bool:
-        return bool(self._builtin_grasp_target())
-
-    def _builtin_grasp_cfg(self, suffix: str, default: Any) -> Any:
-        target = self._builtin_grasp_target() or str(getattr(self.ctx, "builtin_grasp_target", "") or "bottle")
-        return getattr(self.cfg, f"builtin_{target}_{suffix}", default)
-
-    def _builtin_bottle_pose_line(self) -> str:
-        target = self._builtin_grasp_target() or str(getattr(self.ctx, "builtin_grasp_target", "") or "bottle")
-        default = "POSE_APPLE" if target == "apple" else "POSE_BOTTLE"
-        return str(self._builtin_grasp_cfg("pose_line", default) or default).strip() or default
-
-    def _builtin_bottle_grab_line(self) -> str:
-        return str(self._builtin_grasp_cfg("grab_line", "GRABBED") or "GRABBED").strip() or "GRABBED"
-
-    def _builtin_ack_matches(self, resp: Any, configured_ack: str, parsed_status: str) -> bool:
-        status = str(getattr(resp, "parsed_status", "") or getattr(resp, "message", "") or "").strip().upper()
-        raw = str(getattr(resp, "raw_line", "") or "").strip().upper()
-        ack = str(configured_ack or "").strip().upper()
-        return bool(status == parsed_status or (ack and raw.startswith(ack)))
-
-    def _builtin_bottle_summary(self, phase: str, *, waiting_for: str = "") -> Dict[str, Any]:
-        return {
-            "grasp_phase": phase,
-            "grasp_source": "builtin",
-            "builtin_target": self._builtin_grasp_target() or str(getattr(self.ctx, "builtin_grasp_target", "") or ""),
-            "builtin_bottle_active": True,
-            "builtin_grasp_active": True,
-            "builtin_substate": str(getattr(self.ctx, "grasp_substate", "") or ""),
-            "waiting_for": waiting_for,
-            "remote_grasp_active": False,
-            "remote_result_ignored": bool(getattr(self.ctx, "remote_result_ignored", False)),
-            "pose_line": self._builtin_bottle_pose_line(),
-            "grab_line": self._builtin_bottle_grab_line(),
-            "skip_remote": bool(self._builtin_grasp_cfg("skip_remote", True)),
-            "vx_mps": 0.0,
-            "vy_mps": 0.0,
-            "wz_radps": 0.0,
-        }
-
-    def _tick_builtin_bottle_send_pose(self, now_m: float) -> MotionDecision:
-        if not self._builtin_bottle_target_active():
-            self.ctx.builtin_bottle_active = False
-            self.ctx.builtin_grasp_active = False
-            self.ctx.grasp_source = ""
-            self.ctx.remote_grasp_active = True
-            self.ctx.grasp_substate = "AWAITING_RESPOND"
-            self.ctx.grasp_timeout_mono = now_m + _GRASP_RESPOND_TIMEOUT_S
-            return self.controller.stop_cmd("GRASP")
-        pose_line = self._builtin_bottle_pose_line()
-        target = self._builtin_grasp_target()
-        self.ctx.grasp_source = "builtin"
-        self.ctx.builtin_grasp_target = target
-        self.ctx.remote_grasp_active = False
-        self.ctx.builtin_bottle_active = True
-        self.ctx.builtin_grasp_active = True
-        self.ctx.builtin_bottle_pose_started = False
-        self.ctx.arm_response = None
-        self.ctx.grasp_substate = "BUILTIN_BOTTLE_WAIT_POSE_DONE"
-        self.ctx.grasp_timeout_mono = now_m + max(0.1, float(self._builtin_grasp_cfg("pose_timeout_s", 15.0) or 15.0))
-        self._log("info", f"[GRASP][BUILTIN_POSE_SEND] target={target} line={pose_line}")
-        arm_cmd = ArmCommand(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, command=pose_line)
-        decision = MotionDecision(cmd=self.controller.stop_cmd("GRASP").cmd, arm_cmd=arm_cmd)
-        decision.control_summary = self._builtin_bottle_summary("builtin_pose_send", waiting_for="OK_BUILTIN_POSE_DONE")
-        return decision
-
-    def _tick_builtin_bottle_wait_pose_start(self, now_m: float) -> MotionDecision:
-        resp = self.ctx.arm_response
-        target = str(getattr(self.ctx, "builtin_grasp_target", "") or self._builtin_grasp_target() or "bottle")
-        if resp is not None and self._builtin_ack_matches(resp, self._builtin_grasp_cfg("pose_start_ack", f"OK POSE_{target.upper()} START"), "OK_BUILTIN_POSE_START"):
-            self.ctx.arm_response = None
-            self.ctx.builtin_bottle_pose_started = True
-            self.ctx.grasp_substate = "BUILTIN_BOTTLE_WAIT_POSE_DONE"
-            self._log("info", f"[GRASP][BUILTIN_POSE_START] target={target} raw={getattr(resp, 'raw_line', '')!r}")
-            return self.controller.stop_cmd("GRASP")
-        if resp is not None and self._builtin_ack_matches(resp, self._builtin_grasp_cfg("pose_done_ack", f"OK POSE_{target.upper()} DONE"), "OK_BUILTIN_POSE_DONE"):
-            return self._handle_builtin_bottle_pose_done(resp, now_m)
-        if now_m > self.ctx.grasp_timeout_mono:
-            self._log_grasp_flow_tick_debug("BUILTIN_BOTTLE_WAIT_POSE_START", "OK_BUILTIN_POSE_START", now_m)
-            self._enter_error_recovery("builtin_bottle_pose_timeout")
-        return self.controller.stop_cmd("GRASP")
-
-    def _handle_builtin_bottle_pose_done(self, resp: Any, now_m: float) -> MotionDecision:
-        self.ctx.arm_response = None
-        self.ctx.builtin_bottle_pose_started = True
-        self.ctx.grasp_substate = "BUILTIN_BOTTLE_SEND_GRAB"
-        target = str(getattr(self.ctx, "builtin_grasp_target", "") or self._builtin_grasp_target() or "bottle")
-        self.ctx.grasp_timeout_mono = now_m + max(0.1, float(self._builtin_grasp_cfg("grab_timeout_s", 10.0) or 10.0))
-        self._log("info", f"[GRASP][BUILTIN_POSE_DONE] target={target} raw={getattr(resp, 'raw_line', '')!r}")
-        return self.controller.stop_cmd("GRASP")
-
-    def _tick_builtin_bottle_wait_pose_done(self, now_m: float) -> MotionDecision:
-        if now_m > self.ctx.grasp_timeout_mono:
-            self._log_grasp_flow_tick_debug("BUILTIN_BOTTLE_WAIT_POSE_DONE", "OK_BUILTIN_POSE_DONE", now_m)
-            self._enter_error_recovery("builtin_bottle_pose_done_timeout")
-            return self.controller.stop_cmd("GRASP")
-        resp = self.ctx.arm_response
-        if resp is None:
-            return self.controller.stop_cmd("GRASP")
-        target = str(getattr(self.ctx, "builtin_grasp_target", "") or self._builtin_grasp_target() or "bottle")
-        if self._builtin_ack_matches(resp, self._builtin_grasp_cfg("pose_start_ack", f"OK POSE_{target.upper()} START"), "OK_BUILTIN_POSE_START"):
-            self.ctx.arm_response = None
-            self.ctx.builtin_bottle_pose_started = True
-            self._log("info", f"[GRASP][BUILTIN_POSE_START] target={target} raw={getattr(resp, 'raw_line', '')!r}")
-            return self.controller.stop_cmd("GRASP")
-        if self._builtin_ack_matches(resp, self._builtin_grasp_cfg("pose_done_ack", f"OK POSE_{target.upper()} DONE"), "OK_BUILTIN_POSE_DONE"):
-            return self._handle_builtin_bottle_pose_done(resp, now_m)
-        parsed_status = str(getattr(resp, "parsed_status", "") or getattr(resp, "message", "") or "").strip().upper()
-        raw = getattr(resp, "raw_line", "")
-        self.ctx.arm_response = None
-        if parsed_status in {"ARM_RESPONSE_TIMEOUT", "ARM_TX_FAILED", "ARM_SERIAL_OPEN_FAILED", "ERR_CMD", "ERR_IK"}:
-            reason = "builtin_bottle_pose_timeout" if parsed_status == "ARM_RESPONSE_TIMEOUT" else f"builtin_bottle_pose_failed:{parsed_status}"
-            self._log("warn", f"[GRASP][BUILTIN_POSE_FAILED] parsed_status={parsed_status} raw={raw!r}")
-            self._enter_error_recovery(reason)
-            return self.controller.stop_cmd("GRASP")
-        self._log("warn", f"[GRASP][BUILTIN_POSE_IGNORED] parsed_status={parsed_status} raw={raw!r}")
-        return self.controller.stop_cmd("GRASP")
-
-    def _tick_builtin_bottle_send_grab(self, now_m: float) -> MotionDecision:
-        target = str(getattr(self.ctx, "builtin_grasp_target", "") or self._builtin_grasp_target() or "bottle")
-        if not bool(self._builtin_grasp_cfg("grab_enable", True)):
-            self.ctx.grasp_substate = "BUILTIN_BOTTLE_DONE"
-            return self.controller.stop_cmd("GRASP")
-        grab_line = self._builtin_bottle_grab_line()
-        self.ctx.arm_response = None
-        self.ctx.grasp_substate = "BUILTIN_BOTTLE_WAIT_GRAB_DONE"
-        self.ctx.grasp_timeout_mono = now_m + max(0.1, float(self._builtin_grasp_cfg("grab_timeout_s", 10.0) or 10.0))
-        self._log("info", f"[GRASP][BUILTIN_GRAB_SEND] target={target} line={grab_line}")
-        arm_cmd = ArmCommand(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, command=grab_line)
-        decision = MotionDecision(cmd=self.controller.stop_cmd("GRASP").cmd, arm_cmd=arm_cmd)
-        decision.control_summary = self._builtin_bottle_summary("builtin_grab_send", waiting_for="OK_GRABBED_DONE")
-        return decision
-
-    def _tick_builtin_bottle_wait_grab_done(self, now_m: float) -> MotionDecision:
-        if now_m > self.ctx.grasp_timeout_mono:
-            self._log_grasp_flow_tick_debug("BUILTIN_BOTTLE_WAIT_GRAB_DONE", "OK_GRABBED_DONE", now_m)
-            self._enter_error_recovery("builtin_bottle_grab_timeout")
-            return self.controller.stop_cmd("GRASP")
-        resp = self.ctx.arm_response
-        if resp is None:
-            return self.controller.stop_cmd("GRASP")
-        parsed_status = str(getattr(resp, "parsed_status", "") or getattr(resp, "message", "") or "").strip().upper()
-        raw = getattr(resp, "raw_line", "")
-        self.ctx.arm_response = None
-        target = str(getattr(self.ctx, "builtin_grasp_target", "") or self._builtin_grasp_target() or "bottle")
-        if self._builtin_ack_matches(resp, self._builtin_grasp_cfg("grab_done_ack", "OK GRABBED DONE"), "OK_GRABBED_DONE"):
-            self.ctx.grasp_substate = "BUILTIN_BOTTLE_DONE"
-            self._log("info", f"[GRASP][BUILTIN_GRAB_DONE] target={target} raw={raw!r}")
-            return self.controller.stop_cmd("GRASP")
-        if parsed_status in {"OK_GRABBED_START", "OK_KEEP_CLAW"}:
-            self._log("info", f"[GRASP][BUILTIN_GRAB_PROGRESS] parsed_status={parsed_status} raw={raw!r}")
-            return self.controller.stop_cmd("GRASP")
-        reason = "builtin_bottle_grab_timeout" if parsed_status == "ARM_GRABBED_TIMEOUT" else f"builtin_bottle_grab_failed:{parsed_status or 'unknown'}"
-        self._log("warn", f"[GRASP][BUILTIN_GRAB_FAILED] parsed_status={parsed_status} raw={raw!r}")
-        self._enter_error_recovery(reason)
-        return self.controller.stop_cmd("GRASP")
-
-    def _tick_builtin_bottle_done(self, now_m: float) -> MotionDecision:
+    def _tick_recipe_wait_arm_ready(self, now_m: float) -> MotionDecision:
         del now_m
-        target = str(getattr(self.ctx, "builtin_grasp_target", "") or self._builtin_grasp_target() or "bottle")
-        self.ctx.grasp_source = "builtin"
-        self.ctx.builtin_bottle_active = False
-        self.ctx.builtin_grasp_active = False
-        self.ctx.remote_grasp_active = False
-        self.ctx.carrying_object = True
-        self.ctx.carried_target = target
+        recipe = self._selected_grasp_recipe()
+        if recipe is None:
+            self._emit_tts_event("RECIPE_NOT_READY", state=State.GRASP.value)
+            self._transition(State.DONE, "RECIPE_NOT_READY")
+            return self.controller.stop_cmd("DONE")
+        if not bool(getattr(self.ctx, "arm_serial_ready", False)):
+            self._enter_error_recovery("arm_serial_not_ready")
+            return self.controller.stop_cmd("GRASP")
+        self.ctx.grasp_substate = "RECIPE_SEND_STEP"
+        return self._tick_recipe_send_step(monotonic_ts())
+
+    def _tick_recipe_send_step(self, now_m: float) -> MotionDecision:
+        recipe, index, step = self._selected_grasp_step()
+        if recipe is None:
+            self._emit_tts_event("RECIPE_NOT_READY", state=State.GRASP.value)
+            self._transition(State.DONE, "RECIPE_NOT_READY")
+            return self.controller.stop_cmd("DONE")
+        if step is None:
+            self.ctx.grasp_substate = "RECIPE_DONE"
+            return self._tick_recipe_done(now_m)
         self.ctx.arm_response = None
-        self.ctx.grasp_substate = "BUILTIN_BOTTLE_DONE"
-        self._log("info", f"[GRASP][BUILTIN_DONE] target={target}")
-        if bool(getattr(self.cfg, "post_grasp_fixed_flow_enable", True)):
-            self.ctx.post_grasp_fixed_entry_logged = False
-            self.ctx.post_grasp_rise_substate = ""
-            self.ctx.post_grasp_rise_timeout_mono = 0.0
-            self._transition(State.POST_GRASP_TURN_FIXED, f"arm_motion_done builtin_{target} post_grasp_fixed_flow_enable=true")
-            self._queue_tts("抓取完成，开始固定放置动作")
-            return self.controller.stop_cmd("POST_GRASP_TURN_FIXED")
-        self._transition(State.DONE, "arm_motion_done builtin_bottle")
-        self._queue_tts("抓取完成")
-        return self.controller.stop_cmd("DONE")
-
-    def _tick_grasp_pre_arm_stop_settle(self, now_m: float) -> MotionDecision:
-        settle_ms = getattr(self.car_cfg, "pre_arm_stop_settle_ms", 150)
-        settle_s = float(settle_ms) / 1000.0
-        if now_m - self.ctx.pre_arm_stop_settle_start_mono < settle_s:
-            return self.controller.stop_cmd("GRASP")
-
-        if getattr(self.ctx, "use_fallback_grasp", False):
-            arm_cmd = ArmCommand(
-                x_cm=0.0,
-                y_cm=0.0,
-                z_cm=0.0,
-                pitch_deg=0.0,
-                roll_deg=0.0,
-                claw_deg=0.0,
-                time_ms=0,
-                command="POSE_BOTTLE",
-            )
-            self.ctx.grasp_substate = "AWAITING_ARM"
-            self.ctx.grasp_timeout_mono = now_m + _GRASP_ARM_TIMEOUT_S
-            self._log_grasp_phase_update("pose_wait", "arm_pose_send_fallback")
-            decision = MotionDecision(cmd=self.controller.stop_cmd("GRASP").cmd, arm_cmd=arm_cmd)
-            decision.control_summary = {
-                "input_grasp": {},
-                "source": "fallback_grasp",
-            }
-            self._log_grasp_flow_tick_debug("AWAITING_ARM", "arm_response", now_m)
-            return decision
-
-        if isinstance(self.ctx.grasp_result, dict):
-            raw_target = self.ctx.active_target
-            canonical_target = None
-            class_name = None
-            class_id = self.ctx.grasp_result.get("class_id")
-
-            if class_id is None and raw_target:
-                try:
-                    class_id = target_to_class_id(raw_target)
-                except Exception:
-                    pass
-
-            if raw_target:
-                try:
-                    from ...utils.target_utils import resolve_target
-                    spec = resolve_target(raw_target)
-                    if spec is not None:
-                        canonical_target = spec.canonical_target
-                        class_name = spec.class_name
-                except Exception:
-                    pass
-
-            if (canonical_target is None or class_name is None) and class_id is not None:
-                try:
-                    from ...utils.target_utils import OBJECT_REGISTRY
-                    for spec in OBJECT_REGISTRY.values():
-                        if int(spec.class_id) == int(class_id):
-                            canonical_target = spec.canonical_target
-                            class_name = spec.class_name
-                            break
-                except Exception:
-                    pass
-
-            override_val = None
-            matched_key = None
-            try:
-                cfg = getattr(self, "cfg", None)
-                lookup_map = getattr(cfg, "target_gripper_widths", {}) if cfg is not None else {}
-                if not isinstance(lookup_map, dict):
-                    self._log("warn", f"[GRASP][GRIPPER_WIDTH] target_gripper_widths is not a dict: {type(lookup_map)}")
-                    lookup_map = {}
-
-                if lookup_map:
-                    if canonical_target is not None and canonical_target in lookup_map:
-                        override_val = lookup_map[canonical_target]
-                        matched_key = canonical_target
-                    elif class_name is not None and class_name in lookup_map:
-                        override_val = lookup_map[class_name]
-                        matched_key = class_name
-                    elif raw_target is not None and raw_target in lookup_map:
-                        override_val = lookup_map[raw_target]
-                        matched_key = raw_target
-                    elif class_id is not None and str(class_id) in lookup_map:
-                        override_val = lookup_map[str(class_id)]
-                        matched_key = str(class_id)
-                    elif class_id is not None and class_id in lookup_map:
-                        override_val = lookup_map[class_id]
-                        matched_key = str(class_id)
-            except Exception as exc:
-                self._log("warn", f"[GRASP][GRIPPER_WIDTH] failed to lookup target_gripper_widths: {exc}")
-
-            cloud_width = self.ctx.grasp_result.get("gripper_width_cm")
-            override_applied = False
-            final_width = None
-            source = "default"
-            key = "N/A"
-
-            if override_val is not None:
-                try:
-                    override_val_float = float(override_val)
-                    if override_val_float > 15.0:
-                        final_width = override_val_float / 10.0
-                    else:
-                        final_width = override_val_float
-                    self.ctx.grasp_result["gripper_width_cm"] = final_width
-                    override_applied = True
-                    source = "override"
-                    key = str(matched_key)
-                except Exception as exc:
-                    self._log("warn", f"[GRASP][GRIPPER_WIDTH] failed to parse override_val {override_val}: {exc}")
-
-            if not override_applied:
-                if cloud_width is not None:
-                    final_width = float(cloud_width)
-                    source = "cloud"
-                else:
-                    final_width = 8.0
-                    self.ctx.grasp_result["gripper_width_cm"] = 8.0
-                    source = "default"
-
-            self._log(
-                "info",
-                f"[GRASP][GRIPPER_WIDTH] target={raw_target} key={key} width={final_width:.3f} source={source}"
-            )
-
-            try:
-                arm_cmd = grasp_to_pose_params(
-                    self.ctx.grasp_result,
-                    time_ms=int(getattr(self.car_cfg, "grasp_pose_time_ms", 800) or 800),
-                )
-            except ValueError as exc:
-                self._enter_error_recovery("grasp_pose_schema_invalid")
-                self._log("error", f"[GRASP][POSE_SCHEMA_INVALID] {exc}")
-                return self.controller.stop_cmd("GRASP")
-            self.ctx.grasp_substate = "AWAITING_ARM"
-            self.ctx.grasp_timeout_mono = now_m + _GRASP_ARM_TIMEOUT_S
-            self._log_grasp_phase_update("pose_wait", "arm_pose_send")
-            decision = MotionDecision(cmd=self.controller.stop_cmd("GRASP").cmd, arm_cmd=arm_cmd)
-            decision.control_summary = {
-                "input_grasp": dict(self.ctx.grasp_result),
-                "source": "remote_grasp_client",
-            }
-            self._log_grasp_flow_tick_debug("AWAITING_ARM", "arm_response", now_m)
-            return decision
-        else:
-            self.ctx.grasp_substate = "AWAITING_RESPOND"
-            self.ctx.grasp_timeout_mono = now_m + _GRASP_RESPOND_TIMEOUT_S
-            return self.controller.stop_cmd("GRASP")
-
-    def _tick_grasp_repositioning(self, now_m: float) -> MotionDecision:
-        if now_m > self.ctx.grasp_timeout_mono:
-            self._active_reposition_proposal = None
-            self._enter_error_recovery("grasp reposition timeout")
-            return self.controller.stop_cmd("GRASP")
-
-        proposal = self.ctx.grasp_reposition_proposal
-        if not isinstance(proposal, dict):
-            self._active_reposition_proposal = None
-            self.ctx.grasp_substate = "AWAITING_RESPOND"
-            self.ctx.grasp_timeout_mono = now_m + _GRASP_RESPOND_TIMEOUT_S
-            return self.controller.stop_cmd("GRASP")
-
-        dx = float(proposal.get("dx_cm", 0.0) or 0.0)
-        dy = float(proposal.get("dy_cm", 0.0) or 0.0)
-        total_distance = math.hypot(dx, dy)
-
-        # Track active proposal and reset start time if proposal changed
-        active_prop = getattr(self, "_active_reposition_proposal", None)
-        if active_prop is None or active_prop != proposal:
-            self._log("info", f"[GRASP][REPOSITION] Proposal changed from {active_prop} to {proposal}, resetting start time.")
-            self._active_reposition_proposal = proposal
-            self.ctx.grasp_reposition_start_mono = now_m
-
-        speed_cm_s = float(getattr(self.car_cfg, "grasp_reposition_speed_cm_s", 10.0))
-        if speed_cm_s <= 0.0 or not math.isfinite(speed_cm_s):
-            speed_cm_s = 10.0
-        speed_cm_s = max(1.0, min(30.0, speed_cm_s))
-
-        speed_m_s = speed_cm_s / 100.0
-        duration = total_distance / speed_cm_s
-        elapsed = now_m - self.ctx.grasp_reposition_start_mono
-
-        if total_distance < 0.5 or (duration - elapsed) <= 0.08:
-            target_obs = self.ctx.last_target_obs
-            self._active_reposition_proposal = None
-            self.ctx.grasp_reposition_proposal = None
-            self.ctx.grasp_substate = "AWAITING_RESPOND"
-            self.ctx.grasp_timeout_mono = now_m + _GRASP_RESPOND_TIMEOUT_S
-            self._queue_vision_req(
-                make_grasp_req(
-                    target=self.ctx.class_name or self.ctx.canonical_target or self.ctx.active_target or "",
-                    class_id=int(self.ctx.class_id) if self.ctx.class_id is not None else target_to_class_id(self.ctx.active_target or ""),
-                    session_id=self.ctx.active_session_id,
-                    epoch=self.ctx.active_epoch,
-                    op="START",
-                    payload={
-                        "task_id": self.ctx.active_task_id,
-                        "raw_target": self.ctx.raw_target,
-                        "canonical_target": self.ctx.canonical_target or self.ctx.active_target,
-                        "class_name": self.ctx.class_name,
-                        "local_target_bbox_xyxy": getattr(target_obs, "matched_bbox", None) or getattr(target_obs, "bbox", None) if target_obs is not None else None,
-                        "local_target_conf": getattr(target_obs, "matched_conf", None) if target_obs is not None else None,
-                        "local_target_frame_id": getattr(target_obs, "frame_id", None) if target_obs is not None else None,
-                    },
-                ),
-                force=True,
-            )
-            return self.controller.stop_cmd("GRASP")
-
-        vx = (dx / total_distance) * speed_m_s
-        vy = (dy / total_distance) * speed_m_s
-        cmd = self.controller._cmd("GRASP_REPOSITION", vx=vx, vy=vy, wz=0.0)
-        return MotionDecision(cmd=cmd, control_summary=self.controller._summary(
-            "GRASP_REPOSITION", cmd, reason=f"reposition dx={dx:.1f} dy={dy:.1f}"
-        ))
-
-    def _tick_grasp_awaiting_arm(self, now_m: float) -> MotionDecision:
-        if now_m > self.ctx.grasp_timeout_mono:
-            self._log_grasp_flow_tick_debug("AWAITING_ARM", "arm_response", now_m)
-            self._log("warn", "arm_pose_failed {'reason': 'arm_pose_timeout'}")
-            self._log_grasp_phase_update("error", "arm_pose_timeout")
-            self._enter_error_recovery("arm_pose_timeout")
-            return self.controller.stop_cmd("GRASP")
-
-        resp = self.ctx.arm_response
-        if resp is not None:
-            if resp.ok:
-                sent_pose = dict(getattr(resp, "sent_pose", {}) or {})
-                response_pose = dict(getattr(resp, "response_pose", {}) or {})
-                self._log(
-                    "info",
-                    "arm_pose_success "
-                    f"{{'sent_pose': {sent_pose!r}, "
-                    f"'response_pose': {response_pose!r}, "
-                    "'response_matches_sent': True, "
-                    f"'raw_response': {getattr(resp, 'raw_line', '')!r}, "
-                    "'next_substate': 'AWAITING_GRABBED'}}",
-                )
-                self.ctx.grasp_substate = "AWAITING_GRABBED"
-                self.ctx.grasp_timeout_mono = now_m + _GRASP_ARM_TIMEOUT_S
-                self.ctx.arm_response = None
-                self._log_grasp_phase_update("grabbed_wait", "arm_pose_success")
-                return self.controller.stop_cmd("GRASP")
-            parsed_status = str(getattr(resp, "parsed_status", "") or resp.message or "").strip().upper()
-            self.ctx.arm_response = None
-            if parsed_status == "ERR_IK":
-                self._log("warn", "arm_pose_failed {'reason': 'arm_pose_ik_failed'}")
-                self._log_grasp_phase_update("error", "arm_pose_ik_failed")
-                self._enter_error_recovery("arm_pose_ik_failed")
-                return self.controller.stop_cmd("GRASP")
-            if parsed_status == "ERR_CMD":
-                self._log("warn", "arm_pose_failed {'reason': 'arm_pose_cmd_error'}")
-                self._log_grasp_phase_update("error", "arm_pose_cmd_error")
-                self._enter_error_recovery("arm_pose_cmd_error")
-                return self.controller.stop_cmd("GRASP")
-            if parsed_status == "ARM_SERIAL_OPEN_FAILED":
-                self._log("warn", "arm_pose_failed {'reason': 'arm_serial_open_failed'}")
-                self._enter_error_recovery("arm_serial_open_failed")
-                return self.controller.stop_cmd("GRASP")
-            if parsed_status in {"ARM_TX_FAILED", "ARM_SERIAL_WRITE_FAILED"}:
-                self._log("warn", "arm_pose_failed {'reason': 'arm_tx_failed'}")
-                self._enter_error_recovery("arm_tx_failed")
-                return self.controller.stop_cmd("GRASP")
-            if parsed_status == "ARM_RESPONSE_TIMEOUT":
-                self._log("warn", "arm_pose_failed {'reason': 'arm_pose_timeout'}")
-                self._log_grasp_phase_update("error", "arm_pose_timeout")
-                self._enter_error_recovery("arm_pose_timeout")
-                return self.controller.stop_cmd("GRASP")
-            self.ctx.grasp_retry_count += 1
-            if self.ctx.grasp_retry_count > _GRASP_RETRY_LIMIT:
-                self._enter_error_recovery("arm_pose_unknown_error")
-                return self.controller.stop_cmd("GRASP")
-            self.ctx.grasp_substate = "AWAITING_RESPOND"
-            self.ctx.grasp_timeout_mono = now_m + _GRASP_RESPOND_TIMEOUT_S
-            self.ctx.arm_response = None
-
-        return self.controller.stop_cmd("GRASP")
-
-    def _tick_grasp_awaiting_grabbed(self, now_m: float) -> MotionDecision:
-        self.ctx.grasp_substate = "AWAITING_GRABBED_DONE"
-        self.ctx.grasp_timeout_mono = now_m + _GRASP_ARM_TIMEOUT_S
-        self.ctx.arm_response = None
-        self._log("info", "arm_grabbed_send {'command': 'GRABBED'}")
-        self._log_grasp_phase_update("grabbed_wait", "arm_grabbed_send")
-        arm_cmd = ArmCommand(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, command="GRABBED")
+        self.ctx.grasp_recipe_step_send_mono = now_m
+        self.ctx.grasp_timeout_mono = now_m + float(step.timeout_s)
+        self.ctx.grasp_substate = "RECIPE_WAIT_STEP"
+        self._log(
+            "info",
+            f"grasp_recipe_step_send recipe_name={recipe.name} step_index={index} "
+            f"step_command={step.command} send_mono={now_m:.6f}",
+        )
+        arm_cmd = ArmCommand(
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0,
+            command=step.command,
+            recipe_name=recipe.name,
+            recipe_step_index=index,
+            expect_ack=bool(step.expect_ack),
+            success_ack=step.success_ack,
+            timeout_s=float(step.timeout_s),
+        )
         decision = MotionDecision(cmd=self.controller.stop_cmd("GRASP").cmd, arm_cmd=arm_cmd)
         decision.control_summary = {
-            "grasp_phase": "retracting_with_object",
-            "source": "arm_grabbed",
+            "grasp_source": "recipe",
+            "recipe_name": recipe.name,
+            "step_index": index,
+            "step_command": step.command,
+            "arm_serial_ready": bool(self.ctx.arm_serial_ready),
         }
         return decision
 
-    def _tick_grasp_awaiting_grabbed_done(self, now_m: float) -> MotionDecision:
-        if now_m > self.ctx.grasp_timeout_mono:
-            self._log_grasp_flow_tick_debug("AWAITING_GRABBED_DONE", "arm_grabbed_response", now_m)
-            self._log("warn", "arm_grabbed_timeout {'reason': 'arm_grabbed_timeout'}")
-            self._log_grasp_phase_update("error", "arm_grabbed_timeout")
-            self._enter_error_recovery("arm_grabbed_timeout")
+    def _tick_recipe_wait_step(self, now_m: float) -> MotionDecision:
+        recipe, index, step = self._selected_grasp_step()
+        if recipe is None or step is None:
+            self._enter_error_recovery("grasp_recipe_runtime_missing")
             return self.controller.stop_cmd("GRASP")
-
         resp = self.ctx.arm_response
         if resp is None:
+            if now_m > float(self.ctx.grasp_timeout_mono or 0.0):
+                self._enter_error_recovery(f"grasp_recipe_step_timeout:{recipe.name}:{index}")
             return self.controller.stop_cmd("GRASP")
-
-        parsed_status = str(getattr(resp, "parsed_status", "") or resp.message or "").strip().upper()
-        raw = getattr(resp, "raw_line", "")
         self.ctx.arm_response = None
-        if bool(resp.ok) and parsed_status == "OK_GRABBED_DONE":
-            self._log("info", f"arm_grabbed_done {{'raw_response': {raw!r}, 'next_state': 'DONE'}}")
-            self.ctx.grasp_substate = "GRASP_VERIFY"
-            self.ctx.grasp_timeout_mono = now_m + 3.0
-            self.ctx.grasp_verify_reported = False
-            self._log_grasp_phase_update("done", "arm_grabbed_done")
+        duration_ms = max(
+            0.0,
+            (now_m - float(self.ctx.grasp_recipe_step_send_mono or now_m)) * 1000.0,
+        )
+        if not bool(getattr(resp, "ok", False)):
+            self._log(
+                "error",
+                f"grasp_recipe_step_result recipe_name={recipe.name} step_index={index} "
+                f"step_duration_ms={duration_ms:.1f} step_result=failed "
+                f"status={getattr(resp, 'parsed_status', '')}",
+            )
+            self._enter_error_recovery(f"grasp_recipe_step_failed:{recipe.name}:{index}")
             return self.controller.stop_cmd("GRASP")
-        if parsed_status == "OK_GRABBED_START":
-            self._log("info", f"arm_grabbed_started {{'raw_response': {raw!r}}}")
-            return self.controller.stop_cmd("GRASP")
-        if parsed_status == "OK_KEEP_CLAW":
-            self._log("info", f"arm_grabbed_keep_claw {{'raw_response': {raw!r}}}")
-            return self.controller.stop_cmd("GRASP")
-        if parsed_status == "ERR_CMD":
-            reason = "arm_grabbed_cmd_error"
-        elif parsed_status == "ARM_GRABBED_TIMEOUT":
-            reason = "arm_grabbed_timeout"
+        self._log(
+            "info",
+            f"grasp_recipe_step_result recipe_name={recipe.name} step_index={index} "
+            f"ack_mono={now_m:.6f} step_duration_ms={duration_ms:.1f} step_result=success",
+        )
+        self.ctx.grasp_recipe_step_index = index + 1
+        if float(step.settle_after_s) > 0.0:
+            self.ctx.grasp_recipe_settle_until_mono = now_m + float(step.settle_after_s)
+            self.ctx.grasp_substate = "RECIPE_SETTLE"
         else:
-            reason = "arm_grabbed_unknown_error"
-        self._log("warn", f"arm_grabbed_failed {{'reason': {reason!r}, 'parsed_status': {parsed_status!r}, 'raw_response': {raw!r}}}")
-        self._log_grasp_phase_update("error", reason)
-        self._enter_error_recovery(reason)
+            self.ctx.grasp_substate = "RECIPE_SEND_STEP"
         return self.controller.stop_cmd("GRASP")
 
-    def _tick_grasp_verify(self, now_m: float) -> MotionDecision:
-        self._log("info", "[GRASP][VERIFY_ASSUMED_SUCCESS] grasp_success_assumed_for_demo=true")
-        if bool(getattr(self.cfg, "post_grasp_fixed_flow_enable", True)):
-            self.ctx.carrying_object = True
-            self.ctx.carried_target = str(self.ctx.canonical_target or self.ctx.active_target or "")
-            self.ctx.arm_response = None
-            self.ctx.post_grasp_fixed_entry_logged = False
-            self.ctx.post_grasp_rise_substate = ""
-            self.ctx.post_grasp_rise_timeout_mono = 0.0
-            self._transition(State.POST_GRASP_TURN_FIXED, "arm_motion_done post_grasp_fixed_flow_enable=true")
-            self._queue_tts("抓取完成，开始固定放置动作")
-            return self.controller.stop_cmd("POST_GRASP_TURN_FIXED")
-        self._transition(State.DONE, "arm_motion_done grasp_success_assumed_for_demo")
+    def _tick_recipe_settle(self, now_m: float) -> MotionDecision:
+        if now_m >= float(getattr(self.ctx, "grasp_recipe_settle_until_mono", 0.0) or 0.0):
+            self.ctx.grasp_substate = "RECIPE_SEND_STEP"
+        return self.controller.stop_cmd("GRASP")
+
+    def _tick_recipe_done(self, now_m: float) -> MotionDecision:
+        del now_m
+        recipe = self._selected_grasp_recipe()
+        self.ctx.grasp_source = "recipe"
+        self.ctx.carrying_object = True
+        self.ctx.carried_target = str(getattr(recipe, "name", "") or self.ctx.canonical_target or "")
+        self.ctx.grasp_substate = "RECIPE_DONE"
+        self._transition(State.DONE, f"arm_motion_done recipe={self.ctx.carried_target}")
         self._queue_tts("抓取完成")
         return self.controller.stop_cmd("DONE")
-
-    def _tick_grasp_verify_legacy(self, now_m: float) -> MotionDecision:
-        status = str(self.ctx.grasp_status or "").strip().upper()
-        result = self.ctx.grasp_result if isinstance(self.ctx.grasp_result, dict) else {}
-        explicit_success = result.get("verify_success")
-        if explicit_success is None:
-            explicit_success = result.get("grasp_success")
-
-        if bool(getattr(self.cfg, "assume_grasp_success_for_test", False)):
-            self._log("info", "[GRASP][VERIFY_ASSUMED_SUCCESS] ORCH_ASSUME_GRASP_SUCCESS_FOR_TEST=1")
-            self._transition(State.RETURN_HOME, "grasp verify assumed success")
-            self._queue_tts("抓取完成，开始返航")
-            return self.controller.stop_cmd("RETURN_HOME")
-
-        if status in {"VERIFY_OK", "VERIFIED", "GRASP_VERIFIED", "SUCCESS"} or explicit_success is True:
-            self._transition(State.RETURN_HOME, "grasp verified successfully")
-            self._queue_tts("抓取完成，开始返航")
-            return self.controller.stop_cmd("RETURN_HOME")
-
-        if status in {"VERIFY_FAILED", "GRASP_VERIFY_FAILED"} or explicit_success is False:
-            return self._handle_grasp_verify_failed("grasp verify failed")
-
-        if not self.ctx.grasp_verify_reported:
-            self._log("warn", "[GRASP][VERIFY_UNAVAILABLE] no real grasp verification source; not assuming success")
-            self.ctx.grasp_verify_reported = True
-
-        if now_m > self.ctx.grasp_timeout_mono:
-            return self._handle_grasp_verify_failed("grasp verification unavailable")
-
-        return self.controller.stop_cmd("GRASP")
-
-    def _handle_grasp_verify_failed(self, reason: str) -> MotionDecision:
-        self.ctx.grasp_retry_count += 1
-        if self.ctx.grasp_retry_count > _GRASP_RETRY_LIMIT:
-            self._enter_error_recovery(reason)
-            return self.controller.stop_cmd("GRASP")
-        self.ctx.grasp_substate = "AWAITING_RESPOND"
-        self.ctx.grasp_timeout_mono = monotonic_ts() + _GRASP_RESPOND_TIMEOUT_S
-        self.ctx.grasp_status = ""
-        self.ctx.grasp_result = None
-        self.ctx.arm_response = None
-        self.ctx.grasp_verify_reported = False
-        return self.controller.stop_cmd("GRASP")

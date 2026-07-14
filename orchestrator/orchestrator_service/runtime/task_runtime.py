@@ -191,15 +191,6 @@ class TaskRuntimeMixin:
         if status and status not in KNOWN_VISION_STATUS:
             self._enter_error_recovery(f"unknown vision status: {status}")
             return
-        if bool(getattr(self.ctx, "builtin_grasp_active", False) or getattr(self.ctx, "builtin_bottle_active", False)):
-            reason = str(obs.get("reason") or (obs.get("result") if isinstance(obs.get("result"), dict) else {}).get("reason") or "")
-            self.ctx.remote_result_ignored = True
-            target = str(getattr(self.ctx, "builtin_grasp_target", "") or getattr(self.ctx, "canonical_target", "") or "")
-            if status == "FAILED" or "timeout" in reason.lower():
-                self._log("warn", f"[GRASP][REMOTE_TIMEOUT_IGNORED] reason=builtin_grasp_active target={target} status={status} remote_reason={reason}")
-            else:
-                self._log("info", f"[GRASP][REMOTE_RESULT_IGNORED] reason=builtin_grasp_active target={target} status={status}")
-            return
         result = obs.get("result") if isinstance(obs.get("result"), dict) else {}
         self.ctx.grasp_status = status
         grasp = obs.get("grasp") if isinstance(obs.get("grasp"), dict) else None
@@ -619,6 +610,25 @@ class TaskRuntimeMixin:
         self.ctx.target_action_policy = spec.action_policy
         self.ctx.target_support_status = spec.support_status
         self.ctx.target_grasp_recipe = spec.grasp_recipe or ""
+        recipe = (
+            self.grasp_recipe_registry.get(spec.grasp_recipe or spec.canonical_target)
+            if self.grasp_recipe_registry is not None
+            else None
+        )
+        self.ctx.selected_grasp_recipe = recipe
+        self.ctx.selected_grasp_recipe_name = str(getattr(recipe, "name", "") or "")
+        self.ctx.grasp_recipe_ready = recipe is not None
+        self.ctx.grasp_recipe_step_index = 0
+        self.ctx.grasp_recipe_step_send_mono = 0.0
+        self.ctx.grasp_recipe_settle_until_mono = 0.0
+        self._log(
+            "info",
+            "grasp_recipe_preselected "
+            f"canonical_target={spec.canonical_target} "
+            f"selected_recipe={self.ctx.selected_grasp_recipe_name or 'none'} "
+            f"recipe_ready={str(self.ctx.grasp_recipe_ready).lower()} "
+            f"arm_serial_ready={str(self.ctx.arm_serial_ready).lower()}",
+        )
         self.ctx.active_task_id = f"task_{int(time.time() * 1000)}"
         self.ctx.active_target = spec.canonical_target
         self.ctx.active_session_id = cmd.session_id

@@ -343,30 +343,19 @@ class TransitionsMixin:
             self.ctx.arm_response = None
             self.ctx.grasp_verify_reported = False
             self.ctx.remote_result_ignored = False
-            if self._builtin_bottle_target_active():
-                builtin_target = self._builtin_grasp_target()
-                pose_line = self._builtin_bottle_pose_line()
-                self.ctx.grasp_source = "builtin"
-                self.ctx.remote_grasp_active = False
-                self.ctx.builtin_bottle_active = True
-                self.ctx.builtin_grasp_active = True
-                self.ctx.builtin_grasp_target = builtin_target
-                self.ctx.builtin_bottle_pose_started = False
-                self.ctx.grasp_substate = "BUILTIN_BOTTLE_SEND_POSE"
-                self.ctx.grasp_timeout_mono = monotonic_ts() + float(self._builtin_grasp_cfg("pose_timeout_s", 15.0) or 15.0)
-                self._log("info", f"[GRASP][BUILTIN_SELECTED] target={builtin_target} line={pose_line} reason=grasp_enter_target_builtin")
-                if bool(self._builtin_grasp_cfg("skip_remote", True)):
-                    self._log("info", f"[GRASP][REMOTE_SKIPPED] reason=builtin_grasp_active target={builtin_target}")
-            else:
-                self.ctx.grasp_source = "remote"
-                self.ctx.remote_grasp_active = True
-                self.ctx.builtin_bottle_active = False
-                self.ctx.builtin_grasp_active = False
-                self.ctx.builtin_grasp_target = ""
-                self.ctx.builtin_bottle_pose_started = False
-                self.ctx.grasp_substate = "AWAITING_RESPOND"
-                self.ctx.grasp_timeout_mono = monotonic_ts() + _GRASP_RESPOND_TIMEOUT_S
-                self._log("info", "grasp_remote_request_sent")
+            self.ctx.grasp_source = "recipe"
+            self.ctx.remote_grasp_active = False
+            self.ctx.grasp_recipe_step_index = 0
+            self.ctx.grasp_recipe_step_send_mono = 0.0
+            self.ctx.grasp_recipe_settle_until_mono = 0.0
+            self.ctx.grasp_substate = "RECIPE_WAIT_ARM_READY"
+            self._log(
+                "info",
+                "grasp_recipe_enter "
+                f"recipe_name={self.ctx.selected_grasp_recipe_name or 'none'} "
+                f"recipe_ready={str(self.ctx.grasp_recipe_ready).lower()} "
+                f"arm_serial_ready={str(self.ctx.arm_serial_ready).lower()}",
+            )
         elif state == State.DONE:
             if self.ctx.last_fail_reason:
                 warning = str(self.ctx.last_fail_reason).strip()

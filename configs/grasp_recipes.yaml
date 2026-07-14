@@ -1,0 +1,43 @@
+version: 1
+
+defaults:
+  command_timeout_s: 8.0
+  settle_after_step_s: 0.0
+  stop_on_failure: true
+
+recipes:
+  apple:
+    enabled: true
+    recipe_type: fixed_sequence
+    description: Fixed grasp sequence for apple
+    steps:
+      - command: POSE_APPLE
+        expect_ack: true
+        success_ack: OK POSE_APPLE DONE
+        timeout_s: 15.0
+      - command: GRABBED
+        expect_ack: true
+        success_ack: OK GRABBED DONE
+        timeout_s: 10.0
+      - command: POSE_RISE
+        expect_ack: true
+        success_ack: OK POSE_RISE DONE
+        timeout_s: 10.0
+
+  bottle:
+    enabled: true
+    recipe_type: fixed_sequence
+    description: Fixed grasp sequence for bottle
+    steps:
+      - command: POSE_BOTTLE
+        expect_ack: true
+        success_ack: OK POSE_BOTTLE DONE
+        timeout_s: 15.0
+      - command: GRABBED
+        expect_ack: true
+        success_ack: OK GRABBED DONE
+        timeout_s: 10.0
+      - command: POSE_RISE
+        expect_ack: true
+        success_ack: OK POSE_RISE DONE
+        timeout_s: 10.0

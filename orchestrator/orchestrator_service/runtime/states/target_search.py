@@ -1018,6 +1018,10 @@ class TargetSearchMixin:
             self._transition(State.DONE, "target_catalog_missing_after_lock")
             return self.controller.stop_cmd("DONE")
         route = route_locked_target(spec)
+        if route.next_state == "GRASP" and not bool(getattr(self.ctx, "grasp_recipe_ready", False)):
+            self._emit_tts_event("RECIPE_NOT_READY", state=State.FREEZE_BASE.value)
+            self._transition(State.DONE, f"RECIPE_NOT_READY target={spec.canonical_name}")
+            return self.controller.stop_cmd("DONE")
         if route.tts_event:
             self._emit_tts_event(route.tts_event, state=State.FREEZE_BASE.value)
         next_state = State(route.next_state)

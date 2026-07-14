@@ -2,11 +2,12 @@
 # -*- coding: utf-8 -*-
 
 from dataclasses import dataclass
+import threading
 import time
 from typing import Any, Dict, List, Optional
 
 from ..ipc.protocol import ArmResponse
-from .arm_protocol import encode_grabbed, parse_arm_response_detail, pose_dict_from_command, pose_matches
+from .arm_protocol import parse_arm_response_detail, pose_dict_from_command, pose_matches
 
 try:
     import serial  # type: ignore
@@ -45,6 +46,11 @@ class ArmSerialBridge:
         self.log = logger
         self._ser = None
         self._opened = False
+        self._io_lock = threading.RLock()
+
+    @property
+    def ready(self) -> bool:
+        return bool(self._opened and (self._ser is not None or bool(getattr(self.cfg, "dry_run", False))))
 
     def _emit(self, level: str, event: str, **fields: Any) -> None:
         if self.log is None:
@@ -224,14 +230,15 @@ class ArmSerialBridge:
         return discarded
 
     def close(self) -> None:
-        ser = self._ser
-        self._ser = None
-        self._opened = False
-        if ser is not None:
-            try:
-                ser.close()
-            except Exception:
-                pass
+        with self._io_lock:
+            ser = self._ser
+            self._ser = None
+            self._opened = False
+            if ser is not None:
+                try:
+                    ser.close()
+                except Exception:
+                    pass
 
     def _write_line(self, line: str) -> Dict[str, Any]:
         line = str(line or "").rstrip("\r\n")
@@ -270,6 +277,68 @@ class ArmSerialBridge:
             self._emit("error", "arm_serial_error", error=str(exc))
             return ""
 
+    def send_command_and_wait(
+        self,
+        line: str,
+        *,
+        expect_ack: bool,
+        success_ack: str,
+        timeout_s: float,
+    ) -> Dict[str, Any]:
+        """Send one prevalidated recipe step through the single arm owner."""
+        command = str(line or "").strip()
+        ack = str(success_ack or "").strip().upper()
+        with self._io_lock:
+            if not self.ready:
+                resp = self._command_failure_response(
+                    parsed_status="ARM_SERIAL_NOT_READY",
+                    message="arm_serial_not_ready",
+                    raw_line="arm_serial_not_ready",
+                )
+                return {"ok": False, "error": "arm_serial_not_ready", "response": resp, "line": command}
+            write_result = self._write_line(command)
+            if not bool(write_result.get("ok", False)):
+                resp = self._command_failure_response(
+                    parsed_status="ARM_TX_FAILED",
+                    message="arm_tx_failed",
+                    raw_line="arm_tx_failed",
+                )
+                return {"ok": False, "error": "arm_tx_failed", "response": resp, "line": command, **write_result}
+            if not expect_ack or not bool(getattr(self.cfg, "readback_enabled", True)):
+                resp = ArmResponse(ok=True, message="RECIPE_STEP_SENT", raw_line="", ts=time.time(), parsed_status="RECIPE_STEP_DONE")
+                return {"ok": True, "error": "", "response": resp, "line": command, **write_result}
+            if bool(getattr(self.cfg, "dry_run", False)):
+                resp = ArmResponse(ok=True, message="RECIPE_STEP_DONE", raw_line=ack, ts=time.time(), parsed_status="RECIPE_STEP_DONE")
+                return {"ok": True, "error": "", "response": resp, "line": command, "received_lines": [ack], **write_result}
+            deadline = time.monotonic() + max(0.1, float(timeout_s or 0.0))
+            received_lines: List[str] = []
+            while time.monotonic() <= deadline:
+                raw = self.read_line()
+                if not raw:
+                    continue
+                received_lines.append(raw)
+                status = str(parse_arm_response_detail(raw).get("status") or "UNKNOWN")
+                self._emit("info", "arm_rx_line", raw=raw, parsed_status=status)
+                if ack and raw.strip().upper().startswith(ack):
+                    resp = ArmResponse(ok=True, message="RECIPE_STEP_DONE", raw_line=raw, ts=time.time(), parsed_status="RECIPE_STEP_DONE")
+                    return {"ok": True, "error": "", "response": resp, "line": command, "received_lines": received_lines, **write_result}
+                if status in {"ERR_CMD", "ERR_IK", "ARM_GRABBED_TIMEOUT"}:
+                    resp = self._command_failure_response(parsed_status=status, message=status, raw_line=raw)
+                    return {"ok": False, "error": status.lower(), "response": resp, "line": command, "received_lines": received_lines, **write_result}
+            resp = self._command_failure_response(
+                parsed_status="ARM_RESPONSE_TIMEOUT",
+                message="arm_response_timeout",
+                raw_line="arm_response_timeout",
+            )
+            return {
+                "ok": False,
+                "error": "arm_response_timeout",
+                "response": resp,
+                "line": command,
+                "received_lines": received_lines,
+                "last_lines": received_lines[-5:],
+                **write_result,
+            }
     def _failure_response(self, *, parsed_status: str, message: str, raw_line: str, sent_pose: Dict[str, Any], response_pose: Optional[Dict[str, Any]] = None) -> ArmResponse:
         resp = ArmResponse(ok=False, message=message, raw_line=raw_line, ts=time.time(), parsed_status=parsed_status)
         setattr(resp, "sent_pose", dict(sent_pose or {}))
@@ -280,157 +349,6 @@ class ArmSerialBridge:
     @staticmethod
     def _command_failure_response(*, parsed_status: str, message: str, raw_line: str) -> ArmResponse:
         return ArmResponse(ok=False, message=message, raw_line=raw_line, ts=time.time(), parsed_status=parsed_status)
-
-    def send_grabbed_and_wait(self, *, line: Optional[str] = None, timeout_s: Optional[float] = None) -> Dict[str, Any]:
-        line = str(line or encode_grabbed()).strip() or encode_grabbed()
-        if not bool(getattr(self.cfg, "enabled", True)):
-            resp = self._command_failure_response(parsed_status="ARM_SERIAL_DISABLED", message="arm_serial_disabled", raw_line="arm_serial_disabled")
-            return {"ok": False, "error": "arm_serial_disabled", "response": resp, "line": line}
-        if bool(getattr(self.cfg, "dry_run", False)):
-            write_result = self._write_line(line)
-            received_lines = ["OK GRABBED START", "OK KEEP_CLAW dry_run", "OK GRABBED DONE"]
-            for raw in received_lines:
-                self._emit("info", "arm_rx_line", raw=raw, parsed_status=parse_arm_response_detail(raw).get("status"), dry_run=True)
-            resp = ArmResponse(ok=True, message="OK_GRABBED_DONE", raw_line="OK GRABBED DONE", ts=time.time(), parsed_status="OK_GRABBED_DONE")
-            return {"ok": True, "error": "", "response": resp, "line": line, "received_lines": received_lines, "received_lines_count": len(received_lines), **write_result}
-        if not self.open():
-            resp = self._command_failure_response(parsed_status="ARM_SERIAL_OPEN_FAILED", message="arm_serial_open_failed", raw_line="arm_serial_open_failed")
-            return {"ok": False, "error": "arm_serial_open_failed", "response": resp, "line": line}
-
-        discarded_lines = self._prepare_before_tx()
-        write_result = self._write_line(line)
-        if not bool(write_result.get("ok", False)):
-            resp = self._command_failure_response(parsed_status="ARM_TX_FAILED", message="arm_tx_failed", raw_line="arm_tx_failed")
-            return {"ok": False, "error": "arm_tx_failed", "response": resp, "line": line, "discarded_lines": discarded_lines, **write_result}
-        if not bool(getattr(self.cfg, "readback_enabled", True)):
-            return {"ok": True, "error": "", "response": None, "line": line, "discarded_lines": discarded_lines, **write_result}
-
-        deadline = time.time() + max(0.1, float(timeout_s if timeout_s is not None else getattr(self.cfg, "response_timeout_s", 10.0)))
-        received_lines: List[str] = []
-        while time.time() <= deadline:
-            raw = self.read_line()
-            if not raw:
-                continue
-            received_lines.append(raw)
-            detail = parse_arm_response_detail(raw)
-            status = str(detail.get("status") or "UNKNOWN")
-            if status == "NOISE":
-                self._emit("info", "arm_rx_noise_line", raw=raw)
-            else:
-                self._emit("info", "arm_rx_line", raw=raw, parsed_status=status)
-            self._emit("info", "arm_response_parsed", status=status, raw=raw)
-
-            if status in {"NOISE", "UNKNOWN", "OK_POSE", "ERR_IK"}:
-                continue
-            if status == "OK_GRABBED_START":
-                self._emit("info", "arm_grabbed_started", raw=raw)
-                continue
-            if status == "OK_KEEP_CLAW":
-                self._emit("info", "arm_grabbed_keep_claw", raw=raw)
-                continue
-            if status == "OK_GRABBED_DONE":
-                resp = ArmResponse(ok=True, message="OK_GRABBED_DONE", raw_line=raw, ts=time.time(), parsed_status="OK_GRABBED_DONE")
-                return {"ok": True, "error": "", "response": resp, "line": line, "received_lines": received_lines, "received_lines_count": len(received_lines), **write_result}
-            if status == "ERR_CMD":
-                resp = self._command_failure_response(parsed_status="ERR_CMD", message="ERR_CMD", raw_line=raw)
-                return {"ok": False, "error": "err_cmd", "response": resp, "line": line, "received_lines": received_lines, **write_result}
-
-        self._emit(
-            "error",
-            "arm_response_parsed",
-            status="GRABBED_TIMEOUT",
-            raw="",
-            received_lines_count=len(received_lines),
-            last_lines=received_lines[-5:],
-        )
-        resp = self._command_failure_response(parsed_status="ARM_GRABBED_TIMEOUT", message="arm_grabbed_timeout", raw_line="arm_grabbed_timeout")
-        return {
-            "ok": False,
-            "error": "arm_grabbed_timeout",
-            "response": resp,
-            "line": line,
-            "received_lines": received_lines,
-            "received_lines_count": len(received_lines),
-            "last_lines": received_lines[-5:],
-            **write_result,
-        }
-
-    def send_pose_bottle_and_wait(self, *, line: Optional[str] = None, timeout_s: Optional[float] = None) -> Dict[str, Any]:
-        line = str(line or "POSE_BOTTLE").strip() or "POSE_BOTTLE"
-        ack_base = line.upper() if line.upper().startswith("POSE_") else "POSE_BOTTLE"
-        if not bool(getattr(self.cfg, "enabled", True)):
-            resp = self._command_failure_response(parsed_status="ARM_SERIAL_DISABLED", message="arm_serial_disabled", raw_line="arm_serial_disabled")
-            return {"ok": False, "error": "arm_serial_disabled", "response": resp, "line": line}
-        if bool(getattr(self.cfg, "dry_run", False)):
-            write_result = self._write_line(line)
-            received_lines = [f"OK {ack_base} START", f"OK {ack_base} DONE"]
-            for raw in received_lines:
-                status = str(parse_arm_response_detail(raw).get("status") or "UNKNOWN")
-                self._emit("info", "arm_rx_line", raw=raw, parsed_status=status, dry_run=True)
-                self._emit("info", "arm_response_parsed", status=status, raw=raw, dry_run=True)
-            resp = ArmResponse(ok=True, message="OK_BUILTIN_POSE_DONE", raw_line=received_lines[-1], ts=time.time(), parsed_status="OK_BUILTIN_POSE_DONE")
-            return {"ok": True, "error": "", "response": resp, "line": line, "received_lines": received_lines, **write_result}
-        if not self.open():
-            resp = self._command_failure_response(parsed_status="ARM_SERIAL_OPEN_FAILED", message="arm_serial_open_failed", raw_line="arm_serial_open_failed")
-            return {"ok": False, "error": "arm_serial_open_failed", "response": resp, "line": line}
-
-        discarded_lines = self._prepare_before_tx()
-        write_result = self._write_line(line)
-        if not bool(write_result.get("ok", False)):
-            resp = self._command_failure_response(parsed_status="ARM_TX_FAILED", message="arm_tx_failed", raw_line="arm_tx_failed")
-            return {"ok": False, "error": "arm_tx_failed", "response": resp, "line": line, "discarded_lines": discarded_lines, **write_result}
-        if not bool(getattr(self.cfg, "readback_enabled", True)):
-            return {"ok": True, "error": "", "response": None, "line": line, "discarded_lines": discarded_lines, **write_result}
-
-        deadline = time.time() + max(0.1, float(timeout_s if timeout_s is not None else getattr(self.cfg, "response_timeout_s", 10.0)))
-        received_lines: List[str] = []
-        while time.time() <= deadline:
-            raw = self.read_line()
-            if not raw:
-                continue
-            received_lines.append(raw)
-            detail = parse_arm_response_detail(raw)
-            status = str(detail.get("status") or "UNKNOWN")
-            if status == "NOISE":
-                self._emit("info", "arm_rx_noise_line", raw=raw)
-            else:
-                self._emit("info", "arm_rx_line", raw=raw, parsed_status=status)
-            self._emit("info", "arm_response_parsed", status=status, raw=raw)
-
-            if status in {"NOISE", "UNKNOWN", "OK_POSE"}:
-                continue
-            if status == "OK_BUILTIN_POSE_START":
-                self._emit("info", "arm_builtin_pose_started", raw=raw, line=line)
-                continue
-            if status == "OK_BUILTIN_POSE_DONE":
-                resp = ArmResponse(ok=True, message="OK_BUILTIN_POSE_DONE", raw_line=raw, ts=time.time(), parsed_status="OK_BUILTIN_POSE_DONE")
-                return {"ok": True, "error": "", "response": resp, "line": line, "received_lines": received_lines, **write_result}
-            if status == "ERR_IK":
-                resp = self._command_failure_response(parsed_status="ERR_IK", message="ERR_IK", raw_line=raw)
-                return {"ok": False, "error": "err_ik", "response": resp, "line": line, "received_lines": received_lines, **write_result}
-            if status == "ERR_CMD":
-                resp = self._command_failure_response(parsed_status="ERR_CMD", message="ERR_CMD", raw_line=raw)
-                return {"ok": False, "error": "err_cmd", "response": resp, "line": line, "received_lines": received_lines, **write_result}
-
-        self._emit(
-            "error",
-            "arm_response_parsed",
-            status="TIMEOUT",
-            raw="",
-            received_lines_count=len(received_lines),
-            last_lines=received_lines[-5:],
-        )
-        resp = self._command_failure_response(parsed_status="ARM_RESPONSE_TIMEOUT", message="arm_response_timeout", raw_line="arm_response_timeout")
-        return {
-            "ok": False,
-            "error": "arm_response_timeout",
-            "response": resp,
-            "line": line,
-            "received_lines": received_lines,
-            "received_lines_count": len(received_lines),
-            "last_lines": received_lines[-5:],
-            **write_result,
-        }
 
     def send_pose_and_wait(self, pose_line: str, *, timeout_s: Optional[float] = None) -> Dict[str, Any]:
         line = str(pose_line or "").rstrip("\r\n")

@@ -527,6 +527,8 @@ class ArmSerialConfig:
     baudrate: int = 9600
     timeout_s: float = 0.10
     open_settle_s: float = 3.0
+    boot_drain_max_s: float = 5.0
+    boot_quiet_s: float = 0.5
     bytesize: int = 8
     parity: str = "N"
     stopbits: int = 1
@@ -660,36 +662,6 @@ class ControlThresholds:
     yolo_approach_far_vx_mps: float = 0.30
     yolo_approach_mid_vx_mps: float = 0.20
     yolo_approach_near_vx_mps: float = 0.10
-    builtin_bottle_grasp_enable: bool = True
-    builtin_bottle_skip_remote: bool = True
-    builtin_bottle_pose_line: str = "POSE_BOTTLE"
-    builtin_bottle_pose_start_ack: str = "OK POSE_BOTTLE START"
-    builtin_bottle_pose_done_ack: str = "OK POSE_BOTTLE DONE"
-    builtin_bottle_pose_timeout_s: float = 15.0
-    builtin_bottle_grab_enable: bool = True
-    builtin_bottle_grab_line: str = "GRABBED"
-    builtin_bottle_grab_done_ack: str = "OK GRABBED DONE"
-    builtin_bottle_grab_timeout_s: float = 10.0
-    builtin_apple_grasp_enable: bool = True
-    builtin_apple_skip_remote: bool = True
-    builtin_apple_pose_line: str = "POSE_APPLE"
-    builtin_apple_pose_start_ack: str = "OK POSE_APPLE START"
-    builtin_apple_pose_done_ack: str = "OK POSE_APPLE DONE"
-    builtin_apple_pose_timeout_s: float = 15.0
-    builtin_apple_grab_enable: bool = True
-    builtin_apple_grab_line: str = "GRABBED"
-    builtin_apple_grab_done_ack: str = "OK GRABBED DONE"
-    builtin_apple_grab_timeout_s: float = 10.0
-    post_grasp_fixed_flow_enable: bool = True
-    post_grasp_turn_direction_sign: int = -1
-    post_grasp_forward_vx_mps: float = 0.08
-    post_grasp_forward_duration_s: float = 5.0
-    post_grasp_stop_hold_s: float = 0.5
-    post_grasp_rise_enable: bool = True
-    post_grasp_rise_line: str = "POSE_RISE"
-    post_grasp_rise_start_ack: str = "OK POSE_RISE START"
-    post_grasp_rise_done_ack: str = "OK POSE_RISE DONE"
-    post_grasp_rise_timeout_s: float = 10.0
     bbox_track_forward_enabled: bool = True
     min_forward_vx_mps: float = 0.040
     bbox_track_forward_center_band: float = 0.45
@@ -1403,12 +1375,6 @@ class DetectorConfig:
 
 
 @dataclass
-class PoseBottleConfig:
-    fall_back_grasp: bool = False
-    x_center_tolerance: float = 0.06
-
-
-@dataclass
 class OnlineEdgeConfig:
     """Configuration structure representing the Online Edge Detector service."""
     runtime: OnlineEdgeRuntimeConfig = field(default_factory=OnlineEdgeRuntimeConfig)
@@ -1430,4 +1396,3 @@ class SystemGlobalConfig:
     gateway: MobileGatewayConfig = field(default_factory=MobileGatewayConfig)
     voice_gateway: VoiceGatewayConfig = field(default_factory=VoiceGatewayConfig)
     online_edge: OnlineEdgeConfig = field(default_factory=OnlineEdgeConfig)
-    POSE_BOTTLE: PoseBottleConfig = field(default_factory=PoseBottleConfig)

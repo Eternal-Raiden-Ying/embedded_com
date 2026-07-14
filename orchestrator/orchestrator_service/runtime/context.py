@@ -376,11 +376,14 @@ class RuntimeContext:
     grasp_timeout_mono: float = 0.0
     grasp_verify_reported: bool = False
     grasp_source: str = ""
+    selected_grasp_recipe: Optional[object] = None
+    selected_grasp_recipe_name: str = ""
+    grasp_recipe_ready: bool = False
+    grasp_recipe_step_index: int = 0
+    grasp_recipe_step_send_mono: float = 0.0
+    grasp_recipe_settle_until_mono: float = 0.0
+    arm_serial_ready: bool = False
     remote_grasp_active: bool = False
-    builtin_bottle_active: bool = False
-    builtin_grasp_active: bool = False
-    builtin_grasp_target: str = ""
-    builtin_bottle_pose_started: bool = False
     remote_result_ignored: bool = False
     carrying_object: bool = False
     carried_target: str = ""
@@ -390,9 +393,6 @@ class RuntimeContext:
     basket_last_seen_mono: float = 0.0
     basket_place_substate: str = ""
     basket_place_timeout_mono: float = 0.0
-    post_grasp_fixed_entry_logged: bool = False
-    post_grasp_rise_substate: str = ""
-    post_grasp_rise_timeout_mono: float = 0.0
 
     def clear_carrying_object(self) -> None:
         self.carrying_object = False
@@ -403,9 +403,6 @@ class RuntimeContext:
         self.basket_last_seen_mono = 0.0
         self.basket_place_substate = ""
         self.basket_place_timeout_mono = 0.0
-        self.post_grasp_fixed_entry_logged = False
-        self.post_grasp_rise_substate = ""
-        self.post_grasp_rise_timeout_mono = 0.0
 
     def clear_final_enter_candidate(self) -> None:
         self.final_edge_seen_after_find = False
@@ -640,11 +637,13 @@ class RuntimeContext:
         self.grasp_substate = ""
         self.grasp_verify_reported = False
         self.grasp_source = ""
+        self.selected_grasp_recipe = None
+        self.selected_grasp_recipe_name = ""
+        self.grasp_recipe_ready = False
+        self.grasp_recipe_step_index = 0
+        self.grasp_recipe_step_send_mono = 0.0
+        self.grasp_recipe_settle_until_mono = 0.0
         self.remote_grasp_active = False
-        self.builtin_bottle_active = False
-        self.builtin_grasp_active = False
-        self.builtin_grasp_target = ""
-        self.builtin_bottle_pose_started = False
         self.remote_result_ignored = False
 
     def reset_edge_alignment_complete(self, reason: str) -> None:
@@ -782,10 +781,6 @@ class RuntimeContext:
         self.grasp_verify_reported = False
         self.grasp_source = ""
         self.remote_grasp_active = False
-        self.builtin_bottle_active = False
-        self.builtin_grasp_active = False
-        self.builtin_grasp_target = ""
-        self.builtin_bottle_pose_started = False
         self.remote_result_ignored = False
         self.clear_carrying_object()
         self.clear_final_enter_candidate()

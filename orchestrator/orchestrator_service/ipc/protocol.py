@@ -1226,6 +1226,11 @@ class ArmCommand:
     claw_deg: float
     time_ms: int = 500
     command: str = "POSE"
+    recipe_name: str = ""
+    recipe_step_index: int = -1
+    expect_ack: bool = True
+    success_ack: str = ""
+    timeout_s: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

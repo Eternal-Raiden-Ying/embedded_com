@@ -395,7 +395,7 @@ def _resolve_config_path(config_path_str: str, system_config_dir: Optional[Path]
     return repo_root / p
 
 
-_CONFIG_SECTION_KEYS = {"vision", "orchestrator", "gateway", "voice_gateway", "online_edge", "POSE_BOTTLE"}
+_CONFIG_SECTION_KEYS = {"vision", "orchestrator", "gateway", "voice_gateway", "online_edge"}
 
 
 def _record_loaded_file(config: SystemGlobalConfig, path: Path) -> None:
