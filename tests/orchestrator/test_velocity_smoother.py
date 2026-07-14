@@ -71,6 +71,19 @@ def test_search_table_wz_is_normal_slew_and_reversal_does_not_jump():
     assert meta["smoothing_profile"] != "urgent_wz"
 
 
+def test_bbox_reacquire_alignment_uses_normal_wz_slew():
+    smoother = VelocitySmoother(MotionSmoothingConfig())
+    smoother.last_ts_monotonic = 10.0
+    smoother.last_wz = 0.20
+    out, meta = smoother.apply(
+        _cmd(wz=-0.06), state="YOLO_ACQUIRE_ALIGN", now_monotonic=10.1,
+        summary={"docking_action": "BBOX_REACQUIRE_ROTATE", "fov_guard_level": "none"},
+    )
+    assert 0.0 < out.wz_radps < 0.20
+    assert meta["smoothing_urgent"] is False
+    assert meta["smoothing_profile"] != "urgent_wz"
+
+
 def test_hard_fov_recovery_keeps_urgent_wz_profile():
     smoother = VelocitySmoother(MotionSmoothingConfig())
     smoother.last_ts_monotonic = 10.0

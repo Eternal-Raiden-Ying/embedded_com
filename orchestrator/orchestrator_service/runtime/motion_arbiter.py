@@ -2367,6 +2367,12 @@ def arbitrate_table_docking_motion(
         bbox_track_block = "bbox_track_disabled"
     elif not bbox_track_phase_allowed:
         bbox_track_block = "not_bbox_track_phase"
+    elif summary.get("allow_forward") is False:
+        # Control authority has already classified this tick as alignment-only
+        # (for example, outside the bbox hard-centre limit).  The arbiter may
+        # select the bounded bbox-forward path only after that authority has
+        # explicitly released forward motion.
+        bbox_track_block = str(summary.get("forward_block_reason") or "bbox_alignment_only")
     elif not docking_obs.bbox_control_valid:
         bbox_track_block = "bbox_invalid"
     elif bbox_err is None:
@@ -2401,10 +2407,6 @@ def arbitrate_table_docking_motion(
             except Exception:
                 pass
         elapsed_ms = max(0.0, (now_track - float(getattr(ctx, "bbox_track_entered_mono", now_track) or now_track)) * 1000.0)
-        if (not roi_depth_valid or roi_depth_m is None or roi_depth_m > 1.2) and docking_obs.bbox_control_valid:
-            bbox_track_vx = min(abs(_float(summary, "far_bbox_track_vx_mps", 0.200)), bbox_track_max_vx if bbox_track_max_vx > 0.0 else 0.200)
-        elif roi_depth_m is not None and roi_depth_m > 0.8:
-            bbox_track_vx = min(max(bbox_track_vx, abs(_float(summary, "min_forward_vx_mps", 0.040))), bbox_track_max_vx if bbox_track_max_vx > 0.0 else 0.200)
         bbox_track_vx, lateral_priority_reason = cap_vx_for_lateral_priority(bbox_track_vx)
         desired_bbox_wz = desired_wz if abs(desired_wz) > 1e-9 else _float(summary, "bbox_yaw_cmd", 0.0)
         if bbox_track_max_wz > 0.0:
@@ -2455,6 +2457,7 @@ def arbitrate_table_docking_motion(
 
     bbox_reacquire_needed = bool(
         bbox_err is None
+        or summary.get("yolo_forward_allowed") is False
         or abs(float(bbox_err)) > bbox_track_center_band
         or fov_level == FovGuardLevel.HARD
     )
@@ -2475,17 +2478,18 @@ def arbitrate_table_docking_motion(
     if state == "SEARCH_TABLE" or intent_type in {"local_rotate_search", "search"} or phase == "SEARCH_SCAN":
         wz = desired_wz if abs(desired_wz) > 1e-9 else _search_wz(ctx, summary)
         no_valid_edge = not bool(summary.get("edge_found") or summary.get("edge_valid") or summary.get("edge_trusted"))
+        no_current_bbox = not bool(docking_obs.bbox_control_valid)
         return _docking_result(
             action=DockingAction.SEARCH_ROTATE,
             stage=DockingStage.SEARCH,
             summary=with_common({
                 "search_table_stale_gate_bypass": True,
-                "docking_reason": "coarse_scan_no_valid_edge" if no_valid_edge else "coarse_scan",
+                "docking_reason": "search_no_bbox" if no_current_bbox else ("coarse_scan_no_valid_edge" if no_valid_edge else "coarse_scan"),
                 "perception_dead": perception_dead,
             }),
             wz=wz,
             yaw_owner="search",
-            reason="coarse_scan_no_valid_edge" if no_valid_edge else "search_rotate",
+            reason="search_no_bbox" if no_current_bbox else ("coarse_scan_no_valid_edge" if no_valid_edge else "search_rotate"),
         )
 
     if _active_table_docking(ctx) and abs(desired_vx) < 1e-9 and abs(desired_wz) < 1e-9:

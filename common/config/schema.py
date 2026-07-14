@@ -228,58 +228,8 @@ class SingleModelConfig:
 
 @dataclass
 class ModelConfig:
-    active_model: str = "yolo26s_detect"
+    active_model: str = "yolo26s_detect_imgsz640"
     profiles: Dict[str, SingleModelConfig] = field(default_factory=lambda: {
-        "yolov7_detect": SingleModelConfig(
-            target_model=str(_DEFAULT_DETECT_MODEL),
-            width=640,
-            height=640,
-            conf_thres=0.25,
-            iou_thres=0.45,
-            class_num=80,
-            classes=_COCO80,
-            predictor_type="detect",
-            model_backend="qnn",
-            anchors=(
-                (12, 16, 19, 36, 40, 28),
-                (36, 75, 76, 55, 72, 146),
-                (142, 110, 192, 243, 459, 401),
-            ),
-            strides=(8, 16, 32),
-        ),
-        "yolov8s_seg": SingleModelConfig(
-            target_model=str(Path(_DEFAULT_MODEL_ROOT) / "yolov8s-seg" / "cutoff_yolov8s-seg_qcs6490_w8a8.qnn236.ctx.bin"),
-            width=640,
-            height=640,
-            conf_thres=0.45,
-            iou_thres=0.45,
-            class_num=80,
-            classes=_COCO80,
-            predictor_type="segment",
-            model_backend="qnn",
-        ),
-        "yolo26s_seg": SingleModelConfig(
-            target_model=str(_DEFAULT_SEG_MODEL_QNN216),
-            width=640,
-            height=640,
-            conf_thres=0.25,
-            iou_thres=0.15,
-            class_num=20,
-            classes=_GRASPING_COCO20,
-            predictor_type="segment",
-            model_backend="qnn",
-        ),
-        "yolo26s_seg_qnn216": SingleModelConfig(
-            target_model=str(_DEFAULT_SEG_MODEL_QNN216),
-            width=640,
-            height=640,
-            conf_thres=0.25,
-            iou_thres=0.15,
-            class_num=20,
-            classes=_GRASPING_COCO20,
-            predictor_type="segment",
-            model_backend="qnn",
-        ),
         "yolo26s_detect": SingleModelConfig(
             target_model=str(
                 _DEFAULT_MODEL_ROOT
@@ -290,6 +240,38 @@ class ModelConfig:
             ),
             width=640,
             height=640,
+            conf_thres=0.25,
+            iou_thres=0.45,
+            class_num=15,
+            classes=_FINETUNE_YOLO26S_BGR15,
+            predictor_type="detect26",
+            model_backend="qnn",
+        ),
+        "yolo26s_detect_imgsz640": SingleModelConfig(
+            target_model=str(
+                _DEFAULT_MODEL_ROOT
+                / "yolo26s"
+                / "models"
+                / "yolo26s-cutoff-bgr-imgsz640_qcs6490_w8a8.qnn236.ctx.bin"
+            ),
+            width=640,
+            height=640,
+            conf_thres=0.25,
+            iou_thres=0.45,
+            class_num=15,
+            classes=_FINETUNE_YOLO26S_BGR15,
+            predictor_type="detect26",
+            model_backend="qnn",
+        ),
+        "yolo26s_detect_imgsz1280": SingleModelConfig(
+            target_model=str(
+                _DEFAULT_MODEL_ROOT
+                / "yolo26s"
+                / "models"
+                / "yolo26s-cutoff-bgr-imgsz1280_qcs6490_w8a8.qnn236.ctx.bin"
+            ),
+            width=1280,
+            height=1280,
             conf_thres=0.25,
             iou_thres=0.45,
             class_num=15,
@@ -594,10 +576,6 @@ class ControlThresholds:
     table_stable_frames: int = 5
     table_yolo_align_center_x_target: float = 0.50
     table_yolo_align_center_x_tol: float = 0.08
-    # SEARCH_TABLE remains a coarse, latched scan until a real bbox direction is
-    # confirmed by several distinct fresh observations.
-    search_bbox_confirm_frames: int = 3
-    search_direction_min_dwell_s: float = 0.80
     yolo_table_control_enable: bool = True
     yolo_table_conf_min: float = 0.25
     yolo_table_edge_stable_frames: int = 5

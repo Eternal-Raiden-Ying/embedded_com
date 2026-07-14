@@ -389,98 +389,46 @@ class MotionController:
         view_err_norm = float(center_error * 2.0) if center_error is not None else 0.0
         gain = float(getattr(self.car_cfg, "yolo_table_yaw_gain", 0.20) or 0.20)
         max_wz = abs(float(getattr(self.car_cfg, "yolo_table_max_wz_radps", 0.06) or 0.06))
-        if center_error is not None:
-            # Positive yaw speed is a right/clockwise turn. A bbox right of image
-            # center therefore must produce a positive yaw command.
-            wz_raw = center_error * 2.0 * gain
+        # Bbox alignment follows the table-view convention, which is distinct
+        # from edge-plane yaw.  Keep the camera target offset in center_error;
+        # table_view_wz_sign is the chassis mapping for this bbox-only branch.
+        bbox_wz_sign = float(getattr(self.car_cfg, "table_view_wz_sign", -1.0) or -1.0)
+        if center_error is not None and abs(float(center_error)) > table_center_tol:
+            wz_raw = center_error * 2.0 * gain * bbox_wz_sign
             wz = self._clamp(wz_raw, -max_wz, max_wz)
-            if abs(wz) < 0.02:
-                wz = 0.0
         else:
             wz_raw = 0.0
             wz = 0.0
         mode_name = str(mode or "SEARCH_TABLE").upper().strip() or "SEARCH_TABLE"
         source_name = normalize_control_source(control_source or "yolo_forward")
         assist_vx = 0.0
-        edge_guidance_available = bool(
-            obs is not None
-            and bool(getattr(obs, "edge_trusted", False) or getattr(obs, "usable_for_approach", False) or getattr(obs, "edge_control_allowed", False))
-        )
-        center_good_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_good_limit", 0.06) or 0.06))
-        center_hard_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.40) or 0.40))
-        far_vx = abs(float(getattr(self.cfg, "yolo_approach_far_vx_mps", 0.50) or 0.50))
-        mid_vx = min(far_vx, abs(float(getattr(self.cfg, "yolo_approach_mid_vx_mps", 0.20) or 0.20)))
-        near_vx = min(mid_vx, abs(float(getattr(self.cfg, "yolo_approach_near_vx_mps", 0.10) or 0.10)))
-        min_vx = min(near_vx, abs(float(getattr(self.cfg, "yolo_approach_min_vx_mps", 0.05) or 0.05)))
-        depth_value = None
-        depth_source = "unknown"
-        if obs is not None:
-            for source, value in (
-                ("table_roi_median_m", getattr(obs, "table_roi_depth_median", None)),
-                ("edge_measured_dist_m", getattr(obs, "obs_target_dist_m", None)),
-                ("table_edge_dist_m", getattr(obs, "target_dist_m", None)),
-            ):
-                try:
-                    if value is not None:
-                        depth_value = float(value)
-                        depth_source = source
-                        break
-                except (TypeError, ValueError):
-                    pass
-        stale = self._stale_guard(obs)
-        obs_fresh = stale.get("stale_level") == "fresh"
-        obs_age_ms = stale.get("obs_total_age_ms")
-        trusted_depth_source = depth_source in {"table_roi_median_m", "edge_measured_dist_m", "table_edge_dist_m"}
-        far_allowed = bool(depth_value is not None and depth_value > 1.20 and obs_fresh and trusted_depth_source)
-        far_block_reason = ""
-        if depth_value is None:
-            far_block_reason = "depth_unknown"
-        elif depth_value <= 1.20:
-            far_block_reason = "depth_not_far"
-        elif not obs_fresh:
-            far_block_reason = f"obs_{stale.get('stale_level') or 'stale'}"
-        elif not trusted_depth_source:
-            far_block_reason = "depth_source_untrusted"
-        if depth_value is None:
-            speed_band = "unknown"
-            forward_vx = min_vx
-        elif far_allowed:
-            speed_band = "far"
-            forward_vx = far_vx
-        elif depth_value > 0.90:
-            speed_band = "mid"
-            forward_vx = mid_vx
-        elif depth_value > 0.65:
-            speed_band = "near"
-            forward_vx = near_vx
-        else:
-            speed_band = "min"
-            forward_vx = min_vx
-        slow_vx = min(forward_vx, near_vx)
-        yolo_forward_allowed = bool(center_error is not None and abs(center_error) <= center_hard_limit)
+        # SEARCH_TABLE has one bbox-driven entry rule: a current bbox inside the
+        # alignment tolerance may move forward at the bounded bbox-track speed.
+        # Edge confidence and depth bands belong to later handoff/safety stages.
+        forward_vx = abs(float(getattr(self.cfg, "bbox_track_forward_vx_mps", 0.10) or 0.10))
+        yolo_forward_allowed = bool(center_error is not None and abs(center_error) <= table_center_tol)
         if source_name in {"yolo_forward", "yolo_track_forward"}:
             if yolo_forward_allowed:
-                assist_vx = forward_vx if mode_name == "YOLO_APPROACH" else (forward_vx if abs(center_error) <= center_good_limit else slow_vx)
+                assist_vx = forward_vx
                 source_name = "yolo_track_forward"
             else:
                 assist_vx = 0.0
-                wz = float(getattr(self.car_cfg, "search_table_wz_radps", 0.10) or 0.10) * (1.0 if int(turn_sign) >= 0 else -1.0)
-                source_name = "local_rotate_search"
+                source_name = "yolo_align"
         elif source_name == "edge_adjust":
             # edge_adjust is generated by edge/docking paths, not by pure YOLO.
             # Fall back to forward-safe semantics if called here accidentally.
             if yolo_forward_allowed:
-                assist_vx = forward_vx if mode_name == "YOLO_APPROACH" else (forward_vx if abs(center_error) <= center_good_limit else slow_vx)
+                assist_vx = forward_vx
                 source_name = "yolo_track_forward"
             else:
                 assist_vx = 0.0
-                source_name = "local_rotate_search"
+                source_name = "yolo_align"
         elif source_name == "local_rotate_search":
             assist_vx = 0.0
             wz = float(getattr(self.car_cfg, "search_table_wz_radps", 0.10) or 0.10) * (1.0 if int(turn_sign) >= 0 else -1.0)
         else:
             assist_vx = forward_vx if yolo_forward_allowed else 0.0
-            source_name = "yolo_track_forward" if yolo_forward_allowed else "local_rotate_search"
+            source_name = "yolo_track_forward" if yolo_forward_allowed else "yolo_align"
         cmd = self._cmd(mode_name, vx=assist_vx, wz=wz)
         summary = self._summary(mode_name, cmd, obs, reason=reason)
 
@@ -495,21 +443,15 @@ class MotionController:
                 "table_err_x": float(center_error) if center_error is not None else None,
                 "target_offset": float(center_error) if center_error is not None else None,
                 "center_error": float(center_error) if center_error is not None else None,
-                "yolo_forward_center_good_limit": float(center_good_limit),
-                "yolo_forward_center_hard_limit": float(center_hard_limit),
+                "yolo_forward_center_good_limit": float(table_center_tol),
+                "yolo_forward_center_hard_limit": float(table_center_tol),
                 "yolo_forward_allowed": bool(yolo_forward_allowed),
-                "yolo_approach_speed_band": speed_band,
-                "yolo_approach_speed_depth": float(depth_value) if depth_value is not None else None,
+                "yolo_approach_speed_band": "bbox_track",
+                "yolo_approach_speed_depth": None,
                 "yolo_approach_selected_vx": float(assist_vx),
-                "yolo_approach_depth_source": depth_source,
-                "yolo_approach_obs_fresh": bool(obs_fresh),
-                "yolo_approach_obs_age_s": (float(obs_age_ms) / 1000.0) if obs_age_ms is not None else None,
-                "yolo_approach_far_allowed": bool(far_allowed),
-                "yolo_approach_speed_block_reason": far_block_reason,
-                "yolo_approach_far_vx_mps": float(far_vx),
-                "yolo_approach_mid_vx_mps": float(mid_vx),
-                "yolo_approach_near_vx_mps": float(near_vx),
-                "yolo_approach_min_vx_mps": float(min_vx),
+                "yolo_approach_depth_source": "bbox_only",
+                "yolo_approach_far_allowed": False,
+                "yolo_approach_speed_block_reason": "",
                 "table_cx_norm_signed": float(center_error * 2.0) if center_error is not None else None,
                 "yolo_yaw_gain": float(gain),
                 "yolo_max_wz_radps": float(max_wz),
@@ -517,8 +459,8 @@ class MotionController:
                 "yolo_yaw_cmd": float(wz),
                 "edge_yaw_cmd": 0.0,
                 "final_yaw_cmd": float(wz),
-                "wz_sign_basis": "wz = bbox_center_error_control * 2 * yolo_table_yaw_gain",
-                "table_view_wz_sign": 1.0,
+                "wz_sign_basis": "wz = bbox_center_error_control * 2 * yolo_table_yaw_gain * table_view_wz_sign",
+                "table_view_wz_sign": float(bbox_wz_sign),
                 "final_wz": float(wz),
                 "vx_mps": float(assist_vx),
                 "vy_mps": 0.0,
@@ -527,7 +469,7 @@ class MotionController:
                 "allow_forward": bool(assist_vx > 0.0),
                 "allow_rotate": bool(abs(wz) > 1e-9),
                 "forward_block_reason": "" if assist_vx > 0.0 else ("yolo_center_error_too_large_rotate_only" if center_error is not None else "center_unavailable"),
-                "edge_guidance_available": bool(edge_guidance_available),
+                "edge_guidance_available": False,
                 "rotate_block_reason": "" if abs(wz) > 1e-9 else "yolo_track_forward",
                 "bbox_visible_but_edge_invalid": bool(source_name in {"yolo_forward", "yolo_track_forward"} and not bool(getattr(obs, "edge_trusted", False))),
                 "selected_timeout_reason": "bbox_visible_but_edge_invalid" if source_name in {"yolo_forward", "yolo_track_forward"} and not bool(getattr(obs, "edge_trusted", False)) else "",
@@ -535,8 +477,8 @@ class MotionController:
                 "edge_geometry_timeout": False,
                 "no_table_bbox_timeout": False,
                 "table_lost_search_timeout": False,
-                "yolo_approach_speed_band": speed_band,
-                "yolo_approach_speed_depth": float(depth_value) if depth_value is not None else None,
+                "yolo_approach_speed_band": "bbox_track",
+                "yolo_approach_speed_depth": None,
                 "yolo_approach_selected_vx": float(assist_vx),
                 "yolo_view_err_norm": view_err_norm,
                 "edge_yaw_err_rad": float(getattr(obs, "yaw_err_rad", 0.0) or 0.0) if obs is not None else 0.0,

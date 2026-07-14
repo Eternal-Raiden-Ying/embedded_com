@@ -1161,35 +1161,10 @@ class TableDockingMixin:
     def _control_phase_status(self, obs: Optional[TableEdgeObs], depth_stop_ready: bool) -> Dict[str, object]:
         """State-independent, hard ownership handoff between search/bbox/edge."""
         now = monotonic_ts()
-        if self.ctx.state == State.SEARCH_TABLE and not bool(getattr(self.ctx, "search_bbox_handoff_confirmed", False)):
-            # A SEARCH_TABLE tick has exactly one yaw owner: the coarse scan.
-            # Do not allow a single bbox, a held ROI, or a reused observation to
-            # promote the bbox controller and overwrite the latched scan command.
-            handoff = self._update_search_bbox_handoff(obs)
-            if self.ctx.control_phase != "SEARCH_SCAN":
-                self.ctx.control_phase = "SEARCH_SCAN"
-                self.ctx.control_phase_since_mono = now
-            dwell_ms = max(0.0, (now - float(self.ctx.control_phase_since_mono or now)) * 1000.0)
-            return {
-                "control_phase": "SEARCH_SCAN",
-                "phase_reason": str(handoff["reason"]),
-                "bbox_center_error": handoff["center_error"],
-                "phase_dwell_ms": dwell_ms,
-                "edge_handoff_complete": False,
-                "handoff_timeout": False,
-                "edge_conf_score": float(getattr(self.ctx, "edge_conf_score", 0.0) or 0.0),
-                "edge_readiness_score": float(getattr(self.ctx, "edge_readiness_score", 0.0) or 0.0),
-                "edge_readiness_level": str(getattr(self.ctx, "edge_readiness_level", "") or ""),
-                "edge_readiness_enter_score": float(getattr(self.cfg, "edge_readiness_enter_score", 0.65) or 0.65),
-                "edge_readiness_exit_score": float(getattr(self.cfg, "edge_readiness_exit_score", 0.35) or 0.35),
-                "edge_handoff_block_reason": str(handoff["reason"]),
-                "edge_handoff_source": "search_bbox_confirmation",
-                "approach_commit_active": False,
-                "search_bbox_confirm_streak": int(handoff["streak"]),
-                "search_bbox_candidate_sign": int(handoff["candidate_sign"]),
-                "search_bbox_handoff_confirmed": False,
-            }
-        current_bbox = self._table_yolo_reliable(obs) or self._bbox_yaw_hold_valid(obs)
+        # Initial table acquisition is driven only by a current fresh bbox.
+        # Held/reused observations may be used by later safety logic, but never
+        # create an acquire/forward decision here.
+        current_bbox = self._table_yolo_reliable(obs)
         hard_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.25) or 0.25))
         geom = self._bbox_control_geometry(obs)
         center_error = geom["bbox_center_error_control"]
@@ -1233,7 +1208,7 @@ class TableDockingMixin:
                 self.ctx.edge_trusted_streak += 1
                 yaw = float(getattr(obs, "yaw_err_rad", 0.0) or 0.0)
                 self.ctx.edge_yaw_ema = yaw if self.ctx.edge_yaw_ema is None else (0.7 * self.ctx.edge_yaw_ema + 0.3 * yaw)
-            stable_bbox = self.ctx.bbox_centered_streak >= 2
+            stable_bbox = centered
             fov_guard = self._bbox_fov_guard_status(obs, geom)
             readiness = self._refresh_edge_readiness(obs, {}, current_bbox=current_bbox, stable_bbox=stable_bbox, depth_stop_ready=depth_stop_ready)
             edge_readiness_score = float(readiness["edge_readiness_score"])
@@ -1332,63 +1307,6 @@ class TableDockingMixin:
                 "edge_handoff_block_reason": "" if float(getattr(self.ctx, "edge_readiness_score", 0.0) or 0.0) >= float(getattr(self.cfg, "edge_readiness_enter_score", 0.65) or 0.65) else str(getattr(self.ctx, "edge_readiness_level", "") or ""),
                 "edge_handoff_source": "readiness_score",
                 "approach_commit_active": bool(self.ctx.approach_commit_active)}
-
-    def _update_search_bbox_handoff(self, obs: Optional[TableEdgeObs]) -> Dict[str, object]:
-        """Confirm a bbox handoff without letting reused/noisy data steer scan yaw."""
-        geom = self._bbox_control_geometry(obs)
-        center_error = geom["bbox_center_error_control"]
-        obs_key = self._table_obs_key(obs) if obs is not None else ""
-        is_new = bool(obs_key and obs_key != self.ctx.search_scan_last_obs_key)
-        if is_new:
-            self.ctx.search_scan_last_obs_key = obs_key
-        reused = bool(
-            getattr(obs, "reused", False)
-            or getattr(obs, "is_reused", False)
-            or getattr(obs, "observation_reused", False)
-            or int(getattr(obs, "same_obs_reuse_count", 0) or 0) > 0
-        ) if obs is not None else False
-        latched_only = bool(
-            getattr(obs, "table_roi_latched", False)
-            or getattr(obs, "latched_table_roi", False)
-            or getattr(obs, "table_bbox_hold_active", False)
-        ) if obs is not None else False
-        fresh_bbox = bool(
-            obs is not None
-            and is_new
-            and not reused
-            and not latched_only
-            and self._table_yolo_reliable(obs)
-            and bool(geom["bbox_center_valid"])
-            and center_error is not None
-        )
-        if fresh_bbox:
-            deadband = abs(float(getattr(self.cfg, "table_yolo_align_center_x_tol", 0.08) or 0.08))
-            candidate_sign = 0 if abs(float(center_error)) <= deadband else (1 if float(center_error) > 0.0 else -1)
-            if candidate_sign == int(getattr(self.ctx, "search_bbox_candidate_sign", 0) or 0):
-                self.ctx.search_bbox_confirm_streak += 1
-            else:
-                self.ctx.search_bbox_candidate_sign = candidate_sign
-                self.ctx.search_bbox_confirm_streak = 1
-            reason = "fresh_bbox_confirmation"
-        elif is_new:
-            # A missing, held, latched, or reused observation is not evidence in
-            # either direction.  It cannot flip the coarse-search latch.
-            self.ctx.search_bbox_candidate_sign = 0
-            self.ctx.search_bbox_confirm_streak = 0
-            reason = "search_waiting_for_fresh_bbox"
-        else:
-            reason = "search_waiting_for_new_fresh_bbox"
-        required = max(3, int(getattr(self.cfg, "search_bbox_confirm_frames", 3) or 3))
-        if self.ctx.search_bbox_confirm_streak >= required:
-            self.ctx.search_bbox_handoff_confirmed = True
-            self.ctx.search_bbox_handoff_reason = "stable_fresh_bbox_confirmed"
-            reason = self.ctx.search_bbox_handoff_reason
-        return {
-            "streak": int(self.ctx.search_bbox_confirm_streak),
-            "candidate_sign": int(self.ctx.search_bbox_candidate_sign),
-            "center_error": center_error,
-            "reason": reason,
-        }
 
     def _get_control_authority(self, obs: Optional[TableEdgeObs], depth_roi_stop_active: bool = False, explicit_stop_active: bool = False) -> ControlAuthority:
         sem = build_table_perception_semantics(obs, self.cfg)
@@ -1588,11 +1506,16 @@ class TableDockingMixin:
         bbox_fov_guard_reason = str(bbox_fov_guard["reason"])
         center_error = geom["bbox_center_error_control"]
         bbox_wz = 0.0
-        deadband = 0.01
+        # Use the configured bbox alignment tolerance (including any camera
+        # offset target), rather than a 1%-of-image implicit deadband.
+        deadband = abs(float(getattr(self.cfg, "table_yolo_align_center_x_tol", 0.08) or 0.08))
         if center_error is not None and abs(float(center_error)) > deadband:
-            # Positive wz is right/clockwise. The control error is cx - 0.5,
-            # so a right-side bbox must remain a positive yaw command.
-            bbox_wz = float(center_error) * 2.0 * float(getattr(self.car_cfg, "yolo_table_yaw_gain", 0.20) or 0.20)
+            bbox_wz = (
+                float(center_error)
+                * 2.0
+                * float(getattr(self.car_cfg, "yolo_table_yaw_gain", 0.20) or 0.20)
+                * float(getattr(self.car_cfg, "table_view_wz_sign", -1.0) or -1.0)
+            )
             max_wz = abs(float(getattr(self.car_cfg, "yolo_table_max_wz_radps", 0.06) or 0.06))
             bbox_wz = max(-max_wz, min(max_wz, bbox_wz))
             self.ctx.last_bbox_yaw_cmd = bbox_wz
@@ -1785,15 +1708,7 @@ class TableDockingMixin:
             "coast_reason": coast_reason,
             "zero_cmd_age_ms": 0.0,
             "zero_escape_reason": "",
-            "search_latch_age_ms": float(max(0.0, (monotonic_ts() - (
-                float(self.ctx.search_wz_latch_until_mono or monotonic_ts())
-                - float(getattr(self.cfg, "search_direction_min_dwell_s", 0.80) or 0.80)
-            )) * 1000.0)),
             "search_latch_reason": str(self.ctx.current_search_direction_reason or "latched_search_direction"),
-            "search_bbox_confirm_streak": int(getattr(self.ctx, "search_bbox_confirm_streak", 0) or 0),
-            "search_bbox_candidate_sign": int(getattr(self.ctx, "search_bbox_candidate_sign", 0) or 0),
-            "search_bbox_handoff_confirmed": bool(getattr(self.ctx, "search_bbox_handoff_confirmed", False)),
-            "search_bbox_handoff_reason": str(getattr(self.ctx, "search_bbox_handoff_reason", "") or ""),
             "wz_sign_final": sign(float(decision.cmd.wz_radps)),
             "edge_handoff_complete": bool(self.ctx.edge_handoff_complete), "handoff_timeout": bool(self.ctx.edge_handoff_timeout),
             "phase_dwell_ms": float(max(0.0, (monotonic_ts() - float(self.ctx.control_phase_since_mono or monotonic_ts())) * 1000.0)),
@@ -3032,9 +2947,7 @@ class TableDockingMixin:
         self.ctx.current_search_direction_source = search_src
         self.ctx.current_search_direction_reason = search_dir
         self.ctx.search_wz_sign_latched = 1 if int(turn_sign) >= 0 else -1
-        self.ctx.search_wz_latch_until_mono = monotonic_ts() + max(
-            0.0, float(getattr(self.cfg, "search_direction_min_dwell_s", 0.80) or 0.80)
-        )
+        self.ctx.search_wz_latch_until_mono = monotonic_ts()
         return turn_sign, search_src, search_dir
 
     def _check_approach_progress(self, obs: Optional[TableEdgeObs]) -> bool:
@@ -3159,8 +3072,9 @@ class TableDockingMixin:
     def _tick_yolo_acquire_align_impl(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
         obs = self._fresh_table_obs()
-        if not self._table_yolo_reliable(obs) and not self._bbox_yaw_hold_valid(obs):
-            return self._bbox_lost_hold_or_search(obs, "YOLO_ACQUIRE_ALIGN")
+        if not self._table_yolo_reliable(obs):
+            self._transition(State.SEARCH_TABLE, "YOLO_ACQUIRE_ALIGN current bbox lost")
+            return self.controller.search_table_cmd(*self._get_memory_search_params())
         self.ctx.bbox_lost_hold_active = False
         self.ctx.bbox_lost_since_mono = 0.0
         self._reset_table_loss()
@@ -3168,93 +3082,37 @@ class TableDockingMixin:
         cx_norm = geom["bbox_cx_norm_control"]
         center_error = geom["bbox_center_error_control"]
         if center_error is None:
-            return self._bbox_lost_hold_or_search(obs, "YOLO_ACQUIRE_ALIGN")
-        hard_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.25) or 0.25))
-        self._annotate_hard_yaw_gate(obs)
-        yaw_err = abs(float(getattr(obs, "yaw_err_rad", 0.0) or 0.0))
-        hard_yaw = max(
-            abs(float(getattr(self.car_cfg, "table_approach_yaw_realign_rad", 0.16) or 0.16)),
-            abs(float(getattr(self.car_cfg, "table_edge_hard_rotate_only_yaw_rad", 0.45) or 0.45)),
-        )
-        if (getattr(obs, "edge_valid", False) or getattr(obs, "edge_trusted", False)) and yaw_err <= hard_yaw:
-            return self._approach_from_table_signal(obs, reason=f"YOLO_ACQUIRE_ALIGN edge forward handoff yaw={yaw_err:.3f}")
-        if abs(center_error) <= hard_limit:
+            self._transition(State.SEARCH_TABLE, "YOLO_ACQUIRE_ALIGN bbox center unavailable")
+            return self.controller.search_table_cmd(*self._get_memory_search_params())
+        center_tol = abs(float(getattr(self.cfg, "table_yolo_align_center_x_tol", 0.08) or 0.08))
+        if abs(center_error) <= center_tol:
             if self.ctx.state != State.YOLO_APPROACH:
                 self._transition(State.YOLO_APPROACH, f"YOLO_ACQUIRE_ALIGN bbox trackable (cx_norm={cx_norm:.3f}), transition to YOLO_APPROACH")
-            decision = self.controller.yolo_table_search_cmd(
-                obs,
-                turn_sign=self.ctx.relocate_turn_sign,
-                mode="YOLO_APPROACH",
-                reason="yolo_acquire_track_forward",
-                control_source="yolo_track_forward",
-            )
-            decision.control_summary.update(
-                {
-                    "yolo_acquire_align_active": True,
-                    "bbox_cx_norm": float(cx_norm),
-                    "center_error": float(center_error),
-                    "transition_reason": self.ctx.last_enter_reason,
-                }
-            )
-            return decision
-        
-        # Rotate in place towards center
-        cx = (cx_norm * 2.0) - 1.0
-        gain = float(getattr(self.car_cfg, "yolo_table_yaw_gain", 0.20) or 0.20)
-        max_wz = abs(float(getattr(self.car_cfg, "yolo_table_max_wz_radps", 0.06) or 0.06))
-        sign = float(getattr(self.car_cfg, "table_view_wz_sign", -1.0))
-        wz_raw = cx * gain * sign
-        wz = max(-max_wz, min(max_wz, wz_raw))
-        if abs(wz) < 0.02:
-            wz = 0.0
-            
-        cmd = self.controller._cmd("YOLO_ACQUIRE_ALIGN", vx=0.0, wz=wz)
-        decision = MotionDecision(
-            cmd=cmd,
-            control_summary=self.controller._summary("YOLO_ACQUIRE_ALIGN", cmd, obs, reason="yolo_acquire_align"),
+        return self.controller.yolo_table_search_cmd(
+            obs,
+            turn_sign=self.ctx.relocate_turn_sign,
+            mode="YOLO_APPROACH" if self.ctx.state == State.YOLO_APPROACH else "YOLO_ACQUIRE_ALIGN",
+            reason="bbox_track_forward" if self.ctx.state == State.YOLO_APPROACH else "bbox_align",
+            control_source="yolo_track_forward",
         )
-        decision.control_summary.update({
-            "control_source": "yolo_align",
-            "yolo_acquire_align_active": True,
-            "bbox_cx_norm": float(cx_norm),
-            "vx_mps": 0.0,
-            "vy_mps": 0.0,
-            "wz_radps": float(wz),
-            "allow_forward": False,
-            "allow_rotate": True,
-            "forward_block_reason": "yolo_center_error_too_large_rotate_only",
-            "rotate_block_reason": "",
-            "speed_profile": "search",
-            "speed_limit_reason": "yolo_align",
-        })
-        return decision
 
     def _tick_yolo_approach_impl(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
         obs = self._fresh_table_obs()
-        if not self._table_yolo_reliable(obs) and not self._bbox_yaw_hold_valid(obs):
-            return self._bbox_lost_hold_or_search(obs, "YOLO_APPROACH")
+        if not self._table_yolo_reliable(obs):
+            self._transition(State.SEARCH_TABLE, "YOLO_APPROACH current bbox lost")
+            return self.controller.search_table_cmd(*self._get_memory_search_params())
+        center_error = self._bbox_control_geometry(obs)["bbox_center_error_control"]
+        center_tol = abs(float(getattr(self.cfg, "table_yolo_align_center_x_tol", 0.08) or 0.08))
+        if center_error is None or abs(float(center_error)) > center_tol:
+            self._transition(State.YOLO_ACQUIRE_ALIGN, "YOLO_APPROACH bbox left center tolerance")
+            return self.controller.yolo_table_search_cmd(
+                obs, turn_sign=self.ctx.relocate_turn_sign, mode="YOLO_ACQUIRE_ALIGN",
+                reason="bbox_align", control_source="yolo_track_forward",
+            )
         self.ctx.bbox_lost_hold_active = False
         self.ctx.bbox_lost_since_mono = 0.0
         self._reset_table_loss()
-        if self.controller._edge_trusted(obs):
-            decision = self.controller.fov_table_approach_cmd(
-                obs,
-                phase="PLANE_APPROACH",
-                mode="YOLO_APPROACH",
-            )
-            if decision.control_summary is not None:
-                decision.control_summary.update(
-                    {
-                        "control_source": "edge_guided_forward",
-                        "yaw_source": "edge",
-                        "forward_source": "yolo_or_edge",
-                        "transition_reason": "YOLO_APPROACH table edge trusted, stay forward-controlled",
-                        "edge_trusted_yolo_approach_handoff": True,
-                    }
-                )
-            return decision
-            
         decision = self.controller.yolo_table_search_cmd(
             obs,
             turn_sign=self.ctx.relocate_turn_sign,
@@ -3268,189 +3126,21 @@ class TableDockingMixin:
         self._maybe_resend_req(self._active_req_payload())
         obs = self._fresh_table_obs()
         yolo_status = self._yolo_table_status(obs)
-        warmup_s = max(0.0, float(getattr(self.car_cfg, "table_perception_warmup_s", 1.0) or 1.0))
-        task_elapsed_s = max(0.0, time.time() - float(getattr(self.ctx, "task_start_wall_ts", 0.0) or time.time()))
-        if task_elapsed_s <= warmup_s:
-            if (
-                obs is not None
-                and bool(getattr(self.ctx, "search_bbox_handoff_confirmed", False))
-                and self._table_motion_signal_available(obs)
-            ):
-                return self._approach_from_table_signal(obs, reason=f"perception_warmup_signal_seen elapsed_s={task_elapsed_s:.2f}")
-            decision = self.controller.stop_cmd("SEARCH_TABLE")
-            decision.control_summary.update(
-                {
-                    "control_source": "perception_warmup_hold",
-                    "allow_forward": False,
-                    "allow_rotate": False,
-                    "forward_block_reason": "perception_warmup_waiting",
-                    "rotate_block_reason": "perception_warmup_waiting",
-                    "perception_warmup_active": True,
-                    "perception_warmup_elapsed_s": float(task_elapsed_s),
-                    "perception_warmup_s": float(warmup_s),
-                    "transition_reason": "perception_warmup_waiting",
-                }
-            )
-            return decision
-        near_start = self._near_start_status(obs)
-        if bool(near_start.get("enabled")) and bool(near_start.get("near")):
-            self.ctx.start_distance_band = "near"
-            self.ctx.start_depth_source = str(near_start.get("depth_source") or "")
-            self.ctx.start_depth_value = near_start.get("depth")
-            geom = self._bbox_control_geometry(obs)
-            err = geom.get("table_err_x")
-            tol = abs(float(getattr(self.cfg, "table_yolo_align_center_x_tol", 0.08) or 0.08))
-            align_timeout_s = max(0.0, float(getattr(self.cfg, "near_start_align_timeout_s", 2.0) or 2.0))
-            if (
-                bool(getattr(self.cfg, "near_start_align_enable", True))
-                and err is not None
-                and abs(float(err)) > tol
-                and self._state_elapsed() <= align_timeout_s
-            ):
-                if self.ctx.state != State.YOLO_ACQUIRE_ALIGN:
-                    self._transition(State.YOLO_ACQUIRE_ALIGN, "near_start_align")
-                decision = self.controller.yolo_table_search_cmd(
-                    obs,
-                    turn_sign=self.ctx.relocate_turn_sign,
-                    mode="YOLO_ACQUIRE_ALIGN",
-                    reason="near_start_align",
-                    control_source="local_rotate_search",
-                )
-                self.ctx.selected_initial_state = "YOLO_ACQUIRE_ALIGN"
-                self.ctx.selected_initial_vx = 0.0
-                if decision.control_summary is not None:
-                    decision.control_summary.update(
-                        {
-                            **near_start,
-                            "start_distance_band": "near",
-                            "selected_initial_state": "YOLO_ACQUIRE_ALIGN",
-                            "selected_initial_vx": 0.0,
-                            "table_yolo_align_center_x_target": geom.get("table_yolo_align_center_x_target"),
-                            "table_center_x_norm": geom.get("table_center_x_norm"),
-                            "table_err_x": geom.get("table_err_x"),
-                        }
-                    )
-                return decision
-            status = {
-                "allowed": True,
-                "final_enter_stat_used": near_start.get("depth_source"),
-                "final_enter_stat_value": near_start.get("depth"),
-                "final_enter_threshold": near_start.get("threshold"),
-                "final_enter_stable_count": 1,
-                "reason": "near_start_final",
-            }
-            self.ctx.selected_initial_state = "FINAL_SLOW_STOP"
-            self.ctx.selected_initial_vx = self._final_slow_vx_mps()
-            final_decision = self._enter_final_slow_stop(obs, status, reason="near_start_final")
-            if final_decision.control_summary is not None:
-                final_decision.control_summary.update(
-                    {
-                        **near_start,
-                        "start_distance_band": "near",
-                        "selected_initial_state": "FINAL_SLOW_STOP",
-                        "selected_initial_vx": float(self._final_slow_vx_mps()),
-                    }
-                )
-            return final_decision
-        local_search_active = bool(
-            self.ctx.prev_state in TABLE_APPROACH_STATES
-            and ("丢失" in str(self.ctx.last_enter_reason or "") or "lost" in str(self.ctx.last_enter_reason or "").lower())
-        )
-        local_search_elapsed_s = self._state_elapsed() if local_search_active else 0.0
-        local_search_timeout_s = max(
-            0.0,
-            float(
-                getattr(
-                    self.cfg,
-                    "no_table_bbox_timeout_s",
-                    getattr(self.cfg, "rotate_search_timeout_s", 10.0),
-                )
-                or getattr(self.cfg, "rotate_search_timeout_s", 10.0)
-            ),
-        )
-        if local_search_active and local_search_elapsed_s >= local_search_timeout_s:
-            if yolo_status["fresh"]:
-                self._log(
-                    "warn",
-                    (
-                        "[TABLE_TIMEOUT] suppressed table_lost_search_timeout "
-                        f"current_state={self.ctx.state.value} selected_timeout_reason=bbox_visible_but_edge_invalid "
-                        f"fallback_action=yolo_assist "
-                        f"yolo_table_visible={int(yolo_status['visible'])} "
-                        f"yolo_table_fresh={int(yolo_status['fresh'])} "
-                        f"yolo_table_age_ms={yolo_status['age_ms']} "
-                        f"edge_valid={int(bool(getattr(obs, 'edge_valid', False))) if obs is not None else 0} "
-                        f"edge_trusted={int(bool(getattr(obs, 'edge_trusted', False))) if obs is not None else 0} "
-                        f"edge_age_ms={self._table_obs_age_ms(obs)}"
-                    ),
-                )
-            else:
-                self.ctx.last_fail_reason = "table_lost_search_timeout:no_table_bbox_timeout"
-                self._log(
-                    "warn",
-                    (
-                        "[TABLE_TIMEOUT] triggering table_lost_search_timeout "
-                        f"current_state={self.ctx.state.value} selected_timeout_reason=no_table_bbox_timeout "
-                        f"fallback_action=error_recovery "
-                        f"yolo_table_visible={int(yolo_status['visible'])} "
-                        f"yolo_table_fresh={int(yolo_status['fresh'])} "
-                        f"yolo_table_age_ms={yolo_status['age_ms']} "
-                        f"edge_valid={int(bool(getattr(obs, 'edge_valid', False))) if obs is not None else 0} "
-                        f"edge_trusted={int(bool(getattr(obs, 'edge_trusted', False))) if obs is not None else 0} "
-                        f"edge_age_ms={self._table_obs_age_ms(obs)}"
-                    ),
-                )
-                self._enter_error_recovery(self.ctx.last_fail_reason, tts_text="桌边丢失搜索超时，已停车", interrupt_tts=True)
-                decision = self.controller.stop_cmd("ERROR_RECOVERY", brake=True)
-                decision.control_summary.update(
-                    {
-                        "control_source": "search_failed_stop",
-                        "table_lost_search_active": True,
-                        "table_lost_search_elapsed_s": float(local_search_elapsed_s),
-                        "table_lost_search_timeout": True,
-                        "no_table_bbox_timeout": True,
-                        "selected_timeout_reason": "no_table_bbox_timeout",
-                        "fallback_action": "error_recovery",
-                        "yolo_table_visible": bool(yolo_status["visible"]),
-                        "yolo_table_fresh": bool(yolo_status["fresh"]),
-                        "yolo_table_age_ms": yolo_status["age_ms"],
-                        "edge_valid": bool(getattr(obs, "edge_valid", False)) if obs is not None else False,
-                        "edge_trusted": bool(getattr(obs, "edge_trusted", False)) if obs is not None else False,
-                        "edge_age_ms": self._table_obs_age_ms(obs),
-                        "stop_source_state": "SEARCH_TABLE",
-                        "stop_reason": self.ctx.last_fail_reason,
-                    }
-                )
-                return decision
-        level = self._control_level(obs)
-        if (
-            obs is not None
-            and bool(getattr(self.ctx, "search_bbox_handoff_confirmed", False))
-            and self._table_motion_signal_available(obs)
-        ):
+        if obs is not None and self._table_motion_signal_available(obs):
             geom = self._bbox_control_geometry(obs)
             cx_norm = geom["bbox_cx_norm_control"]
             center_error = geom["bbox_center_error_control"]
             if center_error is not None:
-                hard_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.25) or 0.25))
-                self._annotate_hard_yaw_gate(obs)
-                yaw_err = abs(float(getattr(obs, "yaw_err_rad", 0.0) or 0.0))
-                hard_yaw = max(
-                    abs(float(getattr(self.car_cfg, "table_approach_yaw_realign_rad", 0.16) or 0.16)),
-                    abs(float(getattr(self.car_cfg, "table_edge_hard_rotate_only_yaw_rad", 0.45) or 0.45)),
-                )
-                next_state = State.YOLO_APPROACH if abs(center_error) <= hard_limit else State.YOLO_ACQUIRE_ALIGN
+                center_tol = abs(float(getattr(self.cfg, "table_yolo_align_center_x_tol", 0.08) or 0.08))
+                next_state = State.YOLO_APPROACH if abs(center_error) <= center_tol else State.YOLO_ACQUIRE_ALIGN
                 self._transition(next_state, f"table signal found cx_norm={cx_norm:.3f} center_error={center_error:.3f}")
-                decision = self.controller.yolo_table_search_cmd(
+                return self.controller.yolo_table_search_cmd(
                     obs,
                     turn_sign=self.ctx.relocate_turn_sign,
                     mode=next_state.value,
-                    reason="search_table_yolo_track_forward" if next_state == State.YOLO_APPROACH else "search_table_yolo_rotate_only",
-                    control_source="yolo_track_forward" if next_state == State.YOLO_APPROACH else "local_rotate_search",
+                    reason="bbox_track_forward" if next_state == State.YOLO_APPROACH else "bbox_align",
+                    control_source="yolo_track_forward",
                 )
-                return decision
-        # Without table bbox, docking/edge must not drive state transitions.
-        # It can still be logged by vision, but control falls back to local rotate search.
         self.ctx.table_found_frames = 0
         if self._state_elapsed() >= float(self.cfg.search_table_timeout_s):
             self.ctx.last_fail_reason = "搜索桌边超时"
@@ -3460,19 +3150,15 @@ class TableDockingMixin:
         decision.control_summary.update(
             {
                 "control_source": "local_rotate_search",
-                "table_lost_search_active": bool(local_search_active),
-                "table_lost_search_elapsed_s": float(local_search_elapsed_s),
-                "table_lost_search_timeout": False,
-                "no_table_bbox_timeout": False,
-                "selected_timeout_reason": "bbox_visible_but_edge_invalid" if yolo_status["visible"] else "searching_no_table_bbox",
-                "fallback_action": "yolo_assist" if yolo_status["fresh"] else "local_rotate_search",
+                "selected_timeout_reason": "searching_no_current_bbox",
+                "fallback_action": "local_rotate_search",
                 "yolo_table_visible": bool(yolo_status["visible"]),
                 "yolo_table_fresh": bool(yolo_status["fresh"]),
                 "yolo_table_age_ms": yolo_status["age_ms"],
                 "edge_valid": bool(getattr(obs, "edge_valid", False)) if obs is not None else False,
                 "edge_trusted": bool(getattr(obs, "edge_trusted", False)) if obs is not None else False,
                 "edge_age_ms": self._table_obs_age_ms(obs),
-                "search_table_stale_gate_bypass": True,
+                "docking_reason": "search_no_bbox",
             }
         )
         return decision
@@ -4254,6 +3940,15 @@ class TableDockingMixin:
         if age_ms is None:
             age_ms = self._table_obs_age_ms(obs)
         explicit_fresh = getattr(obs, "yolo_table_fresh", None)
+        reused_or_latched = bool(
+            getattr(obs, "reused", False)
+            or getattr(obs, "is_reused", False)
+            or getattr(obs, "observation_reused", False)
+            or int(getattr(obs, "same_obs_reuse_count", 0) or 0) > 0
+            or getattr(obs, "table_roi_latched", False)
+            or getattr(obs, "latched_table_roi", False)
+            or getattr(obs, "table_bbox_hold_active", False)
+        )
         max_age_ms = max(
             float(getattr(self.cfg, "table_obs_stale_stop_ms", 500) or 500),
             float(getattr(self.cfg, "no_table_bbox_timeout_s", 1.0) or 1.0) * 1000.0,
@@ -4263,9 +3958,9 @@ class TableDockingMixin:
         except Exception:
             age_ok = False
         if explicit_fresh is None:
-            fresh = bool(visible and age_ok and not bool(getattr(obs, "is_stale", False)))
+            fresh = bool(visible and age_ok and not reused_or_latched and not bool(getattr(obs, "is_stale", False)))
         else:
-            fresh = bool(visible and bool(explicit_fresh) and age_ok)
+            fresh = bool(visible and bool(explicit_fresh) and age_ok and not reused_or_latched)
         return {"visible": bool(visible), "fresh": bool(fresh), "age_ms": age_ms}
 
     def _table_plane_stable(self, obs: Optional[TableEdgeObs]) -> bool:

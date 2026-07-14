@@ -116,9 +116,20 @@ def decide_table_control_authority(
     if depth_roi_stop_active:
         return make("depth_roi_stop", "none", "none", "roi_depth", False, False, "depth_roi_stop_active", "DEPTH_FINAL_STOP")
 
+    hard_limit = abs(float(getattr(getattr(cfg, "car", cfg), "yolo_forward_center_hard_limit", 0.25) or 0.25))
+    bbox_centered_for_forward = bool(
+        sem.table_bbox_current_found
+        and bbox_center_error is not None
+        and abs(float(bbox_center_error)) <= hard_limit
+    )
     if control_phase == "BBOX_ACQUIRE":
         return make("yolo_acquire_align", "bbox", "none", "none", False, True, "bbox_acquire", "BBOX_ACQUIRE")
     if control_phase == "EDGE_HANDOFF_CONFIRM":
+        # Stable fresh bbox alignment owns the far, low-speed approach while
+        # edge geometry is still being collected.  Edge trust gates only the
+        # later EDGE_GUIDED_APPROACH handoff, never this bbox-forward stage.
+        if bbox_centered_for_forward:
+            return make("yolo_track_forward", "bbox", "bbox", "none", True, True, "bbox_centered_edge_handoff_pending", "EDGE_HANDOFF_CONFIRM")
         return make("yolo_acquire_align", "bbox", "none", "none", False, True, "edge_handoff_confirm", "EDGE_HANDOFF_CONFIRM")
     if control_phase == "EDGE_GUIDED_APPROACH":
         return make("edge_guided_forward", "edge", "edge", "none", True, True, "edge_handoff_complete", "EDGE_GUIDED_APPROACH")
@@ -130,7 +141,6 @@ def decide_table_control_authority(
     if not sem.table_bbox_current_found:
         return make("local_rotate_search", "search", "none", "none", False, True, "table_bbox_unavailable", "SEARCH_SCAN")
 
-    hard_limit = abs(float(getattr(getattr(cfg, "car", cfg), "yolo_forward_center_hard_limit", 0.25) or 0.25))
     if state == "YOLO_ACQUIRE_ALIGN" or (bbox_center_error is not None and abs(float(bbox_center_error)) > hard_limit):
         return make("yolo_acquire_align", "yolo", "none", "none", False, True, "yolo_center_error_too_large")
 

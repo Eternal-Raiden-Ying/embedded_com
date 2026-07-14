@@ -266,11 +266,6 @@ class RuntimeContext:
     last_bbox_yaw_cmd: float = 0.0
     search_wz_sign_latched: int = 0
     search_wz_latch_until_mono: float = 0.0
-    search_scan_last_obs_key: str = ""
-    search_bbox_candidate_sign: int = 0
-    search_bbox_confirm_streak: int = 0
-    search_bbox_handoff_confirmed: bool = False
-    search_bbox_handoff_reason: str = ""
     target_found_frames: int = 0
     target_lost_frames: int = 0
     target_lock_frames: int = 0
@@ -523,11 +518,6 @@ class RuntimeContext:
         self.bbox_lost_hold_active = False
         self.search_wz_sign_latched = 0
         self.search_wz_latch_until_mono = 0.0
-        self.search_scan_last_obs_key = ""
-        self.search_bbox_candidate_sign = 0
-        self.search_bbox_confirm_streak = 0
-        self.search_bbox_handoff_confirmed = False
-        self.search_bbox_handoff_reason = ""
         self.target_found_frames = 0
         self.target_lost_frames = 0
         self.target_lock_frames = 0

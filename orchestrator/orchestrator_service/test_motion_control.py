@@ -68,27 +68,27 @@ def _obs(**updates):
     return TableEdgeObs(**data)
 
 
-def test_yolo_visible_allows_forward_with_wz_correction():
+def test_yolo_offset_bbox_rotates_without_forward():
     ctrl = _controller()
     obs = _obs(table_cx_norm=0.28, yolo_bbox_center_x_norm=0.64)
 
     decision = ctrl.yolo_table_search_cmd(obs, mode="YOLO_ACQUIRE_ALIGN", control_source="yolo_track_forward")
 
-    assert decision.cmd.vx_mps > 0.0
+    assert decision.cmd.vx_mps == 0.0
     assert abs(decision.cmd.wz_radps) > 0.0
-    assert decision.control_summary["control_source"] == "yolo_track_forward"
-    assert decision.control_summary["forward_block_reason"] == ""
+    assert decision.control_summary["control_source"] == "yolo_align"
+    assert decision.control_summary["forward_block_reason"] == "yolo_center_error_too_large_rotate_only"
 
 
-def test_yolo_moderate_offset_does_not_block_forward():
+def test_yolo_moderate_offset_still_blocks_forward_until_centered():
     ctrl = _controller()
     obs = _obs(table_cx_norm=0.34, yolo_bbox_center_x_norm=0.67)
 
     decision = ctrl.yolo_table_search_cmd(obs, mode="YOLO_APPROACH", control_source="yolo_track_forward")
 
-    assert decision.cmd.vx_mps > 0.0
+    assert decision.cmd.vx_mps == 0.0
     assert abs(decision.cmd.wz_radps) > 0.0
-    assert decision.control_summary["forward_block_reason"] == ""
+    assert decision.control_summary["forward_block_reason"] == "yolo_center_error_too_large_rotate_only"
 
 
 def test_edge_trusted_enters_controlled_approach_not_yaw_only():
@@ -111,7 +111,7 @@ def test_edge_trusted_enters_controlled_approach_not_yaw_only():
     assert decision.control_summary["forward_block_reason"] != "edge_adjust_yaw_only"
 
 
-def test_start_facing_table_warmup_goes_to_approach_without_search_rotate():
+def test_start_with_offset_bbox_uses_alignment_during_warmup():
     cfg, car = _cfg()
     core = OrchestratorCore(cfg, car)
     core.ctx.state = State.SEARCH_TABLE
@@ -133,14 +133,12 @@ def test_start_facing_table_warmup_goes_to_approach_without_search_rotate():
 
     decision = core.tick()
 
-    assert core.ctx.state == State.EDGE_ADJUST
-    assert decision.cmd.vx_mps > 0.0
-    assert decision.control_summary["control_source"] == "edge_guided_forward"
-    assert decision.control_summary["forward_block_reason"] == ""
-    assert decision.cmd.wz_radps != 0.1
+    assert core.ctx.state == State.YOLO_ACQUIRE_ALIGN
+    assert decision.cmd.vx_mps == 0.0
+    assert decision.control_summary["docking_action"] == "BBOX_REACQUIRE_ROTATE"
 
 
-def test_bbox_touch_side_with_edge_valid_slows_forward_not_block():
+def test_bbox_touch_side_with_edge_valid_still_aligns_before_forward():
     ctrl = _controller()
     obs = _obs(
         edge_found=True,
@@ -155,9 +153,9 @@ def test_bbox_touch_side_with_edge_valid_slows_forward_not_block():
 
     decision = ctrl.yolo_table_search_cmd(obs, mode="YOLO_APPROACH", control_source="yolo_track_forward")
 
-    assert decision.cmd.vx_mps > 0.0
-    assert decision.cmd.vx_mps <= 0.015
-    assert decision.control_summary["forward_block_reason"] == ""
+    assert decision.cmd.vx_mps == 0.0
+    assert decision.cmd.wz_radps < 0.0
+    assert decision.control_summary["forward_block_reason"] == "yolo_center_error_too_large_rotate_only"
 
 
 def test_single_large_yaw_does_not_immediately_block_forward():
@@ -197,7 +195,7 @@ def test_consecutive_hard_yaw_uses_rotate_only():
     assert decision.control_summary["forward_block_reason"] == "yaw_too_large_rotate_only"
 
 
-def test_no_same_tick_yolo_approach_to_edge_adjust_blocks_forward():
+def test_offset_bbox_does_not_skip_alignment_for_edge_handoff():
     cfg, car = _cfg()
     core = OrchestratorCore(cfg, car)
     core.ctx.state = State.YOLO_ACQUIRE_ALIGN
@@ -216,10 +214,9 @@ def test_no_same_tick_yolo_approach_to_edge_adjust_blocks_forward():
 
     decision = core.tick()
 
-    assert core.ctx.state == State.EDGE_ADJUST
-    assert decision.cmd.vx_mps > 0.0
-    assert decision.control_summary["forward_block_reason"] == ""
-    assert decision.control_summary["control_source"] in {"yolo_track_forward", "edge_guided_forward"}
+    assert core.ctx.state == State.YOLO_ACQUIRE_ALIGN
+    assert decision.cmd.vx_mps == 0.0
+    assert decision.control_summary["docking_action"] == "BBOX_REACQUIRE_ROTATE"
 
 
 def test_target_distance_compatibility():
@@ -239,4 +236,3 @@ def test_target_distance_compatibility():
     summary = ctrl._summary("EDGE_ADJUST", cmd, obs)
     assert abs(summary["measured_dist_m"] - 0.35) < 1e-4
     assert abs(summary["final_dist_err_m"] - 0.05) < 1e-4
-
