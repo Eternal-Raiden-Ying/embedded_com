@@ -168,7 +168,7 @@ class TableEdgeConfig:
     """Global table-edge debug knobs (not mode-specific)."""
     roi_preset: str = ""
     yolo_table_roi_enable: bool = True
-    yolo_table_class_id: int = 0
+    yolo_table_class_id: int = 1
     yolo_table_conf_min: float = 0.25
     yolo_table_roi_use_rgb_depth_mapping: bool = True
     yolo_table_roi_mode: str = "centered_bbox_scale"
@@ -191,10 +191,10 @@ class TableEdgeConfig:
     final_roi_latch_enable: bool = True
     final_roi_latch_max_age_s: float = 2.0
     final_fixed_roi_enable: bool = True
-    final_fixed_roi_x0_norm: float = 0.42
-    final_fixed_roi_x1_norm: float = 0.58
-    final_fixed_roi_y0_norm: float = 0.69
-    final_fixed_roi_y1_norm: float = 0.90
+    final_fixed_roi_x0_norm: float = 0.32
+    final_fixed_roi_x1_norm: float = 0.68
+    final_fixed_roi_y0_norm: float = 0.72
+    final_fixed_roi_y1_norm: float = 0.88
     final_fixed_roi_min_valid_ratio: float = 0.03
     final_fixed_roi_min_sample_count: int = 32
     final_depth_debug_enable: bool = False

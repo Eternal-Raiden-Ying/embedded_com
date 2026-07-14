@@ -28,7 +28,13 @@ from ..utils.table_roi import find_table_bbox, table_detection_debug
 
 CapabilitySink = Optional[Callable[[str, Dict[str, Any]], None]]
 
-_FINAL_FIXED_ROI_STATES = {"FINAL_SLOW_STOP", "FINAL_LOCK", "FINAL_LOCK_HOLD"}
+_FINAL_FIXED_ROI_STATES = {
+    "YOLO_ACQUIRE_ALIGN",
+    "YOLO_APPROACH",
+    "FINAL_SLOW_STOP",
+    "FINAL_LOCK",
+    "FINAL_LOCK_HOLD",
+}
 
 
 def _is_final_phase_for_fixed_roi(runtime_status: Dict[str, Any]) -> bool:
@@ -126,6 +132,7 @@ class TableEdgeManager:
         self._last_update_interval_ms = None
         self._last_edge_dbg_ts = 0.0
         self._last_profile_log_ts = 0.0
+        self._last_final_fixed_roi_log_ts = 0.0
         self._frame_id = 0
         self._dropped_frame_count = 0
         self._processed_frame_count = 0
@@ -4082,10 +4089,10 @@ class TableEdgeManager:
             fixed_roi_xyxy = None
             if isinstance(depth, np.ndarray) and depth.ndim == 2 and depth.size > 0:
                 h_depth, w_depth = depth.shape[:2]
-                x0_norm = max(0.0, min(1.0, float(getattr(self.cfg.table_edge, "final_fixed_roi_x0_norm", 0.42))))
-                x1_norm = max(0.0, min(1.0, float(getattr(self.cfg.table_edge, "final_fixed_roi_x1_norm", 0.58))))
-                y0_norm = max(0.0, min(1.0, float(getattr(self.cfg.table_edge, "final_fixed_roi_y0_norm", 0.69))))
-                y1_norm = max(0.0, min(1.0, float(getattr(self.cfg.table_edge, "final_fixed_roi_y1_norm", 0.90))))
+                x0_norm = max(0.0, min(1.0, float(getattr(self.cfg.table_edge, "final_fixed_roi_x0_norm", 0.32))))
+                x1_norm = max(0.0, min(1.0, float(getattr(self.cfg.table_edge, "final_fixed_roi_x1_norm", 0.68))))
+                y0_norm = max(0.0, min(1.0, float(getattr(self.cfg.table_edge, "final_fixed_roi_y0_norm", 0.72))))
+                y1_norm = max(0.0, min(1.0, float(getattr(self.cfg.table_edge, "final_fixed_roi_y1_norm", 0.88))))
                 x0_norm, x1_norm = sorted((x0_norm, x1_norm))
                 y0_norm, y1_norm = sorted((y0_norm, y1_norm))
                 x0 = max(0, min(w_depth, int(round(w_depth * x0_norm))))
@@ -4113,7 +4120,7 @@ class TableEdgeManager:
             }
             payload["final_fixed_roi_active"] = bool(fixed_roi_enabled and fixed_roi_xyxy is not None)
             payload["final_fixed_roi_xyxy"] = fixed_roi_xyxy
-            payload["final_fixed_roi_source"] = "fixed_center_low_roi" if fixed_roi_enabled and fixed_roi_xyxy is not None else ""
+            payload["final_fixed_roi_source"] = "final_fixed_lower_roi" if fixed_roi_enabled and fixed_roi_xyxy is not None else ""
             fixed_stats = {}
             if fixed_roi_enabled and fixed_roi_xyxy is not None:
                 fixed_stats_start = time.perf_counter()
@@ -4155,6 +4162,16 @@ class TableEdgeManager:
                 "valid_ratio": fixed_ratio,
             }
             payload["final_fixed_roi_depth_invalid_reason"] = str(fixed_stats.get("table_roi_depth_invalid_reason") or fixed_roi_skip_reason)
+            now_mono = time.monotonic()
+            if fixed_roi_enabled and now_mono - self._last_final_fixed_roi_log_ts >= 1.0:
+                self._last_final_fixed_roi_log_ts = now_mono
+                self.log.info(
+                    "final_fixed_lower_roi | xyxy=%s valid_points=%s median=%s p10=%s source=final_fixed_lower_roi",
+                    fixed_roi_xyxy,
+                    fixed_count,
+                    fixed_median,
+                    fixed_p10,
+                )
             final_depth_debug = bool(getattr(self.cfg.table_edge, "final_depth_debug_enable", False))
             if final_depth_debug and fixed_roi_enabled:
                 for key, value in fixed_stats.items():

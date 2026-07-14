@@ -4514,6 +4514,7 @@ class TableDockingMixin:
             "target_dist": None,
             "margin": None,
             "final_fixed_roi_xyxy": None,
+            "final_fixed_roi_source": "final_fixed_lower_roi",
             "final_fixed_roi_mean": None,
             "final_fixed_roi_median": None,
             "final_fixed_roi_p10": None,
@@ -4561,6 +4562,9 @@ class TableDockingMixin:
         status.update(
             {
                 "final_fixed_roi_xyxy": xyxy,
+                "final_fixed_roi_source": str(
+                    getattr(obs, "final_fixed_roi_source", None) or "final_fixed_lower_roi"
+                ),
                 "final_fixed_roi_width_px": width_px,
                 "final_fixed_roi_height_px": height_px,
                 "final_fixed_roi_shape_valid": bool(shape_valid),

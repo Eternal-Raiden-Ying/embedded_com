@@ -456,6 +456,7 @@ class RuntimeContext:
             "edge_final_stop_stable_count",
             "roi_final_stop_stable_count",
             "fixed_roi_final_stop_stable_count",
+            "fixed_roi_final_stop_last_obs_key",
             "final_fixed_roi_min_stat_m",
             "final_reverse_too_close_count",
             "final_fixed_roi_status_last_log_mono",

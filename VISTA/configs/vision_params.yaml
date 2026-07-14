@@ -130,7 +130,7 @@ table_edge:
   # 可选：""、center_mid、center_lower、full_width_lower。
   roi_preset: center_lower
   yolo_table_roi_enable: true
-  yolo_table_class_id: 0
+  yolo_table_class_id: 1
   yolo_table_conf_min: 0.25
   yolo_table_roi_use_rgb_depth_mapping: true
   yolo_table_roi_mode: centered_bbox_scale
@@ -149,10 +149,10 @@ table_edge:
   matched_roi_hold_ttl_ms: 200.0
   yolo_table_roi_hold_enable: true
   final_fixed_roi_enable: true
-  final_fixed_roi_x0_norm: 0.40
-  final_fixed_roi_x1_norm: 0.60
-  final_fixed_roi_y0_norm: 0.45
-  final_fixed_roi_y1_norm: 0.62
+  final_fixed_roi_x0_norm: 0.32
+  final_fixed_roi_x1_norm: 0.68
+  final_fixed_roi_y0_norm: 0.72
+  final_fixed_roi_y1_norm: 0.88
   final_fixed_roi_min_valid_ratio: 0.03
   final_fixed_roi_min_sample_count: 32
   # bbox贴RGB左/右/下边界时，直接选择扩展ROI；每帧仍只运行一次检测。

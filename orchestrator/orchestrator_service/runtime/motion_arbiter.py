@@ -782,7 +782,7 @@ def arbitrate_table_docking_motion(
     if fixed_roi_selected:
         final_depth_valid = True
         final_depth_m = fixed_roi_depth_m
-        final_depth_source = "fixed_center_low_roi"
+        final_depth_source = "final_fixed_lower_roi"
     elif legacy_depth_allowed_for_control and legacy_roi_depth_valid and legacy_roi_depth_m is not None:
         final_depth_valid = True
         final_depth_m = legacy_roi_depth_m
@@ -812,7 +812,7 @@ def arbitrate_table_docking_motion(
                 "final_fixed_roi_depth_invalid_reason",
                 getattr(obs, "final_fixed_roi_depth_invalid_reason", "") if obs is not None else "",
             ),
-            "final_depth_candidate_source": "fixed_center_low_roi" if fixed_roi_valid and fixed_roi_depth_m is not None else "",
+            "final_depth_candidate_source": "final_fixed_lower_roi" if fixed_roi_valid and fixed_roi_depth_m is not None else "",
             "final_depth_candidate_m": float(fixed_roi_depth_m) if fixed_roi_valid and fixed_roi_depth_m is not None else None,
             "final_depth_usable_for_control": bool(fixed_roi_selected),
             "final_depth_gate_reason": "gate_open" if fixed_roi_selected else ("final_fixed_roi_shape_invalid" if fixed_roi_shape_invalid else (final_gate_block_reason if fixed_roi_only_blocked else ("not_close_enough" if fixed_roi_valid and fixed_roi_depth_m is not None else "missing_fixed_roi"))),
@@ -825,7 +825,7 @@ def arbitrate_table_docking_motion(
             "final_gate_edge_slope_latched": bool(edge_slope_final_ready_latched),
             "final_gate_edge_slope_latch_age_s": edge_slope_latch_age_s,
             "final_gate_fixed_roi_only_blocked": bool(fixed_roi_only_blocked),
-            "final_depth_source_candidate": "fixed_center_low_roi" if fixed_roi_valid and fixed_roi_depth_m is not None else "",
+            "final_depth_source_candidate": "final_fixed_lower_roi" if fixed_roi_valid and fixed_roi_depth_m is not None else "",
             "final_depth_source_selected": final_depth_source,
             "fixed_roi_depth_m": float(fixed_roi_depth_m) if fixed_roi_depth_m is not None else None,
             "fixed_roi_depth_stat_used": fixed_roi_stat_used,
@@ -843,6 +843,7 @@ def arbitrate_table_docking_motion(
             "final_fixed_roi_shape_invalid": bool(fixed_roi_shape_invalid),
             "final_fixed_roi_status": {
                 "active": bool(fixed_roi_active),
+                "source": "final_fixed_lower_roi",
                 "mean": fixed_roi_mean_m,
                 "median": fixed_roi_median_m,
                 "p10": fixed_roi_p10_m,
@@ -855,6 +856,10 @@ def arbitrate_table_docking_motion(
                 "valid_ratio": summary.get(
                     "final_fixed_roi_depth_valid_ratio",
                     getattr(obs, "final_fixed_roi_depth_valid_ratio", None) if obs is not None else None,
+                ),
+                "valid_points": summary.get(
+                    "final_fixed_roi_depth_sample_count",
+                    getattr(obs, "final_fixed_roi_depth_sample_count", None) if obs is not None else None,
                 ),
             },
             "edge_ready_for_final_strong": bool(edge_ready_for_final_strong),
@@ -877,11 +882,24 @@ def arbitrate_table_docking_motion(
         and fixed_roi_depth_m is not None
         and fixed_roi_depth_m <= fixed_roi_final_stop_threshold
     )
+    fixed_roi_obs_key = ""
+    if obs is not None:
+        for key_name in ("obs_seq", "camera_frame_seq", "capture_mono_ns"):
+            key_value = getattr(obs, key_name, None)
+            if key_value is not None:
+                fixed_roi_obs_key = f"{key_name}:{key_value}"
+                break
+    new_fixed_roi_depth_frame = bool(
+        fixed_roi_obs_key
+        and fixed_roi_obs_key != str(getattr(ctx, "fixed_roi_final_stop_last_obs_key", "") or "")
+    )
     try:
-        if fixed_roi_final_stop_reached:
-            ctx.fixed_roi_final_stop_stable_count = int(getattr(ctx, "fixed_roi_final_stop_stable_count", 0) or 0) + 1
-        else:
-            ctx.fixed_roi_final_stop_stable_count = 0
+        if new_fixed_roi_depth_frame:
+            ctx.fixed_roi_final_stop_last_obs_key = fixed_roi_obs_key
+            if fixed_roi_final_stop_reached:
+                ctx.fixed_roi_final_stop_stable_count = int(getattr(ctx, "fixed_roi_final_stop_stable_count", 0) or 0) + 1
+            else:
+                ctx.fixed_roi_final_stop_stable_count = 0
         if fixed_roi_depth_m is not None:
             prev_min = getattr(ctx, "final_fixed_roi_min_stat_m", None)
             if prev_min is None or float(fixed_roi_depth_m) < float(prev_min):
@@ -913,6 +931,8 @@ def arbitrate_table_docking_motion(
                 "threshold": float(fixed_roi_final_stop_threshold),
                 "stop_reached": bool(fixed_roi_final_stop_reached),
                 "stable_count": int(getattr(ctx, "fixed_roi_final_stop_stable_count", 0) or 0),
+                "stable_frame_key": fixed_roi_obs_key,
+                "new_depth_frame": bool(new_fixed_roi_depth_frame),
                 "min_observed_stat": getattr(ctx, "final_fixed_roi_min_stat_m", None),
             }
         )
@@ -938,8 +958,10 @@ def arbitrate_table_docking_motion(
         return max(0.0, ctrl_target)
 
     def table_measured_dist_m() -> tuple[Optional[float], str]:
-        if final_depth_valid and final_depth_m is not None and str(final_depth_source) == "fixed_center_low_roi":
-            return float(final_depth_m), "fixed_center_low_roi"
+        if final_depth_valid and final_depth_m is not None and str(final_depth_source) == "final_fixed_lower_roi":
+            return float(final_depth_m), "final_fixed_lower_roi"
+        if fixed_roi_enabled_for_control:
+            return None, "final_fixed_lower_roi_missing"
         if docking_obs.dist_err_m is not None:
             return obs_target_dist_m() + float(docking_obs.dist_err_m), "edge"
         if final_depth_valid and final_depth_m is not None:

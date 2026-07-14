@@ -121,7 +121,7 @@ vision:
   table_edge:
     roi_preset: "" # ROI preset coordinate profiles
     yolo_table_roi_enable: true # Scale ROI from YOLO bounding box
-    yolo_table_class_id: 0 # YOLO class id corresponding to table
+    yolo_table_class_id: 1 # YOLO class id corresponding to table2
     yolo_table_conf_min: 0.25 # Minimum confidence to trust table bbox
     yolo_table_roi_use_rgb_depth_mapping: true # Apply FOV mapping coordinates
     yolo_table_roi_mode: "centered_bbox_scale" # Bounding box extraction strategy
@@ -144,10 +144,10 @@ vision:
     table_roi_depth_current_min_valid_ratio: 0.08 # Valid depth ratio for current ROI sampler
     table_roi_depth_current_min_sample_count: 64 # Valid depth sample count for current ROI sampler
     final_fixed_roi_enable: true # Use fixed center-low ROI during close/final depth control
-    final_fixed_roi_x0_norm: 0.42 # Fixed final ROI left edge in depth-frame normalized coords
-    final_fixed_roi_x1_norm: 0.58 # Fixed final ROI right edge in depth-frame normalized coords
-    final_fixed_roi_y0_norm: 0.69 # Fixed final ROI top edge in depth-frame normalized coords
-    final_fixed_roi_y1_norm: 0.90 # Fixed final ROI bottom edge in depth-frame normalized coords
+    final_fixed_roi_x0_norm: 0.32 # Fixed final ROI left edge in depth-frame normalized coords
+    final_fixed_roi_x1_norm: 0.68 # Fixed final ROI right edge in depth-frame normalized coords
+    final_fixed_roi_y0_norm: 0.72 # Fixed final ROI top edge in depth-frame normalized coords
+    final_fixed_roi_y1_norm: 0.88 # Fixed final ROI bottom edge in depth-frame normalized coords
     final_fixed_roi_min_valid_ratio: 0.03 # Valid depth ratio for fixed final ROI sampler
     final_fixed_roi_min_sample_count: 32 # Valid depth sample count for fixed final ROI sampler
     final_depth_debug_enable: false # Keep low-level ROI sampler diagnostics out of main payload/logs

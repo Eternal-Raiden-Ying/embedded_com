@@ -595,6 +595,7 @@ class TableEdgeObs:
     table_roi_xyxy: Optional[list] = None
     final_fixed_roi_active: bool = False
     final_fixed_roi_xyxy: Optional[list] = None
+    final_fixed_roi_source: Optional[str] = None
     final_fixed_roi_depth_valid: bool = False
     final_fixed_roi_depth_mean: Optional[float] = None
     final_fixed_roi_depth_median: Optional[float] = None
@@ -829,6 +830,7 @@ class TableEdgeObs:
             table_roi_xyxy=_pick_optional_bbox(payload, "table_roi_xyxy", "table_edge_roi", "depth_edge_roi"),
             final_fixed_roi_active=bool(payload.get("final_fixed_roi_active", False)),
             final_fixed_roi_xyxy=_pick_optional_bbox(payload, "final_fixed_roi_xyxy"),
+            final_fixed_roi_source=_pick_optional_str(payload, "final_fixed_roi_source"),
             final_fixed_roi_depth_valid=bool(payload.get("final_fixed_roi_depth_valid", False)),
             final_fixed_roi_depth_mean=_pick_optional_float(payload, "final_fixed_roi_depth_mean", "fixed_roi_depth_mean"),
             final_fixed_roi_depth_median=_pick_optional_float(payload, "final_fixed_roi_depth_median", "fixed_roi_depth_median"),
