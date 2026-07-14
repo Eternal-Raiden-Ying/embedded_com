@@ -4331,6 +4331,11 @@ class OrchestratorService(BaseModule):
             "depth_source": summary.get("forward_depth_source"),
             "depth_age_ms": summary.get("forward_depth_age_ms"),
             "edge_handoff_state": summary.get("control_phase"),
+            "edge_handoff_count": summary.get("edge_handoff_count", summary.get("edge_trusted_streak")),
+            "edge_handoff_ready": summary.get("edge_handoff_ready", summary.get("edge_handoff_complete")),
+            "final_gate_ready": summary.get("final_gate_ready"),
+            "final_gate_block_reason": summary.get("final_gate_block_reason"),
+            "hard_zero_vx_reason": summary.get("hard_zero_vx_reason", ""),
         }
         self.run_logger.write_jsonl("motion_gate_trace", trace)
         is_docking = trace["state"] in {"SEARCH_TABLE", "YOLO_ACQUIRE_ALIGN", "YOLO_APPROACH", "EDGE_ADJUST", "FINAL_SLOW_STOP", "AT_TABLE_EDGE"}
@@ -4996,6 +5001,20 @@ class OrchestratorService(BaseModule):
         summary["uart_requested_vy"] = float(effective_cmd.vy_mps)
         summary["uart_requested_wz"] = float(effective_cmd.wz_radps)
         summary["physical_clamp_vx"] = float(effective_cmd.vx_mps)
+        if (
+            bool(summary.get("hard_zero_vx", False))
+            and str(summary.get("forward_owner") or "none").strip().lower() in {"", "none"}
+            and abs(float(effective_cmd.vx_mps)) > 1e-6
+        ):
+            self.log(
+                "error",
+                "state_machine",
+                "FORWARD_OWNER_RELEASED_BUT_EFFECTIVE_VX_NONZERO",
+                {
+                    "hard_zero_vx_reason": summary.get("hard_zero_vx_reason"),
+                    "effective_vx": float(effective_cmd.vx_mps),
+                },
+            )
         center_error = summary.get("bbox_center_error_control", summary.get("center_error"))
         rejected_wz = float(getattr(effective_cmd, "wz_radps", 0.0) or 0.0)
         if enforce_bbox_uart_yaw_sign(effective_cmd, summary, self.core.controller):

@@ -574,7 +574,7 @@ def test_complete_docking_action_and_owner_chain_is_monotonic():
     assert (reacquire.control_summary["yaw_owner"], reacquire.control_summary["forward_owner"]) == ("bbox", "none")
     assert (track.control_summary["yaw_owner"], track.control_summary["forward_owner"]) == ("bbox", "bbox_track")
     assert handoff.control_summary["yaw_owner"] == "bbox"
-    assert (edge.control_summary["yaw_owner"], edge.control_summary["forward_owner"], edge.control_summary["lateral_owner"]) == ("edge", "edge_approach", "edge_view")
+    assert (edge.control_summary["yaw_owner"], edge.control_summary["forward_owner"], edge.control_summary["lateral_owner"]) == ("edge", "edge_approach", "bbox_view")
     assert edge.cmd.vx_mps > 0.0
     assert 0.0 < abs(edge.cmd.vy_mps) <= car.table_controlled_vy_max_mps
     assert edge.cmd.wz_radps != 0.0
@@ -598,7 +598,7 @@ def test_edge_approach_outputs_combined_axes_for_20_ticks():
         assert decision.control_summary["docking_action"] == "EDGE_APPROACH_FORWARD"
         assert decision.control_summary["yaw_owner"] == "edge"
         assert decision.control_summary["forward_owner"] == "edge_approach"
-        assert decision.control_summary["lateral_owner"] == "edge_view"
+        assert decision.control_summary["lateral_owner"] == "bbox_view"
     assert all(vx > 0.0 and abs(vy) > 0.0 and abs(wz) > 0.0 for vx, vy, wz in commands)
 
 

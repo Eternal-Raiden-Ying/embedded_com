@@ -107,9 +107,9 @@ def collect() -> tuple[Dict[str, Dict[str, Any]], list[str]]:
     _record_car(values, system_yaml, "speed", "search_wz_radps", car, "search_table_wz_radps", 0.20)
     for key, fallback in (
         ("min_forward_vx_mps", 0.04),
-        ("yolo_approach_far_vx_mps", 0.50),
-        ("yolo_approach_mid_vx_mps", 0.35),
-        ("yolo_approach_near_vx_mps", 0.20),
+        ("yolo_approach_far_vx_mps", 0.30),
+        ("yolo_approach_mid_vx_mps", 0.20),
+        ("yolo_approach_near_vx_mps", 0.10),
         ("bbox_track_forward_max_wz_radps", 0.20),
         ("near_slow_max_vx_mps", 0.03),
         ("near_slow_max_wz_radps", 0.04),

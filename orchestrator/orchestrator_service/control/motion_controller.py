@@ -503,11 +503,11 @@ class MotionController:
                 band = "NEAR"
         ctx.approach_speed_band = band
         profile = {
-            "FAR": abs(float(getattr(self.cfg, "yolo_approach_far_vx_mps", 0.50) or 0.50)),
-            "MID": abs(float(getattr(self.cfg, "yolo_approach_mid_vx_mps", 0.35) or 0.35)),
-            "NEAR": abs(float(getattr(self.cfg, "yolo_approach_near_vx_mps", 0.20) or 0.20)),
+            "FAR": abs(float(getattr(self.cfg, "yolo_approach_far_vx_mps", 0.30) or 0.30)),
+            "MID": abs(float(getattr(self.cfg, "yolo_approach_mid_vx_mps", 0.20) or 0.20)),
+            "NEAR": abs(float(getattr(self.cfg, "yolo_approach_near_vx_mps", 0.10) or 0.10)),
         }
-        software_cap = abs(float(getattr(self.car_cfg, "table_controlled_vx_max_mps", 0.50) or 0.50))
+        software_cap = abs(float(getattr(self.car_cfg, "table_controlled_vx_max_mps", 0.30) or 0.30))
         profile_vx = min(profile[band], software_cap)
         decision.cmd.vx_mps = profile_vx
         summary.update(
@@ -567,7 +567,7 @@ class MotionController:
         # Tight tolerance is only the yaw deadband.  Forward motion remains
         # available throughout the wider hard-limit band so the robot can
         # advance while applying a bounded bbox correction.
-        forward_vx = abs(float(getattr(self.cfg, "yolo_approach_far_vx_mps", 0.50) or 0.50))
+        forward_vx = abs(float(getattr(self.cfg, "yolo_approach_far_vx_mps", 0.30) or 0.30))
         yolo_forward_allowed = bool(center_error is not None and abs(center_error) <= active_forward_limit)
         if source_name in {"yolo_forward", "yolo_track_forward"}:
             if yolo_forward_allowed:
@@ -1130,7 +1130,7 @@ class MotionController:
         now_s = time.time()
         last_ts = getattr(self.docking, "_last_ts", 0.0) or now_s
         dt = max(0.05, min(0.25, now_s - float(last_ts)))
-        vx_max = abs(float(getattr(self.car_cfg, "table_controlled_vx_max_mps", 0.50) or 0.50))
+        vx_max = abs(float(getattr(self.car_cfg, "table_controlled_vx_max_mps", 0.30) or 0.30))
         vx = self._clamp(vx, -vx_max, vx_max)
         vy = self._clamp(vy, -abs(float(getattr(self.car_cfg, "table_vy_max_mps", 0.02))), abs(float(getattr(self.car_cfg, "table_vy_max_mps", 0.02))))
         wz_max = max(
@@ -1335,7 +1335,7 @@ class MotionController:
         vx_from_dist = 0.0
         min_forward_dist = max(0.0, float(getattr(self.car_cfg, "table_min_forward_dist_err_m", 0.07) or 0.07))
         vx_min = abs(float(getattr(self.car_cfg, "table_vx_mps_min", 0.018) or 0.018))
-        vx_max = abs(float(getattr(self.car_cfg, "table_controlled_vx_max_mps", 0.50) or 0.50))
+        vx_max = abs(float(getattr(self.car_cfg, "table_controlled_vx_max_mps", 0.30) or 0.30))
         vx_min = min(vx_min, vx_max)
         vx_kp = max(0.0, float(getattr(self.car_cfg, "table_vx_kp_mps_per_m", 0.10) or 0.10))
         near_dist_err_th = max(min_forward_dist, float(getattr(self.car_cfg, "table_near_dist_err_th_m", 0.10) or 0.10))
@@ -1368,7 +1368,7 @@ class MotionController:
             forward_block_reason = f"phase_{phase_name.lower()}"
         if forward_allowed:
             min_forward_vx = abs(float(getattr(self.cfg, "min_forward_vx_mps", 0.04) or 0.04))
-            cruise_forward_vx = abs(float(getattr(self.cfg, "yolo_approach_far_vx_mps", 0.50) or 0.50))
+            cruise_forward_vx = abs(float(getattr(self.cfg, "yolo_approach_far_vx_mps", 0.30) or 0.30))
             if dist_err > 0.15:
                 vx_from_dist = cruise_forward_vx
             else:
@@ -1521,7 +1521,7 @@ class MotionController:
         pose_missing_safe_vx_mps = float(pose_missing_safe_vx_mps)
         approach_speed_mode = "profile"
         approach_safe_vx_mps = abs(float(getattr(self.car_cfg, "table_approach_safe_vx_mps", pose_missing_safe_vx_mps) or pose_missing_safe_vx_mps))
-        approach_max_vx_mps = abs(float(getattr(self.car_cfg, "table_controlled_vx_max_mps", 0.50) or 0.50))
+        approach_max_vx_mps = abs(float(getattr(self.car_cfg, "table_controlled_vx_max_mps", 0.30) or 0.30))
         if approach_max_vx_mps > 0.0:
             approach_safe_vx_mps = min(approach_safe_vx_mps, approach_max_vx_mps)
         approach_vx_mps = float(approach_safe_vx_mps)

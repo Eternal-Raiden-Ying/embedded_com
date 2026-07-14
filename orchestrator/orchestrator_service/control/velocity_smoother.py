@@ -65,12 +65,14 @@ class VelocitySmoother:
         self.last_wz = 0.0
         self.last_ts_monotonic: Optional[float] = None
         self.last_task_epoch: Optional[int] = None
+        self.last_forward_owner: str = "none"
 
     def reset_to_zero(self, now_monotonic: Optional[float] = None) -> None:
         self.last_vx = 0.0
         self.last_vy = 0.0
         self.last_wz = 0.0
         self.last_ts_monotonic = time.monotonic() if now_monotonic is None else float(now_monotonic)
+        self.last_forward_owner = "none"
 
     def apply(
         self,
@@ -123,6 +125,25 @@ class VelocitySmoother:
         nominal_vx = float(getattr(cmd, "vx_mps", 0.0) or 0.0)
         nominal_vy = float(getattr(cmd, "vy_mps", 0.0) or 0.0)
         nominal_wz = float(getattr(cmd, "wz_radps", 0.0) or 0.0)
+        forward_owner = str(summary.get("forward_owner") or "none").strip().lower()
+        previous_forward_owner = str(self.last_forward_owner or "none").strip().lower()
+        action = str(summary.get("docking_action") or "").strip().upper()
+        hard_zero_actions = {
+            "BBOX_REACQUIRE_ROTATE",
+            "CONTROL_RECOVERY_ROTATE",
+            "SEARCH_ROTATE",
+        }
+        owner_released = bool(previous_forward_owner not in {"", "none"} and forward_owner in {"", "none"})
+        hard_zero_vx_reason = ""
+        if owner_released:
+            hard_zero_vx_reason = "forward_owner_released"
+        elif action in hard_zero_actions:
+            hard_zero_vx_reason = f"action_{action.lower()}"
+        elif state_u in {"SEARCH_TABLE", "YOLO_ACQUIRE_ALIGN", "ERROR_RECOVERY"} and nominal_vx <= 0.0:
+            hard_zero_vx_reason = f"state_{state_u.lower()}"
+        if hard_zero_vx_reason:
+            nominal_vx = 0.0
+            self.last_vx = 0.0
         axis_profile = "normal"
         if state_u == "EDGE_SLIDE_SEARCH" or mode_u == "EDGE_SLIDE_SEARCH":
             nominal_vx = 0.0
@@ -143,8 +164,11 @@ class VelocitySmoother:
                 base_freeze=bool(getattr(cmd, "base_freeze", False)),
             )
             self.last_vx, self.last_vy, self.last_wz = nominal_vx, nominal_vy, nominal_wz
+            self.last_forward_owner = forward_owner
             self.last_ts_monotonic = now_mono
-            return out, self._meta(before, self._cmd_dict(out), enabled=False, applied=False, bypassed=True, bypass_reason="disabled", profile=axis_profile, urgent=urgent_wz, dt_s=dt)
+            meta = self._meta(before, self._cmd_dict(out), enabled=False, applied=False, bypassed=True, bypass_reason="disabled", profile=axis_profile, urgent=urgent_wz, dt_s=dt)
+            meta.update({"hard_zero_vx": bool(hard_zero_vx_reason), "hard_zero_vx_reason": hard_zero_vx_reason})
+            return out, meta
 
         vx = self._slew(self.last_vx, nominal_vx, dt, self.cfg.vx_accel_mps2, self.cfg.vx_decel_mps2)
         vy = self._slew(self.last_vy, nominal_vy, dt, self.cfg.vy_accel_mps2, self.cfg.vy_decel_mps2)
@@ -153,6 +177,7 @@ class VelocitySmoother:
         wz = self._slew(self.last_wz, nominal_wz, dt, wz_accel, wz_decel)
 
         self.last_vx, self.last_vy, self.last_wz = vx, vy, wz
+        self.last_forward_owner = forward_owner
         self.last_ts_monotonic = now_mono
         out = CmdVel(
             ts=float(getattr(cmd, "ts", time.time()) or time.time()),
@@ -167,7 +192,9 @@ class VelocitySmoother:
         after = self._cmd_dict(out)
         applied = any(abs(after[k] - before[k]) > 1e-9 for k in ("vx_mps", "vy_mps", "wz_radps"))
         profile = "urgent_wz" if urgent_wz else axis_profile
-        return out, self._meta(before, after, enabled=True, applied=applied, bypassed=False, bypass_reason="", profile=profile, urgent=urgent_wz, dt_s=dt)
+        meta = self._meta(before, after, enabled=True, applied=applied, bypassed=False, bypass_reason="", profile=profile, urgent=urgent_wz, dt_s=dt)
+        meta.update({"hard_zero_vx": bool(hard_zero_vx_reason), "hard_zero_vx_reason": hard_zero_vx_reason})
+        return out, meta
 
     def _bypass_reason(self, cmd: CmdVel, state_u: str, mode_u: str, summary: Dict[str, Any]) -> str:
         if bool(getattr(cmd, "brake", False)):

@@ -2216,7 +2216,7 @@ def arbitrate_table_docking_motion(
                 "motion_intent_type": "near_edge_hold",
                 "yaw_owner": yaw_source,
                 "forward_owner": "bbox_track" if near_vx > 1e-9 else "none",
-                "lateral_owner": "bbox" if abs(near_vy) > 1e-9 else "none",
+                "lateral_owner": bbox_lateral_owner,
                 "near_stage_yaw_source": yaw_source,
                 "forward_block_reason": "" if near_vx > 1e-9 else "near_table_latched",
                 "bbox_lost_ignored_due_to_near_latch": bool(intent_type in {"local_rotate_search", "search"} or phase == "SEARCH_SCAN"),
@@ -2227,7 +2227,7 @@ def arbitrate_table_docking_motion(
             wz=edge_wz,
             yaw_owner=yaw_source,
             forward_owner="bbox_track" if near_vx > 1e-9 else "none",
-            lateral_owner="bbox" if abs(near_vy) > 1e-9 else "none",
+            lateral_owner=bbox_lateral_owner,
             stop_class=StopClass.NONE,
             blocked_by="" if near_vx > 1e-9 else "near_table_latched",
             reason="near_edge_forward" if near_vx > 1e-9 else "near_hold",
@@ -2279,7 +2279,20 @@ def arbitrate_table_docking_motion(
         if abs(vx) > 1e-9:
             edge_vy, _edge_vy_block = bbox_recenter_vy()
             lateral_priority_reason = ""
-            active_yaw_owner = "edge" if edge_yaw_available else "bbox"
+            last_good_edge_age_s = (
+                max(0.0, now_mono - float(getattr(ctx, "last_good_edge_yaw_mono", 0.0) or 0.0))
+                if float(getattr(ctx, "last_good_edge_yaw_mono", 0.0) or 0.0) > 0.0
+                else 999.0
+            )
+            edge_yaw_hold_valid = bool(edge_handoff_complete and last_good_edge_age_s <= 1.2)
+            active_yaw_owner = "edge" if (edge_yaw_available or edge_yaw_hold_valid) else "bbox"
+            active_wz = (
+                desired_wz
+                if edge_yaw_available
+                else float(getattr(ctx, "last_good_edge_yaw_cmd", 0.0) or 0.0)
+                if edge_yaw_hold_valid
+                else desired_wz
+            )
             return _docking_result(
                 action=DockingAction.EDGE_APPROACH_FORWARD,
                 stage=DockingStage.EDGE_APPROACH,
@@ -2290,13 +2303,15 @@ def arbitrate_table_docking_motion(
                     "bbox_fov_soft_allowed_forward": bool(fov_level == FovGuardLevel.SOFT),
                     "stale_policy": stale_policy.value,
                     "yaw_owner": active_yaw_owner,
+                    "edge_yaw_hold_active": bool(not edge_yaw_available and edge_yaw_hold_valid),
+                    "edge_yaw_hold_age_ms": float(last_good_edge_age_s * 1000.0) if edge_yaw_hold_valid else None,
                     "lateral_owner": bbox_lateral_owner,
                     "lateral_priority_vx_cap_reason": lateral_priority_reason,
                     }
                 ),
                 vx=vx,
                 vy=edge_vy,
-                wz=desired_wz,
+                wz=active_wz,
                 yaw_owner=active_yaw_owner,
                 forward_owner="edge_approach",
                 lateral_owner=bbox_lateral_owner,

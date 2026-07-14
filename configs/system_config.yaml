@@ -435,9 +435,9 @@ orchestrator:
     depth_envelope_stop_p10_m: 0.30 # Depth envelope hard hold threshold, below final fixed ROI stop
     depth_envelope_slow_p10_m: 0.50 # Depth envelope slow threshold
     depth_emergency_stop_p10_m: 0.20 # Emergency depth stop threshold
-    yolo_approach_far_vx_mps: 0.50 # Canonical pre-Final speed for table ROI P10 > 2.0m
-    yolo_approach_mid_vx_mps: 0.35 # Canonical pre-Final speed for 1.0m < table ROI P10 <= 2.0m
-    yolo_approach_near_vx_mps: 0.20 # Canonical pre-Final speed for table ROI P10 <= 1.0m before Final
+    yolo_approach_far_vx_mps: 0.30 # Canonical pre-Final speed for table ROI P10 > 2.0m
+    yolo_approach_mid_vx_mps: 0.20 # Canonical pre-Final speed for 1.0m < table ROI P10 <= 2.0m
+    yolo_approach_near_vx_mps: 0.10 # Canonical pre-Final speed for table ROI P10 <= 1.0m before Final
     builtin_bottle_grasp_enable: true # Use STM32 builtin bottle grasp once target is locked
     builtin_bottle_skip_remote: true # Do not send GRASP_REMOTE while builtin bottle path is active
     builtin_bottle_pose_line: "POSE_BOTTLE" # Builtin bottle pose command line
@@ -566,7 +566,7 @@ orchestrator:
     grasp_reposition_speed_cm_s: 10.0 # Base reposition speed during grasp retry
     pre_arm_stop_settle_ms: 150 # Stop settle before sending arm POSE
     grasp_pose_time_ms: 800 # Default arm POSE movement time
-    search_table_wz_radps: 0.20 # Rotational velocity to search for table
+    search_table_wz_radps: 0.10 # Rotational velocity to search for table
     fallback_align_turn_wz_min_radps: 0.10 # Minimum rotation velocity in fallback
     fallback_align_turn_wz_max_radps: 0.45 # Maximum rotation velocity in fallback
     fallback_forward_vx_mps_min: 0.06 # Minimum forward velocity in fallback
@@ -583,7 +583,7 @@ orchestrator:
     table_coarse_align_wz_min_radps: 0.080 # Minimum rotation velocity in coarse align
     table_coarse_align_wz_max_radps: 0.150 # Maximum rotation velocity in coarse align
     table_controlled_vx_min_mps: 0.060 # Minimum forward velocity in controlled approach
-    table_controlled_vx_max_mps: 0.500 # Canonical pre-Final forward cap
+    table_controlled_vx_max_mps: 0.300 # Canonical pre-Final forward cap
     table_controlled_vy_min_mps: 0.000 # Minimum lateral velocity in controlled approach
     table_controlled_vy_max_mps: 0.750 # Canonical pre-Final lateral cap
     table_controlled_wz_min_radps: 0.000 # Minimum rotation velocity in controlled approach
@@ -655,7 +655,7 @@ orchestrator:
     motion_hold_ms: 400 # Command watchdog safety timeout
     hard_stale_stop_ms: 800 # Emergency stop watchdog safety timeout
     soft_stale_hold_enable: true # Preserve last command on small gaps
-    max_vx_mps: 0.5 # Absolute forward speed limit for the 0.50 pre-Final profile
+    max_vx_mps: 0.5 # Physical/UART ceiling above the 0.30 pre-Final software profile
     max_vy_mps: 1.0 # Absolute lateral speed limit
     max_wz_radps: 1.0 # Absolute rotation speed limit
     stm32_wheel_speed_limit: 100 # Hardware limit for wheel speed
@@ -682,7 +682,7 @@ orchestrator:
     precise_lateral_tol_m: 0.015 # Lateral error stop precision tolerance
     precise_stable_s: 0.50 # Settle time to confirm docking complete
     coarse_max_wz_radps: 0.45 # Max coarse align angular speed
-    approach_max_vx_mps: 0.50 # Normal pre-Final approach software cap
+    approach_max_vx_mps: 0.30 # Normal pre-Final approach software cap
     approach_max_vy_mps: 0.18 # Max approach lateral speed
     approach_max_wz_radps: 0.32 # Max approach angular speed
     final_max_vx_mps: 0.12 # Max docking forward speed
