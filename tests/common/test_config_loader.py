@@ -174,6 +174,61 @@ class ConfigLoaderLayeringTest(unittest.TestCase):
         self.assertTrue(cfg.vision.runtime.keep_preview_alive_after_task)
         self.assertFalse(cfg.vision.runtime.release_model_on_idle)
 
+    def _load_profile(self, profile: str):
+        with patch.dict(os.environ, {"SYSTEM_CONFIG_PROFILE": profile}, clear=False):
+            return load_global_config(str(ROOT / "configs" / "system_config.yaml"))
+
+    def test_online_phone_tts_profiles_inherit_base_ipc_and_only_override_asr(self):
+        from voice_service.config.loader import load_voice_config
+
+        profile_pairs = (
+            ("sc171_voice_phone_tts", "sc171_voice_phone_tts_online_asr"),
+            ("sc171_voice_phone_tts_dryrun", "sc171_voice_phone_tts_online_asr_dryrun"),
+        )
+        endpoint_paths = (
+            ("vision.req_in", lambda cfg: cfg.vision.req_in),
+            ("vision.obs_out", lambda cfg: cfg.vision.obs_out),
+            ("orchestrator.task_cmd_in", lambda cfg: cfg.orchestrator.task_cmd_in),
+            ("orchestrator.task_ack_out", lambda cfg: cfg.orchestrator.task_ack_out),
+            ("orchestrator.vision_obs_in", lambda cfg: cfg.orchestrator.vision_obs_in),
+            ("orchestrator.vision_req_out", lambda cfg: cfg.orchestrator.vision_req_out),
+            ("orchestrator.tts_event_out", lambda cfg: cfg.orchestrator.tts_event_out),
+            ("orchestrator.tts_playback_in", lambda cfg: cfg.orchestrator.tts_playback_in),
+            ("gateway.orchestrator_task_cmd_out", lambda cfg: cfg.gateway.orchestrator_task_cmd_out),
+            ("gateway.tts_event_in", lambda cfg: cfg.gateway.tts_event_in),
+            ("gateway.tts_playback_out", lambda cfg: cfg.gateway.tts_playback_out),
+        )
+        for base_profile, online_profile in profile_pairs:
+            base_cfg = self._load_profile(base_profile)
+            online_cfg = self._load_profile(online_profile)
+            self.assertEqual(online_cfg.profile, online_profile)
+            self.assertEqual(online_cfg.orchestrator.runtime.config_profile, online_profile)
+            self.assertIn(f"{base_profile}.yaml", "\n".join(online_cfg.orchestrator.runtime.loaded_config_files))
+            self.assertIn(f"{online_profile}.yaml", "\n".join(online_cfg.orchestrator.runtime.loaded_config_files))
+            for name, getter in endpoint_paths:
+                with self.subTest(profile=online_profile, endpoint=name):
+                    base_endpoint = getter(base_cfg)
+                    online_endpoint = getter(online_cfg)
+                    self.assertEqual(online_endpoint.transport, base_endpoint.transport)
+                    self.assertEqual(online_endpoint.ipc_socket_path, base_endpoint.ipc_socket_path)
+                    self.assertTrue(online_endpoint.ipc_socket_path)
+
+            base_voice = load_voice_config(["--profile", f"configs/profiles/{base_profile}.yaml"])
+            online_voice = load_voice_config(["--profile", f"configs/profiles/{online_profile}.yaml"])
+            for field in (
+                "arecord_device", "task_transport", "task_uds_path",
+                "task_ack_transport", "task_ack_uds_path", "tts_event_transport",
+                "mobile_feedback_transport", "mobile_tts_event_uds_path",
+                "playback_transport", "playback_uds_path", "disable_tts", "vad_quant",
+            ):
+                with self.subTest(profile=online_profile, voice_field=field):
+                    self.assertEqual(getattr(online_voice, field), getattr(base_voice, field))
+            self.assertEqual(online_voice.asr_mode, "online")
+            self.assertTrue(online_voice.asr_quant)
+            self.assertEqual(online_voice.asr_online_chunk_size, [5, 10, 5])
+            self.assertEqual(online_voice.asr_online_encoder_chunk_look_back, 4)
+            self.assertEqual(online_voice.asr_online_decoder_chunk_look_back, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

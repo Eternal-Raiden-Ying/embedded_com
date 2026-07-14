@@ -210,6 +210,45 @@ def map_nested_dict(nested: Dict[str, Any], flat: Dict[str, Any]) -> None:
             if val is not None:
                 flat[k] = val
 
+
+def _resolve_profile_path(profile_path: str) -> Path:
+    """Resolve a configured profile name to a profile file in this repository."""
+    path = Path(profile_path)
+    if path.is_absolute():
+        return path
+    for candidate in (
+        REPO_ROOT / "configs" / "profiles" / path.name,
+        REPO_ROOT / "configs" / "profiles" / (path.name + ".yaml"),
+        REPO_ROOT / path,
+    ):
+        if candidate.exists():
+            return candidate
+    return path
+
+
+def _load_profile_layers(profile_path: Path, seen: Optional[List[Path]] = None) -> List[Dict[str, Any]]:
+    """Load a ``base_profile`` chain from base to derived profile."""
+    resolved_path = profile_path.resolve()
+    chain = list(seen or [])
+    if resolved_path in chain:
+        cycle = " -> ".join(str(path) for path in (*chain, resolved_path))
+        raise ValueError(f"voice profile inheritance cycle: {cycle}")
+    if not resolved_path.is_file():
+        raise ValueError(f"voice profile file does not exist: {profile_path}")
+
+    profile_data = load_yaml_file(resolved_path)
+    layers: List[Dict[str, Any]] = []
+    base_profile = profile_data.get("base_profile")
+    if base_profile:
+        base_path = _resolve_profile_path(str(base_profile))
+        if not base_path.is_file():
+            raise ValueError(
+                f"base_profile {base_profile!r} referenced by {resolved_path} does not exist"
+            )
+        layers.extend(_load_profile_layers(base_path, (*chain, resolved_path)))
+    layers.append(profile_data)
+    return layers
+
 def load_voice_config(argv: Optional[List[str]] = None) -> VoiceServiceConfig:
     # 1. Start with schema defaults
     default_config = VoiceServiceConfig()
@@ -283,22 +322,13 @@ def load_voice_config(argv: Optional[List[str]] = None) -> VoiceServiceConfig:
             profile_path = profile_env
 
     if profile_path:
-        # Check if it's a relative path in configs/profiles/
-        p = Path(profile_path)
-        if not p.is_absolute():
-            cand = REPO_ROOT / "configs" / "profiles" / p.name
-            if cand.exists():
-                p = cand
-            else:
-                cand2 = REPO_ROOT / "configs" / "profiles" / (p.name + ".yaml")
-                if cand2.exists():
-                    p = cand2
+        p = _resolve_profile_path(profile_path)
         if p.exists():
-            profile_yaml = load_yaml_file(p)
-            # Pull runtime_overrides -> voice_gateway, or top-level voice_gateway
-            overrides = profile_yaml.get("runtime_overrides", {})
-            voice_section = overrides.get("voice_gateway", profile_yaml.get("voice_gateway", {}))
-            map_nested_dict(voice_section, flat)
+            for profile_yaml in _load_profile_layers(p):
+                # Pull runtime_overrides -> voice_gateway, or top-level voice_gateway.
+                overrides = profile_yaml.get("runtime_overrides", {})
+                voice_section = overrides.get("voice_gateway", profile_yaml.get("voice_gateway", {}))
+                map_nested_dict(voice_section, flat)
 
     # 5. Overwrite with environment variables
     # Legacy env mapping

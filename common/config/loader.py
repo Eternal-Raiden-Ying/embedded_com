@@ -5,7 +5,7 @@
 import dataclasses
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Type, Union
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 from .schema import SystemGlobalConfig
 from .validators import validate_config
@@ -442,6 +442,40 @@ def _load_profile_data(profile_name: str, system_config_dir: Optional[Path]) -> 
     return _resolve_config_path(str(profile_path), system_config_dir)
 
 
+def _load_profile_layers(
+    profile_path: Path,
+    system_config_dir: Optional[Path],
+    seen: Optional[List[Path]] = None,
+) -> List[Tuple[Path, Dict[str, Any]]]:
+    """Return profile data from base to derived profile.
+
+    A profile may declare ``base_profile`` as another profile name or path.  Each
+    layer is merged independently into the typed system configuration, keeping
+    the existing recursive dataclass merge semantics while preventing partial
+    overlay profiles from dropping unrelated IPC sections.
+    """
+    resolved_path = profile_path.resolve()
+    chain = list(seen or [])
+    if resolved_path in chain:
+        cycle = " -> ".join(str(path) for path in (*chain, resolved_path))
+        raise ValueError(f"profile inheritance cycle: {cycle}")
+    if not resolved_path.is_file():
+        raise ValueError(f"profile file does not exist: {profile_path}")
+
+    profile_data = load_yaml_file(resolved_path)
+    layers: List[Tuple[Path, Dict[str, Any]]] = []
+    base_profile = profile_data.get("base_profile")
+    if base_profile:
+        base_path = _load_profile_data(str(base_profile), system_config_dir)
+        if base_path is None or not base_path.is_file():
+            raise ValueError(
+                f"base_profile {base_profile!r} referenced by {resolved_path} does not exist"
+            )
+        layers.extend(_load_profile_layers(base_path, system_config_dir, (*chain, resolved_path)))
+    layers.append((resolved_path, profile_data))
+    return layers
+
+
 def _merge_layered_system_config(
     config: SystemGlobalConfig,
     yaml_data: Dict[str, Any],
@@ -459,15 +493,15 @@ def _merge_layered_system_config(
         config.orchestrator.runtime.config_profile = profile_name
         profile_path = _load_profile_data(profile_name, system_config_dir)
         if profile_path and profile_path.is_file():
-            profile_data = load_yaml_file(profile_path)
-            profile_defaults = profile_data.get("defaults")
-            if isinstance(profile_defaults, dict):
-                _merge_known_sections(config, profile_defaults)
-            _merge_known_sections(config, profile_data)
-            overrides = profile_data.get("runtime_overrides")
-            if isinstance(overrides, dict):
-                _merge_known_sections(config, overrides)
-            _record_loaded_file(config, profile_path)
+            for loaded_path, profile_data in _load_profile_layers(profile_path, system_config_dir):
+                profile_defaults = profile_data.get("defaults")
+                if isinstance(profile_defaults, dict):
+                    _merge_known_sections(config, profile_defaults)
+                _merge_known_sections(config, profile_data)
+                overrides = profile_data.get("runtime_overrides")
+                if isinstance(overrides, dict):
+                    _merge_known_sections(config, overrides)
+                _record_loaded_file(config, loaded_path)
 
     runtime_overrides = yaml_data.get("runtime_overrides")
     if isinstance(runtime_overrides, dict):

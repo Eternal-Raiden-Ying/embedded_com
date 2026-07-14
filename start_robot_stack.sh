@@ -1105,6 +1105,70 @@ assert_launcher_safety() {
   esac
 }
 
+validate_profile_ipc() {
+  # Validate all configured UDS routes before starting VISTA or any connector.
+  # This turns an incomplete overlay profile into a clear launcher error instead
+  # of a later transport exception inside a service process.
+  SYSTEM_CONFIG_FILE="$SYSTEM_CONFIG_FILE" SYSTEM_CONFIG_PROFILE="$SYSTEM_CONFIG_PROFILE" \
+    VOICE_PROFILE="$VOICE_PROFILE" \
+    PYTHONPATH="$STACK_ROOT:$STACK_ROOT/Voice:$ORCH_ROOT:${PYTHONPATH:-}" /usr/bin/python3 - <<'PY'
+from common.config_loader import get_config
+from voice_service.config.loader import load_voice_config
+import os
+
+cfg = get_config()
+voice = load_voice_config(["--profile", os.environ["VOICE_PROFILE"]])
+
+def endpoint_path(endpoint):
+    return str(getattr(endpoint, "ipc_socket_path", "") or getattr(endpoint, "uds_path", "") or "").strip()
+
+def endpoint_mode(endpoint):
+    return str(getattr(endpoint, "transport", "disabled") or "disabled").strip().lower()
+
+endpoints = (
+    ("vision.req_in", cfg.vision.req_in),
+    ("vision.obs_out", cfg.vision.obs_out),
+    ("orchestrator.task_cmd_in", cfg.orchestrator.task_cmd_in),
+    ("orchestrator.task_ack_out", cfg.orchestrator.task_ack_out),
+    ("orchestrator.vision_obs_in", cfg.orchestrator.vision_obs_in),
+    ("orchestrator.vision_req_out", cfg.orchestrator.vision_req_out),
+    ("orchestrator.tts_event_out", cfg.orchestrator.tts_event_out),
+    ("orchestrator.tts_playback_in", cfg.orchestrator.tts_playback_in),
+    ("gateway.command_in", cfg.gateway.command_in),
+    ("gateway.status_out", cfg.gateway.status_out),
+    ("gateway.orchestrator_task_cmd_out", cfg.gateway.orchestrator_task_cmd_out),
+    ("gateway.orchestrator_task_ack_in", cfg.gateway.orchestrator_task_ack_in),
+    ("gateway.tts_event_in", cfg.gateway.tts_event_in),
+    ("gateway.tts_playback_out", cfg.gateway.tts_playback_out),
+    ("gateway.orchestrator_tts_playback_out", cfg.gateway.orchestrator_tts_playback_out),
+)
+errors = [name + " uses uds with an empty socket path" for name, endpoint in endpoints
+          if endpoint_mode(endpoint) == "uds" and not endpoint_path(endpoint)]
+
+voice_endpoints = (
+    ("voice.task_cmd_out", voice.task_transport, voice.task_uds_path),
+    ("voice.task_ack_in", voice.task_ack_transport, voice.task_ack_uds_path),
+    ("voice.tts_event_in", voice.tts_event_transport, voice.tts_event_uds_path),
+    ("voice.mobile_feedback", voice.mobile_feedback_transport, voice.mobile_tts_event_uds_path),
+    ("voice.playback", voice.playback_transport, voice.playback_uds_path),
+)
+errors.extend(name + " uses uds with an empty socket path" for name, mode, path in voice_endpoints
+              if str(mode or "disabled").strip().lower() == "uds" and not str(path or "").strip())
+if errors:
+    raise SystemExit("[BLOCKED] invalid profile IPC: " + "; ".join(errors))
+
+print(
+    "[PROFILE] name=%s vision_req mode=%s path=%s vision_obs mode=%s path=%s"
+    % (cfg.profile, endpoint_mode(cfg.vision.req_in), endpoint_path(cfg.vision.req_in),
+       endpoint_mode(cfg.vision.obs_out), endpoint_path(cfg.vision.obs_out))
+)
+print(
+    "[PROFILE] asr mode=%s model_path=%s serial_dry_run=%s arm_dry_run=%s"
+    % (voice.asr_mode, voice.asr_dir, cfg.orchestrator.serial.dry_run, cfg.orchestrator.arm_serial.dry_run)
+)
+PY
+}
+
 phone_tts_route_enabled() {
   SYSTEM_CONFIG_FILE="$SYSTEM_CONFIG_FILE" SYSTEM_CONFIG_PROFILE="$SYSTEM_CONFIG_PROFILE" \
     PYTHONPATH="$STACK_ROOT:${PYTHONPATH:-}" /usr/bin/python3 - <<'PY'
@@ -1777,6 +1841,7 @@ start_stack() {
   export VOICE_PID_FILE="$STACK_ROOT/Voice/voice.pid"
   export VOICE_PROFILE="${VOICE_PROFILE:-configs/profiles/${SYSTEM_CONFIG_PROFILE}.yaml}"
   assert_launcher_safety || return 1
+  validate_profile_ipc || return 1
   write_stack_manifest
 
   # Listener owners start before connectors: VISTA(req_in), Voice(task_ack_in),

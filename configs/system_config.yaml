@@ -224,7 +224,7 @@ vision:
     yolo_table_min_conf: 0.25 # YOLO table confidence minimum threshold
     edge_sync_threshold_s: 0.25 # Timestamp sync threshold between edge and local perception
   preview:
-    preview_mode: "light" # off/light/debug/full preview rendering cost profile
+    preview_mode: "full" # off/light/debug/full preview rendering cost profile
     mode_layouts:
       IDLE: "rgb_minimal" # Layout for IDLE state
       FIND_EDGE: "rgb_depth_edge" # Layout for FIND_EDGE state

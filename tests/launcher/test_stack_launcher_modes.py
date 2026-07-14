@@ -182,6 +182,43 @@ assert cfg.orchestrator.vision_obs_in.ipc_socket_path == '/tmp/robot_stack/visio
     assert result.returncode == 0, result.stderr
 
 
+def test_online_dryrun_profile_inherits_vista_ipc_and_launcher_prints_effective_summary():
+    result = shell(
+        "source ./start_robot_stack.sh; STACK_PROFILE=dryrun; apply_profile_defaults; "
+        "configure_voice_phone_tts_online; normalize_input_mode; validate_profile_ipc"
+    )
+    assert result.returncode == 0, result.stderr
+    assert "name=sc171_voice_phone_tts_online_asr_dryrun" in result.stdout
+    assert "vision_req mode=uds path=/tmp/robot_stack/vision_req.sock" in result.stdout
+    assert "vision_obs mode=uds path=/tmp/robot_stack/vision_obs.sock" in result.stdout
+    assert "asr mode=online" in result.stdout
+    assert "serial_dry_run=True arm_dry_run=True" in result.stdout
+
+
+def test_online_profile_ipc_preflight_blocks_empty_uds_path_before_service_start():
+    result = shell(
+        "source ./start_robot_stack.sh; STACK_PROFILE=dryrun; apply_profile_defaults; "
+        "configure_voice_phone_tts_online; normalize_input_mode; "
+        "export VISION_REQ_IN_SOCKET_PATH=''; validate_profile_ipc"
+    )
+    assert result.returncode != 0
+    assert "invalid profile IPC" in result.stderr
+    assert "vision.req_in uses uds with an empty socket path" in result.stderr
+
+
+def test_main_dryrun_start_voice_tts_online_maps_to_online_dryrun_profile_without_starting_services():
+    result = shell(
+        "source ./start_robot_stack.sh; "
+        "start_stack(){ printf '%s|%s|%s|%s|%s' \"$STACK_PROFILE\" \"$SYSTEM_CONFIG_PROFILE\" \"$ROBOT_INPUT_MODE\" \"$FEEDBACK_OUTPUT_MODE\" \"$VOICE_PROFILE\"; }; "
+        "main dryrun start-voice-tts-online"
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == (
+        "dryrun|sc171_voice_phone_tts_online_asr_dryrun|voice_only|phone_tts|"
+        f"{ROOT}/configs/profiles/sc171_voice_phone_tts_online_asr_dryrun.yaml"
+    )
+
+
 def test_phone_tts_dryrun_profile_keeps_vista_ipc_and_actuator_dryrun_contract():
     code = """
 from common.config.loader import get_config

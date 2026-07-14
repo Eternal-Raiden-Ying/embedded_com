@@ -2701,7 +2701,18 @@ class OrchestratorService(BaseModule):
         )
         self.log_ipc("TX", "task_ack", f"skipped_{skip_reason}", {"cmd_id": cmd.cmd_id, "accepted": accepted})
 
-    def _send_task_ack(self, cmd: TaskCmd, accepted: bool, reason: str):
+    _TASK_ACK_EXTRA_FIELDS = frozenset({
+        "raw_target", "canonical_target", "class_name", "class_id", "task_id",
+        "execution_status", "supported_targets",
+    })
+
+    def _send_task_ack(self, cmd: TaskCmd, accepted: bool, reason: str) -> bool:
+        """Build and send the non-critical Task ACK without affecting task execution.
+
+        Target action policy is internal state-machine metadata, not part of the
+        public TaskAck contract.  Keep the explicit allow-list aligned with
+        make_task_ack() rather than forwarding arbitrary context fields.
+        """
         extra = getattr(self.core.ctx, "last_task_ack_extra", None)
         extra = dict(extra or {}) if isinstance(extra, dict) else {}
         if cmd.intent == "FIND":
@@ -2713,13 +2724,31 @@ class OrchestratorService(BaseModule):
                 extra.setdefault("task_id", getattr(self.core.ctx, "active_task_id", "") or cmd.cmd_id)
             else:
                 extra.setdefault("supported_targets", supported_targets())
-        ack = make_task_ack(cmd, accepted=accepted, reason=reason, state=self.core.ctx.state.value, **extra)
+        ack_extra = {key: extra[key] for key in self._TASK_ACK_EXTRA_FIELDS if key in extra}
+        extra_keys = sorted(extra.keys())
+        logger = self.child_logger("task_ack")
+        state = self.core.ctx.state.value
+        try:
+            ack = make_task_ack(cmd, accepted=accepted, reason=reason, state=state, **ack_extra)
+        except Exception:
+            logger.exception(
+                "task ack build failed | cmd_id=%s intent=%s source=%s accepted=%s state=%s extra_keys=%s",
+                cmd.cmd_id, cmd.intent, cmd.source, accepted, state, extra_keys,
+            )
+            return False
         skip_reason = self._task_ack_out_unavailable_reason()
         if skip_reason:
             self._record_task_ack_skip(cmd, ack, accepted, reason, skip_reason)
-            return
+            return True
 
-        sent = self.task_ack_sender.send(ack)
+        try:
+            sent = bool(self.task_ack_sender.send(ack))
+        except Exception:
+            logger.exception(
+                "task ack send failed | cmd_id=%s intent=%s source=%s accepted=%s state=%s extra_keys=%s",
+                cmd.cmd_id, cmd.intent, cmd.source, accepted, state, extra_keys,
+            )
+            return False
         if not sent:
             now = time.time()
             self._task_ack_skip_until_ts = now + 2.0
@@ -2745,6 +2774,7 @@ class OrchestratorService(BaseModule):
             {"cmd_id": cmd.cmd_id, "accepted": accepted, "error": "" if sent else reason},
         )
         self.log_ipc("TX", "task_ack", "sent" if sent else "failed", {"cmd_id": cmd.cmd_id, "accepted": accepted})
+        return sent
 
     @staticmethod
     def _clamp_float(value: Any, lo: float, hi: float) -> float:
