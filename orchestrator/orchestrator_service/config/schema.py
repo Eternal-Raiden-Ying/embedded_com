@@ -555,6 +555,7 @@ class CarMotionConfig:
     yolo_table_yaw_gain: float = 0.20
     yolo_table_max_wz_radps: float = 0.06
     yolo_table_forward_vx_mps: float = 0.015
+    yolo_forward_center_hard_limit: float = 0.25
     table_view_wz_kp: float = 0.18
     table_view_vy_kp: float = 0.04
     table_view_recover_vy_mps: float = 0.008

@@ -259,6 +259,134 @@ class TestTableEdgeObsBuilder(unittest.TestCase):
             merged_stale = merge_table_bbox_from_local_perception(obs, local_perception, tick_ts=100.2)
             self.assertFalse(merged_stale["edge_found"])
 
+    def test_unavailable_depth_sync_does_not_block_latest_rgb_bbox(self):
+        obs = {
+            "selected_source": "results",
+            "source": "results",
+            "source_frame_id": 100,
+            "frame_id": 100,
+            "sync_status": "unavailable",
+            "edge_found": True,
+            "edge_valid": True,
+            "point_count": 42,
+            "table_roi_depth_valid": False,
+        }
+        local = {
+            "frame_id": 101,
+            "obs_ts": 10.01,
+            "trace_id": "rgb-101",
+            "table_bbox_current_found": True,
+            "table_bbox": [320, 80, 600, 430],
+            "rgb_shape": (480, 640, 3),
+        }
+
+        merged = merge_table_bbox_from_local_perception(obs, local, tick_ts=10.02)
+
+        self.assertTrue(merged["table_bbox_current_found"])
+        self.assertTrue(merged["table_bbox_control_valid"])
+        self.assertTrue(merged["yolo_table_fresh"])
+        self.assertEqual(merged["table_bbox"], [320.0, 80.0, 600.0, 430.0])
+        self.assertEqual(merged["table_bbox_frame_id"], 101)
+        self.assertEqual(merged["local_perception_trace_id"], "rgb-101")
+        self.assertEqual(merged["sync_status"], "unavailable")
+
+    def test_matched_hold_depth_roi_cannot_authorize_motion(self):
+        obs = {
+            "selected_source": "results",
+            "source": "results",
+            "source_frame_id": 200,
+            "frame_id": 200,
+            "sync_status": "matched_hold",
+            "table_bbox_current_found": True,
+            "table_bbox_control_valid": True,
+            "yolo_table_fresh": True,
+            "table_bbox": [20, 30, 220, 300],
+            "table_roi_depth_valid": True,
+            "table_roi_depth_p10": 0.44,
+            "table_roi_depth_bbox": [10, 20, 110, 150],
+            "roi_source": "yolo_table_bbox_hold",
+        }
+        local = {
+            "frame_id": 201,
+            "obs_ts": 20.01,
+            "trace_id": "rgb-201-empty",
+            "table_bbox_current_found": False,
+            "table_bbox": None,
+            "rgb_shape": (480, 640, 3),
+        }
+
+        merged = merge_table_bbox_from_local_perception(obs, local, tick_ts=20.02)
+
+        self.assertTrue(merged["table_roi_depth_valid"])
+        self.assertEqual(merged["table_roi_depth_p10"], 0.44)
+        self.assertEqual(merged["table_roi_depth_bbox"], [10, 20, 110, 150])
+        self.assertEqual(merged["sync_status"], "matched_hold")
+        self.assertFalse(merged["table_bbox_current_found"])
+        self.assertFalse(merged["table_bbox_control_valid"])
+        self.assertFalse(merged["yolo_table_fresh"])
+        self.assertIsNone(merged["table_bbox"])
+
+    def test_edge_geometry_and_newer_rgb_bbox_keep_distinct_identities(self):
+        obs = {
+            "selected_source": "results",
+            "source": "results",
+            "source_frame_id": 300,
+            "frame_id": 300,
+            "obs_ts": 30.0,
+            "sync_status": "exact",
+            "edge_found": True,
+            "edge_valid": True,
+            "edge_trusted": True,
+            "yaw_err_rad": 0.12,
+            "point_count": 88,
+            "table_roi_depth_valid": True,
+            "table_roi_depth_p10": 0.51,
+        }
+        local = {
+            "frame_id": 301,
+            "obs_ts": 30.03,
+            "table_bbox_current_found": True,
+            "table_bbox": [100, 120, 500, 470],
+            "rgb_shape": (480, 640, 3),
+        }
+
+        merged = merge_table_bbox_from_local_perception(obs, local, tick_ts=30.04)
+
+        self.assertTrue(merged["edge_found"])
+        self.assertTrue(merged["edge_trusted"])
+        self.assertEqual(merged["yaw_err_rad"], 0.12)
+        self.assertEqual(merged["point_count"], 88)
+        self.assertTrue(merged["table_roi_depth_valid"])
+        self.assertEqual(merged["frame_id"], 300)
+        self.assertEqual(merged["local_perception_frame_id"], 301)
+        self.assertEqual(merged["table_bbox_frame_id"], 301)
+
+    def test_completed_empty_inference_clears_previous_control_bbox(self):
+        obs = {
+            "selected_source": "results",
+            "source": "results",
+            "frame_id": 400,
+            "table_bbox_current_found": True,
+            "table_bbox_control_valid": True,
+            "yolo_table_fresh": True,
+            "table_bbox": [100, 100, 500, 450],
+        }
+        local = {
+            "frame_id": 401,
+            "obs_ts": 40.01,
+            "has_infer": True,
+            "box_count": 0,
+            "infer_boxes": [],
+            "rgb_shape": (480, 640, 3),
+        }
+
+        merged = merge_table_bbox_from_local_perception(obs, local, tick_ts=40.02)
+
+        self.assertFalse(merged["table_bbox_current_found"])
+        self.assertFalse(merged["table_bbox_control_valid"])
+        self.assertFalse(merged["yolo_table_fresh"])
+        self.assertIsNone(merged["table_bbox"])
+
 
 if __name__ == "__main__":
     unittest.main()

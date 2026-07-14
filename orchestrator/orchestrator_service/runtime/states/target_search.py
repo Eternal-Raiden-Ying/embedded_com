@@ -370,10 +370,17 @@ class TargetSearchMixin:
             self._transition(State.LEAVE_EDGE, f"{self.ctx.last_fail_reason}，切换到边 {self.ctx.current_edge_id}")
             self._queue_tts("当前边未找到目标，准备换边")
             decision = self.controller.leave_edge_cmd()
-        else:
+        elif bool(getattr(self.cfg, "multi_table_enabled", False)):
             self._transition(State.NEXT_TABLE, f"{self.ctx.last_fail_reason}，准备切换下一张桌")
             self._queue_tts("当前桌位未找到目标，尝试下一张桌")
             decision = self.controller.next_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+        else:
+            self.ctx.last_fail_reason = "single_table_target_search_timeout"
+            self._enter_error_recovery(self.ctx.last_fail_reason)
+            decision = self.controller.stop_cmd("ERROR_RECOVERY", brake=True)
+            decision.control_summary.update(
+                {"control_source": "search_failed_stop", "multi_table_enabled": False}
+            )
         if decision.control_summary is not None:
             decision.control_summary.update(
                 {

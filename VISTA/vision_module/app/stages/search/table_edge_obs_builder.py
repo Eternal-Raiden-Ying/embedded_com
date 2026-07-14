@@ -181,6 +181,8 @@ def _has_local_table_bbox_signal(local_perception: Dict[str, object]) -> bool:
         "table_roi_reason",
         "yolo_table_conf",
         "table_conf",
+        "has_infer",
+        "yolo_has_infer",
     ):
         if key in local_perception:
             return True
@@ -311,10 +313,6 @@ def merge_table_bbox_from_local_perception(
     if not isinstance(local_perception, dict):
         return obs
     out = dict(obs or default_table_edge_obs())
-    if out.get("sync_status") in {"exact", "nearest", "matched_hold", "unavailable"} and out.get("source_frame_id") is not None:
-        # The producer already bound YOLO to the depth FrameBundle before edge
-        # computation.  Never overwrite that decision with the stage's latest slot.
-        return out
     bbox = _local_current_table_bbox(local_perception)
     protected_edge = bool(
         str(out.get("selected_source") or out.get("source") or "").strip().lower() == "results"
@@ -355,21 +353,26 @@ def merge_table_bbox_from_local_perception(
             "ts",
             "age_ms",
             "is_stale",
+            "sync_status",
+            "source_frame_id",
+            "perception_frame_id",
+            "sync_frame_delta",
+            "sync_age_ms",
+            "table_roi_depth_valid",
+            "table_roi_depth_p10",
+            "table_roi_depth_median",
+            "table_roi_depth_mean",
+            "table_roi_depth_valid_ratio",
+            "table_roi_depth_sample_count",
+            "table_roi_depth_bbox",
+            "table_roi_depth_bbox_norm",
+            "table_roi_depth_coord_space",
+            "roi_source",
+            "roi_reason",
         )
         if key in out
     }
     if bbox is None and not _has_local_table_bbox_signal(local_perception):
-        if not bool(out.get("table_bbox_current_found", False)):
-            out.update({
-                "table_roi_depth_valid": False,
-                "table_roi_depth_p10": None,
-                "table_roi_depth_median": None,
-                "table_roi_depth_mean": None,
-                "table_roi_depth_valid_ratio": 0.0,
-                "table_roi_depth_sample_count": 0,
-                "table_roi_depth_bbox": None,
-                "table_roi_depth_bbox_norm": None,
-            })
         return out
     obs_ts = _local_obs_ts(local_perception, tick_ts)
     frame_id = _local_frame_id(local_perception)
@@ -472,14 +475,11 @@ def merge_table_bbox_from_local_perception(
                 "yolo_table_visible": False,
                 "yolo_table_fresh": False,
                 "yolo_table_age_ms": None,
-                "table_roi_depth_valid": False,
-                "table_roi_depth_p10": None,
-                "table_roi_depth_median": None,
-                "table_roi_depth_mean": None,
-                "table_roi_depth_valid_ratio": 0.0,
-                "table_roi_depth_sample_count": 0,
-                "table_roi_depth_bbox": None,
-                "table_roi_depth_bbox_norm": None,
+                "local_perception_frame_id": frame_id,
+                "local_perception_obs_ts": float(obs_ts),
+                "local_perception_trace_id": local_perception.get("trace_id"),
+                "table_bbox_frame_id": frame_id,
+                "table_bbox_obs_ts": float(obs_ts),
                 "reason": reason,
                 "source": out.get("source") if protected_edge else "local_perception_no_table_bbox",
             }
@@ -583,6 +583,11 @@ def merge_table_bbox_from_local_perception(
             "yolo_table_fresh": True,
             "yolo_table_age_ms": 0.0,
             "yolo_table_conf": conf,
+            "local_perception_frame_id": frame_id,
+            "local_perception_obs_ts": float(obs_ts),
+            "local_perception_trace_id": local_perception.get("trace_id"),
+            "table_bbox_frame_id": frame_id,
+            "table_bbox_obs_ts": float(obs_ts),
             "yolo_bbox_center_x_norm": local_perception.get("yolo_bbox_center_x_norm"),
             "roi_source": source,
             "roi_reason": local_perception.get("table_roi_reason") or "local_perception_table_bbox",

@@ -357,6 +357,7 @@ orchestrator:
     dt_max_s: 0.20 # Maximum slew timestep
     reset_gap_s: 0.50 # Reset smoother after long control gaps
   control:
+    multi_table_enabled: false # Single-table hard gate; NEXT_TABLE is forbidden when false
     cmd_confidence_th: 0.60 # Confidence threshold for aligning/docking
     target_obs_max_age_s: 1.00 # Max age of target tag observation
     table_obs_max_age_s: 1.00 # Max age of table edge observation
@@ -618,6 +619,7 @@ orchestrator:
     table_dist_kp_mps_per_m: 0.12 # Distance error gain factor
     yolo_table_yaw_gain: 0.20 # Tag heading error gain factor
     yolo_table_max_wz_radps: 0.06 # Maximum rotation speed for tag tracking
+    yolo_forward_center_hard_limit: 0.25 # Wider bbox band allowing forward motion with yaw correction
     yolo_table_forward_vx_mps: 0.015 # Tag search forward speed
     table_view_wz_kp: 0.18 # tag yaw tracking gain
     table_view_vy_kp: 0.04 # tag lateral tracking gain

@@ -48,6 +48,15 @@ from .core_types import (
 class TransitionsMixin:
     def _transition(self, new_state: State, reason: str):
         old_state = self.ctx.state
+        if new_state == State.NEXT_TABLE and not bool(getattr(self.cfg, "multi_table_enabled", False)):
+            self._log(
+                "error",
+                "[STATE_INVARIANT] requested NEXT_TABLE while multi_table_enabled=false; "
+                f"old_state={old_state.value} reason={reason}",
+            )
+            self.ctx.last_fail_reason = str(reason or "single_table_next_table_blocked")
+            new_state = State.ERROR_RECOVERY
+            reason = f"single_table_next_table_blocked: {reason}"
         if old_state == State.AT_TABLE_EDGE and getattr(self.ctx, "final_locked", False):
             if new_state in {State.SEARCH_TABLE, State.REACQUIRE_TABLE, State.NO_PROGRESS_RECOVERY, State.LEAVE_EDGE, State.ERROR_RECOVERY}:
                 self._log("warn", f"Bypassing transition from AT_TABLE_EDGE to {new_state.value} due to final_locked=True")

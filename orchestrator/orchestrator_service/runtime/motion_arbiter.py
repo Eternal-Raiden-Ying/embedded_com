@@ -2140,6 +2140,32 @@ def arbitrate_table_docking_motion(
             reason=edge_block,
         )
 
+    if bool(summary.get("bbox_lost_hold_active", False)) or intent_type == "bbox_lost_hold":
+        # A short current-RGB dropout is a stop/hold condition, never a blind
+        # search request.  Preserve only the already bounded hold yaw, if any.
+        return _docking_result(
+            action=DockingAction.PERCEPTION_DROPOUT_HOLD,
+            stage=DockingStage.PERCEPTION_DROPOUT_HOLD,
+            summary=with_common(
+                {
+                    "control_source": "bbox_lost_hold",
+                    "motion_intent_type": "bbox_lost_hold",
+                    "allow_forward": False,
+                    "allow_rotate": bool(abs(desired_wz) > 1e-9),
+                    "forward_block_reason": "bbox_lost_hold",
+                    "rotate_block_reason": "" if abs(desired_wz) > 1e-9 else "bbox_lost_hold",
+                }
+            ),
+            vx=0.0,
+            vy=0.0,
+            wz=desired_wz,
+            yaw_owner="bbox_hold" if abs(desired_wz) > 1e-9 else "hold",
+            forward_owner="none",
+            lateral_owner="none",
+            blocked_by="bbox_lost_hold",
+            reason="bbox_lost_hold",
+        )
+
     final_servo_enter_p10 = _float(summary, "final_enter_depth_threshold_m", 0.58)
     near_final_servo_ready = bool(
         summary.get("near_table_latched", False)

@@ -380,6 +380,7 @@ class MotionController:
         bbox_cx_norm_control = geom["bbox_cx_norm_control"]
         table_target_x = max(0.0, min(1.0, float(getattr(self.cfg, "table_yolo_align_center_x_target", 0.50) or 0.50)))
         table_center_tol = abs(float(getattr(self.cfg, "table_yolo_align_center_x_tol", 0.08) or 0.08))
+        forward_hard_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.25) or 0.25))
         bbox_center_error_control = (
             float(bbox_cx_norm_control) - table_target_x
             if bbox_cx_norm_control is not None else geom["bbox_center_error_control"]
@@ -389,12 +390,11 @@ class MotionController:
         view_err_norm = float(center_error * 2.0) if center_error is not None else 0.0
         gain = float(getattr(self.car_cfg, "yolo_table_yaw_gain", 0.20) or 0.20)
         max_wz = abs(float(getattr(self.car_cfg, "yolo_table_max_wz_radps", 0.06) or 0.06))
-        # Bbox alignment follows the table-view convention, which is distinct
-        # from edge-plane yaw.  Keep the camera target offset in center_error;
-        # table_view_wz_sign is the chassis mapping for this bbox-only branch.
-        bbox_wz_sign = float(getattr(self.car_cfg, "table_view_wz_sign", -1.0) or -1.0)
         if center_error is not None and abs(float(center_error)) > table_center_tol:
-            wz_raw = center_error * 2.0 * gain * bbox_wz_sign
+            # Pure RGB bbox yaw follows image-space error directly.  The
+            # table-view sign belongs to edge/FOV geometry and must not be
+            # reused here.
+            wz_raw = center_error * 2.0 * gain
             wz = self._clamp(wz_raw, -max_wz, max_wz)
         else:
             wz_raw = 0.0
@@ -402,11 +402,11 @@ class MotionController:
         mode_name = str(mode or "SEARCH_TABLE").upper().strip() or "SEARCH_TABLE"
         source_name = normalize_control_source(control_source or "yolo_forward")
         assist_vx = 0.0
-        # SEARCH_TABLE has one bbox-driven entry rule: a current bbox inside the
-        # alignment tolerance may move forward at the bounded bbox-track speed.
-        # Edge confidence and depth bands belong to later handoff/safety stages.
+        # Tight tolerance is only the yaw deadband.  Forward motion remains
+        # available throughout the wider hard-limit band so the robot can
+        # advance while applying a bounded bbox correction.
         forward_vx = abs(float(getattr(self.cfg, "bbox_track_forward_vx_mps", 0.10) or 0.10))
-        yolo_forward_allowed = bool(center_error is not None and abs(center_error) <= table_center_tol)
+        yolo_forward_allowed = bool(center_error is not None and abs(center_error) <= forward_hard_limit)
         if source_name in {"yolo_forward", "yolo_track_forward"}:
             if yolo_forward_allowed:
                 assist_vx = forward_vx
@@ -444,7 +444,7 @@ class MotionController:
                 "target_offset": float(center_error) if center_error is not None else None,
                 "center_error": float(center_error) if center_error is not None else None,
                 "yolo_forward_center_good_limit": float(table_center_tol),
-                "yolo_forward_center_hard_limit": float(table_center_tol),
+                "yolo_forward_center_hard_limit": float(forward_hard_limit),
                 "yolo_forward_allowed": bool(yolo_forward_allowed),
                 "yolo_approach_speed_band": "bbox_track",
                 "yolo_approach_speed_depth": None,
@@ -459,8 +459,7 @@ class MotionController:
                 "yolo_yaw_cmd": float(wz),
                 "edge_yaw_cmd": 0.0,
                 "final_yaw_cmd": float(wz),
-                "wz_sign_basis": "wz = bbox_center_error_control * 2 * yolo_table_yaw_gain * table_view_wz_sign",
-                "table_view_wz_sign": float(bbox_wz_sign),
+                "wz_sign_basis": "wz = bbox_center_error_control * 2 * yolo_table_yaw_gain",
                 "final_wz": float(wz),
                 "vx_mps": float(assist_vx),
                 "vy_mps": 0.0,

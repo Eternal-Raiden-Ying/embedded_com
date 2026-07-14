@@ -59,6 +59,7 @@ class TableDockingMixin:
     def _arbitrate_table_motion_decision(self, decision: MotionDecision, obs: Optional[TableEdgeObs]) -> MotionDecision:
         summary = decision.control_summary if decision.control_summary is not None else {}
         decision.control_summary = summary
+        summary["multi_table_enabled"] = bool(getattr(self.cfg, "multi_table_enabled", False))
         intent = MotionIntent(
             intent_type=str(summary.get("control_source") or summary.get("control_intent") or decision.cmd.mode or ""),
             desired_vx=float(getattr(decision.cmd, "vx_mps", 0.0) or 0.0),
@@ -123,6 +124,24 @@ class TableDockingMixin:
                 "wz_radps": float(result.final_wz),
             }
         )
+        control_source = str(summary.get("control_source") or "")
+        fresh_bbox = bool(self._table_yolo_reliable(obs))
+        center_error = summary.get("bbox_center_error_control", summary.get("center_error"))
+        final_wz = float(decision.cmd.wz_radps)
+        violations = []
+        if fresh_bbox and control_source == "local_rotate_search":
+            violations.append("fresh_bbox_owned_by_local_rotate_search")
+        if control_source in {"yolo_align", "yolo_acquire_align", "yolo_track_forward", "yolo_forward"} and center_error is not None:
+            if abs(final_wz) > 1e-6 and float(center_error) * final_wz < 0.0:
+                violations.append("bbox_yaw_direction_mismatch")
+        if violations:
+            summary["control_invariant_violation"] = ",".join(violations)
+            self._log(
+                "error",
+                "[TABLE_CONTROL_INVARIANT] "
+                f"violations={summary['control_invariant_violation']} state={self.ctx.state.value} "
+                f"control_source={control_source} center_error={center_error} final_wz={final_wz:.4f}",
+            )
         self.ctx.motion_intent_type = str(summary.get("motion_intent_type") or intent.intent_type or "")
         self.ctx.yaw_owner = str(summary.get("yaw_owner") or intent.yaw_owner or "")
         self.ctx.forward_owner = str(summary.get("forward_owner") or intent.forward_owner or "none")
@@ -1000,6 +1019,10 @@ class TableDockingMixin:
 
     def _bbox_lost_hold_or_search(self, obs: Optional[TableEdgeObs], mode: str) -> MotionDecision:
         """Hold table docking state before clearing handoff/searching for bbox loss."""
+        obs_key = self._final_lock_obs_key(obs)
+        if not obs_key or obs_key != str(getattr(self.ctx, "yolo_bbox_loss_last_obs_key", "") or ""):
+            self.ctx.table_lost_frames = int(getattr(self.ctx, "table_lost_frames", 0) or 0) + 1
+            self.ctx.yolo_bbox_loss_last_obs_key = obs_key
         handoff_status = self._recent_final_handoff_status(obs, mode)
         if bool(handoff_status.get("allowed", False)):
             self._log(
@@ -1076,9 +1099,8 @@ class TableDockingMixin:
         self.ctx.bbox_lost_hold_active = True
         hold_age_s = self._loss_elapsed(self.ctx.bbox_lost_since_mono)
         hold_limit_s = max(0.0, float(getattr(self.cfg, "table_loss_hold_s", 1.2) or 1.2))
-        stale_level = str(self.controller._stale_guard(obs).get("stale_level") or "fresh")
-        hard_lost = stale_level in {"hard_stale", "dead"}
-        if not hard_lost and hold_age_s < hold_limit_s:
+        lost_frame_limit = max(1, int(getattr(self.cfg, "yolo_table_lost_to_search_frames", 8) or 8))
+        if hold_age_s < hold_limit_s and int(self.ctx.table_lost_frames) < lost_frame_limit:
             edge_safe = bool(obs is not None and (getattr(obs, "edge_found", False) or getattr(obs, "edge_valid", False) or getattr(obs, "usable_for_approach", False) or getattr(obs, "edge_trusted", False)))
             depth_value = getattr(obs, "table_roi_depth_p10", None) if obs is not None else None
             if depth_value is None and obs is not None:
@@ -1113,6 +1135,8 @@ class TableDockingMixin:
                     "bbox_lost_hold_active": True,
                     "bbox_lost_hold_age_ms": hold_age_s * 1000.0,
                     "bbox_lost_hold_limit_ms": hold_limit_s * 1000.0,
+                    "bbox_lost_frames": int(self.ctx.table_lost_frames),
+                    "bbox_lost_frame_limit": int(lost_frame_limit),
                     "bbox_lost_hold_reason": hold_reason,
                     "control_phase": self.ctx.control_phase,
                     "edge_handoff_complete": bool(self.ctx.edge_handoff_complete),
@@ -1495,6 +1519,10 @@ class TableDockingMixin:
             summary.update(depth_status)
         phase = auth.control_phase
         # Pick one yaw owner after raw controller safety/limit generation; never blend.
+        now_for_search_latch = monotonic_ts()
+        if self.ctx.search_wz_sign_latched and now_for_search_latch >= float(self.ctx.search_wz_latch_until_mono or 0.0):
+            self.ctx.search_wz_sign_latched = 0
+            self.ctx.search_wz_latch_until_mono = 0.0
         search_sign = int(self.ctx.search_wz_sign_latched or self.ctx.relocate_turn_sign or 1)
         if phase == "SEARCH_SCAN" and not self.ctx.search_wz_sign_latched:
             search_sign, _, _ = self._get_memory_search_params()
@@ -1514,7 +1542,6 @@ class TableDockingMixin:
                 float(center_error)
                 * 2.0
                 * float(getattr(self.car_cfg, "yolo_table_yaw_gain", 0.20) or 0.20)
-                * float(getattr(self.car_cfg, "table_view_wz_sign", -1.0) or -1.0)
             )
             max_wz = abs(float(getattr(self.car_cfg, "yolo_table_max_wz_radps", 0.06) or 0.06))
             bbox_wz = max(-max_wz, min(max_wz, bbox_wz))
@@ -2911,12 +2938,6 @@ class TableDockingMixin:
         return final_decision
 
     def _get_memory_search_params(self) -> Tuple[int, str, str]:
-        if int(getattr(self.ctx, "search_wz_sign_latched", 0) or 0):
-            return (
-                int(self.ctx.search_wz_sign_latched),
-                str(self.ctx.current_search_direction_source or "latched"),
-                str(self.ctx.current_search_direction_reason or "latched_search_direction"),
-            )
         turn_sign = self.ctx.relocate_turn_sign
         search_src = "default"
         search_dir = "no_memory"
@@ -2946,8 +2967,6 @@ class TableDockingMixin:
                 
         self.ctx.current_search_direction_source = search_src
         self.ctx.current_search_direction_reason = search_dir
-        self.ctx.search_wz_sign_latched = 1 if int(turn_sign) >= 0 else -1
-        self.ctx.search_wz_latch_until_mono = monotonic_ts()
         return turn_sign, search_src, search_dir
 
     def _check_approach_progress(self, obs: Optional[TableEdgeObs]) -> bool:
@@ -3073,10 +3092,12 @@ class TableDockingMixin:
         self._maybe_resend_req(self._active_req_payload())
         obs = self._fresh_table_obs()
         if not self._table_yolo_reliable(obs):
-            self._transition(State.SEARCH_TABLE, "YOLO_ACQUIRE_ALIGN current bbox lost")
-            return self.controller.search_table_cmd(*self._get_memory_search_params())
+            return self._bbox_lost_hold_or_search(obs, "YOLO_ACQUIRE_ALIGN")
+        self.ctx.search_wz_sign_latched = 0
+        self.ctx.search_wz_latch_until_mono = 0.0
         self.ctx.bbox_lost_hold_active = False
         self.ctx.bbox_lost_since_mono = 0.0
+        self.ctx.yolo_bbox_loss_last_obs_key = ""
         self._reset_table_loss()
         geom = self._bbox_control_geometry(obs)
         cx_norm = geom["bbox_cx_norm_control"]
@@ -3084,8 +3105,8 @@ class TableDockingMixin:
         if center_error is None:
             self._transition(State.SEARCH_TABLE, "YOLO_ACQUIRE_ALIGN bbox center unavailable")
             return self.controller.search_table_cmd(*self._get_memory_search_params())
-        center_tol = abs(float(getattr(self.cfg, "table_yolo_align_center_x_tol", 0.08) or 0.08))
-        if abs(center_error) <= center_tol:
+        forward_hard_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.25) or 0.25))
+        if abs(center_error) <= forward_hard_limit:
             if self.ctx.state != State.YOLO_APPROACH:
                 self._transition(State.YOLO_APPROACH, f"YOLO_ACQUIRE_ALIGN bbox trackable (cx_norm={cx_norm:.3f}), transition to YOLO_APPROACH")
         return self.controller.yolo_table_search_cmd(
@@ -3100,18 +3121,20 @@ class TableDockingMixin:
         self._maybe_resend_req(self._active_req_payload())
         obs = self._fresh_table_obs()
         if not self._table_yolo_reliable(obs):
-            self._transition(State.SEARCH_TABLE, "YOLO_APPROACH current bbox lost")
-            return self.controller.search_table_cmd(*self._get_memory_search_params())
+            return self._bbox_lost_hold_or_search(obs, "YOLO_APPROACH")
+        self.ctx.search_wz_sign_latched = 0
+        self.ctx.search_wz_latch_until_mono = 0.0
         center_error = self._bbox_control_geometry(obs)["bbox_center_error_control"]
-        center_tol = abs(float(getattr(self.cfg, "table_yolo_align_center_x_tol", 0.08) or 0.08))
-        if center_error is None or abs(float(center_error)) > center_tol:
-            self._transition(State.YOLO_ACQUIRE_ALIGN, "YOLO_APPROACH bbox left center tolerance")
+        forward_hard_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.25) or 0.25))
+        if center_error is None or abs(float(center_error)) > forward_hard_limit:
+            self._transition(State.YOLO_ACQUIRE_ALIGN, "YOLO_APPROACH bbox left forward hard limit")
             return self.controller.yolo_table_search_cmd(
                 obs, turn_sign=self.ctx.relocate_turn_sign, mode="YOLO_ACQUIRE_ALIGN",
                 reason="bbox_align", control_source="yolo_track_forward",
             )
         self.ctx.bbox_lost_hold_active = False
         self.ctx.bbox_lost_since_mono = 0.0
+        self.ctx.yolo_bbox_loss_last_obs_key = ""
         self._reset_table_loss()
         decision = self.controller.yolo_table_search_cmd(
             obs,
@@ -3127,12 +3150,14 @@ class TableDockingMixin:
         obs = self._fresh_table_obs()
         yolo_status = self._yolo_table_status(obs)
         if obs is not None and self._table_motion_signal_available(obs):
+            self.ctx.search_wz_sign_latched = 0
+            self.ctx.search_wz_latch_until_mono = 0.0
             geom = self._bbox_control_geometry(obs)
             cx_norm = geom["bbox_cx_norm_control"]
             center_error = geom["bbox_center_error_control"]
             if center_error is not None:
-                center_tol = abs(float(getattr(self.cfg, "table_yolo_align_center_x_tol", 0.08) or 0.08))
-                next_state = State.YOLO_APPROACH if abs(center_error) <= center_tol else State.YOLO_ACQUIRE_ALIGN
+                forward_hard_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.25) or 0.25))
+                next_state = State.YOLO_APPROACH if abs(center_error) <= forward_hard_limit else State.YOLO_ACQUIRE_ALIGN
                 self._transition(next_state, f"table signal found cx_norm={cx_norm:.3f} center_error={center_error:.3f}")
                 return self.controller.yolo_table_search_cmd(
                     obs,
@@ -3143,9 +3168,17 @@ class TableDockingMixin:
                 )
         self.ctx.table_found_frames = 0
         if self._state_elapsed() >= float(self.cfg.search_table_timeout_s):
-            self.ctx.last_fail_reason = "搜索桌边超时"
-            self._transition(State.NEXT_TABLE, self.ctx.last_fail_reason)
-            return self.controller.next_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+            if bool(getattr(self.cfg, "multi_table_enabled", False)):
+                self.ctx.last_fail_reason = "搜索桌边超时"
+                self._transition(State.NEXT_TABLE, self.ctx.last_fail_reason)
+                return self.controller.next_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+            self.ctx.last_fail_reason = "single_table_search_timeout"
+            self._enter_error_recovery(self.ctx.last_fail_reason)
+            decision = self.controller.stop_cmd("ERROR_RECOVERY", brake=True)
+            decision.control_summary.update(
+                {"control_source": "search_failed_stop", "multi_table_enabled": False}
+            )
+            return decision
         decision = self.controller.search_table_cmd(*self._get_memory_search_params())
         decision.control_summary.update(
             {

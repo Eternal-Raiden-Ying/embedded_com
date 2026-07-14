@@ -90,12 +90,32 @@ class RecoveryMixin:
         else:
             self.ctx.table_found_frames = 0
         if self._state_elapsed() >= float(self.cfg.reacquire_timeout_s):
-            self.ctx.last_fail_reason = f"重捕获边 {self.ctx.current_edge_id} 超时"
-            self._transition(State.NEXT_TABLE, self.ctx.last_fail_reason)
-            return self.controller.next_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+            if bool(getattr(self.cfg, "multi_table_enabled", False)):
+                self.ctx.last_fail_reason = f"重捕获边 {self.ctx.current_edge_id} 超时"
+                self._transition(State.NEXT_TABLE, self.ctx.last_fail_reason)
+                return self.controller.next_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
+            self.ctx.last_fail_reason = "single_table_reacquire_timeout"
+            self._enter_error_recovery(self.ctx.last_fail_reason)
+            decision = self.controller.stop_cmd("ERROR_RECOVERY", brake=True)
+            decision.control_summary.update(
+                {"control_source": "search_failed_stop", "multi_table_enabled": False}
+            )
+            return decision
         return self.controller.search_table_cmd(*self._get_memory_search_params())
 
     def _tick_next_table(self) -> MotionDecision:
+        if not bool(getattr(self.cfg, "multi_table_enabled", False)):
+            self._log(
+                "error",
+                "[STATE_INVARIANT] actual NEXT_TABLE while multi_table_enabled=false; forcing brake stop",
+            )
+            self.ctx.last_fail_reason = "single_table_next_table_state_blocked"
+            self._enter_error_recovery(self.ctx.last_fail_reason)
+            decision = self.controller.stop_cmd("ERROR_RECOVERY", brake=True)
+            decision.control_summary.update(
+                {"control_source": "search_failed_stop", "multi_table_enabled": False}
+            )
+            return decision
         if self._state_elapsed() >= float(self.cfg.next_table_dwell_s):
             self.ctx.table_cycle_count += 1
             self.ctx.reset_edge_plan()
@@ -227,4 +247,6 @@ class RecoveryMixin:
             self._transition(State.NEXT_TABLE, reason)
             return self.controller.next_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
         self._transition(State.SEARCH_TABLE, f"{reason}，单桌模式重新搜索桌边")
-        return self.controller.search_table_cmd(*self._get_memory_search_params())
+        decision = self.controller.search_table_cmd(*self._get_memory_search_params())
+        decision.control_summary["multi_table_enabled"] = False
+        return decision

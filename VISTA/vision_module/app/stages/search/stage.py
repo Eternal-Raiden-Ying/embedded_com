@@ -112,6 +112,52 @@ def _table_edge_result_dict(payload: object) -> Optional[dict]:
             return out
     return None
 
+
+def _local_perception_identity(local_perception: object) -> Optional[tuple]:
+    """Return a stable, hashable identity for the current RGB inference."""
+    if not isinstance(local_perception, dict):
+        return None
+    frame_id = next(
+        (
+            local_perception.get(key)
+            for key in ("frame_id", "frame_seq", "camera_frame_seq", "yolo_frame_seq")
+            if local_perception.get(key) is not None
+        ),
+        None,
+    )
+    timestamp = next(
+        (
+            local_perception.get(key)
+            for key in ("capture_mono_ns", "obs_ts", "ts", "frame_capture_ts")
+            if local_perception.get(key) is not None
+        ),
+        None,
+    )
+    bbox = next(
+        (
+            local_perception.get(key)
+            for key in ("detected_table_bbox", "table_bbox", "table_bbox_xyxy", "yolo_table_bbox")
+            if local_perception.get(key) is not None
+        ),
+        None,
+    )
+    bbox_identity = tuple(bbox[:4]) if isinstance(bbox, (list, tuple)) and len(bbox) >= 4 else None
+    current_found = local_perception.get("table_bbox_current_found")
+    if current_found is None:
+        current_found = local_perception.get("table_bbox_detected", local_perception.get("table_found"))
+    if current_found is None and bbox_identity is not None:
+        current_found = True
+    if current_found is None and bool(local_perception.get("has_infer", local_perception.get("yolo_has_infer", False))):
+        current_found = False
+    return (
+        frame_id,
+        timestamp,
+        local_perception.get("trace_id"),
+        bbox_identity,
+        current_found,
+        local_perception.get("yolo_table_fresh"),
+    )
+
 def _sync_edge_follow_payload(req: VisionReq, ctx: StageContext) -> None:
     payload = req.payload if isinstance(req.payload, dict) else {}
     for key in (
@@ -271,6 +317,9 @@ class SearchStagePlan(BaseStagePlan):
         prev_found = bool(prev_obs.get("edge_found", False))
         prev_valid = bool(prev_obs.get("edge_valid", False))
         prev_trusted = bool(prev_obs.get("edge_trusted", False))
+        prev_bbox_found = bool(prev_obs.get("table_bbox_current_found", False))
+        prev_bbox_valid = bool(prev_obs.get("table_bbox_control_valid", False))
+        prev_yolo_fresh = bool(prev_obs.get("yolo_table_fresh", False))
 
         local_frame_id = None
         if isinstance(local_perception, dict):
@@ -306,16 +355,12 @@ class SearchStagePlan(BaseStagePlan):
         if local_ts_val is None:
             local_ts_val = tick_input.ts
 
-        sync_status = str(table_edge_obs.get("sync_status") or "").strip().lower()
-        if sync_status in {"exact", "nearest", "matched_hold", "unavailable"}:
-            is_current_frame = sync_status in {"exact", "nearest", "matched_hold"}
-        else:
-            is_current_frame, _ = check_edge_current_enough(
-                edge_frame_id=edge_frame_id,
-                local_frame_id=local_frame_id,
-                edge_ts=edge_ts_val,
-                local_ts=local_ts_val,
-            )
+        is_current_frame, _ = check_edge_current_enough(
+            edge_frame_id=edge_frame_id,
+            local_frame_id=local_frame_id,
+            edge_ts=edge_ts_val,
+            local_ts=local_ts_val,
+        )
 
         logger.info(
             "[EDGE_SELECTION_TRACE] results_present=%s results_frame_id=%s results_edge_found=%s "
@@ -450,9 +495,18 @@ class SearchStagePlan(BaseStagePlan):
         if _has_edge_candidate(table_edge_obs):
             ctx.stage_state["_table_edge_obs_cache"] = dict(table_edge_obs)
         
-        status_changed = (after_edge_found != prev_found) or (after_edge_valid != prev_valid) or (after_edge_trusted != prev_trusted)
+        status_changed = bool(
+            (after_edge_found != prev_found)
+            or (after_edge_valid != prev_valid)
+            or (after_edge_trusted != prev_trusted)
+            or (bool(table_edge_obs.get("table_bbox_current_found", False)) != prev_bbox_found)
+            or (bool(table_edge_obs.get("table_bbox_control_valid", False)) != prev_bbox_valid)
+            or (bool(table_edge_obs.get("yolo_table_fresh", False)) != prev_yolo_fresh)
+        )
         obs_seq = table_edge_obs.get("obs_seq")
-        obs_identity = (obs_seq,) if obs_seq is not None else (edge_frame_id, table_edge_obs.get("trace_id"))
+        edge_identity = (obs_seq,) if obs_seq is not None else (edge_frame_id, table_edge_obs.get("trace_id"))
+        local_identity = _local_perception_identity(local_perception)
+        obs_identity = (edge_identity, local_identity)
         previous_identity = ctx.stage_state.get("last_seen_table_edge_identity")
         is_new_identity = obs_identity != previous_identity
         if is_new_identity:
@@ -461,7 +515,17 @@ class SearchStagePlan(BaseStagePlan):
             ctx.stage_state["last_seen_table_edge_frame_id"] = edge_frame_id
         # A result is urgent only on first arrival; repeated scheduler reads are
         # retained as latest state but do not refresh observation freshness.
-        force_send = bool((table_edge_source == "results" and is_current_frame and is_new_identity) or status_changed)
+        local_updated = bool(local_identity is not None and is_new_identity)
+        edge_updated = bool(table_edge_source == "results" and is_current_frame and is_new_identity)
+        force_send = bool(local_updated or edge_updated or status_changed)
+        force_send_reasons = []
+        if local_updated:
+            force_send_reasons.append("local_perception_identity_changed")
+        if edge_updated:
+            force_send_reasons.append("current_edge_identity_changed")
+        if status_changed:
+            force_send_reasons.append("control_status_changed")
+        table_edge_obs["force_send_reason"] = ",".join(force_send_reasons) if force_send_reasons else "deduplicated"
 
         return table_edge_obs, table_edge_source, force_send
 
