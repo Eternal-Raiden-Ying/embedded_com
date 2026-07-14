@@ -58,8 +58,9 @@ def main() -> None:
     vista_cfg_text = (Path(ROOT) / "VISTA/configs/vision_params.yaml").read_text(encoding="utf-8")
     assert vista_cfg_text.count("target_dist_m: 0.30") >= 3
     assert abs(loaded_ctrl.min_forward_vx_mps - 0.04) < 1e-9
-    assert abs(loaded_ctrl.bbox_track_forward_vx_mps - 0.10) < 1e-9
-    assert abs(loaded_ctrl.bbox_track_forward_max_vx_mps - 0.20) < 1e-9
+    assert abs(loaded_ctrl.yolo_approach_far_vx_mps - 1.50) < 1e-9
+    assert abs(loaded_ctrl.yolo_approach_mid_vx_mps - 1.00) < 1e-9
+    assert abs(loaded_ctrl.yolo_approach_near_vx_mps - 0.50) < 1e-9
     assert abs(loaded_ctrl.bbox_track_forward_center_band - 0.45) < 1e-9
     assert abs(loaded_ctrl.final_servo_enter_p10_m - 0.45) < 1e-9
     assert abs(loaded_ctrl.edge_final_enter_margin_m - 0.06) < 1e-9
@@ -79,11 +80,9 @@ def main() -> None:
     assert abs(loaded_ctrl.depth_envelope_mid_p10_m - 0.70) < 1e-9
     assert abs(loaded_ctrl.depth_envelope_slow_vx_mps - 0.006) < 1e-9
     assert abs(loaded_ctrl.depth_envelope_mid_vx_mps - 0.015) < 1e-9
-    assert abs(loaded_ctrl.far_bbox_track_vx_mps - 0.20) < 1e-9
     assert loaded_ctrl.bbox_track_forward_min_hold_ms == 800
     assert abs(loaded_ctrl.bbox_track_forward_max_wz_radps - 0.20) < 1e-9
     assert abs(loaded_ctrl.edge_readiness_yaw_max_rad - 0.35) < 1e-9
-    assert abs(loaded_ctrl.edge_handoff_forward_vx_mps - 0.08) < 1e-9
     assert abs(loaded_ctrl.lateral_vy_max_mps - 0.18) < 1e-9
     assert abs(loaded_ctrl.lateral_kp - 0.30) < 1e-9
     assert abs(loaded_ctrl.lateral_deadband_norm - 0.020) < 1e-9
@@ -111,8 +110,7 @@ def main() -> None:
     assert abs(loaded_ctrl.far_forward_commit_min_s - 2.0) < 1e-9
     assert loaded_ctrl.stop_after_table_docking is False
     assert abs(ControlThresholds().near_slow_max_vx_mps - 0.030) < 1e-9
-    assert abs(ControlThresholds().bbox_track_forward_vx_mps - 0.100) < 1e-9
-    assert abs(ControlThresholds().bbox_track_forward_max_vx_mps - 0.200) < 1e-9
+    assert abs(ControlThresholds().yolo_approach_far_vx_mps - 1.50) < 1e-9
     assert abs(ControlThresholds().bbox_track_forward_center_band - 0.45) < 1e-9
     assert abs(ControlThresholds().final_servo_enter_p10_m - 0.45) < 1e-9
     assert abs(ControlThresholds().final_probe_vx_mps - 0.008) < 1e-9
@@ -126,7 +124,7 @@ def main() -> None:
         text = path.read_text(encoding="utf-8")
         assert text.count("near_slow_max_vx_mps") == 1
         assert text.count("bbox_track_forward_center_band") == 1
-        assert text.count("far_bbox_track_vx_mps") == 1
+        assert text.count("yolo_approach_far_vx_mps") == 1
         assert text.count("far_forward_commit_min_s") == 1
 
     vista_obs = TableEdgeObs.from_dict({
@@ -1738,9 +1736,7 @@ def main() -> None:
             "cmd": {"vx_mps": 0.014},
             "table_roi_depth_valid": True,
             "table_roi_depth_p10": 1.30,
-            "bbox_track_forward_vx_mps": 0.014,
-            "bbox_track_forward_max_vx_mps": 0.018,
-            "far_bbox_track_vx_mps": 0.016,
+            "profile_selected_vx": 0.014,
             "lateral_enabled": True,
         },
     )

@@ -371,7 +371,6 @@ def sync_orchestrator_config(config: SystemGlobalConfig) -> None:
     """Synchronize duplicative absolute-speed config values for backward compatibility."""
     car = config.orchestrator.car
     car.table_vx_mps_min = abs(float(car.table_controlled_vx_min_mps))
-    car.table_vx_mps_max = abs(float(car.table_controlled_vx_max_mps))
     car.table_vy_max_mps = abs(float(car.table_controlled_vy_max_mps))
     if getattr(car, "table_wz_view_max_radps", 0.0) == 0.0:
         car.table_wz_view_max_radps = abs(float(car.table_controlled_wz_max_radps))

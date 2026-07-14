@@ -247,6 +247,7 @@ class RuntimeContext:
     last_valid_depth_p10_m: Optional[float] = None
     last_valid_depth_p10_source: str = ""
     last_valid_depth_p10_mono: float = 0.0
+    approach_speed_band: str = "FAR"
     close_range_probe_start_mono: float = 0.0
     close_range_probe_last_mono: float = 0.0
     close_range_probe_distance_used_m: float = 0.0
@@ -433,6 +434,7 @@ class RuntimeContext:
         self.last_valid_depth_p10_m = None
         self.last_valid_depth_p10_source = ""
         self.last_valid_depth_p10_mono = 0.0
+        self.approach_speed_band = "FAR"
         for name in (
             "close_range_latched",
             "close_range_since_mono",

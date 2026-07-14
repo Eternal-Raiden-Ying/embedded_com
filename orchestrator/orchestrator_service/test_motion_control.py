@@ -20,7 +20,6 @@ def _cfg():
     car.table_controlled_wz_max_radps = 0.12
     car.table_controlled_wz_min_radps = 0.0
     car.table_approach_safe_vx_mps = 0.020
-    car.table_approach_max_vx_mps = 0.035
     car.table_approach_yaw_realign_rad = 0.16
     car.table_edge_hard_rotate_only_yaw_rad = 0.45
     car.table_edge_hard_yaw_rotate_only_frames = 3
@@ -456,7 +455,6 @@ def _edge_ready_core():
     car.table_approach_allow_vy = True
     car.table_approach_allow_wz = True
     car.table_approach_safe_vx_mps = 0.060
-    car.table_approach_max_vx_mps = 0.080
     car.table_controlled_vx_min_mps = 0.060
     car.table_controlled_vx_max_mps = 0.080
     car.table_controlled_vy_max_mps = 0.050
@@ -517,7 +515,6 @@ def test_complete_docking_action_and_owner_chain_is_monotonic():
     cfg.edge_trusted_stable_frames = 3
     car.table_approach_allow_vy = True
     car.table_approach_safe_vx_mps = 0.060
-    car.table_approach_max_vx_mps = 0.080
     car.table_controlled_vx_min_mps = 0.060
     car.table_controlled_vx_max_mps = 0.080
     car.table_controlled_vy_max_mps = 0.050

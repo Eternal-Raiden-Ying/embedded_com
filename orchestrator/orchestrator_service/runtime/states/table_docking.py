@@ -1615,6 +1615,7 @@ class TableDockingMixin:
             self.ctx.approach_commit_active
             and stale_level_before_auth in {"hard_stale", "dead"}
             and last_good_unexpired
+            and not bbox_usable_before_auth
             and not hard_safety_before_auth
             and not bool(depth_status.get("depth_roi_stop_ready"))
             and str(fov_before_auth["level"]) != "hard"
@@ -1747,7 +1748,6 @@ class TableDockingMixin:
             elif phase == "EDGE_GUIDED_APPROACH":
                 decision.cmd.wz_radps = edge_wz
 
-        forward_commit_vx = abs(float(getattr(self.car_cfg, "table_approach_safe_vx_mps", 0.06) or 0.06))
         edge_readiness_ready = bool(
             float(summary.get("edge_readiness_score", 0.0) or 0.0)
             >= float(summary.get("edge_readiness_enter_score", getattr(self.cfg, "edge_readiness_enter_score", 0.65)) or 0.65)
@@ -1758,17 +1758,16 @@ class TableDockingMixin:
             and bool(auth.allow_forward)
             and bool(getattr(obs, "edge_trusted", False) or edge_readiness_ready)
         )
-        forward_coast_candidate = bool(
-            phase == "EDGE_GUIDED_APPROACH"
-            and bool(self.ctx.approach_commit_active)
-            and bool(auth.allow_forward)
-        )
         edge_commit_block_reason = ""
         stale_reason = str(summary.get("stale_guard_reason") or "").lower()
-        if edge_guided_candidate or forward_coast_candidate:
+        if edge_guided_candidate:
             if explicit_stop_active or bool(decision.cmd.brake) or any(bool(summary.get(key, False)) for key in ("emergency_stop_active", "car_estop", "estop_active")):
                 edge_commit_block_reason = "explicit_stop"
-            elif stale_level in {"hard_stale", "dead"} or "perception_dead" in stale_reason or "vision_dead" in stale_reason:
+            elif not bbox_usable_before_auth and (
+                stale_level in {"hard_stale", "dead"}
+                or "perception_dead" in stale_reason
+                or "vision_dead" in stale_reason
+            ):
                 edge_commit_block_reason = "hard_stale"
             elif bool(depth_status.get("depth_roi_stop_ready")) or auth.stop_source == "roi_depth":
                 edge_commit_block_reason = "depth_final_stop"
@@ -1777,19 +1776,9 @@ class TableDockingMixin:
             else:
                 if bbox_fov_guard_level == "hard":
                     edge_commit_block_reason = "bbox_fov_guard_hard"
-                else:
-                    hard_yaw = abs(float(summary.get("hard_rotate_only_yaw_rad", getattr(self.car_cfg, "table_edge_hard_rotate_only_yaw_rad", 0.45)) or 0.45))
-                    edge_yaw_abs = abs(float(summary.get("edge_yaw", getattr(obs, "yaw_err_rad", 0.0) if obs is not None else 0.0) or 0.0))
-                    if edge_yaw_abs > hard_yaw or bool(getattr(obs, "hard_yaw_rotate_only_active", False)):
-                        edge_commit_block_reason = "edge_yaw_too_large"
 
         edge_guided_commit = bool(edge_guided_candidate and not edge_commit_block_reason)
-        forward_coast_active = False
-        coast_reason = ""
         if edge_guided_commit:
-            edge_vx_max = abs(float(getattr(self.car_cfg, "table_approach_max_vx_mps", 0.08) or 0.08))
-            candidate_vx = abs(float(decision.cmd.vx_mps or 0.0))
-            decision.cmd.vx_mps = min(edge_vx_max, max(candidate_vx, forward_commit_vx))
             if not bool(getattr(self.car_cfg, "table_approach_allow_vy", True)):
                 decision.cmd.vy_mps = 0.0
             decision.cmd.wz_radps = edge_wz
@@ -1798,30 +1787,6 @@ class TableDockingMixin:
             summary["pose_found"] = True
             summary["pose_missing_duration_s"] = 0.0
             summary["pose_missing_safe_vx_active"] = False
-        elif forward_coast_candidate and not edge_commit_block_reason:
-            edge_usable = bool(obs is not None and (getattr(obs, "edge_found", False) or getattr(obs, "usable_for_approach", False)))
-            edge_recent = bool(monotonic_ts() - float(self.ctx.last_edge_good_mono or 0.0) <= 0.8)
-            coast_ready = bool(
-                geom["bbox_center_valid"]
-                and float(self.ctx.edge_conf_score) >= 0.25
-                and (edge_usable or edge_recent)
-            )
-            if coast_ready:
-                coast_wz = edge_wz if bool(getattr(obs, "edge_trusted", False)) else float(self.ctx.last_edge_yaw_cmd or self.ctx.edge_yaw_ema or 0.0)
-                decision.cmd.vx_mps = forward_commit_vx
-                decision.cmd.vy_mps = 0.0
-                decision.cmd.wz_radps = coast_wz
-                forward_coast_active = True
-                coast_reason = "forward_coast_edge_unstable"
-                summary["forward_block_reason"] = ""
-                summary["forward_allowed"] = True
-                summary["pose_found"] = False
-                summary["pose_missing_safe_vx_active"] = False
-            else:
-                edge_commit_block_reason = "edge_confidence_low"
-                decision.cmd.vx_mps = 0.0
-                summary["forward_block_reason"] = edge_commit_block_reason
-                summary["forward_allowed"] = False
         elif edge_guided_candidate:
             decision.cmd.vx_mps = 0.0
             summary["forward_block_reason"] = edge_commit_block_reason
@@ -1829,12 +1794,8 @@ class TableDockingMixin:
             summary["pose_found"] = False
             summary["pose_missing_safe_vx_active"] = False
 
-        if edge_commit_block_reason in {"explicit_stop", "hard_stale", "depth_final_stop", "base_safety", "bbox_fov_guard_hard", "edge_yaw_too_large"}:
+        if edge_commit_block_reason in {"explicit_stop", "hard_stale", "depth_final_stop", "base_safety", "bbox_fov_guard_hard"}:
             self.ctx.approach_commit_active = False
-        elif phase == "EDGE_GUIDED_APPROACH" and not (edge_guided_commit or forward_coast_active):
-            summary["pose_found"] = False
-            summary["pose_missing_safe_vx_active"] = False
-            summary["forward_allowed"] = False
 
         summary.update({
             **geom, "bbox_yaw_cmd": float(bbox_wz),
@@ -1844,7 +1805,6 @@ class TableDockingMixin:
             "edge_yaw_ema": self.ctx.edge_yaw_ema, "bbox_wz_sign": bbox_sign, "edge_wz_sign": edge_sign,
             "yaw_conflict": yaw_conflict, "search_wz_sign_latched": int(self.ctx.search_wz_sign_latched),
             "bbox_yaw_owner_enforced": bool(bbox_owner_active),
-            "forward_commit_vx": float(forward_commit_vx),
             "lateral_enabled": bool(getattr(self.cfg, "lateral_enabled", True) and getattr(self.car_cfg, "table_approach_allow_vy", True)),
             "pose_gate_ignored_for_phase": bool(edge_guided_commit),
             "vx_override_reason": "edge_guided_commit_soft_fov" if edge_guided_commit and bbox_fov_guard_level == "soft" else ("edge_guided_commit" if edge_guided_commit else ""),
@@ -1855,10 +1815,7 @@ class TableDockingMixin:
             "bbox_fov_soft_allowed_forward": bool(bbox_fov_guard_level == "soft" and not edge_commit_block_reason),
             "bbox_fov_hard_block": bool(bbox_fov_guard_level == "hard"),
             "bbox_track_forward_enabled": bool(getattr(self.cfg, "bbox_track_forward_enabled", True)),
-            "bbox_track_forward_vx_mps": float(getattr(self.cfg, "bbox_track_forward_vx_mps", 0.100) or 0.100),
-            "bbox_track_forward_max_vx_mps": float(getattr(self.cfg, "bbox_track_forward_max_vx_mps", 0.200) or 0.200),
             "bbox_track_forward_center_band": float(getattr(self.cfg, "bbox_track_forward_center_band", 0.30) or 0.30),
-            "far_bbox_track_vx_mps": float(getattr(self.cfg, "far_bbox_track_vx_mps", 0.200) or 0.200),
             "bbox_track_forward_min_hold_ms": int(getattr(self.cfg, "bbox_track_forward_min_hold_ms", 800) or 800),
             "bbox_track_forward_max_wz_radps": float(getattr(self.cfg, "bbox_track_forward_max_wz_radps", 0.200) or 0.200),
             "near_slow_max_vx_mps": float(getattr(self.cfg, "near_slow_max_vx_mps", 0.030) or 0.030),
@@ -1871,8 +1828,6 @@ class TableDockingMixin:
             "yolo_approach_far_vx_mps": float(getattr(self.cfg, "yolo_approach_far_vx_mps", 0.50) or 0.50),
             "yolo_approach_mid_vx_mps": float(getattr(self.cfg, "yolo_approach_mid_vx_mps", 0.20) or 0.20),
             "yolo_approach_near_vx_mps": float(getattr(self.cfg, "yolo_approach_near_vx_mps", 0.10) or 0.10),
-            "yolo_approach_min_vx_mps": float(getattr(self.cfg, "yolo_approach_min_vx_mps", 0.05) or 0.05),
-            "edge_handoff_forward_vx_mps": float(getattr(self.cfg, "edge_handoff_forward_vx_mps", 0.080) or 0.080),
             "forward_commit_min_s": float(getattr(self.cfg, "forward_commit_min_s", 1.5) or 1.5),
             "far_forward_commit_min_s": float(getattr(self.cfg, "far_forward_commit_min_s", 1.8) or 1.8),
             "lateral_enabled": bool(getattr(self.cfg, "lateral_enabled", False)),
@@ -1905,12 +1860,12 @@ class TableDockingMixin:
             "last_good_table_obs_age_ms": max(0.0, (monotonic_ts() - float(self.ctx.last_good_table_obs_mono or monotonic_ts())) * 1000.0),
             "stale_hold_policy": str(self.ctx.perception_dropout_hold_reason or ""),
             "approach_commit_active": bool(self.ctx.approach_commit_active),
-            "forward_coast_active": bool(forward_coast_active),
+            "forward_coast_active": False,
             "edge_conf_score": float(self.ctx.edge_conf_score),
             "last_edge_yaw_cmd": float(self.ctx.last_edge_yaw_cmd),
             "last_good_edge_yaw_cmd": float(self.ctx.last_good_edge_yaw_cmd),
             "last_good_edge_yaw_mono": float(self.ctx.last_good_edge_yaw_mono),
-            "coast_reason": coast_reason,
+            "coast_reason": "",
             "zero_cmd_age_ms": 0.0,
             "zero_escape_reason": "",
             "search_latch_reason": str(self.ctx.current_search_direction_reason or "latched_search_direction"),
@@ -1958,7 +1913,13 @@ class TableDockingMixin:
             summary["block_reason"] = raw_rotate_reason
 
         # Force bbox acquire yaw owner enforcement
-        if phase == "BBOX_ACQUIRE" and not bool(getattr(self.ctx, "near_table_latched", False) or getattr(self.ctx, "final_depth_latched", False)) and center_error is not None and abs(float(center_error)) > deadband:
+        if (
+            phase == "BBOX_ACQUIRE"
+            and not auth.allow_forward
+            and not bool(getattr(self.ctx, "near_table_latched", False) or getattr(self.ctx, "final_depth_latched", False))
+            and center_error is not None
+            and abs(float(center_error)) > deadband
+        ):
             safety_stop = (
                 explicit_stop_active
                 or bool(decision.cmd.brake)
@@ -1972,42 +1933,7 @@ class TableDockingMixin:
                 bbox_owner_active = True
                 summary["bbox_yaw_owner_enforced"] = True
 
-        safety_stop_active = bool(
-            explicit_stop_active
-            or bool(decision.cmd.brake)
-            or bool(depth_status.get("depth_roi_stop_ready"))
-            or edge_commit_block_reason in {"explicit_stop", "hard_stale", "depth_final_stop", "base_safety", "bbox_fov_guard_hard", "edge_yaw_too_large"}
-        )
-        active_docking = str(getattr(self.ctx.state, "value", self.ctx.state) or "") in {"YOLO_ACQUIRE_ALIGN", "YOLO_APPROACH", "EDGE_ADJUST"}
-        zero_eps = 1e-6
-        if active_docking and not safety_stop_active and abs(float(decision.cmd.vx_mps)) < zero_eps and abs(float(decision.cmd.wz_radps)) < zero_eps:
-            now_mono = monotonic_ts()
-            if float(self.ctx.zero_cmd_started_mono or 0.0) <= 0.0:
-                self.ctx.zero_cmd_started_mono = now_mono
-            zero_age_s = max(0.0, now_mono - float(self.ctx.zero_cmd_started_mono))
-            summary["zero_cmd_age_ms"] = zero_age_s * 1000.0
-            if zero_age_s >= 0.8:
-                coast_safe = bool(
-                    self.ctx.approach_commit_active
-                    and bool(geom["bbox_center_valid"])
-                    and float(self.ctx.edge_conf_score) >= 0.25
-                )
-                if coast_safe:
-                    decision.cmd.vx_mps = forward_commit_vx
-                    decision.cmd.vy_mps = 0.0
-                    decision.cmd.wz_radps = float(self.ctx.last_edge_yaw_cmd or self.ctx.edge_yaw_ema or 0.0)
-                    summary["forward_coast_active"] = True
-                    summary["forward_source"] = "approach_commit"
-                    summary["coast_reason"] = "zero_watchdog_forward_coast"
-                    summary["zero_escape_reason"] = "forward_coast"
-                elif geom["bbox_center_valid"] and center_error is not None and abs(float(center_error)) > deadband:
-                    decision.cmd.wz_radps = bbox_wz
-                    summary["zero_escape_reason"] = "bbox_reacquire_rotate"
-                elif not bool(geom["bbox_center_valid"]):
-                    decision.cmd.wz_radps = abs(float(self.car_cfg.search_table_wz_radps)) * search_sign
-                    summary["zero_escape_reason"] = "search_rotate"
-        else:
-            self.ctx.zero_cmd_started_mono = 0.0
+        self.ctx.zero_cmd_started_mono = 0.0
 
         final_mode_active = bool(
             summary.get("close_range_latched")
@@ -2099,7 +2025,7 @@ class TableDockingMixin:
         """Validate the final authority/arbiter command, logging only failures."""
         summary = decision.control_summary if decision.control_summary is not None else {}
         decision.control_summary = summary
-        if self.ctx.state not in {State.YOLO_ACQUIRE_ALIGN, State.YOLO_APPROACH}:
+        if self.ctx.state not in {State.YOLO_ACQUIRE_ALIGN, State.YOLO_APPROACH, State.EDGE_ADJUST}:
             return decision
         geom = self._bbox_control_geometry(obs)
         center_error = geom.get("bbox_center_error_control")
@@ -2119,7 +2045,7 @@ class TableDockingMixin:
         )
         violations = []
         if (
-            self.ctx.state == State.YOLO_APPROACH
+            self.ctx.state in {State.YOLO_APPROACH, State.EDGE_ADJUST}
             and self._table_yolo_reliable(obs)
             and center_error is not None
             and abs(float(center_error)) <= hard_limit
@@ -2127,6 +2053,15 @@ class TableDockingMixin:
             and float(decision.cmd.vx_mps) <= 0.0
         ):
             violations.append("YOLO_APPROACH_VALID_BBOX_BUT_NO_FORWARD")
+        profile_vx = summary.get("profile_selected_vx")
+        if (
+            self.ctx.state in {State.YOLO_APPROACH, State.EDGE_ADJUST}
+            and str(summary.get("forward_owner") or "") == "bbox_track"
+            and profile_vx is not None
+            and not safety_stop
+            and abs(float(decision.cmd.vx_mps) - float(profile_vx)) > 1e-6
+        ):
+            violations.append("BBOX_FORWARD_PROFILE_OVERRIDDEN")
         if (
             summary.get("has_new_inference") is False
             and getattr(self.ctx, "last_valid_yolo_obs", None) is not None
@@ -2173,6 +2108,8 @@ class TableDockingMixin:
             if bool(decision.control_summary.get("completed_bbox_hold_active", False))
             else obs
         )
+        if self.ctx.state == State.YOLO_APPROACH:
+            decision = self.controller.apply_canonical_approach_profile(decision, control_obs, self.ctx)
         decision = self._apply_control_authority(decision, control_obs)
         self._ensure_speed_profile(decision)
         return self._check_yolo_continuity_invariants(decision, control_obs)
@@ -2185,122 +2122,21 @@ class TableDockingMixin:
             if bool(decision.control_summary.get("completed_bbox_hold_active", False))
             else obs
         )
+        decision = self.controller.apply_canonical_approach_profile(decision, control_obs, self.ctx)
         decision = self._apply_control_authority(decision, control_obs)
-        decision = self._apply_yolo_approach_speed_band(decision, control_obs)
         final_enter_decision = self._maybe_enter_explicit_final_slow_stop(obs, decision)
         if final_enter_decision is not None:
             decision = final_enter_decision
         self._ensure_speed_profile(decision)
         return self._check_yolo_continuity_invariants(decision, control_obs)
 
-    def _apply_yolo_approach_speed_band(self, decision: MotionDecision, obs: Optional[TableEdgeObs]) -> MotionDecision:
-        if self.ctx.state != State.YOLO_APPROACH:
-            return decision
-        summary = decision.control_summary if decision.control_summary is not None else {}
-        decision.control_summary = summary
-        if bool(getattr(decision.cmd, "brake", False)) or float(getattr(decision.cmd, "vx_mps", 0.0) or 0.0) <= 1e-9:
-            return decision
-        if str(summary.get("safety_action") or "").strip().lower() in {"hold", "emergency_stop"}:
-            return decision
-        if str(summary.get("speed_limit_reason") or "").strip().lower() == "stop":
-            return decision
-        depth = None
-        depth_source = "unknown"
-        for source, value in (
-            ("table_roi_median_m", getattr(obs, "table_roi_depth_median", None) if obs is not None else None),
-            ("fixed_roi_median_m", getattr(obs, "final_fixed_roi_depth_median", None) if obs is not None else None),
-            ("edge_measured_dist_m", getattr(obs, "depth_median", None) if obs is not None else None),
-        ):
-            parsed = self._final_enter_float(value)
-            if parsed is not None and parsed > 0.0:
-                depth = float(parsed)
-                depth_source = source
-                break
-        min_vx = abs(float(getattr(self.cfg, "yolo_approach_min_vx_mps", 0.04) or 0.04))
-        far_vx = abs(float(getattr(self.cfg, "yolo_approach_far_vx_mps", 0.22) or 0.22))
-        mid_vx = abs(float(getattr(self.cfg, "yolo_approach_mid_vx_mps", 0.12) or 0.12))
-        near_vx = abs(float(getattr(self.cfg, "yolo_approach_near_vx_mps", 0.06) or 0.06))
-        bbox_track_vx = abs(float(getattr(self.cfg, "bbox_track_forward_vx_mps", 0.10) or 0.10))
-        obs_fresh = obs is not None
-        obs_age_ms = self._table_obs_age_ms(obs) if obs is not None else None
-        far_allowed = bool(depth is not None and depth > 1.20 and obs_fresh)
-        if depth is None:
-            band = "bbox_track"
-            selected = bbox_track_vx
-            block_reason = "bbox_track_depth_unknown"
-        elif far_allowed:
-            band = "far"
-            selected = min(far_vx, bbox_track_vx)
-            block_reason = "allowed"
-        elif depth >= 0.90:
-            band = "mid"
-            selected = min(mid_vx, bbox_track_vx)
-            block_reason = "depth_not_far"
-        elif depth >= 0.65:
-            band = "near"
-            selected = min(near_vx, bbox_track_vx)
-            block_reason = "depth_not_far"
-        else:
-            band = "min"
-            selected = min_vx
-            block_reason = "depth_not_far"
-        selected = max(min_vx, selected)
-        cap = self._final_enter_float(summary.get("depth_speed_envelope_vx_cap"))
-        if cap is not None and cap <= 0.0:
-            return decision
-        if cap is not None and cap > 0.0:
-            selected = min(selected, float(cap))
-        if band == "far" and selected < far_vx - 1e-9:
-            far_allowed = False
-            block_reason = "depth_speed_envelope_cap"
-            if selected >= mid_vx - 1e-9:
-                band = "mid"
-            elif selected >= near_vx - 1e-9:
-                band = "near"
-            else:
-                band = "min"
-        inconsistent = bool(not far_allowed and (band == "far" or selected >= far_vx - 1e-9))
-        if inconsistent:
-            self._log(
-                "warn",
-                "[YOLO_SPEED][INCONSISTENT_DECISION] "
-                f"far_allowed=false band={band} selected_vx={selected:.3f} depth={depth} source={depth_source}",
-            )
-            band = "near" if depth is not None and depth > 0.65 else "min"
-            selected = near_vx if band == "near" else min_vx
-            block_reason = block_reason or "far_not_allowed"
-        decision.cmd.vx_mps = float(selected)
-        selected_vy = float(decision.cmd.vy_mps)
-        selected_wz = float(decision.cmd.wz_radps)
-        summary.update(
-            {
-                "yolo_approach_speed_band": band,
-                "yolo_approach_speed_depth": depth,
-                "yolo_approach_selected_vx": float(selected),
-                "yolo_approach_depth_source": depth_source,
-                "yolo_approach_obs_fresh": bool(obs_fresh),
-                "yolo_approach_obs_age_s": (
-                    float(obs_age_ms) / 1000.0 if obs_age_ms is not None else None
-                ),
-                "yolo_approach_far_allowed": bool(far_allowed and band == "far"),
-                "yolo_approach_speed_block_reason": "" if far_allowed and band == "far" else block_reason,
-                "vx_mps": float(selected),
-                "vy_mps": selected_vy,
-                "wz_radps": selected_wz,
-                "final_vx": float(selected),
-                "final_vy": selected_vy,
-                "final_wz": selected_wz,
-                "allow_forward": True,
-            }
-        )
-        return decision
-
     def _tick_edge_adjust(self) -> MotionDecision:
         decision = self._tick_edge_adjust_impl()
         obs = self._fresh_table_obs()
+        decision = self.controller.apply_canonical_approach_profile(decision, obs, self.ctx)
         decision = self._apply_control_authority(decision, obs)
         self._ensure_speed_profile(decision)
-        return decision
+        return self._check_yolo_continuity_invariants(decision, obs)
 
     def _tick_final_slow_stop(self) -> MotionDecision:
         timeout_decision = self._final_slow_timeout_decision()

@@ -264,9 +264,6 @@ class ControlThresholds:
     yolo_approach_far_vx_mps: float = 1.50
     yolo_approach_mid_vx_mps: float = 1.00
     yolo_approach_near_vx_mps: float = 0.50
-    yolo_approach_min_vx_mps: float = 0.05
-    yolo_approach_depth_stat_for_envelope: str = "median"
-    yolo_approach_use_p10_for_safety_only: bool = True
     builtin_bottle_grasp_enable: bool = True
     builtin_bottle_skip_remote: bool = True
     builtin_bottle_pose_line: str = "POSE_BOTTLE"
@@ -299,10 +296,7 @@ class ControlThresholds:
     post_grasp_rise_timeout_s: float = 10.0
     bbox_track_forward_enabled: bool = True
     min_forward_vx_mps: float = 0.040
-    bbox_track_forward_vx_mps: float = 1.500
-    bbox_track_forward_max_vx_mps: float = 1.500
     bbox_track_forward_center_band: float = 0.45
-    far_bbox_track_vx_mps: float = 1.500
     bbox_track_forward_min_hold_ms: int = 800
     bbox_track_forward_max_wz_radps: float = 0.200
     edge_readiness_enabled: bool = True
@@ -313,7 +307,6 @@ class ControlThresholds:
     edge_readiness_min_inliers: int = 30
     edge_readiness_yaw_max_rad: float = 0.35
     edge_handoff_min_hold_ms: int = 800
-    edge_handoff_forward_vx_mps: float = 0.080
     forward_commit_min_s: float = 1.8
     far_forward_commit_min_s: float = 2.0
     lateral_enabled: bool = True
@@ -521,7 +514,6 @@ class CarMotionConfig:
     table_controlled_wz_min_radps: float = 0.000
     table_controlled_wz_max_radps: float = 0.120
     table_approach_safe_vx_mps: float = 0.060
-    table_approach_max_vx_mps: float = 1.500
     table_approach_yaw_deadband_rad: float = 0.08
     table_approach_yaw_realign_rad: float = 0.16
     table_edge_hard_rotate_only_yaw_rad: float = 1.40
@@ -547,7 +539,6 @@ class CarMotionConfig:
     table_stage_c_vx_min_mps: float = 0.0
     table_min_forward_dist_err_m: float = 0.07
     table_vx_mps_min: float = 0.040
-    table_vx_mps_max: float = 1.500
     table_vx_kp_mps_per_m: float = 0.30
     table_yaw_slow_th_rad: float = 0.12
     table_yaw_stop_th_rad: float = 0.45

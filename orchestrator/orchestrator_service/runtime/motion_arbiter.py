@@ -222,6 +222,9 @@ def _result(
             "final_vx": float(final_vx),
             "final_vy": float(final_vy),
             "final_wz": float(final_wz),
+            "arbiter_vx": float(final_vx),
+            "arbiter_vy": float(final_vy),
+            "arbiter_wz": float(final_wz),
             "vx_mps": float(final_vx),
             "vy_mps": float(final_vy),
             "wz_radps": float(final_wz),
@@ -305,6 +308,7 @@ def _docking_result(
     final_roi_mode_latched = _bool_field("final_roi_mode_latched")
     near_table_latched = _bool_field("near_table_latched")
     state_name = str(_field("state", "") or "").strip().upper()
+    profile_approach_state = state_name in {"YOLO_APPROACH", "EDGE_ADJUST"}
     final_phase_state = state_name == "FINAL_SLOW_STOP"
     final_parking_depth_phase = bool(
         _bool_field("close_range_latched")
@@ -323,21 +327,15 @@ def _docking_result(
         safety_p10 = _optional_field_float("table_roi_depth_p10")
         if safety_p10 is None:
             safety_p10 = _optional_field_float("depth_p10")
-        if state_name == "YOLO_APPROACH":
-            median_value = _optional_field_float("table_roi_depth_median")
-            if median_value is not None:
-                depth_p10 = median_value
-                depth_stat_value = median_value
-                depth_stat_used = "table_roi_depth_median"
-            else:
-                depth_p10 = None
-                depth_stat_value = None
-                depth_stat_used = "missing"
+        if profile_approach_state:
+            depth_p10 = safety_p10
+            depth_stat_value = safety_p10
+            depth_stat_used = "table_roi_depth_p10" if safety_p10 is not None else "missing"
         elif depth_p10 is None:
             depth_p10 = safety_p10
             depth_stat_value = depth_p10
             depth_stat_used = "table_roi_depth_p10" if depth_p10 is not None else "missing"
-    if depth_p10 is None and state_name != "YOLO_APPROACH":
+    if depth_p10 is None and not profile_approach_state:
         depth_p10 = _optional_field_float("depth_p10")
         depth_stat_value = depth_p10
         depth_stat_used = "depth_p10" if depth_p10 is not None else "missing"
@@ -347,7 +345,7 @@ def _docking_result(
     if (final_locked or final_depth_latched) and not final_distance_servo_active:
         vx_cap = 0.0
         envelope_reason = "final_locked" if final_locked else "final_depth_latched"
-    elif state_name == "YOLO_APPROACH" and safety_p10 is not None and safety_p10 <= _float(safe_summary, "depth_envelope_stop_p10_m", 0.30):
+    elif profile_approach_state and safety_p10 is not None and safety_p10 <= _float(safe_summary, "depth_envelope_stop_p10_m", 0.30):
         vx_cap = 0.0
         envelope_reason = "depth_p10_stop"
         safe_summary["safety_source"] = "table_roi_p10"
@@ -359,14 +357,14 @@ def _docking_result(
         safe_summary["safety_blocks_arrival_transition"] = bool(float(safety_p10) <= float(_float(safe_summary, "depth_emergency_stop_p10_m", 0.20)))
         depth_stat_used = "table_roi_depth_p10"
         depth_stat_value = safety_p10
-    elif depth_p10 is not None:
+    elif depth_p10 is not None and not profile_approach_state:
         stop_p10 = _float(safe_summary, "depth_envelope_stop_p10_m", 0.30)
         slow_p10 = _float(safe_summary, "depth_envelope_slow_p10_m", 0.50)
         emergency_p10 = _float(safe_summary, "depth_emergency_stop_p10_m", 0.20)
         mid_p10 = _float(safe_summary, "depth_envelope_mid_p10_m", 0.70)
         if depth_p10 <= stop_p10:
             vx_cap = 0.0
-            envelope_reason = "depth_median_stop" if state_name == "YOLO_APPROACH" else "depth_p10_stop"
+            envelope_reason = "depth_p10_stop"
             safe_summary.setdefault("safety_value", float(depth_p10))
             safe_summary.setdefault("safety_hard_hold_threshold", float(stop_p10))
             safe_summary.setdefault("safety_emergency_threshold", float(emergency_p10))
@@ -375,19 +373,19 @@ def _docking_result(
             safe_summary["safety_blocks_arrival_transition"] = bool(float(depth_p10) <= float(emergency_p10))
         elif depth_p10 <= slow_p10:
             vx_cap = abs(_float(safe_summary, "depth_envelope_slow_vx_mps", 0.006))
-            envelope_reason = "depth_median_slow" if state_name == "YOLO_APPROACH" else "depth_p10_slow"
+            envelope_reason = "depth_p10_slow"
             safe_summary.setdefault("safety_value", float(depth_p10))
             safe_summary["safety_action"] = "slow"
             safe_summary["safety_blocks_forward"] = False
             safe_summary["safety_blocks_arrival_transition"] = False
         elif depth_p10 <= mid_p10:
             vx_cap = abs(_float(safe_summary, "depth_envelope_mid_vx_mps", 0.015))
-            envelope_reason = "depth_median_mid" if state_name == "YOLO_APPROACH" else "depth_p10_mid"
+            envelope_reason = "depth_p10_mid"
             safe_summary.setdefault("safety_value", float(depth_p10))
             safe_summary["safety_action"] = "slow"
             safe_summary["safety_blocks_forward"] = False
             safe_summary["safety_blocks_arrival_transition"] = False
-    if vx_cap is None and near_table_latched:
+    if vx_cap is None and near_table_latched and not profile_approach_state:
         vx_cap = abs(_float(safe_summary, "near_slow_max_vx_mps", _float(safe_summary, "depth_envelope_slow_vx_mps", 0.030)))
         envelope_reason = "near_table_latched"
     final_vx = float(vx)
@@ -404,25 +402,6 @@ def _docking_result(
         final_no_yaw = True
     if vx_cap is not None and abs(final_vx) > vx_cap:
         final_vx = max(-vx_cap, min(vx_cap, final_vx))
-    yolo_min_vx = abs(_float(safe_summary, "yolo_approach_min_vx_mps", 0.02))
-    yolo_min_allowed = bool(
-        state_name == "YOLO_APPROACH"
-        and final_vx > 1e-9
-        and yolo_min_vx > 0.0
-        and stop_class == StopClass.NONE
-        and not bool(safe_summary.get("emergency_stop_active", False))
-        and not bool(safe_summary.get("obstacle_active", False))
-        and not bool(safe_summary.get("obstacle_stop_active", False))
-        and not bool(safe_summary.get("base_depth_hard_safety", False))
-        and not bool(safe_summary.get("base_depth_stop_active", False))
-        and not bool(safe_summary.get("depth_hard_stop_active", False))
-        and not bool(safe_summary.get("safety_stop_active", False))
-        and str(safe_summary.get("stale_level") or "").strip().lower() not in {"hard_stale", "dead"}
-        and str(safe_summary.get("stop_class") or "").strip().lower() not in {"emergency", "safety", "stale_recovery"}
-    )
-    if yolo_min_allowed and final_vx < yolo_min_vx:
-        final_vx = yolo_min_vx
-        safe_summary["speed_limit_reason"] = str(safe_summary.get("speed_limit_reason") or "yolo_approach_min_vx")
     if final_no_yaw:
         final_vy = 0.0
         final_wz = 0.0
@@ -447,8 +426,7 @@ def _docking_result(
         safe_summary["depth_speed_envelope_stat_used"] = str(depth_stat_used)
         safe_summary["depth_speed_envelope_stat_value"] = depth_stat_value
         safe_summary["depth_speed_envelope_vx_cap"] = float(vx_cap if vx_cap is not None else 0.0)
-    if state_name == "YOLO_APPROACH":
-        safe_summary["yolo_approach_min_vx_mps"] = float(yolo_min_vx)
+    if profile_approach_state:
         safe_summary.setdefault("depth_speed_envelope_stat_used", str(depth_stat_used))
         safe_summary.setdefault("depth_speed_envelope_stat_value", depth_stat_value)
         safe_summary.setdefault("safety_source", "")
@@ -1945,6 +1923,19 @@ def arbitrate_table_docking_motion(
     if edge_yaw_rejected:
         summary["edge_yaw_reject_reason"] = "edge_yaw_rejected_near_vertical"
 
+    bbox_forward_hard_limit = abs(_float(summary, "yolo_forward_center_hard_limit", 0.25))
+    bbox_forward_contract = bool(
+        state in {"YOLO_APPROACH", "EDGE_ADJUST"}
+        and docking_obs.bbox_control_valid
+        and docking_obs.bbox_center_error is not None
+        and abs(float(docking_obs.bbox_center_error)) <= bbox_forward_hard_limit
+        and not emergency_active
+        and not explicit_stop
+        and not hard_safety
+        and not bool(summary.get("final_depth_latched", False))
+        and not bool(summary.get("final_locked", False))
+    )
+
     edge_yaw_should_control = bool(
         edge_yaw_available
         and edge_owner_gate_ready
@@ -1959,7 +1950,7 @@ def arbitrate_table_docking_motion(
     )
     if edge_yaw_should_control:
         edge_wz = edge_yaw_correction_wz()
-        vx = 0.0
+        vx = desired_vx if bbox_forward_contract else 0.0
         vy = 0.0
         edge_lateral_cap = abs(_float(summary, "edge_yaw_align_lateral_vy_max_mps", 0.08))
         if bool(summary.get("edge_yaw_align_allow_lateral", True)):
@@ -1981,12 +1972,12 @@ def arbitrate_table_docking_motion(
                     "lateral_owner": "edge_view" if abs(vy) > 1e-9 else "none",
                     "edge_yaw_align_allow_lateral": bool(summary.get("edge_yaw_align_allow_lateral", True)),
                     "edge_yaw_align_lateral_vy_max_mps": float(edge_lateral_cap),
-                    "forward_block_reason": "edge_yaw_large_correction",
+                    "forward_block_reason": "" if bbox_forward_contract else "edge_yaw_large_correction",
                     "rotate_block_reason": "",
                     "yaw_conflict": bool(summary.get("yaw_conflict", False)),
                     "wz_before_gate": float(desired_wz),
                     "wz_after_gate": float(edge_wz),
-                    "allow_forward": False,
+                    "allow_forward": bool(bbox_forward_contract),
                     "allow_rotate": bool(abs(edge_wz) > 1e-9),
                     "allow_lateral": bool(abs(vy) > 1e-9),
                 }
@@ -1995,9 +1986,9 @@ def arbitrate_table_docking_motion(
             vy=vy,
             wz=edge_wz,
             yaw_owner="edge",
-            forward_owner="none",
+            forward_owner="bbox_track" if bbox_forward_contract else "none",
             lateral_owner="edge_view" if abs(vy) > 1e-9 else "none",
-            blocked_by="edge_yaw_large_correction",
+            blocked_by="" if bbox_forward_contract else "edge_yaw_large_correction",
             reason="edge_yaw_large_correction",
         )
 
@@ -2016,7 +2007,7 @@ def arbitrate_table_docking_motion(
         perception_dead = obs is None
     is_dead_no_last_good = bool(stale_level == "dead" and perception_dead and last_good_expired)
 
-    if is_dead_no_last_good:
+    if is_dead_no_last_good and not bbox_forward_contract:
         if bool(summary.get("final_depth_latched", False)):
             edge_wz, yaw_source = edge_final_wz()
             return _docking_result(
@@ -2053,7 +2044,7 @@ def arbitrate_table_docking_motion(
                 reason="stale_dead_no_last_good_recovery",
             )
 
-    if stale_policy == StalePolicy.DROPOUT_HOLD and edge_lost_age_s <= _float(summary, "edge_long_dropout_s", 1.2):
+    if not bbox_forward_contract and stale_policy == StalePolicy.DROPOUT_HOLD and edge_lost_age_s <= _float(summary, "edge_long_dropout_s", 1.2):
         min_forward = abs(_float(summary, "min_forward_vx_mps", 0.040))
         vx = max(abs(desired_vx), min_forward)
         short_dropout = bool(edge_lost_age_s < _float(summary, "edge_short_dropout_s", 0.8))
@@ -2078,7 +2069,7 @@ def arbitrate_table_docking_motion(
             reason="perception_dropout_hold",
         )
 
-    if stale_policy == StalePolicy.HARD_STOP and state not in {"SEARCH_TABLE"} and not bool(summary.get("search_table_stale_gate_bypass", False)):
+    if not bbox_forward_contract and stale_policy == StalePolicy.HARD_STOP and state not in {"SEARCH_TABLE"} and not bool(summary.get("search_table_stale_gate_bypass", False)):
         wz = _float(summary, "last_edge_yaw_cmd", _float(summary, "last_good_edge_yaw_cmd", 0.0))
         if abs(wz) <= 1e-9:
             wz = bbox_recovery_wz()
@@ -2106,7 +2097,7 @@ def arbitrate_table_docking_motion(
             reason=edge_block,
             service_may_override=True,
         )
-    if edge_block in {"hard_stale", "perception_dropout_hold_expired"}:
+    if edge_block in {"hard_stale", "perception_dropout_hold_expired"} and not bbox_forward_contract:
         wz = _float(summary, "last_edge_yaw_cmd", _float(summary, "last_good_edge_yaw_cmd", 0.0))
         if abs(wz) <= 1e-9:
             wz = bbox_recovery_wz()
@@ -2207,7 +2198,7 @@ def arbitrate_table_docking_motion(
         if abs(edge_wz) <= 1e-9:
             edge_wz = _float(summary, "last_good_edge_yaw_cmd", 0.0)
         yaw_source = str(summary.get("near_stage_yaw_source") or ("last_good_edge" if abs(edge_wz) > 1e-9 else "hold"))
-        near_vx = max(0.0, min(abs(desired_vx), abs(_float(summary, "near_slow_max_vx_mps", 0.030))))
+        near_vx = max(0.0, abs(desired_vx))
         near_vy, _near_vy_block = bbox_recenter_vy(near=True)
         return _docking_result(
             action=DockingAction.NEAR_EDGE_FORWARD,
@@ -2216,7 +2207,7 @@ def arbitrate_table_docking_motion(
                 {
                 "motion_intent_type": "near_edge_hold",
                 "yaw_owner": yaw_source,
-                "forward_owner": "near_depth" if near_vx > 1e-9 else "none",
+                "forward_owner": "bbox_track" if near_vx > 1e-9 else "none",
                 "lateral_owner": "bbox" if abs(near_vy) > 1e-9 else "none",
                 "near_stage_yaw_source": yaw_source,
                 "forward_block_reason": "" if near_vx > 1e-9 else "near_table_latched",
@@ -2227,14 +2218,14 @@ def arbitrate_table_docking_motion(
             vy=near_vy,
             wz=edge_wz,
             yaw_owner=yaw_source,
-            forward_owner="near_depth" if near_vx > 1e-9 else "none",
+            forward_owner="bbox_track" if near_vx > 1e-9 else "none",
             lateral_owner="bbox" if abs(near_vy) > 1e-9 else "none",
             stop_class=StopClass.NONE,
             blocked_by="" if near_vx > 1e-9 else "near_table_latched",
             reason="near_edge_forward" if near_vx > 1e-9 else "near_hold",
         )
 
-    if fov_level == FovGuardLevel.HARD:
+    if fov_level == FovGuardLevel.HARD and not bbox_forward_contract:
         wz = bbox_recovery_wz()
         return _docking_result(
             action=DockingAction.BBOX_REACQUIRE_ROTATE if abs(wz) > 1e-9 else DockingAction.CONTROL_RECOVERY_ROTATE,
@@ -2252,8 +2243,8 @@ def arbitrate_table_docking_motion(
             amb_cap = abs(_float(summary, "yaw_ambiguous_wz_cap", 0.0))
             amb_boost = max(1.0, _float(summary, "yaw_ambiguous_vy_boost", 1.5))
             edge_vy, _edge_vy_block = bbox_recenter_vy(boost=amb_boost)
-            vx = max(abs(desired_vx), abs(_float(summary, "min_forward_vx_mps", 0.040)))
-            vx, lateral_priority_reason = cap_vx_for_lateral_priority(vx)
+            vx = abs(desired_vx)
+            lateral_priority_reason = ""
             wz = _clamp(desired_wz, -amb_cap, amb_cap)
             return _docking_result(
                 action=DockingAction.EDGE_APPROACH_FORWARD,
@@ -2277,17 +2268,12 @@ def arbitrate_table_docking_motion(
                 reason="edge_yaw_ambiguous_lateral_priority",
             )
         vx = desired_vx
-        if bool(summary.get("approach_commit_active", False)) or _edge_usable(obs, summary):
-            vx = max(abs(vx), _float(summary, "min_forward_vx_mps", 0.040))
-        if fov_level == FovGuardLevel.SOFT:
-            max_soft_vx = max(0.0, _float(summary, "min_forward_vx_mps", 0.040))
-            vx = min(max(abs(vx), max_soft_vx), max_soft_vx)
         if abs(vx) > 1e-9:
             edge_vy = desired_vy
             _edge_vy_block = ""
             if abs(edge_vy) <= 1e-9:
                 edge_vy, _edge_vy_block = bbox_recenter_vy()
-            vx, lateral_priority_reason = cap_vx_for_lateral_priority(vx)
+            lateral_priority_reason = ""
             return _docking_result(
                 action=DockingAction.EDGE_APPROACH_FORWARD,
                 stage=DockingStage.EDGE_APPROACH,
@@ -2335,7 +2321,7 @@ def arbitrate_table_docking_motion(
             and fov_level != FovGuardLevel.HARD
         )
         if handoff_depth_ok and handoff_bbox_ok:
-            handoff_vx = min(abs(_float(summary, "edge_handoff_forward_vx_mps", 0.080)), abs(_float(summary, "bbox_track_forward_max_vx_mps", 0.200)))
+            handoff_vx = abs(desired_vx)
         handoff_vy, _handoff_vy_block = bbox_recenter_vy()
         return _docking_result(
             action=DockingAction.EDGE_READINESS_HANDOFF,
@@ -2358,39 +2344,23 @@ def arbitrate_table_docking_motion(
             vy=handoff_vy,
             wz=handoff_wz,
             yaw_owner=yaw_owner,
-            forward_owner="edge_handoff" if handoff_vx > 1e-9 else "none",
+            forward_owner="bbox_track" if handoff_vx > 1e-9 else "none",
             lateral_owner="bbox_view" if abs(handoff_vy) > 1e-9 else "none",
             reason="edge_readiness_handoff",
         )
 
     bbox_err = docking_obs.bbox_center_error
     bbox_forward_vx = raw_cmd_vx()
-    bbox_track_enabled = bool(summary.get("bbox_track_forward_enabled", True))
-    bbox_track_center_band = abs(_float(summary, "bbox_track_forward_center_band", _float(summary, "yolo_forward_center_good_limit", 0.30)))
-    bbox_track_vx = abs(_float(summary, "bbox_track_forward_vx_mps", 0.100))
-    bbox_track_max_vx = abs(_float(summary, "bbox_track_forward_max_vx_mps", 0.200))
-    if bbox_track_max_vx > 0.0:
-        bbox_track_vx = min(bbox_track_vx, bbox_track_max_vx)
+    bbox_track_center_band = bbox_forward_hard_limit
+    bbox_track_vx = abs(float(desired_vx))
     bbox_track_max_wz = abs(_float(summary, "bbox_track_forward_max_wz_radps", 0.200))
-    bbox_track_min_hold_ms = max(0.0, _float(summary, "bbox_track_forward_min_hold_ms", 800.0))
     bbox_track_block = ""
     now_track = time.monotonic()
-    bbox_track_active_since = float(getattr(ctx, "bbox_track_entered_mono", 0.0) or 0.0)
-    bbox_track_elapsed_if_active_ms = max(0.0, (now_track - bbox_track_active_since) * 1000.0) if bbox_track_active_since > 0.0 else 0.0
-    bbox_track_hold_active = bool(bbox_track_active_since > 0.0 and bbox_track_elapsed_if_active_ms < bbox_track_min_hold_ms)
-    bbox_track_hold_band = max(bbox_track_center_band, abs(_float(summary, "yolo_forward_center_hard_limit", 0.25)))
-    if forward_commit_active:
-        bbox_track_hold_active = True
-        bbox_track_hold_band = max(bbox_track_hold_band, 0.30)
     bbox_track_phase_allowed = bool(
-        phase in {"BBOX_ACQUIRE", "EDGE_HANDOFF_CONFIRM"}
-        or (phase == "EDGE_GUIDED_APPROACH" and not edge_approach_gate_ready)
+        state in {"YOLO_APPROACH", "EDGE_ADJUST"}
+        and phase in {"BBOX_ACQUIRE", "EDGE_HANDOFF_CONFIRM", "EDGE_GUIDED_APPROACH", "SEARCH_SCAN"}
     )
-    near_depth_floor = _float(summary, "bbox_track_forward_min_depth_m", _float(summary, "near_depth_threshold_m", 0.40))
-    roi_depth_too_near = bool(roi_depth_valid and roi_depth_m is not None and roi_depth_m <= near_depth_floor)
-    if not bbox_track_enabled:
-        bbox_track_block = "bbox_track_disabled"
-    elif not bbox_track_phase_allowed:
+    if not bbox_track_phase_allowed:
         bbox_track_block = "not_bbox_track_phase"
     elif summary.get("allow_forward") is False:
         # Control authority has already classified this tick as alignment-only
@@ -2402,20 +2372,14 @@ def arbitrate_table_docking_motion(
         bbox_track_block = "bbox_invalid"
     elif bbox_err is None:
         bbox_track_block = "bbox_center_missing"
-    elif abs(float(bbox_err)) > bbox_track_center_band and not (bbox_track_hold_active and abs(float(bbox_err)) <= bbox_track_hold_band):
+    elif abs(float(bbox_err)) > bbox_track_center_band:
         bbox_track_block = "bbox_center_error_large"
-    elif fov_level == FovGuardLevel.HARD:
+    elif fov_level == FovGuardLevel.HARD and not bbox_forward_contract:
         bbox_track_block = "bbox_fov_guard_hard"
-    elif bool(summary.get("near_table_latched", False)):
-        bbox_track_block = "near_table_latched"
     elif bool(summary.get("final_depth_latched", False)):
         bbox_track_block = "final_depth_latched"
     elif bool(summary.get("depth_roi_stop_ready", False)):
         bbox_track_block = "depth_final_stop"
-    elif roi_depth_too_near:
-        bbox_track_block = "roi_depth_too_near"
-    elif edge_readiness_ready:
-        bbox_track_block = "edge_readiness_ready"
     elif emergency_active or explicit_stop:
         bbox_track_block = "emergency_or_explicit_stop"
     elif hard_safety:
@@ -2432,7 +2396,7 @@ def arbitrate_table_docking_motion(
             except Exception:
                 pass
         elapsed_ms = max(0.0, (now_track - float(getattr(ctx, "bbox_track_entered_mono", now_track) or now_track)) * 1000.0)
-        bbox_track_vx, lateral_priority_reason = cap_vx_for_lateral_priority(bbox_track_vx)
+        lateral_priority_reason = ""
         desired_bbox_wz = desired_wz if abs(desired_wz) > 1e-9 else _float(summary, "bbox_yaw_cmd", 0.0)
         if bbox_track_max_wz > 0.0:
             desired_bbox_wz = max(-bbox_track_max_wz, min(bbox_track_max_wz, desired_bbox_wz))
@@ -2447,19 +2411,16 @@ def arbitrate_table_docking_motion(
                     "allow_rotate": bool(abs(desired_wz) > 1e-9),
                     "forward_block_reason": "",
                     "rotate_block_reason": "yolo_track_forward" if abs(desired_wz) <= 1e-9 else "",
-                    "fallback_action": "yolo_assist",
-                    "bbox_track_forward_enabled": bool(bbox_track_enabled),
-                    "bbox_track_forward_vx_mps": float(bbox_track_vx),
-                    "bbox_track_forward_max_vx_mps": float(bbox_track_max_vx),
+                    "profile_selected_vx": float(bbox_track_vx),
+                    "arbiter_vx": float(bbox_track_vx),
                     "bbox_track_forward_center_band": float(bbox_track_center_band),
-                    "bbox_track_forward_min_hold_ms": float(bbox_track_min_hold_ms),
                     "bbox_track_forward_max_wz_radps": float(bbox_track_max_wz),
                     "lateral_priority_vx_cap_reason": lateral_priority_reason,
                     "bbox_track_elapsed_ms": float(elapsed_ms),
                     "bbox_track_exit_reason": "",
                     "forward_owner": "bbox_track",
                     "lateral_owner": "bbox_view" if abs(bbox_vy) > 1e-9 else "none",
-                    "advance_condition": "bbox_centered_depth_far",
+                    "advance_condition": "bbox_valid_within_forward_hard_limit",
                     "fallback_condition": "bbox_track_exit",
                 }
             ),
@@ -2469,7 +2430,7 @@ def arbitrate_table_docking_motion(
             yaw_owner="bbox",
             forward_owner="bbox_track",
             lateral_owner="bbox_view" if abs(bbox_vy) > 1e-9 else "none",
-            reason="bbox_track_forward_compatible",
+            reason="bbox_track_forward_canonical",
         )
     if bbox_track_block:
         try:
@@ -2500,36 +2461,25 @@ def arbitrate_table_docking_motion(
             reason="bbox_acquire_rotate",
         )
 
-    if state == "SEARCH_TABLE" or intent_type in {"local_rotate_search", "search"} or phase == "SEARCH_SCAN":
+    if (state == "SEARCH_TABLE" or intent_type in {"local_rotate_search", "search"} or phase == "SEARCH_SCAN") and not docking_obs.bbox_control_valid:
         wz = desired_wz if abs(desired_wz) > 1e-9 else _search_wz(ctx, summary)
-        no_valid_edge = not bool(summary.get("edge_found") or summary.get("edge_valid") or summary.get("edge_trusted"))
         no_current_bbox = not bool(docking_obs.bbox_control_valid)
         return _docking_result(
             action=DockingAction.SEARCH_ROTATE,
             stage=DockingStage.SEARCH,
             summary=with_common({
                 "search_table_stale_gate_bypass": True,
-                "docking_reason": "search_no_bbox" if no_current_bbox else ("coarse_scan_no_valid_edge" if no_valid_edge else "coarse_scan"),
+                "docking_reason": "search_no_bbox",
                 "perception_dead": perception_dead,
             }),
             wz=wz,
             yaw_owner="search",
-            reason="search_no_bbox" if no_current_bbox else ("coarse_scan_no_valid_edge" if no_valid_edge else "search_rotate"),
+            reason="search_no_bbox",
         )
 
     if _active_table_docking(ctx) and abs(desired_vx) < 1e-9 and abs(desired_wz) < 1e-9:
         zero_age_ms = _float(summary, "zero_cmd_age_ms", 0.0)
         if zero_age_ms >= 800.0:
-            if bool(summary.get("approach_commit_active", False)):
-                return _docking_result(
-                    action=DockingAction.NEAR_EDGE_FORWARD,
-                    stage=DockingStage.RECOVERY_ROTATE,
-                    summary=with_common({"zero_escape_reason": "forward_coast"}),
-                    vx=_float(summary, "min_forward_vx_mps", 0.040),
-                    wz=_float(summary, "last_edge_yaw_cmd", 0.0),
-                    yaw_owner="last_good_edge",
-                    reason="zero_watchdog_forward_coast",
-                )
             wz = bbox_recovery_wz()
             action = DockingAction.BBOX_REACQUIRE_ROTATE if summary.get("bbox_center_valid") else DockingAction.SEARCH_ROTATE
             return _docking_result(

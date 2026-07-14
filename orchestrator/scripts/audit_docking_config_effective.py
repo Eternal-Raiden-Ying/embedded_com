@@ -107,11 +107,10 @@ def collect() -> tuple[Dict[str, Dict[str, Any]], list[str]]:
     _record_car(values, system_yaml, "speed", "search_wz_radps", car, "search_table_wz_radps", 0.20)
     for key, fallback in (
         ("min_forward_vx_mps", 0.04),
-        ("bbox_track_forward_vx_mps", 0.10),
-        ("bbox_track_forward_max_vx_mps", 0.20),
-        ("far_bbox_track_vx_mps", 0.20),
+        ("yolo_approach_far_vx_mps", 1.50),
+        ("yolo_approach_mid_vx_mps", 1.00),
+        ("yolo_approach_near_vx_mps", 0.50),
         ("bbox_track_forward_max_wz_radps", 0.20),
-        ("edge_handoff_forward_vx_mps", 0.08),
         ("near_slow_max_vx_mps", 0.03),
         ("near_slow_max_wz_radps", 0.04),
         ("final_servo_enter_p10_m", 0.45),
@@ -235,8 +234,8 @@ def collect() -> tuple[Dict[str, Dict[str, Any]], list[str]]:
     near_vy = float(values["lateral"]["near_slow_max_vy_mps"]["value"] or 0.0)
     if near_vy > 0.0 and not lateral_enabled:
         warnings.append("near_slow_max_vy_mps > 0 but lateral_enabled is false")
-    if float(values["speed"]["global_max_vx_mps"]["value"] or 0.0) < float(values["speed"]["bbox_track_forward_max_vx_mps"]["value"] or 0.0):
-        warnings.append("global max_vx_mps is below bbox_track_forward_max_vx_mps")
+    if float(values["speed"]["global_max_vx_mps"]["value"] or 0.0) < float(values["speed"]["yolo_approach_far_vx_mps"]["value"] or 0.0):
+        warnings.append("global max_vx_mps is below yolo_approach_far_vx_mps")
     if float(values["speed"]["global_max_vy_mps"]["value"] or 0.0) < float(values["lateral"]["far_lateral_vy_max_mps"]["value"] or 0.0):
         warnings.append("global max_vy_mps is below far_lateral_vy_max_mps")
     return values, warnings

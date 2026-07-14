@@ -135,15 +135,17 @@ _CONTROL_SUMMARY_KEYS = (
     "depth_speed_envelope_stat_used",
     "depth_speed_envelope_stat_value",
     "depth_speed_envelope_vx_cap",
-    "yolo_approach_min_vx_mps",
-    "yolo_approach_speed_band",
-    "yolo_approach_speed_depth",
-    "yolo_approach_selected_vx",
-    "yolo_approach_depth_source",
-    "yolo_approach_obs_fresh",
-    "yolo_approach_obs_age_s",
-    "yolo_approach_far_allowed",
-    "yolo_approach_speed_block_reason",
+    "approach_speed_band",
+    "profile_selected_vx",
+    "candidate_vx",
+    "arbiter_vx",
+    "service_vx",
+    "uart_requested_vx",
+    "physical_clamp_vx",
+    "forward_depth_m",
+    "forward_depth_source",
+    "forward_depth_age_ms",
+    "forward_depth_is_latched",
     "safety_source",
     "safety_value",
     "safety_slow_threshold",
@@ -1050,7 +1052,7 @@ class OrchestratorService(BaseModule):
             },
             "table_docking_motion": {
                 "approach_safe_vx_mps": self.cfg.car.table_approach_safe_vx_mps,
-                "approach_max_vx_mps": self.cfg.car.table_approach_max_vx_mps,
+                "approach_max_vx_mps": self.cfg.car.table_controlled_vx_max_mps,
                 "approach_yaw_deadband_rad": self.cfg.car.table_approach_yaw_deadband_rad,
                 "approach_yaw_realign_rad": self.cfg.car.table_approach_yaw_realign_rad,
                 "approach_allow_wz": self.cfg.car.table_approach_allow_wz,
@@ -2491,14 +2493,14 @@ class OrchestratorService(BaseModule):
                 }
                 if self.core.ctx.state.value == "YOLO_APPROACH":
                     for key in (
-                        "yolo_approach_speed_band",
-                        "yolo_approach_speed_depth",
-                        "yolo_approach_selected_vx",
-                        "yolo_approach_depth_source",
-                        "yolo_approach_obs_fresh",
-                        "yolo_approach_obs_age_s",
-                        "yolo_approach_far_allowed",
-                        "yolo_approach_speed_block_reason",
+                        "approach_speed_band",
+                        "profile_selected_vx",
+                        "candidate_vx",
+                        "arbiter_vx",
+                        "forward_depth_m",
+                        "forward_depth_source",
+                        "forward_depth_age_ms",
+                        "forward_depth_is_latched",
                     ):
                         perf_record[key] = control_summary.get(key)
                 self.run_logger.write_jsonl("perf_timing", perf_record)
@@ -4308,14 +4310,21 @@ class OrchestratorService(BaseModule):
             "search_latch_age_ms": summary.get("search_latch_age_ms", 0.0),
             "search_latch_reason": summary.get("search_latch_reason", ""),
             "wz_sign_final": summary.get("wz_sign_final", 0),
-            "yolo_approach_speed_band": summary.get("yolo_approach_speed_band"),
-            "yolo_approach_speed_depth": summary.get("yolo_approach_speed_depth"),
-            "yolo_approach_selected_vx": summary.get("yolo_approach_selected_vx"),
-            "yolo_approach_depth_source": summary.get("yolo_approach_depth_source"),
-            "yolo_approach_obs_fresh": summary.get("yolo_approach_obs_fresh"),
-            "yolo_approach_obs_age_s": summary.get("yolo_approach_obs_age_s"),
-            "yolo_approach_far_allowed": summary.get("yolo_approach_far_allowed"),
-            "yolo_approach_speed_block_reason": summary.get("yolo_approach_speed_block_reason"),
+            "approach_speed_band": summary.get("approach_speed_band"),
+            "profile_selected_vx": summary.get("profile_selected_vx"),
+            "candidate_vx": summary.get("candidate_vx"),
+            "arbiter_vx": summary.get("arbiter_vx"),
+            "service_vx": summary.get("service_vx", vx),
+            "service_vy": summary.get("service_vy", vy),
+            "service_wz": summary.get("service_wz", wz),
+            "uart_requested_vx": summary.get("uart_requested_vx", vx),
+            "uart_requested_vy": summary.get("uart_requested_vy", vy),
+            "uart_requested_wz": summary.get("uart_requested_wz", wz),
+            "physical_clamp_vx": summary.get("physical_clamp_vx"),
+            "forward_depth_m": summary.get("forward_depth_m"),
+            "forward_depth_source": summary.get("forward_depth_source"),
+            "forward_depth_age_ms": summary.get("forward_depth_age_ms"),
+            "forward_depth_is_latched": summary.get("forward_depth_is_latched"),
         }
         self.run_logger.write_jsonl("motion_gate_trace", trace)
         is_docking = trace["state"] in {"SEARCH_TABLE", "YOLO_ACQUIRE_ALIGN", "YOLO_APPROACH", "EDGE_ADJUST", "FINAL_SLOW_STOP", "AT_TABLE_EDGE"}
@@ -4965,6 +4974,9 @@ class OrchestratorService(BaseModule):
         self._perf_marker("motion_arbiter_start")
         effective_cmd, uart_arbitration = self._arbitrate_uart_motion_cmd(cmd, summary)
         summary.update(uart_arbitration)
+        summary["service_vx"] = float(effective_cmd.vx_mps)
+        summary["service_vy"] = float(effective_cmd.vy_mps)
+        summary["service_wz"] = float(effective_cmd.wz_radps)
         allow_send = bool(summary.get("allow_uart_send", True))
         smoothed_cmd, smoothing_meta = self.velocity_smoother.apply(
             effective_cmd,
@@ -4974,6 +4986,10 @@ class OrchestratorService(BaseModule):
         )
         effective_cmd = smoothed_cmd
         summary.update(smoothing_meta)
+        summary["uart_requested_vx"] = float(effective_cmd.vx_mps)
+        summary["uart_requested_vy"] = float(effective_cmd.vy_mps)
+        summary["uart_requested_wz"] = float(effective_cmd.wz_radps)
+        summary["physical_clamp_vx"] = float(effective_cmd.vx_mps)
         center_error = summary.get("bbox_center_error_control", summary.get("center_error"))
         rejected_wz = float(getattr(effective_cmd, "wz_radps", 0.0) or 0.0)
         if enforce_bbox_uart_yaw_sign(effective_cmd, summary, self.core.controller):

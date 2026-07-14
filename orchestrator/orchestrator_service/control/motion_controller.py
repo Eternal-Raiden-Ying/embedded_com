@@ -406,6 +406,127 @@ class MotionController:
         raw = float(center_error) * 2.0 * gain
         return self._clamp(raw, -max_wz, max_wz), raw
 
+    def _resolve_forward_depth(self, obs: Optional[TableEdgeObs], ctx: Any) -> Dict[str, Any]:
+        """Resolve the one pre-Final forward distance without edge trust gates."""
+        now_mono = time.monotonic()
+        hold_s = max(0.0, float(getattr(self.car_cfg, "table_pose_missing_max_hold_s", 3.0) or 3.0))
+        obs_age_ms = self._obs_timing(obs).get("obs_total_age_ms") if obs is not None else None
+        try:
+            obs_age_s = max(0.0, float(obs_age_ms) / 1000.0) if obs_age_ms is not None else None
+        except (TypeError, ValueError):
+            obs_age_s = None
+
+        current_depth = None
+        current_source = ""
+        for source, value in (
+            ("current_depth_p10", getattr(obs, "table_roi_depth_p10", None) if obs is not None else None),
+            ("current_edge_distance", getattr(obs, "depth_p10", None) if obs is not None else None),
+        ):
+            try:
+                parsed = float(value) if value is not None else None
+            except (TypeError, ValueError):
+                parsed = None
+            if parsed is not None and parsed > 0.0:
+                current_depth = parsed
+                current_source = source
+                break
+
+        if current_depth is not None and obs_age_s is not None and obs_age_s <= hold_s:
+            sample_mono = now_mono - obs_age_s
+            if sample_mono >= float(getattr(ctx, "last_valid_depth_p10_mono", 0.0) or 0.0):
+                ctx.last_valid_depth_p10_m = float(current_depth)
+                ctx.last_valid_depth_p10_source = current_source
+                ctx.last_valid_depth_p10_mono = sample_mono
+            return {
+                "depth_m": float(current_depth),
+                "depth_source": current_source,
+                "depth_age_ms": obs_age_s * 1000.0,
+                "depth_is_latched": False,
+            }
+
+        last_depth = getattr(ctx, "last_valid_depth_p10_m", None)
+        last_mono = float(getattr(ctx, "last_valid_depth_p10_mono", 0.0) or 0.0)
+        last_age_s = max(0.0, now_mono - last_mono) if last_mono > 0.0 else None
+        if last_depth is not None and last_age_s is not None and last_age_s <= hold_s:
+            return {
+                "depth_m": float(last_depth),
+                "depth_source": "latched_depth_p10",
+                "depth_age_ms": last_age_s * 1000.0,
+                "depth_is_latched": True,
+            }
+        return {
+            "depth_m": None,
+            "depth_source": "unavailable",
+            "depth_age_ms": None,
+            "depth_is_latched": False,
+        }
+
+    def apply_canonical_approach_profile(
+        self,
+        decision: MotionDecision,
+        obs: Optional[TableEdgeObs],
+        ctx: Any,
+    ) -> MotionDecision:
+        """Apply the sole FAR -> MID -> NEAR pre-Final speed selector."""
+        if str(getattr(decision.cmd, "mode", "") or "").upper() not in {"YOLO_APPROACH", "EDGE_ADJUST"}:
+            return decision
+        summary = decision.control_summary if decision.control_summary is not None else {}
+        decision.control_summary = summary
+        geom = compute_bbox_control_geometry(obs)
+        center_error = geom.get("bbox_center_error_control")
+        hard_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.25) or 0.25))
+        bbox_valid = bool(self._yolo_reliable(obs) and center_error is not None)
+        safety_stop = bool(
+            decision.cmd.brake
+            or any(bool(summary.get(key, False)) for key in (
+                "emergency_stop_active", "car_estop", "estop_active", "obstacle_stop_active",
+                "base_depth_hard_safety", "base_depth_stop_active", "depth_hard_stop_active", "safety_stop_active",
+            ))
+        )
+        if not bbox_valid or abs(float(center_error)) > hard_limit or safety_stop:
+            return decision
+
+        depth = self._resolve_forward_depth(obs, ctx)
+        depth_m = depth["depth_m"]
+        band = str(getattr(ctx, "approach_speed_band", "FAR") or "FAR").upper()
+        if band not in {"FAR", "MID", "NEAR"}:
+            band = "FAR"
+        far_to_mid = 1.20
+        mid_to_near = 0.90
+        if depth_m is not None:
+            if band == "FAR" and float(depth_m) <= far_to_mid:
+                band = "MID"
+            if band in {"FAR", "MID"} and float(depth_m) <= mid_to_near:
+                band = "NEAR"
+        ctx.approach_speed_band = band
+        profile = {
+            "FAR": abs(float(getattr(self.cfg, "yolo_approach_far_vx_mps", 1.50) or 1.50)),
+            "MID": abs(float(getattr(self.cfg, "yolo_approach_mid_vx_mps", 1.00) or 1.00)),
+            "NEAR": abs(float(getattr(self.cfg, "yolo_approach_near_vx_mps", 0.50) or 0.50)),
+        }
+        software_cap = abs(float(getattr(self.car_cfg, "table_controlled_vx_max_mps", 1.50) or 1.50))
+        profile_vx = min(profile[band], software_cap)
+        decision.cmd.vx_mps = profile_vx
+        summary.update(
+            {
+                "approach_speed_band": band,
+                "profile_selected_vx": profile_vx,
+                "candidate_vx": profile_vx,
+                "candidate_vy": float(decision.cmd.vy_mps),
+                "candidate_wz": float(decision.cmd.wz_radps),
+                "forward_depth_m": depth_m,
+                "forward_depth_source": depth["depth_source"],
+                "forward_depth_age_ms": depth["depth_age_ms"],
+                "forward_depth_is_latched": bool(depth["depth_is_latched"]),
+                "control_source": "yolo_track_forward" if not bool(getattr(obs, "edge_trusted", False)) else str(summary.get("control_source") or "edge_guided_forward"),
+                "allow_forward": True,
+                "forward_block_reason": "",
+                "vx_mps": profile_vx,
+                "final_vx": profile_vx,
+            }
+        )
+        return decision
+
     def yolo_table_search_cmd(
         self,
         obs: Optional[TableEdgeObs],
@@ -443,7 +564,7 @@ class MotionController:
         # Tight tolerance is only the yaw deadband.  Forward motion remains
         # available throughout the wider hard-limit band so the robot can
         # advance while applying a bounded bbox correction.
-        forward_vx = abs(float(getattr(self.cfg, "bbox_track_forward_vx_mps", 0.10) or 0.10))
+        forward_vx = abs(float(getattr(self.cfg, "yolo_approach_far_vx_mps", 1.50) or 1.50))
         yolo_forward_allowed = bool(center_error is not None and abs(center_error) <= active_forward_limit)
         if source_name in {"yolo_forward", "yolo_track_forward"}:
             if yolo_forward_allowed:
@@ -486,12 +607,6 @@ class MotionController:
                 "yolo_forward_center_exit_limit": float(forward_exit_limit),
                 "yolo_forward_center_active_limit": float(active_forward_limit),
                 "yolo_forward_allowed": bool(yolo_forward_allowed),
-                "yolo_approach_speed_band": "bbox_track",
-                "yolo_approach_speed_depth": None,
-                "yolo_approach_selected_vx": float(assist_vx),
-                "yolo_approach_depth_source": "bbox_only",
-                "yolo_approach_far_allowed": False,
-                "yolo_approach_speed_block_reason": "",
                 "table_cx_norm_signed": float(center_error * 2.0) if center_error is not None else None,
                 "yolo_yaw_gain": float(gain),
                 "yolo_max_wz_radps": float(max_wz),
@@ -516,9 +631,6 @@ class MotionController:
                 "edge_geometry_timeout": False,
                 "no_table_bbox_timeout": False,
                 "table_lost_search_timeout": False,
-                "yolo_approach_speed_band": "bbox_track",
-                "yolo_approach_speed_depth": None,
-                "yolo_approach_selected_vx": float(assist_vx),
                 "yolo_view_err_norm": view_err_norm,
                 "edge_yaw_err_rad": float(getattr(obs, "yaw_err_rad", 0.0) or 0.0) if obs is not None else 0.0,
                 "yolo_edge_yaw_conflict": False,
@@ -1015,7 +1127,7 @@ class MotionController:
         now_s = time.time()
         last_ts = getattr(self.docking, "_last_ts", 0.0) or now_s
         dt = max(0.05, min(0.25, now_s - float(last_ts)))
-        vx_max = abs(float(getattr(self.car_cfg, "table_vx_mps_max", getattr(self.car_cfg, "table_stage_c_vx_max_mps", 0.05)) or 0.05))
+        vx_max = abs(float(getattr(self.car_cfg, "table_controlled_vx_max_mps", 1.50) or 1.50))
         vx = self._clamp(vx, -vx_max, vx_max)
         vy = self._clamp(vy, -abs(float(getattr(self.car_cfg, "table_vy_max_mps", 0.02))), abs(float(getattr(self.car_cfg, "table_vy_max_mps", 0.02))))
         wz_max = max(
@@ -1220,7 +1332,7 @@ class MotionController:
         vx_from_dist = 0.0
         min_forward_dist = max(0.0, float(getattr(self.car_cfg, "table_min_forward_dist_err_m", 0.07) or 0.07))
         vx_min = abs(float(getattr(self.car_cfg, "table_vx_mps_min", 0.018) or 0.018))
-        vx_max = abs(float(getattr(self.car_cfg, "table_vx_mps_max", 0.045) or 0.045))
+        vx_max = abs(float(getattr(self.car_cfg, "table_controlled_vx_max_mps", 1.50) or 1.50))
         vx_min = min(vx_min, vx_max)
         vx_kp = max(0.0, float(getattr(self.car_cfg, "table_vx_kp_mps_per_m", 0.10) or 0.10))
         near_dist_err_th = max(min_forward_dist, float(getattr(self.car_cfg, "table_near_dist_err_th_m", 0.10) or 0.10))
@@ -1253,7 +1365,7 @@ class MotionController:
             forward_block_reason = f"phase_{phase_name.lower()}"
         if forward_allowed:
             min_forward_vx = abs(float(getattr(self.cfg, "min_forward_vx_mps", 0.04) or 0.04))
-            cruise_forward_vx = abs(float(getattr(self.cfg, "bbox_track_forward_vx_mps", 0.10) or 0.10))
+            cruise_forward_vx = abs(float(getattr(self.cfg, "yolo_approach_far_vx_mps", 1.50) or 1.50))
             if dist_err > 0.15:
                 vx_from_dist = cruise_forward_vx
             else:
@@ -1406,7 +1518,7 @@ class MotionController:
         pose_missing_safe_vx_mps = float(pose_missing_safe_vx_mps)
         approach_speed_mode = "profile"
         approach_safe_vx_mps = abs(float(getattr(self.car_cfg, "table_approach_safe_vx_mps", pose_missing_safe_vx_mps) or pose_missing_safe_vx_mps))
-        approach_max_vx_mps = abs(float(getattr(self.car_cfg, "table_approach_max_vx_mps", 0.030) or 0.030))
+        approach_max_vx_mps = abs(float(getattr(self.car_cfg, "table_controlled_vx_max_mps", 1.50) or 1.50))
         if approach_max_vx_mps > 0.0:
             approach_safe_vx_mps = min(approach_safe_vx_mps, approach_max_vx_mps)
         approach_vx_mps = float(approach_safe_vx_mps)
