@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Config-driven fixed grasp sequence state handlers."""
+"""Config-driven structured POSE sequence state handlers."""
 from __future__ import annotations
 
 from ...ipc.protocol import ArmCommand
@@ -64,20 +64,21 @@ class GraspFlowMixin:
         self._log(
             "info",
             f"grasp_recipe_step_send recipe_name={recipe.name} step_index={index} "
-            f"step_command={step.command} send_mono={now_m:.6f}",
+            f"step_name={step.name} send_mono={now_m:.6f}",
         )
         arm_cmd = ArmCommand(
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0,
-            command=step.command,
+            step.x,
+            step.y,
+            step.z,
+            step.pitch,
+            step.roll,
+            step.claw,
+            step.time_ms,
+            command="POSE",
             recipe_name=recipe.name,
             recipe_step_index=index,
-            expect_ack=bool(step.expect_ack),
+            recipe_step_name=step.name,
+            expect_ack=True,
             success_ack=step.success_ack,
             timeout_s=float(step.timeout_s),
         )
@@ -86,7 +87,7 @@ class GraspFlowMixin:
             "grasp_source": "recipe",
             "recipe_name": recipe.name,
             "step_index": index,
-            "step_command": step.command,
+            "step_name": step.name,
             "arm_serial_ready": bool(self.ctx.arm_serial_ready),
         }
         return decision
@@ -124,13 +125,14 @@ class GraspFlowMixin:
         if float(step.settle_after_s) > 0.0:
             self.ctx.grasp_recipe_settle_until_mono = now_m + float(step.settle_after_s)
             self.ctx.grasp_substate = "RECIPE_SETTLE"
-        else:
-            self.ctx.grasp_substate = "RECIPE_SEND_STEP"
-        return self.controller.stop_cmd("GRASP")
+            return self.controller.stop_cmd("GRASP")
+        self.ctx.grasp_substate = "RECIPE_SEND_STEP"
+        return self._tick_recipe_send_step(now_m)
 
     def _tick_recipe_settle(self, now_m: float) -> MotionDecision:
         if now_m >= float(getattr(self.ctx, "grasp_recipe_settle_until_mono", 0.0) or 0.0):
             self.ctx.grasp_substate = "RECIPE_SEND_STEP"
+            return self._tick_recipe_send_step(now_m)
         return self.controller.stop_cmd("GRASP")
 
     def _tick_recipe_done(self, now_m: float) -> MotionDecision:

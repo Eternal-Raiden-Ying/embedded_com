@@ -326,6 +326,7 @@ class TransitionsMixin:
             self.reset_edge_tracking("enter_search_table")
             self.reset_target_tracking("enter_search_table")
         elif state == State.FREEZE_BASE:
+            self.ctx.base_freeze_started_mono = monotonic_ts()
             self._log("info", "freeze_base_enter")
         elif state in {State.NO_PROGRESS_RECOVERY, State.LEAVE_EDGE, State.NEXT_TABLE}:
             reason = f"enter_{state.value.lower()}"
@@ -333,6 +334,7 @@ class TransitionsMixin:
             self.reset_target_tracking(reason)
             self.reset_slide_reference(reason)
         elif state == State.GRASP:
+            self.ctx.grasp_state_entered_mono = monotonic_ts()
             self._log("info", "grasp_enter")
             self.ctx.grasp_result = None
             self.ctx.grasp_status = ""
@@ -348,7 +350,11 @@ class TransitionsMixin:
             self.ctx.grasp_recipe_step_index = 0
             self.ctx.grasp_recipe_step_send_mono = 0.0
             self.ctx.grasp_recipe_settle_until_mono = 0.0
-            self.ctx.grasp_substate = "RECIPE_WAIT_ARM_READY"
+            self.ctx.grasp_substate = (
+                "RECIPE_SEND_STEP"
+                if self.ctx.grasp_recipe_ready and self.ctx.arm_serial_ready
+                else "RECIPE_WAIT_ARM_READY"
+            )
             self._log(
                 "info",
                 "grasp_recipe_enter "

@@ -535,7 +535,6 @@ orchestrator:
       "bottle": 30.0
   car:
     grasp_reposition_speed_cm_s: 10.0 # Base reposition speed during grasp retry
-    pre_arm_stop_settle_ms: 150 # Stop settle before sending arm POSE
     grasp_pose_time_ms: 800 # Default arm POSE movement time
     search_table_wz_radps: 0.15 # Rotational velocity to search for table
     fallback_align_turn_wz_min_radps: 0.10 # Minimum rotation velocity in fallback

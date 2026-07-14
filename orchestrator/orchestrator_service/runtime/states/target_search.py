@@ -149,27 +149,36 @@ class TargetSearchMixin:
             centered_ok = bool(centered_in_deadband)
             stable_ok = lateral_stable_count >= self._target_lateral_stable_frames()
             if new_lateral_inference and centered_ok and stable_ok:
+                completed_mono = monotonic_ts()
                 self._clear_target_lateral_command_latch()
+                self.ctx.target_confirmed = True
+                self.ctx.target_locked = True
+                self.ctx.selected_target_snapshot = dict(target_obs.to_dict())
+                self.ctx.selected_target_inference_id = str(self.ctx.target_lateral_last_inference_id or "")
+                self.ctx.slice_complete_mono = completed_mono
                 self.ctx.target_last_transition_reason = (
                     f"slice_complete inference_id={self.ctx.target_lateral_last_inference_id} "
                     f"bbox_valid={int(self._target_bbox_valid(target_obs))} "
                     f"target_lateral_stable_count={lateral_stable_count}"
                 )
                 self._transition(
-                    State.TARGET_CONFIRM,
-                    self._format_target_transition_reason("target_found", target_obs),
+                    State.FREEZE_BASE,
+                    self._format_target_transition_reason("slice_target_confirmed_locked", target_obs),
                 )
                 decision = self._annotate_target_lateral_decision(
-                    self.controller.stop_cmd("TARGET_CONFIRM"),
+                    self.controller.stop_cmd("FREEZE_BASE"),
                     target_obs,
                     active=False,
-                    reason="target_lateral_centered_confirm",
+                    reason="slice_complete_freeze_base",
                     vy_cmd=0.0,
                 )
                 decision.control_summary.update(
                     {
                         "slice_complete": True,
                         "slice_block_reason": "",
+                        "target_confirmed": True,
+                        "target_locked": True,
+                        "slice_complete_mono": completed_mono,
                         "selected_inference_id": self.ctx.target_lateral_last_inference_id,
                     }
                 )
@@ -1013,6 +1022,8 @@ class TargetSearchMixin:
     def _tick_freeze_base(self) -> MotionDecision:
         if self._state_elapsed() < float(self.cfg.freeze_settle_s):
             return self.controller.stop_cmd("FREEZE_BASE")
+        if self.ctx.base_freeze_ready_mono <= 0.0:
+            self.ctx.base_freeze_ready_mono = monotonic_ts()
         spec = resolve_target(self.ctx.canonical_target or self.ctx.active_target or "")
         if spec is None:
             self._transition(State.DONE, "target_catalog_missing_after_lock")
@@ -1022,6 +1033,8 @@ class TargetSearchMixin:
             self._emit_tts_event("RECIPE_NOT_READY", state=State.FREEZE_BASE.value)
             self._transition(State.DONE, f"RECIPE_NOT_READY target={spec.canonical_name}")
             return self.controller.stop_cmd("DONE")
+        if route.next_state == "GRASP" and not bool(getattr(self.ctx, "arm_serial_ready", False)):
+            return self.controller.stop_cmd("FREEZE_BASE")
         if route.tts_event:
             self._emit_tts_event(route.tts_event, state=State.FREEZE_BASE.value)
         next_state = State(route.next_state)

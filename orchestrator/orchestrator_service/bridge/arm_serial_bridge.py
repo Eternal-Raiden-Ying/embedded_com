@@ -322,7 +322,7 @@ class ArmSerialBridge:
                 if ack and raw.strip().upper().startswith(ack):
                     resp = ArmResponse(ok=True, message="RECIPE_STEP_DONE", raw_line=raw, ts=time.time(), parsed_status="RECIPE_STEP_DONE")
                     return {"ok": True, "error": "", "response": resp, "line": command, "received_lines": received_lines, **write_result}
-                if status in {"ERR_CMD", "ERR_IK", "ARM_GRABBED_TIMEOUT"}:
+                if status in {"ERR_CMD", "ERR_IK"}:
                     resp = self._command_failure_response(parsed_status=status, message=status, raw_line=raw)
                     return {"ok": False, "error": status.lower(), "response": resp, "line": command, "received_lines": received_lines, **write_result}
             resp = self._command_failure_response(

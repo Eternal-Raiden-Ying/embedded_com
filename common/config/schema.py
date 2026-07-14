@@ -884,7 +884,6 @@ class ControlThresholds:
 class CarMotionConfig:
     """PID, limits, and behavior variables for actual motion control."""
     grasp_reposition_speed_cm_s: float = 10.0
-    pre_arm_stop_settle_ms: int = 150
     grasp_pose_time_ms: int = 800
     search_table_wz_radps: float = 0.10
     fallback_align_turn_wz_min_radps: float = 0.10

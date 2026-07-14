@@ -1,43 +1,49 @@
 version: 1
+protocol: pose_v1
 
 defaults:
-  command_timeout_s: 8.0
-  settle_after_step_s: 0.0
+  ack: "OK POSE"
+  timeout_s: 6.0
   stop_on_failure: true
 
-recipes:
+targets:
   apple:
-    enabled: true
-    recipe_type: fixed_sequence
-    description: Fixed grasp sequence for apple
+    enabled: false
+    disabled_reason: "Missing verified Apple lift POSE parameters"
+    missing_parameters:
+      - lift.x
+      - lift.y
+      - lift.z
+      - lift.pitch
+      - lift.roll
+      - lift.claw
+      - lift.time_ms
     steps:
-      - command: POSE_APPLE
-        expect_ack: true
-        success_ack: OK POSE_APPLE DONE
-        timeout_s: 15.0
-      - command: GRABBED
-        expect_ack: true
-        success_ack: OK GRABBED DONE
-        timeout_s: 10.0
-      - command: POSE_RISE
-        expect_ack: true
-        success_ack: OK POSE_RISE DONE
-        timeout_s: 10.0
+      - name: grasp
+        x: 29
+        y: 4
+        z: 14
+        pitch: 0
+        roll: 0
+        claw: 40
+        time_ms: 800
 
   bottle:
-    enabled: true
-    recipe_type: fixed_sequence
-    description: Fixed grasp sequence for bottle
-    steps:
-      - command: POSE_BOTTLE
-        expect_ack: true
-        success_ack: OK POSE_BOTTLE DONE
-        timeout_s: 15.0
-      - command: GRABBED
-        expect_ack: true
-        success_ack: OK GRABBED DONE
-        timeout_s: 10.0
-      - command: POSE_RISE
-        expect_ack: true
-        success_ack: OK POSE_RISE DONE
-        timeout_s: 10.0
+    enabled: false
+    disabled_reason: "Missing verified Bottle grasp and lift POSE parameters"
+    missing_parameters:
+      - grasp.x
+      - grasp.y
+      - grasp.z
+      - grasp.pitch
+      - grasp.roll
+      - grasp.claw
+      - grasp.time_ms
+      - lift.x
+      - lift.y
+      - lift.z
+      - lift.pitch
+      - lift.roll
+      - lift.claw
+      - lift.time_ms
+    steps: []

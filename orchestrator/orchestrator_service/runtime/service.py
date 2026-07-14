@@ -2427,16 +2427,39 @@ class OrchestratorService(BaseModule):
             return
         recipe_name = str(getattr(arm, "recipe_name", "") or "").strip()
         step_index = int(getattr(arm, "recipe_step_index", -1))
-        command = str(getattr(arm, "command", "") or "").strip()
+        step_name = str(getattr(arm, "recipe_step_name", "") or "").strip()
+        command = encode_pose(
+            arm.x_cm,
+            arm.y_cm,
+            arm.z_cm,
+            arm.pitch_deg,
+            arm.roll_deg,
+            arm.claw_deg,
+            arm.time_ms,
+        )
         send_mono = monotonic_ts()
+        if self.core.ctx.first_pose_sent_mono <= 0.0:
+            self.core.ctx.first_pose_sent_mono = send_mono
+        else:
+            self.core.ctx.next_pose_sent_mono = send_mono
         identity = {
             "task_id": str(self.core.ctx.active_task_id or ""),
             "session_id": str(self.core.ctx.active_session_id or ""),
             "epoch": int(self.core.ctx.active_epoch or 0),
             "recipe_name": recipe_name,
             "step_index": step_index,
+            "step_name": step_name,
             "step_command": command,
             "send_mono": send_mono,
+            "slice_complete_mono": float(self.core.ctx.slice_complete_mono or 0.0),
+            "base_freeze_started_mono": float(self.core.ctx.base_freeze_started_mono or 0.0),
+            "base_freeze_ready_mono": float(self.core.ctx.base_freeze_ready_mono or 0.0),
+            "grasp_state_entered_mono": float(self.core.ctx.grasp_state_entered_mono or 0.0),
+            "first_pose_sent_mono": float(self.core.ctx.first_pose_sent_mono or 0.0),
+            "transition_wait_ms": round(
+                max(0.0, send_mono - float(self.core.ctx.slice_complete_mono or send_mono)) * 1000.0,
+                1,
+            ),
         }
         self._arm_step_inflight = True
         self.run_logger.write_jsonl("arm_recipe_step_send", dict(identity))
@@ -2479,10 +2502,21 @@ class OrchestratorService(BaseModule):
                 self.core.ctx.arm_serial_ready = False
                 self._start_arm_serial_preload()
             ack_mono = float(item.get("ack_mono", monotonic_ts()) or monotonic_ts())
+            self.core.ctx.last_pose_ack_mono = ack_mono
             self.run_logger.write_jsonl(
                 "arm_recipe_step_result",
                 {
-                    **{key: item.get(key) for key in ("recipe_name", "step_index", "step_command", "send_mono")},
+                    **{
+                        key: item.get(key)
+                        for key in (
+                            "recipe_name",
+                            "step_index",
+                            "step_name",
+                            "step_command",
+                            "send_mono",
+                            "transition_wait_ms",
+                        )
+                    },
                     "ack_mono": ack_mono,
                     "step_duration_ms": round((ack_mono - float(item.get("send_mono", ack_mono))) * 1000.0, 1),
                     "step_result": "success" if bool(resp.ok) else "failed",

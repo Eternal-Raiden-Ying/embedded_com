@@ -352,7 +352,17 @@ class RuntimeContext:
     selected_candidate_score: Optional[float] = None
     selected_candidate_reason: str = ""
     target_candidate_last_log_inference_id: str = ""
+    target_confirmed: bool = False
     target_locked: bool = False
+    selected_target_snapshot: Dict[str, object] = field(default_factory=dict)
+    selected_target_inference_id: str = ""
+    slice_complete_mono: float = 0.0
+    base_freeze_started_mono: float = 0.0
+    base_freeze_ready_mono: float = 0.0
+    grasp_state_entered_mono: float = 0.0
+    first_pose_sent_mono: float = 0.0
+    last_pose_ack_mono: float = 0.0
+    next_pose_sent_mono: float = 0.0
     start_distance_band: str = "unknown"
     start_depth_source: str = ""
     start_depth_value: Optional[float] = None
@@ -370,7 +380,6 @@ class RuntimeContext:
     grasp_reason: str = ""
     grasp_reposition_proposal: Optional[Dict] = None
     grasp_reposition_start_mono: float = 0.0
-    pre_arm_stop_settle_start_mono: float = 0.0
     grasp_retry_count: int = 0
     arm_response: Optional[object] = None
     grasp_timeout_mono: float = 0.0
@@ -632,7 +641,17 @@ class RuntimeContext:
         self.selected_candidate_score = None
         self.selected_candidate_reason = ""
         self.target_candidate_last_log_inference_id = ""
+        self.target_confirmed = False
         self.target_locked = False
+        self.selected_target_snapshot.clear()
+        self.selected_target_inference_id = ""
+        self.slice_complete_mono = 0.0
+        self.base_freeze_started_mono = 0.0
+        self.base_freeze_ready_mono = 0.0
+        self.grasp_state_entered_mono = 0.0
+        self.first_pose_sent_mono = 0.0
+        self.last_pose_ack_mono = 0.0
+        self.next_pose_sent_mono = 0.0
         self.grasp_retry_count = 0
         self.grasp_substate = ""
         self.grasp_verify_reported = False
@@ -774,7 +793,6 @@ class RuntimeContext:
         self.grasp_reason = ""
         self.grasp_reposition_proposal = None
         self.grasp_reposition_start_mono = 0.0
-        self.pre_arm_stop_settle_start_mono = 0.0
         self.grasp_retry_count = 0
         self.arm_response = None
         self.grasp_timeout_mono = 0.0

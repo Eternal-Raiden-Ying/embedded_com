@@ -41,23 +41,17 @@ def encode_pose(
 ) -> str:
     """Encode an arm POSE command for the STM32 arm MCU.
 
-    The arm firmware PC mode expects one text line with seven integer
-    parameters. The caller is responsible for validating the input range.
+    The caller is responsible for validating the input range.
     """
     return (
-        f"POSE {round(x)} {round(y)} {round(z)} "
-        f"{round(pitch)} {round(roll)} {round(claw)} {int(time_ms)}"
+        f"POSE {float(x):g} {float(y):g} {float(z):g} "
+        f"{float(pitch):g} {float(roll):g} {float(claw):g} {int(time_ms)}"
     )
 
 
 def encode_reset() -> str:
     """Encode a RESET command for the arm MCU."""
     return "RESET\n"
-
-
-def encode_grabbed() -> str:
-    """Encode a GRABBED command for retracting with the object held."""
-    return "GRABBED"
 
 
 def pose_dict_from_command(line: str) -> Dict[str, int]:
@@ -111,10 +105,7 @@ def _is_noise_line(raw: str) -> bool:
 def parse_arm_response_detail(line: str) -> Dict[str, Any]:
     """Parse one raw line from the arm serial port.
 
-    Returns a dict with status in:
-      OK_BUILTIN_POSE_START, OK_BUILTIN_POSE_DONE, OK_POSE,
-      OK_GRABBED_START, OK_KEEP_CLAW, OK_GRABBED_DONE, ERR_IK,
-      ERR_CMD, NOISE, UNKNOWN.
+    Returns a dict with status in OK_POSE, ERR_IK, ERR_CMD, NOISE, UNKNOWN.
     """
     raw = str(line or "").strip()
     if not raw:
@@ -125,34 +116,8 @@ def parse_arm_response_detail(line: str) -> Dict[str, Any]:
     if _is_noise_line(raw):
         return {"status": "NOISE", "raw": raw}
 
-    for builtin_name in ("BOTTLE", "APPLE", "RISE"):
-        prefix = f"OK POSE_{builtin_name} "
-        if upper.startswith(prefix + "START"):
-            return {
-                "status": "OK_BUILTIN_POSE_START",
-                "raw": raw,
-                "builtin_stage": "pose_start",
-                "builtin_name": builtin_name.lower(),
-            }
-        if upper.startswith(prefix + "DONE"):
-            return {
-                "status": "OK_BUILTIN_POSE_DONE",
-                "raw": raw,
-                "builtin_stage": "pose_done",
-                "builtin_name": builtin_name.lower(),
-            }
-
     if upper.startswith("OK POSE"):
         return {"status": "OK_POSE", "raw": raw, "pose": parse_pose_fields(raw)}
-
-    if upper.startswith("OK GRABBED DONE"):
-        return {"status": "OK_GRABBED_DONE", "raw": raw}
-
-    if upper.startswith("OK GRABBED START"):
-        return {"status": "OK_GRABBED_START", "raw": raw}
-
-    if upper.startswith("OK KEEP_CLAW"):
-        return {"status": "OK_KEEP_CLAW", "raw": raw}
 
     if upper.startswith("ERR IK"):
         detail = {"status": "ERR_IK", "raw": raw}
@@ -201,33 +166,6 @@ def parse_arm_response(line: str) -> Optional[ArmResponse]:
             raw_line=line,
             ts=now_ts(),
             parsed_status="OK_POSE",
-        )
-
-    if status in {"OK_BUILTIN_POSE_START", "OK_BUILTIN_POSE_DONE"}:
-        return ArmResponse(
-            ok=status == "OK_BUILTIN_POSE_DONE",
-            message=status,
-            raw_line=line,
-            ts=now_ts(),
-            parsed_status=status,
-        )
-
-    if status == "OK_GRABBED_DONE":
-        return ArmResponse(
-            ok=True,
-            message="OK_GRABBED_DONE",
-            raw_line=line,
-            ts=now_ts(),
-            parsed_status="OK_GRABBED_DONE",
-        )
-
-    if status in {"OK_GRABBED_START", "OK_KEEP_CLAW"}:
-        return ArmResponse(
-            ok=False,
-            message=status,
-            raw_line=line,
-            ts=now_ts(),
-            parsed_status=status,
         )
 
     if status == "ERR_IK":

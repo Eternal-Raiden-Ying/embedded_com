@@ -1228,6 +1228,7 @@ class ArmCommand:
     command: str = "POSE"
     recipe_name: str = ""
     recipe_step_index: int = -1
+    recipe_step_name: str = ""
     expect_ack: bool = True
     success_ack: str = ""
     timeout_s: float = 0.0
