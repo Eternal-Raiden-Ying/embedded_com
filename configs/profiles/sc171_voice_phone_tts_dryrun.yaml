@@ -98,8 +98,7 @@ voice_gateway:
     channels: 1
     format: "S16_LE"
   kws:
-    frontend_backend: onnx
-    classifier_backend: onnx
+    backend: sherpa_onnx
   asr:
     quantized: true
   vad:

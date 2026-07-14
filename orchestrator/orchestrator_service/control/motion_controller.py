@@ -24,6 +24,22 @@ class MotionDecision:
     jog_reason: str = ""
 
 
+def enforce_bbox_uart_yaw_sign(cmd: CmdVel, summary: Dict[str, Any], controller: Any) -> bool:
+    """Last-line invariant used by service before UART encoding."""
+    yaw_owner = str(summary.get("yaw_owner") or summary.get("yaw_source") or "")
+    center_error = summary.get("bbox_center_error_control", summary.get("center_error"))
+    if yaw_owner != "bbox" or center_error is None:
+        return False
+    final_wz = float(getattr(cmd, "wz_radps", 0.0) or 0.0)
+    if abs(final_wz) <= 1e-6 or float(center_error) * final_wz >= 0.0:
+        return False
+    corrected_wz, _raw = controller._compute_bbox_yaw_cmd(float(center_error))
+    cmd.wz_radps = float(corrected_wz)
+    summary["bbox_yaw_hard_corrected_before_uart"] = True
+    summary.setdefault("control_invariant_violations", []).append("BBOX_FINAL_YAW_SIGN_WRONG")
+    return True
+
+
 class MotionController:
     def __init__(
         self,
@@ -262,6 +278,15 @@ class MotionController:
             "yolo_table_visible": yolo_table_visible,
             "yolo_table_fresh": yolo_table_fresh,
             "yolo_table_age_ms": getattr(obs, "yolo_table_age_ms", None) if obs is not None else None,
+            "inference_executed": getattr(obs, "inference_executed", None) if obs is not None else None,
+            "inference_completed": getattr(obs, "inference_completed", None) if obs is not None else None,
+            "inference_seq": getattr(obs, "inference_seq", None) if obs is not None else None,
+            "inference_age_ms": getattr(obs, "inference_age_ms", None) if obs is not None else None,
+            "has_new_inference": getattr(obs, "has_new_inference", None) if obs is not None else None,
+            "explicit_negative": bool(getattr(obs, "explicit_negative_detection", False)) if obs is not None else False,
+            "explicit_negative_detection": bool(getattr(obs, "explicit_negative_detection", False)) if obs is not None else False,
+            "bbox_age_ms": getattr(obs, "control_bbox_age_ms", getattr(obs, "yolo_table_age_ms", None)) if obs is not None else None,
+            "bbox_hold_reason": str(getattr(obs, "bbox_hold_reason", "") or "") if obs is not None else "",
             "yolo_valid_reason": str(getattr(obs, "yolo_valid_reason", "") or "") if obs is not None else "",
             "yolo_invalid_reason": str(getattr(obs, "yolo_invalid_reason", "") or "") if obs is not None else "",
             **semantic_fields,
@@ -365,6 +390,22 @@ class MotionController:
         )
         return MotionDecision(cmd=cmd, cx_norm_abs=abs(wz), distance_ratio=1.0, control_summary=summary)
 
+    def _compute_bbox_yaw_cmd(self, center_error: Optional[float]) -> Tuple[float, float]:
+        """Return the one canonical RGB-bbox yaw mapping used by docking.
+
+        Image-right is positive yaw on the deployed base.  Edge/view sign
+        calibration therefore must never be applied to this pure bbox path.
+        """
+        if center_error is None:
+            return 0.0, 0.0
+        tight_tol = abs(float(getattr(self.cfg, "table_yolo_align_center_x_tol", 0.08) or 0.08))
+        if abs(float(center_error)) <= tight_tol:
+            return 0.0, 0.0
+        gain = float(getattr(self.car_cfg, "yolo_table_yaw_gain", 0.20) or 0.20)
+        max_wz = abs(float(getattr(self.car_cfg, "yolo_table_max_wz_radps", 0.06) or 0.06))
+        raw = float(center_error) * 2.0 * gain
+        return self._clamp(raw, -max_wz, max_wz), raw
+
     def yolo_table_search_cmd(
         self,
         obs: Optional[TableEdgeObs],
@@ -390,23 +431,20 @@ class MotionController:
         view_err_norm = float(center_error * 2.0) if center_error is not None else 0.0
         gain = float(getattr(self.car_cfg, "yolo_table_yaw_gain", 0.20) or 0.20)
         max_wz = abs(float(getattr(self.car_cfg, "yolo_table_max_wz_radps", 0.06) or 0.06))
-        if center_error is not None and abs(float(center_error)) > table_center_tol:
-            # Pure RGB bbox yaw follows image-space error directly.  The
-            # table-view sign belongs to edge/FOV geometry and must not be
-            # reused here.
-            wz_raw = center_error * 2.0 * gain
-            wz = self._clamp(wz_raw, -max_wz, max_wz)
-        else:
-            wz_raw = 0.0
-            wz = 0.0
+        wz, wz_raw = self._compute_bbox_yaw_cmd(center_error)
         mode_name = str(mode or "SEARCH_TABLE").upper().strip() or "SEARCH_TABLE"
+        forward_exit_limit = max(
+            forward_hard_limit,
+            abs(float(getattr(self.car_cfg, "yolo_forward_center_exit_limit", forward_hard_limit + 0.03) or (forward_hard_limit + 0.03))),
+        )
+        active_forward_limit = forward_exit_limit if mode_name == "YOLO_APPROACH" else forward_hard_limit
         source_name = normalize_control_source(control_source or "yolo_forward")
         assist_vx = 0.0
         # Tight tolerance is only the yaw deadband.  Forward motion remains
         # available throughout the wider hard-limit band so the robot can
         # advance while applying a bounded bbox correction.
         forward_vx = abs(float(getattr(self.cfg, "bbox_track_forward_vx_mps", 0.10) or 0.10))
-        yolo_forward_allowed = bool(center_error is not None and abs(center_error) <= forward_hard_limit)
+        yolo_forward_allowed = bool(center_error is not None and abs(center_error) <= active_forward_limit)
         if source_name in {"yolo_forward", "yolo_track_forward"}:
             if yolo_forward_allowed:
                 assist_vx = forward_vx
@@ -445,6 +483,8 @@ class MotionController:
                 "center_error": float(center_error) if center_error is not None else None,
                 "yolo_forward_center_good_limit": float(table_center_tol),
                 "yolo_forward_center_hard_limit": float(forward_hard_limit),
+                "yolo_forward_center_exit_limit": float(forward_exit_limit),
+                "yolo_forward_center_active_limit": float(active_forward_limit),
                 "yolo_forward_allowed": bool(yolo_forward_allowed),
                 "yolo_approach_speed_band": "bbox_track",
                 "yolo_approach_speed_depth": None,

@@ -11,8 +11,6 @@ from typing import Any, Dict, Optional
 class AudioConfig:
     wake_key: str
     stop_key: str
-    wake_th: float
-    stop_th: float
     armed_secs: float
     followup_secs: float
     stop_followup_secs: float

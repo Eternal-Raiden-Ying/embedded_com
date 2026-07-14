@@ -69,6 +69,15 @@ def validate_config(config: SystemGlobalConfig, force_production: bool = False) 
     """Validate the final effective config before runtime use."""
     load_target_catalog()
     warnings = []
+    kws = config.voice_gateway.kws
+    if str(kws.backend).strip().lower() != "sherpa_onnx":
+        raise ValueError("Invalid voice_gateway.kws.backend; production requires sherpa_onnx")
+    if int(kws.num_threads) < 1 or int(kws.max_active_paths) < 1 or int(kws.num_trailing_blanks) < 0:
+        raise ValueError("Invalid voice_gateway.kws Sherpa runtime parameters")
+    if int(kws.trigger_cooldown_ms) < 0 or int(kws.max_consecutive_errors) < 1:
+        raise ValueError("Invalid voice_gateway.kws cooldown/error policy")
+    if not str(kws.model_dir).strip() or not str(kws.keywords_file).strip():
+        raise ValueError("voice_gateway.kws model_dir and keywords_file are required")
     gateway_runtime = config.gateway.runtime
     task_input_mode = str(getattr(gateway_runtime, "task_input_mode", "") or "").strip().lower()
     if task_input_mode not in {"mobile", "mobile_only", "voice", "voice_only"}:

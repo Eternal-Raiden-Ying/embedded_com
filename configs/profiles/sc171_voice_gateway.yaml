@@ -28,8 +28,7 @@ voice_gateway:
     input_mode: voice_only
     dry_run_text: false
   kws:
-    frontend_backend: tflite
-    classifier_backend: onnx
+    backend: sherpa_onnx
   ipc:
     task_cmd_out:
       transport: uds

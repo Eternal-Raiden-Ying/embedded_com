@@ -78,16 +78,15 @@ def inspect_models():
 
     components = [
         {
-            "name": "wake_kws",
-            "backend": "openwakeword_onnx",
-            "configured_path": cfg.wake_tflite,
-            "required_companions": []
-        },
-        {
-            "name": "stop_kws",
-            "backend": "openwakeword_onnx",
-            "configured_path": cfg.stop_tflite,
-            "required_companions": []
+            "name": "kws",
+            "backend": cfg.kws.backend,
+            "configured_path": cfg.kws.model_dir,
+            "required_companions": [
+                "encoder-epoch-13-avg-2-chunk-16-left-64.int8.onnx",
+                "decoder-epoch-13-avg-2-chunk-16-left-64.onnx",
+                "joiner-epoch-13-avg-2-chunk-16-left-64.int8.onnx",
+                "tokens.txt",
+            ]
         },
         {
             "name": "vad",

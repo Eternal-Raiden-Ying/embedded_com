@@ -112,6 +112,7 @@ class PredictorManager:
         self._last_contract_warning_count = 0
         self._last_table_det_ts = 0.0
         self._last_infer_error = ""
+        self._completed_inference_seq = 0
 
     @staticmethod
     def _env_bool(name: str, default: bool = False) -> bool:
@@ -342,6 +343,13 @@ class PredictorManager:
                 infer_ms = max(0.0, (time.perf_counter() - infer_start) * 1000.0)
 
             payload = self._build_local_perception_payload(rgb_shape, boxes, masks, has_infer)
+            inference_completed = bool(
+                has_infer
+                and payload.get("contract_ok", True)
+                and not str(payload.get("infer_error") or "")
+            )
+            if inference_completed:
+                self._completed_inference_seq += 1
             inference_done_mono_ns = time.monotonic_ns()
             payload["obs_ts"] = time.time()
             payload["frame_seq"] = int(seq)
@@ -350,6 +358,10 @@ class PredictorManager:
             payload["capture_mono_ns"] = frames.get("capture_mono_ns")
             payload["frame_capture_ts"] = frames.get("frame_capture_ts")
             payload["inference_done_mono_ns"] = int(inference_done_mono_ns)
+            payload["inference_executed"] = bool(has_infer)
+            payload["inference_completed"] = bool(inference_completed)
+            payload["inference_seq"] = int(self._completed_inference_seq) if inference_completed else None
+            payload["last_completed_inference_mono_ns"] = int(inference_done_mono_ns) if inference_completed else None
             payload["trace_id"] = frames.get("trace_id")
             payload["age_ms"] = 0.0
             payload["yolo_infer_ms"] = infer_ms
@@ -438,6 +450,10 @@ class PredictorManager:
                     "yolo_infer_running": bool(has_infer),
                     "yolo_table_search_enabled": yolo_table_search_enabled,
                     "table_bbox_detected": bool(table_semantics.get("table_bbox_current_found")),
+                    "last_completed_had_table": bool(table_semantics.get("table_bbox_current_found")) if inference_completed else None,
+                    "explicit_negative_detection": bool(
+                        inference_completed and not table_semantics.get("table_bbox_current_found")
+                    ),
                     "table_bbox_used_for_search": table_bbox_used_for_search,
                     "table_direction_hint": table_detection_debug(payload, rgb_shape).get("direction"),
                     **table_semantics,

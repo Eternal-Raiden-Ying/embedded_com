@@ -55,8 +55,7 @@ voice_gateway:
     input_mode: voice_only
     dry_run_text: true
   kws:
-    frontend_backend: onnx
-    classifier_backend: onnx
+    backend: sherpa_onnx
   ipc:
     task_cmd_out:
       transport: tcp

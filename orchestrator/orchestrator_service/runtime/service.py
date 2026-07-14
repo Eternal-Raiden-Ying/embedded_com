@@ -20,6 +20,7 @@ from ..bridge.simple_car_protocol import parse_car_state_line
 from ..bridge.uart_bridge import UartBridge
 from ..config.schema import OrchestratorConfig, SocketEndpoint
 from ..control.motion_adapter import Stm32MotionAdapter
+from ..control.motion_controller import enforce_bbox_uart_yaw_sign
 from ..control.motion.velocity_limits import SimpleCarMapper
 from ..control.velocity_smoother import VelocitySmoother
 from ..ipc.protocol import (
@@ -1487,7 +1488,7 @@ class OrchestratorService(BaseModule):
                 "motion_class": summary.get("motion_class") or "",
                 "estop_cooldown_applied": (
                     True if (stop_class or "").lower() in {"emergency", "safety"}
-                    else (False if (stop_class or "").lower() in {"control_recovery", "stale_recovery"} else None)
+                    else False
                 ),
                 "estop_cooldown_reason": "hard_stop" if (stop_class or "").lower() in {"emergency", "safety"} else "",
                 "service_override": service_override,
@@ -1682,7 +1683,7 @@ class OrchestratorService(BaseModule):
             "stop_class": stop_class,
             "estop_cooldown_applied": (
                 True if stop_class in {"emergency", "safety"}
-                else (False if stop_class in {"control_recovery", "stale_recovery"} else None)
+                else False
             ),
             "estop_cooldown_reason": "hard_stop" if stop_class in {"emergency", "safety"} else "",
             "service_override": service_override,
@@ -2173,6 +2174,18 @@ class OrchestratorService(BaseModule):
                     or "uart_not_accepted"
                 )
                 self.log("warn", "state_machine", f"[RETURN_PLACE][UART_BLOCKED] reason={reason} state={state}")
+        if is_velocity_line and state in {"SEARCH_TARGET_INIT", "EDGE_SLIDE_SEARCH", "TARGET_CONFIRM"}:
+            vy = float(payload.get("vy_mps", 0.0) or 0.0)
+            accepted = bool(payload.get("writer_accept_cmd") is not False and payload.get("uart_tx_ok", True))
+            if accepted and abs(vy) > 1e-9:
+                self.core.ctx.target_lateral_last_uart_accept_mono = monotonic_ts()
+            elif str(payload.get("writer_discard_reason") or "") == "estop_cooldown" and str(payload.get("stop_class") or "none") not in {"emergency", "safety"}:
+                self.log(
+                    "error",
+                    "state_machine",
+                    "NORMAL_CONTROL_BLOCKED_BY_ESTOP_COOLDOWN",
+                    {"state": state, "vy_mps": vy},
+                )
         payload["summary_key"] = self._uart_event_key(payload)
         payload["rendered"] = self._render_uart_line(payload)
         if bool(payload.get("uart_mode_send_required")) or str(payload.get("stm32_kind") or "") == "mode":
@@ -4873,6 +4886,19 @@ class OrchestratorService(BaseModule):
         )
         effective_cmd = smoothed_cmd
         summary.update(smoothing_meta)
+        center_error = summary.get("bbox_center_error_control", summary.get("center_error"))
+        rejected_wz = float(getattr(effective_cmd, "wz_radps", 0.0) or 0.0)
+        if enforce_bbox_uart_yaw_sign(effective_cmd, summary, self.core.controller):
+            self.log(
+                "error",
+                "state_machine",
+                "BBOX_FINAL_YAW_SIGN_WRONG corrected_before_uart",
+                {
+                    "center_error": center_error,
+                    "rejected_wz": rejected_wz,
+                    "corrected_wz": float(effective_cmd.wz_radps),
+                },
+            )
         effective_cmd, final_clamp_meta = self._apply_final_forward_only_clamp(effective_cmd, summary)
         if final_clamp_meta:
             summary.update(final_clamp_meta)
@@ -4885,6 +4911,7 @@ class OrchestratorService(BaseModule):
         summary["last_valid_motion_age_ms"] = self._last_valid_motion_age_ms(time.time())
         summary["effective_cmd"] = self._cmd_dict(effective_cmd)
         summary["effective_cmd_after_service"] = self._cmd_dict(effective_cmd)
+        summary["service_effective_cmd"] = self._cmd_dict(effective_cmd)
         obs = self.core.ctx.last_table_obs
         summary["tick_interval_ms"] = getattr(obs, "state_machine_tick_interval_ms", None) if obs is not None else None
         summary["tick_process_ms"] = self._last_tick_process_ms

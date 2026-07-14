@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 
 from voice_service.config.loader import load_voice_config
-from voice_service.runtime.kws_engine import FlexibleWakeWord
+from voice_service.runtime.kws_engine import create_kws_backend
 
 def read_wav(wav_path):
     with wave.open(str(wav_path), "rb") as wf:
@@ -68,15 +68,8 @@ def main():
     audio, resampled = resample_audio(raw_audio, sr, target_sr=16000)
     print(f"Resampling Performed: {resampled}")
 
-    # KWS Model selection
-    models = []
-    if cfg.wake_tflite:
-        models.append(cfg.wake_tflite)
-    if cfg.stop_tflite:
-        models.append(cfg.stop_tflite)
-
-    print(f"Wake Model Path: {cfg.wake_tflite}")
-    print(f"Stop Model Path: {cfg.stop_tflite}")
+    print(f"KWS Model Directory: {cfg.kws.model_dir}")
+    print(f"Keywords File: {cfg.kws.keywords_file}")
 
     # Measure model load time
     t0 = time.perf_counter()
@@ -84,14 +77,7 @@ def main():
     # The probe runs normal mode unless explicitly requested
     dry_run = cfg.dry_run_text
     try:
-        oww = FlexibleWakeWord(
-            models,
-            vad_threshold=cfg.oww_vad_th,
-            ncpu=1,
-            dry_run_text=dry_run,
-            frontend_backend=cfg.frontend_backend,
-            classifier_backend=cfg.classifier_backend
-        )
+        kws = create_kws_backend(cfg.kws, dry_run_text=dry_run)
     except (ValueError, ImportError, ModuleNotFoundError) as e:
         print(f"\n[VOICE][MODEL] status=SKIPPED_ENV_DEPENDENCY reason='{e}'")
         import traceback
@@ -103,7 +89,7 @@ def main():
         traceback.print_exc()
         sys.exit(0)
     load_time = time.perf_counter() - t0
-    print(f"Backend: {'mock_stub' if dry_run else 'openwakeword_onnx'}")
+    print(f"Backend: {'mock_stub' if dry_run else 'sherpa_onnx'}")
     print(f"Model Load Time: {load_time * 1000.0:.2f} ms")
 
     # Segment audio in 80ms (1280 samples) frames
@@ -111,30 +97,19 @@ def main():
     num_frames = len(audio) // frame_samples
 
     latencies = []
-    wake_scores = []
-    stop_scores = []
     wake_triggered = False
     stop_triggered = False
-
-    wake_key = cfg.wake_key or (Path(cfg.wake_tflite).stem if cfg.wake_tflite else "")
-    stop_key = cfg.stop_key or (Path(cfg.stop_tflite).stem if cfg.stop_tflite else "")
 
     for i in range(num_frames):
         chunk = audio[i * frame_samples : (i + 1) * frame_samples]
 
         t_start = time.perf_counter()
-        preds = oww.predict(chunk)
+        keyword = kws.process(np.ascontiguousarray(chunk.astype(np.float32) / 32768.0))
         t_elapsed = time.perf_counter() - t_start
         latencies.append(t_elapsed * 1000.0)
-
-        ws = preds.get(wake_key, 0.0)
-        ss = preds.get(stop_key, 0.0)
-        wake_scores.append(ws)
-        stop_scores.append(ss)
-
-        if ws >= cfg.wake_th:
+        if keyword == cfg.kws.wake_keyword:
             wake_triggered = True
-        if ss >= cfg.stop_th:
+        if keyword == cfg.kws.stop_keyword:
             stop_triggered = True
 
     if not latencies:
@@ -147,17 +122,10 @@ def main():
     p50 = np.percentile(warm_times, 50)
     p95 = np.percentile(warm_times, 95)
 
-    wake_max = max(wake_scores) if wake_scores else 0.0
-    stop_max = max(stop_scores) if stop_scores else 0.0
-
     print("\n--- Inference Performance Baseline ---")
     print(f"Cold Inference Latency (First frame): {cold_time:.2f} ms")
     print(f"Warm Inference Latency (p50)        : {p50:.2f} ms")
     print(f"Warm Inference Latency (p95)        : {p95:.2f} ms")
-    print(f"Wake Max Score                      : {wake_max:.3f}")
-    print(f"Stop Max Score                      : {stop_max:.3f}")
-    print(f"Wake Threshold                      : {cfg.wake_th:.3f}")
-    print(f"Stop Threshold                      : {cfg.stop_th:.3f}")
     print(f"Wake Triggered                      : {wake_triggered}")
     print(f"Stop Triggered                      : {stop_triggered}")
 
@@ -170,8 +138,6 @@ def main():
             "cold_latency_ms": cold_time,
             "warm_p50_ms": p50,
             "warm_p95_ms": p95,
-            "wake_max": wake_max,
-            "stop_max": stop_max,
             "wake_triggered": wake_triggered,
             "stop_triggered": stop_triggered,
         }, fp, indent=2)

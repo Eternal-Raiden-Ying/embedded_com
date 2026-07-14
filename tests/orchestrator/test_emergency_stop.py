@@ -238,6 +238,67 @@ class EmergencyStopTest(unittest.TestCase):
         finally:
             bridge.close()
 
+    def test_normal_soft_stop_does_not_arm_estop_cooldown_and_next_vy_is_accepted(self) -> None:
+        captured = []
+        bridge = UartBridge(
+            "/dev/null",
+            115200,
+            0.1,
+            dry_run=True,
+            dry_run_echo_stdout=False,
+            readback_enabled=False,
+            tx_callback=lambda line, dry_run, meta: captured.append((line, dict(meta or {}))),
+        )
+        bridge.start()
+        try:
+            before = bridge._last_estop_mono
+            bridge.send_soft_stop(tx_meta={"stop_class": "control_recovery", "estop_cooldown_applied": False})
+            deadline = time.time() + 1.0
+            while len(captured) < 1 and time.time() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(bridge._last_estop_mono, before)
+
+            bridge.send_motion_line(
+                "V 0.000 -0.030 0.000\r\n",
+                tx_meta={"kind": "vel", "stop_class": "none", "estop_cooldown_applied": False},
+            )
+            deadline = time.time() + 1.0
+            while len(captured) < 2 and time.time() < deadline:
+                time.sleep(0.01)
+            vel_meta = captured[-1][1]
+            self.assertIsNot(vel_meta.get("writer_accept_cmd"), False)
+            self.assertEqual(vel_meta.get("writer_discard_reason", ""), "")
+        finally:
+            bridge.close()
+
+    def test_real_emergency_stop_arms_cooldown_and_suppresses_velocity(self) -> None:
+        captured = []
+        bridge = UartBridge(
+            "/dev/null",
+            115200,
+            0.1,
+            dry_run=True,
+            dry_run_echo_stdout=False,
+            readback_enabled=False,
+            tx_callback=lambda line, dry_run, meta: captured.append((line, dict(meta or {}))),
+        )
+        bridge.start()
+        try:
+            bridge.send_emergency_stop(tx_meta={"stop_class": "emergency"})
+            self.assertGreater(bridge._last_estop_mono, 0.0)
+            bridge.send_motion_line(
+                "V 0.000 -0.030 0.000\r\n",
+                tx_meta={"kind": "vel", "stop_class": "emergency", "estop_cooldown_applied": True},
+            )
+            deadline = time.time() + 1.0
+            while not any(meta.get("writer_discard_reason") for _, meta in captured) and time.time() < deadline:
+                time.sleep(0.01)
+            discarded = [meta for _, meta in captured if meta.get("writer_discard_reason")]
+            self.assertTrue(discarded)
+            self.assertEqual(discarded[-1]["writer_discard_reason"], "estop_cooldown")
+        finally:
+            bridge.close()
+
     def test_stale_v_and_cooldown_suppression(self) -> None:
         """Verify that stale V commands or V commands during cooldown window are suppressed.
 

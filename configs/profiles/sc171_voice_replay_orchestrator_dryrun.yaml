@@ -31,9 +31,7 @@ voice_gateway:
     replay_fail_fast: true
     asr_warmup_enabled: true
   kws:
-    threshold: 0.90
-    frontend_backend: onnx
-    classifier_backend: onnx
+    backend: sherpa_onnx
   asr: {quantized: true, mode: offline}
   vad: {quantized: true}
   tts: {enabled: false}

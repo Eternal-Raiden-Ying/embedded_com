@@ -134,9 +134,6 @@ def run_voice_service(cfg: VoiceServiceConfig, stop_event: Optional[threading.Ev
     )
     run_dir = configure_artifact_logging(cfg.runs_dir)
 
-    cfg.wake_key = cfg.wake_key or (cfg.wake_tflite.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].split(".")[0] if cfg.wake_tflite else "")
-    cfg.stop_key = cfg.stop_key or (cfg.stop_tflite.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].split(".")[0] if cfg.stop_tflite else "")
-
     interpreter = CommandInterpreter.from_json(cfg.commands_json)
     if stop_event is None:
         stop_event = threading.Event()
@@ -212,13 +209,15 @@ def run_voice_service(cfg: VoiceServiceConfig, stop_event: Optional[threading.Ev
     tts_enabled = shared_tts is not None
     tts_listener_enabled = tts_listener is not None
     task_ack_enabled = task_ack_listener is not None
-    stop_hotword_enabled = bool(cfg.stop_tflite and cfg.stop_key)
+    stop_hotword_enabled = bool(cfg.kws.stop_keyword)
     _effective_online_chunk_size = list(getattr(cfg, "asr_online_chunk_size", [5, 10, 5]))
 
     config_payload = {
         "ts": time.time(),
         "run_dir": run_dir,
-        "wake_model": cfg.wake_tflite,
+        "kws_backend": cfg.kws.backend,
+        "kws_model_dir": cfg.kws.model_dir,
+        "kws_keywords_file": cfg.kws.keywords_file,
         "asr_mode": cfg.asr_mode,
         "asr_backend": pipeline.asr.name,
         "asr_model_path": cfg.asr_dir,
@@ -227,11 +226,9 @@ def run_voice_service(cfg: VoiceServiceConfig, stop_event: Optional[threading.Ev
         "asr_online_step_samples": int(_effective_online_chunk_size[1]) * 960,
         "asr_online_encoder_chunk_look_back": getattr(cfg, "asr_online_encoder_chunk_look_back", None),
         "asr_online_decoder_chunk_look_back": getattr(cfg, "asr_online_decoder_chunk_look_back", None),
-        "stop_model": cfg.stop_tflite,
-        "wake_key": cfg.wake_key,
-        "stop_key": cfg.stop_key,
-        "wake_th": cfg.wake_th,
-        "stop_th": cfg.stop_th,
+        "wake_key": cfg.kws.wake_keyword,
+        "stop_key": cfg.kws.stop_keyword,
+        "kws_trigger_cooldown_ms": cfg.kws.trigger_cooldown_ms,
         "arecord_device": cfg.arecord_device,
         "task_transport": cfg.task_transport,
         "task_send_mode": cfg.task_send_mode,
@@ -254,7 +251,7 @@ def run_voice_service(cfg: VoiceServiceConfig, stop_event: Optional[threading.Ev
     }
     write_config_snapshot(config_payload)
     write_named_jsonl("boot", config_payload)
-    write_stop_trace("STOP_BOOT_CONFIG", stop_key=cfg.stop_key, stop_hotword_enabled=stop_hotword_enabled, stop_th=cfg.stop_th)
+    write_stop_trace("STOP_BOOT_CONFIG", stop_key=cfg.kws.stop_keyword, stop_hotword_enabled=stop_hotword_enabled)
 
     jlog({
         "level": "info", "src": "boot",

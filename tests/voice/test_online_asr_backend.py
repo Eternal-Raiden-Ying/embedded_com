@@ -159,11 +159,15 @@ def test_stale_online_chunk_and_final_are_dropped_and_abort_clears_session():
 
 
 def test_online_missing_model_fails_explicitly_but_offline_is_independent(tmp_path: Path):
-    wake = tmp_path / "wake.onnx"
-    stop = tmp_path / "stop.onnx"
-    wake.touch()
-    stop.touch()
-    base = dict(wake_tflite=str(wake), stop_tflite=str(stop), vad_dir=str(tmp_path), piper_model="",
+    from common.config.schema import VoiceKwsConfig
+    for name in (
+        "encoder-epoch-13-avg-2-chunk-16-left-64.int8.onnx",
+        "decoder-epoch-13-avg-2-chunk-16-left-64.onnx",
+        "joiner-epoch-13-avg-2-chunk-16-left-64.int8.onnx", "tokens.txt", "keywords.txt",
+    ):
+        (tmp_path / name).touch()
+    kws = VoiceKwsConfig(model_dir=str(tmp_path), keywords_file=str(tmp_path / "keywords.txt"))
+    base = dict(kws=kws, vad_dir=str(tmp_path), piper_model="",
                 piper_config="", disable_tts=True, dry_run_text=False)
     with pytest.raises(SystemExit):
         check_models(SimpleNamespace(**base, asr_mode="online", asr_dir=str(tmp_path / "missing-online")))

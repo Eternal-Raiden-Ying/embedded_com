@@ -169,6 +169,9 @@ class RuntimeContext:
     bbox_valid_streak: int = 0
     bbox_centered_streak: int = 0
     edge_trusted_streak: int = 0
+    edge_last_obs_identity: object = None
+    edge_last_yaw_sample: Optional[float] = None
+    edge_last_yaw_delta: Optional[float] = None
     edge_yaw_ema: Optional[float] = None
     edge_handoff_started_mono: float = 0.0
     edge_handoff_complete: bool = False
@@ -206,6 +209,10 @@ class RuntimeContext:
     yaw_owner: str = ""
     forward_owner: str = ""
     lateral_owner: str = ""
+    docking_owner_enter_mono: float = 0.0
+    docking_owner_acquire_reason: str = ""
+    docking_owner_release_reason: str = ""
+    bbox_forward_allowed_latched: bool = False
     arbitration_reason: str = ""
     motion_class: str = ""
     stop_class: str = "none"
@@ -264,6 +271,9 @@ class RuntimeContext:
     bbox_lost_since_mono: float = 0.0
     bbox_lost_hold_active: bool = False
     last_bbox_yaw_cmd: float = 0.0
+    last_valid_yolo_obs: Optional[TableEdgeObs] = None
+    last_valid_yolo_obs_mono: float = 0.0
+    last_counted_negative_inference_key: str = ""
     search_wz_sign_latched: int = 0
     search_wz_latch_until_mono: float = 0.0
     target_found_frames: int = 0
@@ -302,6 +312,15 @@ class RuntimeContext:
     last_good_vy_mps: float = 0.0
     target_lateral_hold_active: bool = False
     target_lateral_hold_source: str = ""
+    target_lateral_last_progress_mono: float = 0.0
+    target_lateral_min_abs_err_x: Optional[float] = None
+    target_lateral_last_err_x: Optional[float] = None
+    target_lateral_last_good_obs: Optional[TargetObs] = None
+    target_lateral_last_good_obs_mono: float = 0.0
+    target_lateral_last_good_vy_mps: float = 0.0
+    target_lateral_last_cmd_mono: float = 0.0
+    target_lateral_last_uart_accept_mono: float = 0.0
+    target_lateral_timeout_type: str = ""
     selected_candidate_idx: Optional[int] = None
     selected_candidate_score: Optional[float] = None
     selected_candidate_reason: str = ""
@@ -465,6 +484,9 @@ class RuntimeContext:
         self.edge_slope_final_ready_reset_edge_id = str(self.current_edge_id or "")
         self.bbox_centered_streak = 0
         self.edge_trusted_streak = 0
+        self.edge_last_obs_identity = None
+        self.edge_last_yaw_sample = None
+        self.edge_last_yaw_delta = None
         self.edge_yaw_ema = None
         self.edge_handoff_started_mono = 0.0
         self.edge_handoff_complete = False
@@ -492,6 +514,10 @@ class RuntimeContext:
         self.yaw_owner = ""
         self.forward_owner = ""
         self.lateral_owner = ""
+        self.docking_owner_enter_mono = 0.0
+        self.docking_owner_acquire_reason = ""
+        self.docking_owner_release_reason = ""
+        self.bbox_forward_allowed_latched = False
         self.arbitration_reason = ""
         self.motion_class = ""
         self.stop_class = "none"
@@ -516,6 +542,9 @@ class RuntimeContext:
         self.bbox_fov_violation_streak = 0
         self.bbox_lost_since_mono = 0.0
         self.bbox_lost_hold_active = False
+        self.last_valid_yolo_obs = None
+        self.last_valid_yolo_obs_mono = 0.0
+        self.last_counted_negative_inference_key = ""
         self.search_wz_sign_latched = 0
         self.search_wz_latch_until_mono = 0.0
         self.target_found_frames = 0
@@ -544,6 +573,15 @@ class RuntimeContext:
         self.last_good_vy_mps = 0.0
         self.target_lateral_hold_active = False
         self.target_lateral_hold_source = ""
+        self.target_lateral_last_progress_mono = 0.0
+        self.target_lateral_min_abs_err_x = None
+        self.target_lateral_last_err_x = None
+        self.target_lateral_last_good_obs = None
+        self.target_lateral_last_good_obs_mono = 0.0
+        self.target_lateral_last_good_vy_mps = 0.0
+        self.target_lateral_last_cmd_mono = 0.0
+        self.target_lateral_last_uart_accept_mono = 0.0
+        self.target_lateral_timeout_type = ""
         self.selected_candidate_idx = None
         self.selected_candidate_score = None
         self.selected_candidate_reason = ""
@@ -572,6 +610,9 @@ class RuntimeContext:
         self.last_table_touch_left = False
         self.last_table_touch_right = False
         self.last_table_touch_bottom = False
+        self.last_valid_yolo_obs = None
+        self.last_valid_yolo_obs_mono = 0.0
+        self.last_counted_negative_inference_key = ""
 
     def reset_edge_plan(self):
         self.current_edge_id = self.edge_visit_order[0] if self.edge_visit_order else "front"

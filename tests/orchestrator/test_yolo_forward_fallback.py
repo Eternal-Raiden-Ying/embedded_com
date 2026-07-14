@@ -101,10 +101,10 @@ def test_bbox_alignment_turns_toward_target_with_symmetric_limits_and_deadband()
     right_cmd = controller.yolo_table_search_cmd(right, mode="YOLO_ACQUIRE_ALIGN", control_source="yolo_track_forward")
     centered_cmd = controller.yolo_table_search_cmd(centered, mode="YOLO_ACQUIRE_ALIGN", control_source="yolo_track_forward")
 
-    # table_view_wz_sign=-1 is the established chassis convention: target on
-    # the left turns positive and target on the right turns negative.
-    assert left_cmd.cmd.wz_radps > 0.0
-    assert right_cmd.cmd.wz_radps < 0.0
+    # Pure bbox yaw has its own calibrated camera/chassis sign.  The edge/view
+    # table_view_wz_sign must not reverse this branch.
+    assert left_cmd.cmd.wz_radps < 0.0
+    assert right_cmd.cmd.wz_radps > 0.0
     assert abs(left_cmd.cmd.wz_radps) == abs(right_cmd.cmd.wz_radps)
     assert centered_cmd.cmd.wz_radps == 0.0
     assert controller.search_table_cmd(turn_sign=1).cmd.wz_radps > 0.0
@@ -121,7 +121,7 @@ def test_one_centered_fresh_bbox_enters_bbox_track_forward_without_edge_trust():
     assert final.control_summary["control_source"] == "yolo_track_forward"
 
 
-def test_bbox_forward_stops_and_realigns_when_fresh_bbox_leaves_tolerance():
+def test_bbox_forward_keeps_tracking_inside_forward_hard_limit():
     core, now = _search_core()
     core.ctx.last_table_obs = _bbox_obs_at_center_x(0.50, ts=now + 0.001, seq=1)
     assert core.tick().cmd.vx_mps > 0.0
@@ -129,10 +129,10 @@ def test_bbox_forward_stops_and_realigns_when_fresh_bbox_leaves_tolerance():
     core.ctx.last_table_obs = _bbox_obs_at_center_x(0.35, ts=now + 0.002, seq=2)
     decision = core.tick()
 
-    assert core.ctx.state == State.YOLO_ACQUIRE_ALIGN
-    assert decision.cmd.vx_mps == 0.0
-    assert decision.cmd.wz_radps > 0.0
-    assert decision.control_summary["docking_action"] == "BBOX_REACQUIRE_ROTATE"
+    assert core.ctx.state == State.YOLO_APPROACH
+    assert decision.cmd.vx_mps > 0.0
+    assert decision.cmd.wz_radps < 0.0
+    assert decision.control_summary["docking_action"] == "BBOX_TRACK_FORWARD"
 
 
 def test_trusted_edge_handoffs_after_bbox_forward_without_skipping_to_final():
@@ -144,9 +144,14 @@ def test_trusted_edge_handoffs_after_bbox_forward_without_skipping_to_final():
         obs.edge_valid = True
         obs.edge_trusted = True
         obs.usable_for_approach = True
+        obs.usable_for_alignment = True
+        obs.yolo_table_edge_stable_count = 6
         obs.yaw_err_rad = 0.02
-        obs.table_roi_depth_valid = True
-        obs.table_roi_depth_median = 1.0
+        obs.dist_err_m = 0.58
+        obs.target_dist_m = 0.50
+        obs.pose_found = True
+        obs.table_roi_depth_valid = False
+        obs.table_roi_depth_median = None
         core.ctx.last_table_obs = obs
         core.tick()
 
@@ -156,11 +161,23 @@ def test_trusted_edge_handoffs_after_bbox_forward_without_skipping_to_final():
     obs.edge_valid = True
     obs.edge_trusted = True
     obs.usable_for_approach = True
+    obs.usable_for_alignment = True
+    obs.yolo_table_edge_stable_count = 6
     obs.yaw_err_rad = 0.02
-    obs.table_roi_depth_valid = True
-    obs.table_roi_depth_median = 1.0
+    obs.dist_err_m = 0.58
+    obs.target_dist_m = 0.50
+    obs.pose_found = True
+    obs.table_roi_depth_valid = False
+    obs.table_roi_depth_median = None
     core.ctx.last_table_obs = obs
-    decision = core.tick()
+    handoff = core.tick()
+    if handoff.control_summary["docking_action"] == "EDGE_READINESS_HANDOFF":
+        obs.obs_seq = 7
+        obs.seq = 7
+        core.ctx.last_table_obs = obs
+        decision = core.tick()
+    else:
+        decision = handoff
 
     assert core.ctx.control_phase == "EDGE_GUIDED_APPROACH"
     assert decision.control_summary["docking_action"] == "EDGE_APPROACH_FORWARD"
@@ -176,7 +193,7 @@ def test_bbox_outside_hard_limit_stays_rotate_only_without_forward():
 
     assert core.ctx.state == State.YOLO_ACQUIRE_ALIGN
     assert decision.cmd.vx_mps == 0.0
-    assert decision.cmd.wz_radps > 0.0
+    assert decision.cmd.wz_radps < 0.0
 
 
 def test_search_table_transitions_to_yolo_approach_and_commands_forward_motion():
@@ -432,7 +449,7 @@ def test_reused_or_latched_bbox_cannot_enter_forward_or_change_search_owner():
     assert core.ctx.state == State.SEARCH_TABLE
 
 
-def test_fresh_bbox_switches_immediately_and_loss_returns_to_search():
+def test_fresh_bbox_switches_immediately_and_single_loss_holds_bbox_owner():
     core, now = _search_core()
     owners = []
     phases = []
@@ -449,9 +466,10 @@ def test_fresh_bbox_switches_immediately_and_loss_returns_to_search():
          "yolo_table_visible": False, "yolo_table_fresh": False}
     )
     decision = core.tick()
-    assert core.ctx.state == State.SEARCH_TABLE
+    assert core.ctx.state == State.YOLO_ACQUIRE_ALIGN
     assert decision.cmd.vx_mps == 0.0
-    assert decision.control_summary["docking_action"] == "SEARCH_ROTATE"
+    assert decision.control_summary["docking_action"] == "PERCEPTION_DROPOUT_HOLD"
+    assert decision.control_summary["control_source"] == "bbox_lost_hold"
 
 
 def test_live_invalid_edge_is_not_reclassified_as_dead_no_last_good_recovery():

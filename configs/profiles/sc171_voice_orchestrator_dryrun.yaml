@@ -33,7 +33,7 @@ voice_gateway:
     sample_rate: 16000
     channels: 1
     format: "S16_LE"
-  kws: {frontend_backend: onnx, classifier_backend: onnx}
+  kws: {backend: sherpa_onnx}
   asr: {mode: offline, quantized: true}
   vad: {quantized: true}
   tts: {enabled: false}

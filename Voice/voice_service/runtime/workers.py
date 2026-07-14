@@ -17,7 +17,7 @@ from ..ipc import JsonlAckInbox, InboundPollerThread, build_msgpack_client_sende
 from .asr_engine import AudioCommandPipeline
 from .commands import CommandInterpreter
 from .common import FRAME_MS, MIN_UTT_MS, SR, clean_asr_text, current_run_dir, jlog, kws_trigger, rms_int16, write_ipc_event, write_state_block, write_timeline
-from .kws_engine import FlexibleWakeWord
+from .kws_engine import KwsBackendFatalError, create_kws_backend
 from .mic_stream import RawMicStream, WavReplayAudioSource
 from .state import AudioConfig, RuntimeState
 from .playback import PhonePlaybackGuard
@@ -96,10 +96,8 @@ class AudioKWSWorker(threading.Thread):
                  pipeline: Optional[AudioCommandPipeline] = None):
         super().__init__(daemon=True, name="audio_kws")
         self.cfg_runtime = AudioConfig(
-            wake_key=cfg.wake_key,
-            stop_key=cfg.stop_key,
-            wake_th=cfg.wake_th,
-            stop_th=cfg.stop_th,
+            wake_key=cfg.kws.wake_keyword,
+            stop_key=cfg.kws.stop_keyword,
             armed_secs=cfg.armed_secs,
             followup_secs=cfg.followup_secs,
             stop_followup_secs=cfg.stop_followup_secs,
@@ -131,20 +129,9 @@ class AudioKWSWorker(threading.Thread):
         self.online_chunk_size = list(getattr(cfg, "asr_online_chunk_size", [5, 10, 5]))
         self.online_step_samples = max(1, int(self.online_chunk_size[1]) * 960)
 
-        models = []
-        if cfg.wake_tflite:
-            models.append(cfg.wake_tflite)
-        if cfg.stop_tflite:
-            models.append(cfg.stop_tflite)
-
-        self.oww = FlexibleWakeWord(
-            models,
-            vad_threshold=cfg.oww_vad_th,
-            ncpu=1,
-            dry_run_text=self.dry_run_text,
-            frontend_backend=cfg.frontend_backend,
-            classifier_backend=cfg.classifier_backend
-        )
+        self.kws = create_kws_backend(cfg.kws, dry_run_text=self.dry_run_text)
+        self.kws_trigger_cooldown_s = max(0.0, float(cfg.kws.trigger_cooldown_ms) / 1000.0)
+        self._last_kws_trigger: Dict[str, float] = {}
         if str(getattr(cfg, "input_mode", "voice_only")) == "wav_replay":
             self.mic = WavReplayAudioSource(
                 manifest_path=cfg.replay_manifest,
@@ -162,6 +149,8 @@ class AudioKWSWorker(threading.Thread):
                 mic_debug_every=cfg.mic_debug_every,
                 dry_run_text=self.dry_run_text,
             )
+        self._last_mic_restart_count = int(self.mic.stats().get("restarts", 0))
+        self._last_busy = False
         self.prebuf = deque(maxlen=self.cfg_runtime.pre_frames)
         self.state = "WAIT_WAKE"
         self.speech_up = 0
@@ -185,9 +174,10 @@ class AudioKWSWorker(threading.Thread):
         self._noise_floor_rms = 0.0
         self._noise_floor_before_prompt: Optional[float] = None
         self._last_speech_gate_blocked_at = 0.0
-        self._kws_window_started = time.monotonic()
-        self._kws_scores = []
-        self._kws_rms = []
+        self._reset_kws("gateway_restart")
+
+    def _reset_kws(self, reason: str) -> None:
+        self.kws.reset(reason)
 
     def _emit_heartbeat(self):
         now = time.time()
@@ -242,7 +232,7 @@ class AudioKWSWorker(threading.Thread):
         self.asr_sample_buf = np.zeros((0,), dtype=np.int16)
         self.asr_chunk_seq = 0
         self.prebuf.clear()
-        self.oww.reset()
+        self._reset_kws("recording_reset")
         if update_runtime:
             self.rt.set_state(next_state)
             write_state_block(self.rt.snapshot())
@@ -421,7 +411,7 @@ class AudioKWSWorker(threading.Thread):
         self.asr_sample_buf = np.zeros((0,), dtype=np.int16)
         self.asr_chunk_seq = 0
         self.prebuf.clear()
-        self.oww.reset()
+        self._reset_kws("command_capture_armed")
         if self.asr_mode == "online":
             self._start_online_session(reason)
         static = float(self.cfg_runtime.energy_th)
@@ -615,13 +605,49 @@ class AudioKWSWorker(threading.Thread):
             self.asr_sample_buf = self.asr_sample_buf[self.online_step_samples:]
             self._emit_online_asr_event("CHUNK", audio=audio)
 
-    def _predict_subset(self, armed: bool, busy: bool):
-        only = [self.cfg_runtime.wake_key]
-        if self.cfg_runtime.stop_key:
-            only.append(self.cfg_runtime.stop_key)
-        if armed or busy:
-            only = [self.cfg_runtime.stop_key] if self.cfg_runtime.stop_key else [self.cfg_runtime.wake_key]
-        return [x for x in only if x]
+    def _classify_kws_hit(self, keyword: str, muted: bool, armed: bool, busy: bool, in_guard: bool) -> str:
+        now_mono = time.monotonic()
+        now_wall = time.time()
+        snap = self.rt.snapshot()
+        current_state = str(snap.get("state", self.state))
+        last = self._last_kws_trigger.get(keyword, 0.0)
+        cooldown_remaining = max(0.0, self.kws_trigger_cooldown_s - (now_mono - last))
+        jlog({
+            "level": "info", "src": "kws", "event": "KWS_HIT", "keyword": keyword,
+            "current_state": current_state, "cooldown": cooldown_remaining > 0.0,
+            "cooldown_ms": int(round(cooldown_remaining * 1000.0)), "timestamp": now_wall,
+        })
+
+        reason = ""
+        if keyword not in {self.cfg_runtime.wake_key, self.cfg_runtime.stop_key}:
+            reason = "unknown_keyword"
+        elif cooldown_remaining > 0.0:
+            reason = "trigger_cooldown"
+        elif keyword == self.cfg_runtime.stop_key:
+            if not self.rt.can_trigger_stop():
+                reason = "stop_authority_guard"
+            else:
+                self._last_kws_trigger[keyword] = now_mono
+                return "STOP"
+        elif self.phone_playback is not None and self.phone_playback.waiting():
+            reason = "phone_tts_playback"
+        elif muted:
+            reason = "phone_tts_or_mute_guard"
+        elif current_state != "WAIT_WAKE" or self.state != "WAIT_WAKE":
+            reason = "not_wait_wake"
+        elif armed or busy:
+            reason = "voice_session_active"
+        elif in_guard or bool(snap.get("cooldown")):
+            reason = "interaction_cooldown"
+        else:
+            self._last_kws_trigger[keyword] = now_mono
+            return "WAKE"
+
+        jlog({
+            "level": "info", "src": "kws", "event": "KWS_IGNORED", "keyword": keyword,
+            "reason": reason, "current_state": current_state,
+        })
+        return ""
 
     def _emit_stop_hotword(self, stop_score: float):
         snap = self.rt.snapshot()
@@ -667,7 +693,7 @@ class AudioKWSWorker(threading.Thread):
         write_timeline(event, cmd_id=result["cmd"]["cmd_id"], accepted=result.get("accepted", False), dropped_utts=dropped)
         jlog({
             "level": "info",
-            "src": "oww",
+            "src": "kws",
             "msg": "STOP hotword triggered",
             "score": round(float(stop_score), 4),
             "sent": bool(result.get("sent")),
@@ -716,6 +742,10 @@ class AudioKWSWorker(threading.Thread):
         try:
             while not self.stop_event.is_set():
                 b = self.mic.read_frame()
+                restart_count = int(self.mic.stats().get("restarts", 0))
+                if restart_count != self._last_mic_restart_count:
+                    self._last_mic_restart_count = restart_count
+                    self._reset_kws("audio_reconnect")
                 if b is None:
                     if getattr(self.mic, "completed", False) and bool(getattr(self.cfg_board, "replay_exit_after_complete", False)):
                         jlog({"level": "info", "src": "loop", "msg": "WAV replay complete", "stats": self.mic.stats()})
@@ -736,50 +766,23 @@ class AudioKWSWorker(threading.Thread):
                 busy = self.rt.snapshot()["busy"]
                 in_guard = self.rt.in_guard()
 
-                pred = {}
-                hotword_action = ""
-                if self.cfg_runtime.stop_key and self.rt.can_trigger_stop():
-                    pred = self.oww.predict(x, only=self._predict_subset(armed=armed, busy=busy))
-                    if self.cfg_runtime.debug:
-                        jlog({"level": "debug", "src": "oww", "pred": pred})
-                    hotword_action = select_hotword_action(
-                        pred, self.cfg_runtime.wake_key, self.cfg_runtime.wake_th,
-                        self.cfg_runtime.stop_key, self.cfg_runtime.stop_th,
-                    )
-                    if hotword_action == "STOP":
-                        self._emit_stop_hotword(pred.get(self.cfg_runtime.stop_key, 0.0))
-                        continue
-                elif not muted:
-                    pred = self.oww.predict(x, only=[self.cfg_runtime.wake_key] if self.cfg_runtime.wake_key else [])
-                    hotword_action = select_hotword_action(
-                        pred, self.cfg_runtime.wake_key, self.cfg_runtime.wake_th, "", self.cfg_runtime.stop_th,
-                    )
+                if busy and not self._last_busy:
+                    self._reset_kws("new_task_started")
+                self._last_busy = bool(busy)
 
-                wake_score_sample = float(pred.get(self.cfg_runtime.wake_key, 0.0) or 0.0)
-                self._kws_scores.append(wake_score_sample)
-                self._kws_rms.append(float(r))
-                now_mono = time.monotonic()
-                if now_mono - self._kws_window_started >= 1.0:
-                    scores = self._kws_scores
-                    rms_values = self._kws_rms
-                    try:
-                        write_timeline(
-                            "KWS_WINDOW_STATS",
-                            window_s=round(now_mono - self._kws_window_started, 3),
-                            wake_score_max=round(max(scores), 4) if scores else 0.0,
-                            wake_score_mean=round(sum(scores) / len(scores), 4) if scores else 0.0,
-                            wake_threshold=float(self.cfg_runtime.wake_th),
-                            audio_rms_max=round(max(rms_values), 2) if rms_values else 0.0,
-                            audio_rms_mean=round(sum(rms_values) / len(rms_values), 2) if rms_values else 0.0,
-                            noise_floor_rms=round(float(self._noise_floor_rms), 2),
-                            frame_count=len(scores),
-                            triggered=bool(hotword_action == "WAKE"),
-                        )
-                    except Exception:
-                        pass
-                    self._kws_window_started = now_mono
-                    self._kws_scores = []
-                    self._kws_rms = []
+                try:
+                    audio_float32 = np.ascontiguousarray(x.astype(np.float32) / 32768.0)
+                    keyword = self.kws.process(audio_float32)
+                except KwsBackendFatalError as exc:
+                    self.rt.set_state("KWS_ERROR")
+                    jlog({"level": "error", "src": "kws", "event": "KWS_BACKEND_ERROR", "stage": "runtime", "exception": str(exc)})
+                    write_timeline("KWS_BACKEND_ERROR", stage="runtime", exception=str(exc))
+                    self.stop_event.set()
+                    break
+                hotword_action = self._classify_kws_hit(keyword, muted, armed, busy, in_guard) if keyword else ""
+                if hotword_action == "STOP":
+                    self._emit_stop_hotword(0.0)
+                    continue
 
                 if (self.state == "WAIT_WAKE" and not muted and not armed and not busy and not in_guard and
                         hotword_action == "WAKE"):
@@ -799,11 +802,10 @@ class AudioKWSWorker(threading.Thread):
                         self.captured = []
                         self.asr_sample_buf = np.zeros((0,), dtype=np.int16)
                         self.asr_chunk_seq = 0
-                    jlog({"level": "info", "src": "oww", "msg": "WAKE triggered -> phone prompt" if phone_prompt_sent else "WAKE triggered -> armed", "session_id": self.rt.snapshot().get("session_id")})
-                    wake_score = float(pred.get(self.cfg_runtime.wake_key, 0.0) or 0.0)
+                    jlog({"level": "info", "src": "kws", "msg": "WAKE triggered -> phone prompt" if phone_prompt_sent else "WAKE triggered -> armed", "session_id": self.rt.snapshot().get("session_id")})
                     noise = float(self._noise_floor_rms or 0.0)
                     snr = 20.0 * math.log10(max(r, 1e-6) / max(noise, 1e-6)) if noise > 0 else None
-                    write_timeline("WAKE_TRIGGERED", reason="wake_hotword", session_id=self.rt.snapshot().get("session_id"), epoch=self.rt.snapshot().get("epoch"), wake_score=round(wake_score, 4), wake_threshold=float(self.cfg_runtime.wake_th), audio_rms=round(r, 2), noise_floor_rms=round(noise, 2), snr_db=round(snr, 2) if snr is not None else None)
+                    write_timeline("WAKE_TRIGGERED", reason="wake_hotword", keyword=self.cfg_runtime.wake_key, session_id=self.rt.snapshot().get("session_id"), epoch=self.rt.snapshot().get("epoch"), audio_rms=round(r, 2), noise_floor_rms=round(noise, 2), snr_db=round(snr, 2) if snr is not None else None)
                     continue
 
                 if self.phone_playback is not None:

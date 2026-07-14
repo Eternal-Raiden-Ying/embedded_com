@@ -7,6 +7,8 @@ import threading
 import time
 from pathlib import Path
 
+import numpy as np
+
 from voice_service.config.loader import load_voice_config
 from voice_service.runtime.service import run_voice_service, list_audio_devices
 
@@ -15,10 +17,15 @@ def check_models(cfg) -> None:
     # "Normal vs. dry-run models: If model binaries are missing during dry-run-text, the gateway must print a warning and run successfully. In normal mode, it must crash with a structured error."
     missing = []
 
-    # We check: KWS wake, KWS stop, VAD, ASR, TTS model files
+    if str(cfg.kws.backend).strip().lower() != "sherpa_onnx":
+        missing.append(("Sherpa KWS backend", str(cfg.kws.backend)))
+    kws_dir = Path(cfg.kws.model_dir)
     to_check = {
-        "Wake Word Model": cfg.wake_tflite,
-        "Stop Word Model": cfg.stop_tflite,
+        "Sherpa KWS encoder": str(kws_dir / "encoder-epoch-13-avg-2-chunk-16-left-64.int8.onnx"),
+        "Sherpa KWS decoder": str(kws_dir / "decoder-epoch-13-avg-2-chunk-16-left-64.onnx"),
+        "Sherpa KWS joiner": str(kws_dir / "joiner-epoch-13-avg-2-chunk-16-left-64.int8.onnx"),
+        "Sherpa KWS tokens": str(kws_dir / "tokens.txt"),
+        "Sherpa KWS keywords": cfg.kws.keywords_file,
         "ASR Model Directory": cfg.asr_dir,
     }
 
@@ -64,17 +71,12 @@ def run_audio_replay(cfg, replay_path_str: str, send_task: bool) -> None:
     import csv
     from voice_service.runtime.commands import CommandInterpreter
     from voice_service.runtime.asr_engine import AudioCommandPipeline
-    from voice_service.runtime.kws_engine import FlexibleWakeWord
+    from voice_service.runtime.kws_engine import create_kws_backend
 
     interpreter = CommandInterpreter.from_json(cfg.commands_json)
     pipeline = AudioCommandPipeline(cfg, interpreter)
 
-    models = []
-    if cfg.wake_tflite:
-        models.append(cfg.wake_tflite)
-    if cfg.stop_tflite:
-        models.append(cfg.stop_tflite)
-    oww = FlexibleWakeWord(models, vad_threshold=cfg.oww_vad_th, ncpu=1, dry_run_text=cfg.dry_run_text)
+    kws = create_kws_backend(cfg.kws, dry_run_text=cfg.dry_run_text)
 
     replay_path = Path(replay_path_str)
     wav_files = sorted(list(replay_path.rglob("*.wav"))) if replay_path.is_dir() else [replay_path]
@@ -95,17 +97,13 @@ def run_audio_replay(cfg, replay_path_str: str, send_task: bool) -> None:
             t0 = time.perf_counter()
             frame_samples = 1280
             num_frames = len(audio) // frame_samples
-            wake_score, stop_score = 0.0, 0.0
-            wake_key = cfg.wake_key or (Path(cfg.wake_tflite).stem if cfg.wake_tflite else "")
-            stop_key = cfg.stop_key or (Path(cfg.stop_tflite).stem if cfg.stop_tflite else "")
+            detected = []
 
             for i in range(num_frames):
                 chunk = audio[i * frame_samples : (i + 1) * frame_samples]
-                preds = oww.predict(chunk)
-                ws = preds.get(wake_key, 0.0)
-                ss = preds.get(stop_key, 0.0)
-                if ws > wake_score: wake_score = ws
-                if ss > stop_score: stop_score = ss
+                keyword = kws.process(np.ascontiguousarray(chunk.astype(np.float32) / 32768.0))
+                if keyword:
+                    detected.append(keyword)
 
             kws_latency = (time.perf_counter() - t0) * 1000.0
 
@@ -114,7 +112,7 @@ def run_audio_replay(cfg, replay_path_str: str, send_task: bool) -> None:
             asr_latency = (time.perf_counter() - t_asr) * 1000.0
             total_latency = (time.perf_counter() - t0) * 1000.0
 
-            print(f"  KWS Wake Score: {wake_score:.3f}, Stop Score: {stop_score:.3f}")
+            print("  KWS Hits: {}".format(detected))
             print(f"  Raw ASR: {asr_result.get('text')}")
             print(f"  Intent: {asr_result.get('intent')}, Target: {asr_result.get('target')}")
 
@@ -138,8 +136,8 @@ def run_audio_replay(cfg, replay_path_str: str, send_task: bool) -> None:
                 "expected_text": wf_path.stem,
                 "expected_intent": asr_result.get("intent"),
                 "expected_target": asr_result.get("target"),
-                "wake_score": f"{wake_score:.3f}",
-                "stop_score": f"{stop_score:.3f}",
+                "wake_score": "1.0" if cfg.kws.wake_keyword in detected else "0.0",
+                "stop_score": "1.0" if cfg.kws.stop_keyword in detected else "0.0",
                 "raw_asr": asr_result.get("text"),
                 "normalized_asr": asr_result.get("text"),
                 "actual_intent": asr_result.get("intent"),

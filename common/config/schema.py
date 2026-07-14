@@ -90,6 +90,28 @@ class SocketEndpoint:
         self.tcp_port = int(value)
 
 
+@dataclass
+class VoiceKwsConfig:
+    """Canonical Voice Gateway keyword-spotter configuration."""
+    backend: str = "sherpa_onnx"
+    model_dir: str = "Voice/kws/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20"
+    keywords_file: str = "Voice/kws/sherpa_custom/extreme.txt"
+    provider: str = "cpu"
+    num_threads: int = 1
+    max_active_paths: int = 4
+    num_trailing_blanks: int = 1
+    trigger_cooldown_ms: int = 800
+    max_consecutive_errors: int = 3
+    wake_keyword: str = "你好小车"
+    stop_keyword: str = "停止小车"
+
+
+@dataclass
+class VoiceGatewayConfig:
+    """Voice settings owned by the repository-wide configuration schema."""
+    kws: VoiceKwsConfig = field(default_factory=VoiceKwsConfig)
+
+
 # ==============================================================================
 # Vision Module Configs
 # ==============================================================================
@@ -544,6 +566,10 @@ class ControlThresholds:
     search_table_timeout_s: float = 20.0
     approach_timeout_s: float = 14.0
     target_search_timeout_s: float = 10.0
+    target_search_absolute_timeout_s: float = 60.0
+    target_lateral_no_progress_timeout_s: float = 10.0
+    target_lateral_uart_no_progress_timeout_s: float = 3.0
+    target_lateral_progress_min_delta: float = 0.01
     return_search_timeout_s: float = 15.0
     req_resend_period_s: float = 1.0
     stop_after_table_docking: bool = False
@@ -916,14 +942,14 @@ class CarMotionConfig:
     table_coarse_align_vy_max_mps: float = 0.000
     table_coarse_align_wz_min_radps: float = 0.080
     table_coarse_align_wz_max_radps: float = 0.150
-    table_controlled_vx_min_mps: float = 0.020
-    table_controlled_vx_max_mps: float = 0.035
+    table_controlled_vx_min_mps: float = 0.060
+    table_controlled_vx_max_mps: float = 0.080
     table_controlled_vy_min_mps: float = 0.000
-    table_controlled_vy_max_mps: float = 0.000
+    table_controlled_vy_max_mps: float = 0.050
     table_controlled_wz_min_radps: float = 0.000
     table_controlled_wz_max_radps: float = 0.120
-    table_approach_safe_vx_mps: float = 0.020
-    table_approach_max_vx_mps: float = 0.035
+    table_approach_safe_vx_mps: float = 0.060
+    table_approach_max_vx_mps: float = 0.080
     table_approach_yaw_deadband_rad: float = 0.08
     table_approach_yaw_realign_rad: float = 0.16
     table_edge_hard_rotate_only_yaw_rad: float = 1.40
@@ -931,7 +957,7 @@ class CarMotionConfig:
     table_edge_hard_yaw_rotate_only_ms: int = 350
     table_perception_warmup_s: float = 1.0
     table_approach_allow_wz: bool = True
-    table_approach_allow_vy: bool = False
+    table_approach_allow_vy: bool = True
     table_pose_missing_safe_vx_mps: float = 0.040
     table_pose_missing_max_hold_s: float = 3.0
     table_final_lock_vx_min_mps: float = 0.000
@@ -959,9 +985,10 @@ class CarMotionConfig:
     table_wz_plane_max_radps: float = 0.06
     table_dist_kp_mps_per_m: float = 0.12
     yolo_table_yaw_gain: float = 0.20
-    yolo_table_max_wz_radps: float = 0.06
+    yolo_table_max_wz_radps: float = 0.12
     yolo_table_forward_vx_mps: float = 0.015
     yolo_forward_center_hard_limit: float = 0.25
+    yolo_forward_center_exit_limit: float = 0.28
     table_view_wz_kp: float = 0.18
     table_view_vy_kp: float = 0.04
     table_view_recover_vy_mps: float = 0.008
@@ -1414,5 +1441,6 @@ class SystemGlobalConfig:
     vision: VisionServiceConfig = field(default_factory=VisionServiceConfig)
     orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
     gateway: MobileGatewayConfig = field(default_factory=MobileGatewayConfig)
+    voice_gateway: VoiceGatewayConfig = field(default_factory=VoiceGatewayConfig)
     online_edge: OnlineEdgeConfig = field(default_factory=OnlineEdgeConfig)
     POSE_BOTTLE: PoseBottleConfig = field(default_factory=PoseBottleConfig)

@@ -90,6 +90,7 @@ def decide_table_control_authority(
     edge_handoff_complete: bool = False,
     handoff_timeout: bool = False,
     phase_dwell_ms: float = 0.0,
+    bbox_forward_allowed: bool | None = None,
 ) -> ControlAuthority:
     """Return the owner of the current table-approach motion command.
 
@@ -122,7 +123,11 @@ def decide_table_control_authority(
         and bbox_center_error is not None
         and abs(float(bbox_center_error)) <= hard_limit
     )
+    if bbox_forward_allowed is not None:
+        bbox_centered_for_forward = bool(bbox_forward_allowed and sem.table_bbox_current_found)
     if control_phase == "BBOX_ACQUIRE":
+        if bbox_centered_for_forward:
+            return make("yolo_track_forward", "bbox", "bbox_track", "none", True, True, "bbox_forward_hysteresis_hold", "BBOX_ACQUIRE")
         return make("yolo_acquire_align", "bbox", "none", "none", False, True, "bbox_acquire", "BBOX_ACQUIRE")
     if control_phase == "EDGE_HANDOFF_CONFIRM":
         # Stable fresh bbox alignment owns the far, low-speed approach while

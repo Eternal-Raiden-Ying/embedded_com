@@ -1,4 +1,4 @@
-# Default Voice Gateway Configuration
+# Canonical Voice Gateway defaults. Profiles may override these values.
 audio:
   backend: arecord
   input_device: plughw:CARD=UACDemoV10,DEV=0
@@ -7,17 +7,17 @@ audio:
   frame_ms: 80
 
 kws:
-  enabled: true
-  model_path: Voice/kws/wake_nihao_xiaoche_v2.onnx
-  threshold: 0.60
-  cooldown_s: 1.0
-  wake_word: wake_nihao_xiaoche_v2
-
-stop_kws:
-  enabled: true
-  model_path: Voice/kws/stop_smallcar_v1.onnx
-  threshold: 0.58
-  always_on: true
+  backend: sherpa_onnx
+  model_dir: Voice/kws/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20
+  keywords_file: Voice/kws/sherpa_custom/extreme.txt
+  provider: cpu
+  num_threads: 1
+  max_active_paths: 4
+  num_trailing_blanks: 1
+  trigger_cooldown_ms: 800
+  max_consecutive_errors: 3
+  wake_keyword: 你好小车
+  stop_keyword: 停止小车
 
 vad:
   enabled: true

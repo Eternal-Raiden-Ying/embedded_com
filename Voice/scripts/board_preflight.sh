@@ -42,7 +42,7 @@ for pkg in "${PACKAGES[@]}"; do
 done
 
 # Check board-specific libraries
-BOARD_LIBS=("funasr_onnx" "piper")
+BOARD_LIBS=("sherpa_onnx" "funasr_onnx" "piper")
 for pkg in "${BOARD_LIBS[@]}"; do
     if $PYTHON_CMD -c "import $pkg" 2>/dev/null; then
         echo "  [PASS] Import $pkg (board runtime) succeeded"
@@ -54,8 +54,11 @@ done
 # 5. Model File Validation
 echo -e "\n--- Model File Existence ---"
 MODELS=(
-    "Voice/kws/wake_nihao_xiaoche_v2.onnx"
-    "Voice/kws/stop_smallcar_v1.onnx"
+    "Voice/kws/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/encoder-epoch-13-avg-2-chunk-16-left-64.int8.onnx"
+    "Voice/kws/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/decoder-epoch-13-avg-2-chunk-16-left-64.onnx"
+    "Voice/kws/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/joiner-epoch-13-avg-2-chunk-16-left-64.int8.onnx"
+    "Voice/kws/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/tokens.txt"
+    "Voice/kws/sherpa_custom/extreme.txt"
     "Voice/ONNX/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-onnx/model_quant.onnx"
     "Voice/ONNX/speech_fsmn_vad_zh-cn-16k-common-onnx/model_quant.onnx"
     "Voice/tts/zh_CN-huayan-x_low/zh_CN-huayan-x_low.onnx"

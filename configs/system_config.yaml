@@ -75,8 +75,8 @@ vision:
         fps: 30 # Frame rate
         crop_x: 0 # Horizontal crop start pixel
         crop_y: 0 # Vertical crop start pixel
-        crop_w: 1280 # Crop width
-        crop_h: 720 # Crop height
+        crop_w: 0 # Crop width
+        crop_h: 0 # Crop height
         enable: true # Stream enabled status
         auto_exposure: true # Enable auto exposure
         exposure: null # Fixed exposure value if auto is false
@@ -365,6 +365,10 @@ orchestrator:
     search_table_timeout_s: 20.0 # Timeout for table bbox search phase
     approach_timeout_s: 14.0 # Timeout for table approach phase
     target_search_timeout_s: 10.0 # Timeout for target search phase
+    target_search_absolute_timeout_s: 60.0 # Absolute safety ceiling; progress may extend the normal timeout
+    target_lateral_no_progress_timeout_s: 10.0 # Visible target must improve within this window
+    target_lateral_uart_no_progress_timeout_s: 3.0 # Lateral commands must be accepted within this window
+    target_lateral_progress_min_delta: 0.01 # Minimum normalized error improvement
     return_search_timeout_s: 15.0 # Timeout for return trip tag search phase
     req_resend_period_s: 1.0 # Re-trigger command send rate
     stop_after_table_docking: false # Continue into target search after table docking
@@ -579,18 +583,18 @@ orchestrator:
     table_coarse_align_vy_max_mps: 0.000 # Maximum lateral velocity in coarse align
     table_coarse_align_wz_min_radps: 0.080 # Minimum rotation velocity in coarse align
     table_coarse_align_wz_max_radps: 0.150 # Maximum rotation velocity in coarse align
-    table_controlled_vx_min_mps: 0.020 # Minimum forward velocity in controlled approach
-    table_controlled_vx_max_mps: 0.035 # Maximum forward velocity in controlled approach
+    table_controlled_vx_min_mps: 0.060 # Minimum forward velocity in controlled approach
+    table_controlled_vx_max_mps: 0.080 # Maximum forward velocity in controlled approach
     table_controlled_vy_min_mps: 0.000 # Minimum lateral velocity in controlled approach
-    table_controlled_vy_max_mps: 0.000 # Maximum lateral velocity in controlled approach
+    table_controlled_vy_max_mps: 0.050 # Maximum lateral velocity in controlled approach
     table_controlled_wz_min_radps: 0.000 # Minimum rotation velocity in controlled approach
     table_controlled_wz_max_radps: 0.120 # Maximum rotation velocity in controlled approach
-    table_approach_safe_vx_mps: 0.020 # Safe forward velocity limit in approach
-    table_approach_max_vx_mps: 0.035 # Maximum forward velocity limit in approach
+    table_approach_safe_vx_mps: 0.060 # Normal edge-approach forward speed
+    table_approach_max_vx_mps: 0.080 # Maximum edge-approach forward speed
     table_approach_yaw_deadband_rad: 0.08 # Deadband for heading corrections
     table_approach_yaw_realign_rad: 0.16 # Heading error forcing stop and align
     table_approach_allow_wz: true # Enable heading correction during approach
-    table_approach_allow_vy: false # Enable lateral correction during approach
+    table_approach_allow_vy: true # Enable lateral correction during approach
     table_pose_missing_safe_vx_mps: 0.040 # Safe speed on brief perception loss
     table_pose_missing_max_hold_s: 3.0 # Duration to keep moving on loss
     table_final_lock_vx_min_mps: 0.000 # Minimum forward speed in final lock
@@ -608,18 +612,19 @@ orchestrator:
     table_stage_c_vx_min_mps: 0.0 # Docking phase minimum forward velocity
     table_min_forward_dist_err_m: 0.07 # Minimum distance to target
     table_vx_mps_min: 0.020 # Base forward speed
-    table_vx_mps_max: 0.035 # Peak forward speed
+    table_vx_mps_max: 0.100 # Peak non-final table approach speed
     table_vx_kp_mps_per_m: 0.30 # Forward speed gain factor
     table_yaw_slow_th_rad: 0.12 # Heading error requiring deceleration
     table_yaw_stop_th_rad: 0.45 # Heading error forcing stop
     table_near_dist_err_th_m: 0.10 # Near table distance threshold
-    table_vy_max_mps: 0.000 # Maximum lateral velocity
+    table_vy_max_mps: 0.050 # Maximum lateral velocity
     table_wz_view_max_radps: 0.05 # Maximum rotation velocity during tag search
     table_wz_plane_max_radps: 0.150 # Maximum rotation velocity during edge search
     table_dist_kp_mps_per_m: 0.12 # Distance error gain factor
     yolo_table_yaw_gain: 0.20 # Tag heading error gain factor
-    yolo_table_max_wz_radps: 0.06 # Maximum rotation speed for tag tracking
+    yolo_table_max_wz_radps: 0.12 # Maximum canonical bbox alignment rotation speed
     yolo_forward_center_hard_limit: 0.25 # Wider bbox band allowing forward motion with yaw correction
+    yolo_forward_center_exit_limit: 0.28 # Hysteretic exit threshold for bbox forward ownership
     yolo_table_forward_vx_mps: 0.015 # Tag search forward speed
     table_view_wz_kp: 0.18 # tag yaw tracking gain
     table_view_vy_kp: 0.04 # tag lateral tracking gain

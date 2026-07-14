@@ -189,6 +189,53 @@ def _has_local_table_bbox_signal(local_perception: Dict[str, object]) -> bool:
     return False
 
 
+def local_inference_completed(local_perception: object) -> bool:
+    """Whether this payload contains a newly completed inference result."""
+    if not isinstance(local_perception, dict):
+        return False
+    if "inference_completed" in local_perception:
+        return bool(local_perception.get("inference_completed"))
+    if "has_infer" in local_perception or "yolo_has_infer" in local_perception:
+        return bool(local_perception.get("has_infer", local_perception.get("yolo_has_infer", False)))
+    # Compatibility for recorded payloads produced before inference metadata
+    # was added. An explicit bbox outcome is itself a completed result.
+    return any(
+        key in local_perception
+        for key in (
+            "table_bbox_current_found",
+            "table_bbox_detected",
+            "detected_table_bbox",
+            "table_bbox",
+            "table_bbox_xyxy",
+            "yolo_table_bbox",
+        )
+    )
+
+
+def local_inference_identity(local_perception: object) -> Optional[tuple]:
+    if not isinstance(local_perception, dict) or not local_inference_completed(local_perception):
+        return None
+    inference_seq = local_perception.get("inference_seq")
+    if inference_seq is not None:
+        return ("inference_seq", inference_seq)
+    return (
+        "legacy_inference",
+        _local_frame_id(local_perception),
+        local_perception.get("inference_done_mono_ns")
+        or local_perception.get("capture_mono_ns")
+        or local_perception.get("obs_ts"),
+        local_perception.get("trace_id"),
+    )
+
+
+def local_explicit_negative(local_perception: object) -> bool:
+    if not isinstance(local_perception, dict) or not local_inference_completed(local_perception):
+        return False
+    if "explicit_negative_detection" in local_perception:
+        return bool(local_perception.get("explicit_negative_detection"))
+    return _local_current_table_bbox(local_perception) is None
+
+
 def _edge_semantic_present(obs: Dict[str, object]) -> bool:
     if not isinstance(obs, dict):
         return False
@@ -313,7 +360,40 @@ def merge_table_bbox_from_local_perception(
     if not isinstance(local_perception, dict):
         return obs
     out = dict(obs or default_table_edge_obs())
+    if not local_inference_completed(local_perception):
+        # A camera/scheduler tick without a completed inference is not a
+        # negative detection. Preserve the last completed control bbox already
+        # present in the observation.
+        out.update(
+            {
+                "inference_executed": bool(local_perception.get("inference_executed", local_perception.get("has_infer", False))),
+                "inference_completed": False,
+                "has_new_inference": False,
+                "explicit_negative_detection": False,
+                "bbox_hold_reason": "inference_pending" if bool(local_perception.get("inference_executed")) else "no_inference_executed",
+            }
+        )
+        return out
     bbox = _local_current_table_bbox(local_perception)
+    inference_identity = local_inference_identity(local_perception)
+    inference_seq = local_perception.get("inference_seq")
+    explicit_negative = local_explicit_negative(local_perception)
+    inference_age_ms = local_perception.get("inference_age_ms", local_perception.get("control_bbox_age_ms", 0.0))
+    inference_diag = {
+        "inference_executed": bool(local_perception.get("inference_executed", local_perception.get("has_infer", True))),
+        "inference_completed": True,
+        "inference_seq": inference_seq,
+        "completed_inference_identity": inference_identity,
+        "has_new_inference": bool(local_perception.get("has_new_inference", True)),
+        "explicit_negative_detection": bool(explicit_negative),
+        "explicit_negative": bool(explicit_negative),
+        "inference_age_ms": float(inference_age_ms or 0.0),
+        "control_bbox_age_ms": float(inference_age_ms or 0.0),
+        "last_completed_inference_mono_ns": local_perception.get("last_completed_inference_mono_ns")
+        or local_perception.get("inference_done_mono_ns"),
+        "last_completed_had_table": bool(bbox is not None),
+        "bbox_hold_reason": str(local_perception.get("bbox_hold_reason") or "new_completed_inference"),
+    }
     protected_edge = bool(
         str(out.get("selected_source") or out.get("source") or "").strip().lower() == "results"
         and _edge_semantic_present(out)
@@ -447,6 +527,7 @@ def merge_table_bbox_from_local_perception(
 
         out.update(
             {
+                **inference_diag,
                 "table_found": bool(edge_present and edge_valid),
                 "edge_found": edge_present,
                 "edge_valid": edge_valid,
@@ -548,6 +629,7 @@ def merge_table_bbox_from_local_perception(
 
     out.update(
         {
+            **inference_diag,
             "table_found": True,
             "edge_found": edge_present,
             "edge_valid": edge_valid,
@@ -581,7 +663,7 @@ def merge_table_bbox_from_local_perception(
             "yolo_table_control_valid": True,
             "yolo_table_visible": True,
             "yolo_table_fresh": True,
-            "yolo_table_age_ms": 0.0,
+            "yolo_table_age_ms": float(inference_age_ms or 0.0),
             "yolo_table_conf": conf,
             "local_perception_frame_id": frame_id,
             "local_perception_obs_ts": float(obs_ts),
@@ -601,6 +683,7 @@ def merge_table_bbox_from_local_perception(
         out.update(protected_values)
         out.update(
             {
+                **inference_diag,
                 "table_found": True,
                 "table_confirmed_by_yolo": True,
                 "table_bbox_current_found": True,
@@ -619,7 +702,7 @@ def merge_table_bbox_from_local_perception(
                 "yolo_table_control_valid": True,
                 "yolo_table_visible": True,
                 "yolo_table_fresh": True,
-                "yolo_table_age_ms": 0.0,
+                "yolo_table_age_ms": float(inference_age_ms or 0.0),
                 "yolo_table_conf": conf,
                 "yolo_bbox_center_x_norm": local_perception.get("yolo_bbox_center_x_norm"),
                 "roi_source": source,

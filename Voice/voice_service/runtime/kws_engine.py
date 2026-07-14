@@ -2,11 +2,145 @@
 # -*- coding: utf-8 -*-
 
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Protocol
 
 import numpy as np
 
 from .common import clamp01, jlog
+
+
+class KwsBackendError(RuntimeError):
+    pass
+
+
+class KwsBackendFatalError(KwsBackendError):
+    pass
+
+
+class KwsBackend(Protocol):
+    """One streaming KWS instance fed by the Voice Gateway capture worker."""
+
+    def process(self, audio_float32: np.ndarray) -> str:
+        ...
+
+    def reset(self, reason: str) -> None:
+        ...
+
+
+class SherpaOnnxKwsBackend:
+    """Streaming Sherpa-ONNX transducer KWS with one long-lived stream."""
+
+    _ENCODER = "encoder-epoch-13-avg-2-chunk-16-left-64.int8.onnx"
+    _DECODER = "decoder-epoch-13-avg-2-chunk-16-left-64.onnx"
+    _JOINER = "joiner-epoch-13-avg-2-chunk-16-left-64.int8.onnx"
+    _TOKENS = "tokens.txt"
+
+    def __init__(self, cfg: Any, spotter_factory: Any = None):
+        model_dir = Path(str(cfg.model_dir))
+        keywords_file = Path(str(cfg.keywords_file))
+        required = {
+            "encoder": model_dir / self._ENCODER,
+            "decoder": model_dir / self._DECODER,
+            "joiner": model_dir / self._JOINER,
+            "tokens": model_dir / self._TOKENS,
+            "keywords_file": keywords_file,
+        }
+        missing = ["{}={}".format(name, path) for name, path in required.items() if not path.is_file()]
+        if missing:
+            message = "missing Sherpa KWS resources: " + ", ".join(missing)
+            jlog({"level": "error", "src": "kws", "event": "KWS_BACKEND_ERROR", "stage": "validate_resources", "exception": message})
+            raise KwsBackendError(message)
+
+        try:
+            if spotter_factory is None:
+                import sherpa_onnx
+                spotter_factory = sherpa_onnx.KeywordSpotter
+            # Per-keyword score/threshold values are read by Sherpa directly
+            # from keywords_file. Do not pass competing global overrides here.
+            self.spotter = spotter_factory(
+                tokens=str(required["tokens"]),
+                encoder=str(required["encoder"]),
+                decoder=str(required["decoder"]),
+                joiner=str(required["joiner"]),
+                keywords_file=str(keywords_file),
+                provider=str(cfg.provider),
+                num_threads=int(cfg.num_threads),
+                max_active_paths=int(cfg.max_active_paths),
+                num_trailing_blanks=int(cfg.num_trailing_blanks),
+            )
+            self.stream = self.spotter.create_stream()
+        except Exception as exc:
+            jlog({"level": "error", "src": "kws", "event": "KWS_BACKEND_ERROR", "stage": "initialize", "exception": str(exc)})
+            raise KwsBackendError("Sherpa KWS initialization failed: {}".format(exc)) from exc
+
+        self.max_consecutive_errors = max(1, int(cfg.max_consecutive_errors))
+        self.consecutive_errors = 0
+        jlog({
+            "level": "info", "src": "kws", "event": "KWS_BACKEND_READY",
+            "backend": "sherpa_onnx", "model_dir": str(model_dir),
+            "keywords_file": str(keywords_file),
+        })
+
+    def reset(self, reason: str) -> None:
+        try:
+            self.spotter.reset_stream(self.stream)
+        except Exception as exc:
+            jlog({"level": "error", "src": "kws", "event": "KWS_BACKEND_ERROR", "stage": "reset", "exception": str(exc)})
+            try:
+                self.stream = self.spotter.create_stream()
+            except Exception as recreate_exc:
+                raise KwsBackendFatalError("Sherpa KWS stream recreation failed: {}".format(recreate_exc)) from recreate_exc
+        jlog({"level": "info", "src": "kws", "event": "KWS_RESET", "reason": str(reason)})
+
+    def process(self, audio_float32: np.ndarray) -> str:
+        stage = "accept_waveform"
+        try:
+            audio = np.ascontiguousarray(audio_float32, dtype=np.float32).reshape(-1)
+            self.stream.accept_waveform(16000, audio)
+            stage = "decode_stream"
+            while self.spotter.is_ready(self.stream):
+                self.spotter.decode_stream(self.stream)
+            stage = "get_result"
+            keyword = str(self.spotter.get_result(self.stream) or "").strip()
+            self.consecutive_errors = 0
+            if keyword:
+                self.reset("keyword_detected")
+            return keyword
+        except KwsBackendFatalError:
+            raise
+        except Exception as exc:
+            self.consecutive_errors += 1
+            jlog({
+                "level": "error", "src": "kws", "event": "KWS_BACKEND_ERROR",
+                "stage": stage, "exception": str(exc),
+                "consecutive_errors": self.consecutive_errors,
+            })
+            try:
+                self.reset("decode_exception")
+            except KwsBackendFatalError:
+                raise
+            if self.consecutive_errors >= self.max_consecutive_errors:
+                raise KwsBackendFatalError(
+                    "Sherpa KWS failed {} consecutive frames".format(self.consecutive_errors)
+                ) from exc
+            return ""
+
+
+class DryRunKwsBackend:
+    def process(self, audio_float32: np.ndarray) -> str:
+        return ""
+
+    def reset(self, reason: str) -> None:
+        return None
+
+
+def create_kws_backend(cfg: Any, dry_run_text: bool = False) -> KwsBackend:
+    backend = str(getattr(cfg, "backend", "") or "").strip().lower()
+    if backend != "sherpa_onnx":
+        raise KwsBackendError("unsupported production KWS backend: {!r}".format(backend))
+    if dry_run_text:
+        return DryRunKwsBackend()
+    return SherpaOnnxKwsBackend(cfg)
 
 class FlexibleWakeWord:
     def __init__(self, wakeword_models: List[str], vad_threshold: float = 0.0, ncpu: int = 1, dry_run_text: bool = False,

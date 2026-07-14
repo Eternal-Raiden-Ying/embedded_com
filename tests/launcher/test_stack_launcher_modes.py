@@ -293,8 +293,7 @@ def test_voice_dryrun_profile_is_real_arecord_with_tts_disabled():
     output = result.stdout
     for expected in (
         "arecord_device=plughw:CARD=UACDemoV10,DEV=0",
-        "frontend_backend=onnx",
-        "classifier_backend=onnx",
+        "kws=VoiceKwsConfig(backend='sherpa_onnx'",
         "asr_quant=True",
         "vad_quant=True",
         "disable_tts=True",

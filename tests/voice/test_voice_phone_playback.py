@@ -40,7 +40,7 @@ class FakeOWW:
     def __init__(self):
         self.reset_calls = 0
 
-    def reset(self):
+    def reset(self, _reason=None):
         self.reset_calls += 1
 
 
@@ -65,7 +65,9 @@ def make_capture_worker(rt=None, phone_playback=None):
     worker.asr_sample_buf = np.zeros((0,), dtype=np.int16)
     worker.asr_chunk_seq = 0
     worker.prebuf = deque(maxlen=3)
-    worker.oww = FakeOWW()
+    worker.kws = FakeOWW()
+    worker.kws_trigger_cooldown_s = 0.8
+    worker._last_kws_trigger = {}
     worker._noise_floor_rms = 0.0
     worker._noise_floor_before_prompt = None
     worker._last_speech_gate_blocked_at = 0.0
@@ -251,13 +253,33 @@ def test_local_wake_uses_same_capture_arm_transition():
     assert worker.speech_up == 0
     assert worker.captured == []
     assert not worker.prebuf
-    assert worker.oww.reset_calls == 1
+    assert worker.kws.reset_calls == 1
 
 
-def test_armed_command_capture_only_predicts_stop_not_wake():
-    worker = SimpleNamespace(cfg_runtime=SimpleNamespace(wake_key="wake", stop_key="stop"))
-    assert AudioKWSWorker._predict_subset(worker, armed=True, busy=False) == ["stop"]
-    assert AudioKWSWorker._predict_subset(worker, armed=False, busy=False) == ["wake", "stop"]
+def test_armed_command_capture_ignores_wake_but_accepts_stop():
+    worker = make_capture_worker()
+    worker.cfg_runtime.wake_key = "wake"
+    worker.cfg_runtime.stop_key = "stop"
+    assert worker._classify_kws_hit("wake", muted=False, armed=True, busy=False, in_guard=False) == ""
+    assert worker._classify_kws_hit("stop", muted=False, armed=True, busy=False, in_guard=False) == "STOP"
+
+
+def test_kws_cooldown_is_per_keyword_and_wake_triggers_once():
+    worker = make_capture_worker()
+    worker.cfg_runtime.wake_key = "wake"
+    worker.cfg_runtime.stop_key = "stop"
+    assert worker._classify_kws_hit("wake", muted=False, armed=False, busy=False, in_guard=False) == "WAKE"
+    assert worker._classify_kws_hit("wake", muted=False, armed=False, busy=False, in_guard=False) == ""
+    assert worker._classify_kws_hit("stop", muted=False, armed=False, busy=False, in_guard=False) == "STOP"
+
+
+def test_phone_playback_suppresses_wake_but_not_stop():
+    playback = FakePlayback(waiting=True)
+    worker = make_capture_worker(phone_playback=playback)
+    worker.cfg_runtime.wake_key = "wake"
+    worker.cfg_runtime.stop_key = "stop"
+    assert worker._classify_kws_hit("wake", muted=True, armed=False, busy=False, in_guard=False) == ""
+    assert worker._classify_kws_hit("stop", muted=True, armed=False, busy=False, in_guard=False) == "STOP"
 
 
 def test_stale_wrong_and_duplicate_playback_ack_are_ignored():
@@ -305,13 +327,13 @@ def test_phone_profile_disables_local_piper_and_enables_phone_endpoints():
     assert cfg.mobile_tts_event_uds_path == "/tmp/robot_stack/mobile_tts_event.sock"
     assert cfg.playback_transport == "uds"
     assert cfg.playback_uds_path == "/tmp/robot_stack/tts_playback.sock"
-    assert cfg.frontend_backend == "onnx"
-    assert cfg.classifier_backend == "onnx"
+    assert cfg.kws.backend == "sherpa_onnx"
+    assert cfg.kws.provider == "cpu"
     assert cfg.asr_quant is True
     assert cfg.vad_quant is True
 
 
-def test_phone_dryrun_profile_uses_onnx_quantized_voice_configuration():
+def test_phone_dryrun_profile_uses_sherpa_quantized_voice_configuration():
     cfg = load_voice_config(["--profile", "configs/profiles/sc171_voice_phone_tts_dryrun.yaml"])
     assert cfg.disable_tts
     assert cfg.input_mode == "voice_only"
@@ -321,8 +343,8 @@ def test_phone_dryrun_profile_uses_onnx_quantized_voice_configuration():
     assert cfg.task_transport == "uds"
     assert cfg.mobile_feedback_transport == "uds"
     assert cfg.playback_transport == "uds"
-    assert cfg.frontend_backend == "onnx"
-    assert cfg.classifier_backend == "onnx"
+    assert cfg.kws.backend == "sherpa_onnx"
+    assert cfg.kws.num_threads == 1
     assert cfg.asr_quant is True
     assert cfg.vad_quant is True
     assert cfg.followup_secs == 8.0
@@ -349,8 +371,8 @@ def test_debug_profile_disables_all_robot_and_phone_ipc():
     assert cfg.mobile_feedback_transport == "disabled"
     assert cfg.playback_transport == "disabled"
     assert cfg.disable_tts
-    assert cfg.frontend_backend == "onnx"
-    assert cfg.classifier_backend == "onnx"
+    assert cfg.kws.backend == "sherpa_onnx"
+    assert cfg.kws.keywords_file.endswith("Voice/kws/sherpa_custom/extreme.txt")
     assert cfg.asr_quant is True
     assert cfg.vad_quant is True
 

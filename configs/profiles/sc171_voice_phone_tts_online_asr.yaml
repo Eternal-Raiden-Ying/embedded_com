@@ -1,6 +1,8 @@
 profile: "sc171_voice_phone_tts_online_asr"
 base_profile: "sc171_voice_phone_tts"
 voice_gateway:
+  kws:
+    backend: sherpa_onnx
   asr:
     mode: online
     model_path: Voice/ONNX/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online-onnx

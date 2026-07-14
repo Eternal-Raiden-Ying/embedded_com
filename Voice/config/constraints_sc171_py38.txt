@@ -3,3 +3,4 @@ onnxruntime==1.19.2
 PyYAML==5.3.1
 msgpack==1.1.1
 soundfile==0.12.1
+sherpa-onnx==1.13.4

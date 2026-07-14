@@ -74,18 +74,16 @@ def test_stop_state_updates():
 
 def test_model_missing_checks():
     # In normal mode, missing model throws SystemExit
-    cfg = VoiceServiceConfig(
-        dry_run_text=False,
-        wake_tflite="nonexistent_wake_model.onnx"
-    )
+    cfg = VoiceServiceConfig(dry_run_text=False)
+    cfg.kws.model_dir = "nonexistent_kws_model"
+    cfg.kws.keywords_file = "nonexistent_keywords.txt"
     with pytest.raises(SystemExit):
         check_models(cfg)
         
     # In dry_run_text mode, missing model only prints a warning and does not exit
-    cfg_dry = VoiceServiceConfig(
-        dry_run_text=True,
-        wake_tflite="nonexistent_wake_model.onnx"
-    )
+    cfg_dry = VoiceServiceConfig(dry_run_text=True)
+    cfg_dry.kws.model_dir = "nonexistent_kws_model"
+    cfg_dry.kws.keywords_file = "nonexistent_keywords.txt"
     check_models(cfg_dry)  # Should execute successfully without raising SystemExit
 
 
@@ -255,8 +253,6 @@ def test_voice_new_config_structures():
     from voice_service.config.schema import VoiceServiceConfig, VoiceConsoleConfig, VoiceLexiconConfig, VoiceInteractionConfig
     
     cfg = VoiceServiceConfig(
-        wake_key="xiaoche",
-        stop_key="ting",
         wake_phrases="xiaoche",
         asr_dir="",
         vad_dir="",
@@ -283,5 +279,3 @@ def test_voice_new_config_structures():
     assert cfg.interaction.post_command_cooldown_ms == 1000
     assert cfg.interaction.reject_commands_while_busy is True
     assert cfg.interaction.allow_stop_while_busy is True
-
-

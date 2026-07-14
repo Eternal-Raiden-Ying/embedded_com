@@ -5,6 +5,8 @@ print("[VISTA_EDGE_MAPPING_FIX_ACTIVE] version=20260626_edge_payload_path_v2 fil
 print("[VISTA_EDGE_E2E_CHAIN_FIX_ACTIVE] version=20260626_edge_e2e_results_priority_v1 file=" + __file__, flush=True)
 
 from collections.abc import Mapping
+from functools import lru_cache
+import time
 from typing import Optional
 
 from ....ipc.protocol import VisionReq
@@ -14,11 +16,26 @@ from .status_policy import FAILED, RELAXING, RUNNING, invalid_search_kind_result
 from .table_edge_obs_builder import (
     annotate_table_edge_obs,
     merge_table_bbox_from_local_perception,
+    local_explicit_negative,
+    local_inference_completed,
+    local_inference_identity,
     payload_has_table_edge_obs,
     table_edge_obs_from_payload,
     table_edge_obs_from_results,
     check_edge_current_enough,
 )
+
+
+@lru_cache(maxsize=1)
+def _completed_table_bbox_stale_s() -> float:
+    """Reuse the existing docking loss-hold TTL across the control boundary."""
+    try:
+        from common.config_loader import get_config
+
+        cfg = get_config()
+        return max(0.5, float(cfg.orchestrator.control.table_loss_hold_s))
+    except Exception:
+        return 1.2
 from .target_obs_builder import (
     payload_has_target_obs,
     target_obs_from_payload,
@@ -117,6 +134,9 @@ def _local_perception_identity(local_perception: object) -> Optional[tuple]:
     """Return a stable, hashable identity for the current RGB inference."""
     if not isinstance(local_perception, dict):
         return None
+    completed_identity = local_inference_identity(local_perception)
+    if completed_identity is None:
+        return None
     frame_id = next(
         (
             local_perception.get(key)
@@ -150,6 +170,7 @@ def _local_perception_identity(local_perception: object) -> Optional[tuple]:
     if current_found is None and bool(local_perception.get("has_infer", local_perception.get("yolo_has_infer", False))):
         current_found = False
     return (
+        completed_identity,
         frame_id,
         timestamp,
         local_perception.get("trace_id"),
@@ -157,6 +178,79 @@ def _local_perception_identity(local_perception: object) -> Optional[tuple]:
         current_found,
         local_perception.get("yolo_table_fresh"),
     )
+
+
+def _completed_local_perception_for_control(
+    local_perception: object,
+    stage_state: dict,
+    *,
+    tick_ts: float,
+) -> Optional[dict]:
+    """Return the latest completed inference, never an empty scheduler tick."""
+    local = dict(local_perception) if isinstance(local_perception, dict) else None
+    if local is not None and local_inference_completed(local):
+        identity = local_inference_identity(local)
+        previous_identity = stage_state.get("_last_completed_inference_identity")
+        local["has_new_inference"] = bool(identity != previous_identity)
+        local["explicit_negative_detection"] = bool(local_explicit_negative(local))
+        local["explicit_negative"] = bool(local["explicit_negative_detection"])
+        local["inference_age_ms"] = 0.0
+        local["control_bbox_age_ms"] = 0.0
+        local["bbox_hold_reason"] = "new_completed_inference"
+        stage_state["_last_completed_local_perception"] = dict(local)
+        stage_state["_last_completed_inference_identity"] = identity
+        return local
+
+    cached = stage_state.get("_last_completed_local_perception")
+    if not isinstance(cached, dict):
+        if local is not None:
+            local["has_new_inference"] = False
+            local["explicit_negative_detection"] = False
+            local["explicit_negative"] = False
+        return local
+
+    completed_ts = cached.get("obs_ts", cached.get("frame_capture_ts"))
+    age_s = None
+    if completed_ts is not None:
+        try:
+            age_s = max(0.0, float(tick_ts) - float(completed_ts))
+        except Exception:
+            age_s = None
+    if age_s is None:
+        completed_mono_ns = cached.get("last_completed_inference_mono_ns") or cached.get("inference_done_mono_ns")
+        if completed_mono_ns is not None:
+            try:
+                age_s = max(0.0, (time.monotonic_ns() - int(completed_mono_ns)) / 1_000_000_000.0)
+            except Exception:
+                age_s = None
+    age_s = float(age_s if age_s is not None else 0.0)
+    held = dict(cached)
+    held["has_new_inference"] = False
+    held["explicit_negative_detection"] = False
+    held["explicit_negative"] = False
+    held["inference_age_ms"] = age_s * 1000.0
+    held["control_bbox_age_ms"] = age_s * 1000.0
+    held["bbox_hold_reason"] = "inference_pending" if bool(local and local.get("inference_executed")) else "no_new_inference"
+    if age_s <= _completed_table_bbox_stale_s():
+        return held
+
+    # Absolute timeout: invalidate the cached positive without fabricating a
+    # completed negative or incrementing a detection-loss counter.
+    held.update(
+        {
+            "detected_table_bbox": None,
+            "table_bbox": None,
+            "table_bbox_xyxy": None,
+            "yolo_table_bbox": None,
+            "table_bbox_current_found": False,
+            "table_bbox_detected": False,
+            "yolo_table_fresh": False,
+            "explicit_negative_detection": False,
+            "explicit_negative": False,
+            "bbox_hold_reason": "completed_bbox_stale_timeout",
+        }
+    )
+    return held
 
 def _sync_edge_follow_payload(req: VisionReq, ctx: StageContext) -> None:
     payload = req.payload if isinstance(req.payload, dict) else {}
@@ -278,6 +372,11 @@ class SearchStagePlan(BaseStagePlan):
 
         logger = logging.getLogger("vision.stage.search")
         raw_results_edge = (results or {}).get("table_edge_obs")
+        local_perception = _completed_local_perception_for_control(
+            local_perception,
+            ctx.stage_state,
+            tick_ts=tick_input.ts,
+        )
         results_edge_dict = _table_edge_result_dict(raw_results_edge)
         results_present = isinstance(results_edge_dict, dict)
         results_summary = table_edge_obs_from_results({"table_edge_obs": results_edge_dict}) if results_present else None
@@ -405,6 +504,17 @@ class SearchStagePlan(BaseStagePlan):
             local_perception,
             tick_ts=tick_input.ts,
         )
+        # This is a newly assembled control observation even when its bbox is
+        # held from the latest completed inference. Keep component timestamps
+        # for diagnosis, while the aggregate timestamp follows this publish
+        # cycle so Orchestrator does not confuse inference cadence with a dead
+        # vision transport.
+        table_edge_obs["edge_geometry_obs_ts"] = edge_ts_val
+        table_edge_obs["edge_geometry_frame_id"] = edge_frame_id
+        if isinstance(local_perception, dict) and local_perception.get("has_new_inference") is False:
+            table_edge_obs["obs_ts"] = float(tick_input.ts)
+            table_edge_obs["ts"] = float(tick_input.ts)
+            table_edge_obs["age_ms"] = 0.0
 
         # After merge metrics:
         after_edge_found = bool(table_edge_obs.get("edge_found"))
@@ -516,7 +626,7 @@ class SearchStagePlan(BaseStagePlan):
         # A result is urgent only on first arrival; repeated scheduler reads are
         # retained as latest state but do not refresh observation freshness.
         local_updated = bool(local_identity is not None and is_new_identity)
-        edge_updated = bool(table_edge_source == "results" and is_current_frame and is_new_identity)
+        edge_updated = bool(table_edge_source == "results" and is_new_identity)
         force_send = bool(local_updated or edge_updated or status_changed)
         force_send_reasons = []
         if local_updated:

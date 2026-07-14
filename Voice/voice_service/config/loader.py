@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Type, Union
 
 from .paths import REPO_ROOT, resolve_path
 from .schema import VoiceServiceConfig, VoiceConsoleConfig, VoiceLexiconConfig, VoiceInteractionConfig
+from common.config.schema import VoiceKwsConfig
 
 # Import common loader if possible, or fall back to simple parser
 try:
@@ -57,26 +58,16 @@ def map_nested_dict(nested: Dict[str, Any], flat: Dict[str, Any]) -> None:
     # 2. kws section
     if "kws" in nested and isinstance(nested["kws"], dict):
         kws = nested["kws"]
-        if "model_path" in kws:
-            flat["wake_tflite"] = str(kws["model_path"])
-        if "threshold" in kws:
-            flat["wake_th"] = float(kws["threshold"])
-        if "wake_word" in kws:
-            flat["wake_key"] = str(kws["wake_word"])
-        if "frontend_backend" in kws:
-            flat["frontend_backend"] = str(kws["frontend_backend"])
-        if "classifier_backend" in kws:
-            flat["classifier_backend"] = str(kws["classifier_backend"])
+        flat.setdefault("kws", {})
+        for key in (
+            "backend", "model_dir", "keywords_file", "provider", "num_threads",
+            "max_active_paths", "num_trailing_blanks", "trigger_cooldown_ms",
+            "max_consecutive_errors", "wake_keyword", "stop_keyword",
+        ):
+            if key in kws:
+                flat["kws"][key] = kws[key]
 
-    # 3. stop_kws section
-    if "stop_kws" in nested and isinstance(nested["stop_kws"], dict):
-        stop_kws = nested["stop_kws"]
-        if "model_path" in stop_kws:
-            flat["stop_tflite"] = str(stop_kws["model_path"])
-        if "threshold" in stop_kws:
-            flat["stop_th"] = float(stop_kws["threshold"])
-
-    # 4. vad section
+    # 3. vad section
     if "vad" in nested and isinstance(nested["vad"], dict):
         vad = nested["vad"]
         if "model_path" in vad:
@@ -208,7 +199,8 @@ def map_nested_dict(nested: Dict[str, Any], flat: Dict[str, Any]) -> None:
         if k in nested:
             val = nested[k]
             if val is not None:
-                flat[k] = val
+                if k != "kws":
+                    flat[k] = val
 
 
 def _resolve_profile_path(profile_path: str) -> Path:
@@ -275,7 +267,7 @@ def load_voice_config(argv: Optional[List[str]] = None) -> VoiceServiceConfig:
     global_yaml_path = cli_args.config
     if not global_yaml_path:
         # Default fallback
-        cand = REPO_ROOT / "Voice" / "config" / "voice_gateway.yaml"
+        cand = REPO_ROOT / "configs" / "common" / "voice_gateway.yaml"
         if cand.exists():
             global_yaml_path = str(cand)
 
@@ -295,18 +287,6 @@ def load_voice_config(argv: Optional[List[str]] = None) -> VoiceServiceConfig:
                     if "model_path" in asr: flat["asr_dir"] = str(asr["model_path"])
                     if "vad_model_path" in asr: flat["vad_dir"] = str(asr["vad_model_path"])
                     if "backend" in asr: flat["asr_mode"] = "online" if "online" in str(asr["backend"]) else "offline"
-            if "wake_kws" in models and isinstance(models["wake_kws"], dict):
-                wake = models["wake_kws"]
-                if wake.get("enabled", True):
-                    if "model_path" in wake: flat["wake_tflite"] = str(wake["model_path"])
-                    if "threshold" in wake: flat["wake_th"] = float(wake["threshold"])
-                    if "frontend_backend" in wake: flat["frontend_backend"] = str(wake["frontend_backend"])
-                    if "classifier_backend" in wake: flat["classifier_backend"] = str(wake["classifier_backend"])
-            if "stop_kws" in models and isinstance(models["stop_kws"], dict):
-                stop = models["stop_kws"]
-                if stop.get("enabled", True):
-                    if "model_path" in stop: flat["stop_tflite"] = str(stop["model_path"])
-                    if "threshold" in stop: flat["stop_th"] = float(stop["threshold"])
             if "tts" in models and isinstance(models["tts"], dict):
                 tts = models["tts"]
                 if tts.get("enabled", True):
@@ -333,8 +313,6 @@ def load_voice_config(argv: Optional[List[str]] = None) -> VoiceServiceConfig:
     # 5. Overwrite with environment variables
     # Legacy env mapping
     env_mappings = {
-        "VOICE_WAKE_MODEL": "wake_tflite",
-        "VOICE_STOP_MODEL": "stop_tflite",
         "VOICE_PIPER_MODEL": "piper_model",
         "VOICE_RUNS_DIR": "runs_dir",
         "VOICE_ASR_DIR": "asr_dir",
@@ -358,8 +336,6 @@ def load_voice_config(argv: Optional[List[str]] = None) -> VoiceServiceConfig:
         "VOICE_TTS_EVENT_HOST": "tts_event_host",
         "VOICE_TTS_EVENT_PORT": "tts_event_port",
         "VOICE_TTS_EVENT_UDS_PATH": "tts_event_uds_path",
-        "VOICE_WAKE_TH": "wake_th",
-        "VOICE_STOP_TH": "stop_th",
         "VOICE_ARMED_SECS": "armed_secs",
         "VOICE_FOLLOWUP_SECS": "followup_secs",
         "VOICE_STOP_FOLLOWUP_SECS": "stop_followup_secs",
@@ -451,23 +427,21 @@ def load_voice_config(argv: Optional[List[str]] = None) -> VoiceServiceConfig:
     p_vad, _ = resolve_and_verify_model("vad", flat.get("vad_dir"), "VOICE_VAD_MODEL_PATH", "fsmn_vad")
     if p_vad: flat["vad_dir"] = str(p_vad)
 
-    p_wake, _ = resolve_and_verify_model("wake_kws", flat.get("wake_tflite"), "VOICE_WAKE_MODEL_PATH", "openwakeword")
-    if p_wake: flat["wake_tflite"] = str(p_wake)
-
-    p_stop, _ = resolve_and_verify_model("stop_kws", flat.get("stop_tflite"), "VOICE_STOP_MODEL_PATH", "openwakeword")
-    if p_stop: flat["stop_tflite"] = str(p_stop)
+    kws = flat.get("kws", {})
+    if not isinstance(kws, dict):
+        raise ValueError("voice.kws must be a mapping")
+    if str(kws.get("backend", "")).strip().lower() != "sherpa_onnx":
+        raise ValueError("production Voice Gateway requires voice.kws.backend=sherpa_onnx")
+    for key in ("model_dir", "keywords_file"):
+        if not kws.get(key):
+            raise ValueError("voice.kws.{} is required".format(key))
+        kws[key] = str(resolve_path(kws[key]))
 
     p_tts, _ = resolve_and_verify_model("tts", flat.get("piper_model"), "VOICE_TTS_MODEL_PATH", "piper")
     if p_tts: flat["piper_model"] = str(p_tts)
 
     p_tts_cfg, _ = resolve_and_verify_model("tts_config", flat.get("piper_config"), "VOICE_TTS_CONFIG_PATH", "piper")
     if p_tts_cfg: flat["piper_config"] = str(p_tts_cfg)
-
-    # Optional Mel / Embedding overrides checks
-    if os.getenv("VOICE_KWS_MEL_MODEL_PATH"):
-        resolve_and_verify_model("kws_frontend_mel", os.environ["VOICE_KWS_MEL_MODEL_PATH"], "VOICE_KWS_MEL_MODEL_PATH", "openwakeword")
-    if os.getenv("VOICE_KWS_EMBEDDING_MODEL_PATH"):
-        resolve_and_verify_model("kws_frontend_embed", os.environ["VOICE_KWS_EMBEDDING_MODEL_PATH"], "VOICE_KWS_EMBEDDING_MODEL_PATH", "openwakeword")
 
     # Resolve regular config folders
     for path_field in ("commands_json", "runs_dir", "logs_dir", "tts_cache", "tts_out_dir"):
@@ -489,5 +463,10 @@ def load_voice_config(argv: Optional[List[str]] = None) -> VoiceServiceConfig:
         flat["interaction"] = VoiceInteractionConfig(**flat["interaction"])
     elif flat.get("interaction") is None:
         flat["interaction"] = VoiceInteractionConfig()
+
+    if isinstance(flat.get("kws"), dict):
+        flat["kws"] = VoiceKwsConfig(**flat["kws"])
+    elif flat.get("kws") is None:
+        flat["kws"] = VoiceKwsConfig()
 
     return VoiceServiceConfig(**flat)

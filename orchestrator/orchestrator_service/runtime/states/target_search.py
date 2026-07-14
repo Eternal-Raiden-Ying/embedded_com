@@ -117,7 +117,7 @@ class TargetSearchMixin:
             if is_new_obs
             else self._target_window_stats()
         )
-        timed_out = self._state_elapsed() >= float(self.cfg.target_search_timeout_s)
+        timeout_reason = ""
         if candidate_ok and target_obs is not None:
             if is_new_obs:
                 self.ctx.target_found_frames += 1
@@ -125,7 +125,13 @@ class TargetSearchMixin:
             self._remember_good_target(target_obs, self.ctx.target_lateral_vy_cmd)
             if is_new_obs:
                 self._update_target_stability(target_obs)
-            self._record_target_lateral_good(target_obs, None)
+            if is_new_obs:
+                self._record_target_lateral_good(target_obs, None)
+            timeout_reason = self._target_lateral_timeout_reason(candidate_ok=True)
+            if timeout_reason:
+                return self._handle_edge_slide_target_timeout(
+                    target_obs, target_window, candidate_reason, timeout_reason=timeout_reason
+                )
             if stable_count < stable_required:
                 return self._annotate_target_lateral_decision(
                     self.controller.stop_cmd("EDGE_SLIDE_SEARCH"),
@@ -180,8 +186,6 @@ class TargetSearchMixin:
                     f"frames={int(progress.get('edge_slide_frames', 0) or 0)} "
                     "confirm_allowed=false",
                 )
-            if timed_out:
-                return self._handle_edge_slide_target_timeout(target_obs, target_window, candidate_reason)
             align_decision = self._target_lateral_align_decision(target_obs, state="EDGE_SLIDE_SEARCH")
             if align_decision is not None:
                 return align_decision
@@ -194,8 +198,11 @@ class TargetSearchMixin:
                     vy_cmd=0.0,
                 )
         else:
-            if timed_out:
-                return self._handle_edge_slide_target_timeout(target_obs, target_window, candidate_reason)
+            timeout_reason = self._target_lateral_timeout_reason(candidate_ok=False)
+            if timeout_reason:
+                return self._handle_edge_slide_target_timeout(
+                    target_obs, target_window, candidate_reason, timeout_reason=timeout_reason
+                )
             had_recent_target = bool(
                 self.ctx.target_found_frames > 0
                 or self.ctx.target_lateral_stable_count > 0
@@ -345,16 +352,42 @@ class TargetSearchMixin:
         target_obs: Optional[TargetObs],
         target_window: Dict[str, Any],
         candidate_reason: str,
+        *,
+        timeout_reason: str = "",
     ) -> MotionDecision:
-        reject_reason = self._target_search_reject_reason(target_obs, target_window, candidate_reason, timeout=True)
-        if self.ctx.last_good_target_mono > 0.0:
-            reject_reason = "target_lost_timeout"
-        elif self.ctx.target_found_frames <= 0:
-            reject_reason = "target_never_found_timeout"
-        elif int(self.ctx.target_lateral_stable_count) < self._target_lateral_stable_frames():
-            reject_reason = "target_lateral_align_timeout"
+        reject_reason = str(timeout_reason or self._target_lateral_timeout_reason(candidate_ok=target_obs is not None))
+        if not reject_reason:
+            reject_reason = self._edge_slide_timeout_reason(target_obs, target_window, candidate_reason)
+        now_mono = monotonic_ts()
+        last_progress_mono = float(getattr(self.ctx, "target_lateral_last_progress_mono", 0.0) or 0.0)
+        progress_age_s = max(0.0, now_mono - last_progress_mono) if last_progress_mono > 0.0 else None
+        no_progress_timeout_s = max(
+            0.1,
+            float(
+                getattr(
+                    self.cfg,
+                    "target_lateral_no_progress_timeout_s",
+                    getattr(self.cfg, "target_search_timeout_s", 10.0),
+                )
+                or 10.0
+            ),
+        )
+        progress_timeout_violation = bool(
+            target_obs is not None
+            and getattr(target_obs, "found", False)
+            and progress_age_s is not None
+            and progress_age_s < no_progress_timeout_s
+            and reject_reason != "target_absolute_timeout"
+        )
+        if progress_timeout_violation:
+            self._log(
+                "error",
+                "[TARGET_CONTROL_INVARIANT] TARGET_PROGRESS_BUT_TIMEOUT_TRIGGERED "
+                f"reason={reject_reason} progress_age_s={progress_age_s:.3f}",
+            )
         self.ctx.target_last_lost_reason = reject_reason
-        self.ctx.last_fail_reason = f"当前桌边未找到目标 reject_reason={reject_reason}"
+        self.ctx.target_lateral_timeout_type = reject_reason
+        self.ctx.last_fail_reason = reject_reason
         min_abs_err = getattr(self.ctx, "target_lateral_min_abs_err_x", None)
         last_err = getattr(self.ctx, "target_lateral_last_err_x", None)
         timeout_s = float(self.cfg.target_search_timeout_s)
@@ -375,8 +408,7 @@ class TargetSearchMixin:
             self._queue_tts("当前桌位未找到目标，尝试下一张桌")
             decision = self.controller.next_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
         else:
-            self.ctx.last_fail_reason = "single_table_target_search_timeout"
-            self._enter_error_recovery(self.ctx.last_fail_reason)
+            self._enter_error_recovery(reject_reason)
             decision = self.controller.stop_cmd("ERROR_RECOVERY", brake=True)
             decision.control_summary.update(
                 {"control_source": "search_failed_stop", "multi_table_enabled": False}
@@ -393,9 +425,53 @@ class TargetSearchMixin:
                     "stable_count": int(self.ctx.target_found_frames),
                     "lateral_stable_count": int(self.ctx.target_lateral_stable_count),
                     "center_jitter": float(target_window.get("center_jitter", 0.0) or 0.0),
+                    "target_progress_age_s": progress_age_s,
+                    "control_invariant_violation": (
+                        "TARGET_PROGRESS_BUT_TIMEOUT_TRIGGERED" if progress_timeout_violation else ""
+                    ),
                 }
             )
         return decision
+
+    def _target_lateral_timeout_reason(self, *, candidate_ok: bool) -> str:
+        """Use progress/loss/UART clocks instead of the short state wall clock."""
+        now = monotonic_ts()
+        elapsed = max(0.0, self._state_elapsed())
+        normal_timeout = max(0.1, float(getattr(self.cfg, "target_search_timeout_s", 10.0) or 10.0))
+        absolute_timeout = max(
+            normal_timeout,
+            float(getattr(self.cfg, "target_search_absolute_timeout_s", 60.0) or 60.0),
+        )
+        if elapsed >= absolute_timeout:
+            return "target_absolute_timeout"
+
+        last_good = float(getattr(self.ctx, "target_lateral_last_good_obs_mono", 0.0) or 0.0)
+        had_target = bool(last_good > 0.0 or getattr(self.ctx, "target_lateral_min_abs_err_x", None) is not None)
+        if not had_target:
+            return "target_never_found_timeout" if elapsed >= normal_timeout else ""
+        if not candidate_ok:
+            lost_timeout = max(0.0, float(getattr(self.cfg, "target_lateral_lost_stop_s", 1.2) or 1.2))
+            if last_good > 0.0 and now - last_good >= lost_timeout:
+                return "target_lost_timeout"
+            return ""
+
+        last_progress = float(getattr(self.ctx, "target_lateral_last_progress_mono", 0.0) or 0.0)
+        if last_progress <= 0.0:
+            self.ctx.target_lateral_last_progress_mono = now
+            last_progress = now
+        no_progress_timeout = max(
+            0.1,
+            float(getattr(self.cfg, "target_lateral_no_progress_timeout_s", normal_timeout) or normal_timeout),
+        )
+        if now - last_progress >= no_progress_timeout:
+            return "target_lateral_no_progress_timeout"
+
+        last_cmd = float(getattr(self.ctx, "target_lateral_last_cmd_mono", 0.0) or 0.0)
+        last_accept = float(getattr(self.ctx, "target_lateral_last_uart_accept_mono", 0.0) or 0.0)
+        uart_timeout = max(0.1, float(getattr(self.cfg, "target_lateral_uart_no_progress_timeout_s", 3.0) or 3.0))
+        if last_cmd > 0.0 and now - last_cmd >= uart_timeout and last_accept < last_cmd:
+            return "target_uart_no_progress_timeout"
+        return ""
 
     def _edge_slide_timeout_reason(
         self,
@@ -1411,6 +1487,21 @@ class TargetSearchMixin:
                 "found_ratio": float(self._target_window_stats().get("found_ratio", 0.0) or 0.0),
                 "center_jitter": float(self.ctx.target_last_center_jitter),
                 "target_lateral_vy_cmd": float(vy_cmd),
+                "lateral_owner": "target_lateral" if abs(float(vy_cmd)) > 1e-9 else "none",
+                "yaw_owner": "none",
+                "forward_owner": "none",
+                "docking_action": "TARGET_LATERAL_ALIGN" if abs(float(vy_cmd)) > 1e-9 else "TARGET_CONFIRM_HOLD",
+                "target_lateral_min_abs_err": getattr(self.ctx, "target_lateral_min_abs_err_x", None),
+                "target_lateral_last_err": getattr(self.ctx, "target_lateral_last_err_x", None),
+                "target_lateral_last_progress_age_s": (
+                    max(0.0, monotonic_ts() - float(self.ctx.target_lateral_last_progress_mono))
+                    if float(getattr(self.ctx, "target_lateral_last_progress_mono", 0.0) or 0.0) > 0.0 else None
+                ),
+                "target_lateral_last_uart_accept_age_s": (
+                    max(0.0, monotonic_ts() - float(self.ctx.target_lateral_last_uart_accept_mono))
+                    if float(getattr(self.ctx, "target_lateral_last_uart_accept_mono", 0.0) or 0.0) > 0.0 else None
+                ),
+                "target_timeout_type": str(getattr(self.ctx, "target_lateral_timeout_type", "") or ""),
                 "target_lateral_stable_count": int(self.ctx.target_lateral_stable_count),
                 "target_lateral_stable_frames": int(self._target_lateral_stable_frames()),
                 "target_lateral_hold_active": bool(getattr(self.ctx, "target_lateral_hold_active", False)),
@@ -1547,8 +1638,10 @@ class TargetSearchMixin:
             self.ctx.target_lateral_last_err_x = float(err)
             abs_err = abs(float(err))
             previous = getattr(self.ctx, "target_lateral_min_abs_err_x", None)
-            if previous is None or abs_err < float(previous):
+            progress_delta = abs(float(getattr(self.cfg, "target_lateral_progress_min_delta", 0.01) or 0.01))
+            if previous is None or abs_err <= float(previous) - progress_delta:
                 self.ctx.target_lateral_min_abs_err_x = abs_err
+                self.ctx.target_lateral_last_progress_mono = now_m
 
     def _target_lateral_hold_decision(
         self,
@@ -1589,6 +1682,7 @@ class TargetSearchMixin:
         if abs(vy_cmd) <= 1e-9:
             return None
         self.ctx.target_lateral_vy_cmd = float(vy_cmd)
+        self.ctx.target_lateral_last_cmd_mono = monotonic_ts()
         self._log(
             "info",
             f"[SLICE][TARGET_HOLD] state={state or 'EDGE_SLIDE_SEARCH'} age={age_s:.2f} last_vy={last_vy:.3f} reason={candidate_reason}",
@@ -1678,6 +1772,7 @@ class TargetSearchMixin:
         if abs(vy_cmd) < vy_min:
             vy_cmd = vy_min if vy_raw >= 0.0 else -vy_min
         cmd = self.controller._cmd(state, vx=0.0, vy=vy_cmd, wz=0.0)
+        self.ctx.target_lateral_last_cmd_mono = monotonic_ts()
         decision = MotionDecision(
             cmd=cmd,
             control_summary=self.controller._summary(state, cmd, reason="target_lateral_align"),

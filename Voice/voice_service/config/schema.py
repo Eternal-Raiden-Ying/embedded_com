@@ -4,6 +4,8 @@
 from dataclasses import dataclass, field
 from typing import List, Dict, Union, Optional
 
+from common.config.schema import VoiceKwsConfig
+
 @dataclass
 class VoiceConsoleConfig:
     events: List[str] = field(default_factory=lambda: ["AUDIO_READY", "WAKE_TRIGGERED", "COMMAND_CAPTURE_ARMED", "SPEECH_GATE_BLOCKED", "REC_STARTED", "REC_ENDED", "ASR_FINAL", "TASK_CMD_SENT", "TASK_ACK", "INTENT_ACCEPTED", "INTENT_REJECTED", "WARN", "ERROR"])
@@ -32,11 +34,12 @@ class VoiceServiceConfig:
     # Models & configuration resources
     asr_dir: str = ""
     vad_dir: str = ""
-    wake_tflite: str = ""
-    stop_tflite: str = ""
     piper_model: str = ""
     piper_config: str = ""
     commands_json: str = ""
+
+    # Canonical KWS settings are defined by common.config.schema.
+    kws: VoiceKwsConfig = field(default_factory=VoiceKwsConfig)
 
     # Audio device parameters
     arecord_device: str = "plughw:CARD=UACDemoV10,DEV=0"
@@ -55,18 +58,11 @@ class VoiceServiceConfig:
     asr_warmup_samples: int = 1600
 
     # Wake & Stop Hotword parameters
-    wake_key: str = ""
-    stop_key: str = ""
-    wake_th: float = 0.60
-    stop_th: float = 0.58
     armed_secs: float = 6.0
     followup_secs: float = 4.0
     stop_followup_secs: float = 5.5
     max_followup_turns: int = 3
     max_reject_streak: int = 2
-    oww_vad_th: float = 0.0
-    frontend_backend: str = "tflite"
-    classifier_backend: str = "onnx"
     wake_phrases: str = "你好小车,你好 小车,小车你好"
 
     # Energy-based VAD / segmenting

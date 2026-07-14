@@ -1,13 +1,15 @@
 # KWS Models Directory
 
-Place wake word and STOP hotword models in this directory.
+The production Voice Gateway uses one Sherpa-ONNX streaming keyword spotter for
+both wake and STOP phrases. It consumes frames from the Gateway's existing
+audio capture worker; it does not open an audio device itself.
 
-## Expected Models
-- Wake Word Model (ONNX):
-  - `wake_nihao_xiaoche_v2.onnx` (Default)
-  - `wake_nihao_xiaoche.onnx`
-  - `wake_nihao_xiaoche_clean.onnx`
-- Stop Hotword Model (ONNX):
-  - `stop_smallcar_v1.onnx` (Default)
-  - `stop_xiaochetingzhi_v1.onnx`
-  - `stop_smallcar.onnx`
+## Production resources
+
+- `sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/`
+- `sherpa_custom/extreme.txt`
+
+Canonical paths and runtime parameters live in
+`configs/common/voice_gateway.yaml`. Legacy standalone classifier models may
+remain in this directory for reference, but production profiles do not load
+them.

@@ -17,6 +17,52 @@ from vision_module.app.stages.search.table_edge_obs_builder import (
 )
 
 class TestTableEdgeObsBuilder(unittest.TestCase):
+    def test_no_inference_tick_preserves_completed_control_bbox(self):
+        previous = {
+            **default_table_edge_obs(),
+            "table_bbox_current_found": True,
+            "table_bbox_control_valid": True,
+            "yolo_table_fresh": True,
+            "table_bbox_xyxy": [320.0, 80.0, 600.0, 460.0],
+        }
+        merged = merge_table_bbox_from_local_perception(
+            previous,
+            {
+                "frame_id": 22,
+                "has_infer": False,
+                "inference_completed": False,
+                "inference_executed": False,
+            },
+            tick_ts=100.1,
+        )
+        self.assertTrue(merged["table_bbox_current_found"])
+        self.assertTrue(merged["table_bbox_control_valid"])
+        self.assertTrue(merged["yolo_table_fresh"])
+        self.assertEqual(merged["table_bbox_xyxy"], previous["table_bbox_xyxy"])
+        self.assertFalse(merged["explicit_negative_detection"])
+
+    def test_pending_inference_preserves_completed_control_bbox(self):
+        previous = {
+            **default_table_edge_obs(),
+            "table_bbox_current_found": True,
+            "table_bbox_control_valid": True,
+            "yolo_table_fresh": True,
+            "table_bbox_xyxy": [100.0, 40.0, 420.0, 440.0],
+        }
+        merged = merge_table_bbox_from_local_perception(
+            previous,
+            {
+                "frame_id": 23,
+                "has_infer": True,
+                "inference_executed": True,
+                "inference_completed": False,
+            },
+            tick_ts=100.2,
+        )
+        self.assertTrue(merged["table_bbox_current_found"])
+        self.assertEqual(merged["bbox_hold_reason"], "inference_pending")
+        self.assertFalse(merged["explicit_negative_detection"])
+
     def test_confidence_backfills_zero_edge_conf(self):
         obs = {
             "edge_found": True,
