@@ -274,6 +274,11 @@ class RuntimeContext:
     last_valid_yolo_obs: Optional[TableEdgeObs] = None
     last_valid_yolo_obs_mono: float = 0.0
     last_counted_negative_inference_key: str = ""
+    table_control_latch_active: bool = False
+    last_valid_table_cmd: Dict[str, object] = field(default_factory=dict)
+    last_valid_table_cmd_mono: float = 0.0
+    last_valid_table_cmd_owner: str = ""
+    last_valid_table_cmd_action: str = ""
     search_wz_sign_latched: int = 0
     search_wz_latch_until_mono: float = 0.0
     target_found_frames: int = 0
@@ -321,6 +326,17 @@ class RuntimeContext:
     target_lateral_last_cmd_mono: float = 0.0
     target_lateral_last_uart_accept_mono: float = 0.0
     target_lateral_timeout_type: str = ""
+    last_completed_target_inference_id: str = ""
+    last_completed_target_inference_mono: float = 0.0
+    last_target_explicit_negative_id: str = ""
+    target_explicit_negative_count: int = 0
+    target_control_latch_active: bool = False
+    last_valid_target_obs: Optional[TargetObs] = None
+    last_valid_target_obs_mono: float = 0.0
+    last_valid_target_lateral_cmd: Dict[str, object] = field(default_factory=dict)
+    last_valid_target_lateral_cmd_mono: float = 0.0
+    last_valid_target_cmd_owner: str = ""
+    last_valid_target_cmd_action: str = ""
     selected_candidate_idx: Optional[int] = None
     selected_candidate_score: Optional[float] = None
     selected_candidate_reason: str = ""
@@ -545,6 +561,11 @@ class RuntimeContext:
         self.last_valid_yolo_obs = None
         self.last_valid_yolo_obs_mono = 0.0
         self.last_counted_negative_inference_key = ""
+        self.table_control_latch_active = False
+        self.last_valid_table_cmd.clear()
+        self.last_valid_table_cmd_mono = 0.0
+        self.last_valid_table_cmd_owner = ""
+        self.last_valid_table_cmd_action = ""
         self.search_wz_sign_latched = 0
         self.search_wz_latch_until_mono = 0.0
         self.target_found_frames = 0
@@ -582,6 +603,17 @@ class RuntimeContext:
         self.target_lateral_last_cmd_mono = 0.0
         self.target_lateral_last_uart_accept_mono = 0.0
         self.target_lateral_timeout_type = ""
+        self.last_completed_target_inference_id = ""
+        self.last_completed_target_inference_mono = 0.0
+        self.last_target_explicit_negative_id = ""
+        self.target_explicit_negative_count = 0
+        self.target_control_latch_active = False
+        self.last_valid_target_obs = None
+        self.last_valid_target_obs_mono = 0.0
+        self.last_valid_target_lateral_cmd.clear()
+        self.last_valid_target_lateral_cmd_mono = 0.0
+        self.last_valid_target_cmd_owner = ""
+        self.last_valid_target_cmd_action = ""
         self.selected_candidate_idx = None
         self.selected_candidate_score = None
         self.selected_candidate_reason = ""
@@ -613,6 +645,11 @@ class RuntimeContext:
         self.last_valid_yolo_obs = None
         self.last_valid_yolo_obs_mono = 0.0
         self.last_counted_negative_inference_key = ""
+        self.table_control_latch_active = False
+        self.last_valid_table_cmd.clear()
+        self.last_valid_table_cmd_mono = 0.0
+        self.last_valid_table_cmd_owner = ""
+        self.last_valid_table_cmd_action = ""
 
     def reset_edge_plan(self):
         self.current_edge_id = self.edge_visit_order[0] if self.edge_visit_order else "front"

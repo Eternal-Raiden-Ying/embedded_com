@@ -435,10 +435,13 @@ orchestrator:
     depth_envelope_stop_p10_m: 0.30 # Depth envelope hard hold threshold, below final fixed ROI stop
     depth_envelope_slow_p10_m: 0.50 # Depth envelope slow threshold
     depth_emergency_stop_p10_m: 0.20 # Emergency depth stop threshold
-    yolo_approach_far_vx_mps: 0.50 # YOLO approach speed for depth > 1.20m
-    yolo_approach_mid_vx_mps: 0.20 # YOLO approach speed for 0.90m..1.20m
-    yolo_approach_near_vx_mps: 0.10 # YOLO approach speed for 0.65m..0.90m
+    yolo_approach_far_vx_mps: 1.50 # Canonical pre-Final maximum for depth > 1.20m
+    yolo_approach_mid_vx_mps: 1.00 # Canonical pre-Final speed for 0.90m..1.20m
+    yolo_approach_near_vx_mps: 0.50 # Canonical pre-Final speed for 0.65m..0.90m
     yolo_approach_min_vx_mps: 0.05 # YOLO approach speed near final handoff
+    bbox_track_forward_vx_mps: 1.50 # Pre-Final bbox-track maximum; distance profile applies below it
+    bbox_track_forward_max_vx_mps: 1.50 # Canonical pre-Final bbox-track cap
+    far_bbox_track_vx_mps: 1.50 # Far pre-Final bbox-track cap
     builtin_bottle_grasp_enable: true # Use STM32 builtin bottle grasp once target is locked
     builtin_bottle_skip_remote: true # Do not send GRASP_REMOTE while builtin bottle path is active
     builtin_bottle_pose_line: "POSE_BOTTLE" # Builtin bottle pose command line
@@ -509,7 +512,7 @@ orchestrator:
     target_lateral_align_center_x_tol: 0.06 # Center tolerance for lock
     target_lateral_align_kp_vy: 0.10 # Lateral proportional gain
     target_lateral_align_vy_min_mps: 0.016 # Minimum lateral command
-    target_lateral_align_vy_max_mps: 0.050 # Maximum lateral command
+    target_lateral_align_vy_max_mps: 0.750 # Canonical pre-Final target lateral cap
     target_lateral_align_stable_frames: 3 # Consecutive centered frames
     target_lateral_align_lost_hold_s: 0.80 # Hold duration after target loss
     target_lateral_hold_enable: true # Keep lateral motion through brief target drops
@@ -584,13 +587,13 @@ orchestrator:
     table_coarse_align_wz_min_radps: 0.080 # Minimum rotation velocity in coarse align
     table_coarse_align_wz_max_radps: 0.150 # Maximum rotation velocity in coarse align
     table_controlled_vx_min_mps: 0.060 # Minimum forward velocity in controlled approach
-    table_controlled_vx_max_mps: 0.080 # Maximum forward velocity in controlled approach
+    table_controlled_vx_max_mps: 1.500 # Canonical pre-Final forward cap
     table_controlled_vy_min_mps: 0.000 # Minimum lateral velocity in controlled approach
-    table_controlled_vy_max_mps: 0.050 # Maximum lateral velocity in controlled approach
+    table_controlled_vy_max_mps: 0.750 # Canonical pre-Final lateral cap
     table_controlled_wz_min_radps: 0.000 # Minimum rotation velocity in controlled approach
     table_controlled_wz_max_radps: 0.120 # Maximum rotation velocity in controlled approach
     table_approach_safe_vx_mps: 0.060 # Normal edge-approach forward speed
-    table_approach_max_vx_mps: 0.080 # Maximum edge-approach forward speed
+    table_approach_max_vx_mps: 1.500 # Maximum pre-Final edge-approach forward speed
     table_approach_yaw_deadband_rad: 0.08 # Deadband for heading corrections
     table_approach_yaw_realign_rad: 0.16 # Heading error forcing stop and align
     table_approach_allow_wz: true # Enable heading correction during approach
@@ -612,12 +615,12 @@ orchestrator:
     table_stage_c_vx_min_mps: 0.0 # Docking phase minimum forward velocity
     table_min_forward_dist_err_m: 0.07 # Minimum distance to target
     table_vx_mps_min: 0.020 # Base forward speed
-    table_vx_mps_max: 0.100 # Peak non-final table approach speed
+    table_vx_mps_max: 1.500 # Peak pre-Final table approach speed
     table_vx_kp_mps_per_m: 0.30 # Forward speed gain factor
     table_yaw_slow_th_rad: 0.12 # Heading error requiring deceleration
     table_yaw_stop_th_rad: 0.45 # Heading error forcing stop
     table_near_dist_err_th_m: 0.10 # Near table distance threshold
-    table_vy_max_mps: 0.050 # Maximum lateral velocity
+    table_vy_max_mps: 0.750 # Maximum pre-Final lateral velocity
     table_wz_view_max_radps: 0.05 # Maximum rotation velocity during tag search
     table_wz_plane_max_radps: 0.150 # Maximum rotation velocity during edge search
     table_dist_kp_mps_per_m: 0.12 # Distance error gain factor
@@ -658,7 +661,7 @@ orchestrator:
     motion_hold_ms: 400 # Command watchdog safety timeout
     hard_stale_stop_ms: 800 # Emergency stop watchdog safety timeout
     soft_stale_hold_enable: true # Preserve last command on small gaps
-    max_vx_mps: 1.0 # Absolute forward speed limit
+    max_vx_mps: 1.5 # Absolute forward speed limit for the 1.5 pre-Final profile
     max_vy_mps: 1.0 # Absolute lateral speed limit
     max_wz_radps: 1.0 # Absolute rotation speed limit
     stm32_wheel_speed_limit: 100 # Hardware limit for wheel speed

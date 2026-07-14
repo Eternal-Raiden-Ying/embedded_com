@@ -1359,6 +1359,40 @@ class OrchestratorService(BaseModule):
             brake=False,
         )
 
+    def _target_control_latch_status(self) -> Tuple[bool, Optional[float], str]:
+        ctx = self.core.ctx
+        if not bool(getattr(ctx, "target_control_latch_active", False)):
+            return False, None, "inactive"
+        obs_mono = float(getattr(ctx, "last_valid_target_obs_mono", 0.0) or 0.0)
+        cmd_mono = float(getattr(ctx, "last_valid_target_lateral_cmd_mono", 0.0) or 0.0)
+        ttl_s = max(0.0, float(getattr(self.cfg.control, "target_lateral_lost_stop_s", 1.2) or 1.2))
+        age_s = max(0.0, monotonic_ts() - obs_mono) if obs_mono > 0.0 else None
+        cmd_age_s = max(0.0, monotonic_ts() - cmd_mono) if cmd_mono > 0.0 else None
+        negative_limit = max(1, int(getattr(self.cfg.control, "target_confirm_lost_frames", 2) or 2))
+        if age_s is None or age_s > ttl_s:
+            ctx.target_control_latch_active = False
+            return False, age_s, "observation_ttl_expired"
+        if int(getattr(ctx, "target_explicit_negative_count", 0) or 0) >= negative_limit:
+            ctx.target_control_latch_active = False
+            return False, age_s, "explicit_negative_threshold"
+        if cmd_age_s is None or cmd_age_s > ttl_s:
+            return False, age_s, "command_ttl_expired"
+        return True, age_s, "latched_completed_inference"
+
+    def _repeat_target_lateral_latch(self, now: float) -> Optional[CmdVel]:
+        last = dict(getattr(self.core.ctx, "last_valid_target_lateral_cmd", {}) or {})
+        if not last:
+            return None
+        return CmdVel(
+            ts=float(now),
+            mode="EDGE_SLIDE_SEARCH",
+            vx_mps=0.0,
+            vy_mps=float(last.get("vy_mps", 0.0) or 0.0),
+            wz_radps=0.0,
+            hold_ms=int(getattr(self.cfg.car, "cmd_hold_ms", 150) or 150),
+            brake=False,
+        )
+
     def _sync_last_valid_motion_after_smoothing(self, cmd: CmdVel, now: float) -> None:
         if self._cmd_has_motion(cmd):
             self._last_valid_motion_cmd = self._cmd_dict(cmd)
@@ -1388,6 +1422,15 @@ class OrchestratorService(BaseModule):
         }
         target_flow_state = bool(state in target_flow_states or mode in target_flow_states)
         edge_slide_state = bool(state == "EDGE_SLIDE_SEARCH" or mode == "EDGE_SLIDE_SEARCH")
+        if not edge_slide_state and state in {
+            "TARGET_CONFIRM", "TARGET_LOCKED", "FREEZE_BASE", "GRASP", "DONE", "ERROR", "ERROR_RECOVERY"
+        }:
+            self.core.ctx.target_control_latch_active = False
+            self.core.ctx.last_valid_target_lateral_cmd.clear()
+            self.core.ctx.last_valid_target_lateral_cmd_mono = 0.0
+            self.core.ctx.last_valid_target_cmd_owner = ""
+            self.core.ctx.last_valid_target_cmd_action = ""
+        target_latch_valid, target_latch_age_s, target_latch_reason = self._target_control_latch_status()
         return_place_states = {
             "POST_GRASP_TURN_180",
             "POST_GRASP_TURN_FIXED",
@@ -1425,6 +1468,34 @@ class OrchestratorService(BaseModule):
                     "final_vx": 0.0,
                     "final_vy": float(vy),
                     "final_wz": 0.0,
+                }
+            )
+            if self._cmd_has_motion(cmd):
+                self.core.ctx.last_valid_target_lateral_cmd = self._cmd_dict(cmd)
+                self.core.ctx.last_valid_target_lateral_cmd_mono = monotonic_ts()
+                self.core.ctx.last_valid_target_cmd_owner = "target_lateral"
+                self.core.ctx.last_valid_target_cmd_action = "TARGET_LATERAL_ALIGN"
+            elif target_latch_valid and not bool(getattr(cmd, "brake", False)):
+                repeated = self._repeat_target_lateral_latch(now)
+                if repeated is not None and self._cmd_has_motion(repeated):
+                    cmd = repeated
+                    vy = float(repeated.vy_mps)
+                    summary.update(
+                        {
+                            "target_lateral_align_active": True,
+                            "target_lateral_hold_active": True,
+                            "lateral_cmd_source": "command_latch",
+                            "lateral_owner": "target_lateral",
+                            "target_lateral_vy_cmd": vy,
+                            "vy_mps": vy,
+                            "final_vy": vy,
+                        }
+                    )
+            summary.update(
+                {
+                    "target_control_latch_active": bool(target_latch_valid),
+                    "target_control_latch_age_s": target_latch_age_s,
+                    "target_control_latch_reason": target_latch_reason,
                 }
             )
         arbiter_applied = bool(summary.get("arbiter_applied", False))
@@ -1533,11 +1604,12 @@ class OrchestratorService(BaseModule):
         target_lateral_vy_allowed = bool(
             edge_slide_state
             and not perception_dead
-            and bool(summary.get("target_lateral_align_active", False))
+            and (bool(summary.get("target_lateral_align_active", False)) or target_latch_valid)
             and (
                 bool(summary.get("target_found", False))
                 or bool(summary.get("target_lateral_hold_active", False))
                 or str(summary.get("lateral_cmd_source") or "") == "hold"
+                or target_latch_valid
             )
             and abs(float(getattr(cmd, "vy_mps", 0.0) or 0.0)) > 1e-9
             and abs(float(getattr(cmd, "vx_mps", 0.0) or 0.0)) <= 1e-9
@@ -1579,7 +1651,12 @@ class OrchestratorService(BaseModule):
         else:
             stale_source = ""
         has_new_valid_motion = bool(self._cmd_has_motion(cmd) and not explicit_stop and not hard_stale)
-        target_flow_stop_only = bool(target_flow_state and not target_lateral_vy_allowed and not explicit_stop)
+        target_flow_stop_only = bool(
+            target_flow_state
+            and not target_lateral_vy_allowed
+            and not (edge_slide_state and target_latch_valid and not perception_dead)
+            and not explicit_stop
+        )
         last_within_hold = bool(last_age_ms is not None and last_age_ms <= float(hold_ms))
         soft_stale_within_hard_timeout = bool(
             stale_level == "soft_stale"
@@ -1608,9 +1685,17 @@ class OrchestratorService(BaseModule):
             self._last_valid_motion_ts = 0.0
             last_age_ms = None
         elif target_flow_stop_only:
-            emit_reason = "target_flow_stale_stop" if hard_stale_raw else "target_flow_no_recovery_stop"
+            target_latch_expired = bool(
+                edge_slide_state
+                and target_latch_reason in {
+                    "observation_ttl_expired",
+                    "command_ttl_expired",
+                    "explicit_negative_threshold",
+                }
+            )
+            emit_reason = "target_flow_stale_stop" if target_latch_expired else "target_flow_no_recovery_stop"
             zero_cmd_reason = stale_level or stale_reason or "target_flow_recovery_motion_blocked"
-            stop_class = "stale_recovery" if hard_stale_raw else "control_recovery"
+            stop_class = "stale_recovery" if target_latch_expired else "control_recovery"
             effective = self._make_stop_cmd(now, hold_ms=int(getattr(cmd, "hold_ms", self.cfg.car.cmd_hold_ms) or self.cfg.car.cmd_hold_ms))
             self._last_valid_motion_cmd = None
             self._last_valid_motion_ts = 0.0
@@ -1674,6 +1759,9 @@ class OrchestratorService(BaseModule):
             "yolo_allows_edge_stale": bool(yolo_allows_edge_stale),
             "search_allows_edge_stale": bool(search_allows_edge_stale),
             "target_lateral_vy_allowed": bool(target_lateral_vy_allowed),
+            "target_control_latch_active": bool(target_latch_valid),
+            "target_control_latch_age_s": target_latch_age_s,
+            "target_control_latch_reason": target_latch_reason,
             "target_flow_stop_only": bool(target_flow_stop_only),
             "return_place_state": bool(return_place_state),
             "return_place_ignores_table_stale": bool(return_place_state),

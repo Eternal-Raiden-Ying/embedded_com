@@ -136,6 +136,42 @@ class TaskRuntimeMixin:
             self._enter_error_recovery(f"unknown vision status: {status}")
             return
         self.ctx.last_target_obs = obs
+        inference_id = str(
+            getattr(obs, "inference_seq", None)
+            or getattr(obs, "target_done_mono_ns", None)
+            or getattr(obs, "obs_seq", None)
+            or getattr(obs, "frame_id", None)
+            or ""
+        )
+        completed = getattr(obs, "inference_completed", None) is True
+        found = bool(getattr(obs, "found", False))
+        completed_ns = (
+            getattr(obs, "last_completed_inference_mono_ns", None)
+            or getattr(obs, "target_done_mono_ns", None)
+        )
+        completed_mono = (
+            float(completed_ns) / 1_000_000_000.0
+            if completed_ns is not None and float(completed_ns) > 0.0
+            else monotonic_ts()
+        )
+        if completed and inference_id and inference_id != self.ctx.last_completed_target_inference_id:
+            self.ctx.last_completed_target_inference_id = inference_id
+            self.ctx.last_completed_target_inference_mono = completed_mono
+        legacy_completion = getattr(obs, "inference_completed", None) is None
+        if found and (completed or legacy_completion):
+            self.ctx.last_valid_target_obs = obs
+            self.ctx.last_valid_target_obs_mono = completed_mono
+            self.ctx.target_control_latch_active = True
+            self.ctx.target_explicit_negative_count = 0
+            self.ctx.last_target_explicit_negative_id = ""
+        elif (
+            completed
+            and bool(getattr(obs, "explicit_negative_detection", False))
+            and inference_id
+            and inference_id != self.ctx.last_target_explicit_negative_id
+        ):
+            self.ctx.last_target_explicit_negative_id = inference_id
+            self.ctx.target_explicit_negative_count += 1
         if self.ctx.desired_vision_mode == "FIND_OBJECT":
             self.confirm_vision_state("SEARCH", "FIND_OBJECT", source="vision_obs")
 
@@ -386,6 +422,17 @@ class TaskRuntimeMixin:
         self.ctx.target_last_center_jitter = 0.0
         self.ctx.target_last_lost_reason = ""
         self.ctx.target_last_transition_reason = ""
+        self.ctx.last_completed_target_inference_id = ""
+        self.ctx.last_completed_target_inference_mono = 0.0
+        self.ctx.last_target_explicit_negative_id = ""
+        self.ctx.target_explicit_negative_count = 0
+        self.ctx.target_control_latch_active = False
+        self.ctx.last_valid_target_obs = None
+        self.ctx.last_valid_target_obs_mono = 0.0
+        self.ctx.last_valid_target_lateral_cmd.clear()
+        self.ctx.last_valid_target_lateral_cmd_mono = 0.0
+        self.ctx.last_valid_target_cmd_owner = ""
+        self.ctx.last_valid_target_cmd_action = ""
         self._emit_reset_trace("target", reason, cleared)
 
     def reset_slide_reference(self, reason: str) -> None:

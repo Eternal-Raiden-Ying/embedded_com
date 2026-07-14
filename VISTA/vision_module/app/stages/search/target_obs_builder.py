@@ -8,6 +8,26 @@ from ....config.data import normalize_class_name
 from ....utils.detect import compute_target_obs, resolve_target_classes
 
 
+def _inference_metadata(local: Dict[str, object], *, target_found: bool) -> Dict[str, object]:
+    executed = bool(local.get("inference_executed", local.get("has_infer", False)))
+    completed = bool(local.get("inference_completed", executed))
+    inference_seq = (
+        local.get("inference_seq")
+        or local.get("inference_done_mono_ns")
+        or (local.get("obs_seq", local.get("frame_seq")) if completed else None)
+    )
+    return {
+        "inference_executed": executed,
+        "inference_completed": completed,
+        "inference_seq": inference_seq,
+        "has_new_inference": completed,
+        "explicit_negative_detection": bool(completed and not target_found),
+        "last_completed_inference_mono_ns": local.get(
+            "last_completed_inference_mono_ns", local.get("inference_done_mono_ns")
+        ),
+    }
+
+
 def target_obs_from_payload(payload: Optional[Dict[str, object]], target: Optional[str]) -> Dict[str, object]:
     base: Dict[str, object] = {
         "found": False,
@@ -82,6 +102,8 @@ def target_obs_from_results(results: Dict[str, object], target: Optional[str]) -
         merged.setdefault("frame_capture_ts", local.get("frame_capture_ts"))
         merged.setdefault("target_done_mono_ns", local.get("inference_done_mono_ns"))
         merged.setdefault("age_ms", local.get("age_ms"))
+        for key, value in _inference_metadata(local, target_found=target_found).items():
+            merged.setdefault(key, value)
         if contract_error:
             merged.setdefault("contract_error", contract_error)
         if contract_warnings:
@@ -122,6 +144,7 @@ def target_obs_from_results(results: Dict[str, object], target: Optional[str]) -
         "num_target_candidates": 0,
         "bbox_valid": None,
         "bbox_invalid_reason": None,
+        **_inference_metadata(local, target_found=False),
     }
     if not local:
         weak_payload["reason"] = "no_local_perception"
@@ -186,7 +209,12 @@ def target_obs_from_results(results: Dict[str, object], target: Optional[str]) -
     payload = {"found": True, "target_found": True, "target": target}
     payload.update(obs)
     payload.update({k: v for k, v in weak_payload.items() if k in {"boxes_count"}})
-    for key in ("obs_ts", "frame_capture_ts", "frame_id", "seq", "obs_seq", "age_ms", "capture_mono_ns", "target_done_mono_ns"):
+    for key in (
+        "obs_ts", "frame_capture_ts", "frame_id", "seq", "obs_seq", "age_ms",
+        "capture_mono_ns", "target_done_mono_ns", "inference_executed",
+        "inference_completed", "inference_seq", "has_new_inference",
+        "explicit_negative_detection", "last_completed_inference_mono_ns",
+    ):
         if weak_payload.get(key) is not None:
             payload[key] = weak_payload.get(key)
     if payload.get("capture_mono_ns") is not None:

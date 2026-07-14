@@ -134,6 +134,28 @@ class TableDockingMixin:
                 },
             }
         )
+        action = str(summary.get("docking_action") or "")
+        latch_actions = {
+            "BBOX_TRACK_FORWARD", "EDGE_READINESS_HANDOFF", "EDGE_APPROACH_FORWARD", "NEAR_EDGE_FORWARD"
+        }
+        stop_class = str(summary.get("stop_class") or "none").strip().lower()
+        if action in latch_actions and stop_class not in {"emergency", "safety"} and not bool(decision.cmd.brake):
+            self.ctx.table_control_latch_active = True
+            self.ctx.last_valid_table_cmd = {
+                "vx_mps": float(decision.cmd.vx_mps),
+                "vy_mps": float(decision.cmd.vy_mps),
+                "wz_radps": float(decision.cmd.wz_radps),
+            }
+            self.ctx.last_valid_table_cmd_mono = monotonic_ts()
+            self.ctx.last_valid_table_cmd_owner = str(summary.get("forward_owner") or "table_docking")
+            self.ctx.last_valid_table_cmd_action = action
+            summary["table_control_latch_active"] = True
+        elif self.ctx.state in {State.FINAL_SLOW_STOP, State.AT_TABLE_EDGE} or stop_class in {"emergency", "safety"}:
+            self.ctx.table_control_latch_active = False
+            self.ctx.last_valid_table_cmd.clear()
+            self.ctx.last_valid_table_cmd_mono = 0.0
+            self.ctx.last_valid_table_cmd_owner = ""
+            self.ctx.last_valid_table_cmd_action = ""
         control_source = str(summary.get("control_source") or "")
         fresh_bbox = bool(self._table_yolo_reliable(obs))
         center_error = summary.get("bbox_center_error_control", summary.get("center_error"))
@@ -2182,10 +2204,6 @@ class TableDockingMixin:
             return decision
         if str(summary.get("speed_limit_reason") or "").strip().lower() == "stop":
             return decision
-        if str(summary.get("docking_action") or "") == "EDGE_APPROACH_FORWARD":
-            # Edge approach already carries the canonical combined vx/vy/wz
-            # profile.  The YOLO-only speed band must not erase lateral motion.
-            return decision
         depth = None
         depth_source = "unknown"
         for source, value in (
@@ -2252,7 +2270,8 @@ class TableDockingMixin:
             selected = near_vx if band == "near" else min_vx
             block_reason = block_reason or "far_not_allowed"
         decision.cmd.vx_mps = float(selected)
-        decision.cmd.vy_mps = 0.0
+        selected_vy = float(decision.cmd.vy_mps)
+        selected_wz = float(decision.cmd.wz_radps)
         summary.update(
             {
                 "yolo_approach_speed_band": band,
@@ -2266,9 +2285,11 @@ class TableDockingMixin:
                 "yolo_approach_far_allowed": bool(far_allowed and band == "far"),
                 "yolo_approach_speed_block_reason": "" if far_allowed and band == "far" else block_reason,
                 "vx_mps": float(selected),
-                "vy_mps": 0.0,
+                "vy_mps": selected_vy,
+                "wz_radps": selected_wz,
                 "final_vx": float(selected),
-                "final_vy": 0.0,
+                "final_vy": selected_vy,
+                "final_wz": selected_wz,
                 "allow_forward": True,
             }
         )

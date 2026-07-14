@@ -1000,6 +1000,12 @@ class TargetObs:
     capture_mono_ns: Optional[int] = None
     frame_capture_ts: Optional[float] = None
     target_done_mono_ns: Optional[int] = None
+    inference_executed: Optional[bool] = None
+    inference_completed: Optional[bool] = None
+    inference_seq: Optional[int] = None
+    has_new_inference: Optional[bool] = None
+    explicit_negative_detection: bool = False
+    last_completed_inference_mono_ns: Optional[int] = None
     freshness_ms: Optional[float] = None
     freshness: Optional[str] = None
     camera_capture_done_mono_ns: Optional[int] = None
@@ -1073,6 +1079,16 @@ class TargetObs:
             capture_mono_ns=_pick_optional_int(payload, "capture_mono_ns", "frame_capture_mono_ns"),
             frame_capture_ts=_pick_optional_float(payload, "frame_capture_ts", "capture_ts"),
             target_done_mono_ns=_pick_optional_int(payload, "target_done_mono_ns", "inference_done_mono_ns"),
+            inference_executed=_pick_optional_bool(payload, "inference_executed", "has_infer"),
+            inference_completed=_pick_optional_bool(payload, "inference_completed"),
+            inference_seq=_pick_optional_int(payload, "inference_seq"),
+            has_new_inference=_pick_optional_bool(payload, "has_new_inference"),
+            explicit_negative_detection=bool(
+                payload.get("explicit_negative_detection", payload.get("explicit_negative", False))
+            ),
+            last_completed_inference_mono_ns=_pick_optional_int(
+                payload, "last_completed_inference_mono_ns", "inference_done_mono_ns"
+            ),
             freshness_ms=_pick_optional_float(payload, "freshness_ms", "age_ms"),
             freshness=_pick_optional_str(payload, "freshness"),
             camera_capture_done_mono_ns=_pick_optional_int(payload, "camera_capture_done_mono_ns"),

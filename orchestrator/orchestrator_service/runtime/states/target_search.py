@@ -102,7 +102,8 @@ class TargetSearchMixin:
 
     def _tick_edge_slide_search(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
-        target_obs, select_reason = self._select_active_target_obs(self._fresh_target_obs())
+        target_obs, latch_reason = self._target_control_observation(self._fresh_target_obs())
+        target_obs, select_reason = self._select_active_target_obs(target_obs)
         candidate_ok, candidate_reason = self._target_candidate_status(
             target_obs,
             self.cfg.target_confirm_conf_th,
@@ -110,6 +111,8 @@ class TargetSearchMixin:
         )
         if select_reason and select_reason != "single_candidate":
             candidate_reason = select_reason if not candidate_ok else candidate_reason
+        if latch_reason and candidate_ok:
+            candidate_reason = latch_reason
         stable_count, is_new_obs = self._target_control_observation_update(target_obs, candidate_ok)
         stable_required = max(1, int(getattr(self.cfg, "target_prewarm_stable_obs", 2) or 2))
         target_window = (
@@ -133,6 +136,9 @@ class TargetSearchMixin:
                     target_obs, target_window, candidate_reason, timeout_reason=timeout_reason
                 )
             if stable_count < stable_required:
+                align_decision = self._target_lateral_align_decision(target_obs, state="EDGE_SLIDE_SEARCH")
+                if align_decision is not None:
+                    return align_decision
                 return self._annotate_target_lateral_decision(
                     self.controller.stop_cmd("EDGE_SLIDE_SEARCH"),
                     target_obs,
@@ -1351,11 +1357,40 @@ class TargetSearchMixin:
     def _remember_good_target(self, obs: Optional[TargetObs], vy_cmd: float) -> None:
         if obs is None or not bool(getattr(obs, "found", False)):
             return
+        now_m = monotonic_ts()
+        obs_mono = (
+            float(self.ctx.last_valid_target_obs_mono)
+            if obs is getattr(self.ctx, "last_valid_target_obs", None)
+            and float(getattr(self.ctx, "last_valid_target_obs_mono", 0.0) or 0.0) > 0.0
+            else now_m
+        )
         self.ctx.last_good_target_obs = obs
-        self.ctx.last_good_target_mono = monotonic_ts()
+        self.ctx.last_good_target_mono = obs_mono
         self.ctx.last_good_vy_mps = float(vy_cmd)
+        self.ctx.target_control_latch_active = True
         self.ctx.target_lateral_hold_active = False
         self.ctx.target_lateral_hold_source = "current"
+
+    def _target_control_observation(
+        self, obs: Optional[TargetObs]
+    ) -> Tuple[Optional[TargetObs], str]:
+        if (
+            obs is not None
+            and bool(getattr(obs, "found", False))
+            and getattr(obs, "inference_completed", None) is not False
+        ):
+            return obs, "current_completed_inference"
+        if not bool(getattr(self.ctx, "target_control_latch_active", False)):
+            return obs, ""
+        held = getattr(self.ctx, "last_valid_target_obs", None)
+        held_mono = float(getattr(self.ctx, "last_valid_target_obs_mono", 0.0) or 0.0)
+        ttl_s = max(0.0, float(getattr(self.cfg, "target_lateral_lost_stop_s", 1.2) or 1.2))
+        negative_limit = max(1, int(getattr(self.cfg, "target_confirm_lost_frames", 2) or 2))
+        age_s = max(0.0, monotonic_ts() - held_mono) if held_mono > 0.0 else float("inf")
+        if held is None or age_s > ttl_s or int(self.ctx.target_explicit_negative_count) >= negative_limit:
+            self.ctx.target_control_latch_active = False
+            return obs, ""
+        return held, "latched_completed_inference"
 
     def _target_lateral_hold_decision(self, *, state: str, reason: str) -> Optional[MotionDecision]:
         if not bool(getattr(self.cfg, "target_lateral_hold_enable", True)):
@@ -1487,7 +1522,7 @@ class TargetSearchMixin:
                 "found_ratio": float(self._target_window_stats().get("found_ratio", 0.0) or 0.0),
                 "center_jitter": float(self.ctx.target_last_center_jitter),
                 "target_lateral_vy_cmd": float(vy_cmd),
-                "lateral_owner": "target_lateral" if abs(float(vy_cmd)) > 1e-9 else "none",
+                "lateral_owner": "target_lateral" if bool(getattr(self.ctx, "target_control_latch_active", False)) else "none",
                 "yaw_owner": "none",
                 "forward_owner": "none",
                 "docking_action": "TARGET_LATERAL_ALIGN" if abs(float(vy_cmd)) > 1e-9 else "TARGET_CONFIRM_HOLD",
@@ -1525,6 +1560,11 @@ class TargetSearchMixin:
                 "target_locked": bool(self.ctx.target_locked),
                 "grasp_request_sent": False,
                 "grasp_dry_run": False,
+                "target_control_latch_active": bool(getattr(self.ctx, "target_control_latch_active", False)),
+                "last_completed_inference_id": str(getattr(self.ctx, "last_completed_target_inference_id", "") or ""),
+                "explicit_negative_count": int(getattr(self.ctx, "target_explicit_negative_count", 0) or 0),
+                "has_new_inference": bool(getattr(obs, "has_new_inference", False)) if obs is not None else False,
+                "explicit_negative": bool(getattr(obs, "explicit_negative_detection", False)) if obs is not None else False,
             }
         )
         summary["vx_mps"] = float(decision.cmd.vx_mps)
@@ -1536,6 +1576,16 @@ class TargetSearchMixin:
         decision.control_summary = summary
         self.ctx.target_lateral_align_reason = str(reason or "")
         self.ctx.target_lateral_vy_cmd = float(vy_cmd)
+        if str(getattr(decision.cmd, "mode", "") or "").upper() == "EDGE_SLIDE_SEARCH":
+            now_m = monotonic_ts()
+            self.ctx.last_valid_target_lateral_cmd = {
+                "vx_mps": float(decision.cmd.vx_mps),
+                "vy_mps": float(decision.cmd.vy_mps),
+                "wz_radps": float(decision.cmd.wz_radps),
+            }
+            self.ctx.last_valid_target_lateral_cmd_mono = now_m
+            self.ctx.last_valid_target_cmd_owner = "target_lateral"
+            self.ctx.last_valid_target_cmd_action = "TARGET_LATERAL_ALIGN"
         if obs is not None and bool(getattr(obs, "found", False)) and lateral_cmd_source == "current":
             self._record_target_lateral_good(obs, vy_cmd if active else None)
         if str(getattr(decision.cmd, "mode", "") or "") == "EDGE_SLIDE_SEARCH":
@@ -1630,8 +1680,14 @@ class TargetSearchMixin:
     def _record_target_lateral_good(self, obs: TargetObs, vy_cmd: Optional[float]) -> None:
         err = self._target_lateral_error_x(obs)
         now_m = monotonic_ts()
+        obs_mono = (
+            float(self.ctx.last_valid_target_obs_mono)
+            if obs is getattr(self.ctx, "last_valid_target_obs", None)
+            and float(getattr(self.ctx, "last_valid_target_obs_mono", 0.0) or 0.0) > 0.0
+            else now_m
+        )
         self.ctx.target_lateral_last_good_obs = obs
-        self.ctx.target_lateral_last_good_obs_mono = now_m
+        self.ctx.target_lateral_last_good_obs_mono = obs_mono
         if vy_cmd is not None:
             self.ctx.target_lateral_last_good_vy_mps = float(vy_cmd)
         if err is not None:
