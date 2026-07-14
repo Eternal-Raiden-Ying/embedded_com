@@ -212,17 +212,13 @@ class VelocitySmoother:
         return ""
 
     def _is_urgent_wz(self, state_u: str, summary: Dict[str, Any]) -> bool:
-        if state_u == "SEARCH_TABLE":
-            return True
         action = str(summary.get("docking_action") or "").strip().upper()
-        if action in {"BBOX_REACQUIRE_ROTATE", "CONTROL_RECOVERY_ROTATE"}:
+        hard_fov = str(summary.get("fov_guard_level") or summary.get("bbox_fov_guard_level") or "").strip().lower() == "hard"
+        if action in {"BBOX_REACQUIRE_ROTATE", "CONTROL_RECOVERY_ROTATE"} and hard_fov:
             return True
-        if str(summary.get("fov_guard_level") or summary.get("bbox_fov_guard_level") or "").strip().lower() == "hard":
+        if hard_fov:
             return True
-        reason = str(summary.get("docking_reason") or summary.get("reason") or "").strip().lower()
-        if any(token in reason for token in ("reacquire", "bbox_center_extreme", "target_lost")):
-            return True
-        return any(bool(summary.get(key, False)) for key in ("bbox_touch_left", "bbox_touch_right", "target_near_fov_edge"))
+        return any(bool(summary.get(key, False)) for key in ("emergency_stop_active", "car_estop", "estop_active"))
 
     def _slew(self, last: float, nominal: float, dt: float, accel: float, decel: float) -> float:
         delta = float(nominal) - float(last)

@@ -2001,7 +2001,16 @@ def arbitrate_table_docking_motion(
     last_good_obs_age_ms = float(summary.get("last_good_obs_age_ms", 999999.0))
     last_good_expired = bool(not last_good_obs_healthy or last_good_obs_age_ms > 2500.0)
     stale_level = str(summary.get("stale_level") or "fresh").strip().lower()
-    is_dead_no_last_good = bool(stale_level == "dead" and last_good_expired)
+    # An absent observation is a real perception loss.  A present observation
+    # that explicitly reports edge/perception alive must not be recast as dead
+    # merely because no last-good edge has been acquired yet.
+    if "perception_dead" in summary:
+        perception_dead = bool(summary.get("perception_dead"))
+    elif "edge_stale_dead" in summary:
+        perception_dead = bool(summary.get("edge_stale_dead"))
+    else:
+        perception_dead = obs is None
+    is_dead_no_last_good = bool(stale_level == "dead" and perception_dead and last_good_expired)
 
     if is_dead_no_last_good:
         if bool(summary.get("final_depth_latched", False)):
@@ -2465,13 +2474,18 @@ def arbitrate_table_docking_motion(
 
     if state == "SEARCH_TABLE" or intent_type in {"local_rotate_search", "search"} or phase == "SEARCH_SCAN":
         wz = desired_wz if abs(desired_wz) > 1e-9 else _search_wz(ctx, summary)
+        no_valid_edge = not bool(summary.get("edge_found") or summary.get("edge_valid") or summary.get("edge_trusted"))
         return _docking_result(
             action=DockingAction.SEARCH_ROTATE,
             stage=DockingStage.SEARCH,
-            summary=with_common({"search_table_stale_gate_bypass": True}),
+            summary=with_common({
+                "search_table_stale_gate_bypass": True,
+                "docking_reason": "coarse_scan_no_valid_edge" if no_valid_edge else "coarse_scan",
+                "perception_dead": perception_dead,
+            }),
             wz=wz,
             yaw_owner="search",
-            reason="search_rotate",
+            reason="coarse_scan_no_valid_edge" if no_valid_edge else "search_rotate",
         )
 
     if _active_table_docking(ctx) and abs(desired_vx) < 1e-9 and abs(desired_wz) < 1e-9:

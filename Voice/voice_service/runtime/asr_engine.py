@@ -24,6 +24,31 @@ from .common import (
 from .commands import CommandInterpreter
 
 
+def merge_online_hypothesis(previous_text: str, raw_text: str) -> str:
+    """Merge one Paraformer streaming hypothesis into the session hypothesis.
+
+    Online Paraformer may return either a cumulative hypothesis or only its
+    latest increment.  This is intentionally the sole merge point: capture and
+    decision workers consume the resulting ``merged_text`` but never merge text
+    themselves.
+    """
+    previous = str(previous_text or "").strip()
+    incoming = str(raw_text or "").strip()
+    if not incoming:
+        return previous
+    if not previous:
+        return incoming
+    if incoming.startswith(previous):
+        return incoming
+    if previous.startswith(incoming) or incoming in previous:
+        return previous
+    limit = min(len(previous), len(incoming))
+    for overlap in range(limit, 0, -1):
+        if previous[-overlap:] == incoming[:overlap]:
+            return previous + incoming[overlap:]
+    return previous + incoming
+
+
 class VADProcessor:
     def __init__(self, vad_dir: str, quantize: bool, dry_run_text: bool = False):
         self.dry_run_text = dry_run_text
@@ -98,14 +123,99 @@ class OnlineStreamSession:
     backend: Any
     started_at: float = field(default_factory=time.perf_counter)
     samples: int = 0
-    partial_text: str = ""
-    final_text: str = ""
+    merged_text: str = ""
     last_conf: Optional[float] = None
     feed_calls: int = 0
     last_partial_at: float = 0.0
     cache: Dict[str, Any] = field(default_factory=dict)
     debug: Dict[str, Any] = field(default_factory=dict)
     finalized: bool = False
+
+
+@dataclass
+class OnlineVADSession:
+    """Per-command state for the single shared FSMN online VAD model."""
+
+    in_cache: List[Any] = field(default_factory=list)
+    speech_active: bool = False
+    closed: bool = False
+
+
+class OnlineVADProcessor:
+    """Incremental FSMN-VAD adapter used only by the online ASR capture path.
+
+    ``Fsmn_vad_online`` keeps frontend and detector state internally, so the
+    voice service deliberately permits only one active capture session.  Each
+    new session resets that state and owns its ONNX FSMN cache.
+    """
+
+    def __init__(self, vad_dir: str, quantize: bool, dry_run_text: bool = False):
+        self.dry_run_text = dry_run_text
+        self.backend = None
+        self._active_session: Optional[OnlineVADSession] = None
+        if not self.dry_run_text:
+            from funasr_onnx import Fsmn_vad_online
+            self.backend = Fsmn_vad_online(vad_dir, quantize=quantize, intra_op_num_threads=1)
+
+    def create_session(self) -> OnlineVADSession:
+        if self._active_session is not None:
+            self.close_session(self._active_session)
+        session = OnlineVADSession()
+        if self.backend is not None:
+            # These two state holders live in funasr_onnx rather than in its
+            # public param_dict.  Resetting them here prevents a new wake turn
+            # from inheriting the previous turn's speech state or frontend tail.
+            self.backend.frontend.cache_reset()
+            self.backend.vad_scorer.AllResetDetection()
+        self._active_session = session
+        return session
+
+    def close_session(self, session: Optional[OnlineVADSession]) -> None:
+        if session is None:
+            return
+        session.in_cache.clear()
+        session.speech_active = False
+        session.closed = True
+        if self._active_session is session:
+            self._active_session = None
+            if self.backend is not None:
+                self.backend.frontend.cache_reset()
+                self.backend.vad_scorer.AllResetDetection()
+
+    def feed(self, session: OnlineVADSession, audio, is_final: bool = False) -> Dict[str, Any]:
+        if session.closed or self.backend is None:
+            return {"speech_started": False, "speech_ended": False, "segments": []}
+        audio_arr = np.asarray(audio, dtype=np.float32).reshape(-1)
+        if audio_arr.size and float(np.max(np.abs(audio_arr))) > 1.5:
+            audio_arr = audio_arr / 32768.0
+        raw_segments = self.backend(
+            np.ascontiguousarray(audio_arr, dtype=np.float32),
+            param_dict={"in_cache": session.in_cache, "is_final": bool(is_final)},
+        )
+        # The online FunASR VAD emits an open segment through its detector
+        # state, then reports ``[-1, end_ms]`` when it closes.  Inspecting the
+        # active detector buffer lets capture begin at VAD onset rather than
+        # waiting until the end-of-speech event.
+        buffers = getattr(self.backend.vad_scorer, "output_data_buf", [])
+        active = any(
+            bool(getattr(buf, "contain_seg_start_point", False))
+            and not bool(getattr(buf, "contain_seg_end_point", False))
+            for buf in buffers
+        )
+        segments = normalize_vad_segments(raw_segments)
+        reported_end = any(
+            isinstance(segment, (list, tuple)) and len(segment) >= 2 and float(segment[1]) >= 0
+            for batch in (raw_segments if isinstance(raw_segments, list) else [])
+            for segment in (batch if isinstance(batch, list) else [])
+        )
+        speech_started = active and not session.speech_active
+        speech_ended = session.speech_active and (reported_end or not active or bool(is_final))
+        session.speech_active = active and not bool(is_final)
+        return {
+            "speech_started": speech_started,
+            "speech_ended": speech_ended,
+            "segments": segments,
+        }
 
 
 class OnlineASREngine(AsrBackend):
@@ -164,18 +274,20 @@ class OnlineASREngine(AsrBackend):
     def close_session(self, session: OnlineStreamSession) -> None:
         session.cache.clear()
         session.backend = None
-        session.partial_text = ""
-        session.final_text = ""
+        session.merged_text = ""
         session.finalized = True
 
     def feed(self, session: OnlineStreamSession, audio, is_final: bool = False, debug: bool = False) -> Dict[str, Any]:
         if session.finalized:
-            return {"text": "", "merged_text": "", "confidence": None, "feed_latency_ms": 0.0,
+            return {"text": "", "raw_text": "", "previous_text": session.merged_text,
+                    "merged_text": session.merged_text, "confidence": None, "feed_latency_ms": 0.0,
                     "samples": session.samples, "is_final": bool(is_final), "backend": self.name}
         if self.dry_run_text:
             return {
                 "text": "",
-                "merged_text": "",
+                "raw_text": "",
+                "previous_text": session.merged_text,
+                "merged_text": session.merged_text,
                 "confidence": 1.0,
                 "feed_latency_ms": 0.0,
                 "samples": session.samples,
@@ -208,42 +320,21 @@ class OnlineASREngine(AsrBackend):
         )
 
         text, conf = parse_asr_output(asr_out)
-        text = text.strip()
+        raw_text = text.strip()
         if conf is not None:
             session.last_conf = conf
-        if text:
-            # Inline text merging helper
-            prev = session.final_text if is_final else session.partial_text
-            if not prev:
-                merged = text
-            elif not text:
-                merged = prev
-            elif text.startswith(prev) or prev in text:
-                merged = text
-            elif prev.startswith(text) or text in prev:
-                merged = prev
-            else:
-                max_overlap = 0
-                limit = min(len(prev), len(text))
-                for i in range(1, limit + 1):
-                    if prev[-i:] == text[:i]:
-                        max_overlap = i
-                merged = prev + text[max_overlap:]
-
-            if is_final:
-                session.final_text = merged
-            else:
-                session.partial_text = merged
-                session.last_partial_at = time.time()
-
-        if is_final and not session.final_text:
-            session.final_text = session.partial_text
+        previous_text = session.merged_text
+        session.merged_text = merge_online_hypothesis(previous_text, raw_text)
+        if not is_final:
+            session.last_partial_at = time.time()
         if is_final:
             session.finalized = True
 
         return {
-            "text": text,
-            "merged_text": session.final_text if is_final else session.partial_text,
+            "text": raw_text,
+            "raw_text": raw_text,
+            "previous_text": previous_text,
+            "merged_text": session.merged_text,
             "confidence": conf,
             "feed_latency_ms": (time.perf_counter() - t0) * 1000.0,
             "samples": session.samples,
@@ -281,8 +372,10 @@ class AudioCommandPipeline:
 
         self.asr = create_asr_backend(cfg, dry_run_text=self.dry_run_text)
         self.vad = None
-        if not self.is_online():
-            vad_quant = auto_quant_flag(cfg.vad_dir, cfg.vad_quant, "VAD")
+        vad_quant = auto_quant_flag(cfg.vad_dir, cfg.vad_quant, "VAD") if not self.dry_run_text else bool(cfg.vad_quant)
+        if self.is_online():
+            self.vad = OnlineVADProcessor(cfg.vad_dir, vad_quant, dry_run_text=self.dry_run_text)
+        else:
             self.vad = VADProcessor(cfg.vad_dir, vad_quant, dry_run_text=self.dry_run_text)
 
         # Check hotwords capability
@@ -386,11 +479,25 @@ class AudioCommandPipeline:
             raise RuntimeError("start_stream_session() requires online backend")
         return self.asr.create_session()
 
+    def start_vad_stream_session(self) -> OnlineVADSession:
+        if not self.is_online():
+            raise RuntimeError("start_vad_stream_session() requires online backend")
+        return self.vad.create_session()
+
+    def stream_vad_feed(self, session: OnlineVADSession, audio, is_final: bool = False) -> Dict[str, Any]:
+        if not self.is_online():
+            raise RuntimeError("stream_vad_feed() requires online backend")
+        return self.vad.feed(session, audio, is_final=is_final)
+
+    def abort_vad_stream_session(self, session: Optional[OnlineVADSession]) -> None:
+        if self.is_online():
+            self.vad.close_session(session)
+
     def stream_feed(self, session: OnlineStreamSession, audio, is_final: bool = False) -> Dict[str, Any]:
         return self.asr.feed(session, audio, is_final=is_final, debug=self.debug)
 
     def finalize_stream_result(self, session: OnlineStreamSession) -> Dict[str, Any]:
-        text = clean_asr_text((session.final_text or session.partial_text or "").strip())
+        text = clean_asr_text(session.merged_text.strip())
         latency_ms = (time.perf_counter() - session.started_at) * 1000.0
         return self._interpret_text(text, session.last_conf, latency_ms, session.samples)
 

@@ -4,6 +4,7 @@
 from types import SimpleNamespace
 import time
 import wave
+import queue
 from collections import deque
 import numpy as np
 import pytest
@@ -56,7 +57,7 @@ def make_capture_worker(rt=None, phone_playback=None):
     worker = object.__new__(AudioKWSWorker)
     worker.rt = rt or RuntimeState()
     worker.phone_playback = phone_playback
-    worker.cfg_runtime = SimpleNamespace(armed_secs=6.0, energy_th=450.0, start_frames=2)
+    worker.cfg_runtime = SimpleNamespace(armed_secs=6.0, energy_th=450.0, start_frames=2, max_frames=80)
     worker.state = "WAIT_WAKE"
     worker.speech_up = 0
     worker.speech_down = 0
@@ -69,6 +70,43 @@ def make_capture_worker(rt=None, phone_playback=None):
     worker._noise_floor_before_prompt = None
     worker._last_speech_gate_blocked_at = 0.0
     worker.asr_mode = "offline"
+    return worker
+
+
+class FakeOnlineVadPipeline:
+    def __init__(self, events):
+        self.events = deque(events)
+        self.started = 0
+        self.aborted = 0
+
+    def start_vad_stream_session(self):
+        self.started += 1
+        return object()
+
+    def stream_vad_feed(self, _session, _audio, is_final=False):
+        assert not is_final
+        return self.events.popleft() if self.events else {"speech_started": False, "speech_ended": False}
+
+    def abort_vad_stream_session(self, _session):
+        self.aborted += 1
+
+
+def make_online_capture_worker(events):
+    worker = make_capture_worker()
+    worker.asr_mode = "online"
+    worker.pipeline = FakeOnlineVadPipeline(events)
+    worker.cfg_board = SimpleNamespace(asr_stream_session_timeout_s=8.0)
+    worker.utter_q = queue.Queue()
+    worker.online_step_samples = 9600
+    worker.online_vad_session = None
+    worker.online_session_started = False
+    worker.online_speech_started = False
+    worker.online_final_emitted = False
+    worker.online_session_started_at = 0.0
+    worker.online_speech_started_at = 0.0
+    worker.online_speech_samples = 0
+    worker.online_speech_content_samples = 0
+    worker.online_prebuf = deque(maxlen=5)
     return worker
 
 
@@ -160,6 +198,44 @@ def test_phone_finished_command_gate_starts_recording_for_speech_rms():
     assert worker.state == "REC"
     assert worker.rt.snapshot()["state"] == "REC"
     assert AudioKWSWorker._effective_energy_threshold(450.0, 5734.71) == pytest.approx(900.0)
+
+
+def test_online_capture_feeds_fsmn_vad_below_energy_gate_and_uses_preroll():
+    worker = make_online_capture_worker([
+        {"speech_started": False, "speech_ended": False},
+        {"speech_started": False, "speech_ended": False},
+        {"speech_started": True, "speech_ended": False},
+        {"speech_started": False, "speech_ended": False},
+        {"speech_started": False, "speech_ended": False},
+        {"speech_started": False, "speech_ended": False},
+        {"speech_started": False, "speech_ended": False},
+        {"speech_started": False, "speech_ended": False},
+        {"speech_started": False, "speech_ended": True},
+    ])
+    worker._noise_floor_rms = 9000.0
+    worker._arm_command_capture("wake_hotword")
+
+    # START is created at arm time, before VAD reports speech.  Low RMS would
+    # fail the legacy dynamic energy gate but must still reach Online FSMN-VAD.
+    assert worker.utter_q.get_nowait()["kind"] == "START"
+    low = np.full(1280, 10, dtype=np.int16)
+    assert not worker._advance_online_armed_capture(low, 10.0)
+    assert not worker._advance_online_armed_capture(low, 10.0)
+    assert worker._advance_online_armed_capture(low, 10.0)
+    assert worker.state == "REC"
+    assert worker.online_speech_samples == 3 * 1280
+
+    for _ in range(6):
+        worker._advance_online_recording(low, 10.0)
+
+    items = []
+    while not worker.utter_q.empty():
+        items.append(worker.utter_q.get_nowait())
+    assert [item["kind"] for item in items] == ["CHUNK", "FINAL"]
+    assert items[0]["samples"] == 9600
+    assert items[1]["samples"] == 1920
+    assert worker.pipeline.started == 1
+    assert worker.pipeline.aborted == 1
 
 
 def test_local_wake_uses_same_capture_arm_transition():

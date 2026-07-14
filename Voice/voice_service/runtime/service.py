@@ -294,7 +294,10 @@ def run_voice_service(cfg: VoiceServiceConfig, stop_event: Optional[threading.Ev
         pass
 
     try:
-        audio_thread = AudioKWSWorker(cfg, rt, stop_event, utter_q, task_sender=task_sender, ack_inbox=ack_inbox, phone_playback=phone_playback)
+        audio_thread = AudioKWSWorker(
+            cfg, rt, stop_event, utter_q, task_sender=task_sender,
+            ack_inbox=ack_inbox, phone_playback=phone_playback, pipeline=pipeline,
+        )
     except Exception as e:
         print(f"[VOICE][ERROR] component=kws reason={e}")
         sys.exit(1)

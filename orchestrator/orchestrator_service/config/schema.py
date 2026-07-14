@@ -166,6 +166,10 @@ class ControlThresholds:
     table_stable_frames: int = 5
     table_yolo_align_center_x_target: float = 0.50
     table_yolo_align_center_x_tol: float = 0.08
+    # SEARCH_TABLE remains a coarse, latched scan until a real bbox direction is
+    # confirmed by several distinct fresh observations.
+    search_bbox_confirm_frames: int = 3
+    search_direction_min_dwell_s: float = 0.80
     yolo_table_control_enable: bool = True
     yolo_table_conf_min: float = 0.25
     yolo_table_edge_stable_frames: int = 5

@@ -394,6 +394,8 @@ orchestrator:
     table_stable_frames: 5 # Number of stable frames to declare stop ready
     table_yolo_align_center_x_target: 0.50 # Desired table bbox center x during table docking
     table_yolo_align_center_x_tol: 0.08 # Table bbox center tolerance during table docking
+    search_bbox_confirm_frames: 3 # Distinct fresh bbox observations required before SEARCH_TABLE handoff
+    search_direction_min_dwell_s: 0.80 # Minimum coarse-search direction dwell before visual handoff
     yolo_table_control_enable: true # Utilize YOLO table detections
     yolo_table_conf_min: 0.25 # Trust threshold for YOLO table bbox
     yolo_table_edge_stable_frames: 5 # Frames to confirm table edge stability

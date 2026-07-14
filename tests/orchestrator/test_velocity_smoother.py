@@ -61,12 +61,22 @@ def test_edge_slide_does_not_retain_vx_or_wz():
     assert 0.0 < out.vy_mps < 0.03
 
 
-def test_urgent_wz_allows_larger_delta_than_normal():
+def test_search_table_wz_is_normal_slew_and_reversal_does_not_jump():
     normal = VelocitySmoother(MotionSmoothingConfig())
-    urgent = VelocitySmoother(MotionSmoothingConfig())
     normal.last_ts_monotonic = 10.0
-    urgent.last_ts_monotonic = 10.0
-    normal_out, _ = normal.apply(_cmd(wz=0.3), state="YOLO_ACQUIRE_ALIGN", now_monotonic=10.1)
-    urgent_out, meta = urgent.apply(_cmd(wz=0.3), state="SEARCH_TABLE", now_monotonic=10.1)
-    assert urgent_out.wz_radps > normal_out.wz_radps
+    normal.last_wz = 0.20
+    out, meta = normal.apply(_cmd(wz=-0.06), state="SEARCH_TABLE", now_monotonic=10.1)
+    assert 0.0 < out.wz_radps < 0.20
+    assert meta["smoothing_urgent"] is False
+    assert meta["smoothing_profile"] != "urgent_wz"
+
+
+def test_hard_fov_recovery_keeps_urgent_wz_profile():
+    smoother = VelocitySmoother(MotionSmoothingConfig())
+    smoother.last_ts_monotonic = 10.0
+    out, meta = smoother.apply(
+        _cmd(wz=0.3), state="SEARCH_TABLE", now_monotonic=10.1,
+        summary={"docking_action": "BBOX_REACQUIRE_ROTATE", "fov_guard_level": "hard"},
+    )
+    assert out.wz_radps > 0.09
     assert meta["smoothing_urgent"] is True

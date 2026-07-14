@@ -1161,6 +1161,34 @@ class TableDockingMixin:
     def _control_phase_status(self, obs: Optional[TableEdgeObs], depth_stop_ready: bool) -> Dict[str, object]:
         """State-independent, hard ownership handoff between search/bbox/edge."""
         now = monotonic_ts()
+        if self.ctx.state == State.SEARCH_TABLE and not bool(getattr(self.ctx, "search_bbox_handoff_confirmed", False)):
+            # A SEARCH_TABLE tick has exactly one yaw owner: the coarse scan.
+            # Do not allow a single bbox, a held ROI, or a reused observation to
+            # promote the bbox controller and overwrite the latched scan command.
+            handoff = self._update_search_bbox_handoff(obs)
+            if self.ctx.control_phase != "SEARCH_SCAN":
+                self.ctx.control_phase = "SEARCH_SCAN"
+                self.ctx.control_phase_since_mono = now
+            dwell_ms = max(0.0, (now - float(self.ctx.control_phase_since_mono or now)) * 1000.0)
+            return {
+                "control_phase": "SEARCH_SCAN",
+                "phase_reason": str(handoff["reason"]),
+                "bbox_center_error": handoff["center_error"],
+                "phase_dwell_ms": dwell_ms,
+                "edge_handoff_complete": False,
+                "handoff_timeout": False,
+                "edge_conf_score": float(getattr(self.ctx, "edge_conf_score", 0.0) or 0.0),
+                "edge_readiness_score": float(getattr(self.ctx, "edge_readiness_score", 0.0) or 0.0),
+                "edge_readiness_level": str(getattr(self.ctx, "edge_readiness_level", "") or ""),
+                "edge_readiness_enter_score": float(getattr(self.cfg, "edge_readiness_enter_score", 0.65) or 0.65),
+                "edge_readiness_exit_score": float(getattr(self.cfg, "edge_readiness_exit_score", 0.35) or 0.35),
+                "edge_handoff_block_reason": str(handoff["reason"]),
+                "edge_handoff_source": "search_bbox_confirmation",
+                "approach_commit_active": False,
+                "search_bbox_confirm_streak": int(handoff["streak"]),
+                "search_bbox_candidate_sign": int(handoff["candidate_sign"]),
+                "search_bbox_handoff_confirmed": False,
+            }
         current_bbox = self._table_yolo_reliable(obs) or self._bbox_yaw_hold_valid(obs)
         hard_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.25) or 0.25))
         geom = self._bbox_control_geometry(obs)
@@ -1304,6 +1332,63 @@ class TableDockingMixin:
                 "edge_handoff_block_reason": "" if float(getattr(self.ctx, "edge_readiness_score", 0.0) or 0.0) >= float(getattr(self.cfg, "edge_readiness_enter_score", 0.65) or 0.65) else str(getattr(self.ctx, "edge_readiness_level", "") or ""),
                 "edge_handoff_source": "readiness_score",
                 "approach_commit_active": bool(self.ctx.approach_commit_active)}
+
+    def _update_search_bbox_handoff(self, obs: Optional[TableEdgeObs]) -> Dict[str, object]:
+        """Confirm a bbox handoff without letting reused/noisy data steer scan yaw."""
+        geom = self._bbox_control_geometry(obs)
+        center_error = geom["bbox_center_error_control"]
+        obs_key = self._table_obs_key(obs) if obs is not None else ""
+        is_new = bool(obs_key and obs_key != self.ctx.search_scan_last_obs_key)
+        if is_new:
+            self.ctx.search_scan_last_obs_key = obs_key
+        reused = bool(
+            getattr(obs, "reused", False)
+            or getattr(obs, "is_reused", False)
+            or getattr(obs, "observation_reused", False)
+            or int(getattr(obs, "same_obs_reuse_count", 0) or 0) > 0
+        ) if obs is not None else False
+        latched_only = bool(
+            getattr(obs, "table_roi_latched", False)
+            or getattr(obs, "latched_table_roi", False)
+            or getattr(obs, "table_bbox_hold_active", False)
+        ) if obs is not None else False
+        fresh_bbox = bool(
+            obs is not None
+            and is_new
+            and not reused
+            and not latched_only
+            and self._table_yolo_reliable(obs)
+            and bool(geom["bbox_center_valid"])
+            and center_error is not None
+        )
+        if fresh_bbox:
+            deadband = abs(float(getattr(self.cfg, "table_yolo_align_center_x_tol", 0.08) or 0.08))
+            candidate_sign = 0 if abs(float(center_error)) <= deadband else (1 if float(center_error) > 0.0 else -1)
+            if candidate_sign == int(getattr(self.ctx, "search_bbox_candidate_sign", 0) or 0):
+                self.ctx.search_bbox_confirm_streak += 1
+            else:
+                self.ctx.search_bbox_candidate_sign = candidate_sign
+                self.ctx.search_bbox_confirm_streak = 1
+            reason = "fresh_bbox_confirmation"
+        elif is_new:
+            # A missing, held, latched, or reused observation is not evidence in
+            # either direction.  It cannot flip the coarse-search latch.
+            self.ctx.search_bbox_candidate_sign = 0
+            self.ctx.search_bbox_confirm_streak = 0
+            reason = "search_waiting_for_fresh_bbox"
+        else:
+            reason = "search_waiting_for_new_fresh_bbox"
+        required = max(3, int(getattr(self.cfg, "search_bbox_confirm_frames", 3) or 3))
+        if self.ctx.search_bbox_confirm_streak >= required:
+            self.ctx.search_bbox_handoff_confirmed = True
+            self.ctx.search_bbox_handoff_reason = "stable_fresh_bbox_confirmed"
+            reason = self.ctx.search_bbox_handoff_reason
+        return {
+            "streak": int(self.ctx.search_bbox_confirm_streak),
+            "candidate_sign": int(self.ctx.search_bbox_candidate_sign),
+            "center_error": center_error,
+            "reason": reason,
+        }
 
     def _get_control_authority(self, obs: Optional[TableEdgeObs], depth_roi_stop_active: bool = False, explicit_stop_active: bool = False) -> ControlAuthority:
         sem = build_table_perception_semantics(obs, self.cfg)
@@ -1700,8 +1785,15 @@ class TableDockingMixin:
             "coast_reason": coast_reason,
             "zero_cmd_age_ms": 0.0,
             "zero_escape_reason": "",
-            "search_latch_age_ms": float(max(0.0, (monotonic_ts() - (float(self.ctx.search_wz_latch_until_mono or monotonic_ts()) - 0.8)) * 1000.0)),
+            "search_latch_age_ms": float(max(0.0, (monotonic_ts() - (
+                float(self.ctx.search_wz_latch_until_mono or monotonic_ts())
+                - float(getattr(self.cfg, "search_direction_min_dwell_s", 0.80) or 0.80)
+            )) * 1000.0)),
             "search_latch_reason": str(self.ctx.current_search_direction_reason or "latched_search_direction"),
+            "search_bbox_confirm_streak": int(getattr(self.ctx, "search_bbox_confirm_streak", 0) or 0),
+            "search_bbox_candidate_sign": int(getattr(self.ctx, "search_bbox_candidate_sign", 0) or 0),
+            "search_bbox_handoff_confirmed": bool(getattr(self.ctx, "search_bbox_handoff_confirmed", False)),
+            "search_bbox_handoff_reason": str(getattr(self.ctx, "search_bbox_handoff_reason", "") or ""),
             "wz_sign_final": sign(float(decision.cmd.wz_radps)),
             "edge_handoff_complete": bool(self.ctx.edge_handoff_complete), "handoff_timeout": bool(self.ctx.edge_handoff_timeout),
             "phase_dwell_ms": float(max(0.0, (monotonic_ts() - float(self.ctx.control_phase_since_mono or monotonic_ts())) * 1000.0)),
@@ -2904,6 +2996,12 @@ class TableDockingMixin:
         return final_decision
 
     def _get_memory_search_params(self) -> Tuple[int, str, str]:
+        if int(getattr(self.ctx, "search_wz_sign_latched", 0) or 0):
+            return (
+                int(self.ctx.search_wz_sign_latched),
+                str(self.ctx.current_search_direction_source or "latched"),
+                str(self.ctx.current_search_direction_reason or "latched_search_direction"),
+            )
         turn_sign = self.ctx.relocate_turn_sign
         search_src = "default"
         search_dir = "no_memory"
@@ -2933,6 +3031,10 @@ class TableDockingMixin:
                 
         self.ctx.current_search_direction_source = search_src
         self.ctx.current_search_direction_reason = search_dir
+        self.ctx.search_wz_sign_latched = 1 if int(turn_sign) >= 0 else -1
+        self.ctx.search_wz_latch_until_mono = monotonic_ts() + max(
+            0.0, float(getattr(self.cfg, "search_direction_min_dwell_s", 0.80) or 0.80)
+        )
         return turn_sign, search_src, search_dir
 
     def _check_approach_progress(self, obs: Optional[TableEdgeObs]) -> bool:
@@ -3169,7 +3271,11 @@ class TableDockingMixin:
         warmup_s = max(0.0, float(getattr(self.car_cfg, "table_perception_warmup_s", 1.0) or 1.0))
         task_elapsed_s = max(0.0, time.time() - float(getattr(self.ctx, "task_start_wall_ts", 0.0) or time.time()))
         if task_elapsed_s <= warmup_s:
-            if obs is not None and self._table_motion_signal_available(obs):
+            if (
+                obs is not None
+                and bool(getattr(self.ctx, "search_bbox_handoff_confirmed", False))
+                and self._table_motion_signal_available(obs)
+            ):
                 return self._approach_from_table_signal(obs, reason=f"perception_warmup_signal_seen elapsed_s={task_elapsed_s:.2f}")
             decision = self.controller.stop_cmd("SEARCH_TABLE")
             decision.control_summary.update(
@@ -3317,7 +3423,11 @@ class TableDockingMixin:
                 )
                 return decision
         level = self._control_level(obs)
-        if obs is not None and self._table_motion_signal_available(obs):
+        if (
+            obs is not None
+            and bool(getattr(self.ctx, "search_bbox_handoff_confirmed", False))
+            and self._table_motion_signal_available(obs)
+        ):
             geom = self._bbox_control_geometry(obs)
             cx_norm = geom["bbox_cx_norm_control"]
             center_error = geom["bbox_center_error_control"]

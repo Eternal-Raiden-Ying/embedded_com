@@ -16,7 +16,7 @@ from ..ipc import build_task_cmd, normalize_task_ack, normalize_tts_event
 from ..ipc import JsonlAckInbox, InboundPollerThread, build_msgpack_client_sender, build_msgpack_inbound_server
 from .asr_engine import AudioCommandPipeline
 from .commands import CommandInterpreter
-from .common import FRAME_MS, SR, clean_asr_text, current_run_dir, jlog, kws_trigger, rms_int16, write_ipc_event, write_state_block, write_timeline
+from .common import FRAME_MS, MIN_UTT_MS, SR, clean_asr_text, current_run_dir, jlog, kws_trigger, rms_int16, write_ipc_event, write_state_block, write_timeline
 from .kws_engine import FlexibleWakeWord
 from .mic_stream import RawMicStream, WavReplayAudioSource
 from .state import AudioConfig, RuntimeState
@@ -92,7 +92,8 @@ def dispatch_task_cmd(payload: Dict[str, Any], publisher: Any, ack_inbox: Option
 class AudioKWSWorker(threading.Thread):
     def __init__(self, cfg: Any, rt: RuntimeState, stop_event: threading.Event, utter_q: queue.Queue,
                  task_sender: Any, ack_inbox: Optional[JsonlAckInbox],
-                 phone_playback: Optional[PhonePlaybackGuard] = None):
+                 phone_playback: Optional[PhonePlaybackGuard] = None,
+                 pipeline: Optional[AudioCommandPipeline] = None):
         super().__init__(daemon=True, name="audio_kws")
         self.cfg_runtime = AudioConfig(
             wake_key=cfg.wake_key,
@@ -123,6 +124,7 @@ class AudioKWSWorker(threading.Thread):
         self.task_sender = task_sender
         self.ack_inbox = ack_inbox
         self.phone_playback = phone_playback
+        self.pipeline = pipeline
         self.asr_mode = str(getattr(cfg, "asr_mode", "offline") or "offline").lower()
         self.dry_run_text = getattr(cfg, "dry_run_text", False)
 
@@ -168,6 +170,17 @@ class AudioKWSWorker(threading.Thread):
         self.last_heartbeat = 0.0
         self.asr_sample_buf = np.zeros((0,), dtype=np.int16)
         self.asr_chunk_seq = 0
+        self.online_vad_session = None
+        self.online_session_started = False
+        self.online_speech_started = False
+        self.online_final_emitted = False
+        self.online_session_started_at = 0.0
+        self.online_speech_started_at = 0.0
+        self.online_speech_samples = 0
+        self.online_speech_content_samples = 0
+        # 400 ms at the shared 80 ms capture frame cadence.  This protects
+        # short command prefixes while remaining inside the requested 300–500 ms.
+        self.online_prebuf = deque(maxlen=max(1, int(round(400.0 / FRAME_MS))))
         self._last_record_drop_reason = ""
         self._noise_floor_rms = 0.0
         self._noise_floor_before_prompt: Optional[float] = None
@@ -234,6 +247,131 @@ class AudioKWSWorker(threading.Thread):
             self.rt.set_state(next_state)
             write_state_block(self.rt.snapshot())
 
+    def _reset_online_capture_state(self) -> None:
+        """Clear command-local Online ASR/VAD state before a fresh wake turn."""
+        old_vad_session = getattr(self, "online_vad_session", None)
+        pipeline = getattr(self, "pipeline", None)
+        if old_vad_session is not None and pipeline is not None:
+            pipeline.abort_vad_stream_session(old_vad_session)
+        self.online_vad_session = None
+        self.online_session_started = False
+        self.online_speech_started = False
+        self.online_final_emitted = False
+        self.online_session_started_at = 0.0
+        self.online_speech_started_at = 0.0
+        self.online_speech_samples = 0
+        self.online_speech_content_samples = 0
+        self.online_prebuf.clear()
+        self.asr_sample_buf = np.zeros((0,), dtype=np.int16)
+        self.asr_chunk_seq = 0
+
+    def _start_online_session(self, reason: str) -> None:
+        """Open the VAD and ASR sessions immediately after command arm."""
+        if self.asr_mode != "online":
+            return
+        pipeline = getattr(self, "pipeline", None)
+        if pipeline is None:
+            raise RuntimeError("online capture requires the shared AudioCommandPipeline")
+        self._reset_online_capture_state()
+        self.online_vad_session = pipeline.start_vad_stream_session()
+        self.online_session_started = self._emit_online_asr_event("START")
+        self.online_session_started_at = time.monotonic()
+        snap = self.rt.snapshot()
+        fields = {
+            "reason": reason,
+            "session_id": snap.get("session_id", ""),
+            "epoch": snap.get("epoch"),
+            "pre_roll_ms": int(self.online_prebuf.maxlen * FRAME_MS),
+            "step_samples": int(self.online_step_samples),
+        }
+        write_timeline("ONLINE_SESSION_STARTED", **fields)
+        jlog({"level": "info", "src": "online_asr", "msg": "[ONLINE_SESSION_STARTED]", **fields})
+
+    def _finish_online_session(self, rms: float, reason: str, too_long: bool = False) -> None:
+        """Flush exactly one Online FINAL after VAD end or a bounded timeout."""
+        if self.asr_mode != "online" or not self.online_session_started or self.online_final_emitted:
+            return
+        self._flush_online_chunk(is_final=True, rms=rms, too_long=too_long)
+        self.online_final_emitted = True
+        pipeline = getattr(self, "pipeline", None)
+        if pipeline is not None:
+            pipeline.abort_vad_stream_session(self.online_vad_session)
+        self.online_vad_session = None
+        fields = {
+            "reason": reason,
+            "samples": int(self.online_speech_samples),
+            "session_id": self.rt.snapshot().get("session_id", ""),
+            "epoch": self.rt.get_epoch(),
+        }
+        write_timeline("VAD_SPEECH_ENDED", **fields)
+        jlog({"level": "info", "src": "online_vad", "msg": "[VAD_SPEECH_ENDED]", **fields})
+
+    def _advance_online_armed_capture(self, x: np.ndarray, rms: float) -> bool:
+        """Feed every armed frame to FSMN-VAD; RMS never gates Online speech."""
+        if self.online_vad_session is None:
+            return False
+        self.online_prebuf.append(x.copy())
+        vad_meta = self.pipeline.stream_vad_feed(self.online_vad_session, x, is_final=False)
+        if not vad_meta.get("speech_started"):
+            return False
+        self.online_speech_started = True
+        self.online_speech_started_at = time.monotonic()
+        self.online_speech_samples = sum(len(frame) for frame in self.online_prebuf)
+        self.online_speech_content_samples = 0
+        self.captured = list(self.online_prebuf)
+        self.state = "REC"
+        self.rt.begin_recording()
+        self._append_online_samples(np.concatenate(self.captured, axis=0).astype(np.int16))
+        self._flush_online_chunk(is_final=False)
+        fields = {
+            "rms": round(float(rms), 2),
+            "pre_roll_ms": int(self.online_prebuf.maxlen * FRAME_MS),
+            "pre_roll_samples": int(sum(len(frame) for frame in self.online_prebuf)),
+            "session_id": self.rt.snapshot().get("session_id", ""),
+            "epoch": self.rt.get_epoch(),
+        }
+        write_timeline("VAD_SPEECH_STARTED", **fields)
+        write_timeline("REC_STARTED", reason="fsmn_vad_speech_start", **fields)
+        jlog({"level": "info", "src": "online_vad", "msg": "[VAD_SPEECH_STARTED]", **fields})
+        jlog({"level": "info", "src": "seg", "msg": "REC_STARTED", "reason": "fsmn_vad_speech_start", **fields})
+        return True
+
+    def _advance_online_recording(self, x: np.ndarray, rms: float) -> None:
+        """Continue VAD and stream only VAD-bounded speech into Paraformer."""
+        vad_meta = self.pipeline.stream_vad_feed(self.online_vad_session, x, is_final=False)
+        self.captured.append(x.copy())
+        self.online_speech_samples += int(len(x))
+        self.online_speech_content_samples += int(len(x))
+        self._append_online_samples(x)
+        self._flush_online_chunk(is_final=False)
+
+        max_utterance_s = min(
+            float(getattr(self.cfg_board, "asr_stream_session_timeout_s", 8.0)),
+            float(self.cfg_runtime.max_frames * FRAME_MS) / 1000.0,
+        )
+        too_long = self.online_speech_started_at > 0.0 and (time.monotonic() - self.online_speech_started_at) >= max_utterance_s
+        if vad_meta.get("speech_ended") or too_long:
+            if self.online_speech_content_samples < int(MIN_UTT_MS * SR / 1000):
+                fields = {
+                    "reason": "vad_speech_too_short",
+                    "speech_samples": int(self.online_speech_content_samples),
+                    "min_speech_samples": int(MIN_UTT_MS * SR / 1000),
+                    "session_id": self.rt.snapshot().get("session_id", ""),
+                    "epoch": self.rt.get_epoch(),
+                }
+                write_timeline("VAD_SPEECH_ENDED", **fields)
+                jlog({"level": "info", "src": "online_vad", "msg": "[VAD_SPEECH_ENDED]", **fields})
+                self._abort_online_stream("vad_speech_too_short")
+                self._reset_recording("WAIT_WAKE")
+                return
+            self._finish_online_session(rms, "max_utterance_timeout" if too_long else "fsmn_vad_speech_end", too_long=too_long)
+            record_duration_ms = len(self.captured) * FRAME_MS
+            write_timeline(
+                "REC_ENDED", reason="max_frames" if too_long else "vad_speech_end",
+                frames=len(self.captured), too_long=too_long, record_duration_ms=float(record_duration_ms),
+            )
+            self._reset_recording("WAIT_WAKE", update_runtime=False)
+
     @staticmethod
     def _effective_energy_threshold(static_threshold: float, noise_floor_rms: float) -> float:
         """Use a bounded noise-relative onset gate without losing speech capture.
@@ -284,6 +422,8 @@ class AudioKWSWorker(threading.Thread):
         self.asr_chunk_seq = 0
         self.prebuf.clear()
         self.oww.reset()
+        if self.asr_mode == "online":
+            self._start_online_session(reason)
         static = float(self.cfg_runtime.energy_th)
         effective = self._effective_energy_threshold(static, self._noise_floor_rms)
         snap = self.rt.snapshot()
@@ -294,6 +434,7 @@ class AudioKWSWorker(threading.Thread):
             "static_threshold": round(static, 2),
             "noise_floor": round(float(self._noise_floor_rms), 2),
             "effective_threshold": round(effective, 2),
+            "online_energy_gate": self.asr_mode != "online",
             "start_frames": int(self.cfg_runtime.start_frames),
             "session_id": snap.get("session_id", ""),
             "epoch": snap.get("epoch"),
@@ -435,6 +576,13 @@ class AudioKWSWorker(threading.Thread):
             item["seq"] = self.asr_chunk_seq
             self.asr_chunk_seq += 1
         ok = self._push_q_item(item)
+        if kind == "CHUNK" and ok:
+            fields = {
+                "seq": item["seq"], "samples": item.get("samples", 0),
+                "session_id": item.get("session_id", ""), "epoch": item.get("epoch"),
+            }
+            write_timeline("ONLINE_CHUNK_SENT", **fields)
+            jlog({"level": "info", "src": "online_asr", "msg": "[ONLINE_CHUNK_SENT]", **fields})
         if kind == "FINAL" and ok:
             self.rt.set_busy(True)
             self.rt.set_state("BUSY")
@@ -483,7 +631,7 @@ class AudioKWSWorker(threading.Thread):
         if self.phone_playback is not None:
             self.phone_playback.invalidate()
         dropped = self._drop_pending_utterances()
-        self._abort_online_stream()
+        self._abort_online_stream("stop_hotword")
         self.rt.set_busy(False)
         session_id = self.rt.ensure_session("stop_hotword")
         payload = {
@@ -529,13 +677,29 @@ class AudioKWSWorker(threading.Thread):
             "dropped_utts": dropped,
         })
 
-    def _abort_online_stream(self) -> None:
-        if self.asr_mode == "online":
+    def _abort_online_stream(self, reason: str = "abort") -> None:
+        if self.asr_mode != "online":
+            return
+        active = bool(getattr(self, "online_session_started", False))
+        pipeline = getattr(self, "pipeline", None)
+        if pipeline is not None:
+            pipeline.abort_vad_stream_session(getattr(self, "online_vad_session", None))
+        self.online_vad_session = None
+        if active and not getattr(self, "online_final_emitted", False):
             self._emit_online_asr_event("ABORT")
+            fields = {
+                "reason": reason,
+                "session_id": self.rt.snapshot().get("session_id", ""),
+                "epoch": self.rt.get_epoch(),
+            }
+            write_timeline("ONLINE_SESSION_ABORTED", **fields)
+            jlog({"level": "info", "src": "online_asr", "msg": "[ONLINE_SESSION_ABORTED]", **fields})
+        self.online_session_started = False
+        self.online_speech_started = False
 
     def _abort_recording(self, reason: str, next_state: str = "WAIT_WAKE", abort_online: bool = True) -> None:
         if abort_online:
-            self._abort_online_stream()
+            self._abort_online_stream(reason)
         jlog({"level": "info", "src": "seg", "msg": "REC abort reason={}".format(reason), "frames": len(self.captured)})
         write_timeline("REC_ABORTED", reason=reason, frames=len(self.captured), epoch=self.rt.get_epoch())
         self._reset_recording(next_state)
@@ -650,6 +814,15 @@ class AudioKWSWorker(threading.Thread):
 
                 armed = self.rt.is_armed()
                 if self._armed_timeout_applies(self.state, self.rt):
+                    if self.asr_mode == "online" and self.online_session_started:
+                        fields = {
+                            "reason": "armed_wait_deadline",
+                            "session_id": self.rt.snapshot().get("session_id", ""),
+                            "epoch": self.rt.get_epoch(),
+                        }
+                        write_timeline("ONLINE_NO_SPEECH_TIMEOUT", **fields)
+                        jlog({"level": "info", "src": "online_asr", "msg": "[ONLINE_NO_SPEECH_TIMEOUT]", **fields})
+                        self._abort_online_stream("no_speech_timeout")
                     write_timeline("ARM_TIMEOUT", reason="armed_wait_deadline", session_id=self.rt.snapshot().get("session_id"), epoch=self.rt.get_epoch())
                     jlog({"level": "info", "src": "seg", "msg": "ARM timeout reason=armed_wait_deadline"})
                     self.rt.disarm()
@@ -682,14 +855,41 @@ class AudioKWSWorker(threading.Thread):
                     self.rt.set_state("ARMED_WAIT")
 
                 if self.state == "ARMED_WAIT":
-                    self._advance_armed_capture(x, r)
+                    if self.asr_mode == "online":
+                        idle_timeout_s = float(getattr(self.cfg_board, "asr_stream_idle_timeout_s", self.cfg_runtime.armed_secs))
+                        if self.online_session_started_at > 0.0 and time.monotonic() - self.online_session_started_at >= idle_timeout_s:
+                            fields = {
+                                "reason": "asr_stream_idle_timeout",
+                                "timeout_s": idle_timeout_s,
+                                "session_id": self.rt.snapshot().get("session_id", ""),
+                                "epoch": self.rt.get_epoch(),
+                            }
+                            write_timeline("ONLINE_NO_SPEECH_TIMEOUT", **fields)
+                            jlog({"level": "info", "src": "online_asr", "msg": "[ONLINE_NO_SPEECH_TIMEOUT]", **fields})
+                            self._abort_online_stream("no_speech_timeout")
+                            self.rt.disarm()
+                            self._reset_recording("WAIT_WAKE")
+                            continue
+                        try:
+                            self._advance_online_armed_capture(x, r)
+                        except Exception as exc:
+                            jlog({"level": "error", "src": "online_vad", "msg": "online VAD feed failed", "error": str(exc)})
+                            self._abort_online_stream("vad_feed_error")
+                            self.rt.disarm()
+                            self._reset_recording("WAIT_WAKE")
+                    else:
+                        self._advance_armed_capture(x, r)
                     continue
 
                 if self.state == "REC":
-                    self.captured.append(x.copy())
                     if self.asr_mode == "online":
-                        self._append_online_samples(x)
-                        self._flush_online_chunk(is_final=False)
+                        try:
+                            self._advance_online_recording(x, r)
+                        except Exception as exc:
+                            jlog({"level": "error", "src": "online_vad", "msg": "online VAD feed failed", "error": str(exc)})
+                            self._abort_recording("vad_feed_error")
+                        continue
+                    self.captured.append(x.copy())
                     if r < self.cfg_runtime.energy_th:
                         self.speech_down += 1
                     else:
@@ -699,13 +899,10 @@ class AudioKWSWorker(threading.Thread):
                     end_now = enough and self.speech_down >= self.cfg_runtime.end_frames
                     too_long = len(self.captured) >= self.cfg_runtime.max_frames
                     if end_now or too_long:
-                        if self.asr_mode == "online":
-                            self._flush_online_chunk(is_final=True, rms=r, too_long=too_long)
-                        else:
-                            queued = self._enqueue_utterance(self.captured, r)
-                            if not queued:
-                                self._abort_recording("utterance_queue_full")
-                                continue
+                        queued = self._enqueue_utterance(self.captured, r)
+                        if not queued:
+                            self._abort_recording("utterance_queue_full")
+                            continue
                         record_duration_ms = len(self.captured) * FRAME_MS
                         jlog({
                             "level": "info", "src": "seg", "msg": "REC end",
@@ -894,28 +1091,57 @@ class ASRDecisionWorker(threading.Thread):
                 return {"finalize_turn": False, "handle_meta": {"keep_alive": False, "tts": ""}}
             feed_meta = self.pipeline.stream_feed(self.stream_session, item["audio"], is_final=False)
             merged = clean_asr_text(str(feed_meta.get("merged_text", "") or ""))
+            raw_fields = {
+                "raw_text": str(feed_meta.get("raw_text", feed_meta.get("text", "")) or ""),
+                "previous_text": str(feed_meta.get("previous_text", "") or ""),
+                "merged_text": merged,
+                "chunk_seq": item.get("seq"),
+                "session_id": item.get("session_id", ""), "epoch": item_epoch,
+            }
+            write_timeline("ONLINE_RAW_CHUNK", **raw_fields)
+            jlog({"level": "info", "src": "asr_partial", "msg": "[ONLINE_RAW_CHUNK]", **raw_fields})
+            write_timeline("ONLINE_MERGED_PARTIAL", **raw_fields)
+            jlog({"level": "info", "src": "asr_partial", "msg": "[ONLINE_MERGED_PARTIAL]", **raw_fields})
             if self.cfg.asr_emit_partial and merged and merged != self.last_partial_text and not self.interpreter.is_residual_text(merged):
                 self.last_partial_text = merged
-                jlog({
-                    "level": "info", "src": "asr_partial", "text": merged,
+                fields = {
+                    "text": merged,
                     "chunk_seq": item.get("seq"),
                     "feed_latency_ms": round(float(feed_meta.get("feed_latency_ms", 0.0)), 2),
-                })
+                    "session_id": item.get("session_id", ""), "epoch": item_epoch,
+                }
+                write_timeline("ONLINE_PARTIAL", **fields)
+                jlog({"level": "info", "src": "asr_partial", "msg": "[ONLINE_PARTIAL]", **fields})
             return {"finalize_turn": False, "handle_meta": {"keep_alive": False, "tts": ""}}
 
         if kind == "FINAL":
             if item_epoch != self.rt.get_epoch() or self.stream_session is None or self.stream_epoch != item_epoch or self.stream_session.finalized:
                 return {"finalize_turn": False, "handle_meta": {"keep_alive": False, "tts": ""}}
             finalize_turn = True
-            self.pipeline.stream_feed(self.stream_session, item["audio"], is_final=True)
+            feed_meta = self.pipeline.stream_feed(self.stream_session, item["audio"], is_final=True)
+            raw_fields = {
+                "raw_text": str(feed_meta.get("raw_text", feed_meta.get("text", "")) or ""),
+                "previous_text": str(feed_meta.get("previous_text", "") or ""),
+                "merged_text": str(feed_meta.get("merged_text", "") or ""),
+                "session_id": item.get("session_id", ""), "epoch": item_epoch,
+            }
+            write_timeline("ONLINE_RAW_FINAL", **raw_fields)
+            jlog({"level": "info", "src": "asr", "msg": "[ONLINE_RAW_FINAL]", **raw_fields})
             if item_epoch != self.rt.get_epoch():
                 jlog({"level": "info", "src": "decision", "msg": "drop stale final result", "item_epoch": item_epoch, "current_epoch": self.rt.get_epoch()})
                 self.rt.mark_result(False, intent="DROP_STALE")
                 self._reset_stream_session()
                 return {"finalize_turn": finalize_turn, "handle_meta": {"keep_alive": False, "tts": ""}}
             result = self.pipeline.finalize_stream_result(self.stream_session)
+            fields = {
+                "text": result.get("text", ""), "status": result.get("status", ""),
+                "samples": getattr(self.stream_session, "samples", 0),
+                **raw_fields,
+            }
             handle_meta = self._handle_result(result)
             self.say_text(handle_meta.get("tts", ""))
+            write_timeline("ONLINE_FINAL", **fields)
+            jlog({"level": "info", "src": "asr", "msg": "[ONLINE_FINAL]", **fields})
             write_state_block(self.rt.snapshot())
             self._reset_stream_session()
             return {"finalize_turn": finalize_turn, "handle_meta": handle_meta}
