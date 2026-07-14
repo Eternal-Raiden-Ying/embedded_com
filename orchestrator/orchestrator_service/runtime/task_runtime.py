@@ -390,7 +390,9 @@ class TaskRuntimeMixin:
             "table_lock_frames",
             "edge_identity_state",
             "edge_slope_final_ready_latched",
+            "edge_alignment_complete",
         ]
+        self.ctx.reset_edge_alignment_complete(reason)
         self.ctx.reset_edge_slope_final_ready(reason)
         self.ctx.last_table_obs = None
         self.ctx.locked_edge_id = ""

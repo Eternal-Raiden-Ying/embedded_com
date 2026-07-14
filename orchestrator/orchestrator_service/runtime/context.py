@@ -177,6 +177,13 @@ class RuntimeContext:
     edge_handoff_started_mono: float = 0.0
     edge_handoff_complete: bool = False
     edge_handoff_timeout: bool = False
+    edge_alignment_complete: bool = False
+    edge_alignment_complete_mono: float = 0.0
+    last_aligned_edge_yaw: Optional[float] = None
+    edge_alignment_last_obs_key: str = ""
+    edge_alignment_overlimit_count: int = 0
+    edge_alignment_overlimit_last_obs_key: str = ""
+    edge_alignment_reset_reason: str = ""
     approach_commit_active: bool = False
     last_forward_cmd_mono: float = 0.0
     forward_commit_until_mono: float = 0.0
@@ -635,6 +642,15 @@ class RuntimeContext:
         self.builtin_bottle_pose_started = False
         self.remote_result_ignored = False
 
+    def reset_edge_alignment_complete(self, reason: str) -> None:
+        self.edge_alignment_complete = False
+        self.edge_alignment_complete_mono = 0.0
+        self.last_aligned_edge_yaw = None
+        self.edge_alignment_last_obs_key = ""
+        self.edge_alignment_overlimit_count = 0
+        self.edge_alignment_overlimit_last_obs_key = ""
+        self.edge_alignment_reset_reason = str(reason or "")
+
     def clear_perception_cache(self):
         self.last_table_obs = None
         self.last_target_obs = None
@@ -680,6 +696,7 @@ class RuntimeContext:
         self.slide_ref_last_sample_key = ""
         self.handoff_state = ""
         self.last_edge_quality.clear()
+        self.reset_edge_alignment_complete("reset_edge_plan")
         self.reset_edge_slope_final_ready("reset_edge_plan")
 
     def advance_edge(self) -> bool:

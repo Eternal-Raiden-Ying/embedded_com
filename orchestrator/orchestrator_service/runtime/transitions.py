@@ -120,6 +120,8 @@ class TransitionsMixin:
             self.ctx.last_target_explicit_negative_id = ""
         elif new_state in {State.EDGE_SLIDE_SEARCH, State.TARGET_CONFIRM, State.TARGET_LOCKED} and self.ctx.target_search_start_mono <= 0.0:
             self.ctx.target_search_start_mono = self.ctx.state_enter_mono
+        if new_state == State.YOLO_ACQUIRE_ALIGN:
+            self.ctx.reset_edge_alignment_complete("enter_bbox_reacquire")
         if self.transition_observer is not None:
             try:
                 self.transition_observer(old_state.value, new_state.value, reason)

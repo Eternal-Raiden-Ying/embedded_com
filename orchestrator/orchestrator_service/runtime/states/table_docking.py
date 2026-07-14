@@ -139,6 +139,12 @@ class TableDockingMixin:
             "BBOX_TRACK_FORWARD", "EDGE_READINESS_HANDOFF", "EDGE_APPROACH_FORWARD", "NEAR_EDGE_FORWARD"
         }
         stop_class = str(summary.get("stop_class") or "none").strip().lower()
+        if stop_class in {"emergency", "safety", "explicit"} or bool(
+            summary.get("explicit_stop_active")
+            or summary.get("emergency_stop_active")
+            or summary.get("safety_stop_active")
+        ):
+            self.ctx.reset_edge_alignment_complete(f"control_stop:{stop_class}")
         if action in latch_actions and stop_class not in {"emergency", "safety"} and not bool(decision.cmd.brake):
             self.ctx.table_control_latch_active = True
             self.ctx.last_valid_table_cmd = {
@@ -1047,7 +1053,8 @@ class TableDockingMixin:
         self.ctx.edge_yaw_flip_state = ""
 
     def _edge_posture_gate_status(self, obs: Optional[TableEdgeObs]) -> Dict[str, object]:
-        """Single pre-Final posture gate; Final internals remain unchanged."""
+        """Latch completed Edge posture so near-field fit loss cannot block Final."""
+        now = monotonic_ts()
         yaw = self._final_enter_float(getattr(obs, "yaw_err_rad", None) if obs is not None else None)
         tolerance = abs(float(getattr(self.car_cfg, "table_approach_yaw_deadband_rad", 0.08) or 0.08))
         required = max(3, int(getattr(self.cfg, "edge_trusted_stable_frames", 3) or 3))
@@ -1058,8 +1065,59 @@ class TableDockingMixin:
         handoff_complete = bool(self.ctx.edge_handoff_complete)
         stable_count = int(self.ctx.edge_trusted_streak)
         yaw_aligned = bool(yaw is not None and abs(float(yaw)) <= tolerance)
-        ready = bool(trusted and handoff_complete and stable_count >= required and yaw_aligned)
-        if not trusted:
+        instant_alignment_complete = bool(
+            trusted and handoff_complete and stable_count >= required and yaw_aligned
+        )
+        if instant_alignment_complete:
+            aligned_obs_key = self._table_obs_key(obs)
+            if not self.ctx.edge_alignment_complete or (
+                aligned_obs_key and aligned_obs_key != self.ctx.edge_alignment_last_obs_key
+            ):
+                self.ctx.edge_alignment_complete = True
+                self.ctx.edge_alignment_complete_mono = now
+                self.ctx.last_aligned_edge_yaw = float(yaw)
+                self.ctx.edge_alignment_last_obs_key = aligned_obs_key
+            self.ctx.edge_alignment_overlimit_count = 0
+            self.ctx.edge_alignment_overlimit_last_obs_key = ""
+            self.ctx.edge_alignment_reset_reason = ""
+
+        latch_ttl_s = max(
+            3.0,
+            float(getattr(self.cfg, "final_handoff_recent_obs_max_age_s", 1.0) or 1.0) * 3.0,
+        )
+        latch_age_s = (
+            max(0.0, now - float(self.ctx.edge_alignment_complete_mono))
+            if self.ctx.edge_alignment_complete and self.ctx.edge_alignment_complete_mono > 0.0
+            else None
+        )
+        if self.ctx.edge_alignment_complete and latch_age_s is not None and latch_age_s > latch_ttl_s:
+            self.ctx.reset_edge_alignment_complete("alignment_latch_expired")
+            latch_age_s = None
+
+        # Clear a completed posture only after distinct, trusted Edge samples
+        # repeatedly prove that yaw has moved outside the existing tolerance.
+        if self.ctx.edge_alignment_complete and trusted and yaw is not None:
+            obs_key = self._table_obs_key(obs)
+            if abs(float(yaw)) > tolerance:
+                if obs_key and obs_key != self.ctx.edge_alignment_overlimit_last_obs_key:
+                    self.ctx.edge_alignment_overlimit_last_obs_key = obs_key
+                    self.ctx.edge_alignment_overlimit_count += 1
+                if self.ctx.edge_alignment_overlimit_count >= required:
+                    self.ctx.reset_edge_alignment_complete("sustained_edge_yaw_overlimit")
+                    latch_age_s = None
+            else:
+                self.ctx.edge_alignment_overlimit_count = 0
+                self.ctx.edge_alignment_overlimit_last_obs_key = ""
+
+        latched_ready = bool(
+            self.ctx.edge_alignment_complete
+            and self.ctx.edge_alignment_complete_mono > 0.0
+            and (latch_age_s is None or latch_age_s <= latch_ttl_s)
+        )
+        ready = bool(latched_ready or instant_alignment_complete)
+        if ready:
+            reason = ""
+        elif not trusted:
             reason = "edge_not_trusted"
         elif not handoff_complete:
             reason = "edge_handoff_incomplete"
@@ -1078,6 +1136,13 @@ class TableDockingMixin:
             "edge_yaw_for_final_gate": float(yaw) if yaw is not None else None,
             "edge_yaw_tolerance": tolerance,
             "edge_yaw_aligned": yaw_aligned,
+            "edge_alignment_complete": bool(self.ctx.edge_alignment_complete),
+            "edge_alignment_latched": bool(latched_ready),
+            "edge_alignment_latch_age_ms": latch_age_s * 1000.0 if latch_age_s is not None else None,
+            "edge_alignment_latch_ttl_ms": latch_ttl_s * 1000.0,
+            "last_aligned_edge_yaw": self.ctx.last_aligned_edge_yaw,
+            "edge_alignment_overlimit_count": int(self.ctx.edge_alignment_overlimit_count),
+            "edge_alignment_reset_reason": str(self.ctx.edge_alignment_reset_reason or ""),
         }
 
     def _recent_final_handoff_status(self, obs: Optional[TableEdgeObs], mode: str) -> Dict[str, object]:
