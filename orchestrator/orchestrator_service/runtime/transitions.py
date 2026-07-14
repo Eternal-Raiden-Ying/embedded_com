@@ -65,9 +65,11 @@ class TransitionsMixin:
             self.ctx.last_enter_reason = reason
             return
         preserve_target_debounce = (
-            old_state in {State.EDGE_SLIDE_SEARCH, State.TARGET_CONFIRM, State.TARGET_LOCKED}
+            old_state in {State.SEARCH_TARGET_INIT, State.EDGE_SLIDE_SEARCH, State.TARGET_CONFIRM, State.TARGET_LOCKED}
             and new_state in {State.TARGET_CONFIRM, State.TARGET_LOCKED, State.FREEZE_BASE}
         )
+        if old_state == State.SEARCH_TARGET_INIT and new_state == State.EDGE_SLIDE_SEARCH:
+            preserve_target_debounce = True
         prefinal_approach_states = {State.YOLO_ACQUIRE_ALIGN, State.YOLO_APPROACH, State.EDGE_ADJUST}
         preserve_approach_profile = old_state in prefinal_approach_states and new_state in prefinal_approach_states
         approach_profile = (
@@ -111,6 +113,13 @@ class TransitionsMixin:
             self.ctx.dist_missing_started_mono = 0.0
         if preserve_target_debounce:
             self._restore_target_debounce_snapshot(target_debounce)
+        if new_state == State.SEARCH_TARGET_INIT:
+            self.ctx.target_search_start_mono = self.ctx.state_enter_mono
+            self.ctx.target_loss_since_mono = 0.0
+            self.ctx.target_explicit_negative_count = 0
+            self.ctx.last_target_explicit_negative_id = ""
+        elif new_state in {State.EDGE_SLIDE_SEARCH, State.TARGET_CONFIRM, State.TARGET_LOCKED} and self.ctx.target_search_start_mono <= 0.0:
+            self.ctx.target_search_start_mono = self.ctx.state_enter_mono
         if self.transition_observer is not None:
             try:
                 self.transition_observer(old_state.value, new_state.value, reason)

@@ -221,20 +221,25 @@ class TargetSearchMixin:
             hold_decision = self._target_lateral_hold_decision(state="EDGE_SLIDE_SEARCH", reason=candidate_reason)
             if hold_decision is not None:
                 return hold_decision
-            if had_recent_target:
+            explicit_negative = bool(
+                target_obs is not None
+                and getattr(target_obs, "inference_completed", None) is True
+                and bool(getattr(target_obs, "explicit_negative_detection", False))
+            )
+            if had_recent_target and explicit_negative:
                 self._start_loss_timer("target_loss_since_mono")
                 lost_s = self._loss_elapsed(self.ctx.target_loss_since_mono)
                 lost_stop_s = float(getattr(self.cfg, "target_lateral_lost_stop_s", 1.2) or 1.2)
                 if lost_s >= lost_stop_s:
-                    self._log("warn", f"[SLICE][TARGET_LOST_STOP] lost_s={lost_s:.2f} reason=target_lost_timeout")
-            else:
+                    self._log("info", f"[SLICE][TARGET_REACQUIRE] lost_s={lost_s:.2f} explicit_negative=true")
+            elif not had_recent_target:
                 self.ctx.target_loss_since_mono = 0.0
             self.ctx.target_lateral_vy_cmd = 0.0
             return self._annotate_target_lateral_decision(
                 self.controller.stop_cmd("EDGE_SLIDE_SEARCH"),
                 target_obs,
                 active=False,
-                reason="target_lost_timeout" if had_recent_target else (candidate_reason or "target_never_found"),
+                reason="target_explicit_negative_hold" if explicit_negative else (candidate_reason or "target_waiting_inference"),
                 vy_cmd=0.0,
             )
         edge_obs = self._fresh_table_obs()
@@ -414,10 +419,18 @@ class TargetSearchMixin:
             self._queue_tts("当前桌位未找到目标，尝试下一张桌")
             decision = self.controller.next_table_cmd(turn_sign=self.ctx.relocate_turn_sign)
         else:
-            self._enter_error_recovery(reject_reason)
-            decision = self.controller.stop_cmd("ERROR_RECOVERY", brake=True)
+            # A target search timeout is a task-level negative result, not a
+            # hardware safety incident.  Stop safely and return to the stable
+            # command-accepting state without triggering emergency stop.
+            self.ctx.last_fail_reason = "TARGET_SEARCH_TIMEOUT"
+            self._transition(State.IDLE, "TARGET_SEARCH_TIMEOUT")
+            decision = self.controller.stop_cmd("TARGET_SEARCH_TIMEOUT")
             decision.control_summary.update(
-                {"control_source": "search_failed_stop", "multi_table_enabled": False}
+                {
+                    "control_source": "target_search_failed_stop",
+                    "multi_table_enabled": False,
+                    "failure_category": "target_not_found",
+                }
             )
         if decision.control_summary is not None:
             decision.control_summary.update(
@@ -442,7 +455,11 @@ class TargetSearchMixin:
     def _target_lateral_timeout_reason(self, *, candidate_ok: bool) -> str:
         """Use progress/loss/UART clocks instead of the short state wall clock."""
         now = monotonic_ts()
-        elapsed = max(0.0, self._state_elapsed())
+        search_start = float(getattr(self.ctx, "target_search_start_mono", 0.0) or 0.0)
+        if search_start <= 0.0:
+            self.ctx.target_search_start_mono = now
+            search_start = now
+        elapsed = max(0.0, now - search_start)
         normal_timeout = max(0.1, float(getattr(self.cfg, "target_search_timeout_s", 10.0) or 10.0))
         absolute_timeout = max(
             normal_timeout,
@@ -451,14 +468,16 @@ class TargetSearchMixin:
         if elapsed >= absolute_timeout:
             return "target_absolute_timeout"
 
+        if elapsed >= normal_timeout:
+            return "target_search_timeout"
+
         last_good = float(getattr(self.ctx, "target_lateral_last_good_obs_mono", 0.0) or 0.0)
         had_target = bool(last_good > 0.0 or getattr(self.ctx, "target_lateral_min_abs_err_x", None) is not None)
         if not had_target:
-            return "target_never_found_timeout" if elapsed >= normal_timeout else ""
+            return ""
         if not candidate_ok:
-            lost_timeout = max(0.0, float(getattr(self.cfg, "target_lateral_lost_stop_s", 1.2) or 1.2))
-            if last_good > 0.0 and now - last_good >= lost_timeout:
-                return "target_lost_timeout"
+            # Short loss is handled by the explicit-negative latch.  It is not
+            # the ten-second search deadline and must not exit the task.
             return ""
 
         last_progress = float(getattr(self.ctx, "target_lateral_last_progress_mono", 0.0) or 0.0)
@@ -498,10 +517,6 @@ class TargetSearchMixin:
         )
         if not had_target:
             return "target_never_found_timeout"
-        lost_s = self._loss_elapsed(self.ctx.target_loss_since_mono) if self.ctx.target_loss_since_mono > 0.0 else 0.0
-        lost_stop_s = max(0.0, float(getattr(self.cfg, "target_lateral_lost_stop_s", 1.2) or 1.2))
-        if lost_s >= lost_stop_s and str(candidate_reason or "").startswith("target"):
-            return "target_lost_timeout"
         if int(self.ctx.target_lateral_stable_count) < self._target_lateral_stable_frames():
             return "target_lateral_align_timeout"
         return "target_confirm_timeout"
@@ -796,9 +811,15 @@ class TargetSearchMixin:
         self.ctx.target_found_frames = 0
         self.ctx.target_lateral_stable_count = 0
         self.ctx.target_lateral_vy_cmd = 0.0
-        self.ctx.target_lost_frames += 1
-        self._start_loss_timer("target_loss_since_mono")
-        lost_s = self._loss_elapsed(self.ctx.target_loss_since_mono)
+        explicit_negative = bool(
+            obs is not None
+            and getattr(obs, "inference_completed", None) is True
+            and bool(getattr(obs, "explicit_negative_detection", False))
+        )
+        if explicit_negative:
+            self._start_loss_timer("target_loss_since_mono")
+        self.ctx.target_lost_frames = int(getattr(self.ctx, "target_explicit_negative_count", 0) or 0)
+        lost_s = self._loss_elapsed(self.ctx.target_loss_since_mono) if self.ctx.target_loss_since_mono > 0.0 else 0.0
         self.ctx.target_last_lost_reason = f"{visible_reason} lost_hold_ms={int(round(lost_s * 1000.0))}"
         if self._state_elapsed() < float(self.cfg.target_confirm_min_s):
             return self._annotate_target_lateral_decision(
@@ -845,10 +866,16 @@ class TargetSearchMixin:
         lock_ok, lock_reason = self._target_candidate_status(obs, self.cfg.target_lock_conf_th, min_area=0.0)
         target_window = self._record_target_window_sample(obs, lock_reason)
         if not lock_ok or obs is None:
-            self.ctx.target_lost_frames += 1
+            explicit_negative = bool(
+                obs is not None
+                and getattr(obs, "inference_completed", None) is True
+                and bool(getattr(obs, "explicit_negative_detection", False))
+            )
             self.ctx.target_locked = False
-            self._start_loss_timer("target_loss_since_mono")
-            lost_s = self._loss_elapsed(self.ctx.target_loss_since_mono)
+            if explicit_negative:
+                self._start_loss_timer("target_loss_since_mono")
+            self.ctx.target_lost_frames = int(getattr(self.ctx, "target_explicit_negative_count", 0) or 0)
+            lost_s = self._loss_elapsed(self.ctx.target_loss_since_mono) if self.ctx.target_loss_since_mono > 0.0 else 0.0
             self.ctx.target_last_lost_reason = f"{lock_reason} lost_hold_ms={int(round(lost_s * 1000.0))}"
             freeze_fields = {
                 "target_locked_freeze_elapsed_s": float(self._state_elapsed()),
@@ -1550,7 +1577,7 @@ class TargetSearchMixin:
                 ),
                 "last_good_vy_mps": float(getattr(self.ctx, "last_good_vy_mps", 0.0) or 0.0),
                 "lateral_cmd_source": str(getattr(self.ctx, "target_lateral_hold_source", "") or ("current" if active else "stop")),
-                "slice_timeout_reason": str(self.ctx.target_last_lost_reason or ""),
+                "target_last_lost_reason": str(self.ctx.target_last_lost_reason or ""),
                 "candidate_count": int(getattr(obs, "num_target_candidates", 0) or len(self._target_candidate_list(obs))),
                 "selected_candidate_idx": getattr(self.ctx, "selected_candidate_idx", None),
                 "selected_candidate_score": getattr(self.ctx, "selected_candidate_score", None),
@@ -1564,7 +1591,17 @@ class TargetSearchMixin:
                 "last_completed_inference_id": str(getattr(self.ctx, "last_completed_target_inference_id", "") or ""),
                 "explicit_negative_count": int(getattr(self.ctx, "target_explicit_negative_count", 0) or 0),
                 "has_new_inference": bool(getattr(obs, "has_new_inference", False)) if obs is not None else False,
+                "inference_completed": bool(getattr(obs, "inference_completed", False)) if obs is not None else False,
+                "target_found": bool(getattr(obs, "found", False)) if obs is not None else False,
                 "explicit_negative": bool(getattr(obs, "explicit_negative_detection", False)) if obs is not None else False,
+                "target_loss_age_ms": (
+                    max(0.0, monotonic_ts() - float(self.ctx.target_loss_since_mono)) * 1000.0
+                    if float(getattr(self.ctx, "target_loss_since_mono", 0.0) or 0.0) > 0.0 else 0.0
+                ),
+                "target_search_age_ms": (
+                    max(0.0, monotonic_ts() - float(self.ctx.target_search_start_mono)) * 1000.0
+                    if float(getattr(self.ctx, "target_search_start_mono", 0.0) or 0.0) > 0.0 else 0.0
+                ),
             }
         )
         summary["vx_mps"] = float(decision.cmd.vx_mps)

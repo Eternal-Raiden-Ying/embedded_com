@@ -679,10 +679,8 @@ class OrchestratorService(BaseModule):
         if old_state == "EDGE_SLIDE_SEARCH" and new_state in {"LEAVE_EDGE", "NEXT_TABLE"} and "未找到目标" in reason:
             if "target_lateral_align_timeout" in reason:
                 reason = f"target_lateral_align_timeout timeout_s={float(self.cfg.control.target_search_timeout_s):.1f}"
-            elif "target_lost_timeout" in reason:
-                reason = f"target_lost_timeout timeout_s={float(self.cfg.control.target_search_timeout_s):.1f}"
-            elif "target_never_found_timeout" in reason:
-                reason = f"target_never_found_timeout timeout_s={float(self.cfg.control.target_search_timeout_s):.1f}"
+            elif "target_search_timeout" in reason:
+                reason = f"target_search_timeout timeout_s={float(self.cfg.control.target_search_timeout_s):.1f}"
             elif "target_confirm_timeout" in reason:
                 reason = f"target_confirm_timeout timeout_s={float(self.cfg.control.target_search_timeout_s):.1f}"
             else:
@@ -721,8 +719,19 @@ class OrchestratorService(BaseModule):
             self._emit_demo_task_finished(success=True, reason=reason)
         if new_state == "ERROR_RECOVERY":
             self.core.ctx.clear_final_enter_candidate()
-            self.log("warn", "service", f"Immediate transition to ERROR_RECOVERY due to: {reason}, triggering emergency stop")
-            self.uart.send_emergency_stop()
+            reason_lower = reason.lower()
+            task_level_failure = bool(
+                reason_lower.startswith("target_")
+                or "target_lost" in reason_lower
+                or "target_not_found" in reason_lower
+                or "target_search_timeout" in reason_lower
+            )
+            if task_level_failure:
+                self.log("warn", "service", f"Task-level target failure: {reason}; sending normal stop")
+                self.uart.send_stop(tx_meta={"state": new_state, "reason": reason, "failure_category": "target_not_found"})
+            else:
+                self.log("warn", "service", f"Immediate transition to ERROR_RECOVERY due to: {reason}, triggering emergency stop")
+                self.uart.send_emergency_stop()
             self.motion_adapter.cancel_active_jogs()
             self._emit_demo_task_finished(success=False, reason=reason)
         if old_state == "DONE" and new_state == "IDLE":

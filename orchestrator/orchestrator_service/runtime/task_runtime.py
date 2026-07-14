@@ -145,6 +145,13 @@ class TaskRuntimeMixin:
         )
         completed = getattr(obs, "inference_completed", None) is True
         found = bool(getattr(obs, "found", False))
+        explicit_negative = bool(getattr(obs, "explicit_negative_detection", False))
+        if found and explicit_negative:
+            self._log(
+                "error",
+                "[TARGET_INVARIANT] target_found=true with explicit_negative_detection=true; positive result wins",
+            )
+            explicit_negative = False
         completed_ns = (
             getattr(obs, "last_completed_inference_mono_ns", None)
             or getattr(obs, "target_done_mono_ns", None)
@@ -164,9 +171,10 @@ class TaskRuntimeMixin:
             self.ctx.target_control_latch_active = True
             self.ctx.target_explicit_negative_count = 0
             self.ctx.last_target_explicit_negative_id = ""
+            self.ctx.target_loss_since_mono = 0.0
         elif (
             completed
-            and bool(getattr(obs, "explicit_negative_detection", False))
+            and explicit_negative
             and inference_id
             and inference_id != self.ctx.last_target_explicit_negative_id
         ):
@@ -306,6 +314,7 @@ class TaskRuntimeMixin:
             "target_lost_frames": int(self.ctx.target_lost_frames),
             "target_lock_frames": int(self.ctx.target_lock_frames),
             "target_loss_since_mono": float(self.ctx.target_loss_since_mono),
+            "target_search_start_mono": float(self.ctx.target_search_start_mono),
             "target_stable_since_mono": float(self.ctx.target_stable_since_mono),
             "target_center_history": [dict(item) for item in self.ctx.target_center_history],
             "target_obs_window": [dict(item) for item in self.ctx.target_obs_window],
@@ -315,6 +324,10 @@ class TaskRuntimeMixin:
             "target_lateral_stable_count": int(getattr(self.ctx, "target_lateral_stable_count", 0) or 0),
             "target_lateral_align_reason": str(getattr(self.ctx, "target_lateral_align_reason", "") or ""),
             "target_lateral_vy_cmd": float(getattr(self.ctx, "target_lateral_vy_cmd", 0.0) or 0.0),
+            "last_completed_target_inference_id": str(getattr(self.ctx, "last_completed_target_inference_id", "") or ""),
+            "last_completed_target_inference_mono": float(getattr(self.ctx, "last_completed_target_inference_mono", 0.0) or 0.0),
+            "last_target_explicit_negative_id": str(getattr(self.ctx, "last_target_explicit_negative_id", "") or ""),
+            "target_explicit_negative_count": int(getattr(self.ctx, "target_explicit_negative_count", 0) or 0),
         }
 
     def _restore_target_debounce_snapshot(self, snapshot: Dict[str, Any]) -> None:
@@ -324,6 +337,7 @@ class TaskRuntimeMixin:
         self.ctx.target_lost_frames = int(snapshot.get("target_lost_frames", 0) or 0)
         self.ctx.target_lock_frames = int(snapshot.get("target_lock_frames", 0) or 0)
         self.ctx.target_loss_since_mono = float(snapshot.get("target_loss_since_mono", 0.0) or 0.0)
+        self.ctx.target_search_start_mono = float(snapshot.get("target_search_start_mono", 0.0) or 0.0)
         self.ctx.target_stable_since_mono = float(snapshot.get("target_stable_since_mono", 0.0) or 0.0)
         self.ctx.target_center_history = [dict(item) for item in snapshot.get("target_center_history", [])]
         self.ctx.target_last_center_jitter = float(snapshot.get("target_last_center_jitter", 0.0) or 0.0)
@@ -332,6 +346,10 @@ class TaskRuntimeMixin:
         self.ctx.target_last_transition_reason = str(snapshot.get("target_last_transition_reason", "") or "")
         self.ctx.target_lateral_stable_count = int(snapshot.get("target_lateral_stable_count", 0) or 0)
         self.ctx.target_lateral_align_reason = str(snapshot.get("target_lateral_align_reason", "") or "")
+        self.ctx.last_completed_target_inference_id = str(snapshot.get("last_completed_target_inference_id", "") or "")
+        self.ctx.last_completed_target_inference_mono = float(snapshot.get("last_completed_target_inference_mono", 0.0) or 0.0)
+        self.ctx.last_target_explicit_negative_id = str(snapshot.get("last_target_explicit_negative_id", "") or "")
+        self.ctx.target_explicit_negative_count = int(snapshot.get("target_explicit_negative_count", 0) or 0)
         self.ctx.target_lateral_vy_cmd = float(snapshot.get("target_lateral_vy_cmd", 0.0) or 0.0)
 
     def _emit_reset_trace(self, reset_state: str, reason: str, cleared_fields: List[str]) -> None:
@@ -404,6 +422,7 @@ class TaskRuntimeMixin:
             "target_lost_frames",
             "target_lock_frames",
             "target_loss_since_mono",
+            "target_search_start_mono",
             "target_stable_since_mono",
             "target_center_history",
             "target_last_center_jitter",
@@ -416,6 +435,7 @@ class TaskRuntimeMixin:
         self.ctx.target_lost_frames = 0
         self.ctx.target_lock_frames = 0
         self.ctx.target_loss_since_mono = 0.0
+        self.ctx.target_search_start_mono = 0.0
         self.ctx.target_stable_since_mono = 0.0
         self.ctx.target_center_history.clear()
         self.ctx.target_obs_window.clear()

@@ -649,7 +649,13 @@ def compute_dynamic_table_roi_from_yolo_bbox(
     edge_y = max(1e-6, min(0.49, float(bbox_center_edge_band_y_ratio)))
     left_alpha = max(0.0, min(1.0, (edge_x - raw_center_norm) / edge_x))
     right_alpha = max(0.0, min(1.0, (raw_center_norm - (1.0 - edge_x)) / edge_x))
+    bottom_near_boundary = bool(
+        touch_bottom
+        or (bbox_bottom_norm is not None and float(bbox_bottom_norm) >= float(yolo_near_bottom_norm))
+    )
     bottom_alpha = max(0.0, min(1.0, (raw_center_y_norm - (1.0 - edge_y)) / edge_y))
+    if bottom_near_boundary:
+        bottom_alpha = max(bottom_alpha, 1.0)
     fx1, fy1, fx2, fy2 = [int(v) for v in fov_bounds]
     allowed_bounds = [
         max(0, fx1 - int(round(left_alpha * max(0, int(depth_margin_max_extend_left_px))))) if depth_margin_extension_enable else fx1,
@@ -664,19 +670,19 @@ def compute_dynamic_table_roi_from_yolo_bbox(
         roi, mapped_bbox, allowed_bounds,
         touch_left=bool(touch_left or left_alpha > 0.0),
         touch_right=bool(touch_right or right_alpha > 0.0),
-        touch_bottom=bool(touch_bottom or bottom_alpha > 0.0),
+        touch_bottom=bool(bottom_near_boundary or bottom_alpha > 0.0),
         scale_x=float(extended_roi_scale_x), scale_y=float(extended_roi_scale_y),
         lower_band_center_ratio=float(extended_roi_lower_band_center_ratio),
         bottom_margin_px=int(extended_roi_bottom_margin_px),
         max_width_px=int(extended_roi_max_width_px), max_height_px=int(extended_roi_max_height_px),
         max_area_px=int(extended_roi_max_area_px),
-    ) if bool(boundary_extend_enable) and str(boundary_extend_mode or "fov_aligned_bounded") == "fov_aligned_bounded" and (bool(touch_left or touch_right or touch_bottom) or margin_active) else None
+    ) if bool(boundary_extend_enable) and str(boundary_extend_mode or "fov_aligned_bounded") == "fov_aligned_bounded" and (bool(touch_left or touch_right or bottom_near_boundary) or margin_active) else None
     boundary_axes = []
     if touch_left:
         boundary_axes.append("left")
     if touch_right:
         boundary_axes.append("right")
-    if touch_bottom:
+    if bottom_near_boundary:
         boundary_axes.append("bottom")
 
     roi_source = "yolo_table_bbox_mapped"
@@ -696,7 +702,7 @@ def compute_dynamic_table_roi_from_yolo_bbox(
         "yolo_bbox_area_ratio": area_ratio,
         "yolo_table_conf": score,
         **touch,
-        "table_bbox_boundary_allowed": bool(touch_left or touch_right or touch_bottom),
+        "table_bbox_boundary_allowed": bool(touch_left or touch_right or bottom_near_boundary),
         "boundary_extend_enabled": bool(boundary_extend_enable),
         "boundary_extend_mode": str(boundary_extend_mode),
         "depth_margin_mode_active": margin_active,

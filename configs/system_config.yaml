@@ -402,7 +402,7 @@ orchestrator:
     yolo_table_control_enable: true # Utilize YOLO table detections
     yolo_table_conf_min: 0.25 # Trust threshold for YOLO table bbox
     yolo_table_edge_stable_frames: 5 # Frames to confirm table edge stability
-    edge_trusted_stable_frames: 5 # Legacy alias of stable frames
+    edge_trusted_stable_frames: 3 # Distinct trusted Edge observations required for yaw handoff
     edge_trusted_min_conf: 0.60 # Minimum confidence for control gating
     edge_trusted_max_residual: 0.05 # Maximum fit residual tolerance
     edge_trusted_min_support_count: 0 # Minimum height profile support points
@@ -420,7 +420,7 @@ orchestrator:
     final_handoff_min_recent_depth_m: 0.65 # Recent depth must be this close or closer for handoff
     final_fixed_roi_stop_threshold_m: 0.45 # Fixed ROI median stop threshold in final phase
     final_fixed_roi_stop_stable_count_required: 3 # Fixed ROI stop frames required
-    final_slow_probe_vx_mps: 0.05 # Final slow probe forward speed
+    final_slow_probe_vx_mps: 0.02 # Final slow probe forward speed
     remote_init_min_interval_s: 30.0 # Minimum interval between remote init warmups
     remote_init_auto_enabled: false # Disable automatic remote /init warmup; explicit GRASP init remains enabled
     near_start_final_enable: true # Allow near-start handoff into final
@@ -430,14 +430,13 @@ orchestrator:
     final_missing_probe_grace_s: 2.0 # Short missing-distance grace probe window
     final_missing_roi_continue_forward_enable: true # Keep slow forward during initial fixed ROI missing grace
     final_missing_roi_probe_vx_mps: 0.020 # Slow probe speed while fixed ROI is temporarily missing
-    final_entry_bridge_vx_mps: 0.030 # Bridge speed when entering final from YOLO approach
     final_slow_stop_timeout_s: 12.0 # Final slow stop timeout
     depth_envelope_stop_p10_m: 0.30 # Depth envelope hard hold threshold, below final fixed ROI stop
     depth_envelope_slow_p10_m: 0.50 # Depth envelope slow threshold
     depth_emergency_stop_p10_m: 0.20 # Emergency depth stop threshold
-    yolo_approach_far_vx_mps: 0.30 # Canonical pre-Final speed for table ROI P10 > 2.0m
-    yolo_approach_mid_vx_mps: 0.20 # Canonical pre-Final speed for 1.0m < table ROI P10 <= 2.0m
-    yolo_approach_near_vx_mps: 0.10 # Canonical pre-Final speed for table ROI P10 <= 1.0m before Final
+    yolo_approach_far_vx_mps: 0.20 # Canonical pre-Final speed for table ROI P10 > 2.0m
+    yolo_approach_mid_vx_mps: 0.10 # Canonical pre-Final speed for 1.0m < table ROI P10 <= 2.0m
+    yolo_approach_near_vx_mps: 0.05 # Canonical pre-Final speed for table ROI P10 <= 1.0m before Final
     builtin_bottle_grasp_enable: true # Use STM32 builtin bottle grasp once target is locked
     builtin_bottle_skip_remote: true # Do not send GRASP_REMOTE while builtin bottle path is active
     builtin_bottle_pose_line: "POSE_BOTTLE" # Builtin bottle pose command line
@@ -566,7 +565,7 @@ orchestrator:
     grasp_reposition_speed_cm_s: 10.0 # Base reposition speed during grasp retry
     pre_arm_stop_settle_ms: 150 # Stop settle before sending arm POSE
     grasp_pose_time_ms: 800 # Default arm POSE movement time
-    search_table_wz_radps: 0.10 # Rotational velocity to search for table
+    search_table_wz_radps: 0.15 # Rotational velocity to search for table
     fallback_align_turn_wz_min_radps: 0.10 # Minimum rotation velocity in fallback
     fallback_align_turn_wz_max_radps: 0.45 # Maximum rotation velocity in fallback
     fallback_forward_vx_mps_min: 0.06 # Minimum forward velocity in fallback
@@ -892,7 +891,7 @@ online_edge:
     roi_x0: 100 # ROI horizontal start pixel
     roi_x1: 540 # ROI horizontal end pixel
     z_min: 0.2 # Minimum distance to filter depth points
-    z_max: 2.0 # Maximum distance to filter depth points
+    z_max: 3.0 # Keep Edge ROI points available throughout the pre-Final approach
     table_y_min: -0.2 # Table bounding box width minimum boundary
     table_y_max: 0.2 # Table bounding box width maximum boundary
     min_all_points: 1000 # Minimum total points to execute fit

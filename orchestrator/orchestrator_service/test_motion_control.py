@@ -679,24 +679,22 @@ def _target_core(elapsed_s: float = 0.0):
     core = OrchestratorCore(cfg, car)
     core.ctx.state = State.EDGE_SLIDE_SEARCH
     core.ctx.state_enter_mono = time.monotonic() - elapsed_s
+    core.ctx.target_search_start_mono = time.monotonic() - elapsed_s
     core.ctx.active_target = "bottle"
     core.ctx.canonical_target = "bottle"
     core._can_relocate_edge = lambda: False
     return core
 
 
-def test_visible_improving_target_extends_old_wall_clock_timeout():
+def test_visible_improving_target_still_obeys_total_search_timeout():
     core = _target_core(elapsed_s=11.0)
-    decisions = []
-    for seq, cx in enumerate((0.75, 0.68, 0.61), start=1):
-        core.ctx.last_target_obs = _target_obs(seq, cx)
-        decisions.append(core._tick_edge_slide_search())
-    assert core.ctx.state == State.EDGE_SLIDE_SEARCH
-    assert all(decision.control_summary.get("target_timeout_type", "") == "" for decision in decisions)
-    assert decisions[-1].cmd.vy_mps != 0.0
+    core.ctx.last_target_obs = _target_obs(1, 0.75)
+    decision = core._tick_edge_slide_search()
+    assert core.ctx.state == State.IDLE
+    assert decision.control_summary["slice_timeout_reason"] == "target_search_timeout"
 
 
-def test_visible_target_without_progress_gets_precise_timeout():
+def test_visible_target_without_progress_obeys_total_search_timeout():
     core = _target_core(elapsed_s=11.0)
     now = time.monotonic()
     core.ctx.target_lateral_last_good_obs_mono = now
@@ -704,23 +702,24 @@ def test_visible_target_without_progress_gets_precise_timeout():
     core.ctx.target_lateral_min_abs_err_x = 0.20
     core.ctx.last_target_obs = _target_obs(10, 0.60)
     decision = core._tick_edge_slide_search()
-    assert core.ctx.state == State.ERROR_RECOVERY
-    assert core.ctx.last_fail_reason == "target_lateral_no_progress_timeout"
-    assert decision.control_summary["slice_timeout_reason"] == "target_lateral_no_progress_timeout"
+    assert core.ctx.state == State.IDLE
+    assert core.ctx.last_fail_reason == "TARGET_SEARCH_TIMEOUT"
+    assert decision.control_summary["slice_timeout_reason"] == "target_search_timeout"
 
 
-def test_target_never_found_and_lost_have_distinct_timeout_reasons():
+def test_target_total_timeout_and_short_loss_have_distinct_semantics():
     never = _target_core(elapsed_s=11.0)
     never_decision = never._tick_edge_slide_search()
-    assert never.ctx.last_fail_reason == "target_never_found_timeout"
-    assert never_decision.control_summary["slice_timeout_reason"] == "target_never_found_timeout"
+    assert never.ctx.last_fail_reason == "TARGET_SEARCH_TIMEOUT"
+    assert never_decision.control_summary["slice_timeout_reason"] == "target_search_timeout"
 
     lost = _target_core(elapsed_s=2.0)
     lost.ctx.target_lateral_last_good_obs_mono = time.monotonic() - 2.0
     lost.ctx.target_lateral_min_abs_err_x = 0.20
     lost_decision = lost._tick_edge_slide_search()
-    assert lost.ctx.last_fail_reason == "target_lost_timeout"
-    assert lost_decision.control_summary["slice_timeout_reason"] == "target_lost_timeout"
+    assert lost.ctx.state == State.EDGE_SLIDE_SEARCH
+    assert lost.ctx.last_fail_reason != "TARGET_SEARCH_TIMEOUT"
+    assert lost_decision.control_summary.get("slice_timeout_reason", "") == ""
 
 
 def test_left_bbox_correction_persists_between_inferences():

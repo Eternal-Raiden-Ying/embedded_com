@@ -2709,22 +2709,7 @@ class TableEdgeManager:
             stride = max(int(self._adaptive_min_stride), min(int(self._adaptive_max_stride), stride))
         else:
             stride = base_stride
-        depth_roi = depth_frame[y0:y1:stride, x0:x1:stride]
         base_sampled_count = int(math.ceil(float(roi_w) / float(base_stride))) * int(math.ceil(float(roi_h) / float(base_stride)))
-        final_sampled_count = int(depth_roi.size)
-        profile["fast_roi_extract_ms"] = self._ms_since(roi_start)
-        profile["roi_extract_ms"] = float(profile["fast_roi_extract_ms"])
-        profile["roi_crop_ms"] = float(profile["fast_roi_extract_ms"])
-        profile.update({
-            "roi_width_px": int(roi_w), "roi_height_px": int(roi_h), "roi_area_px": int(roi_area),
-            "adaptive_stride": int(stride), "sample_budget": int(self._adaptive_target_sample_count),
-            "base_stride": int(base_stride), "budget_stride": int(budget_stride), "effective_stride": int(stride),
-            "adaptive_budget_active": bool(stride > base_stride), "base_sampled_point_count": int(base_sampled_count),
-            "final_sampled_point_count": int(final_sampled_count),
-            "sample_reduction_ratio": float(1.0 - (float(final_sampled_count) / float(max(1, base_sampled_count)))),
-            "sampled_grid_width": int(depth_roi.shape[1]) if depth_roi.ndim == 2 else 0,
-            "sampled_grid_height": int(depth_roi.shape[0]) if depth_roi.ndim == 2 else 0,
-        })
         roi_payload = self._roi_payload(roi_box, roi_meta)
         roi_payload["selected_roi_xyxy"] = [int(x0), int(y0), int(x1), int(y1)]
         fast_debug_base: Dict[str, Any] = {
@@ -2786,7 +2771,7 @@ class TableEdgeManager:
         }
 
         point_start = time.perf_counter()
-        if depth_roi.size <= 0:
+        if roi_w <= 0 or roi_h <= 0:
             payload = self._default_result(depth_valid=False, reason="roi_empty", frame_seq=frame_seq, roi_meta=roi_meta)
             payload.update(roi_payload)
             payload.update(self._detector_mode_payload())
@@ -2795,16 +2780,63 @@ class TableEdgeManager:
             profile["point_build_ms"] = self._ms_since(point_start)
             profile["total_edge_process_ms"] = self._ms_since(total_start)
             return self._attach_profile(payload, profile, path="fast_plane_only_roi_empty")
-        depth_m = depth_roi.astype(np.float32, copy=False)
-        if depth_roi.dtype != np.float32:
-            scale = float(getattr(calib, "depth_scale", 0.001) or 0.001)
-            depth_m = depth_m * scale
+        scale = 1.0 if depth_frame.dtype == np.float32 else float(getattr(calib, "depth_scale", 0.001) or 0.001)
         z_min = float(cfg.z_min if cfg is not None else 0.2)
         z_max = float(cfg.z_max if cfg is not None else 2.0)
+        full_depth_roi = depth_frame[y0:y1, x0:x1]
+        full_depth_m = full_depth_roi.astype(np.float32, copy=False)
+        if scale != 1.0:
+            full_depth_m = full_depth_m * scale
+        raw_valid_point_count = int(np.count_nonzero((full_depth_m > z_min) & (full_depth_m < z_max)))
+
+        # Retry only the sampling grid for this already-acquired ROI.  A sparse
+        # first pass must not reject the whole Edge observation while denser
+        # bounded samples from the same frame are still available.
+        retry_strides = [int(stride)]
+        for retry_stride in (8, 4, 2):
+            if retry_stride < retry_strides[-1] and retry_stride not in retry_strides:
+                retry_strides.append(retry_stride)
+        stride_retry_count = 0
+        depth_roi = depth_frame[y0:y1:stride, x0:x1:stride]
+        depth_m = depth_roi.astype(np.float32, copy=False)
+        if scale != 1.0:
+            depth_m = depth_m * scale
         valid_mask = (depth_m > z_min) & (depth_m < z_max)
-        yy, xx = np.nonzero(valid_mask)
         sampled_count = int(depth_roi.size)
-        point_count = int(len(xx))
+        point_count = int(np.count_nonzero(valid_mask))
+        min_all = max(60, int(math.ceil(sampled_count * 0.03)))
+        for retry_stride in retry_strides[1:]:
+            if point_count >= min_all:
+                break
+            stride = int(retry_stride)
+            stride_retry_count += 1
+            depth_roi = depth_frame[y0:y1:stride, x0:x1:stride]
+            depth_m = depth_roi.astype(np.float32, copy=False)
+            if scale != 1.0:
+                depth_m = depth_m * scale
+            valid_mask = (depth_m > z_min) & (depth_m < z_max)
+            sampled_count = int(depth_roi.size)
+            point_count = int(np.count_nonzero(valid_mask))
+            min_all = max(60, int(math.ceil(sampled_count * 0.03)))
+        yy, xx = np.nonzero(valid_mask)
+        final_sampled_count = int(depth_roi.size)
+        profile["fast_roi_extract_ms"] = self._ms_since(roi_start)
+        profile["roi_extract_ms"] = float(profile["fast_roi_extract_ms"])
+        profile["roi_crop_ms"] = float(profile["fast_roi_extract_ms"])
+        profile.update({
+            "roi_width_px": int(roi_w), "roi_height_px": int(roi_h), "roi_area_px": int(roi_area),
+            "adaptive_stride": int(stride), "sample_budget": int(self._adaptive_target_sample_count),
+            "base_stride": int(base_stride), "budget_stride": int(budget_stride), "effective_stride": int(stride),
+            "adaptive_budget_active": bool(stride > base_stride), "base_sampled_point_count": int(base_sampled_count),
+            "final_sampled_point_count": int(final_sampled_count),
+            "sample_reduction_ratio": float(1.0 - (float(final_sampled_count) / float(max(1, base_sampled_count)))),
+            "sampled_grid_width": int(depth_roi.shape[1]) if depth_roi.ndim == 2 else 0,
+            "sampled_grid_height": int(depth_roi.shape[0]) if depth_roi.ndim == 2 else 0,
+            "raw_valid_point_count": int(raw_valid_point_count),
+            "stride_used": int(stride),
+            "stride_retry_count": int(stride_retry_count),
+            "min_points_required": int(min_all),
+        })
         profile["sampled_point_count"] = int(sampled_count)
         profile["valid_point_count"] = int(point_count)
         profile["fast_depth_valid_ms"] = self._ms_since(point_start)
@@ -2812,7 +2844,6 @@ class TableEdgeManager:
 
         # Keep absolute floors but make the gate proportional to the actual
         # sampled grid, rather than a fixed-stride division.
-        min_all = max(60, int(math.ceil(sampled_count * 0.03)))
         min_table = max(45, int(math.ceil(sampled_count * 0.02)))
         if self._detector is None or point_count < min_all:
             payload = self._default_result(
@@ -2823,7 +2854,16 @@ class TableEdgeManager:
             )
             payload.update(roi_payload)
             payload.update(self._detector_mode_payload())
-            payload.update({"sampled_point_count": sampled_count, "point_count": point_count, "candidate_count": 0})
+            payload.update({
+                "sampled_point_count": sampled_count,
+                "point_count": point_count,
+                "candidate_count": 0,
+                "raw_valid_point_count": raw_valid_point_count,
+                "stride_used": stride,
+                "stride_retry_count": stride_retry_count,
+                "min_points_required": min_all,
+                "edge_reject_reason": "not_enough_points",
+            })
             payload.update(fast_debug_base)
             payload.update(edge_debug_payload)
             payload.update({

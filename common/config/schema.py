@@ -605,7 +605,7 @@ class ControlThresholds:
     yolo_table_control_enable: bool = True
     yolo_table_conf_min: float = 0.25
     yolo_table_edge_stable_frames: int = 5
-    edge_trusted_stable_frames: int = 5
+    edge_trusted_stable_frames: int = 3
     edge_trusted_min_conf: float = 0.60
     edge_trusted_max_residual: float = 0.05
     edge_trusted_min_support_count: int = 0
@@ -641,7 +641,6 @@ class ControlThresholds:
     final_missing_probe_grace_s: float = 2.0
     final_missing_roi_continue_forward_enable: bool = True
     final_missing_roi_probe_vx_mps: float = 0.020
-    final_entry_bridge_vx_mps: float = 0.030
     final_slow_stop_timeout_s: float = 12.0
     final_missing_reuse_s: float = 0.50
     final_missing_probe_margin_m: float = 0.04
@@ -703,7 +702,7 @@ class ControlThresholds:
     edge_readiness_decay: float = 0.10
     edge_readiness_min_inliers: int = 30
     edge_readiness_yaw_max_rad: float = 0.35
-    edge_handoff_min_hold_ms: int = 800
+    edge_handoff_min_hold_ms: int = 0
     forward_commit_min_s: float = 1.8
     far_forward_commit_min_s: float = 2.0
     lateral_enabled: bool = True
@@ -1337,7 +1336,7 @@ class DetectorConfig:
     roi_x0: int = 100
     roi_x1: int = 540
     z_min: float = 0.2
-    z_max: float = 2.0
+    z_max: float = 3.0
     table_y_min: float = -0.2
     table_y_max: float = 0.2
     min_all_points: int = 1000

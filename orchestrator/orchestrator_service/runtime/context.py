@@ -295,6 +295,7 @@ class RuntimeContext:
 
     table_loss_since_mono: float = 0.0
     target_loss_since_mono: float = 0.0
+    target_search_start_mono: float = 0.0
     tag_loss_since_mono: float = 0.0
     target_stable_since_mono: float = 0.0
     min_dist_seen: float = 999.0
@@ -580,6 +581,7 @@ class RuntimeContext:
         self.avoid_clear_frames = 0
         self.table_loss_since_mono = 0.0
         self.target_loss_since_mono = 0.0
+        self.target_search_start_mono = 0.0
         self.tag_loss_since_mono = 0.0
         self.target_stable_since_mono = 0.0
         self.min_dist_seen = 999.0

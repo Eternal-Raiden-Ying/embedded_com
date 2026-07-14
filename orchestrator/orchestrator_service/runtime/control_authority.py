@@ -130,12 +130,12 @@ def decide_table_control_authority(
             return make("yolo_track_forward", "bbox", "bbox_track", "none", True, True, "bbox_forward_hysteresis_hold", "BBOX_ACQUIRE")
         return make("yolo_acquire_align", "bbox", "none", "none", False, True, "bbox_acquire", "BBOX_ACQUIRE")
     if control_phase == "EDGE_HANDOFF_CONFIRM":
-        # Stable fresh bbox alignment owns the far, low-speed approach while
-        # edge geometry is still being collected.  Edge trust gates only the
-        # later EDGE_GUIDED_APPROACH handoff, never this bbox-forward stage.
+        # Forward and lateral remain bbox-owned while the first distinct Edge
+        # candidates take bounded yaw authority.  This avoids commanding bbox
+        # yaw in the opposite direction immediately before formal handoff.
         if bbox_centered_for_forward:
-            return make("yolo_track_forward", "bbox", "bbox", "none", True, True, "bbox_centered_edge_handoff_pending", "EDGE_HANDOFF_CONFIRM")
-        return make("yolo_acquire_align", "bbox", "none", "none", False, True, "edge_handoff_confirm", "EDGE_HANDOFF_CONFIRM")
+            return make("yolo_track_forward", "edge_candidate", "bbox_track", "none", True, True, "edge_candidate_handoff_pending", "EDGE_HANDOFF_CONFIRM")
+        return make("yolo_acquire_align", "edge_candidate", "none", "none", False, True, "edge_handoff_confirm", "EDGE_HANDOFF_CONFIRM")
     if control_phase == "EDGE_GUIDED_APPROACH":
         return make("edge_guided_forward", "edge", "edge", "none", True, True, "edge_handoff_complete", "EDGE_GUIDED_APPROACH")
 

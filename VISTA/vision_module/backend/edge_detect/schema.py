@@ -62,7 +62,7 @@ class DetectorConfig:
     roi_x0: int = 100
     roi_x1: int = 540
     z_min: float = 0.2
-    z_max: float = 2.0
+    z_max: float = 3.0
     table_y_min: float = -0.2
     table_y_max: float = 0.2
     min_all_points: int = 1000

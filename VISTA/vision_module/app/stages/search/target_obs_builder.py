@@ -62,6 +62,8 @@ def target_obs_from_payload(payload: Optional[Dict[str, object]], target: Option
     base.setdefault("target", target)
     base["target_found"] = bool(base.get("target_found", base.get("found", False)))
     base["found"] = bool(base["target_found"])
+    completed = bool(base.get("inference_completed", False))
+    base["explicit_negative_detection"] = bool(completed and not base["target_found"])
     return base
 
 
@@ -102,8 +104,11 @@ def target_obs_from_results(results: Dict[str, object], target: Optional[str]) -
         merged.setdefault("frame_capture_ts", local.get("frame_capture_ts"))
         merged.setdefault("target_done_mono_ns", local.get("inference_done_mono_ns"))
         merged.setdefault("age_ms", local.get("age_ms"))
+        # Completion metadata is canonical at the local-perception boundary.
+        # A positive target result can never simultaneously be an explicit
+        # negative, even if an older nested payload carried stale flags.
         for key, value in _inference_metadata(local, target_found=target_found).items():
-            merged.setdefault(key, value)
+            merged[key] = value
         if contract_error:
             merged.setdefault("contract_error", contract_error)
         if contract_warnings:
@@ -209,14 +214,20 @@ def target_obs_from_results(results: Dict[str, object], target: Optional[str]) -
     payload = {"found": True, "target_found": True, "target": target}
     payload.update(obs)
     payload.update({k: v for k, v in weak_payload.items() if k in {"boxes_count"}})
+    positive_inference = _inference_metadata(local, target_found=True)
     for key in (
         "obs_ts", "frame_capture_ts", "frame_id", "seq", "obs_seq", "age_ms",
-        "capture_mono_ns", "target_done_mono_ns", "inference_executed",
-        "inference_completed", "inference_seq", "has_new_inference",
-        "explicit_negative_detection", "last_completed_inference_mono_ns",
+        "capture_mono_ns", "target_done_mono_ns",
     ):
         if weak_payload.get(key) is not None:
             payload[key] = weak_payload.get(key)
+    for key in (
+        "inference_executed",
+        "inference_completed", "inference_seq", "has_new_inference",
+        "explicit_negative_detection", "last_completed_inference_mono_ns",
+    ):
+        if positive_inference.get(key) is not None:
+            payload[key] = positive_inference.get(key)
     if payload.get("capture_mono_ns") is not None:
         try:
             payload["freshness_ms"] = max(0.0, (time.monotonic_ns() - int(payload["capture_mono_ns"])) / 1_000_000.0)

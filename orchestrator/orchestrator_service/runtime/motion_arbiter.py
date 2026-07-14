@@ -2321,15 +2321,12 @@ def arbitrate_table_docking_motion(
         summary["edge_handoff_block_reason"] = "edge_approach_gate_not_ready"
         summary["edge_handoff_source"] = str(summary.get("edge_handoff_source") or "readiness_score")
 
-    if (
-        phase in {"BBOX_ACQUIRE", "EDGE_HANDOFF_CONFIRM"}
-        and edge_readiness_ready
-        and int(summary.get("edge_trusted_streak", 0) or 0) >= 3
-    ):
-        # Readiness is observation collection, not yaw authority.  Preserve
-        # the previous bbox owner until the handoff latch is complete.
-        handoff_wz = bbox_recovery_wz()
-        yaw_owner = "bbox"
+    edge_candidate_count = int(summary.get("edge_trusted_streak", 0) or 0)
+    if phase == "EDGE_HANDOFF_CONFIRM" and edge_candidate_count >= 1 and edge_yaw_available:
+        # Readiness uses a low-gain Edge candidate.  Bbox remains the lateral
+        # owner, so image centring continues without fighting Edge on Omega.
+        handoff_wz = max(-0.08, min(0.08, edge_yaw_correction_wz()))
+        yaw_owner = "edge_candidate"
         handoff_vx = 0.0
         handoff_depth_ok = bool(
             not bool(summary.get("near_table_latched", False))
@@ -2352,9 +2349,9 @@ def arbitrate_table_docking_motion(
                 {
                     "forward_block_reason": "edge_readiness_handoff",
                     "rotate_block_reason": "",
-                    "advance_condition": "edge_readiness_enter_score",
+                    "advance_condition": "three_distinct_trusted_edge_observations",
                     "fallback_condition": "edge_readiness_exit_score",
-                    "edge_handoff_source": "readiness_score",
+                    "edge_handoff_source": "edge_candidate",
                     "edge_handoff_block_reason": "",
                     "allow_forward": bool(handoff_vx > 1e-9),
                     "allow_rotate": bool(abs(handoff_wz) > 1e-9),

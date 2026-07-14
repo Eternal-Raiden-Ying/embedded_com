@@ -629,7 +629,11 @@ class TableDockingMixin:
                 and (min_inliers <= 0 or inliers >= min_inliers or edge_trusted or sparse_edge_ready)
             )
             if positive:
-                bonus = rise + (0.05 if edge_trusted else 0.0)
+                required_samples = max(3, int(getattr(self.cfg, "edge_trusted_stable_frames", 3) or 3))
+                bonus = max(
+                    rise + (0.05 if edge_trusted else 0.0),
+                    enter_score / float(required_samples),
+                )
                 score += bonus
                 reason = "fast_sparse_edge_candidate_healthy" if sparse_edge_ready and inliers < min_inliers and not edge_trusted else "edge_candidate_healthy"
             else:
@@ -1120,13 +1124,21 @@ class TableDockingMixin:
                 break
         close_enough = bool(depth_value is not None and float(depth_value) <= max(float(enter_threshold), float(min_recent_depth)))
         posture = self._edge_posture_gate_status(candidate)
-        allowed = bool(
+        final_roi_status = self._depth_roi_stop_status(candidate)
+        final_roi_ready = bool(final_roi_status.get("fixed_roi_valid", False))
+        prewarm_eligible = bool(
             enabled
             and str(mode) in {"YOLO_APPROACH", "YOLO_ACQUIRE_ALIGN"}
             and trusted
             and age_s <= max_age_s
             and close_enough
             and bool(posture["final_gate_ready"])
+        )
+        if prewarm_eligible and not final_roi_ready:
+            self._maybe_force_final_vision_req(reason="prefinal_yolo_loss_roi_prewarm")
+        allowed = bool(
+            prewarm_eligible
+            and final_roi_ready
         )
         reason = "handoff_on_yolo_lost" if allowed else "disabled_or_no_recent_close_obs"
         if not enabled:
@@ -1139,6 +1151,8 @@ class TableDockingMixin:
             reason = "recent_depth_not_close"
         elif not bool(posture["final_gate_ready"]):
             reason = str(posture["final_gate_block_reason"])
+        elif not final_roi_ready:
+            reason = "final_roi_not_ready"
         return {
             **posture,
             "allowed": bool(allowed),
@@ -1155,6 +1169,8 @@ class TableDockingMixin:
             "recent_obs_age_s": float(age_s),
             "recent_obs_trusted": bool(trusted),
             "final_handoff_min_recent_depth_m": float(min_recent_depth),
+            "final_roi_requested": bool(prewarm_eligible),
+            "final_roi_ready": bool(final_roi_ready),
         }
 
     def _bbox_lost_hold_or_search(self, obs: Optional[TableEdgeObs], mode: str) -> MotionDecision:
@@ -1411,7 +1427,10 @@ class TableDockingMixin:
         edge_trusted = bool(self.controller._edge_trusted(obs))
         edge_identity = None
         if obs is not None:
-            for identity_name in ("obs_seq", "source_frame_id", "frame_id", "capture_mono_ns"):
+            # Prefer the Edge/depth frame identity.  A republished composite
+            # observation may receive a new obs_seq without a new Edge fit and
+            # must not advance the handoff counter.
+            for identity_name in ("source_frame_id", "camera_frame_seq", "frame_id", "capture_mono_ns", "obs_seq"):
                 identity_value = getattr(obs, identity_name, None)
                 if identity_value is not None:
                     edge_identity = (identity_name, identity_value)
@@ -1464,16 +1483,21 @@ class TableDockingMixin:
             self.ctx.bbox_forward_allowed_latched = bool(centered)
             self.ctx.bbox_centered_streak = self.ctx.bbox_centered_streak + 1 if centered else 0
             self.ctx.bbox_fov_violation_streak = 0 if centered else self.ctx.bbox_fov_violation_streak + 1
-            if edge_obs_is_new and not edge_trusted:
-                self.ctx.edge_trusted_streak = 0
-                if not bool(self.ctx.approach_commit_active):
-                    self.ctx.edge_yaw_ema = None
-            elif edge_obs_is_new and edge_trusted:
+            if edge_obs_is_new and edge_trusted:
                 yaw = float(getattr(obs, "yaw_err_rad", 0.0) or 0.0)
                 previous_yaw = self.ctx.edge_last_yaw_sample
                 self.ctx.edge_last_yaw_delta = abs(yaw - float(previous_yaw)) if previous_yaw is not None else 0.0
                 self.ctx.edge_last_yaw_sample = yaw
-                edge_yaw_sample_stable = bool(float(self.ctx.edge_last_yaw_delta or 0.0) <= 0.20)
+                direction_continuous = bool(
+                    previous_yaw is None
+                    or abs(float(previous_yaw)) <= 1e-6
+                    or abs(yaw) <= 1e-6
+                    or float(previous_yaw) * yaw > 0.0
+                )
+                edge_yaw_sample_stable = bool(
+                    direction_continuous
+                    and float(self.ctx.edge_last_yaw_delta or 0.0) <= 0.20
+                )
                 if edge_yaw_sample_stable:
                     self.ctx.edge_trusted_streak += 1
                     self.ctx.edge_yaw_ema = yaw if self.ctx.edge_yaw_ema is None else (0.7 * self.ctx.edge_yaw_ema + 0.3 * yaw)
@@ -1493,6 +1517,10 @@ class TableDockingMixin:
             edge_readiness_score = float(readiness["edge_readiness_score"])
             edge_readiness_enter = float(readiness["edge_readiness_enter_score"])
             edge_readiness_exit = float(readiness["edge_readiness_exit_score"])
+            if edge_obs_is_new and not edge_trusted and edge_readiness_score <= edge_readiness_exit:
+                self.ctx.edge_trusted_streak = 0
+                if not bool(self.ctx.approach_commit_active):
+                    self.ctx.edge_yaw_ema = None
             required_edge_streak = max(3, int(getattr(self.cfg, "edge_trusted_stable_frames", 3) or 3))
             edge_readiness_ready = bool(edge_readiness_score >= edge_readiness_enter and self.ctx.edge_trusted_streak >= required_edge_streak)
             edge_readiness_hold = bool(edge_readiness_exit < edge_readiness_score < edge_readiness_enter)
@@ -1541,7 +1569,7 @@ class TableDockingMixin:
             elif edge_readiness_ready:
                 if self.ctx.edge_handoff_entered_mono <= 0.0:
                     self.ctx.edge_handoff_entered_mono = now
-                hold_ms = max(0.0, float(getattr(self.cfg, "edge_handoff_min_hold_ms", 800) or 800))
+                hold_ms = max(0.0, float(getattr(self.cfg, "edge_handoff_min_hold_ms", 0) or 0))
                 handoff_elapsed_ms = max(0.0, (now - float(self.ctx.edge_handoff_entered_mono or now)) * 1000.0)
                 if handoff_elapsed_ms < hold_ms:
                     phase, reason = "EDGE_HANDOFF_CONFIRM", "edge_readiness_handoff_hold"
@@ -2515,10 +2543,6 @@ class TableDockingMixin:
         )
         return max(0.004, min(abs(configured), 0.025))
 
-    def _final_entry_bridge_vx_mps(self) -> float:
-        configured = float(getattr(self.cfg, "final_entry_bridge_vx_mps", 0.030) or 0.030)
-        return max(0.0, min(abs(configured), 0.040))
-
     def _final_slow_hard_safety_active(self, summary: Dict[str, object], decision: Optional[MotionDecision] = None) -> bool:
         if decision is not None and bool(getattr(decision.cmd, "brake", False)):
             return True
@@ -3016,6 +3040,18 @@ class TableDockingMixin:
         depth_safety_hint = str(summary.get("docking_action") or "") in {"FINAL_SLOW_PROBE", "CLOSE_RANGE_PROBE", "DEPTH_SAFETY_HOLD"}
         near_condition_ok = bool(near_by_depth or near_by_edge)
         posture = self._edge_posture_gate_status(obs)
+        final_roi_status = self._depth_roi_stop_status(obs)
+        final_roi_ready = bool(final_roi_status.get("fixed_roi_valid", False))
+        final_roi_prewarm_eligible = bool(
+            state_value in {"YOLO_APPROACH", "YOLO_ACQUIRE_ALIGN"}
+            and self.ctx.final_edge_seen_after_find
+            and self.ctx.final_descending_seen_after_find
+            and current_obs_valid
+            and near_condition_ok
+            and bool(posture["final_gate_ready"])
+        )
+        if final_roi_prewarm_eligible and not final_roi_ready:
+            self._maybe_force_final_vision_req(reason="prefinal_roi_prewarm")
         if near_by_depth and near_by_edge:
             near_condition_source = "depth_and_edge"
         elif near_by_depth:
@@ -3037,6 +3073,8 @@ class TableDockingMixin:
             reason = "not_near_enter_threshold"
         elif not bool(posture["final_gate_ready"]):
             reason = str(posture["final_gate_block_reason"])
+        elif not final_roi_ready:
+            reason = "final_roi_not_ready"
         allowed_frame = not bool(reason)
         if allowed_frame:
             if self.ctx.final_enter_candidate_stable_count <= 0:
@@ -3069,6 +3107,9 @@ class TableDockingMixin:
             "near_condition_ok": bool(near_condition_ok),
             "near_condition_source": near_condition_source,
             "depth_safety_hint": bool(depth_safety_hint),
+            "final_roi_requested": bool(final_roi_prewarm_eligible),
+            "final_roi_ready": bool(final_roi_ready),
+            "final_probe_invalid_reason": str(final_roi_status.get("final_fixed_roi_depth_invalid_reason") or final_roi_status.get("reason") or ""),
             "allowed": bool(allowed),
             "reason": "explicit_final_enter_candidate_stable" if allowed else reason,
         }
@@ -3121,13 +3162,13 @@ class TableDockingMixin:
         self.ctx.table_dock_phase = "APPROACH"
         self.ctx.table_dock_phase_since_mono = monotonic_ts()
         final_decision = self.controller.fov_table_approach_cmd(obs, phase="PLANE_FINAL_LOCK", mode="FINAL_SLOW_STOP")
-        bridge_vx = self._final_entry_bridge_vx_mps()
-        last_yolo_vx = max(0.0, float(status.get("last_yolo_vx_mps", getattr(self.ctx, "last_yolo_approach_vx_mps", 0.0)) or 0.0))
-        if bridge_vx > 0.0 and last_yolo_vx > 0.0 and not bool(getattr(final_decision.cmd, "brake", False)):
-            final_decision.cmd.vx_mps = min(max(bridge_vx, self._final_missing_roi_probe_vx_mps()), last_yolo_vx)
-            final_decision.cmd.vy_mps = 0.0
-            final_decision.cmd.wz_radps = 0.0
-            self._log("info", f"[FINAL][ENTRY_BRIDGE] last_yolo_vx={last_yolo_vx:.3f} final_vx={float(final_decision.cmd.vx_mps):.3f}")
+        # The transition is now gated on a ready Final ROI, so the first Final
+        # command comes directly from the existing Final controller (0.02 m/s
+        # in the effective profile) rather than an intermediate zero/bridge.
+        last_yolo_vx = max(
+            0.0,
+            float(status.get("last_yolo_vx_mps", getattr(self.ctx, "last_yolo_approach_vx_mps", 0.0)) or 0.0),
+        )
         if final_decision.control_summary is not None:
             final_decision.control_summary.update(
                 {
@@ -3146,9 +3187,9 @@ class TableDockingMixin:
                     "final_depth_latched": False,
                     "final_phase_active": True,
                     "final_motion_mode": "slow_probe",
-                    "final_entry_bridge_active": bool(bridge_vx > 0.0 and last_yolo_vx > 0.0),
+                    "final_entry_bridge_active": False,
                     "last_yolo_vx_mps": float(last_yolo_vx),
-                    "final_entry_bridge_vx_mps": float(getattr(final_decision.cmd, "vx_mps", 0.0) or 0.0),
+                    "final_entry_vx_mps": float(getattr(final_decision.cmd, "vx_mps", 0.0) or 0.0),
                 }
             )
         return final_decision
