@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from ...config.schema import CarMotionConfig, ControlThresholds
 from ...control.types import DockingControlConfig
@@ -76,7 +76,7 @@ class TargetSearchMixin:
             if not self._final_forward_speed_near_zero():
                 return self.controller.stop_cmd("SEARCH_TARGET_INIT")
             self.ctx.final_to_lateral_fast_start_ready = True
-        target_obs, candidate_reason = self._select_active_target_obs(self._fresh_target_obs())
+        target_obs, candidate_reason = self._accept_selected_target_obs(self._fresh_target_obs())
         candidate_ok, candidate_reason = self._target_candidate_status(
             target_obs,
             self.cfg.target_confirm_conf_th,
@@ -102,8 +102,9 @@ class TargetSearchMixin:
 
     def _tick_edge_slide_search(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
-        target_obs, latch_reason = self._target_control_observation(self._fresh_target_obs())
-        target_obs, select_reason = self._select_active_target_obs(target_obs)
+        fresh_target_obs = self._fresh_target_obs()
+        target_obs, latch_reason = self._target_control_observation(fresh_target_obs)
+        target_obs, select_reason = self._accept_selected_target_obs(target_obs)
         candidate_ok, candidate_reason = self._target_candidate_status(
             target_obs,
             self.cfg.target_confirm_conf_th,
@@ -114,6 +115,21 @@ class TargetSearchMixin:
         if latch_reason and candidate_ok:
             candidate_reason = latch_reason
         stable_count, is_new_obs = self._target_control_observation_update(target_obs, candidate_ok)
+        centered_in_deadband = bool(
+            candidate_ok
+            and target_obs is not None
+            and (err_x := self._target_lateral_error_x(target_obs)) is not None
+            and abs(float(err_x)) <= self._target_deadband_x()
+        )
+        lateral_stable_count, new_lateral_inference = self._update_slice_lateral_stability(
+            fresh_target_obs,
+            centered=centered_in_deadband,
+            candidate_ok=bool(
+                candidate_ok
+                and fresh_target_obs is target_obs
+                and bool(getattr(fresh_target_obs, "found", False))
+            ),
+        )
         stable_required = max(1, int(getattr(self.cfg, "target_prewarm_stable_obs", 2) or 2))
         target_window = (
             self._record_target_window_sample(target_obs, candidate_reason)
@@ -130,6 +146,34 @@ class TargetSearchMixin:
                 self._update_target_stability(target_obs)
             if is_new_obs:
                 self._record_target_lateral_good(target_obs, None)
+            centered_ok = bool(centered_in_deadband)
+            stable_ok = lateral_stable_count >= self._target_lateral_stable_frames()
+            if new_lateral_inference and centered_ok and stable_ok:
+                self._clear_target_lateral_command_latch()
+                self.ctx.target_last_transition_reason = (
+                    f"slice_complete inference_id={self.ctx.target_lateral_last_inference_id} "
+                    f"bbox_valid={int(self._target_bbox_valid(target_obs))} "
+                    f"target_lateral_stable_count={lateral_stable_count}"
+                )
+                self._transition(
+                    State.TARGET_CONFIRM,
+                    self._format_target_transition_reason("target_found", target_obs),
+                )
+                decision = self._annotate_target_lateral_decision(
+                    self.controller.stop_cmd("TARGET_CONFIRM"),
+                    target_obs,
+                    active=False,
+                    reason="target_lateral_centered_confirm",
+                    vy_cmd=0.0,
+                )
+                decision.control_summary.update(
+                    {
+                        "slice_complete": True,
+                        "slice_block_reason": "",
+                        "selected_inference_id": self.ctx.target_lateral_last_inference_id,
+                    }
+                )
+                return decision
             timeout_reason = self._target_lateral_timeout_reason(candidate_ok=True)
             if timeout_reason:
                 return self._handle_edge_slide_target_timeout(
@@ -145,52 +189,6 @@ class TargetSearchMixin:
                     active=False,
                     reason="target_prewarm_confirming",
                     vy_cmd=0.0,
-                )
-            found_ratio_ok = (
-                float(target_window.get("found_ratio", 0.0) or 0.0)
-                >= float(getattr(self.cfg, "target_confirm_found_ratio_th", 0.5) or 0.5)
-                and int(target_window.get("samples", 0) or 0) >= int(self.cfg.target_found_frames_to_confirm)
-            )
-            consecutive_ok = self.ctx.target_found_frames >= int(self.cfg.target_found_frames_to_confirm)
-            centered_ok = self._target_lateral_centered(target_obs)
-            stable_ok = int(self.ctx.target_lateral_stable_count) >= self._target_lateral_stable_frames()
-            if (found_ratio_ok or consecutive_ok) and centered_ok and stable_ok:
-                confirm_allowed, confirm_block_reason, progress = self._edge_slide_confirm_guard()
-                if confirm_allowed:
-                    self._log(
-                        "info",
-                        "[SLICE][CONFIRM_ALLOWED] "
-                        f"elapsed={float(progress.get('edge_slide_elapsed_s', 0.0) or 0.0):.2f} "
-                        f"lateral_dist={float(progress.get('edge_slide_lateral_distance_m', 0.0) or 0.0):.3f} "
-                        f"frames={int(progress.get('edge_slide_frames', 0) or 0)}",
-                    )
-                    self.ctx.target_last_transition_reason = (
-                        f"confirm_enter found_ratio={float(target_window.get('found_ratio', 0.0) or 0.0):.2f} "
-                        f"consecutive_frames={int(self.ctx.target_found_frames)} bbox_valid={int(self._target_bbox_valid(target_obs))} "
-                        f"target_lateral_stable_count={int(self.ctx.target_lateral_stable_count)} "
-                        f"edge_slide_elapsed_s={float(progress.get('edge_slide_elapsed_s', 0.0) or 0.0):.2f} "
-                        f"edge_slide_lateral_distance_m={float(progress.get('edge_slide_lateral_distance_m', 0.0) or 0.0):.3f} "
-                        f"edge_slide_frames={int(progress.get('edge_slide_frames', 0) or 0)}"
-                    )
-                    self._transition(
-                        State.TARGET_CONFIRM,
-                        self._format_target_transition_reason("target_found", target_obs),
-                    )
-                    return self._annotate_target_lateral_decision(
-                        self.controller.stop_cmd("TARGET_CONFIRM"),
-                        target_obs,
-                        active=False,
-                        reason="target_lateral_centered_confirm",
-                        vy_cmd=0.0,
-                    )
-                self.ctx.edge_slide_confirm_block_reason = confirm_block_reason
-                self._log(
-                    "info",
-                    "[SLICE][MIN_GUARD] "
-                    f"elapsed={float(progress.get('edge_slide_elapsed_s', 0.0) or 0.0):.2f} "
-                    f"lateral_dist={float(progress.get('edge_slide_lateral_distance_m', 0.0) or 0.0):.3f} "
-                    f"frames={int(progress.get('edge_slide_frames', 0) or 0)} "
-                    "confirm_allowed=false",
                 )
             align_decision = self._target_lateral_align_decision(target_obs, state="EDGE_SLIDE_SEARCH")
             if align_decision is not None:
@@ -216,7 +214,9 @@ class TargetSearchMixin:
                 or self.ctx.last_good_target_mono > 0.0
             )
             self.ctx.target_found_frames = 0
-            self.ctx.target_lateral_stable_count = 0
+            if target_obs is None and not bool(self.ctx.target_control_latch_active):
+                self.ctx.target_lateral_stable_count = 0
+                self.ctx.target_lateral_last_inference_id = ""
             self.ctx.target_last_lost_reason = candidate_reason
             hold_decision = self._target_lateral_hold_decision(state="EDGE_SLIDE_SEARCH", reason=candidate_reason)
             if hold_decision is not None:
@@ -560,8 +560,6 @@ class TargetSearchMixin:
             {
                 "edge_quality_mode": quality.get("mode"),
                 "stop_reason": stop_reason or summary.get("stop_reason") or "",
-                "slide_vy_mps": float(getattr(self.controller.car_cfg, "edge_slide_vy_mps", 0.0) or 0.0),
-                "weak_slide_vy_mps": float(getattr(self.controller.car_cfg, "edge_slide_weak_vy_mps", 0.0) or 0.0),
                 "final_vx": float(cmd.vx_mps),
                 "final_vy": float(cmd.vy_mps),
                 "final_wz": float(cmd.wz_radps),
@@ -650,7 +648,7 @@ class TargetSearchMixin:
 
     def _tick_target_confirm(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
-        obs, visible_reason = self._select_active_target_obs(self._fresh_target_obs())
+        obs, visible_reason = self._accept_selected_target_obs(self._fresh_target_obs())
         visible_ok, visible_reason = self._target_candidate_status(
             obs,
             self.cfg.target_confirm_conf_th,
@@ -1199,187 +1197,28 @@ class TargetSearchMixin:
         tol = abs(float(getattr(self.cfg, "target_lateral_align_center_x_tol", 0.06) or 0.06))
         return max(0.0, 0.5 * tol)
 
-    def _target_candidate_list(self, obs: Optional[TargetObs]) -> List[Dict[str, Any]]:
-        if obs is None:
-            return []
-        raw = getattr(obs, "target_candidates", None)
-        if not isinstance(raw, list) or not raw:
-            return []
-        return [dict(item) for item in raw if isinstance(item, dict)]
-
-    def _candidate_class_matches_active(self, cand: Dict[str, Any]) -> bool:
-        active = str(self.ctx.active_target or "").strip()
-        if not active:
-            return True
-        expected_id = self.ctx.class_id
-        for key in ("matched_class_id", "class_id", "target_class_id"):
-            if expected_id is not None and cand.get(key) is not None:
-                try:
-                    if int(expected_id) == int(cand.get(key)):
-                        return True
-                except Exception:
-                    pass
-        expected = str(self.ctx.canonical_target or active).strip()
-        for key in ("canonical_target", "matched_cls", "class_name", "target", "label", "cls"):
-            text = str(cand.get(key) or "").strip()
-            if not text:
-                continue
-            spec = resolve_target(text)
-            canonical = spec.canonical_target if spec is not None else text
-            if canonical == expected or text == str(self.ctx.class_name or "").strip() or text == active:
-                return True
-        return False
-
-    def _candidate_bbox(self, cand: Dict[str, Any]) -> Optional[List[float]]:
-        bbox = cand.get("matched_bbox") or cand.get("bbox") or cand.get("box")
-        if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
-            return None
-        vals = [self._float_or_none(item) for item in bbox[:4]]
-        if not all(item is not None for item in vals):
-            return None
-        return [float(item) for item in vals]  # type: ignore[arg-type]
-
-    def _candidate_center_x(self, cand: Dict[str, Any]) -> Optional[float]:
-        center = cand.get("matched_center_full_norm") or cand.get("matched_center") or cand.get("center")
-        if isinstance(center, dict):
-            cx = self._float_or_none(center.get("cx", center.get("x_norm")))
-            if cx is not None:
-                return max(0.0, min(1.0, float(cx)))
-        for key in ("cx_norm", "x_norm", "cx"):
-            cx = self._float_or_none(cand.get(key))
-            if cx is not None:
-                return max(0.0, min(1.0, float(cx)))
-        bbox = self._candidate_bbox(cand)
-        if bbox is None:
-            return None
-        x0, _, x1, _ = bbox
-        if max(abs(x0), abs(x1)) > 1.5:
-            return None
-        return max(0.0, min(1.0, 0.5 * (x0 + x1)))
-
-    def _candidate_area(self, cand: Dict[str, Any]) -> Optional[float]:
-        for key in ("matched_area", "area_norm", "size_norm", "mask_area_ratio"):
-            value = self._float_or_none(cand.get(key))
-            if value is not None and value > 0.0:
-                return float(value)
-        bbox = self._candidate_bbox(cand)
-        if bbox is None:
-            return None
-        x0, y0, x1, y1 = bbox
-        width = abs(x1 - x0)
-        height = abs(y1 - y0)
-        if width > 1.0 or height > 1.0:
-            return None
-        return max(0.0, width * height)
-
-    def _candidate_conf(self, cand: Dict[str, Any]) -> Optional[float]:
-        for key in ("matched_conf", "confidence", "conf", "score"):
-            value = self._float_or_none(cand.get(key))
-            if value is not None:
-                return max(0.0, min(1.0, float(value)))
-        return None
-
-    def _candidate_execute_score(self, cand: Dict[str, Any]) -> Tuple[float, str]:
-        cx = self._candidate_center_x(cand)
-        conf = self._candidate_conf(cand)
-        area = self._candidate_area(cand)
-        target_x = max(0.0, min(1.0, float(getattr(self.cfg, "target_lateral_align_center_x_target", 0.40) or 0.40)))
-        center_score = 0.0 if cx is None else max(0.0, 1.0 - abs(float(cx) - target_x))
-        if area is None:
-            area_score = 0.4
-            edge_penalty = 0.2
-        else:
-            area_score = max(0.0, min(1.0, area / 0.20))
-            edge_penalty = 0.0 if 0.002 <= area <= 0.60 else 0.35
-        bbox = self._candidate_bbox(cand)
-        if bbox is not None:
-            x0, y0, x1, y1 = bbox
-            if min(x0, y0) <= 0.01 or max(x1, y1) >= 0.99:
-                edge_penalty += 0.20
-        track_score = 0.0
-        last = self.ctx.last_good_target_obs
-        last_cx = self._target_lateral_center_x(last) if last is not None else None
-        if cx is not None and last_cx is not None:
-            track_score = max(0.0, 1.0 - abs(float(cx) - float(last_cx)) * 2.0)
-        score = 0.45 * float(conf or 0.0) + 0.15 * area_score + 0.25 * center_score + 0.15 * track_score - edge_penalty
-        return float(score), "score"
-
-    def _apply_candidate_to_obs(self, obs: TargetObs, cand: Dict[str, Any], idx: int, score: float, reason: str) -> TargetObs:
-        obs.found = True
-        obs.target_found = True
-        obs.matched_cls = str(cand.get("matched_cls") or cand.get("class_name") or cand.get("target") or cand.get("label") or obs.matched_cls or obs.target or "")
-        obs.target = str(cand.get("target") or obs.target or obs.matched_cls or "")
-        spec = resolve_target(obs.matched_cls or obs.target or "")
-        if spec is not None:
-            obs.canonical_target = spec.canonical_target
-        obs.matched_class_id = self._float_or_none(cand.get("matched_class_id") or cand.get("class_id") or cand.get("target_class_id"))
-        if obs.matched_class_id is not None:
-            try:
-                obs.matched_class_id = int(obs.matched_class_id)
-            except Exception:
-                pass
-        obs.matched_conf = self._candidate_conf(cand)
-        bbox = self._candidate_bbox(cand)
-        if bbox is not None:
-            obs.matched_bbox = list(bbox)
-            obs.bbox = list(bbox)
-        cx = self._candidate_center_x(cand)
-        if cx is not None:
-            center = dict(obs.matched_center_full_norm or {})
-            center["cx"] = float(cx)
-            if cand.get("cy_norm") is not None:
-                center["cy"] = self._float_or_none(cand.get("cy_norm"))
-            obs.matched_center_full_norm = center
-            obs.cx_norm = float(cx)
-        area = self._candidate_area(cand)
-        if area is not None:
-            obs.matched_area = float(area)
-            obs.size_norm = float(area)
-        obs.matched_rank_in_all_boxes = idx
-        self.ctx.selected_candidate_idx = int(idx)
-        self.ctx.selected_candidate_score = float(score)
-        self.ctx.selected_candidate_reason = str(reason or "score")
-        return obs
-
-    def _select_active_target_obs(self, obs: Optional[TargetObs]) -> Tuple[Optional[TargetObs], str]:
-        candidates = self._target_candidate_list(obs)
+    def _accept_selected_target_obs(self, obs: Optional[TargetObs]) -> Tuple[Optional[TargetObs], str]:
         if obs is None:
             self.ctx.selected_candidate_idx = None
             self.ctx.selected_candidate_score = None
             self.ctx.selected_candidate_reason = "target_missing"
             return None, "target_missing"
-        if not candidates:
-            self.ctx.selected_candidate_idx = 0 if bool(getattr(obs, "found", False)) else None
-            self.ctx.selected_candidate_score = None
-            self.ctx.selected_candidate_reason = "single_candidate"
-            return obs, "single_candidate"
-        scored: List[Tuple[float, int, Dict[str, Any], str]] = []
-        for idx, cand in enumerate(candidates):
-            if not self._candidate_class_matches_active(cand):
-                self._log("info", f"[SLICE][CANDIDATE_REJECT] reason=class_mismatch idx={idx}")
-                continue
-            cx = self._candidate_center_x(cand)
-            if cx is None:
-                self._log("info", f"[SLICE][CANDIDATE_REJECT] reason=bad_bbox idx={idx}")
-                continue
-            score, reason = self._candidate_execute_score(cand)
-            scored.append((score, idx, cand, reason))
-        if not scored:
-            self.ctx.selected_candidate_idx = None
-            self.ctx.selected_candidate_score = None
-            self.ctx.selected_candidate_reason = "no_matching_candidate"
-            return None, "class_mismatch"
-        score, idx, cand, reason = max(scored, key=lambda item: item[0])
-        selected = self._apply_candidate_to_obs(obs, cand, idx, score, reason)
-        conf = self._candidate_conf(cand)
-        cx = self._candidate_center_x(cand)
-        self._log(
-            "info",
-            "[SLICE][CANDIDATE_SELECT] "
-            f"count={len(candidates)} selected_idx={idx} selected_score={score:.3f} "
-            f"selected_conf={conf if conf is not None else 'n/a'} selected_cx={cx if cx is not None else 'n/a'}",
-        )
-        return selected, "candidate_selected"
+        self.ctx.selected_candidate_idx = getattr(obs, "matched_rank_in_all_boxes", None)
+        self.ctx.selected_candidate_score = self._target_conf_value(obs)
+        self.ctx.selected_candidate_reason = "observation_builder_highest_confidence"
+        inference_id = self._target_completed_inference_identity(obs)
+        candidate_count = int(getattr(obs, "num_target_candidates", 0) or 0)
+        confidences = list(getattr(obs, "target_candidate_confidences", None) or [])
+        if candidate_count > 1 and inference_id != self.ctx.target_candidate_last_log_inference_id:
+            self.ctx.target_candidate_last_log_inference_id = inference_id
+            self._log(
+                "info",
+                "[SLICE][MULTI_CANDIDATE] "
+                f"candidate_count={candidate_count} all_confidences={confidences} "
+                f"selected_confidence={self._target_conf_value(obs)} "
+                f"selected_bbox={getattr(obs, 'matched_bbox', None)}",
+            )
+        return obs, "observation_builder_selected"
 
     def _remember_good_target(self, obs: Optional[TargetObs], vy_cmd: float) -> None:
         if obs is None or not bool(getattr(obs, "found", False)):
@@ -1465,6 +1304,52 @@ class TargetSearchMixin:
     def _target_lateral_stable_frames(self) -> int:
         return max(1, int(getattr(self.cfg, "target_lateral_align_stable_frames", 3) or 3))
 
+    @staticmethod
+    def _target_completed_inference_identity(obs: Optional[TargetObs]) -> str:
+        if obs is None or getattr(obs, "inference_completed", None) is not True:
+            return ""
+        for field in (
+            "inference_seq",
+            "target_done_mono_ns",
+            "last_completed_inference_mono_ns",
+            "frame_id",
+        ):
+            value = getattr(obs, field, None)
+            if value is not None:
+                return f"{field}:{value}"
+        return ""
+
+    def _update_slice_lateral_stability(
+        self,
+        obs: Optional[TargetObs],
+        *,
+        centered: bool,
+        candidate_ok: bool,
+    ) -> Tuple[int, bool]:
+        inference_id = self._target_completed_inference_identity(obs)
+        is_new = bool(
+            inference_id
+            and inference_id != str(self.ctx.target_lateral_last_inference_id or "")
+        )
+        if is_new:
+            self.ctx.target_lateral_last_inference_id = inference_id
+            if candidate_ok and centered:
+                self.ctx.target_lateral_stable_count += 1
+            else:
+                self.ctx.target_lateral_stable_count = 0
+        return int(self.ctx.target_lateral_stable_count), bool(is_new)
+
+    def _clear_target_lateral_command_latch(self) -> None:
+        self.ctx.target_lateral_vy_cmd = 0.0
+        self.ctx.target_lateral_hold_active = False
+        self.ctx.target_lateral_hold_source = "centered"
+        self.ctx.last_good_vy_mps = 0.0
+        self.ctx.target_lateral_last_good_vy_mps = 0.0
+        self.ctx.last_valid_target_lateral_cmd.clear()
+        self.ctx.last_valid_target_lateral_cmd_mono = 0.0
+        self.ctx.last_valid_target_cmd_owner = ""
+        self.ctx.last_valid_target_cmd_action = ""
+
     def _target_lateral_center_x(self, obs: Optional[TargetObs]) -> Optional[float]:
         center = self._target_center_pair(obs)
         if center is None:
@@ -1507,7 +1392,6 @@ class TargetSearchMixin:
         target_x = max(0.0, min(1.0, float(getattr(self.cfg, "target_lateral_align_center_x_target", 0.40) or 0.40)))
         centered_ok = bool(self._target_lateral_centered(obs))
         last_good_age_s = self._target_lateral_last_good_age_s()
-        edge_slide_progress = self._edge_slide_progress_snapshot()
         target_found = bool(obs is not None and getattr(obs, "found", False)) if target_found_override is None else bool(target_found_override)
         summary.update(
             {
@@ -1534,10 +1418,6 @@ class TargetSearchMixin:
                 "last_good_vy_mps": float(getattr(self.ctx, "target_lateral_last_good_vy_mps", 0.0) or 0.0),
                 "lateral_cmd_source": str(lateral_cmd_source or "current"),
                 "slice_timeout_reason": str(slice_timeout_reason or ""),
-                "edge_slide_elapsed_s": float(edge_slide_progress.get("edge_slide_elapsed_s", 0.0) or 0.0),
-                "edge_slide_lateral_distance_m": float(edge_slide_progress.get("edge_slide_lateral_distance_m", 0.0) or 0.0),
-                "edge_slide_frames": int(edge_slide_progress.get("edge_slide_frames", 0) or 0),
-                "confirm_block_reason": str(getattr(self.ctx, "edge_slide_confirm_block_reason", "") or ""),
                 "target_search_reject_reason": self._target_search_reject_reason(
                     obs,
                     self._target_window_stats(),
@@ -1566,6 +1446,15 @@ class TargetSearchMixin:
                 "target_timeout_type": str(getattr(self.ctx, "target_lateral_timeout_type", "") or ""),
                 "target_lateral_stable_count": int(self.ctx.target_lateral_stable_count),
                 "target_lateral_stable_frames": int(self._target_lateral_stable_frames()),
+                "target_lateral_stable_required": int(self._target_lateral_stable_frames()),
+                "selected_inference_id": str(self.ctx.target_lateral_last_inference_id or ""),
+                "selected_class": str(getattr(obs, "matched_cls", "") or "") if obs is not None else "",
+                "selected_confidence": conf,
+                "selected_bbox": getattr(obs, "matched_bbox", None) if obs is not None else None,
+                "selected_center_error": err,
+                "target_centered": bool(err is not None and abs(float(err)) <= self._target_deadband_x()),
+                "slice_complete": False,
+                "slice_block_reason": str(reason or "waiting_stable_inference"),
                 "target_lateral_hold_active": bool(getattr(self.ctx, "target_lateral_hold_active", False)),
                 "target_lateral_hold_age_s": (
                     max(0.0, monotonic_ts() - float(self.ctx.last_good_target_mono))
@@ -1578,7 +1467,10 @@ class TargetSearchMixin:
                 "last_good_vy_mps": float(getattr(self.ctx, "last_good_vy_mps", 0.0) or 0.0),
                 "lateral_cmd_source": str(getattr(self.ctx, "target_lateral_hold_source", "") or ("current" if active else "stop")),
                 "target_last_lost_reason": str(self.ctx.target_last_lost_reason or ""),
-                "candidate_count": int(getattr(obs, "num_target_candidates", 0) or len(self._target_candidate_list(obs))),
+                "candidate_count": int(
+                    getattr(obs, "num_target_candidates", 0)
+                    or (1 if obs is not None and bool(getattr(obs, "found", False)) else 0)
+                ),
                 "selected_candidate_idx": getattr(self.ctx, "selected_candidate_idx", None),
                 "selected_candidate_score": getattr(self.ctx, "selected_candidate_score", None),
                 "selected_candidate_conf": conf,
@@ -1647,66 +1539,6 @@ class TargetSearchMixin:
                 f"target_lateral_stable_count={int(self.ctx.target_lateral_stable_count)}"
             )
         return decision
-
-    def _edge_slide_progress_snapshot(self) -> Dict[str, Any]:
-        now_m = monotonic_ts()
-        enter_m = float(getattr(self.ctx, "edge_slide_enter_mono", 0.0) or 0.0)
-        if enter_m <= 0.0:
-            enter_m = float(getattr(self.ctx, "state_enter_mono", now_m) or now_m)
-        return {
-            "edge_slide_elapsed_s": max(0.0, now_m - enter_m),
-            "edge_slide_lateral_distance_m": max(0.0, float(getattr(self.ctx, "edge_slide_lateral_distance_m", 0.0) or 0.0)),
-            "edge_slide_frames": max(0, int(getattr(self.ctx, "edge_slide_frames", 0) or 0)),
-        }
-
-    def _update_edge_slide_progress(self) -> Dict[str, Any]:
-        now_m = monotonic_ts()
-        enter_m = float(getattr(self.ctx, "edge_slide_enter_mono", 0.0) or 0.0)
-        if enter_m <= 0.0:
-            enter_m = now_m
-            self.ctx.edge_slide_enter_mono = now_m
-        last_m = float(getattr(self.ctx, "edge_slide_last_progress_mono", 0.0) or 0.0)
-        if last_m <= 0.0:
-            last_m = now_m
-        dt_s = max(0.0, now_m - last_m)
-        last_vy = abs(float(getattr(self.ctx, "target_lateral_vy_cmd", 0.0) or 0.0))
-        self.ctx.edge_slide_lateral_distance_m = max(
-            0.0,
-            float(getattr(self.ctx, "edge_slide_lateral_distance_m", 0.0) or 0.0) + last_vy * dt_s,
-        )
-        self.ctx.edge_slide_last_progress_mono = now_m
-        self.ctx.edge_slide_frames = max(0, int(getattr(self.ctx, "edge_slide_frames", 0) or 0)) + 1
-        return self._edge_slide_progress_snapshot()
-
-    def _edge_slide_confirm_guard(self) -> Tuple[bool, str, Dict[str, Any]]:
-        progress = self._edge_slide_progress_snapshot()
-        if bool(getattr(self.cfg, "target_fast_start_confirm_enable", False)):
-            self.ctx.edge_slide_confirm_block_reason = ""
-            return True, "", progress
-
-        elapsed_s = float(progress.get("edge_slide_elapsed_s", 0.0) or 0.0)
-        lateral_dist_m = float(progress.get("edge_slide_lateral_distance_m", 0.0) or 0.0)
-        frames = int(progress.get("edge_slide_frames", 0) or 0)
-        min_duration_s = max(0.0, float(getattr(self.cfg, "edge_slide_min_duration_s", 1.5) or 1.5))
-        min_distance_m = max(0.0, float(getattr(self.cfg, "edge_slide_min_lateral_distance_m", 0.08) or 0.08))
-        min_frames = max(0, int(getattr(self.cfg, "edge_slide_min_frames_before_confirm", 10) or 10))
-
-        frames_ok = frames >= min_frames
-        duration_ok = elapsed_s >= min_duration_s
-        distance_ok = lateral_dist_m >= min_distance_m
-        confirm_allowed = bool(frames_ok and (duration_ok or distance_ok))
-        if confirm_allowed:
-            self.ctx.edge_slide_confirm_block_reason = ""
-            return True, "", progress
-
-        missing = []
-        if not frames_ok:
-            missing.append(f"frames<{min_frames}")
-        if not (duration_ok or distance_ok):
-            missing.append(f"duration<{min_duration_s:.2f}_and_lateral_dist<{min_distance_m:.3f}")
-        reason = "slice_min_guard:" + ",".join(missing or ["not_ready"])
-        self.ctx.edge_slide_confirm_block_reason = reason
-        return False, reason, progress
 
     def _target_lateral_last_good_age_s(self) -> Optional[float]:
         ts = float(getattr(self.ctx, "target_lateral_last_good_obs_mono", 0.0) or 0.0)
@@ -1837,7 +1669,6 @@ class TargetSearchMixin:
             return None
         err = self._target_lateral_error_x(obs)
         if err is None:
-            self.ctx.target_lateral_stable_count = 0
             self.ctx.target_lateral_vy_cmd = 0.0
             return self._annotate_target_lateral_decision(
                 self.controller.stop_cmd(state),
@@ -1847,11 +1678,6 @@ class TargetSearchMixin:
                 vy_cmd=0.0,
             )
         deadband = self._target_deadband_x()
-        tol = abs(float(getattr(self.cfg, "target_lateral_align_center_x_tol", 0.06) or 0.06))
-        if abs(float(err)) <= tol:
-            self.ctx.target_lateral_stable_count += 1
-        else:
-            self.ctx.target_lateral_stable_count = 0
         if abs(float(err)) <= deadband:
             self.ctx.target_lateral_align_reason = "target_center_deadband"
             self.ctx.target_lateral_vy_cmd = 0.0

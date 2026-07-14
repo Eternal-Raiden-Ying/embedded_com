@@ -316,13 +316,6 @@ class TransitionsMixin:
             self.ctx.final_lock_reason = ""
             self.ctx.final_lock_last_transition_reason = ""
             self._reset_slide_ref_handoff()
-        if state == State.EDGE_SLIDE_SEARCH:
-            now_m = monotonic_ts()
-            self.ctx.edge_slide_enter_mono = now_m
-            self.ctx.edge_slide_last_progress_mono = now_m
-            self.ctx.edge_slide_lateral_distance_m = 0.0
-            self.ctx.edge_slide_frames = 0
-            self.ctx.edge_slide_confirm_block_reason = ""
         if state == State.POST_GRASP_TURN_180:
             self.ctx.post_grasp_turn_started_mono = 0.0
             self.ctx.post_grasp_turn_cmd_accepted = False

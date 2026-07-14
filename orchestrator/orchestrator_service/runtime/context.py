@@ -320,6 +320,7 @@ class RuntimeContext:
     target_last_lost_reason: str = ""
     target_last_transition_reason: str = ""
     target_lateral_stable_count: int = 0
+    target_lateral_last_inference_id: str = ""
     target_lateral_align_reason: str = ""
     target_lateral_vy_cmd: float = 0.0
     last_good_target_obs: Optional[TargetObs] = None
@@ -350,6 +351,7 @@ class RuntimeContext:
     selected_candidate_idx: Optional[int] = None
     selected_candidate_score: Optional[float] = None
     selected_candidate_reason: str = ""
+    target_candidate_last_log_inference_id: str = ""
     target_locked: bool = False
     start_distance_band: str = "unknown"
     start_depth_source: str = ""
@@ -601,6 +603,7 @@ class RuntimeContext:
         self.target_last_lost_reason = ""
         self.target_last_transition_reason = ""
         self.target_lateral_stable_count = 0
+        self.target_lateral_last_inference_id = ""
         self.target_lateral_align_reason = ""
         self.target_lateral_vy_cmd = 0.0
         self.last_good_target_obs = None
@@ -631,6 +634,7 @@ class RuntimeContext:
         self.selected_candidate_idx = None
         self.selected_candidate_score = None
         self.selected_candidate_reason = ""
+        self.target_candidate_last_log_inference_id = ""
         self.target_locked = False
         self.grasp_retry_count = 0
         self.grasp_substate = ""

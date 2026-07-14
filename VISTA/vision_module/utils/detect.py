@@ -120,6 +120,17 @@ def _bbox_validity(x1: float, y1: float, x2: float, y2: float, w: float, h: floa
     return True, ""
 
 
+def _select_best_target_candidate(candidates):
+    """Select one canonical target strictly by confidence, then bbox area."""
+    return max(
+        candidates,
+        key=lambda candidate: (
+            float(candidate["conf"]),
+            float(candidate["area_norm"]),
+        ),
+    )
+
+
 def compute_target_obs(
     frame_shape,
     target: str,
@@ -143,7 +154,7 @@ def compute_target_obs(
 
     min_conf = _target_min_conf() if target_min_conf is None else float(target_min_conf)
     min_area = _target_min_bbox_area() if min_bbox_area is None else float(min_bbox_area)
-    prefer_center = _env_bool("VISTA_TARGET_PREFER_CENTER_REGION", False) if prefer_center_region is None else bool(prefer_center_region)
+    _ = prefer_center_region
     _ = use_roi_filter if use_roi_filter is not None else _env_bool("VISTA_TARGET_USE_ROI_FILTER", False)
 
     for rank, det in enumerate(detections, start=1):
@@ -160,20 +171,7 @@ def compute_target_obs(
     if not candidates:
         return None
 
-    def _score(det):
-        if prefer_center:
-            return (
-                round(float(det["conf"]), 6),
-                round(float(det["center_priority"]), 6),
-                round(float(det["area_norm"]), 6),
-            )
-        return (
-            round(float(det["conf"]), 6),
-            round(float(det["area_norm"]), 6),
-            round(float(det["center_priority"]), 6),
-        )
-
-    matched = max(candidates, key=_score)
+    matched = _select_best_target_candidate(candidates)
     x1 = float(matched["x1"])
     y1 = float(matched["y1"])
     x2 = float(matched["x2"])
@@ -230,6 +228,7 @@ def compute_target_obs(
         "matched_area": float(np.clip(area_norm, 0.0, 1.0)),
         "matched_rank_in_all_boxes": int(matched["rank_in_all_boxes"]),
         "num_target_candidates": int(len(candidates)),
+        "target_candidate_confidences": [float(item["conf"]) for item in candidates],
         "all_candidate_classes": all_candidate_classes,
         "best_cls": best["cls_name"],
         "best_class_id": int(best["cls_id"]),

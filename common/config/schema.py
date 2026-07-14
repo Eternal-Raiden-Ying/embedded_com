@@ -775,9 +775,6 @@ class ControlThresholds:
     target_prewarm_max_age_ms: int = 180
     target_prewarm_stable_obs: int = 2
     final_to_lateral_max_vx_mps: float = 0.02
-    edge_slide_min_duration_s: float = 1.50
-    edge_slide_min_lateral_distance_m: float = 0.08
-    edge_slide_min_frames_before_confirm: int = 10
     dock_retry_limit: int = 2
     dock_retry_backoff_s: float = 0.60
 
