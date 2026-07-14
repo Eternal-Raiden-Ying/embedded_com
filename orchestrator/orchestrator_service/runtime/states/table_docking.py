@@ -176,7 +176,7 @@ class TableDockingMixin:
                 summary["arbiter_final_cmd"]["wz_radps"] = float(corrected_wz)
                 summary["bbox_yaw_hard_corrected"] = True
                 final_wz = float(corrected_wz)
-        hard_limit = abs(float(summary.get("yolo_forward_center_hard_limit", getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.25)) or 0.25))
+        hard_limit = abs(float(summary.get("yolo_forward_center_hard_limit", getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.30)) or 0.30))
         no_safety = str(summary.get("stop_class") or "none") not in {"emergency", "safety"}
         if action == "BBOX_TRACK_FORWARD" and center_error is not None and abs(float(center_error)) <= hard_limit and no_safety and float(decision.cmd.vx_mps) <= 0.0:
             violations.append("BBOX_TRACK_FORWARD_WITHOUT_FORWARD_VELOCITY")
@@ -1328,7 +1328,21 @@ class TableDockingMixin:
         # Held/reused observations may be used by later safety logic, but never
         # create an acquire/forward decision here.
         current_bbox = self._table_yolo_reliable(obs)
-        hard_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.25) or 0.25))
+        inference_seq = getattr(obs, "inference_seq", None) if obs is not None else None
+        inference_completed = getattr(obs, "inference_completed", None) if obs is not None else None
+        if inference_seq is not None:
+            positive_inference_key = f"inference:{inference_seq}"
+        elif inference_completed is not None:
+            positive_inference_key = self._table_obs_key(obs) if bool(inference_completed) else ""
+        else:
+            positive_inference_key = self._table_obs_key(obs)
+        positive_inference_is_new = bool(
+            current_bbox
+            and positive_inference_key
+            and positive_inference_key != self.ctx.last_positive_table_inference_key
+            and inference_completed is not False
+        )
+        hard_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.30) or 0.30))
         hard_exit_limit = max(hard_limit, abs(float(getattr(self.car_cfg, "yolo_forward_center_exit_limit", hard_limit + 0.03) or (hard_limit + 0.03))))
         geom = self._bbox_control_geometry(obs)
         center_error = geom["bbox_center_error_control"]
@@ -1368,7 +1382,9 @@ class TableDockingMixin:
                 self.ctx.edge_yaw_ema = None
                 phase, reason = "SEARCH_SCAN", "no_current_fresh_bbox"
         else:
-            self.ctx.bbox_valid_streak += 1
+            if positive_inference_is_new:
+                self.ctx.bbox_valid_streak += 1
+                self.ctx.last_positive_table_inference_key = positive_inference_key
             center_abs = abs(float(center_error)) if center_error is not None else float("inf")
             if self.ctx.bbox_forward_allowed_latched:
                 centered = bool(center_abs <= hard_exit_limit)
@@ -1377,17 +1393,23 @@ class TableDockingMixin:
             self.ctx.bbox_forward_allowed_latched = bool(centered)
             self.ctx.bbox_centered_streak = self.ctx.bbox_centered_streak + 1 if centered else 0
             self.ctx.bbox_fov_violation_streak = 0 if centered else self.ctx.bbox_fov_violation_streak + 1
+            edge_yaw_sample_stable = True
             if edge_obs_is_new and not edge_trusted:
                 self.ctx.edge_trusted_streak = 0
                 if not bool(self.ctx.approach_commit_active):
                     self.ctx.edge_yaw_ema = None
             elif edge_obs_is_new and edge_trusted:
-                self.ctx.edge_trusted_streak += 1
                 yaw = float(getattr(obs, "yaw_err_rad", 0.0) or 0.0)
                 previous_yaw = self.ctx.edge_last_yaw_sample
                 self.ctx.edge_last_yaw_delta = abs(yaw - float(previous_yaw)) if previous_yaw is not None else 0.0
                 self.ctx.edge_last_yaw_sample = yaw
-                self.ctx.edge_yaw_ema = yaw if self.ctx.edge_yaw_ema is None else (0.7 * self.ctx.edge_yaw_ema + 0.3 * yaw)
+                edge_yaw_sample_stable = bool(float(self.ctx.edge_last_yaw_delta or 0.0) <= 0.20)
+                if edge_yaw_sample_stable:
+                    self.ctx.edge_trusted_streak += 1
+                    self.ctx.edge_yaw_ema = yaw if self.ctx.edge_yaw_ema is None else (0.7 * self.ctx.edge_yaw_ema + 0.3 * yaw)
+                else:
+                    self.ctx.edge_trusted_streak = 0
+                    self.ctx.edge_yaw_ema = None
             stable_bbox = centered
             fov_guard = self._bbox_fov_guard_status(obs, geom)
             readiness = self._refresh_edge_readiness(
@@ -1505,6 +1527,9 @@ class TableDockingMixin:
                 "edge_obs_is_new": bool(edge_obs_is_new),
                 "edge_trusted_streak": int(self.ctx.edge_trusted_streak),
                 "edge_yaw_delta": self.ctx.edge_last_yaw_delta,
+                "edge_yaw_sample_stable": bool(edge_yaw_sample_stable),
+                "positive_inference_key": positive_inference_key,
+                "positive_inference_is_new": bool(positive_inference_is_new),
                 "approach_commit_active": bool(self.ctx.approach_commit_active)}
 
     def _get_control_authority(self, obs: Optional[TableEdgeObs], depth_roi_stop_active: bool = False, explicit_stop_active: bool = False) -> ControlAuthority:
@@ -1826,8 +1851,8 @@ class TableDockingMixin:
             "depth_envelope_slow_p10_m": float(getattr(self.cfg, "depth_envelope_slow_p10_m", 0.50) or 0.50),
             "depth_emergency_stop_p10_m": float(getattr(self.cfg, "depth_emergency_stop_p10_m", 0.20) or 0.20),
             "yolo_approach_far_vx_mps": float(getattr(self.cfg, "yolo_approach_far_vx_mps", 0.50) or 0.50),
-            "yolo_approach_mid_vx_mps": float(getattr(self.cfg, "yolo_approach_mid_vx_mps", 0.20) or 0.20),
-            "yolo_approach_near_vx_mps": float(getattr(self.cfg, "yolo_approach_near_vx_mps", 0.10) or 0.10),
+            "yolo_approach_mid_vx_mps": float(getattr(self.cfg, "yolo_approach_mid_vx_mps", 0.35) or 0.35),
+            "yolo_approach_near_vx_mps": float(getattr(self.cfg, "yolo_approach_near_vx_mps", 0.20) or 0.20),
             "forward_commit_min_s": float(getattr(self.cfg, "forward_commit_min_s", 1.5) or 1.5),
             "far_forward_commit_min_s": float(getattr(self.cfg, "far_forward_commit_min_s", 1.8) or 1.8),
             "lateral_enabled": bool(getattr(self.cfg, "lateral_enabled", False)),
@@ -1934,6 +1959,13 @@ class TableDockingMixin:
                 summary["bbox_yaw_owner_enforced"] = True
 
         self.ctx.zero_cmd_started_mono = 0.0
+        safety_stop_active = bool(
+            explicit_stop_active
+            or bool(decision.cmd.brake)
+            or bool(depth_status.get("depth_roi_stop_ready"))
+            or edge_commit_block_reason
+            in {"explicit_stop", "hard_stale", "depth_final_stop", "base_safety", "bbox_fov_guard_hard"}
+        )
 
         final_mode_active = bool(
             summary.get("close_range_latched")
@@ -2004,7 +2036,7 @@ class TableDockingMixin:
         summary["wz_radps"] = float(decision.cmd.wz_radps)
         summary["lost_inference_count"] = int(self.ctx.table_lost_frames)
         if abs(float(decision.cmd.vx_mps)) <= 1e-9 and not summary.get("zero_reason"):
-            if center_error is not None and abs(float(center_error)) > abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.25) or 0.25)):
+            if center_error is not None and abs(float(center_error)) > abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.30) or 0.30)):
                 summary["zero_reason"] = "bbox_outside_hard_limit"
             elif safety_stop_active:
                 summary["zero_reason"] = "safety_stop"
@@ -2030,7 +2062,7 @@ class TableDockingMixin:
         geom = self._bbox_control_geometry(obs)
         center_error = geom.get("bbox_center_error_control")
         tight_tol = abs(float(getattr(self.cfg, "table_yolo_align_center_x_tol", 0.08) or 0.08))
-        hard_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.25) or 0.25))
+        hard_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.30) or 0.30))
         source = str(summary.get("control_source") or "")
         bbox_control_active = source in {"yolo_track_forward", "yolo_forward", "yolo_align", "yolo_acquire_align"}
         safety_stop = bool(
@@ -3220,17 +3252,32 @@ class TableDockingMixin:
         if center_error is None:
             self._transition(State.SEARCH_TABLE, "YOLO_ACQUIRE_ALIGN bbox center unavailable")
             return self.controller.search_table_cmd(*self._get_memory_search_params())
-        forward_hard_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.25) or 0.25))
-        if abs(center_error) <= forward_hard_limit:
+        forward_hard_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.30) or 0.30))
+        bbox_confirmed = int(self.ctx.bbox_valid_streak) >= 2
+        if abs(center_error) <= forward_hard_limit and bbox_confirmed:
             if self.ctx.state != State.YOLO_APPROACH:
                 self._transition(State.YOLO_APPROACH, f"YOLO_ACQUIRE_ALIGN bbox trackable (cx_norm={cx_norm:.3f}), transition to YOLO_APPROACH")
-        return self.controller.yolo_table_search_cmd(
+        decision = self.controller.yolo_table_search_cmd(
             obs,
             turn_sign=self.ctx.relocate_turn_sign,
             mode="YOLO_APPROACH" if self.ctx.state == State.YOLO_APPROACH else "YOLO_ACQUIRE_ALIGN",
             reason="bbox_track_forward" if self.ctx.state == State.YOLO_APPROACH else "bbox_align",
             control_source="yolo_track_forward",
         )
+        if self.ctx.state != State.YOLO_APPROACH and not bbox_confirmed:
+            decision.cmd.vx_mps = 0.0
+            decision.control_summary.update(
+                {
+                    "control_source": "yolo_acquire_align",
+                    "table_seen_decel_confirm": True,
+                    "table_seen_completed_inference_count": int(self.ctx.bbox_valid_streak),
+                    "forward_block_reason": "waiting_two_completed_table_inferences",
+                    "allow_forward": False,
+                    "vx_mps": 0.0,
+                    "final_vx": 0.0,
+                }
+            )
+        return decision
 
     def _tick_yolo_approach_impl(self) -> MotionDecision:
         self._maybe_resend_req(self._active_req_payload())
@@ -3248,7 +3295,7 @@ class TableDockingMixin:
         self.ctx.last_valid_yolo_obs_mono = monotonic_ts() - bbox_age_s
         self.ctx.last_counted_negative_inference_key = ""
         center_error = self._bbox_control_geometry(obs)["bbox_center_error_control"]
-        forward_hard_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.25) or 0.25))
+        forward_hard_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.30) or 0.30))
         forward_exit_limit = max(
             forward_hard_limit,
             abs(float(getattr(self.car_cfg, "yolo_forward_center_exit_limit", forward_hard_limit + 0.03) or (forward_hard_limit + 0.03))),
@@ -3292,16 +3339,28 @@ class TableDockingMixin:
             cx_norm = geom["bbox_cx_norm_control"]
             center_error = geom["bbox_center_error_control"]
             if center_error is not None:
-                forward_hard_limit = abs(float(getattr(self.car_cfg, "yolo_forward_center_hard_limit", 0.25) or 0.25))
-                next_state = State.YOLO_APPROACH if abs(center_error) <= forward_hard_limit else State.YOLO_ACQUIRE_ALIGN
+                next_state = State.YOLO_ACQUIRE_ALIGN
                 self._transition(next_state, f"table signal found cx_norm={cx_norm:.3f} center_error={center_error:.3f}")
-                return self.controller.yolo_table_search_cmd(
+                decision = self.controller.yolo_table_search_cmd(
                     obs,
                     turn_sign=self.ctx.relocate_turn_sign,
                     mode=next_state.value,
-                    reason="bbox_track_forward" if next_state == State.YOLO_APPROACH else "bbox_align",
+                    reason="table_seen_decel_confirm",
                     control_source="yolo_track_forward",
                 )
+                decision.cmd.vx_mps = 0.0
+                decision.control_summary.update(
+                    {
+                        "control_source": "yolo_acquire_align",
+                        "table_seen_decel_confirm": True,
+                        "table_seen_completed_inference_count": 0,
+                        "forward_block_reason": "waiting_two_completed_table_inferences",
+                        "allow_forward": False,
+                        "vx_mps": 0.0,
+                        "final_vx": 0.0,
+                    }
+                )
+                return decision
         self.ctx.table_found_frames = 0
         if self._state_elapsed() >= float(self.cfg.search_table_timeout_s):
             if bool(getattr(self.cfg, "multi_table_enabled", False)):

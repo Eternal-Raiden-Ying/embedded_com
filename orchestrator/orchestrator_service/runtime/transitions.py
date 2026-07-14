@@ -68,6 +68,14 @@ class TransitionsMixin:
             old_state in {State.EDGE_SLIDE_SEARCH, State.TARGET_CONFIRM, State.TARGET_LOCKED}
             and new_state in {State.TARGET_CONFIRM, State.TARGET_LOCKED, State.FREEZE_BASE}
         )
+        prefinal_approach_states = {State.YOLO_ACQUIRE_ALIGN, State.YOLO_APPROACH, State.EDGE_ADJUST}
+        preserve_approach_profile = old_state in prefinal_approach_states and new_state in prefinal_approach_states
+        approach_profile = (
+            str(self.ctx.approach_speed_band),
+            self.ctx.last_valid_depth_p10_m,
+            str(self.ctx.last_valid_depth_p10_source),
+            float(self.ctx.last_valid_depth_p10_mono),
+        ) if preserve_approach_profile else None
         target_debounce = self._target_debounce_snapshot() if preserve_target_debounce else {}
         self.ctx.target_last_transition_reason = str(reason or "")
         snapshot = self._build_transition_snapshot(old_state, new_state, reason)
@@ -90,6 +98,13 @@ class TransitionsMixin:
             if warning and warning not in self.ctx.task_warning_history:
                 self.ctx.task_warning_history.append(warning)
         self.ctx.clear_motion_counters()
+        if approach_profile is not None:
+            (
+                self.ctx.approach_speed_band,
+                self.ctx.last_valid_depth_p10_m,
+                self.ctx.last_valid_depth_p10_source,
+                self.ctx.last_valid_depth_p10_mono,
+            ) = approach_profile
         if new_state in {State.YOLO_APPROACH, State.EDGE_ADJUST, State.FINAL_SLOW_STOP}:
             self.ctx.min_dist_seen = 999.0
             self.ctx.dist_progress_last_refreshed_mono = monotonic_ts()

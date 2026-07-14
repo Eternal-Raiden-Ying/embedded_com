@@ -1135,7 +1135,7 @@ def arbitrate_table_docking_motion(
         if emergency_active or explicit_stop:
             _log_lateral(0.0, 0.0, 0.0, 1.0, "emergency_or_explicit_stop")
             return 0.0, "emergency_or_explicit_stop"
-        if hard_safety or stale_policy == StalePolicy.HARD_STOP:
+        if hard_safety or (stale_policy == StalePolicy.HARD_STOP and not docking_obs.bbox_control_valid):
             _log_lateral(0.0, 0.0, 0.0, 1.0, "hard_safety_or_stale")
             return 0.0, "hard_safety_or_stale"
         if bool(summary.get("final_depth_latched", False)) or bool(summary.get("final_locked", False)):
@@ -1923,18 +1923,28 @@ def arbitrate_table_docking_motion(
     if edge_yaw_rejected:
         summary["edge_yaw_reject_reason"] = "edge_yaw_rejected_near_vertical"
 
-    bbox_forward_hard_limit = abs(_float(summary, "yolo_forward_center_hard_limit", 0.25))
+    bbox_forward_hard_limit = abs(_float(summary, "yolo_forward_center_hard_limit", 0.30))
+    bbox_forward_exit_limit = max(
+        bbox_forward_hard_limit,
+        abs(_float(summary, "yolo_forward_center_exit_limit", bbox_forward_hard_limit + 0.03)),
+    )
+    bbox_forward_active_limit = (
+        bbox_forward_exit_limit
+        if bool(summary.get("bbox_forward_allowed", False))
+        else bbox_forward_hard_limit
+    )
     bbox_forward_contract = bool(
         state in {"YOLO_APPROACH", "EDGE_ADJUST"}
         and docking_obs.bbox_control_valid
         and docking_obs.bbox_center_error is not None
-        and abs(float(docking_obs.bbox_center_error)) <= bbox_forward_hard_limit
+        and abs(float(docking_obs.bbox_center_error)) <= bbox_forward_active_limit
         and not emergency_active
         and not explicit_stop
         and not hard_safety
         and not bool(summary.get("final_depth_latched", False))
         and not bool(summary.get("final_locked", False))
     )
+    bbox_lateral_owner = "bbox_view" if docking_obs.bbox_control_valid else "none"
 
     edge_yaw_should_control = bool(
         edge_yaw_available
@@ -1951,14 +1961,12 @@ def arbitrate_table_docking_motion(
     if edge_yaw_should_control:
         edge_wz = edge_yaw_correction_wz()
         vx = desired_vx if bbox_forward_contract else 0.0
-        vy = 0.0
         edge_lateral_cap = abs(_float(summary, "edge_yaw_align_lateral_vy_max_mps", 0.08))
-        if bool(summary.get("edge_yaw_align_allow_lateral", True)):
-            edge_vy, _edge_vy_block = bbox_recenter_vy()
-            vy = _clamp(edge_vy, -edge_lateral_cap, edge_lateral_cap)
-            summary["lateral_vy_limited"] = float(vy)
-            summary["vy_after_gate"] = float(vy)
-            summary["lateral_vy_cap"] = min(float(summary.get("lateral_vy_cap") or edge_lateral_cap), edge_lateral_cap)
+        edge_vy, _edge_vy_block = bbox_recenter_vy()
+        vy = _clamp(edge_vy, -edge_lateral_cap, edge_lateral_cap)
+        summary["lateral_vy_limited"] = float(vy)
+        summary["vy_after_gate"] = float(vy)
+        summary["lateral_vy_cap"] = min(float(summary.get("lateral_vy_cap") or edge_lateral_cap), edge_lateral_cap)
         return _docking_result(
             action=DockingAction.EDGE_APPROACH_FORWARD,
             stage=DockingStage.EDGE_APPROACH,
@@ -1969,7 +1977,7 @@ def arbitrate_table_docking_motion(
                     "docking_reason": "edge_yaw_large_correction",
                     "yaw_owner": "edge",
                     "yaw_source": "edge",
-                    "lateral_owner": "edge_view" if abs(vy) > 1e-9 else "none",
+                    "lateral_owner": bbox_lateral_owner,
                     "edge_yaw_align_allow_lateral": bool(summary.get("edge_yaw_align_allow_lateral", True)),
                     "edge_yaw_align_lateral_vy_max_mps": float(edge_lateral_cap),
                     "forward_block_reason": "" if bbox_forward_contract else "edge_yaw_large_correction",
@@ -1986,8 +1994,8 @@ def arbitrate_table_docking_motion(
             vy=vy,
             wz=edge_wz,
             yaw_owner="edge",
-            forward_owner="bbox_track" if bbox_forward_contract else "none",
-            lateral_owner="edge_view" if abs(vy) > 1e-9 else "none",
+            forward_owner="edge_approach" if bbox_forward_contract else "none",
+            lateral_owner=bbox_lateral_owner,
             blocked_by="" if bbox_forward_contract else "edge_yaw_large_correction",
             reason="edge_yaw_large_correction",
         )
@@ -2255,7 +2263,7 @@ def arbitrate_table_docking_motion(
                         "edge_yaw_ambiguous_reason": "edge_yaw_ambiguous_lateral_priority",
                         "forward_block_reason": "",
                         "rotate_block_reason": "edge_yaw_ambiguous_lateral_priority",
-                        "lateral_owner": "bbox" if abs(edge_vy) > 1e-9 else "none",
+                        "lateral_owner": bbox_lateral_owner,
                         "lateral_priority_vx_cap_reason": lateral_priority_reason,
                     }
                 ),
@@ -2264,16 +2272,14 @@ def arbitrate_table_docking_motion(
                 wz=wz,
                 yaw_owner="edge_ambiguous_hold",
                 forward_owner="edge_approach",
-                lateral_owner="bbox" if abs(edge_vy) > 1e-9 else "none",
+                lateral_owner=bbox_lateral_owner,
                 reason="edge_yaw_ambiguous_lateral_priority",
             )
         vx = desired_vx
         if abs(vx) > 1e-9:
-            edge_vy = desired_vy
-            _edge_vy_block = ""
-            if abs(edge_vy) <= 1e-9:
-                edge_vy, _edge_vy_block = bbox_recenter_vy()
+            edge_vy, _edge_vy_block = bbox_recenter_vy()
             lateral_priority_reason = ""
+            active_yaw_owner = "edge" if edge_yaw_available else "bbox"
             return _docking_result(
                 action=DockingAction.EDGE_APPROACH_FORWARD,
                 stage=DockingStage.EDGE_APPROACH,
@@ -2283,16 +2289,17 @@ def arbitrate_table_docking_motion(
                     "fov_guard_reason": fov_reason,
                     "bbox_fov_soft_allowed_forward": bool(fov_level == FovGuardLevel.SOFT),
                     "stale_policy": stale_policy.value,
-                    "lateral_owner": "edge_view" if abs(edge_vy) > 1e-9 else "none",
+                    "yaw_owner": active_yaw_owner,
+                    "lateral_owner": bbox_lateral_owner,
                     "lateral_priority_vx_cap_reason": lateral_priority_reason,
                     }
                 ),
                 vx=vx,
                 vy=edge_vy,
                 wz=desired_wz,
-                yaw_owner=str(intent.yaw_owner or "edge"),
+                yaw_owner=active_yaw_owner,
                 forward_owner="edge_approach",
-                lateral_owner="edge_view" if abs(edge_vy) > 1e-9 else "none",
+                lateral_owner=bbox_lateral_owner,
                 reason="edge_guided_approach_soft_fov" if fov_level == FovGuardLevel.SOFT else "edge_guided_approach",
             )
     elif phase == "EDGE_GUIDED_APPROACH" and intent.forward_allowed_by_behavior:
@@ -2317,7 +2324,7 @@ def arbitrate_table_docking_motion(
         handoff_bbox_ok = bool(
             docking_obs.bbox_control_valid
             and docking_obs.bbox_center_error is not None
-            and abs(float(docking_obs.bbox_center_error)) <= abs(_float(summary, "bbox_track_forward_center_band", 0.20))
+            and abs(float(docking_obs.bbox_center_error)) <= bbox_forward_active_limit
             and fov_level != FovGuardLevel.HARD
         )
         if handoff_depth_ok and handoff_bbox_ok:
@@ -2337,7 +2344,7 @@ def arbitrate_table_docking_motion(
                     "allow_forward": bool(handoff_vx > 1e-9),
                     "allow_rotate": bool(abs(handoff_wz) > 1e-9),
                     "forward_block_reason": "" if handoff_vx > 1e-9 else "edge_readiness_handoff",
-                    "lateral_owner": "bbox_view" if abs(handoff_vy) > 1e-9 else "none",
+                    "lateral_owner": bbox_lateral_owner,
                 }
             ),
             vx=handoff_vx,
@@ -2345,13 +2352,13 @@ def arbitrate_table_docking_motion(
             wz=handoff_wz,
             yaw_owner=yaw_owner,
             forward_owner="bbox_track" if handoff_vx > 1e-9 else "none",
-            lateral_owner="bbox_view" if abs(handoff_vy) > 1e-9 else "none",
+            lateral_owner=bbox_lateral_owner,
             reason="edge_readiness_handoff",
         )
 
     bbox_err = docking_obs.bbox_center_error
     bbox_forward_vx = raw_cmd_vx()
-    bbox_track_center_band = bbox_forward_hard_limit
+    bbox_track_center_band = bbox_forward_active_limit
     bbox_track_vx = abs(float(desired_vx))
     bbox_track_max_wz = abs(_float(summary, "bbox_track_forward_max_wz_radps", 0.200))
     bbox_track_block = ""
@@ -2419,7 +2426,7 @@ def arbitrate_table_docking_motion(
                     "bbox_track_elapsed_ms": float(elapsed_ms),
                     "bbox_track_exit_reason": "",
                     "forward_owner": "bbox_track",
-                    "lateral_owner": "bbox_view" if abs(bbox_vy) > 1e-9 else "none",
+                    "lateral_owner": bbox_lateral_owner,
                     "advance_condition": "bbox_valid_within_forward_hard_limit",
                     "fallback_condition": "bbox_track_exit",
                 }
@@ -2429,7 +2436,7 @@ def arbitrate_table_docking_motion(
             wz=desired_bbox_wz,
             yaw_owner="bbox",
             forward_owner="bbox_track",
-            lateral_owner="bbox_view" if abs(bbox_vy) > 1e-9 else "none",
+            lateral_owner=bbox_lateral_owner,
             reason="bbox_track_forward_canonical",
         )
     if bbox_track_block:

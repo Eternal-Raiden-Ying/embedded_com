@@ -4311,7 +4311,9 @@ class OrchestratorService(BaseModule):
             "search_latch_reason": summary.get("search_latch_reason", ""),
             "wz_sign_final": summary.get("wz_sign_final", 0),
             "approach_speed_band": summary.get("approach_speed_band"),
+            "speed_band": summary.get("approach_speed_band"),
             "profile_selected_vx": summary.get("profile_selected_vx"),
+            "profile_vx": summary.get("profile_selected_vx"),
             "candidate_vx": summary.get("candidate_vx"),
             "arbiter_vx": summary.get("arbiter_vx"),
             "service_vx": summary.get("service_vx", vx),
@@ -4325,6 +4327,10 @@ class OrchestratorService(BaseModule):
             "forward_depth_source": summary.get("forward_depth_source"),
             "forward_depth_age_ms": summary.get("forward_depth_age_ms"),
             "forward_depth_is_latched": summary.get("forward_depth_is_latched"),
+            "depth_p10": summary.get("forward_depth_m"),
+            "depth_source": summary.get("forward_depth_source"),
+            "depth_age_ms": summary.get("forward_depth_age_ms"),
+            "edge_handoff_state": summary.get("control_phase"),
         }
         self.run_logger.write_jsonl("motion_gate_trace", trace)
         is_docking = trace["state"] in {"SEARCH_TABLE", "YOLO_ACQUIRE_ALIGN", "YOLO_APPROACH", "EDGE_ADJUST", "FINAL_SLOW_STOP", "AT_TABLE_EDGE"}

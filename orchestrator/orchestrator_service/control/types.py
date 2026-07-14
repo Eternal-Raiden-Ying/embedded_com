@@ -34,7 +34,7 @@ class DockingControlConfig:
     precise_stable_s: float = 0.50
 
     coarse_max_wz_radps: float = 0.45
-    approach_max_vx_mps: float = 0.28
+    approach_max_vx_mps: float = 0.50
     approach_max_vy_mps: float = 0.18
     approach_max_wz_radps: float = 0.32
     final_max_vx_mps: float = 0.12

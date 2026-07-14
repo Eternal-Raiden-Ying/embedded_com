@@ -167,6 +167,7 @@ class RuntimeContext:
     control_phase: str = "SEARCH_SCAN"
     control_phase_since_mono: float = 0.0
     bbox_valid_streak: int = 0
+    last_positive_table_inference_key: str = ""
     bbox_centered_streak: int = 0
     edge_trusted_streak: int = 0
     edge_last_obs_identity: object = None
@@ -487,6 +488,7 @@ class RuntimeContext:
         self.control_phase = "SEARCH_SCAN"
         self.control_phase_since_mono = 0.0
         self.bbox_valid_streak = 0
+        self.last_positive_table_inference_key = ""
         self.reset_edge_slope_final_ready("clear_motion_counters")
 
     def reset_edge_slope_final_ready(self, reason: str) -> None:

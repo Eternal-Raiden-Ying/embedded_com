@@ -435,9 +435,9 @@ orchestrator:
     depth_envelope_stop_p10_m: 0.30 # Depth envelope hard hold threshold, below final fixed ROI stop
     depth_envelope_slow_p10_m: 0.50 # Depth envelope slow threshold
     depth_emergency_stop_p10_m: 0.20 # Emergency depth stop threshold
-    yolo_approach_far_vx_mps: 1.50 # Canonical pre-Final maximum for depth > 1.20m
-    yolo_approach_mid_vx_mps: 1.00 # Canonical pre-Final speed for 0.90m..1.20m
-    yolo_approach_near_vx_mps: 0.50 # Canonical pre-Final speed for 0.65m..0.90m
+    yolo_approach_far_vx_mps: 0.50 # Canonical pre-Final speed for table ROI P10 > 2.0m
+    yolo_approach_mid_vx_mps: 0.35 # Canonical pre-Final speed for 1.0m < table ROI P10 <= 2.0m
+    yolo_approach_near_vx_mps: 0.20 # Canonical pre-Final speed for table ROI P10 <= 1.0m before Final
     builtin_bottle_grasp_enable: true # Use STM32 builtin bottle grasp once target is locked
     builtin_bottle_skip_remote: true # Do not send GRASP_REMOTE while builtin bottle path is active
     builtin_bottle_pose_line: "POSE_BOTTLE" # Builtin bottle pose command line
@@ -583,7 +583,7 @@ orchestrator:
     table_coarse_align_wz_min_radps: 0.080 # Minimum rotation velocity in coarse align
     table_coarse_align_wz_max_radps: 0.150 # Maximum rotation velocity in coarse align
     table_controlled_vx_min_mps: 0.060 # Minimum forward velocity in controlled approach
-    table_controlled_vx_max_mps: 1.500 # Canonical pre-Final forward cap
+    table_controlled_vx_max_mps: 0.500 # Canonical pre-Final forward cap
     table_controlled_vy_min_mps: 0.000 # Minimum lateral velocity in controlled approach
     table_controlled_vy_max_mps: 0.750 # Canonical pre-Final lateral cap
     table_controlled_wz_min_radps: 0.000 # Minimum rotation velocity in controlled approach
@@ -620,8 +620,8 @@ orchestrator:
     table_dist_kp_mps_per_m: 0.12 # Distance error gain factor
     yolo_table_yaw_gain: 0.20 # Tag heading error gain factor
     yolo_table_max_wz_radps: 0.12 # Maximum canonical bbox alignment rotation speed
-    yolo_forward_center_hard_limit: 0.25 # Wider bbox band allowing forward motion with yaw correction
-    yolo_forward_center_exit_limit: 0.28 # Hysteretic exit threshold for bbox forward ownership
+    yolo_forward_center_hard_limit: 0.30 # Enter bbox forward ownership within this center-error band
+    yolo_forward_center_exit_limit: 0.33 # Hysteretic exit threshold for bbox forward ownership
     yolo_table_forward_vx_mps: 0.015 # Tag search forward speed
     table_view_wz_kp: 0.18 # tag yaw tracking gain
     table_view_vy_kp: 0.04 # tag lateral tracking gain
@@ -655,7 +655,7 @@ orchestrator:
     motion_hold_ms: 400 # Command watchdog safety timeout
     hard_stale_stop_ms: 800 # Emergency stop watchdog safety timeout
     soft_stale_hold_enable: true # Preserve last command on small gaps
-    max_vx_mps: 1.5 # Absolute forward speed limit for the 1.5 pre-Final profile
+    max_vx_mps: 0.5 # Absolute forward speed limit for the 0.50 pre-Final profile
     max_vy_mps: 1.0 # Absolute lateral speed limit
     max_wz_radps: 1.0 # Absolute rotation speed limit
     stm32_wheel_speed_limit: 100 # Hardware limit for wheel speed
@@ -682,7 +682,7 @@ orchestrator:
     precise_lateral_tol_m: 0.015 # Lateral error stop precision tolerance
     precise_stable_s: 0.50 # Settle time to confirm docking complete
     coarse_max_wz_radps: 0.45 # Max coarse align angular speed
-    approach_max_vx_mps: 0.28 # Max approach forward speed
+    approach_max_vx_mps: 0.50 # Normal pre-Final approach software cap
     approach_max_vy_mps: 0.18 # Max approach lateral speed
     approach_max_wz_radps: 0.32 # Max approach angular speed
     final_max_vx_mps: 0.12 # Max docking forward speed

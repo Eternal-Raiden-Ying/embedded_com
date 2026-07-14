@@ -658,9 +658,9 @@ class ControlThresholds:
     depth_envelope_mid_p10_m: float = 0.70
     depth_envelope_slow_vx_mps: float = 0.012
     depth_envelope_mid_vx_mps: float = 0.015
-    yolo_approach_far_vx_mps: float = 1.50
-    yolo_approach_mid_vx_mps: float = 1.00
-    yolo_approach_near_vx_mps: float = 0.50
+    yolo_approach_far_vx_mps: float = 0.50
+    yolo_approach_mid_vx_mps: float = 0.35
+    yolo_approach_near_vx_mps: float = 0.20
     builtin_bottle_grasp_enable: bool = True
     builtin_bottle_skip_remote: bool = True
     builtin_bottle_pose_line: str = "POSE_BOTTLE"
@@ -936,7 +936,7 @@ class CarMotionConfig:
     table_coarse_align_wz_min_radps: float = 0.080
     table_coarse_align_wz_max_radps: float = 0.150
     table_controlled_vx_min_mps: float = 0.060
-    table_controlled_vx_max_mps: float = 1.500
+    table_controlled_vx_max_mps: float = 0.500
     table_controlled_vy_min_mps: float = 0.000
     table_controlled_vy_max_mps: float = 0.750
     table_controlled_wz_min_radps: float = 0.000
@@ -978,8 +978,8 @@ class CarMotionConfig:
     yolo_table_yaw_gain: float = 0.20
     yolo_table_max_wz_radps: float = 0.12
     yolo_table_forward_vx_mps: float = 0.015
-    yolo_forward_center_hard_limit: float = 0.25
-    yolo_forward_center_exit_limit: float = 0.28
+    yolo_forward_center_hard_limit: float = 0.30
+    yolo_forward_center_exit_limit: float = 0.33
     table_view_wz_kp: float = 0.18
     table_view_vy_kp: float = 0.04
     table_view_recover_vy_mps: float = 0.008
@@ -1015,7 +1015,7 @@ class CarMotionConfig:
     motion_hold_ms: int = 400
     hard_stale_stop_ms: int = 800
     soft_stale_hold_enable: bool = True
-    max_vx_mps: float = 1.5
+    max_vx_mps: float = 0.5
     max_vy_mps: float = 1.0
     max_wz_radps: float = 1.0
     stm32_wheel_speed_limit: int = 100
@@ -1064,7 +1064,7 @@ class DockingControlConfig:
     precise_stable_s: float = 0.50
 
     coarse_max_wz_radps: float = 0.45
-    approach_max_vx_mps: float = 0.28
+    approach_max_vx_mps: float = 0.50
     approach_max_vy_mps: float = 0.18
     approach_max_wz_radps: float = 0.32
     final_max_vx_mps: float = 0.12
