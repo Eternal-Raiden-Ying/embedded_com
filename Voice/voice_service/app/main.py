@@ -37,6 +37,11 @@ def check_models(cfg) -> None:
         else:
             missing.append((label, "<not configured>"))
 
+    if cfg.asr_mode == "online" and cfg.asr_dir:
+        online_dir = Path(cfg.asr_dir)
+        if online_dir.exists() and online_dir.is_dir() and not any(online_dir.rglob("*.onnx")):
+            missing.append(("Online ASR ONNX files", str(online_dir)))
+
     if missing:
         lines = [f" - {lbl}: {p_str}" for lbl, p_str in missing]
         msg = "CRITICAL ERROR: Configuration references missing model files or directories:\n" + "\n".join(lines)

@@ -60,7 +60,19 @@ class VADProcessor:
                 pass
 
 
-class OfflineASREngine:
+class AsrBackend:
+    """Small common contract; capture/VAD/NLU stay outside the backend."""
+
+    mode = "offline"
+    name = ""
+
+    def close_session(self, session: Any) -> None:
+        """Release per-command state. Offline backends have no session state."""
+
+
+class OfflineASREngine(AsrBackend):
+    mode = "offline"
+    name = "funasr_onnx_offline"
     def __init__(self, asr_dir: str, quantize: bool, dry_run_text: bool = False):
         self.dry_run_text = dry_run_text
         self.asr = None
@@ -93,9 +105,12 @@ class OnlineStreamSession:
     last_partial_at: float = 0.0
     cache: Dict[str, Any] = field(default_factory=dict)
     debug: Dict[str, Any] = field(default_factory=dict)
+    finalized: bool = False
 
 
-class OnlineASREngine:
+class OnlineASREngine(AsrBackend):
+    mode = "online"
+    name = "funasr_onnx_online"
     def __init__(
         self,
         asr_dir: str,
@@ -111,37 +126,52 @@ class OnlineASREngine:
         self.encoder_chunk_look_back = int(encoder_chunk_look_back)
         self.decoder_chunk_look_back = int(decoder_chunk_look_back)
         self.dry_run_text = dry_run_text
+        self.backend = None
+        if not self.dry_run_text:
+            # Load once at boot. Cache remains strictly session-owned.
+            self.backend = self._load_backend()
 
-    def create_session(self) -> OnlineStreamSession:
-        if self.dry_run_text:
-            return OnlineStreamSession(backend=None, debug={"backend": "mock"})
+    @property
+    def step_samples(self) -> int:
+        return max(1, int(self.chunk_size[1]) * 960)
 
+    def _load_backend(self) -> Any:
         from funasr_onnx.paraformer_online_bin import Paraformer as OnlineParaformerImpl
         attempts = [
             {"batch_size": 1, "quantize": self.quantize, "chunk_size": self.chunk_size, "intra_op_num_threads": 1},
             {"batch_size": 1, "quantize": self.quantize, "chunk_size": self.chunk_size},
-            {"batch_size": 1, "quantize": self.quantize},
-            {},
         ]
         last_err = None
         for extra in attempts:
             try:
-                # Basic signature helper (inline logic to avoid inspect parameters on built-ins)
                 kwargs = {"model_dir": self.asr_dir}
                 kwargs.update(extra)
                 try:
-                    backend = OnlineParaformerImpl(**kwargs)
+                    return OnlineParaformerImpl(**kwargs)
                 except TypeError:
                     kwargs = {"model_path": self.asr_dir}
                     kwargs.update(extra)
-                    backend = OnlineParaformerImpl(**kwargs)
-                return OnlineStreamSession(backend=backend, debug={"backend": "funasr_onnx"})
-            except Exception as e:
-                last_err = e
-                continue
-        raise RuntimeError(f"failed to init online ASR backend: {last_err}")
+                    return OnlineParaformerImpl(**kwargs)
+            except Exception as exc:
+                last_err = exc
+        raise RuntimeError("online Paraformer load failed model_path={!r}: {}".format(self.asr_dir, last_err))
+
+    def create_session(self) -> OnlineStreamSession:
+        if self.dry_run_text:
+            return OnlineStreamSession(backend=None, debug={"backend": "mock"})
+        return OnlineStreamSession(backend=self.backend, debug={"backend": self.name})
+
+    def close_session(self, session: OnlineStreamSession) -> None:
+        session.cache.clear()
+        session.backend = None
+        session.partial_text = ""
+        session.final_text = ""
+        session.finalized = True
 
     def feed(self, session: OnlineStreamSession, audio, is_final: bool = False, debug: bool = False) -> Dict[str, Any]:
+        if session.finalized:
+            return {"text": "", "merged_text": "", "confidence": None, "feed_latency_ms": 0.0,
+                    "samples": session.samples, "is_final": bool(is_final), "backend": self.name}
         if self.dry_run_text:
             return {
                 "text": "",
@@ -171,6 +201,9 @@ class OnlineASREngine:
             param_dict={
                 "cache": session.cache,
                 "is_final": bool(is_final),
+                "chunk_size": self.chunk_size,
+                "encoder_chunk_look_back": self.encoder_chunk_look_back,
+                "decoder_chunk_look_back": self.decoder_chunk_look_back,
             },
         )
 
@@ -205,6 +238,8 @@ class OnlineASREngine:
 
         if is_final and not session.final_text:
             session.final_text = session.partial_text
+        if is_final:
+            session.finalized = True
 
         return {
             "text": text,
@@ -217,6 +252,25 @@ class OnlineASREngine:
         }
 
 
+def create_asr_backend(cfg: Any, *, dry_run_text: bool = False) -> AsrBackend:
+    """The only ASR mode switch. No capture/VAD/NLU code is duplicated."""
+    mode = str(getattr(cfg, "asr_mode", "offline") or "offline").lower()
+    asr_quant = auto_quant_flag(cfg.asr_dir, cfg.asr_quant, "ASR") if not dry_run_text else bool(cfg.asr_quant)
+    if mode == "online":
+        chunk_size = list(getattr(cfg, "asr_online_chunk_size", [5, 10, 5]))
+        if len(chunk_size) != 3:
+            raise ValueError("asr_online_chunk_size must contain exactly three integers")
+        return OnlineASREngine(
+            cfg.asr_dir, asr_quant, chunk_size,
+            int(getattr(cfg, "asr_online_encoder_chunk_look_back", 4)),
+            int(getattr(cfg, "asr_online_decoder_chunk_look_back", 1)),
+            dry_run_text=dry_run_text,
+        )
+    if mode != "offline":
+        raise ValueError("unsupported asr_mode={!r}".format(mode))
+    return OfflineASREngine(cfg.asr_dir, asr_quant, dry_run_text=dry_run_text)
+
+
 class AudioCommandPipeline:
     def __init__(self, cfg, interpreter: CommandInterpreter):
         self.asr_mode = str(getattr(cfg, "asr_mode", "offline") or "offline").lower()
@@ -225,32 +279,11 @@ class AudioCommandPipeline:
         self.debug = cfg.debug
         self.dry_run_text = getattr(cfg, "dry_run_text", False)
 
+        self.asr = create_asr_backend(cfg, dry_run_text=self.dry_run_text)
         self.vad = None
-        self.asr = None
-        if self.dry_run_text:
-            self.asr = OnlineASREngine(
-                "", False, [5, 10, 5], 5, 5, dry_run_text=True
-            )
-            self.vad = VADProcessor("", False, dry_run_text=True)
-            return
-
-        asr_quant = auto_quant_flag(cfg.asr_dir, cfg.asr_quant, "ASR")
-        if self.asr_mode == "online":
-            online_chunk_size = list(getattr(cfg, "asr_online_chunk_size", [5, 10, 5]))
-            if len(online_chunk_size) < 3 or online_chunk_size == [0, 8, 4]:
-                online_chunk_size = [5, 10, 5]
-            self.asr = OnlineASREngine(
-                cfg.asr_dir,
-                asr_quant,
-                chunk_size=online_chunk_size,
-                encoder_chunk_look_back=int(getattr(cfg, "asr_online_encoder_chunk_look_back", online_chunk_size[0] if len(online_chunk_size) >= 1 else 5)),
-                decoder_chunk_look_back=int(getattr(cfg, "asr_online_decoder_chunk_look_back", online_chunk_size[2] if len(online_chunk_size) >= 3 else 5)),
-                dry_run_text=False,
-            )
-        else:
+        if not self.is_online():
             vad_quant = auto_quant_flag(cfg.vad_dir, cfg.vad_quant, "VAD")
-            self.vad = VADProcessor(cfg.vad_dir, vad_quant, dry_run_text=False)
-            self.asr = OfflineASREngine(cfg.asr_dir, asr_quant, dry_run_text=False)
+            self.vad = VADProcessor(cfg.vad_dir, vad_quant, dry_run_text=self.dry_run_text)
 
         # Check hotwords capability
         hotwords = getattr(getattr(cfg, "lexicon", None), "asr_hotwords", [])
@@ -349,6 +382,8 @@ class AudioCommandPipeline:
         return self._interpret_text(text, asr_conf, (time.perf_counter() - t0) * 1000.0, len(cut))
 
     def start_stream_session(self) -> OnlineStreamSession:
+        if not self.is_online():
+            raise RuntimeError("start_stream_session() requires online backend")
         return self.asr.create_session()
 
     def stream_feed(self, session: OnlineStreamSession, audio, is_final: bool = False) -> Dict[str, Any]:
@@ -358,3 +393,7 @@ class AudioCommandPipeline:
         text = clean_asr_text((session.final_text or session.partial_text or "").strip())
         latency_ms = (time.perf_counter() - session.started_at) * 1000.0
         return self._interpret_text(text, session.last_conf, latency_ms, session.samples)
+
+    def abort_stream_session(self, session: Optional[OnlineStreamSession]) -> None:
+        if session is not None and self.is_online():
+            self.asr.close_session(session)

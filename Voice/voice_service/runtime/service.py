@@ -214,17 +214,19 @@ def run_voice_service(cfg: VoiceServiceConfig, stop_event: Optional[threading.Ev
     task_ack_enabled = task_ack_listener is not None
     stop_hotword_enabled = bool(cfg.stop_tflite and cfg.stop_key)
     _effective_online_chunk_size = list(getattr(cfg, "asr_online_chunk_size", [5, 10, 5]))
-    if len(_effective_online_chunk_size) < 3 or _effective_online_chunk_size == [0, 8, 4]:
-        _effective_online_chunk_size = [5, 10, 5]
 
     config_payload = {
         "ts": time.time(),
         "run_dir": run_dir,
         "wake_model": cfg.wake_tflite,
         "asr_mode": cfg.asr_mode,
-        "asr_online_chunk_frames": getattr(cfg, "asr_online_chunk_frames", None),
+        "asr_backend": pipeline.asr.name,
+        "asr_model_path": cfg.asr_dir,
+        "asr_quantized": bool(cfg.asr_quant),
         "asr_online_chunk_size": _effective_online_chunk_size,
         "asr_online_step_samples": int(_effective_online_chunk_size[1]) * 960,
+        "asr_online_encoder_chunk_look_back": getattr(cfg, "asr_online_encoder_chunk_look_back", None),
+        "asr_online_decoder_chunk_look_back": getattr(cfg, "asr_online_decoder_chunk_look_back", None),
         "stop_model": cfg.stop_tflite,
         "wake_key": cfg.wake_key,
         "stop_key": cfg.stop_key,
@@ -258,6 +260,13 @@ def run_voice_service(cfg: VoiceServiceConfig, stop_event: Optional[threading.Ev
         "level": "info", "src": "boot",
         "msg": "voice service boot",
         **config_payload,
+    })
+    jlog({
+        "level": "info", "src": "boot",
+        "msg": "asr_mode={} asr_backend={} model_path={} quantized={} chunk_size={} look_back=[{},{}] step_samples={}".format(
+            cfg.asr_mode, pipeline.asr.name, cfg.asr_dir, bool(cfg.asr_quant),
+            _effective_online_chunk_size, getattr(cfg, "asr_online_encoder_chunk_look_back", None),
+            getattr(cfg, "asr_online_decoder_chunk_look_back", None), int(_effective_online_chunk_size[1]) * 960),
     })
     write_timeline("BOOT", run_dir=run_dir, task_transport=cfg.task_transport, task_ack_transport=cfg.task_ack_transport)
     write_ipc_event("CONFIG", task_tcp_port=cfg.task_tcp_port, task_ack_tcp_port=cfg.task_ack_tcp_port)

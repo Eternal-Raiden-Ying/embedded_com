@@ -46,9 +46,8 @@ class VoiceServiceConfig:
     vad_quant: bool = False
 
     # ASR configurations
-    asr_mode: str = "online"  # online / offline
-    asr_online_chunk_frames: int = 6
-    asr_online_chunk_size: List[int] = field(default_factory=lambda: [0, 8, 4])
+    asr_mode: str = "offline"  # online / offline
+    asr_online_chunk_size: List[int] = field(default_factory=lambda: [5, 10, 5])
     asr_online_encoder_chunk_look_back: int = 4
     asr_online_decoder_chunk_look_back: int = 1
     asr_emit_partial: bool = True

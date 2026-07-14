@@ -980,7 +980,9 @@ def transport_enabled(value):
 def endpoint_enabled(endpoint):
     return transport_enabled(getattr(endpoint, "transport", "disabled"))
 
-dedicated_phone_tts_dryrun = os.environ.get("SYSTEM_CONFIG_PROFILE") == "sc171_voice_phone_tts_dryrun"
+dedicated_phone_tts_dryrun = os.environ.get("SYSTEM_CONFIG_PROFILE") in {
+    "sc171_voice_phone_tts_dryrun", "sc171_voice_phone_tts_online_asr_dryrun"
+}
 phone_tts_contract = (
     dedicated_phone_tts_dryrun
     and str(os.environ.get("ORCH_SERIAL_DRY_RUN", "")).strip() == "1"
@@ -1096,7 +1098,7 @@ assert_launcher_safety() {
       assert_dryrun_safety
       ;;
     full)
-      if [[ "$SYSTEM_CONFIG_PROFILE" == "sc171_voice_phone_tts" ]]; then
+      if [[ "$SYSTEM_CONFIG_PROFILE" == "sc171_voice_phone_tts" || "$SYSTEM_CONFIG_PROFILE" == "sc171_voice_phone_tts_online_asr" ]]; then
         assert_full_phone_tts_safety
       fi
       ;;
@@ -1887,6 +1889,24 @@ configure_voice_phone_tts_full() {
   PHONE_TTS_ARM_DRY_RUN=false
 }
 
+configure_voice_phone_tts_online() {
+  if [[ "$STACK_PROFILE" == "dryrun" || "$STACK_PROFILE" == "dry_run" ]]; then
+    SYSTEM_CONFIG_PROFILE="sc171_voice_phone_tts_online_asr_dryrun"
+    VOICE_PROFILE="$STACK_ROOT/configs/profiles/sc171_voice_phone_tts_online_asr_dryrun.yaml"
+    PHONE_TTS_ARM_DRY_RUN=true
+  elif [[ "$STACK_PROFILE" == "full" ]]; then
+    SYSTEM_CONFIG_PROFILE="sc171_voice_phone_tts_online_asr"
+    VOICE_PROFILE="$STACK_ROOT/configs/profiles/sc171_voice_phone_tts_online_asr.yaml"
+    ORCH_SERIAL_DRY_RUN=0
+    ORCH_TTS_EVENT_OUT_TRANSPORT="uds"
+    PHONE_TTS_ARM_DRY_RUN=false
+  else
+    die "start-voice-tts-online 仅支持 dryrun 或 full 启动器 profile"
+  fi
+  ROBOT_INPUT_MODE="voice_only"
+  FEEDBACK_OUTPUT_MODE="phone_tts"
+}
+
 main() {
   local action="${1:-usage}"
   case "$action" in
@@ -1919,6 +1939,10 @@ main() {
       else
         die "start-voice-tts 仅支持 dryrun 或 full 启动器 profile"
       fi
+      start_stack
+      ;;
+    start-voice-tts-online)
+      configure_voice_phone_tts_online
       start_stack
       ;;
     start|on|up|run|开启|开)
@@ -1989,6 +2013,8 @@ main() {
       echo "  ./start_robot_stack.sh dryrun start-voice  # dry-run USB mic Voice -> core"
       echo "  ./start_robot_stack.sh dryrun start-voice-tts # USB 麦克风 + Orchestrator/VISTA + 手机 TTS，执行器 dry-run"
       echo "  ./start_robot_stack.sh full start-voice-tts   # USB 麦克风 + 手机 TTS + VISTA/Orchestrator + 真实底盘与机械臂"
+      echo "  ./start_robot_stack.sh dryrun start-voice-tts-online # Online Paraformer + 手机 TTS，执行器 dry-run"
+      echo "  ./start_robot_stack.sh full start-voice-tts-online   # Online Paraformer + 手机 TTS + 真实执行器"
       echo "  ROBOT_INPUT_MODE=mobile_only ./start_robot_stack.sh dryrun start"
       echo "  ROBOT_INPUT_MODE=voice_only ./start_robot_stack.sh dryrun start"
       echo "  ./start_robot_stack.sh stop             # 等价 core-stop，保留 mobile_gateway"

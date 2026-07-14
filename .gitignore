@@ -57,6 +57,7 @@ tmp/
 
 # Voice third-party assets stay local on board and are not tracked in Git.
 Voice/thirdparty/
+Voice/ONNX/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online-onnx/
 VISTA/grasp_module/graspness_unofficial/
 VISTA/vision_module/model/*
 

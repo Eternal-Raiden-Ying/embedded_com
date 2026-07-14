@@ -127,8 +127,6 @@ class AudioKWSWorker(threading.Thread):
         self.dry_run_text = getattr(cfg, "dry_run_text", False)
 
         self.online_chunk_size = list(getattr(cfg, "asr_online_chunk_size", [5, 10, 5]))
-        if len(self.online_chunk_size) < 3 or self.online_chunk_size == [0, 8, 4]:
-            self.online_chunk_size = [5, 10, 5]
         self.online_step_samples = max(1, int(self.online_chunk_size[1]) * 960)
 
         models = []
@@ -485,6 +483,7 @@ class AudioKWSWorker(threading.Thread):
         if self.phone_playback is not None:
             self.phone_playback.invalidate()
         dropped = self._drop_pending_utterances()
+        self._abort_online_stream()
         self.rt.set_busy(False)
         session_id = self.rt.ensure_session("stop_hotword")
         payload = {
@@ -513,7 +512,7 @@ class AudioKWSWorker(threading.Thread):
             state="POST_STOP_GUARD",
         )
         if self.state == "REC":
-            self._abort_recording("stop_hotword", "POST_STOP_GUARD")
+            self._abort_recording("stop_hotword", "POST_STOP_GUARD", abort_online=False)
         else:
             self._reset_recording("POST_STOP_GUARD")
         event = "STOP_ACKED" if result.get("ack_ok") else "STOP_ACK_TIMEOUT"
@@ -530,7 +529,13 @@ class AudioKWSWorker(threading.Thread):
             "dropped_utts": dropped,
         })
 
-    def _abort_recording(self, reason: str, next_state: str = "WAIT_WAKE") -> None:
+    def _abort_online_stream(self) -> None:
+        if self.asr_mode == "online":
+            self._emit_online_asr_event("ABORT")
+
+    def _abort_recording(self, reason: str, next_state: str = "WAIT_WAKE", abort_online: bool = True) -> None:
+        if abort_online:
+            self._abort_online_stream()
         jlog({"level": "info", "src": "seg", "msg": "REC abort reason={}".format(reason), "frames": len(self.captured)})
         write_timeline("REC_ABORTED", reason=reason, frames=len(self.captured), epoch=self.rt.get_epoch())
         self._reset_recording(next_state)
@@ -865,6 +870,7 @@ class ASRDecisionWorker(threading.Thread):
             self.rt.disarm()
 
     def _reset_stream_session(self):
+        self.pipeline.abort_stream_session(self.stream_session)
         self.stream_session = None
         self.stream_epoch = None
         self.last_partial_text = ""
@@ -876,6 +882,7 @@ class ASRDecisionWorker(threading.Thread):
         if kind == "START":
             if item_epoch != self.rt.get_epoch():
                 return {"finalize_turn": False, "handle_meta": {"keep_alive": False, "tts": ""}}
+            self._reset_stream_session()
             self.stream_session = self.pipeline.start_stream_session()
             self.stream_epoch = item_epoch
             self.last_partial_text = ""
@@ -883,7 +890,7 @@ class ASRDecisionWorker(threading.Thread):
             return {"finalize_turn": False, "handle_meta": {"keep_alive": False, "tts": ""}}
 
         if kind == "CHUNK":
-            if self.stream_session is None or self.stream_epoch != item_epoch:
+            if item_epoch != self.rt.get_epoch() or self.stream_session is None or self.stream_epoch != item_epoch:
                 return {"finalize_turn": False, "handle_meta": {"keep_alive": False, "tts": ""}}
             feed_meta = self.pipeline.stream_feed(self.stream_session, item["audio"], is_final=False)
             merged = clean_asr_text(str(feed_meta.get("merged_text", "") or ""))
@@ -897,10 +904,9 @@ class ASRDecisionWorker(threading.Thread):
             return {"finalize_turn": False, "handle_meta": {"keep_alive": False, "tts": ""}}
 
         if kind == "FINAL":
+            if item_epoch != self.rt.get_epoch() or self.stream_session is None or self.stream_epoch != item_epoch or self.stream_session.finalized:
+                return {"finalize_turn": False, "handle_meta": {"keep_alive": False, "tts": ""}}
             finalize_turn = True
-            if self.stream_session is None or self.stream_epoch != item_epoch:
-                self.rt.mark_result(False, intent="DROP_STALE")
-                return {"finalize_turn": finalize_turn, "handle_meta": {"keep_alive": False, "tts": ""}}
             self.pipeline.stream_feed(self.stream_session, item["audio"], is_final=True)
             if item_epoch != self.rt.get_epoch():
                 jlog({"level": "info", "src": "decision", "msg": "drop stale final result", "item_epoch": item_epoch, "current_epoch": self.rt.get_epoch()})
@@ -916,7 +922,7 @@ class ASRDecisionWorker(threading.Thread):
 
         if kind == "ABORT":
             self._reset_stream_session()
-            return {"finalize_turn": True, "handle_meta": {"keep_alive": False, "tts": ""}}
+            return {"finalize_turn": False, "handle_meta": {"keep_alive": False, "tts": ""}}
 
         raise RuntimeError(f"unknown online event kind: {kind}")
 

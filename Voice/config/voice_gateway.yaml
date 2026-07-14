@@ -32,10 +32,9 @@ asr:
   enabled: true
   backend: funasr_onnx
   model_path: Voice/ONNX/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-onnx
-  mode: online
+  mode: offline
   quantized: false
-  chunk_frames: 6
-  chunk_size: [0, 8, 4]
+  chunk_size: [5, 10, 5]
   timeout_s: 8.0
 
 commands:

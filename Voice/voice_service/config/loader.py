@@ -96,10 +96,14 @@ def map_nested_dict(nested: Dict[str, Any], flat: Dict[str, Any]) -> None:
             flat["asr_dir"] = str(asr["model_path"])
         if "mode" in asr:
             flat["asr_mode"] = str(asr["mode"])
-        if "chunk_frames" in asr:
-            flat["asr_online_chunk_frames"] = int(asr["chunk_frames"])
         if "chunk_size" in asr:
             flat["asr_online_chunk_size"] = [int(i) for i in asr["chunk_size"]]
+        if "encoder_chunk_look_back" in asr:
+            flat["asr_online_encoder_chunk_look_back"] = int(asr["encoder_chunk_look_back"])
+        if "decoder_chunk_look_back" in asr:
+            flat["asr_online_decoder_chunk_look_back"] = int(asr["decoder_chunk_look_back"])
+        if "emit_partial" in asr:
+            flat["asr_emit_partial"] = bool(asr["emit_partial"])
         if "quantized" in asr:
             flat["asr_quant"] = bool(asr["quantized"])
 
@@ -308,7 +312,6 @@ def load_voice_config(argv: Optional[List[str]] = None) -> VoiceServiceConfig:
         "VOICE_COMMANDS_JSON": "commands_json",
         "VOICE_ARECORD_DEVICE": "arecord_device",
         "VOICE_ASR_MODE": "asr_mode",
-        "VOICE_ASR_ONLINE_CHUNK_FRAMES": "asr_online_chunk_frames",
         "VOICE_DISABLE_TTS": "disable_tts",
         "VOICE_TTS_MODE": "tts_mode",
         "VOICE_PLAY_CMD": "play_cmd",
@@ -365,6 +368,8 @@ def load_voice_config(argv: Optional[List[str]] = None) -> VoiceServiceConfig:
                 flat[k] = int(val)
             elif field_type is float:
                 flat[k] = float(val)
+            elif k == "asr_online_chunk_size":
+                flat[k] = [int(x.strip()) for x in val.split(",") if x.strip()]
             else:
                 flat[k] = str(val).strip()
 

@@ -1,0 +1,37 @@
+profile: "sc171_voice_phone_tts_online_asr_dryrun"
+runtime_overrides:
+  orchestrator:
+    runtime: {config_profile: "sc171_voice_phone_tts_online_asr_dryrun"}
+    serial: {port: "DRY_RUN", dry_run: true, readback_enabled: false}
+    arm_serial: {dry_run: true}
+    task_cmd_in: {transport: "uds", ipc_socket_path: "/tmp/robot_stack/task_cmd.sock"}
+    task_ack_out: {transport: "uds", ipc_socket_path: "/tmp/robot_stack/task_ack.sock"}
+    vision_obs_in: {transport: "uds", ipc_socket_path: "/tmp/robot_stack/vision_obs.sock"}
+    vision_req_out: {transport: "uds", ipc_socket_path: "/tmp/robot_stack/vision_req.sock"}
+    tts_event_out: {transport: "uds", ipc_socket_path: "/tmp/robot_stack/mobile_tts_event.sock"}
+    tts_playback_in: {transport: "uds", ipc_socket_path: "/tmp/robot_stack/orchestrator_tts_playback.sock"}
+  gateway:
+    runtime: {task_input_mode: "voice", feedback_output_mode: "phone_tts"}
+    orchestrator_task_cmd_out: {transport: "uds", ipc_socket_path: "/tmp/robot_stack/task_cmd.sock"}
+    tts_event_in: {transport: "uds", ipc_socket_path: "/tmp/robot_stack/mobile_tts_event.sock"}
+    tts_playback_out: {transport: "uds", ipc_socket_path: "/tmp/robot_stack/tts_playback.sock"}
+    orchestrator_tts_playback_out: {transport: "uds", ipc_socket_path: "/tmp/robot_stack/orchestrator_tts_playback.sock"}
+voice_gateway:
+  runtime: {input_mode: "voice", dry_run_text: false, asr_warmup_enabled: true, followup_secs: 8.0}
+  audio: {device: "plughw:CARD=UACDemoV10,DEV=0", sample_rate: 16000, channels: 1, format: "S16_LE"}
+  kws: {frontend_backend: onnx, classifier_backend: onnx}
+  asr:
+    mode: online
+    model_path: Voice/ONNX/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online-onnx
+    quantized: true
+    chunk_size: [5, 10, 5]
+    encoder_chunk_look_back: 4
+    decoder_chunk_look_back: 1
+    emit_partial: true
+  tts: {enabled: false}
+  ipc:
+    task_cmd_out: {transport: uds, ipc_socket_path: /tmp/robot_stack/task_cmd.sock}
+    task_ack_in: {transport: uds, ipc_socket_path: /tmp/robot_stack/task_ack.sock}
+    tts_event_in: {transport: disabled}
+  mobile_feedback: {transport: uds, ipc_socket_path: /tmp/robot_stack/mobile_tts_event.sock}
+  playback: {transport: uds, ipc_socket_path: /tmp/robot_stack/tts_playback.sock, start_timeout_s: 1.5, finish_timeout_s: 6.0, post_guard_s: 0.35}
