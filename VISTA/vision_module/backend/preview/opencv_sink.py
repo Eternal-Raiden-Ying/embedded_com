@@ -437,7 +437,12 @@ class OpenCVPreviewSink(PreviewSink):
             return self._blank(size, "DEPTH", "depth panel disabled")
         if not isinstance(image, np.ndarray) or image.size == 0:
             return self._blank(size, "DEPTH", "depth stale/null")
-        panel, scale, offset = self._fit_with_transform(self._depth_colormap(image, size=size), size)
+        # Keep the colormap in source depth-frame coordinates.  Pre-resizing it
+        # to the panel made ``scale`` equal to 1 while ROIs still used native
+        # depth pixels (for example 424x240), so a centered ROI appeared on the
+        # left of a wider preview panel.  One shared fit transform keeps the
+        # depth image and every depth-space overlay aligned.
+        panel, scale, offset = self._fit_with_transform(self._depth_colormap(image), size)
         self._add_timing("preview_depth_prepare_ms", (time.monotonic_ns() - depth_start_ns) / 1_000_000.0)
         self._title(panel, "DEPTH COLORMAP")
         for name, color in (

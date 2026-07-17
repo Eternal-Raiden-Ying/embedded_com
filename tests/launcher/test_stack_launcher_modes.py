@@ -94,7 +94,7 @@ def test_full_phone_tts_preflight_uses_full_contract_not_generic_dryrun_gate():
     assert result.returncode == 0, result.stderr
     assert "full phone-TTS safety gate" in result.stdout
     assert "unsafe dry-run profile" not in result.stderr
-    assert result.stdout.endswith("sc171_voice_phone_tts|voice|phone_tts|0")
+    assert result.stdout.endswith("sc171_voice_phone_tts_online_asr|voice|phone_tts|0")
 
 
 def test_full_phone_tts_banner_reports_real_actuators_and_selected_modes():
@@ -104,7 +104,7 @@ def test_full_phone_tts_banner_reports_real_actuators_and_selected_modes():
     )
     assert result.returncode == 0, result.stderr
     assert "profile        : full" in result.stdout
-    assert "config profile : sc171_voice_phone_tts" in result.stdout
+    assert "config profile : sc171_voice_phone_tts_online_asr" in result.stdout
     assert "input mode     : voice" in result.stdout
     assert "feedback mode  : phone_tts" in result.stdout
     assert "serial dry-run : false" in result.stdout
@@ -119,8 +119,8 @@ def test_main_full_start_voice_tts_maps_to_production_phone_profile_without_star
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout == (
-        "full|sc171_voice_phone_tts|voice_only|phone_tts|"
-        f"{ROOT}/configs/profiles/sc171_voice_phone_tts.yaml"
+        "full|sc171_voice_phone_tts_online_asr|voice_only|phone_tts|"
+        f"{ROOT}/configs/profiles/sc171_voice_phone_tts_online_asr.yaml"
     )
 
 

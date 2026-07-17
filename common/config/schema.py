@@ -274,7 +274,7 @@ class ModelConfig:
                 _DEFAULT_MODEL_ROOT
                 / "yolo26s"
                 / "models"
-                / "yolo26s-cutoff-bgr-imgsz640_qcs6490_w8a8.qnn236.ctx.bin"
+                / "yolo26s-cutoff-bgr-imgsz640_2_qcs6490_w8a8.qnn236.ctx.bin"
             ),
             width=640,
             height=640,

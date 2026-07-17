@@ -109,6 +109,12 @@ class VoiceServiceConfig:
     playback_start_timeout_s: float = 1.5
     playback_finish_timeout_s: float = 6.0
     post_playback_guard_s: float = 0.35
+    wake_prompt_text: str = "我在，请说出要拿的物品。"
+    command_pre_roll_ms: int = 480
+    pre_roll_before_tts_finished_ms: int = 160
+
+    # Resolved profile used for startup diagnostics.
+    voice_profile: str = ""
 
     # Mic recording loop tunables
     mic_read_timeout: float = 2.0

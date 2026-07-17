@@ -415,18 +415,18 @@ orchestrator:
     near_slow_max_vx_mps: 0.030 # Near-table forward speed cap
     near_slow_max_vy_mps: 0.040 # Near-table lateral speed cap
     near_slow_max_wz_radps: 0.04 # Near-table yaw speed cap
-    final_enter_depth_threshold_m: 0.58 # Final phase handoff depth threshold
+    final_enter_depth_threshold_m: 0.8 # Final phase handoff depth threshold
     final_enter_stable_count_required: 2 # Stable frames required to enter final
     final_handoff_on_yolo_lost_enable: true # Prefer final handoff over search when YOLO table is lost near table
     final_handoff_recent_obs_max_age_s: 1.0 # Max age for recent edge/table observation used for handoff
     final_handoff_min_recent_depth_m: 0.65 # Recent depth must be this close or closer for handoff
-    final_fixed_roi_stop_threshold_m: 0.45 # Fixed ROI median stop threshold in final phase
+    final_fixed_roi_stop_threshold_m: 0.42 # Fixed ROI median stop threshold in final phase
     final_fixed_roi_stop_stable_count_required: 3 # Fixed ROI stop frames required
     final_slow_probe_vx_mps: 0.02 # Final slow probe forward speed
     remote_init_min_interval_s: 30.0 # Minimum interval between remote init warmups
     remote_init_auto_enabled: false # Disable automatic remote /init warmup; explicit GRASP init remains enabled
     near_start_final_enable: true # Allow near-start handoff into final
-    near_start_final_depth_m: 0.58 # Near-start depth threshold
+    near_start_final_depth_m: 0.8 # Near-start depth threshold
     near_start_align_enable: true # Allow brief near-start yaw/table align
     near_start_align_timeout_s: 2.0 # Near-start align timeout
     final_missing_probe_grace_s: 2.0 # Short missing-distance grace probe window

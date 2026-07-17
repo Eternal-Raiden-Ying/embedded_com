@@ -97,7 +97,11 @@ def make_online_capture_worker(events):
     worker = make_capture_worker()
     worker.asr_mode = "online"
     worker.pipeline = FakeOnlineVadPipeline(events)
-    worker.cfg_board = SimpleNamespace(asr_stream_session_timeout_s=8.0)
+    worker.cfg_board = SimpleNamespace(
+        asr_stream_session_timeout_s=8.0,
+        command_pre_roll_ms=480,
+        pre_roll_before_tts_finished_ms=160,
+    )
     worker.utter_q = queue.Queue()
     worker.online_step_samples = 9600
     worker.online_vad_session = None
@@ -109,6 +113,7 @@ def make_online_capture_worker(events):
     worker.online_speech_samples = 0
     worker.online_speech_content_samples = 0
     worker.online_prebuf = deque(maxlen=5)
+    worker.capture_history = deque(maxlen=8)
     return worker
 
 
@@ -117,7 +122,8 @@ def make_cfg():
         mobile_feedback_transport="uds",
         playback_start_timeout_s=1.5,
         playback_finish_timeout_s=6.0,
-        post_playback_guard_s=0.35,
+        post_playback_guard_s=0.20,
+        wake_prompt_text="我在，请说。",
         armed_secs=6.0,
     )
 
@@ -149,8 +155,8 @@ def test_wake_waits_for_ordered_phone_playback_then_arms():
     assert not rt.is_armed()
     assert guard.handle_playback(ack_for(event, "finished"))
     assert rt.snapshot()["state"] == "POST_PLAYBACK_GUARD"
-    clock.now += 0.36
-    guard.poll()
+    clock.now += 0.21
+    assert guard.poll()
     assert rt.snapshot()["state"] == "ARMED_WAIT"
     assert rt.is_armed()
 
@@ -167,8 +173,8 @@ def test_phone_finished_uses_audio_capture_arm_transition():
     event = sender.messages[-1]
     assert guard.handle_playback(ack_for(event, "started"))
     assert guard.handle_playback(ack_for(event, "finished"))
-    clock.now += 0.36
-    guard.poll()
+    clock.now += 0.21
+    assert guard.poll()
 
     assert worker.state == "ARMED_WAIT"
     assert rt.snapshot()["state"] == "ARMED_WAIT"
@@ -217,14 +223,15 @@ def test_online_capture_feeds_fsmn_vad_below_energy_gate_and_uses_preroll():
     worker._noise_floor_rms = 9000.0
     worker._arm_command_capture("wake_hotword")
 
-    # START is created at arm time, before VAD reports speech.  Low RMS would
-    # fail the legacy dynamic energy gate but must still reach Online FSMN-VAD.
-    assert worker.utter_q.get_nowait()["kind"] == "START"
+    # Low RMS would fail the legacy dynamic energy gate but must still reach
+    # Online FSMN-VAD. Paraformer START is deferred until FSMN-VAD START.
+    assert worker.utter_q.empty()
     low = np.full(1280, 10, dtype=np.int16)
     assert not worker._advance_online_armed_capture(low, 10.0)
     assert not worker._advance_online_armed_capture(low, 10.0)
     assert worker._advance_online_armed_capture(low, 10.0)
     assert worker.state == "REC"
+    assert worker.utter_q.get_nowait()["kind"] == "START"
     assert worker.online_speech_samples == 3 * 1280
 
     for _ in range(6):
@@ -238,6 +245,25 @@ def test_online_capture_feeds_fsmn_vad_below_energy_gate_and_uses_preroll():
     assert items[1]["samples"] == 1920
     assert worker.pipeline.started == 1
     assert worker.pipeline.aborted == 1
+
+
+def test_phone_capture_preroll_is_bounded_around_verified_finished_ack():
+    worker = make_online_capture_worker([{"speech_started": False, "speech_ended": False}] * 8)
+    now = time.monotonic()
+    worker.phone_playback = SimpleNamespace(finished_mono=now - 0.20)
+    old_prompt = np.full(1280, 1, dtype=np.int16)
+    early_command = np.full(1280, 2, dtype=np.int16)
+    after_finished = np.full(1280, 3, dtype=np.int16)
+    worker.capture_history.extend([
+        (now - 1.0, old_prompt),
+        (now - 0.34, early_command),
+        (now - 0.18, after_finished),
+    ])
+
+    worker._arm_command_capture("wake_prompt_complete")
+
+    assert [int(frame[0]) for frame in worker.online_prebuf] == [2, 3]
+    assert all(int(frame[0]) != 1 for frame in worker.online_prebuf)
 
 
 def test_local_wake_uses_same_capture_arm_transition():
@@ -331,6 +357,19 @@ def test_phone_profile_disables_local_piper_and_enables_phone_endpoints():
     assert cfg.kws.provider == "cpu"
     assert cfg.asr_quant is True
     assert cfg.vad_quant is True
+
+
+def test_production_online_phone_profile_keeps_stream_baseline_and_short_guard():
+    cfg = load_voice_config(["--profile", "configs/profiles/sc171_voice_phone_tts_online_asr.yaml"])
+    assert cfg.voice_profile.endswith("sc171_voice_phone_tts_online_asr.yaml")
+    assert cfg.asr_mode == "online"
+    assert cfg.asr_online_chunk_size == [5, 10, 5]
+    assert cfg.asr_online_encoder_chunk_look_back == 4
+    assert cfg.asr_online_decoder_chunk_look_back == 1
+    assert cfg.wake_prompt_text == "我在，请说。"
+    assert cfg.post_playback_guard_s == pytest.approx(0.20)
+    assert cfg.command_pre_roll_ms == 480
+    assert cfg.pre_roll_before_tts_finished_ms == 160
 
 
 def test_phone_dryrun_profile_uses_sherpa_quantized_voice_configuration():

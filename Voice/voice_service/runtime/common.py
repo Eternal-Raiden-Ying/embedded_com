@@ -60,7 +60,7 @@ def write_named_jsonl(name: str, payload: Dict[str, Any]):
 
 
 def write_timeline(event: str, **fields):
-    payload = {"ts": time.time(), "event": event}
+    payload = {"ts": time.time(), "mono_ts": time.monotonic(), "event": event}
     payload.update(fields)
     _append_jsonl("timeline", payload)
 
@@ -68,7 +68,10 @@ def write_timeline(event: str, **fields):
     event_upper = str(event).strip().upper()
     if event_upper in {
         "AUDIO_READY", "WAKE_TRIGGERED", "COMMAND_CAPTURE_ARMED", "SPEECH_GATE_BLOCKED", "REC_STARTED", "REC_ENDED", "ASR_FINAL",
-        "TASK_CMD_SENT", "TASK_ACK", "INTENT_ACCEPTED", "INTENT_REJECTED", "WARN", "ERROR"
+        "KWS_HIT", "WAKE_TTS_REQUESTED", "WAKE_TTS_STARTED", "WAKE_TTS_FINISHED",
+        "VAD_START", "VAD_END", "ASR_PARTIAL", "TASK_CMD_SENT", "TASK_ACK",
+        "UTTERANCE_ABORTED", "UTTERANCE_DROPPED_STALE",
+        "INTENT_ACCEPTED", "INTENT_REJECTED", "WARN", "ERROR"
     }:
         import os
         run_id = os.getenv("STACK_RUN_ID", "")
@@ -130,7 +133,8 @@ def should_emit(payload: Dict[str, Any]) -> bool:
         return False
     keep_info_src = {
         "boot", "loop", "oww", "seg", "decision", "tts", "tts_event",
-        "heartbeat", "signal", "queue", "ipc", "state", "stop", "asr_partial", "debug_input",
+        "heartbeat", "signal", "queue", "ipc", "state", "stop", "kws", "online_vad",
+        "online_asr", "asr", "asr_partial", "debug_input",
     }
     if src == "mic":
         return not QUIET_MIC_INFO and level == "info"

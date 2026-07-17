@@ -1,6 +1,11 @@
 profile: "sc171_voice_phone_tts_online_asr"
 base_profile: "sc171_voice_phone_tts"
 voice_gateway:
+  playback:
+    wake_prompt_text: "我在，请说。"
+    post_guard_s: 0.20
+    command_pre_roll_ms: 480
+    pre_roll_before_tts_finished_ms: 160
   kws:
     backend: sherpa_onnx
   asr:

@@ -7,6 +7,7 @@ import signal
 import subprocess
 import threading
 import time
+from pathlib import Path
 from typing import Optional, Any
 
 from ..config.schema import VoiceServiceConfig
@@ -215,6 +216,7 @@ def run_voice_service(cfg: VoiceServiceConfig, stop_event: Optional[threading.Ev
     config_payload = {
         "ts": time.time(),
         "run_dir": run_dir,
+        "voice_profile": Path(cfg.voice_profile).name if cfg.voice_profile else "",
         "kws_backend": cfg.kws.backend,
         "kws_model_dir": cfg.kws.model_dir,
         "kws_keywords_file": cfg.kws.keywords_file,
@@ -223,9 +225,12 @@ def run_voice_service(cfg: VoiceServiceConfig, stop_event: Optional[threading.Ev
         "asr_model_path": cfg.asr_dir,
         "asr_quantized": bool(cfg.asr_quant),
         "asr_online_chunk_size": _effective_online_chunk_size,
+        "chunk_size": _effective_online_chunk_size,
         "asr_online_step_samples": int(_effective_online_chunk_size[1]) * 960,
         "asr_online_encoder_chunk_look_back": getattr(cfg, "asr_online_encoder_chunk_look_back", None),
         "asr_online_decoder_chunk_look_back": getattr(cfg, "asr_online_decoder_chunk_look_back", None),
+        "encoder_chunk_look_back": getattr(cfg, "asr_online_encoder_chunk_look_back", None),
+        "decoder_chunk_look_back": getattr(cfg, "asr_online_decoder_chunk_look_back", None),
         "wake_key": cfg.kws.wake_keyword,
         "stop_key": cfg.kws.stop_keyword,
         "kws_trigger_cooldown_ms": cfg.kws.trigger_cooldown_ms,
@@ -260,8 +265,8 @@ def run_voice_service(cfg: VoiceServiceConfig, stop_event: Optional[threading.Ev
     })
     jlog({
         "level": "info", "src": "boot",
-        "msg": "asr_mode={} asr_backend={} model_path={} quantized={} chunk_size={} look_back=[{},{}] step_samples={}".format(
-            cfg.asr_mode, pipeline.asr.name, cfg.asr_dir, bool(cfg.asr_quant),
+        "msg": "voice_profile={} asr_mode={} asr_backend={} model_path={} quantized={} chunk_size={} encoder_chunk_look_back={} decoder_chunk_look_back={} step_samples={}".format(
+            Path(cfg.voice_profile).name if cfg.voice_profile else "", cfg.asr_mode, pipeline.asr.name, cfg.asr_dir, bool(cfg.asr_quant),
             _effective_online_chunk_size, getattr(cfg, "asr_online_encoder_chunk_look_back", None),
             getattr(cfg, "asr_online_decoder_chunk_look_back", None), int(_effective_online_chunk_size[1]) * 960),
     })

@@ -630,7 +630,7 @@ class QNN_YOLO26_Detect_Predictor(IPredictor):
         return {
             "anchor": int(anchor_idx),
             "raw_bbox": np.asarray(raw_bbox, dtype=np.float32).round(6).tolist(),
-            "table1_score": round(float(table_score), 6),
+            "table2_score": round(float(table_score), 6),
             "max_score": round(float(max_score), 6),
             "max_class_id": int(max_class_id),
             "decode_unclipped": mode_boxes,
@@ -654,7 +654,7 @@ class QNN_YOLO26_Detect_Predictor(IPredictor):
     ) -> None:
         bbox = np.asarray(bbox_out, dtype=np.float32).reshape(1, 4, 8400)[0].T
         scores_tensor = np.asarray(class_out, dtype=np.float32).reshape(1, self.class_num, 8400)[0].T
-        table_scores = scores_tensor[:, 0] if self.class_num > 0 else np.zeros((scores_tensor.shape[0],), dtype=np.float32)
+        table_scores = scores_tensor[:, 1] if self.class_num > 1 else np.zeros((scores_tensor.shape[0],), dtype=np.float32)
         max_ids = scores_tensor.argmax(axis=1)
         max_scores = scores_tensor[np.arange(scores_tensor.shape[0]), max_ids]
         topk = min(int(self._debug_topk), int(bbox.shape[0]))

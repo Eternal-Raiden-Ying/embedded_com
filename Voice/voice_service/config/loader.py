@@ -157,7 +157,7 @@ def map_nested_dict(nested: Dict[str, Any], flat: Dict[str, Any]) -> None:
                 flat[target] = str(feedback[source])
     if "playback" in nested and isinstance(nested["playback"], dict):
         playback = nested["playback"]
-        for source, target in (("transport", "playback_transport"), ("ipc_socket_path", "playback_uds_path"), ("uds_path", "playback_uds_path"), ("start_timeout_s", "playback_start_timeout_s"), ("finish_timeout_s", "playback_finish_timeout_s"), ("post_guard_s", "post_playback_guard_s")):
+        for source, target in (("transport", "playback_transport"), ("ipc_socket_path", "playback_uds_path"), ("uds_path", "playback_uds_path"), ("start_timeout_s", "playback_start_timeout_s"), ("finish_timeout_s", "playback_finish_timeout_s"), ("post_guard_s", "post_playback_guard_s"), ("wake_prompt_text", "wake_prompt_text"), ("command_pre_roll_ms", "command_pre_roll_ms"), ("pre_roll_before_tts_finished_ms", "pre_roll_before_tts_finished_ms")):
             if source in playback:
                 flat[target] = playback[source]
 
@@ -304,6 +304,7 @@ def load_voice_config(argv: Optional[List[str]] = None) -> VoiceServiceConfig:
     if profile_path:
         p = _resolve_profile_path(profile_path)
         if p.exists():
+            flat["voice_profile"] = str(p.resolve())
             for profile_yaml in _load_profile_layers(p):
                 # Pull runtime_overrides -> voice_gateway, or top-level voice_gateway.
                 overrides = profile_yaml.get("runtime_overrides", {})

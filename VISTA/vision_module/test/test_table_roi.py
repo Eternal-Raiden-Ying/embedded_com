@@ -67,8 +67,11 @@ class TableRoiTest(unittest.TestCase):
             [100, 120, 420, 360],
         )
         self.assertEqual(
-            find_table_bbox({"class_names": ["table1", "apple"], "infer_boxes": [[100, 120, 420, 360, 0.7, 0]]}),
+            find_table_bbox({"class_names": ["table1", "table2", "apple"], "infer_boxes": [[100, 120, 420, 360, 0.7, 1]]}),
             [100, 120, 420, 360],
+        )
+        self.assertIsNone(
+            find_table_bbox({"class_names": ["table1", "table2", "apple"], "infer_boxes": [[100, 120, 420, 360, 0.7, 0]]})
         )
         self.assertEqual(
             find_table_bbox({"infer_boxes": [[100, 120, 420, 360, 0.7, "bad", "desk"]]}),
@@ -165,13 +168,13 @@ class TableRoiTest(unittest.TestCase):
         roi = choose_depth_roi(
             {
                 "rgb_shape": (640, 640, 3),
-                "class_names": ["table1"],
-                "infer_boxes": [[250, 410, 610, 640, 0.86, 0]],
+                "class_names": ["table1", "table2"],
+                "infer_boxes": [[250, 410, 610, 640, 0.86, 1]],
             },
             depth_shape=(480, 640),
             fallback_depth_roi=[160, 240, 480, 408],
             yolo_dynamic_enable=True,
-            yolo_table_class_id=0,
+            yolo_table_class_id=1,
             near_distance=True,
         )
         self.assertTrue(roi["bbox_valid"])

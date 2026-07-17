@@ -1945,10 +1945,10 @@ configure_voice_phone_tts_full() {
   if [[ "$STACK_PROFILE" != "full" ]]; then
     die "start-voice-tts 正式入口仅支持 full 启动器 profile"
   fi
-  SYSTEM_CONFIG_PROFILE="sc171_voice_phone_tts"
+  SYSTEM_CONFIG_PROFILE="sc171_voice_phone_tts_online_asr"
   ROBOT_INPUT_MODE="voice_only"
   FEEDBACK_OUTPUT_MODE="phone_tts"
-  VOICE_PROFILE="$STACK_ROOT/configs/profiles/sc171_voice_phone_tts.yaml"
+  VOICE_PROFILE="$STACK_ROOT/configs/profiles/sc171_voice_phone_tts_online_asr.yaml"
   ORCH_SERIAL_DRY_RUN=0
   ORCH_TTS_EVENT_OUT_TRANSPORT="uds"
   PHONE_TTS_ARM_DRY_RUN=false
